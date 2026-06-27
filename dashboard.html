@@ -421,7 +421,7 @@ function renderHeatmap() {
 
   // Build day cells grouped into week columns
   const cells = [];
-  const monthLabels = [];
+  const monthCands = [];   // { x, mo } candidates — one per month boundary
   let week = 0, lastMonth = -1;
   for (let d = new Date(start); d <= end; d.setUTCDate(d.getUTCDate() + 1)) {
     const dow = d.getUTCDay();
@@ -431,10 +431,16 @@ function renderHeatmap() {
     const x   = padL + week * P, y = padT + dow * P;
     const label = `${n} commit${n === 1 ? '' : 's'} · ${DOW[dow]}, ${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`;
     cells.push(`<rect class="hm-cell" x="${x}" y="${y}" width="${C}" height="${C}" rx="2" fill="${heatColor(n)}"><title>${label}</title></rect>`);
-    // month label at the first column of each month (top row)
     const mo = d.getUTCMonth();
-    if (mo !== lastMonth) { monthLabels.push(`<text x="${x}" y="${padT - 5}" fill="#5c6a7a" font-size="10" font-family="ui-monospace,monospace">${MONTHS[mo]}</text>`); lastMonth = mo; }
+    if (mo !== lastMonth) { monthCands.push({ x, mo }); lastMonth = mo; }
   }
+  // Drop a month label if the next one is too close — keeps the leading partial
+  // month (e.g. "Jun" before "Jul") from colliding with its neighbour.
+  const MIN_GAP = 22;
+  const monthLabels = monthCands
+    .filter((c, i) => i === monthCands.length - 1 || monthCands[i + 1].x - c.x >= MIN_GAP)
+    .map(c => `<text x="${c.x}" y="${padT - 5}" fill="#5c6a7a" font-size="10" font-family="ui-monospace,monospace">${MONTHS[c.mo]}</text>`);
+
   const weeks = week + 1;
   const W = padL + weeks * P, H = padT + 7 * P;
   const dayTicks = [1, 3, 5].map(i =>
