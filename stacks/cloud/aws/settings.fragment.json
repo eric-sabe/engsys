@@ -1,0 +1,39 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(aws sts get-caller-identity:*)",
+      "Bash(aws configure get:*)",
+      "Bash(aws s3 ls:*)",
+      "Bash(aws s3api head-bucket:*)",
+      "Bash(aws s3api list-buckets:*)",
+      "Bash(aws s3api get-bucket-*:*)",
+      "Bash(aws cloudformation describe-stacks:*)",
+      "Bash(aws cloudformation describe-stack-events:*)",
+      "Bash(aws cloudformation list-stacks:*)",
+      "Bash(aws cloudformation list-stack-resources:*)",
+      "Bash(aws cloudformation describe-change-set:*)",
+      "Bash(aws cloudformation validate-template:*)",
+      "Bash(aws ecr describe-repositories:*)",
+      "Bash(aws logs describe-log-groups:*)",
+      "Bash(aws logs get-log-events:*)",
+      "Bash(aws logs filter-log-events:*)",
+      "Bash(aws kms list-keys:*)",
+      "Bash(aws kms describe-key:*)",
+      "Bash(aws service-quotas list-service-quotas:*)",
+      "Bash(aws service-quotas get-service-quota:*)",
+      "Bash(cdk synth:*)",
+      "Bash(cdk diff:*)",
+      "Bash(cdk list:*)",
+      "Bash(cfn-lint:*)"
+    ],
+    "deny": [
+      "Bash(aws cloudformation deploy:*)",
+      "Bash(aws cloudformation create-stack:*)",
+      "Bash(aws cloudformation update-stack:*)",
+      "Bash(aws cloudformation delete-stack:*)",
+      "Bash(cdk deploy:*)",
+      "Bash(cdk destroy:*)"
+    ]
+  },
+  "mcpServers": {}
+}

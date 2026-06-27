@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh issue create:*)",
+      "Bash(gh issue list:*)",
+      "Bash(gh issue view:*)",
+      "Bash(gh issue edit:*)",
+      "Bash(gh issue comment:*)",
+      "Bash(gh issue close:*)",
+      "Bash(gh issue status:*)",
+      "Bash(gh project list:*)",
+      "Bash(gh project view:*)",
+      "Bash(gh project create:*)",
+      "Bash(gh project field-list:*)",
+      "Bash(gh project field-create:*)",
+      "Bash(gh project item-list:*)",
+      "Bash(gh project item-add:*)",
+      "Bash(gh project item-edit:*)",
+      "Bash(gh api graphql:*)",
+      "Bash(gh pr create:*)"
+    ]
+  },
+  "mcpServers": {}
+}

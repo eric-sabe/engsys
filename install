@@ -1,0 +1,179 @@
+#!/usr/bin/env node
+'use strict';
+
+// engsys installer — deterministic plumbing for the Claude Code engineering system.
+// Usage:
+//   ./install install --into <path> [--config <file>] [--dry-run] [--force]
+//   ./install update  --into <path> [--config <file>] [--dry-run]
+//   ./install verify  --into <path>
+//
+// The engsys source root is the directory this script lives in.
+
+const path = require('path');
+const { runInstall, runUninstall, runVerify, ENGSYS_VERSION } = require('./lib/commands');
+const { exists } = require('./lib/util');
+
+const engsysRoot = __dirname;
+
+function parseArgs(argv) {
+  const args = { _: [] };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--dry-run') args.dryRun = true;
+    else if (a === '--force') args.force = true;
+    else if (a === '--into') args.into = argv[++i];
+    else if (a === '--config') args.config = argv[++i];
+    else if (a === '--help' || a === '-h') args.help = true;
+    else args._.push(a);
+  }
+  return args;
+}
+
+const USAGE = `engsys ${ENGSYS_VERSION}
+
+Bring the engineering system into a project, faithfully — adopting whatever is
+already there (existing CLAUDE.md, settings, agents, or Copilot/Cursor config).
+
+Commands:
+  install --into <path> [--config <file>] [--dry-run] [--force]
+      First-time materialization. Adopts existing infra: backs up a foreign
+      CLAUDE.md (folding it into project facts), merges settings/.mcp.json,
+      preserves the project's own agents, and imports Copilot/Cursor config.
+      Re-running over an existing install behaves as update.
+  update  --into <path> [--config <file>] [--dry-run]
+      Re-render from current engsys + config. Preserves CLAUDE.md project facts
+      and hand-added permissions; prunes files orphaned by deselected packs.
+  verify  --into <path>
+      Check installed files against the lock (drift detection).
+  uninstall --into <path> [--dry-run]
+      Remove everything engsys added and restore the project's prior files (from
+      .claude/.engsys-backup/). The project's own agents/files are left intact.
+
+  --force   overwrite generated files (CLAUDE.md/settings/.mcp.json) instead of merging.
+
+Config: <into>/engsys.config.yaml (or .yml / .json). See engsys.config.example.yaml.`;
+
+function list(label, items, max = 8) {
+  if (!items || !items.length) return [];
+  const shown = items.slice(0, max).map((i) => `      ${i}`);
+  if (items.length > max) shown.push(`      … and ${items.length - max} more`);
+  return [`  ${label}:`, ...shown];
+}
+
+function report(result, cmd) {
+  const { into, plan } = result;
+  const lines = [];
+
+  if (result.adopting) lines.push('  note: existing engsys install detected → adopting as `update`.');
+  if (result.versionFrom && result.versionFrom !== result.versionTo) {
+    lines.push(`  engsys: ${result.versionFrom} → ${result.versionTo}`);
+  }
+
+  lines.push(...result.actions.map((a) => '  ' + a));
+  const c = result.changes;
+  lines.push(`  files: ${result.managedCount} managed (${c.added} new, ${c.updated} updated, ${c.removed} removed), ${result.generated.length} generated`);
+
+  // Adoption surfaces (scenario 1 & 3) + prune (scenario 2).
+  if (result.preexistingCount) {
+    const p = result.preexisting;
+    const bits = [];
+    if (p.agents.length) bits.push(`${p.agents.length} agent(s)`);
+    if (p.commands.length) bits.push(`${p.commands.length} command(s)`);
+    if (p.skills.length) bits.push(`${p.skills.length} skill(s)`);
+    lines.push(`  preserved (the project's own): ${bits.join(', ')} — left untouched.`);
+    for (const a of p.agents.slice(0, 8)) lines.push(`      ${a}`);
+  }
+  if (result.snapshotted && result.snapshotted.length) {
+    lines.push(`  rollback: ${result.snapshotted.length} pre-existing file(s) snapshotted → \`engsys uninstall\` restores your prior setup.`);
+  } else if (result.firstInstall) {
+    lines.push('  rollback: `engsys uninstall` removes engsys and restores your prior setup.');
+  }
+  lines.push(...list('pruned (orphaned)', result.pruned));
+  if (result.importedNow) {
+    lines.push(`  imported AI config: ${result.foreign.length} file(s) → docs/imported-ai-config/`);
+    lines.push(...result.foreign.slice(0, 8).map((f) => `      ${f.tool}: ${f.rel}`));
+  }
+
+  // Naturalization checklist (model-side; never plumbing).
+  lines.push('');
+  lines.push('Next — naturalization (model-side, never plumbing):');
+  lines.push('  - Fill the CLAUDE.md PROJECT-FACTS region (or run /naturalize): stack, services, invariants, key paths.');
+  if (result.foldedClaude) {
+    lines.push('  - Your prior CLAUDE.md was folded into PROJECT-FACTS (original preserved in .claude/.engsys-backup/) — trim it.');
+  }
+  if (result.importedNow) {
+    lines.push('  - Fold docs/imported-ai-config/ (Copilot/Cursor rules + agent defs) into CLAUDE.md / .claude/agents via /naturalize, then delete it.');
+  }
+  if (result.preexisting && result.preexisting.agents.length) {
+    lines.push("  - Reconcile the project's own agents with the engsys roster (keep, merge, or rename on conflict).");
+  }
+  const placeholderHints = [];
+  for (const f of plan.claudeFragments) {
+    if (/<naturalize:|<proj>|<rg>|<env>|<suffix>/.test(f.text)) placeholderHints.push(f.pack);
+  }
+  if (Object.keys(plan.mcpServers).some((k) => /<naturalize:/.test(JSON.stringify(plan.mcpServers[k])))) {
+    placeholderHints.push('.mcp.json (MCP server env)');
+  }
+  if (placeholderHints.length) lines.push(`  - Replace <naturalize: ...> placeholders in: ${placeholderHints.join(', ')}.`);
+  lines.push(`  - Review .claude/settings.json permissions${Object.keys(plan.mcpServers).length ? ' and .mcp.json' : ''} before first use.`);
+  lines.push(`  - \`engsys verify --into ${into}\` any time to confirm nothing drifted.`);
+
+  if (plan.warnings.length || result.warnings.length) {
+    lines.push('');
+    lines.push('Warnings:');
+    for (const w of [...plan.warnings, ...result.warnings]) lines.push(`  ! ${w}`);
+  }
+  return lines.join('\n');
+}
+
+function main() {
+  const args = parseArgs(process.argv.slice(2));
+  const cmd = args._[0];
+
+  if (args.help || !cmd) { console.log(USAGE); process.exit(args.help ? 0 : 1); }
+
+  if (cmd === 'install' || cmd === 'update') {
+    if (!args.into) { console.error('error: --into <path> is required'); process.exit(1); }
+    const into = path.resolve(args.into);
+    if (!exists(into)) { console.error(`error: target does not exist: ${into}`); process.exit(1); }
+    const result = runInstall({ engsysRoot, into, config: args.config, dryRun: args.dryRun, force: args.force, mode: cmd });
+    const tag = args.dryRun ? ' (dry run — nothing written)' : '';
+    console.log(`engsys ${result.mode}${tag} → ${into}`);
+    console.log(`config: ${path.relative(into, result.configPath) || result.configPath}`);
+    console.log(report(result, cmd));
+    process.exit(0);
+  }
+
+  if (cmd === 'uninstall') {
+    if (!args.into) { console.error('error: --into <path> is required'); process.exit(1); }
+    const into = path.resolve(args.into);
+    const r = runUninstall({ into, dryRun: args.dryRun });
+    const tag = args.dryRun ? ' (dry run — nothing written)' : '';
+    console.log(`engsys uninstall${tag} → ${into}`);
+    console.log(`  removed ${r.removed.length} engsys file(s), restored ${r.restored.length} original(s).`);
+    if (!r.hadManifest) console.log('  note: no rollback manifest found — removed engsys files but had no snapshot to restore.');
+    const n = r.preexisting.agents.length + r.preexisting.commands.length + r.preexisting.skills.length;
+    if (n) console.log(`  left the project's own ${n} agent/command/skill file(s) intact.`);
+    process.exit(0);
+  }
+
+  if (cmd === 'verify') {
+    if (!args.into) { console.error('error: --into <path> is required'); process.exit(1); }
+    const into = path.resolve(args.into);
+    const r = runVerify({ into });
+    if (r.ok) {
+      console.log(`verify: OK — ${Object.keys(r.lock.managed).length} managed files match (engsys ${r.lock.engsysVersion}).`);
+      process.exit(0);
+    }
+    console.log(`verify: DRIFT detected (engsys ${r.lock.engsysVersion}).`);
+    for (const m of r.missing) console.log(`  missing:  ${m}`);
+    for (const m of r.modified) console.log(`  modified: ${m}`);
+    process.exit(2);
+  }
+
+  console.error(`unknown command: ${cmd}\n`);
+  console.log(USAGE);
+  process.exit(1);
+}
+
+main();

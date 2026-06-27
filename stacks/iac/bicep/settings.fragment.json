@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(bicep build:*)",
+      "Bash(az bicep build:*)",
+      "Bash(bicep --version:*)",
+      "Bash(az deployment group validate:*)",
+      "Bash(az deployment group what-if:*)",
+      "Bash(az deployment sub what-if:*)",
+      "Bash(az deployment group list:*)",
+      "Bash(azd provision --preview:*)"
+    ],
+    "deny": [
+      "Bash(az deployment group create:*)",
+      "Bash(az deployment sub create:*)",
+      "Bash(azd up:*)"
+    ]
+  },
+  "mcpServers": {}
+}

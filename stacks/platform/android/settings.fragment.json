@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./gradlew tasks:*)",
+      "Bash(./gradlew projects:*)",
+      "Bash(./gradlew help:*)",
+      "Bash(./gradlew dependencies:*)",
+      "Bash(./gradlew :*:dependencies:*)",
+      "Bash(adb devices:*)"
+    ]
+  },
+  "mcpServers": {}
+}

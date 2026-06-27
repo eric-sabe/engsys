@@ -1,0 +1,45 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(az account show:*)",
+      "Bash(az account list:*)",
+      "Bash(az group list:*)",
+      "Bash(az group show:*)",
+      "Bash(az resource list:*)",
+      "Bash(az resource show:*)",
+      "Bash(az deployment group list:*)",
+      "Bash(az deployment group show:*)",
+      "Bash(az deployment group validate:*)",
+      "Bash(az deployment group what-if:*)",
+      "Bash(az deployment sub what-if:*)",
+      "Bash(az bicep build:*)",
+      "Bash(bicep build:*)",
+      "Bash(az keyvault list:*)",
+      "Bash(az keyvault show:*)",
+      "Bash(az acr show:*)",
+      "Bash(az acr list:*)",
+      "Bash(az postgres flexible-server show:*)",
+      "Bash(az postgres flexible-server list:*)",
+      "Bash(az containerapp show:*)",
+      "Bash(az containerapp list:*)",
+      "Bash(az containerapp revision list:*)",
+      "Bash(az monitor metrics list:*)",
+      "Bash(az monitor log-analytics query:*)",
+      "Bash(azd provision --preview:*)",
+      "Bash(azd env list:*)"
+    ],
+    "deny": [
+      "Bash(az deployment group create:*)",
+      "Bash(az deployment sub create:*)",
+      "Bash(az group delete:*)",
+      "Bash(az resource delete:*)",
+      "Bash(azd up:*)"
+    ]
+  },
+  "mcpServers": {
+    "microsoft-docs": {
+      "type": "http",
+      "url": "https://learn.microsoft.com/api/mcp"
+    }
+  }
+}

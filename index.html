@@ -1,0 +1,500 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>engsys — An AI Engineering Team for Claude Code</title>
+<meta name="description" content="Install a full AI engineering team into any project with one command. 14 specialized agents for Claude Code — swap stack packs, not prompts.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%230a0e14'/%3E%3Ccircle cx='8' cy='8' r='3.4' fill='none' stroke='%2334e0d2' stroke-width='1.6'/%3E%3C/svg%3E">
+<style>
+  :root{
+    --bg:#0a0e14; --panel:#111824; --panel-2:#0e141d; --line:#1f2a38;
+    --ink:#e6edf3; --muted:#8a97a8; --dim:#5c6a7a;
+    --cyan:#34e0d2; --cyan-dim:#176f6a;
+    --amber:#f5b13d; --amber-dim:#6e4f17;
+    --red:#ff6b6b; --green:#46d39a; --green-dim:#235a45;
+    --violet:#9d8cff; --violet-dim:#3a3470;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth;overflow-x:hidden}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.55;
+    background-image:radial-gradient(900px 500px at 80% -10%,rgba(157,140,255,.10),transparent 60%),
+      radial-gradient(800px 500px at -10% 10%,rgba(52,224,210,.08),transparent 55%),
+      linear-gradient(rgba(52,224,210,.03) 1px,transparent 1px),linear-gradient(90deg,rgba(52,224,210,.03) 1px,transparent 1px);
+    background-size:auto,auto,46px 46px,46px 46px;}
+  a{color:var(--cyan);text-decoration:none} a:hover{text-decoration:underline}
+  code,.mono{font-family:var(--mono)}
+  .wrap{max-width:1140px;margin:0 auto;padding:0 22px}
+
+  #bar{position:fixed;top:0;left:0;height:3px;width:0;background:linear-gradient(90deg,var(--cyan),var(--violet));z-index:60;transition:width .1s linear}
+  nav{position:sticky;top:0;z-index:50;background:rgba(10,14,20,.82);backdrop-filter:blur(9px);border-bottom:1px solid var(--line)}
+  nav .wrap{display:flex;align-items:center;gap:14px;min-height:54px;padding:8px 22px;flex-wrap:wrap}
+  nav .brand{font-family:var(--mono);font-size:14px;color:var(--cyan);letter-spacing:.5px;white-space:nowrap}
+  nav .brand b{color:var(--ink)}
+  nav .links{display:flex;gap:3px;flex-wrap:wrap;margin-left:auto}
+  nav .links a{font-size:12.5px;color:var(--muted);padding:5px 9px;border-radius:6px}
+  nav .links a:hover{color:var(--ink);background:var(--panel);text-decoration:none}
+  nav .menu-btn{display:none;background:none;border:1px solid var(--line);color:var(--muted);
+    cursor:pointer;padding:5px 9px;border-radius:6px;font-size:16px;line-height:1;margin-left:auto}
+  nav .menu-btn:hover{color:var(--ink);border-color:var(--muted)}
+  .mobile-menu{display:none;border-top:1px solid var(--line);padding:8px 0 14px}
+  .mobile-menu a{display:block;padding:11px 22px;font-size:15px;color:var(--muted);text-decoration:none}
+  .mobile-menu a:hover,.mobile-menu a.active{color:var(--ink)}
+  nav.open .mobile-menu{display:block}
+  @media(max-width:820px){nav .links{display:none}nav .menu-btn{display:block}}
+
+  section{padding:74px 0;border-bottom:1px solid var(--line)}
+  #cta{border-bottom:none}
+  .kicker{font-family:var(--mono);font-size:12px;letter-spacing:2px;text-transform:uppercase;color:var(--cyan)}
+  h1{font-size:clamp(32px,5.4vw,58px);line-height:1.04;margin:.3em 0 .25em;letter-spacing:-1px}
+  h2{font-size:clamp(24px,3.4vw,38px);line-height:1.08;margin:.2em 0 .3em;letter-spacing:-.5px}
+  h3{font-size:18px;margin:0 0 .3em}
+  p.lede{font-size:clamp(15px,2vw,18px);color:#c7d2de;max-width:64ch}
+  .muted{color:var(--muted)} .small{font-size:13px}
+
+  /* hero */
+  .hero{padding-top:78px}
+  .hero h1 span{color:var(--cyan)}
+  .hero .thesis{max-width:60ch;font-size:clamp(16px,2.1vw,20px);color:#cfd9e4;margin-top:14px}
+  .hero .thesis b{color:#fff}
+  .cmd-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:26px}
+  .cmdbox{display:flex;align-items:center;gap:12px;background:#070b11;border:1px solid var(--cyan-dim);border-radius:10px;padding:11px 14px;font-family:var(--mono);font-size:13.5px}
+  .cmdbox .pr{color:var(--cyan)} .cmdbox .tx{color:var(--ink)}
+  .cmdbox button{background:none;border:0;color:var(--muted);cursor:pointer;font-family:var(--mono);font-size:11px;border-left:1px solid var(--line);padding-left:12px}
+  .cmdbox button:hover{color:var(--cyan)}
+  .btn{display:inline-block;font-size:13px;padding:11px 16px;border-radius:10px;border:1px solid var(--line);color:var(--ink)}
+  .btn:hover{border-color:var(--cyan);text-decoration:none}
+  .faces{display:flex;margin-top:34px}
+  .faces img,.faces .ph{width:46px;height:46px;border-radius:50%;border:2px solid var(--bg);margin-left:-12px;object-fit:cover;background:var(--panel);box-shadow:0 2px 8px rgba(0,0,0,.4)}
+  .faces .more{display:flex;align-items:center;justify-content:center;width:46px;height:46px;border-radius:50%;border:2px solid var(--bg);margin-left:-12px;background:var(--panel);color:var(--muted);font-family:var(--mono);font-size:12px}
+  .faces-note{font-size:12.5px;color:var(--muted);margin-top:12px}
+
+  /* avatars (fallback) */
+  .av{width:100%;aspect-ratio:1;border-radius:50%;object-fit:cover;background:var(--panel-2);display:block}
+  .av-ph{width:100%;aspect-ratio:1;border-radius:50%;display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-weight:700;font-size:26px;color:var(--bg)}
+
+  /* three layers */
+  .layers3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:26px}
+  .lay{background:linear-gradient(180deg,var(--panel),var(--panel-2));border:1px solid var(--line);border-radius:14px;padding:18px 18px;border-top:3px solid var(--c)}
+  .lay .t{font-family:var(--mono);font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--c)}
+  .lay h3{margin-top:6px}
+  .lay p{font-size:13.5px;color:#c2cdd9;margin:.3em 0 0}
+  .demo{margin-top:22px;background:linear-gradient(180deg,var(--panel),var(--panel-2));border:1px solid var(--line);border-radius:14px;padding:20px 22px;display:grid;grid-template-columns:auto 1fr;gap:22px;align-items:center}
+  .demo .who{display:flex;align-items:center;gap:14px}
+  .demo .who img,.demo .who .av-ph{width:74px;height:74px;border-radius:50%}
+  .demo .who b{display:block;font-size:16px} .demo .who span{font-size:12px;color:var(--muted)}
+  .demo .pick .small{color:var(--muted);margin-bottom:8px}
+  .chips{display:flex;gap:8px;flex-wrap:wrap}
+  .chip{font-family:var(--mono);font-size:12px;color:var(--muted);background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:6px 13px;cursor:pointer;transition:.12s}
+  .chip.on{color:var(--bg);background:var(--cyan);border-color:var(--cyan)}
+  .demo .out{margin-top:12px;font-size:13px;color:#cdd7e2}
+  .demo .out code{color:var(--cyan)}
+  @media(max-width:720px){.layers3{grid-template-columns:1fr}.demo{grid-template-columns:1fr}}
+
+  /* team */
+  .filters{display:flex;gap:8px;flex-wrap:wrap;margin:20px 0 18px}
+  .fbtn{font-family:var(--mono);font-size:12px;color:var(--muted);background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:6px 13px;cursor:pointer}
+  .fbtn.on{color:var(--bg);background:var(--cyan);border-color:var(--cyan)}
+  .team{display:grid;grid-template-columns:repeat(auto-fill,minmax(216px,1fr));gap:14px}
+  .mem{background:linear-gradient(180deg,var(--panel),var(--panel-2));border:1px solid var(--line);border-radius:14px;padding:16px;text-align:center;transition:.16s}
+  .mem:hover{border-color:var(--cyan);transform:translateY(-3px)}
+  .mem.hide{display:none}
+  .mem .ring{width:96px;height:96px;margin:0 auto 12px;border-radius:50%;padding:3px;background:conic-gradient(from 200deg,var(--cyan),var(--violet),var(--amber),var(--cyan))}
+  .mem .ring>*{border:3px solid var(--panel)}
+  .mem .nm{font-size:15.5px;font-weight:700}
+  .mem .rl{font-family:var(--mono);font-size:10px;letter-spacing:.6px;text-transform:uppercase;color:var(--cyan);margin-top:2px}
+  .mem .bl{font-size:12.5px;color:#bcc8d6;margin-top:9px;border-top:1px dashed var(--line);padding-top:9px;min-height:54px}
+  .mem .pill{display:inline-block;font-family:var(--mono);font-size:9px;letter-spacing:.5px;text-transform:uppercase;color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:1px 7px;margin-top:10px}
+
+  /* pipeline */
+  .track{position:relative;display:grid;grid-template-columns:repeat(4,1fr);margin:30px 0 6px}
+  .track:before{content:"";position:absolute;top:31px;left:9%;right:9%;height:2px;background:linear-gradient(90deg,var(--cyan-dim),var(--cyan),var(--amber))}
+  .station{position:relative;background:none;border:0;cursor:pointer;padding:0 6px;font-family:inherit;text-align:center}
+  .station .dot{width:22px;height:22px;border-radius:50%;background:var(--bg);border:2px solid var(--cyan-dim);margin:22px auto 10px;display:flex;align-items:center;justify-content:center;transition:.15s}
+  .station .dot i{width:8px;height:8px;border-radius:50%;background:var(--cyan-dim);display:block;transition:.15s}
+  .station .lbl{font-size:12.5px;font-weight:600;color:var(--muted)}
+  .station .cmd{font-family:var(--mono);font-size:10.5px;color:var(--dim);margin-top:2px;display:block}
+  .station:hover .lbl{color:var(--ink)}
+  .station.active .dot{border-color:var(--cyan);box-shadow:0 0 0 5px rgba(52,224,210,.12)}
+  .station.active .dot i{background:var(--cyan);width:11px;height:11px}
+  .station.active .lbl{color:#fff}
+  .detail{background:linear-gradient(180deg,var(--panel),var(--panel-2));border:1px solid var(--line);border-radius:14px;padding:22px 24px;margin-top:18px}
+  .detail .top{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:6px}
+  .detail .top .cmd{font-family:var(--mono);font-size:13px;color:var(--cyan);background:rgba(52,224,210,.07);border:1px solid var(--cyan-dim);padding:3px 9px;border-radius:6px}
+  .detail ul{margin:.4em 0 0;padding-left:18px} .detail li{margin:.3em 0;color:#cdd7e2;font-size:14px}
+
+  /* packs */
+  .packgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(168px,1fr));gap:12px;margin-top:24px}
+  .pk{background:linear-gradient(180deg,var(--panel),var(--panel-2));border:1px solid var(--line);border-radius:12px;padding:14px 15px}
+  .pk .h{font-family:var(--mono);font-size:11px;color:var(--amber);text-transform:uppercase;letter-spacing:1px}
+  .pk .v{font-size:13px;color:#cdd7e2;margin-top:6px;line-height:1.7}
+  .pk .v b{color:var(--ink);font-weight:600}
+
+  /* installer */
+  .install{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:24px;align-items:stretch}
+  @media(max-width:820px){.install{grid-template-columns:1fr}.track{grid-template-columns:repeat(2,1fr);row-gap:18px}.track:before{display:none}.team{grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}}
+  @media(max-width:560px){
+    .wrap{padding:0 16px}
+    section{padding:54px 0}
+    .hero{padding-top:50px}
+    .faces img,.faces .ph,.faces .more{width:36px;height:36px;margin-left:-9px}
+    .cmdbox{font-size:12px;padding:10px 12px}
+    .demo .who img,.demo .who .av-ph{width:60px;height:60px}
+  }
+  .code{background:#070b11;border:1px solid var(--line);border-radius:13px;padding:16px 18px;font-family:var(--mono);font-size:12.5px;line-height:1.7;overflow:auto}
+  .code .cm{color:var(--dim)} .code .k{color:var(--violet)} .code .s{color:var(--cyan)} .code .a{color:var(--amber)}
+  .code .hd{color:var(--muted);font-size:11px;letter-spacing:1px;text-transform:uppercase;margin-bottom:8px}
+
+  /* usage steps */
+  .steps{counter-reset:s;display:grid;gap:10px;margin:26px 0 4px}
+  .step{position:relative;background:linear-gradient(180deg,var(--panel),var(--panel-2));border:1px solid var(--line);border-radius:12px;padding:14px 16px 15px 54px}
+  .step:before{counter-increment:s;content:counter(s);position:absolute;left:15px;top:14px;width:26px;height:26px;border-radius:50%;background:rgba(52,224,210,.1);border:1px solid var(--cyan-dim);color:var(--cyan);font-family:var(--mono);font-size:13px;display:flex;align-items:center;justify-content:center}
+  .step b{font-size:14.5px}
+  .step p{margin:.25em 0 0;font-size:13px;color:var(--muted)}
+  .step code{font-family:var(--mono);font-size:12.5px;color:var(--cyan);background:#070b11;border:1px solid var(--line);border-radius:6px;padding:3px 8px;display:inline-block;margin-top:8px;white-space:nowrap;max-width:100%;overflow:auto}
+  .cmds{display:grid;grid-template-columns:auto 1fr;gap:7px 14px;margin-top:20px;font-size:13px;align-items:baseline}
+  .cmds code{font-family:var(--mono);color:var(--cyan);white-space:nowrap}
+  .cmds span{color:var(--muted)}
+  .callout{margin-top:20px;background:var(--panel-2);border:1px solid var(--line);border-left:3px solid var(--amber);border-radius:10px;padding:14px 16px;font-size:13.5px;color:#cdd7e2}
+  .callout .h{font-family:var(--mono);font-size:11px;color:var(--amber);text-transform:uppercase;letter-spacing:1px;margin-bottom:6px}
+  .callout code,.cmds code{font-family:var(--mono)}
+  .repo-cta{margin-top:22px;display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+  nav .gh{font-family:var(--mono);font-size:12px;color:var(--ink);border:1px solid var(--cyan-dim);background:rgba(52,224,210,.07);padding:5px 11px;border-radius:7px;white-space:nowrap}
+  nav .gh:hover{border-color:var(--cyan);text-decoration:none}
+  nav a.brand{text-decoration:none}
+
+  /* steal */
+  .take{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:13px;margin-top:24px}
+  .tk{background:linear-gradient(180deg,var(--panel),var(--panel-2));border:1px solid var(--line);border-left:3px solid var(--violet);border-radius:12px;padding:15px 16px}
+  .tk b{color:#fff} .tk p{margin:.3em 0 0;font-size:13px;color:var(--muted)}
+
+  /* cta */
+  #cta{text-align:center;padding:90px 0 110px}
+  #cta h2{font-size:clamp(26px,4vw,42px)}
+  #cta .sub{color:var(--muted);margin-top:8px}
+  footer{padding:26px 0;color:var(--dim);font-size:12.5px}
+  footer .wrap{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
+</style>
+</head>
+<body>
+<div id="bar"></div>
+
+<nav><div class="wrap">
+  <a class="brand" href="https://github.com/eric-sabe/engsys" target="_blank" rel="noopener">▢ <b>engsys</b></a>
+  <div class="links">
+    <a href="#layers">Three layers</a>
+    <a href="#team">The team</a>
+    <a href="#pipeline">Pipeline</a>
+    <a href="#packs">Packs</a>
+    <a href="#installer">Install &amp; use</a>
+    <a href="#lessons">Lessons</a>
+    <a href="dashboard.html">Dashboard</a>
+  </div>
+  <button class="menu-btn" aria-expanded="false" aria-label="Open menu">☰</button>
+  <a class="gh" href="https://github.com/eric-sabe/engsys" target="_blank" rel="noopener">GitHub ↗</a>
+</div>
+<div class="mobile-menu">
+  <a href="#layers">Three layers</a>
+  <a href="#team">The team</a>
+  <a href="#pipeline">Pipeline</a>
+  <a href="#packs">Packs</a>
+  <a href="#installer">Install &amp; use</a>
+  <a href="#lessons">Lessons</a>
+  <a href="dashboard.html">Dashboard</a>
+</div></nav>
+
+<header class="hero"><div class="wrap">
+  <div class="kicker">A portable engineering org for Claude Code</div>
+  <h1>Stop using AI to write code.<br><span>Install an engineering team instead.</span></h1>
+  <p class="thesis">engsys is a full team of specialized AI agents — designer, planner, implementer, reviewer, security, architect, tester, librarian — that you install into any project with one command. <b>The personas stay the same everywhere; you swap stack "packs," not prompts.</b></p>
+  <div class="cmd-row">
+    <div class="cmdbox"><span class="pr">$</span> <span class="tx" id="cmd">engsys install --into .</span><button id="copy">copy</button></div>
+    <a class="btn" href="#installer">Install &amp; use →</a>
+    <a class="btn" href="https://github.com/eric-sabe/engsys" target="_blank" rel="noopener">GitHub ↗</a>
+  </div>
+  <div class="faces" id="faces"></div>
+  <div class="faces-note">Fourteen specialists. One install.</div>
+</div></header>
+
+<section id="layers"><div class="wrap">
+  <div class="kicker">The core idea</div>
+  <h2>Persona, pack, project facts</h2>
+  <p class="lede">One split runs the whole system: <i>who</i> does the work, <i>which</i> stack they work on, and what's true about <i>this</i> repo — kept ruthlessly separate.</p>
+  <div class="layers3">
+    <div class="lay" style="--c:var(--violet)"><div class="t">Persona — who</div><h3>Stable everywhere</h3><p>Voice, values, and decision discipline that never change from project to project. Edited once, here.</p></div>
+    <div class="lay" style="--c:var(--cyan)"><div class="t">Capability — which stack</div><h3>Detachable packs</h3><p>Adapting means picking the AWS pack over the Azure one — not editing a prompt. Mixed stacks just compose.</p></div>
+    <div class="lay" style="--c:var(--amber)"><div class="t">Project facts — this repo</div><h3>Generated</h3><p>Services, toolchain, invariants — written into your CLAUDE.md. The one layer unique to you.</p></div>
+  </div>
+
+  <div class="demo">
+    <div class="who">
+      <span id="melvinAv"></span>
+      <div><b>Melvin</b><span>Cloud architect — same person, every cloud</span></div>
+    </div>
+    <div class="pick">
+      <div class="small">Pick the project's cloud → he loads the matching pack. His persona file never changes.</div>
+      <div class="chips" id="cloudChips"></div>
+      <div class="out" id="cloudOut"></div>
+    </div>
+  </div>
+</div></section>
+
+<section id="team"><div class="wrap">
+  <div class="kicker">The roster</div>
+  <h2>Fourteen specialists, one install</h2>
+  <p class="lede">Not one assistant wearing hats — distinct agents with distinct jobs, voices, and standards.</p>
+  <div class="filters" id="teamFilters">
+    <button class="fbtn on" data-f="all">All 14</button>
+    <button class="fbtn" data-f="core">Core (always installed)</button>
+    <button class="fbtn" data-f="optional">Opt-in</button>
+  </div>
+  <div class="team" id="teamGrid"></div>
+</div></section>
+
+<section id="pipeline"><div class="wrap">
+  <div class="kicker">How work moves</div>
+  <h2>Spec to closeout, on rails</h2>
+  <p class="lede">Slash commands call the agents by name, so the process runs the same way every time. Click a stage.</p>
+  <div class="track" id="track"></div>
+  <div class="detail" id="stationDetail"></div>
+</div></section>
+
+<section id="packs"><div class="wrap">
+  <div class="kicker">Adapt by choosing, not rewriting</div>
+  <h2>Same expert, different stack</h2>
+  <p class="lede">Capability lives in detachable packs. Install the ones a project uses; the agnostic personas load whatever is present.</p>
+  <div class="packgrid" id="packGrid"></div>
+</div></section>
+
+<section id="installer"><div class="wrap">
+  <div class="kicker">Install &amp; use</div>
+  <h2>A script lays the foundation</h2>
+  <p class="lede">A real installer — not a model — writes the folders, faithfully, every time. The model only fills in project facts afterward, so plumbing can't be silently skipped. Five steps, start to finish.</p>
+
+  <div class="steps">
+    <div class="step"><b>Get engsys</b>
+      <p>Clone it once. The installer is zero-dependency Node (≥18) — no <code>npm install</code>, runs the same on macOS, Windows, and Linux.</p>
+      <code>git clone https://github.com/eric-sabe/engsys</code></div>
+    <div class="step"><b>Configure your project</b>
+      <p>Copy the example config into your repo, then pick your cloud / iac / lang / platform / db, issue tracker, and which agents you want.</p>
+      <code>cp engsys/engsys.config.example.yaml engsys.config.yaml</code></div>
+    <div class="step"><b>Install</b>
+      <p>Materializes <code>.claude/</code>, renders <code>CLAUDE.md</code> + settings, and seeds the lessons library. Already have a setup? It adopts it — merges your settings, preserves your agents — and snapshots the originals so it's reversible.</p>
+      <code>engsys/install install --into .</code></div>
+    <div class="step"><b>Naturalize</b>
+      <p>Open the project in Claude Code and run the command. It fills the project-facts region of <code>CLAUDE.md</code> and folds in any imported Copilot/Cursor rules. The one model-driven step — never plumbing.</p>
+      <code>/naturalize</code></div>
+    <div class="step"><b>Live with it</b>
+      <p>Confirm nothing drifted, pull engsys improvements or change packs later, or roll all the way back.</p>
+      <code>engsys verify · update · uninstall --into .</code></div>
+  </div>
+
+  <p class="muted small" style="margin-top:8px">A config like the left produces the tree on the right:</p>
+  <div class="install">
+    <div class="code" id="cfgCode"></div>
+    <div class="code" id="treeCode"></div>
+  </div>
+
+  <div class="cmds">
+    <code>install</code><span>materialize, or adopt an existing setup, into a project</span>
+    <code>update</code><span>re-render; prune deselected packs; preserve your project facts + agents</span>
+    <code>verify</code><span>check installed files against the lockfile (drift detection)</span>
+    <code>uninstall</code><span>remove everything engsys added and restore the prior setup</span>
+    <code>--dry-run</code><span>preview the full plan, write nothing &nbsp;·&nbsp; <code>--force</code> overwrite instead of merge</span>
+  </div>
+
+  <div class="callout">
+    <div class="h">Dropping into an existing repo?</div>
+    engsys <b>adopts</b> your <code>CLAUDE.md</code>, settings, and agents instead of overwriting them, imports Copilot/Cursor config for <code>/naturalize</code> to fold in, and <code>uninstall</code> restores everything byte-for-byte. Full walkthrough in <a href="https://github.com/eric-sabe/engsys/blob/main/docs/install-scenarios.md" target="_blank" rel="noopener">install-scenarios.md</a>.
+  </div>
+
+  <div class="repo-cta">
+    <a class="btn" href="https://github.com/eric-sabe/engsys" target="_blank" rel="noopener">Browse the source on GitHub ↗</a>
+    <span class="muted small">MIT licensed · zero-dependency installer · <a href="https://github.com/eric-sabe/engsys/blob/main/README.md" target="_blank" rel="noopener">README</a></span>
+  </div>
+</div></section>
+
+<section id="lessons"><div class="wrap">
+  <div class="kicker">It gets smarter across projects</div>
+  <h2>Every closeout feeds the next install</h2>
+  <p class="lede">Hard-won lessons get mined per project, generalized, and seeded into every new one. The system compounds instead of forking.</p>
+  <div class="take" id="lessonLoop"></div>
+</div></section>
+
+<section id="steal"><div class="wrap">
+  <div class="kicker">Steal this</div>
+  <h2>Principles that transfer to any project</h2>
+  <div class="take" id="take"></div>
+</div></section>
+
+<section id="cta"><div class="wrap">
+  <div class="kicker">Your next project already has a team waiting</div>
+  <h2>One command installs it.</h2>
+  <div class="sub">Define a config, run the installer, naturalize the project facts. That's it.</div>
+  <div class="cmd-row" style="justify-content:center">
+    <div class="cmdbox"><span class="pr">$</span> <span class="tx">engsys install --into .</span></div>
+  </div>
+</div></section>
+
+<footer><div class="wrap">
+  <span>engsys — a portable engineering system for Claude Code</span>
+  <span class="mono">persona · capability · project facts</span>
+</div></footer>
+
+<script>
+const TEAM = [
+  {id:'melvin', name:'Melvin', role:'Architect', tier:'core', bl:'Cloud architect & performance scientist. Reasons about p99, blast radius, and cost curves before he picks a service.'},
+  {id:'aaron', name:'Aaron', role:'IaC & deploys', tier:'core', bl:'Owns the pipeline, the state, and every "it worked yesterday" infra mystery.'},
+  {id:'isabelle', name:'Isabelle', role:'Implementer', tier:'core', bl:'Reads the spec, matches your patterns, tests her work, ships a clean PR.'},
+  {id:'bert', name:'Bert', role:'Bug hunter', tier:'core', bl:'Traces the error to its real source and files the issue. He investigates, he doesn’t guess.'},
+  {id:'jody', name:'Jody', role:'Planner', tier:'core', bl:'Turns a goal into a dependency-mapped batch of issues Isabelle can actually work.'},
+  {id:'leith', name:'Leith', role:'Product / UX', tier:'core', bl:'Turns "make it better" into specs with acceptance criteria you can build against.'},
+  {id:'marcelo', name:'Marcelo', role:'Testing', tier:'core', bl:'Designs the test plan and the quality gate before the bug ships, not after.'},
+  {id:'patricia', name:'Patricia', role:'Librarian', tier:'core', bl:'Records the decision, writes the ADR, and keeps the docs from going stale.'},
+  {id:'nyx', name:'Nyx', role:'Security', tier:'core', bl:'Asks "is this actually secure?" — then breaks it to find out.'},
+  {id:'otto', name:'Otto', role:'LLM optimization', tier:'core', bl:'Finds where your tokens are going and stops the bleeding.'},
+  {id:'gary', name:'Gary', role:'Mobile', tier:'optional', bl:'Mobile architect (iOS and/or Android). Loads your mobile stack and sweats the native UX details.'},
+  {id:'sandy', name:'Sandy', role:'Marketing / SEO', tier:'optional', bl:'Makes skeptics understand — and want — what the engineers built. Clear over clever.'},
+  {id:'jos', name:'Jos', role:'Monetization', tier:'optional', bl:'Pricing, ASO, CAC/LTV math, and the App Store policy call before it bites you.'},
+  {id:'steve', name:'Steve', role:'The scapegoat', tier:'optional', bl:'Officially responsible for phantom config, ghost resources, and IAM nobody admits creating. (Not real. Morale only.)'},
+];
+const TIER_COLORS = {melvin:'#34e0d2',aaron:'#46d39a',isabelle:'#9d8cff',bert:'#f5b13d',jody:'#34e0d2',leith:'#9d8cff',marcelo:'#46d39a',patricia:'#f5b13d',nyx:'#ff6b6b',otto:'#34e0d2',gary:'#9d8cff',sandy:'#f5b13d',jos:'#46d39a',steve:'#5c6a7a'};
+
+function avatar(m, cls){
+  const c = TIER_COLORS[m.id]||'#34e0d2';
+  const ph = `<div class="${cls} av-ph" style="background:linear-gradient(140deg,${c},#0e141d)">${m.name[0]}</div>`;
+  return `<img class="${cls} av" src="team-images/${m.id}.png" alt="${m.name}" loading="lazy" onerror="this.outerHTML=${JSON.stringify(ph).replace(/"/g,'&quot;')}">`;
+}
+
+// hero faces
+const faces = document.getElementById('faces');
+TEAM.slice(0,9).forEach(m=>{
+  const c=TIER_COLORS[m.id];
+  faces.insertAdjacentHTML('beforeend',
+    `<img src="team-images/${m.id}.png" alt="${m.name}" title="${m.name}" onerror="this.outerHTML='<span class=\\'ph\\' style=\\'background:linear-gradient(140deg,${c},#0e141d)\\'></span>'">`);
+});
+faces.insertAdjacentHTML('beforeend','<span class="more">+5</span>');
+
+// team grid
+const grid = document.getElementById('teamGrid');
+function renderTeam(filter){
+  grid.innerHTML = TEAM.map(m=>{
+    const hide = filter!=='all' && m.tier!==filter ? ' hide':'';
+    return `<div class="mem${hide}" data-tier="${m.tier}">
+      <div class="ring">${avatar(m,'')}</div>
+      <div class="nm">${m.name}</div><div class="rl">${m.role}</div>
+      <div class="bl">${m.bl}</div>
+      <span class="pill">${m.tier==='core'?'core':'opt-in'}</span>
+    </div>`;
+  }).join('');
+}
+renderTeam('all');
+document.getElementById('teamFilters').addEventListener('click',e=>{
+  const b=e.target.closest('.fbtn'); if(!b)return;
+  [...e.currentTarget.children].forEach(c=>c.classList.toggle('on',c===b));
+  renderTeam(b.dataset.f);
+});
+
+// three-layer cloud demo
+document.getElementById('melvinAv').outerHTML = avatar({id:'melvin',name:'Melvin'},'');
+const CLOUDS=[
+  {id:'aws',label:'AWS',pack:'cloud-architecture-aws'},
+  {id:'azure',label:'Azure',pack:'cloud-architecture-azure'},
+  {id:'gcp',label:'GCP',pack:'cloud-architecture-gcp'},
+  {id:'cloudflare',label:'Cloudflare',pack:'cloud-architecture-cloudflare'},
+];
+const chips=document.getElementById('cloudChips'), cloudOut=document.getElementById('cloudOut');
+function pickCloud(i){
+  [...chips.children].forEach((c,j)=>c.classList.toggle('on',j===i));
+  const c=CLOUDS[i];
+  cloudOut.innerHTML=`Project declares <code>cloud: ${c.id}</code> → Melvin loads <code>${c.pack}</code>. <span class="muted">His profile is untouched.</span>`;
+}
+CLOUDS.forEach((c,i)=>{const b=document.createElement('button');b.className='chip';b.textContent=c.label;b.onclick=()=>pickCloud(i);chips.appendChild(b);});
+pickCloud(0);
+
+// pipeline
+const STATIONS=[
+  {lbl:'Design + plan',cmd:'/generate-project',pts:['Leith turns the goal into a spec with testable acceptance criteria.','Melvin and Nyx pressure-test architecture and security; Marcelo adds the test strategy.','Jody breaks it into a dependency-ordered board of issues.']},
+  {lbl:'Implement',cmd:'/implement-project',pts:['Isabelle works each issue in an isolated worktree, one phase = one PR.','Matches existing patterns, writes tests, runs the pre-push gate before pushing.','Opens the PR already locally reviewed.']},
+  {lbl:'Review',cmd:'objective gate',pts:['A fresh reviewer with no stake re-runs the gate and checks each acceptance criterion.','Binary verdict: clean, or findings with file:line.','No merge without a clean independent pass.']},
+  {lbl:'Close out',cmd:'/project-closeout',pts:['Verify everything merged, clean up worktrees and branches.','Mine the review findings; generalize recurring ones into lessons.','Promote durable lessons back to the shared library.']},
+];
+const track=document.getElementById('track'), sd=document.getElementById('stationDetail');
+STATIONS.forEach((s,i)=>{
+  const b=document.createElement('button');b.className='station'+(i===0?' active':'');
+  b.innerHTML=`<div class="dot"><i></i></div><div class="lbl">${s.lbl}</div><span class="cmd">${s.cmd}</span>`;
+  b.onclick=()=>{[...track.children].forEach(c=>c.classList.remove('active'));b.classList.add('active');paintStation(i);};
+  track.appendChild(b);
+});
+function paintStation(i){const s=STATIONS[i];sd.innerHTML=`<div class="top"><span class="cmd">${s.cmd}</span><h3 style="margin:0">${s.lbl}</h3></div><ul>${s.pts.map(p=>`<li>${p}</li>`).join('')}</ul>`;}
+paintStation(0);
+
+// packs
+const PACKS=[
+  {h:'cloud',v:'<b>aws</b> · <b>azure</b> · <b>gcp</b> · <b>cloudflare</b>'},
+  {h:'iac',v:'<b>terraform</b> · <b>bicep</b> · <b>cdk</b>'},
+  {h:'lang',v:'<b>typescript</b> · <b>python</b> · <b>swift</b> · <b>kotlin</b> · <b>shell</b>'},
+  {h:'platform',v:'<b>web</b> · <b>ios</b> · <b>android</b>'},
+  {h:'db',v:'<b>prisma</b> · <b>mongo</b>'},
+  {h:'tooling',v:'<b>github</b> · <b>linear</b> issue trackers'},
+];
+document.getElementById('packGrid').innerHTML=PACKS.map(p=>`<div class="pk"><div class="h">${p.h}/</div><div class="v">${p.v}</div></div>`).join('');
+
+// installer code blocks
+document.getElementById('cfgCode').innerHTML=
+`<div class="hd">engsys.config.yaml</div>`+
+[`<span class="k">stack</span>:`,
+ `  <span class="k">cloud</span>: <span class="a">aws</span>`,
+ `  <span class="k">lang</span>: [<span class="a">typescript</span>]`,
+ `  <span class="k">platform</span>: [<span class="a">web</span>]`,
+ `<span class="k">issue_tracker</span>: <span class="a">linear</span>`,
+ `<span class="k">agents</span>: { <span class="k">core</span>: <span class="a">all</span>, <span class="k">extra</span>: [<span class="a">gary</span>] }`,
+ `<span class="cm"># PRs/CI stay on GitHub regardless</span>`].join('<br>');
+document.getElementById('treeCode').innerHTML=
+`<div class="hd">$ engsys install --into .</div>`+
+[`<span class="s">.claude/</span>`,
+ `  <span class="s">agents/</span>      <span class="cm"># personas (untouched per project)</span>`,
+ `  <span class="s">commands/</span>    <span class="cm"># the workflow</span>`,
+ `  <span class="s">skills/</span>      <span class="cm"># core + the aws/ts/web/linear packs</span>`,
+ `  <span class="s">hooks/</span>       <span class="cm"># generated from your config</span>`,
+ `  <span class="s">settings.json</span> <span class="cm"># merged permissions + MCP</span>`,
+ `<span class="s">CLAUDE.md</span>       <span class="cm"># + project-facts region (you fill)</span>`,
+ `<span class="s">.claude/engsys.lock</span> <span class="cm"># verify drift anytime</span>`].join('<br>');
+
+// lessons loop
+document.getElementById('lessonLoop').innerHTML=[
+  {b:'Mine',p:'Closeout pulls the review findings from every PR in the project.'},
+  {b:'Generalize',p:'Recurring, stack-independent ones become a curated library lesson.'},
+  {b:'Seed',p:'The installer drops the library into every new project on day one.'},
+  {b:'Compound',p:'Each project starts smarter than the last. The system doesn’t fork.'},
+].map(x=>`<div class="tk"><b>${x.b}</b><p>${x.p}</p></div>`).join('');
+
+// steal
+document.getElementById('take').innerHTML=[
+  {b:'Separate the stable from the swappable',p:'Keep identity in one place and tech in another, and adapting stops meaning rewriting.'},
+  {b:'Make the boring part deterministic',p:'If a step can be skipped, don’t ask a model to do it — let a script. Save the model for judgment.'},
+  {b:'Compose, don’t fork',p:'Mixed stacks should add up, not branch off. Detachable packs beat copy-paste every time.'},
+  {b:'Close the loop',p:'Mine what you learned, generalize it, seed it forward. A system that doesn’t compound is just a snapshot.'},
+].map(x=>`<div class="tk"><b>${x.b}</b><p>${x.p}</p></div>`).join('');
+
+// scroll progress + copy
+const bar=document.getElementById('bar');
+addEventListener('scroll',()=>{const h=document.documentElement;bar.style.width=(h.scrollTop/(h.scrollHeight-h.clientHeight)*100)+'%';},{passive:true});
+document.getElementById('copy').onclick=function(){navigator.clipboard&&navigator.clipboard.writeText('engsys install --into .');this.textContent='copied';setTimeout(()=>this.textContent='copy',1200);};
+(function(){
+  const btn=document.querySelector('nav .menu-btn'),nav=btn&&btn.closest('nav');
+  if(!btn)return;
+  function close(){nav.classList.remove('open');btn.setAttribute('aria-expanded','false');btn.textContent='☰';}
+  btn.addEventListener('click',()=>{
+    const open=nav.classList.toggle('open');
+    btn.setAttribute('aria-expanded',open);
+    btn.textContent=open?'✕':'☰';
+  });
+  document.querySelectorAll('.mobile-menu a').forEach(a=>a.addEventListener('click',close));
+  document.addEventListener('click',e=>{if(!nav.contains(e.target))close();});
+})();
+</script>
+</body>
+</html>

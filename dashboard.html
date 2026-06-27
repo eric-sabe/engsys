@@ -1,0 +1,727 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>engsys — Activity Dashboard</title>
+<meta name="description" content="Personal GitHub activity dashboard — commits, PRs, issues, code review discipline, and languages across all repos.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%230a0e14'/%3E%3Ccircle cx='8' cy='8' r='3.4' fill='none' stroke='%2334e0d2' stroke-width='1.6'/%3E%3C/svg%3E">
+<style>
+  /* ── Design tokens — identical to index.html ── */
+  :root{
+    --bg:#0a0e14; --panel:#111824; --panel-2:#0e141d; --line:#1f2a38;
+    --ink:#e6edf3; --muted:#8a97a8; --dim:#5c6a7a;
+    --cyan:#34e0d2; --cyan-dim:#176f6a;
+    --amber:#f5b13d; --amber-dim:#6e4f17;
+    --red:#ff6b6b; --green:#46d39a; --green-dim:#235a45;
+    --violet:#9d8cff; --violet-dim:#3a3470;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth;overflow-x:hidden}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.55;
+    background-image:
+      radial-gradient(900px 500px at 80% -10%,rgba(157,140,255,.08),transparent 60%),
+      radial-gradient(800px 500px at -10% 10%,rgba(52,224,210,.06),transparent 55%),
+      linear-gradient(rgba(52,224,210,.025) 1px,transparent 1px),
+      linear-gradient(90deg,rgba(52,224,210,.025) 1px,transparent 1px);
+    background-size:auto,auto,46px 46px,46px 46px;}
+  a{color:var(--cyan);text-decoration:none} a:hover{text-decoration:underline}
+  code,.mono{font-family:var(--mono)}
+  .wrap{max-width:1140px;margin:0 auto;padding:0 22px}
+
+  /* ── Nav — same structure as index.html ── */
+  nav{position:sticky;top:0;z-index:50;background:rgba(10,14,20,.94);
+    backdrop-filter:blur(9px);border-bottom:1px solid var(--line)}
+  nav .wrap{display:flex;align-items:center;gap:14px;min-height:54px;padding:8px 22px;flex-wrap:wrap}
+  nav .brand{font-family:var(--mono);font-size:14px;color:var(--cyan);letter-spacing:.5px;white-space:nowrap}
+  nav .brand b{color:var(--ink)}
+  nav .links{display:flex;gap:3px;flex-wrap:wrap;margin-left:auto}
+  nav .links a{font-size:12.5px;color:var(--muted);padding:5px 9px;border-radius:6px}
+  nav .links a:hover{color:var(--ink);background:var(--panel);text-decoration:none}
+  nav .links a.active{color:var(--ink)}
+  nav .gh{font-family:var(--mono);font-size:12px;color:var(--ink);border:1px solid var(--cyan-dim);
+    background:rgba(52,224,210,.07);padding:5px 11px;border-radius:7px;white-space:nowrap}
+  nav .gh:hover{border-color:var(--cyan);text-decoration:none}
+  nav .menu-btn{display:none;background:none;border:1px solid var(--line);color:var(--muted);
+    cursor:pointer;padding:5px 9px;border-radius:6px;font-size:16px;line-height:1;margin-left:auto}
+  nav .menu-btn:hover{color:var(--ink);border-color:var(--muted)}
+  .mobile-menu{display:none;border-top:1px solid var(--line);padding:8px 0 14px}
+  .mobile-menu a{display:block;padding:11px 22px;font-size:15px;color:var(--muted);text-decoration:none}
+  .mobile-menu a:hover,.mobile-menu a.active{color:var(--ink)}
+  nav.open .mobile-menu{display:block}
+  @media(max-width:820px){nav .links{display:none}nav .menu-btn{display:block}}
+
+  /* ── Dashboard header ── */
+  .db-header{padding:48px 0 26px}
+  .kicker{font-family:var(--mono);font-size:12px;letter-spacing:2px;text-transform:uppercase;color:var(--cyan)}
+  .db-header h1{font-size:clamp(26px,3.6vw,40px);line-height:1.06;margin:.25em 0 .2em;letter-spacing:-.5px}
+  .db-meta{font-size:13px;color:var(--muted);margin-top:4px;display:flex;gap:16px;flex-wrap:wrap;align-items:center}
+  .db-meta .badge{font-family:var(--mono);font-size:11px;background:rgba(245,177,61,.1);
+    border:1px solid var(--amber-dim);color:var(--amber);padding:2px 8px;border-radius:4px}
+
+  /* ── Section scaffolding ── */
+  .sec{padding:14px 0 30px}
+  .sec-head{display:flex;align-items:baseline;gap:12px;margin-bottom:14px;flex-wrap:wrap}
+  .sec-head h2{font-size:17px;margin:0;font-weight:600}
+  .sec-head .hint{font-size:12px;color:var(--dim)}
+  .sec-head .spacer{margin-left:auto}
+  .panel{background:linear-gradient(180deg,var(--panel),var(--panel-2));
+    border:1px solid var(--line);border-radius:14px;padding:18px 16px}
+
+  /* toggle buttons (LOC source) */
+  .fbtn{font-family:var(--mono);font-size:11.5px;color:var(--muted);background:var(--panel);
+    border:1px solid var(--line);border-radius:999px;padding:4px 11px;cursor:pointer;
+    transition:.12s;white-space:nowrap}
+  .fbtn.on{color:var(--bg);background:var(--cyan);border-color:var(--cyan)}
+  .fbtn:hover:not(.on){color:var(--ink);border-color:var(--muted)}
+
+  /* ── Stat cards ── */
+  .stat-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(168px,1fr));gap:12px}
+  .stat-card{background:linear-gradient(180deg,var(--panel),var(--panel-2));
+    border:1px solid var(--line);border-radius:14px;padding:18px 20px;
+    border-top:3px solid var(--c,var(--cyan))}
+  .stat-card .sc-label{font-family:var(--mono);font-size:11px;letter-spacing:1px;
+    text-transform:uppercase;color:var(--muted);margin-bottom:8px}
+  .stat-card .sc-val{font-size:clamp(24px,3.4vw,33px);font-weight:700;color:var(--c,var(--cyan));
+    font-family:var(--mono);line-height:1}
+  .stat-card .sc-sub{font-size:11.5px;color:var(--dim);margin-top:6px}
+
+  /* ── Charts ── */
+  .chart-wrap{position:relative;height:220px}
+  @media(max-width:600px){.chart-wrap{height:180px}}
+
+  /* two-column row (focus + languages) */
+  .two-col{display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:stretch}
+  .two-col .chart-wrap{height:260px}
+  /* Stack to one column on narrow screens and give the donut room for a
+     bottom legend; the second column gets top margin so headings don't collide. */
+  @media(max-width:760px){
+    .two-col{grid-template-columns:1fr}
+    .two-col > div + div{margin-top:8px}
+    .two-col .chart-wrap{height:300px}
+  }
+
+  /* ── Contribution heatmap ── */
+  .heatmap-wrap{overflow-x:auto;padding-bottom:4px}
+  .heatmap-wrap svg{display:block}
+  .hm-cell{transition:stroke .1s}
+  .hm-legend{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--dim);
+    margin-top:10px;justify-content:flex-end}
+  .hm-legend i{width:11px;height:11px;border-radius:2px;display:inline-block}
+
+  /* ── Focus / concentration ── */
+  .callout-row{display:flex;gap:18px;flex-wrap:wrap;margin-bottom:14px}
+  .callout{background:var(--panel-2);border:1px solid var(--line);border-radius:12px;
+    padding:12px 16px;flex:1;min-width:150px}
+  .callout .big{font-family:var(--mono);font-size:24px;font-weight:700;color:var(--cyan);line-height:1}
+  .callout .cap{font-size:11.5px;color:var(--muted);margin-top:5px}
+
+  /* ── Per-repo table ── */
+  .repo-table-wrap{overflow-x:auto}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{padding:9px 12px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
+  th:first-child,td:first-child{text-align:left;font-family:var(--mono)}
+  th.spark-col,td.spark-col{text-align:center;padding:6px 8px}
+  th{font-family:var(--mono);font-size:11px;letter-spacing:.5px;text-transform:uppercase;
+    color:var(--muted);cursor:pointer;user-select:none;background:var(--panel-2)}
+  th:hover{color:var(--ink)}
+  th.sort-asc::after{content:' ↑'}
+  th.sort-desc::after{content:' ↓'}
+  td{color:#cdd7e2}
+  td:first-child{color:var(--cyan);font-size:12px}
+  td.neg{color:var(--red)}
+  tr:hover td{background:rgba(52,224,210,.03)}
+  tr:last-child td{border-bottom:none}
+  .spark{display:block}
+
+  /* ── Loading / no-data states ── */
+  .state-panel{display:flex;flex-direction:column;align-items:center;justify-content:center;
+    min-height:320px;text-align:center;gap:12px}
+  .state-panel .icon{font-size:42px;line-height:1;opacity:.5}
+  .state-panel h2{font-size:20px;margin:0;color:var(--muted)}
+  .state-panel p{font-size:14px;color:var(--dim);max-width:44ch;margin:0}
+  .state-panel code{font-family:var(--mono);font-size:12.5px;color:var(--cyan);
+    background:#070b11;border:1px solid var(--line);border-radius:6px;padding:3px 9px}
+  #loading .spinner{width:32px;height:32px;border:3px solid var(--line);
+    border-top-color:var(--cyan);border-radius:50%;animation:spin .8s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  /* ── Footer (matches index.html) ── */
+  footer{padding:26px 0;color:var(--dim);font-size:12.5px;border-top:1px solid var(--line);margin-top:30px}
+  footer .wrap{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
+</style>
+</head>
+<body>
+
+<nav><div class="wrap">
+  <a class="brand" href="index.html">▢ <b>engsys</b></a>
+  <div class="links">
+    <a href="index.html">Home</a>
+    <a href="dashboard.html" class="active">Dashboard</a>
+  </div>
+  <button class="menu-btn" aria-expanded="false" aria-label="Open menu">☰</button>
+  <a class="gh" href="https://github.com/eric-sabe/engsys" target="_blank" rel="noopener">GitHub ↗</a>
+</div>
+<div class="mobile-menu">
+  <a href="index.html">Home</a>
+  <a href="dashboard.html" class="active">Dashboard</a>
+</div></nav>
+
+<!-- Loading state -->
+<div id="loading">
+  <div class="state-panel wrap">
+    <div class="spinner"></div>
+    <p style="color:var(--muted)">Loading activity data…</p>
+  </div>
+</div>
+
+<!-- No-data state (shown if stats.json is missing or fetch fails) -->
+<div id="no-data" hidden>
+  <div class="state-panel wrap">
+    <div class="icon">📊</div>
+    <h2>No data yet</h2>
+    <p>Add <code>DASHBOARD_PAT</code> to <code>.env</code>, run the collector to
+       generate <code>data/stats.json</code>, then reload.</p>
+    <p style="margin-top:4px">
+      <code>node scripts/collect-stats.mjs</code>
+    </p>
+  </div>
+</div>
+
+<!-- Main app (hidden until data loads) -->
+<div id="app" hidden>
+
+  <div class="db-header"><div class="wrap">
+    <div class="kicker">Personal activity dashboard</div>
+    <h1>GitHub Activity</h1>
+    <div class="db-meta">
+      <span id="windowLabel"></span>
+      <span id="sampleBadge" class="badge" hidden>sample data</span>
+      <span id="generatedAt"></span>
+    </div>
+  </div></div>
+
+  <!-- Stat cards -->
+  <section class="sec"><div class="wrap">
+    <div class="stat-cards" id="statCards"></div>
+  </div></section>
+
+  <!-- Contribution heatmap -->
+  <section class="sec"><div class="wrap">
+    <div class="sec-head">
+      <h2>Contribution heatmap</h2>
+      <span class="hint">commits per day · trailing year</span>
+    </div>
+    <div class="panel">
+      <div class="heatmap-wrap" id="heatmap"></div>
+      <div class="hm-legend">
+        <span>Less</span>
+        <i style="background:rgba(255,255,255,.05)"></i>
+        <i style="background:rgba(70,211,154,.25)"></i>
+        <i style="background:rgba(70,211,154,.45)"></i>
+        <i style="background:rgba(70,211,154,.70)"></i>
+        <i style="background:rgba(70,211,154,1)"></i>
+        <span>More</span>
+      </div>
+    </div>
+  </div></section>
+
+  <!-- Commits & PRs -->
+  <section class="sec"><div class="wrap">
+    <div class="sec-head">
+      <h2>Commits &amp; PRs</h2>
+      <span class="hint">commits on default branch + merged PRs · weekly</span>
+    </div>
+    <div class="panel"><div class="chart-wrap"><canvas id="activityChart"></canvas></div></div>
+  </div></section>
+
+  <!-- Code review discipline -->
+  <section class="sec"><div class="wrap">
+    <div class="sec-head">
+      <h2>Code review discipline</h2>
+      <span class="hint" id="prDiscHint">LOC shipped via PR review vs direct to main · weekly</span>
+    </div>
+    <div class="panel"><div class="chart-wrap"><canvas id="disciplineChart"></canvas></div></div>
+  </div></section>
+
+  <!-- Lines of Code (demoted, with toggle + net) -->
+  <section class="sec"><div class="wrap">
+    <div class="sec-head">
+      <h2>Lines of Code</h2>
+      <span class="hint" id="locHint">added vs removed · cumulative net · weekly</span>
+      <span class="spacer"></span>
+      <button class="fbtn on" data-loc="combined">PR + direct</button>
+      <button class="fbtn" data-loc="pr">PR only</button>
+    </div>
+    <div class="panel"><div class="chart-wrap"><canvas id="locChart"></canvas></div></div>
+  </div></section>
+
+  <!-- Issues -->
+  <section class="sec"><div class="wrap">
+    <div class="sec-head">
+      <h2>Issues</h2>
+      <span class="hint">opened (you authored) vs closed (you closed) · weekly</span>
+    </div>
+    <div class="panel"><div class="chart-wrap"><canvas id="issuesChart"></canvas></div></div>
+  </div></section>
+
+  <!-- Focus + Languages (two-column) -->
+  <section class="sec"><div class="wrap">
+    <div class="two-col">
+      <div>
+        <div class="sec-head"><h2>Focus</h2><span class="hint">commit share by repo</span></div>
+        <div class="panel">
+          <div class="callout-row" id="focusCallouts"></div>
+          <div class="chart-wrap"><canvas id="focusChart"></canvas></div>
+        </div>
+      </div>
+      <div>
+        <div class="sec-head"><h2>Languages</h2><span class="hint">by bytes written · generated HTML excluded</span></div>
+        <div class="panel"><div class="chart-wrap"><canvas id="langChart"></canvas></div></div>
+      </div>
+    </div>
+  </div></section>
+
+  <!-- Per-repo table -->
+  <section class="sec"><div class="wrap">
+    <div class="sec-head"><h2>Per-repo breakdown</h2><span class="hint">click a column to sort</span></div>
+    <div class="repo-table-wrap panel" style="padding:0">
+      <table id="repoTable">
+        <thead>
+          <tr>
+            <th data-col="alias">Repo</th>
+            <th class="spark-col">Activity</th>
+            <th data-col="commits">Commits</th>
+            <th data-col="prsMerged">PRs</th>
+            <th data-col="issuesOpened">Issues opened</th>
+            <th data-col="issuesClosed">Issues closed</th>
+            <th data-col="locAdded">LOC +</th>
+            <th data-col="locRemoved">LOC −</th>
+          </tr>
+        </thead>
+        <tbody id="repoTbody"></tbody>
+      </table>
+    </div>
+  </div></section>
+
+</div><!-- #app -->
+
+<footer><div class="wrap">
+  <span>engsys — a portable engineering system for Claude Code</span>
+  <span class="mono"><a href="index.html">home</a> · <a href="dashboard.html">dashboard</a></span>
+</div></footer>
+
+<!-- Chart.js via CDN — loaded last so body renders first -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script>
+'use strict';
+
+// ── State ─────────────────────────────────────────────────────────────────────
+let DATA = null;
+let locMode = 'combined';            // 'combined' | 'pr'
+let sortCol = 'commits';
+let sortDir = 'desc';
+let locChart, issuesChart, activityChart, disciplineChart, focusChart, langChart;
+
+// ── Format helpers ─────────────────────────────────────────────────────────────
+function fmtNum(n) {
+  const neg = n < 0; n = Math.abs(n);
+  let s;
+  if (n >= 1_000_000) s = (n / 1_000_000).toFixed(1) + 'M';
+  else if (n >= 1_000) s = (n / 1_000).toFixed(1) + 'k';
+  else s = String(n);
+  return (neg ? '−' : '') + s;
+}
+const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const DOW    = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+function fmtWeek(w) { const [, m, d] = w.split('-'); return `${MONTHS[+m - 1]} ${+d}`; }
+function fmtDate(iso) {
+  const d = new Date(iso);
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+}
+function cumsum(arr) { let s = 0; return arr.map(v => (s += (v || 0))); }
+function sumSeries(key) { return DATA.series.reduce((s, w) => s + (w[key] ?? 0), 0); }
+
+// ── Chart.js dark defaults ─────────────────────────────────────────────────────
+function applyChartDefaults() {
+  Chart.defaults.color           = '#8a97a8';
+  Chart.defaults.borderColor     = '#1f2a38';
+  Chart.defaults.font.family     = 'ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace';
+  Chart.defaults.font.size       = 11;
+  Chart.defaults.plugins.legend.labels.boxWidth  = 12;
+  Chart.defaults.plugins.legend.labels.padding   = 14;
+  Chart.defaults.plugins.tooltip.backgroundColor = '#111824';
+  Chart.defaults.plugins.tooltip.borderColor     = '#1f2a38';
+  Chart.defaults.plugins.tooltip.borderWidth     = 1;
+  Chart.defaults.plugins.tooltip.titleColor      = '#e6edf3';
+  Chart.defaults.plugins.tooltip.bodyColor       = '#8a97a8';
+  Chart.defaults.plugins.tooltip.padding         = 10;
+}
+const sd  = () => ({ grid: { color: '#1f2a38' }, ticks: { color: '#8a97a8', maxTicksLimit: 12 } });
+const y2  = () => ({ position: 'right', grid: { drawOnChartArea: false }, ticks: { color: '#5c6a7a', maxTicksLimit: 8 }, beginAtZero: true });
+
+// ── Stat cards ──────────────────────────────────────────────────────────────────
+function activeDayStats() {
+  const days = Object.keys(DATA.daily || {}).filter(d => DATA.daily[d] > 0).sort();
+  if (!days.length) return { count: 0, streak: 0 };
+  let streak = 1, best = 1;
+  for (let i = 1; i < days.length; i++) {
+    const prev = new Date(days[i - 1] + 'T00:00:00Z');
+    const cur  = new Date(days[i]     + 'T00:00:00Z');
+    const gap  = Math.round((cur - prev) / 86400000);
+    streak = gap === 1 ? streak + 1 : 1;
+    if (streak > best) best = streak;
+  }
+  return { count: days.length, streak: best };
+}
+
+function renderCards() {
+  const t = DATA.totals;
+  const viaPR  = sumSeries('locAddedViaPR');
+  const added   = locMode === 'pr' ? viaPR : t.locAdded;
+  // PR-only removed: approximate by the via-PR share of additions (deletions aren't split)
+  const removed = locMode === 'pr' ? Math.round(t.locRemoved * (viaPR / (t.locAdded || 1))) : t.locRemoved;
+  const net     = added - removed;
+  const ad      = activeDayStats();
+
+  const cards = [
+    { label: 'Commits',       val: fmtNum(t.commits),      sub: 'on default branch',         c: 'var(--cyan)' },
+    { label: 'PRs Merged',    val: fmtNum(t.prsMerged),    sub: 'authored by you',           c: 'var(--amber)' },
+    { label: 'Issues Closed', val: fmtNum(t.issuesClosed), sub: 'you closed',                c: 'var(--violet)' },
+    { label: 'Net LOC',       val: fmtNum(net),            sub: `+${fmtNum(added)} / −${fmtNum(removed)}`, c: net >= 0 ? 'var(--green)' : 'var(--red)' },
+    { label: 'Active Repos',  val: String(DATA.repoCount), sub: 'with activity',             c: 'var(--cyan)' },
+    { label: 'Active Days',   val: String(ad.count),       sub: `longest streak ${ad.streak}d`, c: 'var(--green)' },
+  ];
+  document.getElementById('statCards').innerHTML = cards.map(c => `
+    <div class="stat-card" style="--c:${c.c}">
+      <div class="sc-label">${c.label}</div>
+      <div class="sc-val">${c.val}</div>
+      <div class="sc-sub">${c.sub}</div>
+    </div>`).join('');
+}
+
+// ── Contribution heatmap (SVG) ──────────────────────────────────────────────────
+function heatColor(n) {
+  if (n <= 0)  return 'rgba(255,255,255,.05)';
+  if (n <= 2)  return 'rgba(70,211,154,.25)';
+  if (n <= 5)  return 'rgba(70,211,154,.45)';
+  if (n <= 9)  return 'rgba(70,211,154,.70)';
+  return 'rgba(70,211,154,1)';
+}
+function renderHeatmap() {
+  const daily = DATA.daily || {};
+  const C = 11, G = 3, P = C + G, padL = 30, padT = 16;
+
+  const end = new Date(DATA.window.to + 'T00:00:00Z');
+  const start = new Date(end);
+  start.setUTCDate(start.getUTCDate() - 364);
+  start.setUTCDate(start.getUTCDate() - start.getUTCDay()); // back to Sunday
+
+  // Build day cells grouped into week columns
+  const cells = [];
+  const monthLabels = [];
+  let week = 0, lastMonth = -1;
+  for (let d = new Date(start); d <= end; d.setUTCDate(d.getUTCDate() + 1)) {
+    const dow = d.getUTCDay();
+    if (dow === 0 && d > start) week++;
+    const key = d.toISOString().slice(0, 10);
+    const n   = daily[key] || 0;
+    const x   = padL + week * P, y = padT + dow * P;
+    const label = `${n} commit${n === 1 ? '' : 's'} · ${DOW[dow]}, ${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`;
+    cells.push(`<rect class="hm-cell" x="${x}" y="${y}" width="${C}" height="${C}" rx="2" fill="${heatColor(n)}"><title>${label}</title></rect>`);
+    // month label at the first column of each month (top row)
+    const mo = d.getUTCMonth();
+    if (mo !== lastMonth) { monthLabels.push(`<text x="${x}" y="${padT - 5}" fill="#5c6a7a" font-size="10" font-family="ui-monospace,monospace">${MONTHS[mo]}</text>`); lastMonth = mo; }
+  }
+  const weeks = week + 1;
+  const W = padL + weeks * P, H = padT + 7 * P;
+  const dayTicks = [1, 3, 5].map(i =>
+    `<text x="0" y="${padT + i * P + C - 1}" fill="#5c6a7a" font-size="10" font-family="ui-monospace,monospace">${DOW[i]}</text>`).join('');
+
+  document.getElementById('heatmap').innerHTML =
+    `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${monthLabels.join('')}${dayTicks}${cells.join('')}</svg>`;
+}
+
+// ── Commits & PRs ────────────────────────────────────────────────────────────────
+function createActivityChart(labels) {
+  activityChart = new Chart(document.getElementById('activityChart'), {
+    type: 'line',
+    data: { labels, datasets: [
+      { label: 'Commits', data: DATA.series.map(w => w.commits), yAxisID: 'y',
+        borderColor: '#34e0d2', backgroundColor: 'rgba(52,224,210,.08)', tension: .3, pointRadius: 0, borderWidth: 2, fill: true },
+      { label: 'PRs Merged', data: DATA.series.map(w => w.prsMerged), yAxisID: 'y',
+        borderColor: '#f5b13d', backgroundColor: 'rgba(245,177,61,.06)', tension: .3, pointRadius: 0, borderWidth: 2, fill: true },
+      { label: 'Cumulative Commits', data: cumsum(DATA.series.map(w => w.commits)), yAxisID: 'y2',
+        borderColor: 'rgba(52,224,210,.40)', borderDash: [5, 4], fill: false, tension: .35, pointRadius: 0, borderWidth: 1.5 },
+    ]},
+    options: { responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false },
+      plugins: { legend: { position: 'top', align: 'end' } },
+      scales: { x: sd(), y: { ...sd(), beginAtZero: true }, y2: y2() } },
+  });
+}
+
+// ── Code review discipline (stacked area) ──────────────────────────────────────
+function createDisciplineChart(labels) {
+  const viaPR  = DATA.series.map(w => w.locAddedViaPR  ?? 0);
+  const direct = DATA.series.map(w => w.locAddedDirect ?? 0);
+  const totViaPR = viaPR.reduce((a, b) => a + b, 0);
+  const totAll   = totViaPR + direct.reduce((a, b) => a + b, 0);
+  const pct = totAll ? Math.round(100 * totViaPR / totAll) : 0;
+  document.getElementById('prDiscHint').textContent =
+    `${pct}% of added code shipped through PR review · weekly`;
+
+  disciplineChart = new Chart(document.getElementById('disciplineChart'), {
+    type: 'line',
+    data: { labels, datasets: [
+      { label: 'Via PR review', data: viaPR, borderColor: '#46d39a', backgroundColor: 'rgba(70,211,154,.30)',
+        fill: true, tension: .3, pointRadius: 0, borderWidth: 1.5 },
+      { label: 'Direct to main', data: direct, borderColor: '#f5b13d', backgroundColor: 'rgba(245,177,61,.22)',
+        fill: true, tension: .3, pointRadius: 0, borderWidth: 1.5 },
+    ]},
+    options: { responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false },
+      plugins: { legend: { position: 'top', align: 'end' } },
+      scales: { x: { ...sd(), stacked: true }, y: { ...sd(), stacked: true, beginAtZero: true } } },
+  });
+}
+
+// ── Lines of Code (added/removed + cumulative NET) ──────────────────────────────
+function locDatasets() {
+  const combined = locMode === 'combined';
+  const added   = DATA.series.map(w => combined ? w.locAdded : (w.locAddedViaPR ?? 0));
+  const removed = DATA.series.map(w => combined ? w.locRemoved
+                                                : Math.round((w.locRemoved || 0) * ((w.locAddedViaPR ?? 0) / (w.locAdded || 1))));
+  const net = added.map((a, i) => a - removed[i]);
+  return { added, removed, net };
+}
+function createLocChart(labels) {
+  const { added, removed, net } = locDatasets();
+  locChart = new Chart(document.getElementById('locChart'), {
+    type: 'line',
+    data: { labels, datasets: [
+      { label: 'Added', data: added, yAxisID: 'y', borderColor: '#46d39a', backgroundColor: 'rgba(70,211,154,.12)', fill: true, tension: .35, pointRadius: 0, borderWidth: 2 },
+      { label: 'Removed', data: removed, yAxisID: 'y', borderColor: '#ff6b6b', backgroundColor: 'rgba(255,107,107,.10)', fill: true, tension: .35, pointRadius: 0, borderWidth: 2 },
+      { label: 'Cumulative net', data: cumsum(net), yAxisID: 'y2', borderColor: 'rgba(157,140,255,.55)', borderDash: [5, 4], fill: false, tension: .35, pointRadius: 0, borderWidth: 1.5 },
+    ]},
+    options: { responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false },
+      plugins: { legend: { position: 'top', align: 'end' } },
+      scales: { x: sd(), y: { ...sd(), beginAtZero: true }, y2: y2() } },
+  });
+}
+function updateLocChart() {
+  if (!locChart) return;
+  const { added, removed, net } = locDatasets();
+  locChart.data.datasets[0].data = added;
+  locChart.data.datasets[1].data = removed;
+  locChart.data.datasets[2].data = cumsum(net);
+  locChart.update('none');
+}
+
+// ── Issues ───────────────────────────────────────────────────────────────────────
+function createIssuesChart(labels) {
+  issuesChart = new Chart(document.getElementById('issuesChart'), {
+    type: 'bar',
+    data: { labels, datasets: [
+      { label: 'Opened', data: DATA.series.map(w => w.issuesOpened), yAxisID: 'y',
+        backgroundColor: 'rgba(52,224,210,.65)', borderColor: '#34e0d2', borderWidth: 1, borderRadius: 2 },
+      { label: 'Closed', data: DATA.series.map(w => w.issuesClosed), yAxisID: 'y',
+        backgroundColor: 'rgba(157,140,255,.65)', borderColor: '#9d8cff', borderWidth: 1, borderRadius: 2 },
+      { type: 'line', label: 'Cumulative Closed', data: cumsum(DATA.series.map(w => w.issuesClosed)), yAxisID: 'y2',
+        borderColor: 'rgba(157,140,255,.45)', borderDash: [5, 4], fill: false, tension: .35, pointRadius: 0, borderWidth: 1.5 },
+    ]},
+    options: { responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false },
+      plugins: { legend: { position: 'top', align: 'end' } },
+      scales: { x: sd(), y: { ...sd(), beginAtZero: true }, y2: y2() } },
+  });
+}
+
+// ── Focus / concentration ──────────────────────────────────────────────────────
+function renderFocus() {
+  const repos = [...DATA.perRepo].sort((a, b) => b.totals.commits - a.totals.commits);
+  const totalCommits = repos.reduce((s, r) => s + r.totals.commits, 0) || 1;
+  const top3 = repos.slice(0, 3).reduce((s, r) => s + r.totals.commits, 0);
+  const top3Pct = Math.round(100 * top3 / totalCommits);
+
+  document.getElementById('focusCallouts').innerHTML = `
+    <div class="callout"><div class="big">${DATA.repoCount}</div><div class="cap">repos with activity</div></div>
+    <div class="callout"><div class="big">${top3Pct}%</div><div class="cap">of commits in top 3 repos</div></div>`;
+
+  const top = repos.slice(0, 10);
+  focusChart = new Chart(document.getElementById('focusChart'), {
+    type: 'bar',
+    data: { labels: top.map(r => r.alias), datasets: [{
+      label: 'Commits', data: top.map(r => r.totals.commits),
+      backgroundColor: 'rgba(52,224,210,.55)', borderColor: '#34e0d2', borderWidth: 1, borderRadius: 3,
+    }]},
+    options: { indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: { x: { ...sd(), beginAtZero: true }, y: { ...sd(), ticks: { color: '#8a97a8', font: { size: 10 } } } } },
+  });
+}
+
+// ── Languages (donut) ───────────────────────────────────────────────────────────
+const LANG_COLORS = ['#34e0d2','#9d8cff','#f5b13d','#46d39a','#ff6b6b','#5ab0ff','#ff9e6b','#c98cff','#8a97a8'];
+// GitHub's byte counts include generated/vendored markup (coverage reports inflate
+// HTML far past anything hand-written), so drop it from the "what I write" donut.
+const LANGUAGE_EXCLUDE = new Set(['HTML']);
+const narrowMQ = (typeof matchMedia !== 'undefined') ? matchMedia('(max-width:760px)') : { matches: false, addEventListener(){} };
+function renderLanguages() {
+  const entries = Object.entries(DATA.languages || {})
+    .filter(([l]) => !LANGUAGE_EXCLUDE.has(l))
+    .sort(([, a], [, b]) => b - a);
+  if (!entries.length) { document.getElementById('langChart').closest('.panel').innerHTML =
+    '<p style="color:var(--dim);font-size:13px;text-align:center;padding:40px 0">No language data.</p>'; return; }
+  const TOP = 8;
+  const top = entries.slice(0, TOP);
+  const otherBytes = entries.slice(TOP).reduce((s, [, b]) => s + b, 0);
+  const labels = top.map(([l]) => l);
+  const data   = top.map(([, b]) => b);
+  if (otherBytes > 0) { labels.push('Other'); data.push(otherBytes); }
+  const total = data.reduce((a, b) => a + b, 0);
+
+  // Right legend on wide screens; bottom legend on phones (keeps the donut large).
+  const legendPos = narrowMQ.matches ? 'bottom' : 'right';
+  langChart = new Chart(document.getElementById('langChart'), {
+    type: 'doughnut',
+    data: { labels, datasets: [{ data, backgroundColor: LANG_COLORS.slice(0, labels.length), borderColor: '#0e141d', borderWidth: 2 }] },
+    options: { responsive: true, maintainAspectRatio: false, cutout: '58%',
+      plugins: {
+        legend: { position: legendPos, labels: { boxWidth: 10, padding: 10, font: { size: 11 } } },
+        tooltip: { callbacks: { label: (c) => `${c.label}: ${(100 * c.parsed / total).toFixed(1)}%` } },
+      } },
+  });
+}
+
+// ── Per-repo table (with sparklines) ────────────────────────────────────────────
+function sparkline(series) {
+  const vals = series.map(w => w.commits || 0);
+  const max = Math.max(1, ...vals);
+  const W = 84, H = 20, n = vals.length;
+  if (n < 2) return '';
+  const pts = vals.map((v, i) => `${(i / (n - 1) * W).toFixed(1)},${(H - (v / max) * (H - 2) - 1).toFixed(1)}`).join(' ');
+  return `<svg class="spark" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
+    <polyline points="${pts}" fill="none" stroke="#34e0d2" stroke-width="1.3" stroke-linejoin="round" opacity=".85"/></svg>`;
+}
+function renderTable() {
+  const rows = [...DATA.perRepo].sort((a, b) => {
+    const av = sortCol === 'alias' ? a.alias : (a.totals[sortCol] ?? 0);
+    const bv = sortCol === 'alias' ? b.alias : (b.totals[sortCol] ?? 0);
+    if (typeof av === 'string') return sortDir === 'asc' ? av.localeCompare(bv) : bv.localeCompare(av);
+    return sortDir === 'asc' ? av - bv : bv - av;
+  });
+  document.getElementById('repoTbody').innerHTML = rows.map(r => `
+    <tr>
+      <td>${r.alias}</td>
+      <td class="spark-col">${sparkline(r.series || [])}</td>
+      <td>${fmtNum(r.totals.commits)}</td>
+      <td>${fmtNum(r.totals.prsMerged)}</td>
+      <td>${fmtNum(r.totals.issuesOpened)}</td>
+      <td>${fmtNum(r.totals.issuesClosed)}</td>
+      <td>${fmtNum(r.totals.locAdded)}</td>
+      <td class="neg">${fmtNum(r.totals.locRemoved)}</td>
+    </tr>`).join('');
+  document.querySelectorAll('#repoTable th[data-col]').forEach(th => {
+    th.className = th.dataset.col === sortCol ? `sort-${sortDir}` : '';
+  });
+}
+function initTableSort() {
+  document.querySelectorAll('#repoTable th[data-col]').forEach(th => {
+    th.addEventListener('click', () => {
+      const col = th.dataset.col;
+      if (col === sortCol) sortDir = sortDir === 'desc' ? 'asc' : 'desc';
+      else { sortCol = col; sortDir = col === 'alias' ? 'asc' : 'desc'; }
+      renderTable();
+    });
+  });
+}
+
+// ── LOC toggle ───────────────────────────────────────────────────────────────────
+function initToggle() {
+  document.querySelectorAll('.fbtn[data-loc]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      locMode = btn.dataset.loc;
+      document.querySelectorAll('.fbtn[data-loc]').forEach(b => b.classList.toggle('on', b === btn));
+      document.getElementById('locHint').textContent = locMode === 'pr'
+        ? 'PR merges only (excludes direct-to-main) · cumulative net · weekly'
+        : 'added vs removed (PR + direct) · cumulative net · weekly';
+      renderCards();
+      updateLocChart();
+    });
+  });
+}
+
+// ── Render all ────────────────────────────────────────────────────────────────────
+function renderAll() {
+  applyChartDefaults();
+  const labels = DATA.series.map(w => fmtWeek(w.weekStart));
+
+  const win = DATA.window;
+  document.getElementById('windowLabel').textContent =
+    `${fmtDate(win.from)} – ${fmtDate(win.to)} · ${DATA.series.length} weeks · ${DATA.repoCount} repos`;
+  document.getElementById('generatedAt').textContent = `Updated ${fmtDate(DATA.generatedAt)}`;
+  if (DATA.sample) document.getElementById('sampleBadge').hidden = false;
+
+  renderCards();
+  renderHeatmap();
+  createActivityChart(labels);
+  createDisciplineChart(labels);
+  createLocChart(labels);
+  createIssuesChart(labels);
+  renderFocus();
+  renderLanguages();
+  renderTable();
+  initTableSort();
+  initToggle();
+
+  // Re-render the donut when crossing the mobile breakpoint so its legend
+  // flips between right (desktop) and bottom (phone).
+  narrowMQ.addEventListener('change', () => {
+    if (langChart) { langChart.destroy(); renderLanguages(); }
+  });
+
+  document.getElementById('loading').hidden = true;
+  document.getElementById('app').hidden = false;
+}
+
+// ── Boot ──────────────────────────────────────────────────────────────────────────
+async function boot() {
+  try {
+    const res = await fetch('data/stats.json');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    DATA = await res.json();
+  } catch (err) {
+    console.warn('Dashboard: could not load data/stats.json —', err.message);
+    document.getElementById('loading').hidden = true;
+    document.getElementById('no-data').hidden = false;
+    return;
+  }
+  if (!DATA?.series?.length) {
+    document.getElementById('loading').hidden = true;
+    document.getElementById('no-data').hidden = false;
+    return;
+  }
+  if (typeof Chart === 'undefined') {
+    document.querySelector('script[src*="chart"]').addEventListener('load', renderAll);
+  } else {
+    renderAll();
+  }
+}
+boot();
+
+// ── Mobile nav ──────────────────────────────────────────────────────────────────
+(function(){
+  const btn = document.querySelector('nav .menu-btn'), nav = btn && btn.closest('nav');
+  if (!btn) return;
+  function close(){ nav.classList.remove('open'); btn.setAttribute('aria-expanded','false'); btn.textContent='☰'; }
+  btn.addEventListener('click', () => {
+    const open = nav.classList.toggle('open');
+    btn.setAttribute('aria-expanded', open);
+    btn.textContent = open ? '✕' : '☰';
+  });
+  document.querySelectorAll('.mobile-menu a').forEach(a => a.addEventListener('click', close));
+  document.addEventListener('click', e => { if (!nav.contains(e.target)) close(); });
+})();
+</script>
+</body>
+</html>

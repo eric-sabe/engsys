@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wrangler whoami:*)",
+      "Bash(wrangler deploy --dry-run:*)",
+      "Bash(wrangler pages functions build:*)",
+      "Bash(wrangler d1 list:*)",
+      "Bash(wrangler d1 info:*)",
+      "Bash(wrangler d1 migrations list:*)",
+      "Bash(wrangler kv:key list:*)",
+      "Bash(wrangler kv:namespace list:*)",
+      "Bash(wrangler kv namespace list:*)",
+      "Bash(wrangler r2 bucket list:*)",
+      "Bash(wrangler queues list:*)",
+      "Bash(wrangler versions list:*)",
+      "Bash(wrangler versions view:*)",
+      "Bash(wrangler secret list:*)",
+      "Bash(wrangler tail:*)"
+    ],
+    "deny": [
+      "Bash(wrangler delete:*)",
+      "Bash(wrangler d1 execute:*)",
+      "Bash(wrangler d1 migrations apply:*)",
+      "Bash(wrangler secret put:*)",
+      "Bash(wrangler secret delete:*)",
+      "Bash(wrangler r2 object delete:*)",
+      "Bash(wrangler kv:key delete:*)"
+    ]
+  },
+  "mcpServers": {}
+}

@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cdk synth:*)",
+      "Bash(cdk diff:*)",
+      "Bash(cdk list:*)",
+      "Bash(cdk ls:*)",
+      "Bash(cdk doctor:*)",
+      "Bash(cdk context:*)",
+      "Bash(npx cdk synth:*)",
+      "Bash(npx cdk diff:*)",
+      "Bash(npx cdk list:*)"
+    ],
+    "deny": [
+      "Bash(cdk deploy:*)",
+      "Bash(cdk destroy:*)",
+      "Bash(cdk bootstrap:*)",
+      "Bash(npx cdk deploy:*)",
+      "Bash(npx cdk destroy:*)"
+    ]
+  },
+  "mcpServers": {}
+}

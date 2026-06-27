@@ -1,0 +1,78 @@
+# .github/workflows/dashboard.yml
+# Refreshes data/stats.json daily and on manual dispatch.
+#
+# Required repo secrets (Settings → Secrets and variables → Actions):
+#   DASHBOARD_PAT          read-only PAT, scopes: repo, read:org, read:user
+#                          (must NOT be the built-in GITHUB_TOKEN — that has no
+#                          cross-org access to private org repos)
+#   DASHBOARD_LOGIN        your GitHub login
+#   DASHBOARD_OWNERS       owners to scan, "name:type" CSV (e.g. you:user,acme:org)
+#   DASHBOARD_EMAILS       commit-author emails, CSV
+# Optional:
+#   DASHBOARD_EXTRA_LOGINS legacy/renamed logins to fold in, CSV
+#
+# Identity lives in secrets (not the public source). See the README
+# "Activity dashboard" section and .env.example.
+
+name: Update dashboard stats
+
+on:
+  schedule:
+    # Daily at 06:00 UTC — adjust to suit your timezone
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      full:
+        description: 'Run a full collection instead of delta (use to backfill or rebuild)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # needed to commit the updated stats.json
+
+jobs:
+  collect:
+    name: Collect GitHub stats
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run collector
+        env:
+          # Use DASHBOARD_PAT for cross-org access; never the built-in GITHUB_TOKEN
+          GITHUB_TOKEN: ${{ secrets.DASHBOARD_PAT }}
+          # Identity — kept out of the public source; set these as repo secrets
+          DASHBOARD_LOGIN:         ${{ secrets.DASHBOARD_LOGIN }}
+          DASHBOARD_EMAILS:        ${{ secrets.DASHBOARD_EMAILS }}
+          DASHBOARD_OWNERS:        ${{ secrets.DASHBOARD_OWNERS }}
+          DASHBOARD_EXTRA_LOGINS:  ${{ secrets.DASHBOARD_EXTRA_LOGINS }}
+        run: |
+          # Daily schedule always runs delta. Manual dispatch can opt into full.
+          if [ "${{ github.event.inputs.full }}" = "true" ]; then
+            echo "Running full collection (manual override)"
+            node scripts/collect-stats.mjs
+          else
+            echo "Running delta collection"
+            node scripts/collect-stats.mjs --delta
+          fi
+
+      - name: Commit updated stats
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/stats.json
+          # Only commit if stats.json actually changed
+          if git diff --staged --quiet; then
+            echo "No changes to stats.json — skipping commit"
+          else
+            git commit -m "chore: update dashboard stats [skip ci]"
+            git push
+          fi

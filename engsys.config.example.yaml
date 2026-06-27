@@ -1,0 +1,46 @@
+# engsys project config — copy to your project root as engsys.config.yaml,
+# edit, then run:  /path/to/engsys/install install --into .
+#
+# This file is the single source of truth for what the installer materializes.
+# Block lists must be indented under their key (see hook_patterns below).
+
+project:
+  name: Acme Widgets
+  description: One-line description rendered into CLAUDE.md.
+
+# Every stack dimension accepts a single value OR a list — mixed stacks compose
+# (each selected pack contributes its skills, CLAUDE.md fragment, and permissions).
+stack:
+  cloud: aws            # aws | azure | gcp | cloudflare | none   — or a list: [azure, cloudflare]
+  iac: terraform        # terraform | bicep | cdk | none          — or a list
+  lang: [typescript]    # typescript | python | swift | kotlin | shell
+  platform: [web]       # web | ios | android                    — e.g. [web, ios, android]
+  db: none              # prisma | mongo | none                   — or a list: [prisma, mongo]
+  # domain: [mobile-growth]   # optional extra packs under stacks/domain/
+
+# Issue tracker (PRs / CI always stay on GitHub — this is a separate axis).
+issue_tracker: github   # github | linear | jira
+
+agents:
+  core: all             # 'all' or an explicit list, e.g. [melvin, isabelle, bert]
+  extra: [sandy, gary]  # opt-in personas from optional-agents/ (sandy, gary [mobile], jos, steve)
+
+commands: all           # 'all' or an explicit list
+
+lessons:
+  seed: true                      # seed the universal lessons-library into the project
+  into: docs/agent-lessons/library  # where seeded lessons land (project-local lessons stay at docs/agent-lessons/)
+
+naturalize:
+  model_strategy: "Opus for orchestration and judgement; Sonnet for execution."
+  hook_patterns:
+    - glob: "*/schema.prisma"
+      reminder: "Schema changed — regenerate the client and rebuild dependents before pushing."
+    - glob: "docs/vision-and-spec.md"
+      reminder: "Bump the version/date header; keep docs cross-refs in sync."
+  invariants: []        # project hard rules appended to CLAUDE.md project facts
+  # project_facts: |     # optional; otherwise the installer leaves a TODO marker
+  #   Multi-line project facts can go here.
+
+engsys:
+  version: main         # tag / branch / commit the project was installed from

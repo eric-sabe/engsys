@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Post-edit reminders — one-time nudges after edits to sensitive files.
+# Wired in .claude/settings.json under hooks.PostToolUse (Edit|Write|MultiEdit).
+# Keep this list short and high-signal: invariants accrete as the codebase grows.
+set -euo pipefail
+
+# The hook receives the tool payload on stdin as JSON. Extract the edited file's path.
+payload="$(cat || true)"
+file_path="$(printf '%s' "$payload" | grep -oE '"file_path"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 | sed -E 's/.*:[[:space:]]*"([^"]+)"/\1/')"
+[ -z "${file_path:-}" ] && exit 0
+
+# Per-project reminder cases. Each case matches a path glob and echoes a short nudge.
+# The installer injects project-specific cases below.
+case "$file_path" in
+{{REMINDER_CASES}}
+  *) ;;
+esac
+
+exit 0

@@ -1,0 +1,98 @@
+# {{PROJECT_NAME}} — Claude Code working notes
+
+{{PROJECT_DESCRIPTION}}
+
+This file is loaded into every Claude Code session in this repo. Keep it tight; link out to `docs/` for depth.
+
+## Communication
+
+Layer these on top of the system defaults:
+
+- Factual tone. Don't say "fixed!" / "works!" — say "changes applied" or "ready for testing". **Ship ≠ verified** until the human confirms end-to-end.
+- Push back on weak assumptions instead of agreeing politely.
+- No PII in logs. No ad-hoc loggers in production app code — use the project's logging convention. Log route templates, not raw paths. Never log tokens, cookies, email addresses, IPs, or authorization headers.
+
+## Model strategy
+
+{{MODEL_STRATEGY}}
+
+{{STACK_FRAGMENTS}}
+
+## Code review (local, before push)
+
+Review happens **locally before `git push`** — run a local code review with the built-in `/code-review` skill so PRs open already-reviewed.
+
+```bash
+git fetch origin   # so origin/main is current before scoping the diff
+# then run a local code review with the built-in /code-review skill against origin/main
+```
+
+Triage: fix **Critical** + **Warning**; **Info** at discretion. Cap at ~2 passes. Compare against `origin/main`, not local `main` (local main is often stale). For deeper passes the built-in `/security-review` command is also available. Skill: [`.claude/skills/code-review/SKILL.md`](.claude/skills/code-review/SKILL.md).
+
+## Git / PR conventions
+
+- **Never** `git push origin main`. Direct main commits go via PR.
+- **Open PRs as draft** (`gh pr create --draft`); mark Ready only after the local CLI review is resolved and checks are green.
+- Branches: `agent/<phase-or-project-slug>` for batches, `agent/<n>-<slug>` for single-issue work.
+- Commit messages: `type(scope): subject (#issue)`. Types: `feat | fix | chore | docs | test | refactor | style | perf | build | ci | revert`. No `enh:` — use `feat:`.
+- PR closes syntax: **one keyword per line**. `Closes #1, #2` only closes #1 — use `Closes #1` then `Closes #2` on separate lines.
+- Stacked branches: after each upstream merge, `git fetch origin && git rebase origin/main`; already-applied commits → `git rebase --skip`; then `git push --force-with-lease`. **Never** `git push --force`.
+- Write PR/issue/commit bodies to a file under `tmp/` with the Write tool, then pass `--body-file`/`--file`. **No heredocs** — they mangle newlines.
+- Commit/push only when the user asks. End commit messages with the `Co-Authored-By: Claude` trailer.
+
+## Filing issues
+
+1. **Investigate first** — search, root cause, real fix. No band-aids.
+2. **Write the body to `tmp/issue-body-{slug}.md`** with the Write tool (no heredocs).
+3. **Create with `gh`**: `gh issue create --body-file tmp/issue-body-{slug}.md`.
+4. Report back: issue number, URL, short RCA + fix summary, labels.
+
+Quality over speed. Typos / one-liners — just fix.
+
+## Tool preference order
+
+Prefer the most direct, scriptable tool first; fall back to MCP, then manual:
+
+| Need                          | First                            | Fallback                                    |
+| ----------------------------- | -------------------------------- | ------------------------------------------- |
+| GitHub issues / PRs / Actions | `gh` CLI                         | `github` MCP (when `gh` auth/network fails) |
+| GitHub ProjectV2 (boards)     | `gh project` / `gh api graphql`  | — MCP can't do ProjectV2                    |
+| Browser automation (testing)  | `playwright` MCP                 | direct Playwright API                       |
+| Browser debugging (UI)        | `chrome-devtools` MCP            | manual DevTools                             |
+
+General rule: **gh CLI > MCP > manual/UI fallback.**
+
+## MCP servers
+
+{{MCP_SERVERS}}
+
+Project-scoped config lives in [`.mcp.json`](.mcp.json). Approve each server on first startup.
+
+## Slash commands
+
+Imported into [`.claude/commands/`](.claude/commands/):
+
+{{COMMANDS_LIST}}
+
+## Hooks
+
+A `PostToolUse` hook on `Edit|Write|MultiEdit` runs `.claude/hooks/post-edit-reminders.sh`, which emits one-time nudges after edits to sensitive files. It is wired in [`.claude/settings.json`](.claude/settings.json).
+
+## Memory & rules
+
+When the user says "remember this" / "create a rule" — drop a memory file in the memory dir (format in the system prompt). If the guidance should apply to **anyone** in this repo, add it here or to a nested `CLAUDE.md` instead. Don't ask first — "remember" means write it.
+
+## Lessons
+
+{{LESSONS_NOTE}}
+
+<!--
+  ENGSYS:PROJECT-FACTS region.
+  The installer (and/or the model during init) fills the block below with project-specific
+  facts: stack details, service names, conventions, key paths, north star, etc.
+  `engsys update` regenerates everything OUTSIDE this region but NEVER overwrites what's
+  between the START and END markers. Hand-edit freely inside it.
+-->
+<!-- ENGSYS:PROJECT-FACTS:START -->
+{{PROJECT_FACTS}}
+<!-- ENGSYS:PROJECT-FACTS:END -->

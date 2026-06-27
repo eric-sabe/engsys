@@ -1,0 +1,40 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gcloud config get-value:*)",
+      "Bash(gcloud auth list:*)",
+      "Bash(gcloud projects list:*)",
+      "Bash(gcloud projects describe:*)",
+      "Bash(gcloud services list:*)",
+      "Bash(gcloud run services list:*)",
+      "Bash(gcloud run services describe:*)",
+      "Bash(gcloud run revisions list:*)",
+      "Bash(gcloud sql instances list:*)",
+      "Bash(gcloud sql instances describe:*)",
+      "Bash(gcloud pubsub topics list:*)",
+      "Bash(gcloud pubsub subscriptions describe:*)",
+      "Bash(gcloud compute regions describe:*)",
+      "Bash(gcloud compute project-info describe:*)",
+      "Bash(gcloud artifacts repositories describe:*)",
+      "Bash(gcloud deployment-manager deployments list:*)",
+      "Bash(gcloud deployment-manager deployments describe:*)",
+      "Bash(gcloud deployment-manager operations list:*)",
+      "Bash(gcloud logging read:*)",
+      "Bash(gsutil ls:*)",
+      "Bash(terraform fmt:*)",
+      "Bash(terraform validate:*)",
+      "Bash(terraform plan:*)",
+      "Bash(terraform show:*)"
+    ],
+    "deny": [
+      "Bash(gcloud run deploy:*)",
+      "Bash(gcloud sql instances delete:*)",
+      "Bash(gcloud deployment-manager deployments create:*)",
+      "Bash(gcloud deployment-manager deployments update:*)",
+      "Bash(gcloud deployment-manager deployments delete:*)",
+      "Bash(terraform apply:*)",
+      "Bash(terraform destroy:*)"
+    ]
+  },
+  "mcpServers": {}
+}

@@ -1,0 +1,21 @@
+{
+  "mcpServers": {
+    "xcodebuildmcp": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "xcodebuildmcp@latest", "mcp"],
+      "env": {
+        "XCODEBUILDMCP_ENABLED_WORKFLOWS": "simulator,logging",
+        "XCODEBUILDMCP_PROJECT_PATH": "<naturalize: path/to/App.xcodeproj>",
+        "XCODEBUILDMCP_SCHEME": "<naturalize: scheme>",
+        "XCODEBUILDMCP_PLATFORM": "iOS Simulator",
+        "XCODEBUILDMCP_SIMULATOR_ID": "<naturalize: simulator UDID>",
+        "XCODEBUILDMCP_BUNDLE_ID": "<naturalize: bundle id>"
+      }
+    },
+    "sentry": {
+      "type": "http",
+      "url": "https://mcp.sentry.dev/mcp"
+    }
+  }
+}

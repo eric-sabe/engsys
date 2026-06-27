@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(terraform fmt:*)",
+      "Bash(terraform validate:*)",
+      "Bash(terraform plan:*)",
+      "Bash(terraform show:*)",
+      "Bash(terraform state list:*)",
+      "Bash(terraform output:*)",
+      "Bash(terraform version:*)",
+      "Bash(terraform providers:*)",
+      "Bash(tflint:*)",
+      "Bash(tfsec:*)",
+      "Bash(checkov:*)"
+    ],
+    "deny": [
+      "Bash(terraform apply:*)",
+      "Bash(terraform destroy:*)",
+      "Bash(terraform state rm:*)",
+      "Bash(terraform state mv:*)",
+      "Bash(terraform import:*)"
+    ]
+  },
+  "mcpServers": {}
+}
