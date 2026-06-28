@@ -37,29 +37,44 @@ present. Adapting to a project becomes *choosing packs*, not *editing prose*.
 
 ## Quickstart
 
+**Option A — install from npm** (global CLI):
+
 ```bash
-# 1. In your project, drop a config (copy + edit the example):
-cp /path/to/engsys/engsys.config.example.yaml ./engsys.config.yaml
-$EDITOR engsys.config.yaml      # pick cloud / iac / lang / platform / db / agents
+npm install -g engsys
 
-# 2. Materialize the system (deterministic — a script, not a model):
-/path/to/engsys/install install --into .
-#   or, if engsys is linked on PATH:  engsys install --into .
+cd your-project
+engsys init                 # scaffold engsys.config.yaml from the bundled example
+$EDITOR engsys.config.yaml  # pick cloud / iac / lang / platform / db / agents
+engsys install --into .     # materialize .claude/, CLAUDE.md, settings, .mcp.json
 
-# 3. Naturalize project facts (the only model-driven step):
-#   open the project in Claude Code and run  /naturalize
-
-# 4. Anytime, confirm nothing drifted:
-/path/to/engsys/install verify --into .
+# open the project in Claude Code and run /naturalize  (the one model-driven step)
+engsys verify --into .      # anytime: confirm nothing drifted
 ```
 
-No `npm install` required — the installer is zero-dependency Node (≥18) and runs
-the same on macOS, Windows, and Linux.
+**Option B — run from a clone** (no global install; the repo is also where you
+fork packs and PR lessons back, so you'll likely want it anyway):
+
+```bash
+git clone https://github.com/eric-sabe/engsys
+
+cd your-project
+cp /path/to/engsys/engsys.config.example.yaml ./engsys.config.yaml
+$EDITOR engsys.config.yaml
+node /path/to/engsys/install install --into .   # same CLI, invoked directly
+node /path/to/engsys/install verify  --into .
+```
+
+> Tip: from a clone you can also `cd engsys && npm link` once to get the bare
+> `engsys` command on your PATH, then use it exactly like Option A.
+
+The installer is **zero-dependency** Node (≥18) — it adds nothing to your
+project's dependency tree and runs the same on macOS, Windows, and Linux.
 
 ## Commands
 
 | Command | What it does |
 |---------|--------------|
+| `init [--into <path>]` | Scaffold `engsys.config.yaml` from the bundled example (default: current dir). Handy after a global `npm install`. |
 | `install --into <path>` | First-time materialization of `.claude/`, `CLAUDE.md`, settings, `.mcp.json`. |
 | `update --into <path>` | Re-render from current engsys + config. Preserves the CLAUDE.md PROJECT-FACTS region and any hand-added permissions; heals drift in managed files. |
 | `verify --into <path>` | Compares installed managed files against the lockfile; reports missing/modified. |

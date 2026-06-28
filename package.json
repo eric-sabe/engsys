@@ -5,11 +5,39 @@
   "bin": {
     "engsys": "./install"
   },
+  "files": [
+    "install",
+    "lib/",
+    "core/",
+    "optional-agents/",
+    "stacks/",
+    "lessons-library/",
+    "engsys.config.example.yaml"
+  ],
   "scripts": {
-    "test": "node lib/selftest.js"
+    "test": "node lib/selftest.js",
+    "prepublishOnly": "node lib/selftest.js"
   },
   "engines": {
     "node": ">=18"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "ai",
+    "agents",
+    "engineering",
+    "scaffolding",
+    "installer",
+    "developer-tools"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eric-sabe/engsys.git"
+  },
+  "homepage": "https://eric-sabe.github.io/engsys/",
+  "bugs": {
+    "url": "https://github.com/eric-sabe/engsys/issues"
   },
   "license": "MIT"
 }

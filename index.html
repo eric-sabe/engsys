@@ -275,14 +275,14 @@
 
   <div class="steps">
     <div class="step"><b>Get engsys</b>
-      <p>Clone it once. The installer is zero-dependency Node (≥18) — no <code>npm install</code>, runs the same on macOS, Windows, and Linux.</p>
-      <code>git clone https://github.com/eric-sabe/engsys</code></div>
+      <p>Install the CLI from npm — or <code>git clone</code> the repo (you'll want it anyway, to fork packs and PR lessons back). Zero-dependency Node (≥18); adds nothing to your project, same on macOS, Windows, and Linux.</p>
+      <code>npm install -g engsys</code></div>
     <div class="step"><b>Configure your project</b>
-      <p>Copy the example config into your repo, then pick your cloud / iac / lang / platform / db, issue tracker, and which agents you want.</p>
-      <code>cp engsys/engsys.config.example.yaml engsys.config.yaml</code></div>
+      <p>Scaffold the config, then pick your cloud / iac / lang / platform / db, issue tracker, and which agents you want. (From a clone instead: <code>cp engsys/engsys.config.example.yaml engsys.config.yaml</code>.)</p>
+      <code>engsys init</code></div>
     <div class="step"><b>Install</b>
-      <p>Materializes <code>.claude/</code>, renders <code>CLAUDE.md</code> + settings, and seeds the lessons library. Already have a setup? It adopts it — merges your settings, preserves your agents — and snapshots the originals so it's reversible.</p>
-      <code>engsys/install install --into .</code></div>
+      <p>Materializes <code>.claude/</code>, renders <code>CLAUDE.md</code> + settings, and seeds the lessons library. Already have a setup? It adopts it — merges your settings, preserves your agents — and snapshots the originals so it's reversible. (From a clone: <code>node engsys/install install --into .</code>.)</p>
+      <code>engsys install --into .</code></div>
     <div class="step"><b>Naturalize</b>
       <p>Open the project in Claude Code and run the command. It fills the project-facts region of <code>CLAUDE.md</code> and folds in any imported Copilot/Cursor rules. The one model-driven step — never plumbing.</p>
       <code>/naturalize</code></div>

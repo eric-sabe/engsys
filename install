@@ -10,6 +10,7 @@
 // The engsys source root is the directory this script lives in.
 
 const path = require('path');
+const fs = require('fs');
 const { runInstall, runUninstall, runVerify, ENGSYS_VERSION } = require('./lib/commands');
 const { exists } = require('./lib/util');
 
@@ -35,6 +36,10 @@ Bring the engineering system into a project, faithfully — adopting whatever is
 already there (existing CLAUDE.md, settings, agents, or Copilot/Cursor config).
 
 Commands:
+  init [--into <path>] [--force]
+      Scaffold engsys.config.yaml in <path> (default: current dir) from the
+      bundled example. Handy after \`npm install -g engsys\`, where you don't
+      have the repo's example file to copy. Edit it, then run \`install\`.
   install --into <path> [--config <file>] [--dry-run] [--force]
       First-time materialization. Adopts existing infra: backs up a foreign
       CLAUDE.md (folding it into project facts), merges settings/.mcp.json,
@@ -131,6 +136,24 @@ function main() {
   const cmd = args._[0];
 
   if (args.help || !cmd) { console.log(USAGE); process.exit(args.help ? 0 : 1); }
+
+  if (cmd === 'init') {
+    const into = path.resolve(args.into || '.');
+    if (!exists(into)) { console.error(`error: target does not exist: ${into}`); process.exit(1); }
+    const dest    = path.join(into, 'engsys.config.yaml');
+    const example = path.join(engsysRoot, 'engsys.config.example.yaml');
+    if (!exists(example)) { console.error(`error: bundled example not found: ${example}`); process.exit(1); }
+    if (exists(dest) && !args.force) {
+      console.error(`error: ${path.relative(into, dest) || dest} already exists (use --force to overwrite).`);
+      process.exit(1);
+    }
+    if (args.dryRun) { console.log(`engsys init (dry run — nothing written) → ${dest}`); process.exit(0); }
+    fs.writeFileSync(dest, fs.readFileSync(example, 'utf8'));
+    console.log(`engsys init → wrote ${path.relative(process.cwd(), dest) || dest}`);
+    console.log('  Edit it (pick cloud / iac / lang / platform / db / agents), then:');
+    console.log(`    engsys install --into ${args.into || '.'}`);
+    process.exit(0);
+  }
 
   if (cmd === 'install' || cmd === 'update') {
     if (!args.into) { console.error('error: --into <path> is required'); process.exit(1); }
