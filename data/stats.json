@@ -1,18 +1,18 @@
 {
-  "generatedAt": "2026-06-27T15:13:51.511Z",
+  "generatedAt": "2026-06-28T07:31:13.010Z",
   "window": {
     "from": "2025-06-27",
-    "to": "2026-06-27",
+    "to": "2026-06-28",
     "bucket": "week"
   },
   "repoCount": 32,
   "totals": {
-    "issuesOpened": 2846,
-    "issuesClosed": 2632,
-    "commits": 4230,
-    "prsMerged": 1201,
-    "locAdded": 2704232,
-    "locRemoved": 1141839
+    "issuesOpened": 2854,
+    "issuesClosed": 2639,
+    "commits": 4228,
+    "prsMerged": 1149,
+    "locAdded": 2729566,
+    "locRemoved": 1141759
   },
   "series": [
     {
@@ -589,14 +589,14 @@
     },
     {
       "weekStart": "2026-06-22",
-      "issuesOpened": 216,
-      "issuesClosed": 217,
-      "commits": 136,
-      "prsMerged": 121,
-      "locAdded": 101723,
-      "locRemoved": 10089,
-      "locAddedViaPR": 71778,
-      "locAddedDirect": 29945
+      "issuesOpened": 224,
+      "issuesClosed": 224,
+      "commits": 134,
+      "prsMerged": 69,
+      "locAdded": 127057,
+      "locRemoved": 10009,
+      "locAddedViaPR": 52069,
+      "locAddedDirect": 74988
     }
   ],
   "daily": {
@@ -838,19 +838,20 @@
     "2026-06-22": 6,
     "2026-06-23": 18,
     "2026-06-24": 46,
-    "2026-06-25": 31,
-    "2026-06-26": 31,
-    "2026-06-27": 4
+    "2026-06-25": 26,
+    "2026-06-26": 30,
+    "2026-06-27": 2,
+    "2026-06-28": 6
   },
   "languages": {
-    "TypeScript": 22754570,
-    "HTML": 11221211,
+    "TypeScript": 22830542,
+    "HTML": 11231729,
     "Python": 6600251,
-    "JavaScript": 1091005,
+    "JavaScript": 1095411,
     "Shell": 971210,
     "Swift": 911634,
     "Kotlin": 825827,
-    "Bicep": 610625,
+    "Bicep": 633441,
     "Rust": 568184,
     "C#": 528788,
     "CSS": 346436,
@@ -871,10 +872,10 @@
       "totals": {
         "issuesOpened": 0,
         "issuesClosed": 0,
-        "commits": 10,
+        "commits": 2,
         "prsMerged": 0,
-        "locAdded": 28133,
-        "locRemoved": 151
+        "locAdded": 50580,
+        "locRemoved": 3
       },
       "series": [
         {
@@ -1453,22 +1454,20 @@
           "weekStart": "2026-06-22",
           "issuesOpened": 0,
           "issuesClosed": 0,
-          "commits": 10,
+          "commits": 2,
           "prsMerged": 0,
-          "locAdded": 28133,
-          "locRemoved": 151,
+          "locAdded": 50580,
+          "locRemoved": 3,
           "locAddedViaPR": 0,
-          "locAddedDirect": 28133
+          "locAddedDirect": 50580
         }
       ],
       "daily": {
-        "2026-06-27": 4,
-        "2026-06-26": 1,
-        "2026-06-25": 5
+        "2026-06-27": 2
       },
       "languages": {
-        "JavaScript": 94420,
-        "HTML": 60927,
+        "JavaScript": 98826,
+        "HTML": 71445,
         "Go Template": 7185,
         "Shell": 6013
       }
@@ -2070,18 +2069,18 @@
         }
       ],
       "daily": {
-        "2026-06-26": 10,
-        "2026-06-25": 10,
-        "2026-06-24": 19,
-        "2026-06-23": 11,
-        "2026-06-22": 2,
         "2026-06-21": 4,
         "2026-06-20": 20,
         "2026-06-19": 27,
         "2026-06-18": 24,
         "2026-06-17": 29,
         "2026-06-16": 23,
-        "2026-06-15": 1
+        "2026-06-15": 1,
+        "2026-06-26": 10,
+        "2026-06-25": 10,
+        "2026-06-24": 19,
+        "2026-06-23": 11,
+        "2026-06-22": 2
       },
       "languages": {
         "TypeScript": 2453277,
@@ -2691,7 +2690,6 @@
         }
       ],
       "daily": {
-        "2026-06-24": 1,
         "2026-06-16": 5,
         "2026-06-15": 27,
         "2026-06-14": 11,
@@ -2736,7 +2734,8 @@
         "2025-10-25": 2,
         "2025-10-23": 5,
         "2025-10-22": 3,
-        "2025-10-21": 5
+        "2025-10-21": 5,
+        "2026-06-24": 1
       },
       "languages": {
         "Python": 4373890,
@@ -3947,10 +3946,10 @@
         }
       ],
       "daily": {
-        "2026-06-22": 2,
         "2026-06-11": 1,
         "2025-11-20": 1,
-        "2025-11-04": 2
+        "2025-11-04": 2,
+        "2026-06-22": 2
       },
       "languages": {
         "HTML": 562959,
@@ -19277,12 +19276,12 @@
       "_id": "29107299",
       "alias": "Fuzzy Kingfisher",
       "totals": {
-        "issuesOpened": 1759,
-        "issuesClosed": 1594,
-        "commits": 1316,
-        "prsMerged": 715,
-        "locAdded": 906670,
-        "locRemoved": 289663
+        "issuesOpened": 1767,
+        "issuesClosed": 1601,
+        "commits": 1322,
+        "prsMerged": 663,
+        "locAdded": 909557,
+        "locRemoved": 289731
       },
       "series": [
         {
@@ -19859,21 +19858,17 @@
         },
         {
           "weekStart": "2026-06-22",
-          "issuesOpened": 106,
-          "issuesClosed": 110,
-          "commits": 65,
-          "prsMerged": 65,
-          "locAdded": 24615,
-          "locRemoved": 7402,
-          "locAddedViaPR": 24615,
-          "locAddedDirect": 0
+          "issuesOpened": 114,
+          "issuesClosed": 117,
+          "commits": 71,
+          "prsMerged": 13,
+          "locAdded": 27502,
+          "locRemoved": 7470,
+          "locAddedViaPR": 4906,
+          "locAddedDirect": 22596
         }
       ],
       "daily": {
-        "2026-06-26": 17,
-        "2026-06-25": 15,
-        "2026-06-24": 26,
-        "2026-06-23": 7,
         "2026-06-21": 7,
         "2026-06-20": 12,
         "2026-06-19": 8,
@@ -19970,12 +19965,17 @@
         "2025-12-31": 5,
         "2025-12-24": 1,
         "2025-12-23": 3,
-        "2025-12-22": 5
+        "2025-12-22": 5,
+        "2026-06-28": 6,
+        "2026-06-26": 17,
+        "2026-06-25": 15,
+        "2026-06-24": 26,
+        "2026-06-23": 7
       },
       "languages": {
-        "TypeScript": 12151420,
+        "TypeScript": 12227392,
         "HTML": 813830,
-        "Bicep": 458904,
+        "Bicep": 481720,
         "JavaScript": 195484,
         "Python": 154980,
         "Shell": 154656,
