@@ -28,8 +28,13 @@ One lesson per file. Keep them LLM-optimized and trigger-first:
 **Failure mode:** what goes wrong and why.
 **Correct behavior:** the checklist / the fix.
 **Check:** a quick diagnostic before/after.
-**Seen in:** which projects surfaced it (+ rough date).
+**Seen in:** keep it generalized — e.g. "recurring across projects."
 ```
+
+> This library is published publicly (npm + GitHub). Generalize before promoting:
+> **never** include private project/repo/company names, secrets, internal hosts,
+> or proprietary specifics in a lesson. The pattern is what's portable, not the
+> particulars.
 
 ## Seeding
 
