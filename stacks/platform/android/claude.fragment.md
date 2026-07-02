@@ -3,7 +3,8 @@
 
 This project ships an Android app (Kotlin / Jetpack Compose). The Kotlin/Android
 framework conventions live in the `lang/kotlin` skills (`kotlin-coroutines`,
-`jetpack-compose`, `android-testing`); Gary is the mobile experience architect.
+`jetpack-compose`, `android-testing`). Leith owns the Android UX (Material idiom);
+Isabelle implements with the Kotlin packs; Gary audits the shipped surface.
 
 ### Local Gradle gate (no CI for Android)
 

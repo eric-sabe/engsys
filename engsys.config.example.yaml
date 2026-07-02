@@ -22,8 +22,8 @@ stack:
 issue_tracker: github   # github | linear | jira
 
 agents:
-  core: all             # 'all' or an explicit list, e.g. [melvin, isabelle, bert]
-  extra: [sandy, gary]  # opt-in personas from optional-agents/ (sandy, gary [mobile], jos, steve)
+  core: all             # 'all' or an explicit list, e.g. [melvin, isabelle, bert] — includes gary (design critic)
+  extra: [sandy]        # opt-in personas from optional-agents/ (sandy, jos, steve)
 
 commands: all           # 'all' or an explicit list
 

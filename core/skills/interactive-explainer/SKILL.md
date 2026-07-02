@@ -21,7 +21,7 @@ Turn "how does X work?" into a single HTML file the reader can *explore*: click 
 1. **One self-contained `.html` file.** No build step, no CDN, no external requests. It must open from disk, offline, forever. (Embed a font via `@font-face` data-URI only if the file budget allows; otherwise pick a deliberate local stack and let weight/size/spacing do the typographic work.)
 2. **Data-driven.** Nodes, edges, and steps live in one JS object at the top of the file. The rendering reads the data; nobody should ever edit SVG coordinates to fix a typo.
 3. **The picture carries structure; words carry mechanism.** If the text restates what an arrow already shows, cut the text.
-4. **Overview first, zoom and filter, details on demand.** The first screen is the whole shape, legible. Detail appears when asked — click, hover, step — never as a wall of prose beside the diagram.
+4. **Overview first, zoom and filter, details on demand.** The first screen is the whole shape, legible — with the interaction model *demonstrated*, never a blank slate a prose hint has to explain. Open on a worked example (a pre-lit focus via `opening:` or an active step 0) so the first screen shows what clicking does. The legend may not name a state the reader hasn't seen. Detail appears when asked — click, hover, step — never as a wall of prose beside the diagram.
 5. **Accessible or unshipped.** Keyboard operable (Tab/Enter on nodes, ←/→ steps, Esc reset), `prefers-reduced-motion` honored, AA contrast, meaning never encoded in color alone, readable at 375px.
 6. **A deliberate aesthetic.** Commit to a direction (editorial, technical-manual, blueprint, terminal…) with a dominant color and one sharp accent. No default-looking gradient-card slop.
 7. **SVG, not canvas.** Crisp, inspectable, DOM events, screen-reader reachable. Canvas only past ~300 nodes — and past ~30 unclustered nodes you should be collapsing groups anyway.
@@ -54,8 +54,11 @@ Copy [assets/starter.html](assets/starter.html) and replace the data. It already
 Every visible string obeys [references/copy-rules.md](references/copy-rules.md): title ≤ 8 words, node labels ≤ 3, details ≤ 3 sentences of mechanism, banned-word list enforced, cut lines moved to the graveyard comment. **If the `sandy` agent is installed, hand her the draft copy for the pass; the rules file is the fallback when she isn't.**
 
 ### 6. Quality gate
-Open the file in a browser (use the `webapp-testing` or `chrome-devtools` skill if available) and verify:
+Open the file in a browser (use the `webapp-testing` or `chrome-devtools` skill if available). **If the `gary` agent is installed, hand him the artifact for a first-contact audit — his cold-open/walkthrough/severity method is this gate, run properly.** Verify:
 
+- [ ] Cold open, ten seconds, no reading: it's evident that nodes are clickable and a tour exists
+- [ ] The opening state demonstrates focus and the legend colors — a worked example, not a hint
+- [ ] Clicking a node mid-tour pauses the tour — position preserved, resume offered
 - [ ] The whole shape is legible on the first screen — no scroll to understand
 - [ ] Click any node → upstream/downstream highlight correct (spot-check against the data)
 - [ ] Step-through: ←/→ work, every step's focus matches its text
