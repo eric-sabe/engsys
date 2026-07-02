@@ -32,7 +32,7 @@ lessons:
   into: docs/agent-lessons/library  # where seeded lessons land (project-local lessons stay at docs/agent-lessons/)
 
 naturalize:
-  model_strategy: "Opus for orchestration and judgement; Sonnet for execution."
+  model_strategy: "Three tiers: Sonnet 5 for execution; Opus 4.8 for orchestration and judgement; escalate to Fable 5 for the hardest / highest-stakes / stuck cases (Fable is the top, most expensive tier — reserve it)."
   hook_patterns:
     - glob: "*/schema.prisma"
       reminder: "Schema changed — regenerate the client and rebuild dependents before pushing."

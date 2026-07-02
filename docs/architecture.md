@@ -91,6 +91,7 @@ engsys/
       git-workflow-agents/ code-review/ gh-cli/ github-issues/ github-actions/
       pre-push/ refactor/ llm-structured-outputs/ web-design-reviewer/
       webapp-testing/ chrome-devtools/ agentic-eval/ git-commit/
+      interactive-explainer/
     hooks/
       post-edit-reminders.sh    # template; project supplies the file patterns
     workflows/                  # long-form prompt docs the commands reference
@@ -173,7 +174,7 @@ lessons:
   into: docs/agent-lessons/library
 
 naturalize:
-  model_strategy: "Opus for orchestration and judgement; Sonnet for execution."
+  model_strategy: "Three tiers: Sonnet 5 for execution; Opus 4.8 for orchestration and judgement; escalate to Fable 5 for the hardest / highest-stakes / stuck cases."
   hook_patterns:        # file globs -> post-edit reminder text
     - glob: "*/schema.prisma"
       reminder: "Schema changed — regenerate the client before pushing."
@@ -257,7 +258,7 @@ by name and reference long-form procedure in `core/workflows/`.
 
 - **Core (agnostic):** git-workflow-agents, code-review, gh-cli, github-issues,
   github-actions, pre-push, refactor, llm-structured-outputs, web-design-reviewer,
-  webapp-testing, chrome-devtools, agentic-eval, git-commit.
+  webapp-testing, chrome-devtools, agentic-eval, git-commit, interactive-explainer.
 - **Stack packs:** the cloud/iac/lang/platform/db/domain/tooling skills listed in §3.
 
 ## 7. Lessons
