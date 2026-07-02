@@ -80,7 +80,7 @@ engsys/
   core/                   # stack-agnostic — always installed
     agents/
       melvin.md  aaron.md  isabelle.md  bert.md  jody.md
-      leith.md   marcelo.md  patricia.md  nyx.md  otto.md
+      leith.md   marcelo.md  patricia.md  nyx.md  otto.md  gary.md
     commands/
       generate-project.md  implement-project.md  implement-issue.md
       file-issue.md        project-closeout.md   pre-push.md
@@ -114,7 +114,6 @@ engsys/
               issue-tracker-linear/   { issue-tracker-linear, mcp: linear }
 
   optional-agents/        # opt-in personas, not part of core
-    gary.md     # mobile experience architect (iOS and/or Android)
     sandy.md    # marketing site design / conversion copy / SEO
     jos.md      # monetization / business strategy
     steve.md    # the scapegoat (morale)

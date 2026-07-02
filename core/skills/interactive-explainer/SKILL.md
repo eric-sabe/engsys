@@ -54,7 +54,7 @@ Copy [assets/starter.html](assets/starter.html) and replace the data. It already
 Every visible string obeys [references/copy-rules.md](references/copy-rules.md): title ≤ 8 words, node labels ≤ 3, details ≤ 3 sentences of mechanism, banned-word list enforced, cut lines moved to the graveyard comment. **If the `sandy` agent is installed, hand her the draft copy for the pass; the rules file is the fallback when she isn't.**
 
 ### 6. Quality gate
-Open the file in a browser (use the `webapp-testing` or `chrome-devtools` skill if available) and verify:
+Open the file in a browser (use the `webapp-testing` or `chrome-devtools` skill if available). **If the `gary` agent is installed, hand him the artifact for a first-contact audit — his cold-open/walkthrough/severity method is this gate, run properly.** Verify:
 
 - [ ] Cold open, ten seconds, no reading: it's evident that nodes are clickable and a tour exists
 - [ ] The opening state demonstrates focus and the legend colors — a worked example, not a hint

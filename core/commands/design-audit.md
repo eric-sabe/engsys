@@ -57,7 +57,7 @@ If the work is tracked on a ProjectV2 board, use `gh project item-list <num> --o
 
 **Before** spending cycles on fidelity, ask: is the design itself good? A faithful build of a bad design is still a bad product.
 
-Use the **`design-critique`** skill as the engine if available. Pass it the target (surface source, screenshot, or mockup), the project's actors/personas, and the brand/voice brief. Get a second opinion from **leith** for brand fit. Loop in **nyx** if anything touches a security boundary (tenant isolation, trust frame, sandbox). Loop in **otto** if an AI/LLM interaction's cost or latency looks off.
+Use the **`design-critique`** skill as the engine if available. Pass it the target (surface source, screenshot, or mockup), the project's actors/personas, and the brand/voice brief. Run **gary** as the critic — his severity-ranked audit (cold open, walkthrough, heuristic sweep) is the sanity backbone. Get a second opinion from **leith** for brand fit. Loop in **nyx** if anything touches a security boundary (tenant isolation, trust frame, sandbox). Loop in **otto** if an AI/LLM interaction's cost or latency looks off.
 
 Work through the ten sanity questions from [/design-critique](design-critique.md) for the surface, and record sanity findings separately from fidelity findings:
 

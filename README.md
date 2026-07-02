@@ -108,8 +108,7 @@ stacks/             detachable capability packs — pick per project (scalar or 
   domain/           mobile-growth
   tooling/          issue-tracker-github · issue-tracker-linear
 
-optional-agents/    opt-in: gary (mobile), sandy (marketing), jos (monetization),
-                    steve (morale)
+optional-agents/    opt-in: sandy (marketing), jos (monetization), steve (morale)
 lessons-library/    curated cross-project lessons (seeded into projects on install)
 docs/               architecture · naturalization
 lib/  install       the zero-dep Node installer

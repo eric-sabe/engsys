@@ -33,7 +33,7 @@ The project's **design reference** is whatever the project uses as its source of
 
 ## Engine
 
-Use the **`design-critique`** skill as the engine if available. Get a second opinion from the **leith** subagent for brand fit (she holds the voice and value prop). Loop in **nyx** if anything raises tenant-isolation, sandbox-escape, or PII concerns. Loop in **otto** if there's an AI/LLM interaction whose cost or latency model looks off.
+Use the **`design-critique`** skill as the engine if available. Run the **gary** subagent as the critic — cold-open first-contact test, cognitive walkthrough, heuristic sweep with severity ratings; his findings anchor the verdict. Get a second opinion from the **leith** subagent for brand fit (she holds the voice and value prop). Loop in **nyx** if anything raises tenant-isolation, sandbox-escape, or PII concerns. Loop in **otto** if there's an AI/LLM interaction whose cost or latency model looks off.
 
 ## The ten questions (work through every one)
 

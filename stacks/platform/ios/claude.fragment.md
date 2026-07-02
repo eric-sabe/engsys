@@ -1,7 +1,7 @@
 <!-- pack: platform/ios -->
 ## iOS platform
 
-This project ships an iOS app (Swift / SwiftUI). The Swift framework conventions live in the `lang/swift` skills (`swift-concurrency`, `swiftui-patterns`, `swift-testing`, `swiftdata`); Gary is the iOS experience architect.
+This project ships an iOS app (Swift / SwiftUI). The Swift framework conventions live in the `lang/swift` skills (`swift-concurrency`, `swiftui-patterns`, `swift-testing`, `swiftdata`). Leith owns the iOS UX (HIG idiom); Isabelle implements with the Swift packs; Gary audits the shipped surface.
 
 ### Local xcodebuild gate (no CI for iOS)
 
