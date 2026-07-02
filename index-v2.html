@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>engsys, end to end</title>
+<meta name="description" content="An explorable map of engsys: how a goal becomes merged code, and why the next project starts smarter.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%230a0e14'/%3E%3Ccircle cx='8' cy='8' r='3.4' fill='none' stroke='%2334e0d2' stroke-width='1.6'/%3E%3C/svg%3E">
+<style>
+  /* ---- tokens (engsys brand) ---- */
+  :root {
+    --bg: #0a0e14;
+    --panel: #111824;
+    --ink: #e6edf3;
+    --muted: #8a97a8;
+    --line: #1f2a38;
+    --node-fill: #0e141d;
+    --node-stroke: #2b3a4d;
+    --current: #34e0d2;   /* focused node */
+    --up: #f5b13d;        /* upstream: what it needs */
+    --down: #9d8cff;      /* downstream: what it feeds */
+    --fail: #ff6b6b;
+    --edge: #4a5866;
+    --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: var(--font-ui); font-size: 15px; line-height: 1.45;
+    background-image: linear-gradient(rgba(52,224,210,.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(52,224,210,.03) 1px, transparent 1px);
+    background-size: 46px 46px;
+  }
+  header {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px;
+    padding: 22px 24px 8px;
+  }
+  .kicker { font-family: var(--font-mono); font-size: 11px; letter-spacing: 2px; text-transform: uppercase; color: var(--current); width: 100%; }
+  h1 { font-size: 26px; font-weight: 700; margin: 0; letter-spacing: -.5px; }
+  .question { color: var(--muted); margin: 0; font-style: italic; }
+  .legend { margin-left: auto; display: flex; gap: 14px; align-items: center; font-size: 12px; color: var(--muted); }
+  .legend span::before {
+    content: ""; display: inline-block; width: 10px; height: 10px;
+    border-radius: 2px; margin-right: 5px; vertical-align: -1px; background: var(--c);
+  }
+  main { display: grid; grid-template-columns: 1fr 330px; gap: 0 16px; padding: 8px 24px 24px; }
+  #stage { min-width: 0; }
+  svg { width: 100%; height: auto; display: block; }
+
+  /* nodes */
+  .node { cursor: pointer; }
+  .node rect {
+    fill: var(--node-fill); stroke: var(--node-stroke); stroke-width: 1.5; rx: 8;
+    transition: opacity .18s, stroke .18s;
+  }
+  .node text { fill: var(--ink); font-family: var(--font-mono); font-size: 12.5px; pointer-events: none; }
+  .node .grouptick { stroke-width: 3; }
+  .node:hover rect { stroke: var(--muted); }
+  .node:focus { outline: none; }
+  .node:focus rect { stroke: var(--current); stroke-dasharray: 3 3; }
+  .node.current rect { stroke: var(--current); stroke-width: 2.5; filter: drop-shadow(0 0 7px rgba(52,224,210,.4)); }
+  .node.up rect   { stroke: var(--up); stroke-width: 2; }
+  .node.down rect { stroke: var(--down); stroke-width: 2; }
+  .node.dim { opacity: .25; }
+
+  /* edges */
+  .edge path { fill: none; stroke: var(--edge); stroke-width: 1.5; transition: opacity .18s, stroke .18s; }
+  .edge text { fill: var(--muted); font-family: var(--font-mono); font-size: 10.5px; }
+  .edge.loop path { stroke-dasharray: 5 4; }
+  .edge.fail path { stroke-dasharray: 2 4; stroke: color-mix(in srgb, var(--fail) 65%, var(--edge)); }
+  .edge.up path   { stroke: var(--up); stroke-width: 2; }
+  .edge.down path { stroke: var(--down); stroke-width: 2; }
+  .edge.active path {
+    stroke: var(--current); stroke-width: 2;
+    stroke-dasharray: 6 6; animation: flow 1s linear infinite;
+  }
+  .edge.dim { opacity: .15; }
+  @keyframes flow { to { stroke-dashoffset: -12; } }
+  @media (prefers-reduced-motion: reduce) {
+    .edge.active path { animation: none; stroke-dasharray: none; }
+    .node rect, .edge path { transition: none; }
+  }
+
+  /* panel */
+  aside {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 16px; align-self: start; position: sticky; top: 12px;
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  #panel h2 { font-size: 17px; margin: 0 0 6px; }
+  #panel p { margin: 0; color: var(--ink); }
+  #panel .hint { color: var(--muted); font-size: 13px; }
+  .stepper { display: flex; align-items: center; gap: 10px; border-top: 1px solid var(--line); padding-top: 10px; }
+  .stepper button {
+    background: none; border: 1px solid var(--line); color: var(--ink);
+    border-radius: 6px; padding: 5px 12px; cursor: pointer; font: inherit; font-size: 13px;
+  }
+  .stepper button:hover:not(:disabled) { border-color: var(--current); }
+  .stepper button:disabled { opacity: .35; cursor: default; }
+  .stepper .count { color: var(--muted); font-size: 12px; margin-left: auto; font-family: var(--font-mono); }
+  #reset {
+    background: none; border: none; color: var(--muted); cursor: pointer;
+    font: inherit; font-size: 12px; text-decoration: underline; padding: 0; align-self: flex-start;
+  }
+  kbd {
+    background: var(--node-fill); border: 1px solid var(--line); border-radius: 4px;
+    padding: 0 5px; font-size: 11px; font-family: var(--font-mono);
+  }
+  footer { padding: 4px 24px 22px; color: var(--muted); font-size: 12.5px; }
+  footer a { color: var(--current); text-decoration: none; }
+  footer a:hover { text-decoration: underline; }
+  @media (max-width: 720px) {
+    main { grid-template-columns: 1fr; }
+    aside { position: static; }
+    .legend { margin-left: 0; flex-wrap: wrap; }
+    #stage { overflow-x: auto; }
+    #stage svg { min-width: 620px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="kicker">engsys — a portable engineering team for Claude Code</div>
+  <h1 id="title"></h1>
+  <p class="question" id="question"></p>
+  <div class="legend" id="legend"></div>
+</header>
+<main>
+  <div id="stage"></div>
+  <aside>
+    <div id="panel" aria-live="polite"></div>
+    <button id="reset" hidden>Reset (Esc)</button>
+    <div class="stepper">
+      <button id="prev" aria-label="Previous step">&#8592; Prev</button>
+      <button id="next" aria-label="Next step">Next &#8594;</button>
+      <span class="count" id="count"></span>
+    </div>
+  </aside>
+</main>
+<footer>
+  Prefer the full tour? <a href="index.html">index.html</a> &nbsp;&middot;&nbsp;
+  <a href="https://github.com/eric-sabe/engsys" rel="noopener">Source on GitHub</a>
+</footer>
+
+<script>
+"use strict";
+/* ==================== DATA ==================== */
+const EXPLAINER = {
+  title: "engsys, end to end",
+  question: "How does a goal become merged code — and why does the next project start smarter?",
+  groups: {
+    design:   { label: "Design",   color: "#9d8cff" },
+    build:    { label: "Build",    color: "#34e0d2" },
+    gate:     { label: "Gate",     color: "#f5b13d" },
+    compound: { label: "Compound", color: "#46d39a" },
+  },
+  nodes: [
+    { id: "goal",     label: "A goal",          group: "design",   detail: "One sentence from the operator. Everything downstream exists to turn it into merged code." },
+    { id: "spec",     label: "Spec + plan",     group: "design",   detail: "Leith writes acceptance criteria; Melvin and Nyx pressure-test architecture and security; Marcelo adds the test plan. Four specialists argue before anyone codes." },
+    { id: "board",    label: "Issue board",     group: "design",   detail: "Jody breaks the spec into dependency-ordered issues. One phase = one PR is decided here, not during coding." },
+    { id: "implement", label: "Implement",      group: "build",    detail: "Isabelle works each issue in an isolated worktree, matching the repo's own patterns. The pre-push gate runs before anything leaves her branch." },
+    { id: "review",   label: "Objective review", group: "gate",    detail: "A fresh reviewer with no stake in the code re-runs the whole gate. The verdict is binary: CLEAN, or findings with file:line." },
+    { id: "merge",    label: "Merge",           group: "gate",     detail: "Nothing merges without a CLEAN verdict. Main stays releasable the whole project." },
+    { id: "closeout", label: "Closeout",        group: "compound", detail: "Worktrees cleaned, branches pruned — and every review finding mined for what it teaches." },
+    { id: "lessons",  label: "Lessons library", group: "compound", detail: "Recurring findings are generalized into stack-independent lessons. The installer seeds them into every new project on day one." },
+  ],
+  edges: [
+    { from: "goal",      to: "spec" },
+    { from: "spec",      to: "board" },
+    { from: "board",     to: "implement" },
+    { from: "implement", to: "review", label: "phase PR" },
+    { from: "review",    to: "merge",  label: "CLEAN" },
+    { from: "review",    to: "implement", label: "findings", kind: "loop" },
+    { from: "merge",     to: "closeout" },
+    { from: "closeout",  to: "lessons" },
+    { from: "lessons",   to: "goal",   label: "next project", kind: "loop" },
+  ],
+  steps: [
+    { title: "Design before code",     body: "Four specialists argue the spec into shape before anyone writes code.", focus: ["goal", "spec"], edges: [["goal","spec"]] },
+    { title: "A board, not a wish list", body: "Issues come out dependency-ordered. The order is the plan.", focus: ["board"], edges: [["spec","board"]] },
+    { title: "One phase, one PR",      body: "Isabelle ships each phase from an isolated worktree, pre-gated before push.", focus: ["implement"], edges: [["board","implement"]] },
+    { title: "A reviewer with no stake", body: "Findings loop the phase back. CLEAN is the only door to merge.", focus: ["review", "implement"], edges: [["implement","review"],["review","implement"]] },
+    { title: "Merge, then mine",       body: "The merge isn't the end — closeout mines every finding for what it teaches.", focus: ["merge", "closeout"], edges: [["review","merge"],["merge","closeout"]] },
+    { title: "The system compounds",   body: "Lessons seed the next install. Each project starts smarter than the last.", focus: ["lessons", "goal"], edges: [["closeout","lessons"],["lessons","goal"]] },
+  ],
+  legend: [
+    { label: "focused",       color: "var(--current)" },
+    { label: "what it needs", color: "var(--up)" },
+    { label: "what it feeds", color: "var(--down)" },
+  ],
+};
+
+/* ==================== MACHINERY (from interactive-explainer starter) ==================== */
+const SVGNS = "http://www.w3.org/2000/svg";
+const COL_W = 178, ROW_H = 70, NODE_H = 38, PAD = 30;
+
+const nodes = EXPLAINER.nodes, edges = EXPLAINER.edges, steps = EXPLAINER.steps || [];
+const byId = Object.fromEntries(nodes.map(n => [n.id, n]));
+const fwd = {}, rev = {};
+nodes.forEach(n => { fwd[n.id] = []; rev[n.id] = []; });
+edges.forEach(e => { if (e.kind === "loop") return; fwd[e.from].push(e.to); rev[e.to].push(e.from); });
+
+const rank = {};
+function rankOf(id) {
+  if (id in rank) return rank[id];
+  rank[id] = 0;
+  rank[id] = rev[id].length ? Math.max(...rev[id].map(rankOf)) + 1 : 0;
+  return rank[id];
+}
+nodes.forEach(n => rankOf(n.id));
+nodes.forEach(n => { if (typeof n.rank === "number") rank[n.id] = n.rank; });
+
+const cols = [];
+nodes.forEach(n => (cols[rank[n.id]] = cols[rank[n.id]] || []).push(n));
+const maxRows = Math.max(...cols.map(c => c.length));
+cols.forEach((col, r) => {
+  if (r > 0) col.sort((a, b) => avgRow(a) - avgRow(b));
+  col.forEach((n, i) => {
+    n.x = PAD + r * COL_W;
+    n.y = PAD + (maxRows - col.length) * ROW_H / 2 + i * ROW_H;
+    n.w = Math.max(92, n.label.length * 7.2 + 26);
+  });
+  function avgRow(n) {
+    const rows = rev[n.id].map(p => cols[rank[p]] ? cols[rank[p]].indexOf(byId[p]) : 0);
+    return rows.length ? rows.reduce((s, v) => s + v, 0) / rows.length : 0;
+  }
+});
+const W = PAD * 2 + (cols.length - 1) * COL_W + Math.max(...nodes.map(n => n.w));
+const loopCount = edges.filter(e => e.kind === "loop").length;
+const loopBase = PAD + maxRows * ROW_H;      // each loop arc gets its own depth
+const H = loopBase + 26 + loopCount * 22 + 8;
+
+function el(tag, attrs, parent) {
+  const e = document.createElementNS(SVGNS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "group", "aria-label": EXPLAINER.title });
+document.getElementById("stage").appendChild(svg);
+
+const defs = el("defs", {}, svg);
+for (const [name, color] of [["default", "var(--edge)"], ["up", "var(--up)"], ["down", "var(--down)"], ["active", "var(--current)"], ["fail", "var(--fail)"]]) {
+  const m = el("marker", { id: "arr-" + name, viewBox: "0 0 8 8", refX: 7, refY: 4, markerWidth: 7, markerHeight: 7, orient: "auto-start-reverse" }, defs);
+  el("path", { d: "M0,0.5 L7.5,4 L0,7.5 z", fill: color }, m);
+}
+
+let loopIdx = 0;
+const edgeEls = edges.map(e => {
+  const a = byId[e.from], b = byId[e.to];
+  const g = el("g", { class: "edge" + (e.kind ? " " + e.kind : "") }, svg);
+  let d, lx, ly;
+  if (e.kind === "loop") {
+    const x1 = a.x + a.w / 2, y1 = a.y + NODE_H, x2 = b.x + b.w / 2, y2 = b.y + NODE_H;
+    const dip = loopBase + 26 + loopIdx++ * 22;   // stagger arcs so labels never collide
+    d = `M ${x1} ${y1} C ${x1} ${dip}, ${x2} ${dip}, ${x2} ${y2 + 4}`;
+    lx = (x1 + x2) / 2; ly = dip - 8;
+  } else {
+    const x1 = a.x + a.w, y1 = a.y + NODE_H / 2, x2 = b.x, y2 = b.y + NODE_H / 2;
+    const mx = (x1 + x2) / 2;
+    d = `M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2 - 3} ${y2}`;
+    lx = mx; ly = (y1 + y2) / 2 - 7;
+  }
+  const path = el("path", { d, "marker-end": "url(#arr-" + (e.kind === "fail" ? "fail" : "default") + ")" }, g);
+  if (e.label) {
+    const t = el("text", { x: lx, y: ly, "text-anchor": "middle" }, g);
+    t.textContent = e.label;
+  }
+  return { e, g, path };
+});
+
+const nodeEls = nodes.map(n => {
+  const grp = EXPLAINER.groups[n.group];
+  const g = el("g", { class: "node", tabindex: 0, role: "button",
+    "aria-label": n.label + (grp ? " (" + grp.label + ")" : "") }, svg);
+  el("rect", { x: n.x, y: n.y, width: n.w, height: NODE_H, rx: 8 }, g);
+  el("line", { x1: n.x, y1: n.y + 8, x2: n.x, y2: n.y + NODE_H - 8, class: "grouptick", stroke: (grp && grp.color) || "var(--muted)" }, g);
+  const t = el("text", { x: n.x + n.w / 2, y: n.y + NODE_H / 2 + 4.5, "text-anchor": "middle" }, g);
+  t.textContent = n.label;
+  g.addEventListener("click", () => focusNode(n.id));
+  g.addEventListener("keydown", ev => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); focusNode(n.id); } });
+  return { n, g };
+});
+
+document.getElementById("title").textContent = EXPLAINER.title;
+document.getElementById("question").textContent = EXPLAINER.question;
+document.getElementById("legend").innerHTML =
+  (EXPLAINER.legend || []).map(l => `<span style="--c:${l.color}">${l.label}</span>`).join("");
+
+const panel = document.getElementById("panel");
+const resetBtn = document.getElementById("reset");
+const prevBtn = document.getElementById("prev"), nextBtn = document.getElementById("next");
+const countEl = document.getElementById("count");
+
+function showPanel(title, body, hint) {
+  panel.innerHTML = "";
+  const h = document.createElement("h2"); h.textContent = title; panel.appendChild(h);
+  const p = document.createElement("p"); p.textContent = body; panel.appendChild(p);
+  if (hint) { const s = document.createElement("p"); s.className = "hint"; s.innerHTML = hint; panel.appendChild(s); }
+}
+
+let stepIndex = -1, focused = null;
+
+function reach(start, adj) {
+  const seen = new Set(), q = [...adj[start]];
+  while (q.length) { const id = q.shift(); if (seen.has(id)) continue; seen.add(id); q.push(...adj[id]); }
+  return seen;
+}
+
+function apply(current, up, down, activePairs) {
+  const any = current.size || activePairs.size;
+  nodeEls.forEach(({ n, g }) => {
+    g.classList.toggle("current", current.has(n.id));
+    g.classList.toggle("up", up.has(n.id));
+    g.classList.toggle("down", down.has(n.id));
+    g.classList.toggle("dim", any && !current.has(n.id) && !up.has(n.id) && !down.has(n.id));
+  });
+  edgeEls.forEach(({ e, g, path }) => {
+    const key = e.from + ">" + e.to;
+    const isActive = activePairs.has(key);
+    const isUp = up.size && (up.has(e.from) && (up.has(e.to) || current.has(e.to))) && e.kind !== "loop";
+    const isDown = down.size && ((current.has(e.from) || down.has(e.from)) && down.has(e.to)) && e.kind !== "loop";
+    g.classList.toggle("active", isActive);
+    g.classList.toggle("up", !isActive && isUp);
+    g.classList.toggle("down", !isActive && isDown);
+    g.classList.toggle("dim", any && !isActive && !isUp && !isDown);
+    path.setAttribute("marker-end", "url(#arr-" + (isActive ? "active" : isUp ? "up" : isDown ? "down" : e.kind === "fail" ? "fail" : "default") + ")");
+  });
+  resetBtn.hidden = !any;
+}
+
+function focusNode(id) {
+  stepIndex = -1; focused = id;
+  const up = reach(id, rev), down = reach(id, fwd);
+  apply(new Set([id]), up, down, new Set());
+  const n = byId[id];
+  const grp = EXPLAINER.groups[n.group];
+  showPanel(n.label, n.detail || "", grp ? grp.label : "");
+  syncStepper();
+}
+
+function showStep(i) {
+  stepIndex = i; focused = null;
+  const s = steps[i];
+  apply(new Set(s.focus || []), new Set(), new Set(), new Set((s.edges || []).map(p => p[0] + ">" + p[1])));
+  showPanel(s.title, s.body);
+  syncStepper();
+}
+
+function resetAll() {
+  stepIndex = -1; focused = null;
+  apply(new Set(), new Set(), new Set(), new Set());
+  showPanel(EXPLAINER.title, EXPLAINER.question,
+    "Click any node to trace what it needs and what it feeds. <kbd>&#8592;</kbd><kbd>&#8594;</kbd> step through, <kbd>Esc</kbd> reset.");
+  syncStepper();
+}
+
+function syncStepper() {
+  prevBtn.disabled = stepIndex <= 0 && stepIndex !== -1 || !steps.length;
+  nextBtn.disabled = stepIndex >= steps.length - 1;
+  countEl.textContent = steps.length ? (stepIndex === -1 ? steps.length + " steps" : (stepIndex + 1) + " / " + steps.length) : "";
+}
+
+prevBtn.addEventListener("click", () => { if (stepIndex > 0) showStep(stepIndex - 1); });
+nextBtn.addEventListener("click", () => { if (stepIndex < steps.length - 1) showStep(stepIndex + 1); });
+resetBtn.addEventListener("click", resetAll);
+document.addEventListener("keydown", ev => {
+  if (ev.key === "Escape") resetAll();
+  else if (ev.key === "ArrowRight" && stepIndex < steps.length - 1) showStep(stepIndex + 1);
+  else if (ev.key === "ArrowLeft" && stepIndex > 0) showStep(stepIndex - 1);
+});
+
+resetAll();
+</script>
+
+<!-- graveyard:
+  "Not one assistant wearing hats"        → the group ticks show it
+  "kept ruthlessly separate"              → adverb doing a mechanism's job
+  "on rails"                              → the diagram IS the rails
+-->
+</body>
+</html>
