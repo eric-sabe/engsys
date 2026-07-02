@@ -378,7 +378,7 @@ const TEAM = [
   {id:'gary', name:'Gary', role:'Design expert', tier:'core', bl:'The reader’s advocate — four schools of design doctrine and the counter-canon. Breaks comprehension the way Nyx breaks security.'},
   {id:'sandy', name:'Sandy', role:'Marketing / SEO', tier:'optional', bl:'Makes skeptics understand — and want — what the engineers built. Clear over clever.'},
   {id:'jos', name:'Jos', role:'Monetization', tier:'optional', bl:'Pricing, ASO, CAC/LTV math, and the App Store policy call before it bites you.'},
-  {id:'steve', name:'Steve', role:'The scapegoat', tier:'optional', bl:'Officially responsible for phantom config, ghost resources, and IAM nobody admits creating. (Not real. Morale only.)'},
+  {id:'steve', name:'Steve', role:'The scapegoat', tier:'optional', pill:'inevitable', bl:'Officially responsible for phantom config, ghost resources, and IAM nobody admits creating. (Not real. Morale only.)'},
 ];
 const TIER_COLORS = {melvin:'#34e0d2',aaron:'#46d39a',isabelle:'#9d8cff',bert:'#f5b13d',jody:'#34e0d2',leith:'#9d8cff',marcelo:'#46d39a',patricia:'#f5b13d',nyx:'#ff6b6b',otto:'#34e0d2',gary:'#9d8cff',sandy:'#f5b13d',jos:'#46d39a',steve:'#5c6a7a'};
 
@@ -406,7 +406,7 @@ function renderTeam(filter){
       <div class="ring">${avatar(m,'')}</div>
       <div class="nm">${m.name}</div><div class="rl">${m.role}</div>
       <div class="bl">${m.bl}</div>
-      <span class="pill">${m.tier==='core'?'core':'opt-in'}</span>
+      <span class="pill">${m.pill||(m.tier==='core'?'core':'opt-in')}</span>
     </div>`;
   }).join('');
 }
