@@ -120,7 +120,7 @@ Frame the goal and context before launching subagents so each receives the same 
 
 ## Phase 4: Design Loop
 
-Launch Leith and Melvin in parallel when possible, then Nyx, then reconcile, then Marcelo, then Jody. Pass each subagent the goal, answered clarifications, an attachments summary, the spec path, and the exact requested output.
+Launch Leith and Melvin in parallel when possible, then Nyx and Gary in parallel on the merged draft, then reconcile, then Marcelo, then Jody. Pass each subagent the goal, answered clarifications, an attachments summary, the spec path, and the exact requested output.
 
 Subagents do not automatically know parent context. Include enough detail in every prompt for autonomous work.
 
@@ -136,15 +136,19 @@ Enrich the spec with: whole-app architecture impact; affected services, modules,
 
 Given the merged Leith+Melvin draft, enrich with: threat model and trust boundaries; tenant isolation risks; authn/authz requirements; abuse cases and attacker stories; input validation and output encoding; secrets, logging, audit, PII, data retention; security tests and required mitigations; must-fix design changes vs acceptable follow-ups. Returns `Security and Privacy Specification` and a list of required changes.
 
-### 4D: Reconcile Nyx Findings
+### 4D: Gary — Comprehension
 
-If Nyx identifies required changes: send product/interaction findings back to Leith, architecture/platform findings back to Melvin; ask for revised spec patches (not new standalone opinions); merge revisions; keep unresolved disagreements in `Open Questions` with a recommended decision. **Do not proceed to testing strategy while security-required product or architecture changes are unresolved.**
+Given the merged Leith+Melvin draft, walk it the way he'd audit a shipped surface: cognitive walkthrough of the happy and sad paths, unambiguous and testable acceptance criteria, states or flows a real user could get stuck in, copy and IA a skeptical reader would actually follow. Returns severity-ranked findings (0–4) — comprehension problems are cheaper to catch on paper than after Isabelle builds them.
 
-### 4E: Marcelo — Testing Strategy
+### 4E: Reconcile Nyx and Gary Findings
+
+If Nyx or Gary identify required changes: send product/interaction and comprehension findings back to Leith, architecture/platform findings back to Melvin; ask for revised spec patches (not new standalone opinions); merge revisions; keep unresolved disagreements in `Open Questions` with a recommended decision. **Do not proceed to testing strategy while security-required product or architecture changes, or severity 3–4 comprehension findings, are unresolved.**
+
+### 4F: Marcelo — Testing Strategy
 
 Given the reconciled sections, enrich with: testability assessment; unit/integration/E2E/contract/security/performance/accessibility test strategy; input validation matrix for every accepted input; regression impact; seed data/fixtures/factories/local dev data needs; CI quality gates; manual verification paths; test ownership and issue recommendations. Returns `Testing Strategy` and test work items for Jody.
 
-### 4F: Jody — Planning and Project Creation
+### 4G: Jody — Planning and Project Creation
 
 Given the full reconciled spec, ask Jody to: convert it into a phased project plan; define phases that map to future implementation PR batches; create ordered, labeled tracker issues (with dependencies, acceptance criteria, owner persona, labels, test obligations) via the issue-tracker skill's `create-issue` operation; create the tracker board with the skill's `create-board` operation; add issues to the board (`add-to-board`) and set Phase/Priority/Owner/Status fields with `set-board-field` (on GitHub these run `gh project` / `gh api graphql`); enrich the spec with project number, issue list, phase order, dependencies, and implementation handoff notes.
 
