@@ -23,6 +23,7 @@ An explainer earns attention with its picture and loses it with its prose. These
 4. **One term per concept.** If the diagram says "Deploy", the steps say "Deploy" — never "ship", "release", and "roll out" for the same box. Match the codebase's own vocabulary.
 5. **Name the failure.** Every loop-back and fail edge gets an honest label ("changes requested", "regression detected") — skeptical readers trust diagrams that admit failure paths.
 6. **Second person or no person.** "Click a node to trace it" — never "users can click…".
+7. **Controls state their object and their effect.** "Start the tour (6 steps)" beats "Next"; "Resume step 3" beats an ambiguous arrow. A button label is the shortest explainer on the page — budget it like one.
 
 ## Banned words
 

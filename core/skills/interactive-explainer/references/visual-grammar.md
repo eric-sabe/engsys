@@ -80,3 +80,7 @@ Each shape below: when it's right, how to lay it out, the interaction that earns
 | 13–30 | Show everything, but focus-mode is mandatory and default view dims secondary edges |
 | 31–100 | Cluster into collapsible groups; overview shows clusters only |
 | > 100 | Wrong tool — generate per-cluster explainers with an index page |
+
+## Multi-scene explainers
+
+When the story is bigger than one question, don't cram one diagram — split into **scenes** (chapter tabs), each its own shape with its own worked-example opening, plus **one tour that spans scenes**: each step names its scene and the engine switches automatically. Keep one panel, one stepper, one keyboard map across all scenes; track visited marks per scene. The reader gets both paths — the guided story end to end, and free exploration per chapter — without ever leaving the file.

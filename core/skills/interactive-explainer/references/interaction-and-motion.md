@@ -6,7 +6,7 @@ The starter ships the core set (focus+context, ancestry highlighting, stepper, k
 
 Every explainer serves three depths of attention, in order:
 
-1. **Overview (0 clicks)** — the whole shape, legible, on the first screen. A reader who leaves after five seconds should still have the gist.
+1. **Overview (0 clicks)** — the whole shape, legible, on the first screen — and the interaction model *demonstrated*, not described. Open on a worked example: a pre-lit focus or an active step 0, so the first screen already shows what clicking does and what the legend colors mean. A prose hint is not an opening state. A reader who leaves after five seconds should still have the gist.
 2. **Focus (1 click)** — click anything → its neighborhood lights up, the rest dims, the panel explains it. Dim, don't hide: context is the point (~25% opacity, not `display:none`).
 3. **Detail (on demand)** — the panel, not tooltips. Tooltips die on touch screens and can't be the only home of real content.
 
@@ -23,9 +23,19 @@ On node click: BFS the reverse adjacency for upstream (one color), forward for d
 
 Either way: every step names its focus explicitly (`focus: [ids]`). A step whose text doesn't match its highlight is a bug, not a style issue.
 
-## Hover vs click
+Controls state their object and their effect: "Start the tour (6 steps)", never a bare "Next" into the void. Expose progress as knowledge in the world the reader can act on — step dots that show position and jump on click — not a bare counter. A disabled control must make its reason visible.
 
-Hover *hints* (cursor, slight emphasis, edge label reveal); click *commits* (focus, panel, state). Everything reachable by hover must be reachable by click — touch has no hover. Never attach the only path to information to hover.
+## Modes
+
+A tour plus free exploration is two modes, whether you meant it or not. Modes must be:
+
+- **Visible** — the interface says which mode you're in (step counter, "paused" state), not just behaves differently.
+- **Announced** — an action that changes mode says so at the moment it happens.
+- **Reversible** — leaving the tour by clicking a node *pauses* it: position preserved, resume offered. A stray click that destroys the reader's place is an unrecoverable error you designed.
+
+## Signifiers, hover, click
+
+If it responds to a click, it must look clickable **at rest**. Signifiers live in the resting state — a fill tint from the group color, a control-like border, visible weight — because hover only confirms a suspicion the reader already has, and touch has no hover at all. So: resting state *announces*, hover *confirms* (cursor, fill change), click *commits* (focus, panel, state). Everything reachable by hover must be reachable by click.
 
 ## Motion recipes
 
@@ -67,3 +77,5 @@ Keep this map; readers who learn one explainer have learned them all. Nodes are 
 - No meaning in color alone — pair with dash pattern, weight, shape, or label (color-blind readers, grayscale prints).
 - No zoom/pan unless the diagram genuinely exceeds a screen *after* clustering — fit-to-viewBox first.
 - No scroll hijacking that fights the reader.
+- No legend entries for states the reader hasn't seen — demonstrate the state in the opening view, or light the entry only while its state is on screen.
+- No instructions that the interface consumes — a hint that disappears on the first click it describes taught nobody anything. Permanent hints get a permanent home.

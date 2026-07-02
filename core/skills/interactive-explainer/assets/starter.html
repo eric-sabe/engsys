@@ -42,15 +42,18 @@
   #stage { min-width: 0; }
   svg { width: 100%; height: auto; display: block; }
 
-  /* nodes */
+  /* nodes — signifiers live in the resting state: group tint + control weight */
   .node { cursor: pointer; }
   .node rect {
-    fill: var(--node-fill); stroke: var(--node-stroke); stroke-width: 1.5; rx: 8;
-    transition: opacity .18s, stroke .18s;
+    fill: color-mix(in srgb, var(--gc, var(--muted)) 9%, var(--node-fill));
+    stroke: var(--node-stroke); stroke-width: 1.5; rx: 8;
+    transition: opacity .18s, stroke .18s, fill .18s;
   }
   .node text { fill: var(--ink); font-family: var(--font-ui); font-size: 13px; pointer-events: none; }
-  .node .grouptick { stroke-width: 3; }
-  .node:hover rect { stroke: var(--muted); }
+  .node .grouptick { stroke: var(--gc, var(--muted)); stroke-width: 3; }
+  .node .vdot { fill: var(--gc, var(--muted)); display: none; }
+  .node.visited .vdot { display: block; }
+  .node:hover rect { fill: color-mix(in srgb, var(--gc, var(--muted)) 20%, var(--node-fill)); stroke: var(--muted); }
   .node:focus { outline: none; }
   .node:focus rect { stroke: var(--current); stroke-dasharray: 3 3; }
   .node.current rect { stroke: var(--current); stroke-width: 2.5; filter: drop-shadow(0 0 6px rgba(255,209,102,.45)); }
@@ -60,7 +63,7 @@
 
   /* edges */
   .edge path { fill: none; stroke: var(--edge); stroke-width: 1.5; transition: opacity .18s, stroke .18s; }
-  .edge text { fill: var(--muted); font-size: 11px; }
+  .edge text { fill: var(--muted); font-size: 11px; paint-order: stroke; stroke: var(--bg); stroke-width: 3px; }
   .edge.loop path { stroke-dasharray: 5 4; }
   .edge.fail path { stroke-dasharray: 2 4; stroke: color-mix(in srgb, var(--fail) 65%, var(--edge)); }
   .edge.up path   { stroke: var(--up); stroke-width: 2; }
@@ -85,18 +88,27 @@
   #panel h2 { font-family: var(--font-display); font-size: 17px; margin: 0 0 6px; }
   #panel p { margin: 0; color: var(--ink); }
   #panel .hint { color: var(--muted); font-size: 13px; }
-  .stepper { display: flex; align-items: center; gap: 10px; border-top: 1px solid var(--line); padding-top: 10px; }
-  .stepper button {
+  .stepper { border-top: 1px solid var(--line); padding-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+  .dots { display: flex; gap: 7px; }
+  .dots button {
+    width: 10px; height: 10px; border-radius: 50%; padding: 0; cursor: pointer;
+    background: var(--line); border: 1px solid var(--line);
+  }
+  .dots button.on { background: var(--current); border-color: var(--current); }
+  .dots button:hover { border-color: var(--current); }
+  .stepper .row { display: flex; align-items: center; gap: 10px; }
+  .stepper .row button {
     background: none; border: 1px solid var(--line); color: var(--ink);
     border-radius: 6px; padding: 5px 12px; cursor: pointer; font: inherit; font-size: 13px;
   }
-  .stepper button:hover:not(:disabled) { border-color: var(--current); }
-  .stepper button:disabled { opacity: .35; cursor: default; }
+  .stepper .row button:hover:not(:disabled) { border-color: var(--current); }
+  .stepper .row button:disabled { opacity: .35; cursor: default; }
   .stepper .count { color: var(--muted); font-size: 12px; margin-left: auto; }
   #reset {
     background: none; border: none; color: var(--muted); cursor: pointer;
     font: inherit; font-size: 12px; text-decoration: underline; padding: 0; align-self: flex-start;
   }
+  .hintbar { border-top: 1px solid var(--line); padding-top: 9px; color: var(--muted); font-size: 12px; }
   kbd {
     background: var(--node-fill); border: 1px solid var(--line); border-radius: 4px;
     padding: 0 5px; font-size: 11px; font-family: inherit;
@@ -123,10 +135,14 @@
     <div id="panel" aria-live="polite"></div>
     <button id="reset" hidden>Reset (Esc)</button>
     <div class="stepper">
-      <button id="prev" aria-label="Previous step">&#8592; Prev</button>
-      <button id="next" aria-label="Next step">Next &#8594;</button>
-      <span class="count" id="count"></span>
+      <div class="dots" id="dots"></div>
+      <div class="row">
+        <button id="prev" aria-label="Previous step">&#8592; Prev</button>
+        <button id="next"></button>
+        <span class="count" id="count"></span>
+      </div>
     </div>
+    <div class="hintbar">Click any node &middot; <kbd>&#8592;</kbd><kbd>&#8594;</kbd> tour &middot; <kbd>Esc</kbd> reset</div>
   </aside>
 </main>
 
@@ -134,6 +150,8 @@
 "use strict";
 /* =====================================================================
    DATA — the only section you edit for a new explainer.
+   opening: node id pre-focused on load — the worked example. The first
+            screen must DEMONSTRATE focus + legend colors, not hint at them.
    nodes: id, label (≤3 words), group, detail (≤3 sentences of mechanism)
    edges: from, to, label? (≤3 words), kind?: 'loop' (back-edge, excluded
           from ranking + ancestry) | 'fail' (failure path, drawn muted)
@@ -143,10 +161,11 @@
 const EXPLAINER = {
   title: "How a change ships",
   question: "What happens between git push and production?",
+  opening: "review",
   groups: {
-    dev:  { label: "Developer" },
-    ci:   { label: "CI" },
-    prod: { label: "Production" },
+    dev:  { label: "Developer",  color: "#e0b35f" },
+    ci:   { label: "CI",         color: "#4cc9f0" },
+    prod: { label: "Production", color: "#7bd88f" },
   },
   nodes: [
     { id: "edit",     label: "Edit code",      group: "dev",  detail: "A change starts on a branch. Nothing here can touch main directly." },
@@ -222,7 +241,9 @@ cols.forEach((col, r) => {                   // barycenter: order by avg predece
   }
 });
 const W = PAD * 2 + (cols.length - 1) * COL_W + Math.max(...nodes.map(n => n.w));
-const H = PAD * 2 + maxRows * ROW_H + 30;    // +30 for loop arcs below
+const loopCount = edges.filter(e => e.kind === "loop").length;
+const loopBase = PAD + maxRows * ROW_H;      // each loop arc gets its own depth
+const H = loopBase + 26 + loopCount * 22 + 8;
 
 /* ---- render ---- */
 function el(tag, attrs, parent) {
@@ -240,15 +261,16 @@ for (const [name, color] of [["default", "var(--edge)"], ["up", "var(--up)"], ["
   el("path", { d: "M0,0.5 L7.5,4 L0,7.5 z", fill: color }, m);
 }
 
+let loopIdx = 0;
 const edgeEls = edges.map(e => {
   const a = byId[e.from], b = byId[e.to];
   const g = el("g", { class: "edge" + (e.kind ? " " + e.kind : "") }, svg);
   let d, lx, ly;
-  if (e.kind === "loop") {                   // back-edge: arc underneath
+  if (e.kind === "loop") {                   // back-edge: arc underneath, staggered per loop
     const x1 = a.x + a.w / 2, y1 = a.y + NODE_H, x2 = b.x + b.w / 2, y2 = b.y + NODE_H;
-    const dip = H - PAD / 2;
+    const dip = loopBase + 26 + loopIdx++ * 22;
     d = `M ${x1} ${y1} C ${x1} ${dip}, ${x2} ${dip}, ${x2} ${y2 + 4}`;
-    lx = (x1 + x2) / 2; ly = dip - ((x1+x2)/2 % 2 ? 22 : 8); // stagger stacked loop labels
+    lx = (x1 + x2) / 2; ly = dip - 8;
   } else {
     const x1 = a.x + a.w, y1 = a.y + NODE_H / 2, x2 = b.x, y2 = b.y + NODE_H / 2;
     const mx = (x1 + x2) / 2;
@@ -264,10 +286,13 @@ const edgeEls = edges.map(e => {
 });
 
 const nodeEls = nodes.map(n => {
+  const grp = EXPLAINER.groups[n.group];
   const g = el("g", { class: "node", tabindex: 0, role: "button",
-    "aria-label": n.label + (EXPLAINER.groups[n.group] ? " (" + EXPLAINER.groups[n.group].label + ")" : "") }, svg);
+    "aria-label": n.label + (grp ? " (" + grp.label + ")" : "") }, svg);
+  if (grp && grp.color) g.setAttribute("style", "--gc:" + grp.color);
   el("rect", { x: n.x, y: n.y, width: n.w, height: NODE_H, rx: 8 }, g);
-  el("line", { x1: n.x, y1: n.y + 8, x2: n.x, y2: n.y + NODE_H - 8, class: "grouptick", stroke: "var(--muted)" }, g);
+  el("line", { x1: n.x, y1: n.y + 8, x2: n.x, y2: n.y + NODE_H - 8, class: "grouptick" }, g);
+  el("circle", { cx: n.x + n.w - 7, cy: n.y + 7, r: 2.5, class: "vdot" }, g);   // visited mark
   const t = el("text", { x: n.x + n.w / 2, y: n.y + NODE_H / 2 + 4.5, "text-anchor": "middle" }, g);
   t.textContent = n.label;
   g.addEventListener("click", () => focusNode(n.id));
@@ -285,17 +310,25 @@ document.getElementById("legend").innerHTML =
 const panel = document.getElementById("panel");
 const resetBtn = document.getElementById("reset");
 const prevBtn = document.getElementById("prev"), nextBtn = document.getElementById("next");
-const countEl = document.getElementById("count");
+const countEl = document.getElementById("count"), dotsEl = document.getElementById("dots");
+
+steps.forEach((s, i) => {
+  const b = document.createElement("button");
+  b.title = s.title; b.setAttribute("aria-label", "Step " + (i + 1) + ": " + s.title);
+  b.addEventListener("click", () => showStep(i));
+  dotsEl.appendChild(b);
+});
 
 function showPanel(title, body, hint) {
   panel.innerHTML = "";
   const h = document.createElement("h2"); h.textContent = title; panel.appendChild(h);
   const p = document.createElement("p"); p.textContent = body; panel.appendChild(p);
-  if (hint) { const s = document.createElement("p"); s.className = "hint"; s.innerHTML = hint; panel.appendChild(s); }
+  if (hint) { const s = document.createElement("p"); s.className = "hint"; s.textContent = hint; panel.appendChild(s); }
 }
 
 /* ---- state ---- */
-let stepIndex = -1, focused = null;
+let stepIndex = -1, focused = null, pausedStep = -1;
+const visited = new Set();
 
 function reach(start, adj) {                 // BFS over fwd or rev adjacency
   const seen = new Set(), q = [...adj[start]];
@@ -309,6 +342,7 @@ function apply(current, up, down, activePairs) {
     g.classList.toggle("current", current.has(n.id));
     g.classList.toggle("up", up.has(n.id));
     g.classList.toggle("down", down.has(n.id));
+    g.classList.toggle("visited", visited.has(n.id));
     g.classList.toggle("dim", any && !current.has(n.id) && !up.has(n.id) && !down.has(n.id));
   });
   edgeEls.forEach(({ e, g, path }) => {
@@ -322,11 +356,12 @@ function apply(current, up, down, activePairs) {
     g.classList.toggle("dim", any && !isActive && !isUp && !isDown);
     path.setAttribute("marker-end", "url(#arr-" + (isActive ? "active" : isUp ? "up" : isDown ? "down" : e.kind === "fail" ? "fail" : "default") + ")");
   });
-  resetBtn.hidden = !any;
+  resetBtn.hidden = focused === EXPLAINER.opening && stepIndex === -1 && pausedStep < 0;
 }
 
 function focusNode(id) {
-  stepIndex = -1; focused = id;
+  if (stepIndex >= 0) pausedStep = stepIndex;   // leaving the tour pauses it — never destroys it
+  stepIndex = -1; focused = id; visited.add(id);
   const up = reach(id, rev), down = reach(id, fwd);
   apply(new Set([id]), up, down, new Set());
   const n = byId[id];
@@ -336,33 +371,49 @@ function focusNode(id) {
 }
 
 function showStep(i) {
-  stepIndex = i; focused = null;
+  stepIndex = i; focused = null; pausedStep = -1;
   const s = steps[i];
+  (s.focus || []).forEach(id => visited.add(id));
   apply(new Set(s.focus || []), new Set(), new Set(), new Set((s.edges || []).map(p => p[0] + ">" + p[1])));
   showPanel(s.title, s.body);
   syncStepper();
 }
 
 function resetAll() {
-  stepIndex = -1; focused = null;
-  apply(new Set(), new Set(), new Set(), new Set());
-  showPanel(EXPLAINER.title, EXPLAINER.question,
-    "Click any node to trace what it needs and what it feeds. <kbd>&#8592;</kbd><kbd>&#8594;</kbd> step through, <kbd>Esc</kbd> reset.");
-  syncStepper();
+  stepIndex = -1; pausedStep = -1; visited.clear();
+  if (EXPLAINER.opening && byId[EXPLAINER.opening]) {
+    focusNode(EXPLAINER.opening);               // open on a worked example, never a blank slate
+  } else {
+    focused = null;
+    apply(new Set(), new Set(), new Set(), new Set());
+    showPanel(EXPLAINER.title, EXPLAINER.question);
+    syncStepper();
+  }
 }
 
 function syncStepper() {
-  prevBtn.disabled = stepIndex <= 0 && stepIndex !== -1 || !steps.length;
-  nextBtn.disabled = stepIndex >= steps.length - 1;
-  countEl.textContent = steps.length ? (stepIndex === -1 ? steps.length + " steps" : (stepIndex + 1) + " / " + steps.length) : "";
+  prevBtn.disabled = stepIndex <= 0;
+  nextBtn.disabled = steps.length === 0 || stepIndex >= steps.length - 1;
+  nextBtn.textContent = stepIndex >= 0 ? "Next →"
+    : pausedStep >= 0 ? "Resume step " + (pausedStep + 1) + " →"
+    : "Start the tour →";
+  countEl.textContent = !steps.length ? ""
+    : stepIndex >= 0 ? (stepIndex + 1) + " / " + steps.length
+    : pausedStep >= 0 ? "paused " + (pausedStep + 1) + " / " + steps.length
+    : steps.length + " steps";
+  [...dotsEl.children].forEach((d, i) => d.classList.toggle("on", stepIndex >= 0 ? i <= stepIndex : pausedStep >= 0 && i <= pausedStep));
 }
 
+function advance() {
+  if (stepIndex === -1) showStep(pausedStep >= 0 ? pausedStep : 0);
+  else if (stepIndex < steps.length - 1) showStep(stepIndex + 1);
+}
 prevBtn.addEventListener("click", () => { if (stepIndex > 0) showStep(stepIndex - 1); });
-nextBtn.addEventListener("click", () => { if (stepIndex < steps.length - 1) showStep(stepIndex + 1); });
+nextBtn.addEventListener("click", advance);
 resetBtn.addEventListener("click", resetAll);
 document.addEventListener("keydown", ev => {
   if (ev.key === "Escape") resetAll();
-  else if (ev.key === "ArrowRight" && stepIndex < steps.length - 1) showStep(stepIndex + 1);
+  else if (ev.key === "ArrowRight") advance();
   else if (ev.key === "ArrowLeft" && stepIndex > 0) showStep(stepIndex - 1);
 });
 
@@ -374,6 +425,7 @@ resetAll();
   "Blast radius is capped by design."               → "by design" is filler
   edge "fix as new change"                          → over the 3-word budget
   "Requested changes return the branch to editing." → captioned the labeled arrow
+  hint "Click any node to trace…" in the panel      → instructions the first click consumed; moved to the permanent hintbar
 -->
 </body>
 </html>
