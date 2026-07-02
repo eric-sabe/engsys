@@ -108,18 +108,27 @@
   .mem .bl{font-size:12.5px;color:#bcc8d6;margin-top:9px;border-top:1px dashed var(--line);padding-top:9px;min-height:54px}
   .mem .pill{display:inline-block;font-family:var(--mono);font-size:9px;letter-spacing:.5px;text-transform:uppercase;color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:1px 7px;margin-top:10px}
 
-  /* pipeline */
-  .track{position:relative;display:grid;grid-template-columns:repeat(4,1fr);margin:30px 0 6px}
-  .track:before{content:"";position:absolute;top:31px;left:9%;right:9%;height:2px;background:linear-gradient(90deg,var(--cyan-dim),var(--cyan),var(--amber))}
-  .station{position:relative;background:none;border:0;cursor:pointer;padding:0 6px;font-family:inherit;text-align:center}
-  .station .dot{width:22px;height:22px;border-radius:50%;background:var(--bg);border:2px solid var(--cyan-dim);margin:22px auto 10px;display:flex;align-items:center;justify-content:center;transition:.15s}
-  .station .dot i{width:8px;height:8px;border-radius:50%;background:var(--cyan-dim);display:block;transition:.15s}
-  .station .lbl{font-size:12.5px;font-weight:600;color:var(--muted)}
-  .station .cmd{font-family:var(--mono);font-size:10.5px;color:var(--dim);margin-top:2px;display:block}
-  .station:hover .lbl{color:var(--ink)}
-  .station.active .dot{border-color:var(--cyan);box-shadow:0 0 0 5px rgba(52,224,210,.12)}
-  .station.active .dot i{background:var(--cyan);width:11px;height:11px}
-  .station.active .lbl{color:#fff}
+  /* pipeline — stations on the line, plus the two loops a straight line can't draw */
+  .track{margin:26px 0 6px}
+  .track svg{width:100%;height:auto;display:block}
+  .station{cursor:pointer}
+  .station .ring{fill:var(--bg);stroke:var(--cyan-dim);stroke-width:2;transition:.15s}
+  .station .core{fill:var(--cyan-dim);transition:.15s}
+  .station .lbl{fill:var(--muted);font-size:12.5px;font-weight:600;font-family:var(--sans)}
+  .station .cmd{fill:var(--dim);font-family:var(--mono);font-size:10.5px}
+  .station:hover .lbl{fill:var(--ink)}
+  .station:focus{outline:none}
+  .station:focus .ring{stroke:var(--cyan);stroke-dasharray:3 3}
+  .station.active .ring{stroke:var(--cyan);filter:drop-shadow(0 0 5px rgba(52,224,210,.35))}
+  .station.active .core{fill:var(--cyan)}
+  .station.active .lbl{fill:#fff}
+  .tredge path{fill:none;stroke-width:2}
+  .tredge.loop path{stroke:var(--line);stroke-dasharray:5 4;stroke-width:1.5;transition:.15s}
+  .tredge.loop text{fill:var(--muted);font-family:var(--mono);font-size:10.5px;paint-order:stroke;stroke:var(--bg);stroke-width:3px}
+  .tredge.loop.lit path{stroke:var(--cyan);animation:trflow 1s linear infinite}
+  .tredge.loop.lit text{fill:var(--cyan)}
+  @keyframes trflow{to{stroke-dashoffset:-18}}
+  @media (prefers-reduced-motion: reduce){.tredge.loop.lit path{animation:none}}
   .detail{background:linear-gradient(180deg,var(--panel),var(--panel-2));border:1px solid var(--line);border-radius:14px;padding:22px 24px;margin-top:18px}
   .detail .top{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:6px}
   .detail .top .cmd{font-family:var(--mono);font-size:13px;color:var(--cyan);background:rgba(52,224,210,.07);border:1px solid var(--cyan-dim);padding:3px 9px;border-radius:6px}
@@ -134,7 +143,7 @@
 
   /* installer */
   .install{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:24px;align-items:stretch}
-  @media(max-width:820px){.install{grid-template-columns:1fr}.track{grid-template-columns:repeat(2,1fr);row-gap:18px}.track:before{display:none}.team{grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}}
+  @media(max-width:820px){.install{grid-template-columns:1fr}.track{overflow-x:auto}.track svg{min-width:640px}.team{grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}}
   @media(max-width:560px){
     .wrap{padding:0 16px}
     section{padding:54px 0}
@@ -256,7 +265,7 @@
 <section id="pipeline"><div class="wrap">
   <div class="kicker">How work moves</div>
   <h2>Spec to closeout, on rails</h2>
-  <p class="lede">Slash commands call the agents by name, so the process runs the same way every time. Click a stage.</p>
+  <p class="lede">Slash commands call the agents by name, so the process runs the same way every time. Review findings loop a phase back; closeout lessons loop into your next project. Click a stage.</p>
   <div class="track" id="track"></div>
   <div class="detail" id="stationDetail"></div>
 </div></section>
@@ -421,13 +430,58 @@ const STATIONS=[
   {lbl:'Review',cmd:'objective gate',pts:['A fresh reviewer with no stake re-runs the gate and checks each acceptance criterion.','Binary verdict: clean, or findings with file:line.','No merge without a clean independent pass.']},
   {lbl:'Close out',cmd:'/project-closeout',pts:['Verify everything merged, clean up worktrees and branches.','Mine the review findings; generalize recurring ones into lessons.','Promote durable lessons back to the shared library.']},
 ];
+const LOOPS=[
+  {from:2,to:1,label:'findings loop back'},
+  {from:3,to:0,label:'lessons seed the next project'},
+];
 const track=document.getElementById('track'), sd=document.getElementById('stationDetail');
-STATIONS.forEach((s,i)=>{
-  const b=document.createElement('button');b.className='station'+(i===0?' active':'');
-  b.innerHTML=`<div class="dot"><i></i></div><div class="lbl">${s.lbl}</div><span class="cmd">${s.cmd}</span>`;
-  b.onclick=()=>{[...track.children].forEach(c=>c.classList.remove('active'));b.classList.add('active');paintStation(i);};
-  track.appendChild(b);
-});
+(function(){
+  const NS='http://www.w3.org/2000/svg', TW=1100, TY=40, TPAD=80;
+  const TH=TY+64+LOOPS.length*30+8;
+  const tx=i=>TPAD+i*((TW-2*TPAD)/(STATIONS.length-1));
+  function tel(t,a,p){const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);(p)&&p.appendChild(e);return e;}
+  const svg=tel('svg',{viewBox:`0 0 ${TW} ${TH}`,role:'group','aria-label':'The pipeline, including its two loops'});
+  track.appendChild(svg);
+  const defs=tel('defs',{},svg);
+  const grad=tel('linearGradient',{id:'trgrad',x1:0,y1:0,x2:1,y2:0},defs);
+  tel('stop',{offset:'0%','stop-color':'#176f6a'},grad);
+  tel('stop',{offset:'55%','stop-color':'#34e0d2'},grad);
+  tel('stop',{offset:'100%','stop-color':'#f5b13d'},grad);
+  const arr=tel('marker',{id:'trarr',viewBox:'0 0 8 8',refX:7,refY:4,markerWidth:7,markerHeight:7,orient:'auto-start-reverse'},defs);
+  tel('path',{d:'M0,0.5 L7.5,4 L0,7.5 z',fill:'#55606c'},arr);
+  const arrLit=tel('marker',{id:'trarr-lit',viewBox:'0 0 8 8',refX:7,refY:4,markerWidth:7,markerHeight:7,orient:'auto-start-reverse'},defs);
+  tel('path',{d:'M0,0.5 L7.5,4 L0,7.5 z',fill:'#34e0d2'},arrLit);
+  // the main line, same gradient as before
+  const mainG=tel('g',{class:'tredge'},svg);
+  tel('path',{d:`M ${tx(0)} ${TY} L ${tx(STATIONS.length-1)} ${TY}`,stroke:'url(#trgrad)'},mainG);
+  // the two loops the straight line couldn't draw
+  const loopEls=LOOPS.map((L,i)=>{
+    const g=tel('g',{class:'tredge loop'},svg);
+    const x1=tx(L.from), x2=tx(L.to), dip=TY+64+i*30;
+    const p=tel('path',{d:`M ${x1} ${TY+12} C ${x1} ${dip}, ${x2} ${dip}, ${x2} ${TY+14}`,'marker-end':'url(#trarr)'},g);
+    const t=tel('text',{x:(x1+x2)/2,y:dip-7,'text-anchor':'middle'},g); t.textContent=L.label;
+    return {L,g,p};
+  });
+  const stEls=STATIONS.map((s,i)=>{
+    const g=tel('g',{class:'station'+(i===0?' active':''),tabindex:0,role:'button','aria-label':s.lbl+' — '+s.cmd},svg);
+    tel('circle',{class:'ring',cx:tx(i),cy:TY,r:11},g);
+    tel('circle',{class:'core',cx:tx(i),cy:TY,r:5},g);
+    const l=tel('text',{class:'lbl',x:tx(i),y:TY-24,'text-anchor':'middle'},g); l.textContent=s.lbl;
+    const c=tel('text',{class:'cmd',x:tx(i),y:TY+30,'text-anchor':'middle'},g); c.textContent=s.cmd;
+    const pick=()=>{
+      stEls.forEach(e=>e.g.classList.remove('active')); g.classList.add('active');
+      loopEls.forEach(le=>{
+        const lit=le.L.from===i||le.L.to===i;
+        le.g.classList.toggle('lit',lit);
+        le.p.setAttribute('marker-end',lit?'url(#trarr-lit)':'url(#trarr)');
+      });
+      paintStation(i);
+    };
+    g.addEventListener('click',pick);
+    g.addEventListener('keydown',ev=>{if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();pick();}});
+    return {s,g};
+  });
+})();
 function paintStation(i){const s=STATIONS[i];sd.innerHTML=`<div class="top"><span class="cmd">${s.cmd}</span><h3 style="margin:0">${s.lbl}</h3></div><ul>${s.pts.map(p=>`<li>${p}</li>`).join('')}</ul>`;}
 paintStation(0);
 
