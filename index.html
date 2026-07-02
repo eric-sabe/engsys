@@ -109,19 +109,25 @@
   .mem .pill{display:inline-block;font-family:var(--mono);font-size:9px;letter-spacing:.5px;text-transform:uppercase;color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:1px 7px;margin-top:10px}
 
   /* pipeline — stations on the line, plus the two loops a straight line can't draw */
-  .track{margin:26px 0 6px}
+  .track{margin:26px 0 6px;position:relative}
   .track svg{width:100%;height:auto;display:block}
   .station{cursor:pointer}
-  .station .ring{fill:var(--bg);stroke:var(--cyan-dim);stroke-width:2;transition:.15s}
-  .station .core{fill:var(--cyan-dim);transition:.15s}
+  .station .ring{fill:var(--bg);stroke:var(--muted);stroke-width:2;transition:.15s}
+  .station .core{fill:var(--muted);transition:.15s}
   .station .lbl{fill:var(--muted);font-size:12.5px;font-weight:600;font-family:var(--sans)}
-  .station .cmd{fill:var(--dim);font-family:var(--mono);font-size:10.5px}
+  .station .cmd{fill:var(--muted);font-family:var(--mono);font-size:10.5px}
+  .station:hover .ring{stroke:var(--ink)}
   .station:hover .lbl{fill:var(--ink)}
   .station:focus{outline:none}
   .station:focus .ring{stroke:var(--cyan);stroke-dasharray:3 3}
   .station.active .ring{stroke:var(--cyan);filter:drop-shadow(0 0 5px rgba(52,224,210,.35))}
   .station.active .core{fill:var(--cyan)}
   .station.active .lbl{fill:#fff}
+  .station.active .cmd{fill:var(--cyan)}
+  /* explicit navigation — clicking the dots is never the only way through */
+  .trackNav{display:flex;align-items:center;gap:12px;margin:6px 0 4px}
+  .trackNav .fbtn:disabled{opacity:.35;cursor:default}
+  .trackPos{font-family:var(--mono);font-size:12px;color:var(--muted)}
   .tredge path{fill:none;stroke-width:2}
   .tredge.loop path{stroke:var(--line);stroke-dasharray:5 4;stroke-width:1.5;transition:.15s}
   .tredge.loop text{fill:var(--muted);font-family:var(--mono);font-size:10.5px;paint-order:stroke;stroke:var(--bg);stroke-width:3px}
@@ -267,6 +273,11 @@
   <h2>Spec to closeout, on rails</h2>
   <p class="lede">Slash commands call the agents by name, so the process runs the same way every time. Review findings loop a phase back; closeout lessons loop into your next project. Click a stage.</p>
   <div class="track" id="track"></div>
+  <div class="trackNav">
+    <button class="fbtn" id="trackPrev" aria-label="Previous stage">&larr; Prev</button>
+    <span class="trackPos" id="trackPos"></span>
+    <button class="fbtn" id="trackNext" aria-label="Next stage">Next &rarr;</button>
+  </div>
   <div class="detail" id="stationDetail"></div>
 </div></section>
 
@@ -468,19 +479,37 @@ const track=document.getElementById('track'), sd=document.getElementById('statio
     tel('circle',{class:'core',cx:tx(i),cy:TY,r:5},g);
     const l=tel('text',{class:'lbl',x:tx(i),y:TY-24,'text-anchor':'middle'},g); l.textContent=s.lbl;
     const c=tel('text',{class:'cmd',x:tx(i),y:TY+30,'text-anchor':'middle'},g); c.textContent=s.cmd;
-    const pick=()=>{
-      stEls.forEach(e=>e.g.classList.remove('active')); g.classList.add('active');
-      loopEls.forEach(le=>{
-        const lit=le.L.from===i||le.L.to===i;
-        le.g.classList.toggle('lit',lit);
-        le.p.setAttribute('marker-end',lit?'url(#trarr-lit)':'url(#trarr)');
-      });
-      paintStation(i);
-    };
-    g.addEventListener('click',pick);
-    g.addEventListener('keydown',ev=>{if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();pick();}});
+    g.addEventListener('click',()=>goTo(i));
+    g.addEventListener('keydown',ev=>{if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();goTo(i);}});
     return {s,g};
   });
+
+  // explicit Prev/Next — the dots are never the only way through, and the
+  // active station is always scrolled into view (mobile overflows horizontally)
+  const reduced=matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const prevBtn=document.getElementById('trackPrev'), nextBtn=document.getElementById('trackNext'), posEl=document.getElementById('trackPos');
+  let current=0;
+  function centerStation(i){
+    const scale=svg.getBoundingClientRect().width/TW;
+    const cx=tx(i)*scale, target=cx-track.clientWidth/2;
+    track.scrollTo({left:Math.max(0,target),behavior:reduced?'auto':'smooth'});
+  }
+  function goTo(i){
+    current=i;
+    stEls.forEach((e,j)=>e.g.classList.toggle('active',j===i));
+    loopEls.forEach(le=>{
+      const lit=le.L.from===i||le.L.to===i;
+      le.g.classList.toggle('lit',lit);
+      le.p.setAttribute('marker-end',lit?'url(#trarr-lit)':'url(#trarr)');
+    });
+    paintStation(i);
+    centerStation(i);
+    prevBtn.disabled=i===0; nextBtn.disabled=i===STATIONS.length-1;
+    posEl.textContent=(i+1)+' / '+STATIONS.length;
+  }
+  prevBtn.addEventListener('click',()=>{if(current>0)goTo(current-1);});
+  nextBtn.addEventListener('click',()=>{if(current<STATIONS.length-1)goTo(current+1);});
+  goTo(0);
 })();
 function paintStation(i){const s=STATIONS[i];sd.innerHTML=`<div class="top"><span class="cmd">${s.cmd}</span><h3 style="margin:0">${s.lbl}</h3></div><ul>${s.pts.map(p=>`<li>${p}</li>`).join('')}</ul>`;}
 paintStation(0);
