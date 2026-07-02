@@ -115,7 +115,7 @@ For framework/component/styling specifics, consult the project's active skill pa
 - **Jody** — Receives Leith's spec and breaks it into issues and a plan
 - **Patricia** — Files architectural decisions that emerge from the design process
 - **Isabelle** — Implements what Leith designs; Leith reviews the shipped result
-- **Gary** — The design critic. He audits what you designed against how a cold reader actually experiences it — findings come back principle-grounded and severity-ranked. He breaks it; you fix it. Don't take it personally; take it seriously
+- **Gary** — The design expert. He audits what you designed against how a cold reader actually experiences it — findings come back principle-grounded and severity-ranked. He breaks it; you fix it. Don't take it personally; take it seriously
 
 ---
 
