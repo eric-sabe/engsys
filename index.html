@@ -98,7 +98,7 @@
   .fbtn{font-family:var(--mono);font-size:12px;color:var(--muted);background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:6px 13px;cursor:pointer}
   .fbtn.on{color:var(--bg);background:var(--cyan);border-color:var(--cyan)}
   .team{display:grid;grid-template-columns:repeat(auto-fill,minmax(216px,1fr));gap:14px}
-  .mem{background:linear-gradient(180deg,var(--panel),var(--panel-2));border:1px solid var(--line);border-radius:14px;padding:16px;text-align:center;transition:.16s}
+  .mem{position:relative;background:linear-gradient(180deg,var(--panel),var(--panel-2));border:1px solid var(--line);border-radius:14px;padding:16px;text-align:center;transition:.16s}
   .mem:hover{border-color:var(--cyan);transform:translateY(-3px)}
   .mem.hide{display:none}
   .mem .ring{width:96px;height:96px;margin:0 auto 12px;border-radius:50%;padding:3px;background:conic-gradient(from 200deg,var(--cyan),var(--violet),var(--amber),var(--cyan))}
@@ -106,7 +106,7 @@
   .mem .nm{font-size:15.5px;font-weight:700}
   .mem .rl{font-family:var(--mono);font-size:10px;letter-spacing:.6px;text-transform:uppercase;color:var(--cyan);margin-top:2px}
   .mem .bl{font-size:12.5px;color:#bcc8d6;margin-top:9px;border-top:1px dashed var(--line);padding-top:9px;min-height:54px}
-  .mem .pill{display:inline-block;font-family:var(--mono);font-size:9px;letter-spacing:.5px;text-transform:uppercase;color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:1px 7px;margin-top:10px}
+  .mem .pill{position:absolute;top:10px;left:10px;font-family:var(--mono);font-size:9px;letter-spacing:.5px;text-transform:uppercase;color:var(--dim);background:var(--panel-2);border:1px solid var(--line);border-radius:999px;padding:1px 7px}
 
   /* pipeline — stations on the line, plus the two loops a straight line can't draw */
   .track{margin:26px 0 6px;position:relative}
@@ -271,7 +271,7 @@
 <section id="pipeline"><div class="wrap">
   <div class="kicker">How work moves</div>
   <h2>Spec to closeout, on rails</h2>
-  <p class="lede">Slash commands call the agents by name, so the process runs the same way every time. Review findings loop a phase back; closeout lessons loop into your next project. Click a stage.</p>
+  <p class="lede">Slash commands call the agents by name, so the process runs the same way every time. Review findings loop a phase back; closeout lessons loop into your next project.</p>
   <div class="track" id="track"></div>
   <div class="trackNav">
     <button class="fbtn" id="trackPrev" aria-label="Previous stage">&larr; Prev</button>
@@ -375,7 +375,7 @@ const TEAM = [
   {id:'patricia', name:'Patricia', role:'Librarian', tier:'core', bl:'Records the decision, writes the ADR, and keeps the docs from going stale.'},
   {id:'nyx', name:'Nyx', role:'Security', tier:'core', bl:'Asks "is this actually secure?" — then breaks it to find out.'},
   {id:'otto', name:'Otto', role:'LLM optimization', tier:'core', bl:'Finds where your tokens are going and stops the bleeding.'},
-  {id:'gary', name:'Gary', role:'Design expert', tier:'core', bl:'The reader’s advocate — four schools of design doctrine and the counter-canon. Breaks comprehension the way Nyx breaks security.'},
+  {id:'gary', name:'Gary', role:'Design expert', tier:'core', bl:'The reader’s advocate — four schools of design doctrine.'},
   {id:'sandy', name:'Sandy', role:'Marketing / SEO', tier:'optional', bl:'Makes skeptics understand — and want — what the engineers built. Clear over clever.'},
   {id:'jos', name:'Jos', role:'Monetization', tier:'optional', bl:'Pricing, ASO, CAC/LTV math, and the App Store policy call before it bites you.'},
   {id:'steve', name:'Steve', role:'The scapegoat', tier:'optional', pill:'inevitable', bl:'Officially responsible for phantom config, ghost resources, and IAM nobody admits creating. (Not real. Morale only.)'},
@@ -436,7 +436,7 @@ pickCloud(0);
 
 // pipeline
 const STATIONS=[
-  {lbl:'Design + plan',cmd:'/generate-project',pts:['Leith turns the goal into a spec with testable acceptance criteria.','Melvin and Nyx pressure-test architecture and security; Marcelo adds the test strategy.','Jody breaks it into a dependency-ordered board of issues.']},
+  {lbl:'Design + plan',cmd:'/generate-project',pts:['Leith turns the goal into a spec with testable acceptance criteria.','Melvin, Nyx, and Gary pressure-test architecture, security, and comprehension; Marcelo adds the test strategy.','Jody breaks it into a dependency-ordered board of issues.']},
   {lbl:'Implement',cmd:'/implement-project',pts:['Isabelle works each issue in an isolated worktree, one phase = one PR.','Matches existing patterns, writes tests, runs the pre-push gate before pushing.','Opens the PR already locally reviewed.']},
   {lbl:'Review',cmd:'objective gate',pts:['A fresh reviewer with no stake re-runs the gate and checks each acceptance criterion.','Binary verdict: clean, or findings with file:line.','No merge without a clean independent pass.']},
   {lbl:'Close out',cmd:'/project-closeout',pts:['Verify everything merged, clean up worktrees and branches.','Mine the review findings; generalize recurring ones into lessons.','Promote durable lessons back to the shared library.']},
