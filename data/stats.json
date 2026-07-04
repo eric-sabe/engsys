@@ -1,14 +1,14 @@
 {
-  "generatedAt": "2026-07-03T07:13:35.121Z",
+  "generatedAt": "2026-07-04T07:07:20.789Z",
   "window": {
     "from": "2025-06-27",
-    "to": "2026-07-03",
+    "to": "2026-07-04",
     "bucket": "week"
   },
   "repoCount": 32,
   "totals": {
     "issuesOpened": 2942,
-    "issuesClosed": 2714,
+    "issuesClosed": 2715,
     "commits": 4313,
     "prsMerged": 1225,
     "locAdded": 2763673,
@@ -601,7 +601,7 @@
     {
       "weekStart": "2026-06-29",
       "issuesOpened": 76,
-      "issuesClosed": 66,
+      "issuesClosed": 67,
       "commits": 71,
       "prsMerged": 64,
       "locAdded": 27924,
@@ -19355,7 +19355,7 @@
       "alias": "Fuzzy Kingfisher",
       "totals": {
         "issuesOpened": 1779,
-        "issuesClosed": 1634,
+        "issuesClosed": 1635,
         "commits": 1359,
         "prsMerged": 700,
         "locAdded": 918308,
@@ -19948,7 +19948,7 @@
         {
           "weekStart": "2026-06-29",
           "issuesOpened": 7,
-          "issuesClosed": 28,
+          "issuesClosed": 29,
           "commits": 28,
           "prsMerged": 28,
           "locAdded": 7178,
