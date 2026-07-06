@@ -37,17 +37,21 @@ mkdir -p "$W"
 touch "$W/ready.tsv" "$W/deps.tsv" "$W/dirty.tsv" "$W/checks.tsv" "$W/mainrun.txt"
 
 # emit_diff <old-file> <new-file> <added-prefix> [removed-prefix]
-# Files are sorted "key<TAB>rest" lines; prints one event line per delta.
+# Files are sorted "key<TAB>rest" lines. Diffs by KEY ONLY (column 1) so
+# metadata edits (e.g. a PR title change) don't fire false add/remove events.
 emit_diff() {
   old="$1"; new="$2"; addp="$3"; remp="${4:-}"
-  comm -13 "$old" "$new" | while IFS= read -r line; do
-    [ -n "$line" ] && echo "$addp $line"
+  cut -f1 "$old" | sort -u > "$old.k"
+  cut -f1 "$new" | sort -u > "$new.k"
+  comm -13 "$old.k" "$new.k" | while IFS= read -r key; do
+    [ -n "$key" ] && echo "$addp $(awk -F'\t' -v k="$key" '$1==k {print; exit}' "$new")"
   done
   if [ -n "$remp" ]; then
-    comm -23 "$old" "$new" | while IFS= read -r line; do
-      [ -n "$line" ] && echo "$remp $(echo "$line" | cut -f1)"
+    comm -23 "$old.k" "$new.k" | while IFS= read -r key; do
+      [ -n "$key" ] && echo "$remp $key"
     done
   fi
+  rm -f "$old.k" "$new.k"
   mv "$new" "$old"
 }
 
@@ -107,10 +111,14 @@ while true; do
     CONCL=$(echo "$OUT" | cut -f2)
     WF=$(echo "$OUT" | cut -f3)
     LAST=$(cat "$W/mainrun.txt" 2>/dev/null || true)
-    if [ "$CONCL" = "failure" ] && [ "$RUNID" != "$LAST" ]; then
-      echo "MAIN_RED $WF"
+    # Only record runs with a terminal conclusion — recording an in-progress
+    # run id would suppress its MAIN_RED when it later concludes failure.
+    if [ -n "$CONCL" ] && [ "$CONCL" != "null" ]; then
+      if [ "$CONCL" = "failure" ] && [ "$RUNID" != "$LAST" ]; then
+        echo "MAIN_RED $WF"
+      fi
+      echo "$RUNID" > "$W/mainrun.txt"
     fi
-    echo "$RUNID" > "$W/mainrun.txt"
   fi
 
   sleep "$INTERVAL"

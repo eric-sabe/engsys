@@ -29,9 +29,14 @@ echo "labels ok"
 
 echo "== ledger issue =="
 TITLE="🧌 Merge Monster ledger"
-EXISTING=$(gh issue list -R "$REPO" --state all --search "\"$TITLE\" in:title" \
-  --json number,title,state \
-  --jq "[.[] | select(.title == \"$TITLE\")][0] // empty" 2>/dev/null || true)
+# Fail closed: a swallowed lookup error here would create a duplicate ledger.
+if ! LIST=$(gh issue list -R "$REPO" --state all --search "\"$TITLE\" in:title" \
+    --json number,title,state 2>&1); then
+  echo "ERROR: could not query for an existing ledger issue — refusing to create a possible duplicate:" >&2
+  echo "$LIST" >&2
+  exit 1
+fi
+EXISTING=$(echo "$LIST" | jq "[.[] | select(.title == \"$TITLE\")][0] // empty")
 
 if [ -n "$EXISTING" ]; then
   NUM=$(echo "$EXISTING" | jq -r .number)

@@ -22,5 +22,5 @@ gh pr list -R "$REPO" --state open --limit 100 \
       author: .author.login,
       size: (.additions + .deletions),
       mm: [.labels[].name | select(startswith("mm:"))],
-      dependabot: (.author.login == "app/dependabot" or .author.login == "dependabot")
+      dependabot: (.author.login == "app/dependabot" or .author.login == "dependabot" or .author.login == "dependabot[bot]")
     } ]'
