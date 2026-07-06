@@ -93,9 +93,9 @@ core/               stack-agnostic — always installed
   agents/           personas: architect, IaC, implementer, planner, designer,
                     tester, librarian, security, LLM-opt, bug hunter
   commands/         generate-project → implement → file-issue → project-closeout,
-                    pre-push, design-*, prep-review*, naturalize
+                    pre-push, design-*, prep-review*, naturalize, merge-monster
   skills/           git-workflow-agents, code-review, gh-cli, github-issues,
-                    github-actions, pre-push, refactor, …
+                    github-actions, merge-monster, pre-push, refactor, …
   workflows/        long-form procedure docs the commands reference
   templates/        CLAUDE.md, settings, hook, ADR + issue templates
 

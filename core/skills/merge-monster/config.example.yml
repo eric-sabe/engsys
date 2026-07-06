@@ -1,0 +1,46 @@
+# Merge Monster per-repo config — copy to .claude/merge-monster.yml and edit.
+# Read by the model at session start; scripts take flags, never parse YAML.
+# Design spec: docs/merge-monster.md in engsys.
+
+repo: owner/name
+default_branch: main
+ledger_issue: 0              # printed by scripts/mm-setup.sh --repo owner/name
+
+state_dir: logs/merge-monster # working memory: state.md, journal, .watch/ (keep gitignored)
+poll_interval: 30            # seconds — mm-watch.sh cadence (2-4 gh calls/cycle)
+heartbeat_minutes: 30        # ScheduleWakeup fallback tick
+stale_lock_minutes: 45       # heartbeat older than this ⇒ baton is stale, manual merging allowed
+
+merge_method:
+  multi_commit: merge        # batch PRs keep per-issue commits
+  single_commit: squash
+
+ready_requirements:
+  review_marker: ""          # evidence comment preflight requires on the PR,
+                             # e.g. "<!-- cr-cli-findings -->" — empty to skip
+
+# Globs (against changed files) whose PRs merge early to minimize queue-wide
+# rebase churn — lockfiles, CI workflow files, schemas, shared-package APIs.
+conflict_magnets: []
+  # - pnpm-lock.yaml
+  # - .github/workflows/ci.yml
+
+# Globs marking migration-bearing PRs: parked mm:blocked + operator ping.
+migration_globs: []
+  # - services/database/migrations/**
+
+# Full local validation command — the Dependabot auto-merge gate (a Dependabot
+# "quick check" badge is NOT full CI). Empty disables all auto-merging.
+local_gate: ""
+  # e.g. "pnpm install --frozen-lockfile && pnpm build && pnpm test && pnpm lint"
+
+dependabot:
+  # Categories eligible for auto-merge after the local gate passes.
+  # Majors, runtime deps, Docker bases, engine bumps are NEVER auto.
+  auto_merge: [patch_dev, minor_dev, patch_ci, minor_ci, grouped_patch]
+
+escalation:
+  slack_channel: ""          # empty → escalate via GitHub only (label + comments)
+
+fix_attempts_max: 2          # fix-agent dispatches per PR before escalating
+ci_reruns_max: 1             # flake re-runs per PR per cause
