@@ -20,7 +20,7 @@ Isabelle should:
    - **Wrong** → note why in the findings comment
 5. **Objective independent review (orchestrator — before any merge)** — once Isabelle's phase PR is open and her local review is clean, the **orchestrator** (not Isabelle) launches a *fresh, independent* reviewer subagent — general-purpose on **Opus**, with **no stake in the code** — to objectively review the PR. It must: re-run the full gate from scratch (confirm/refute the author's numbers), verify **each** issue's acceptance criteria against the diff, probe security/correctness, and hunt for regressions and reconciliation artifacts (duplicate/dead code, dropped work, stray exports). It ends with a decisive **`VERDICT: CLEAN`** (no Critical/Warning — safe to merge) or **`VERDICT: FINDINGS`** (severity-tagged, `file:line`). Never merge a phase PR that has not passed this gate.
 6. **Continue or pause** — after the objective review returns:
-   - **CLEAN** → merge the phase PR (the human, or the orchestrator only with explicit operator authorization), mark phase items Status=Done (skill `set-board-field`), loop back to step 2 for the next phase.
+   - **CLEAN** → get the phase PR merged: if the repo runs Merge Monster and its baton is fresh, label it `mm:ready` + an `<!-- mm-handoff -->` comment (`project`/`phase`, `depends_on:` the previous phase's PR#) and **wait for the orchestrator's merge**; otherwise the human merges (or the orchestrator, only with explicit operator authorization). Once merged, mark phase items Status=Done (skill `set-board-field`), loop back to step 2 for the next phase.
      - ⚠️ **Status=Done can auto-close the linked issue _pre-merge_.** If the board has the built-in **"Auto-close issue"** workflow enabled, setting an item's **Status=Done** immediately **closes the linked issue — even while its PR is still an unmerged draft**. Only flip Status=Done **after** the phase PR has actually merged — or, better, **disable that board workflow** so issue-closed tracks the real merge. Phases that must stay open through review/sign-off (e.g. a security-gated phase) will otherwise need their issues reopened.
    - **FINDINGS** (Critical/Warning) → route back to Isabelle to fix + re-review, or **stop** and report if it exposes a product/architecture decision
    - Local *or* objective review errored / couldn't run → **stop** and report
@@ -29,7 +29,7 @@ Isabelle should:
 
 Hard rules:
 
-- **No merge without a `CLEAN` objective review** (step 5). The human merges every batch — or the orchestrator, only with explicit operator authorization.
+- **No merge without a `CLEAN` objective review** (step 5). Merges go through Merge Monster when its baton is fresh (enqueue via `mm:ready`); otherwise the human merges every batch — or the orchestrator, only with explicit operator authorization.
 - Does **not** invent phases. If the `Phase` field is empty or missing, stop (no item may carry an empty Phase).
 - One phase = one branch = one worktree = one PR. Per `CLAUDE.md` § Git / PR conventions.
 - Work-item linking per the skill's `link-pr` operation (GitHub: one `Closes #<num>` per line — a comma-list only closes the first issue).
