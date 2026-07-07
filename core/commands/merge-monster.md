@@ -6,7 +6,7 @@ Run the **merge-monster** skill (`.claude/skills/merge-monster/SKILL.md`) as a l
 
 Intended to run on an always-on machine. Before starting the loop:
 
-1. Read `.claude/merge-monster.yml` (if missing: copy `config.example.yml` from the skill, run `scripts/mm-setup.sh --repo <owner/name>`, fill it in, and confirm with the user before proceeding).
+1. Read `.claude/merge-monster.yml` (if missing: copy `config.example.yml` from the skill, run `.claude/skills/merge-monster/scripts/mm-setup.sh --repo <owner/name>`, fill it in, and confirm with the user before proceeding).
 2. Follow SKILL.md § Session startup: reconcile live GitHub state, refresh the heartbeat, arm the persistent Monitor, schedule the fallback tick.
 3. Then run the loop until the ledger issue is closed (kill switch) or the user stops you.
 

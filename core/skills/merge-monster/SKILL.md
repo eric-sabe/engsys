@@ -14,19 +14,21 @@ fresh, nothing else merges. Full design: `docs/merge-monster.md` in engsys
 - `.claude/merge-monster.yml` exists (start from `config.example.yml` next to
   this file). **Read it first** — it defines the repo, ledger issue, conflict
   magnets, migration globs, merge methods, local gate, and escalation channel.
-- Labels + ledger issue exist (`scripts/mm-setup.sh --repo <owner/name>` is
-  idempotent; run it if unsure).
+- Labels + ledger issue exist (`<skill-dir>/scripts/mm-setup.sh --repo
+  <owner/name>` is idempotent; run it if unsure). `<skill-dir>` is this
+  skill's directory (`.claude/skills/merge-monster` when installed).
 - `gh` authed with `repo` scope; `jq` on PATH.
 
 ## Session startup
 
 1. Read the config. `mkdir -p <state_dir>` and load prior `state.md` /
    journal if present (you may be resuming).
-2. Reconcile reality: run `scripts/mm-snapshot.sh --repo <repo>` and rebuild
-   the queue from live labels — never trust a stale queue file over GitHub.
-3. Heartbeat: `scripts/mm-heartbeat.sh --repo <repo> --issue <ledger_issue>
-   --status "session start"`. Comment a session-start digest on the ledger
-   issue (queue depth, planned order).
+2. Reconcile reality: run `<skill-dir>/scripts/mm-snapshot.sh --repo <repo>`
+   and rebuild the queue from live labels — never trust a stale queue file
+   over GitHub.
+3. Heartbeat: `<skill-dir>/scripts/mm-heartbeat.sh --repo <repo> --issue
+   <ledger_issue> --status "session start"`. Comment a session-start digest
+   on the ledger issue (queue depth, planned order).
 4. Arm the event bus — a **persistent Monitor** running:
 
    ```bash
@@ -66,9 +68,13 @@ fresh, nothing else merges. Full design: `docs/merge-monster.md` in engsys
      fix agent? escalate) — this outranks everything.
    - `STOP` → shutdown (below).
 3. **Advance the pipeline:** if nothing is `mm:active` and the queue has a
-   passing head: label `mm:active`, write its number to `<state_dir>/active`,
-   rebase if conflicting, then mark ready (`gh pr ready N`) — this is the CI
-   trigger; do it as late as possible, one PR at a time.
+   passing head, in this order: rebase if conflicting, then mark ready
+   (`gh pr ready N` — the CI trigger, done as late as possible, one PR at a
+   time), and only after ready succeeds label `mm:active` and write its
+   number to `<state_dir>/active`. If any step fails, undo what succeeded
+   (remove the label, clear the active file, back to draft if needed),
+   journal it, and take the next PR — never leave `mm:active` state pointing
+   at a PR you aren't actually piloting.
 4. **Write the ledger** (every wake): rewrite `<state_dir>/state.md` (queue
    table: position, PR, state, one-line reason; active PR; last events);
    append decisions to `journal-YYYY-MM.md` **and** `.jsonl`
