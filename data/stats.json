@@ -1,18 +1,18 @@
 {
-  "generatedAt": "2026-07-10T07:18:38.879Z",
+  "generatedAt": "2026-07-11T06:53:09.787Z",
   "window": {
     "from": "2025-06-27",
-    "to": "2026-07-10",
+    "to": "2026-07-11",
     "bucket": "week"
   },
   "repoCount": 33,
   "totals": {
-    "issuesOpened": 3065,
-    "issuesClosed": 2786,
-    "commits": 4560,
-    "prsMerged": 1347,
-    "locAdded": 2840270,
-    "locRemoved": 1153064
+    "issuesOpened": 3084,
+    "issuesClosed": 2800,
+    "commits": 4588,
+    "prsMerged": 1318,
+    "locAdded": 2857887,
+    "locRemoved": 1154251
   },
   "series": [
     {
@@ -611,14 +611,14 @@
     },
     {
       "weekStart": "2026-07-06",
-      "issuesOpened": 123,
-      "issuesClosed": 70,
-      "commits": 212,
-      "prsMerged": 117,
-      "locAdded": 55591,
-      "locRemoved": 6384,
-      "locAddedViaPR": 48974,
-      "locAddedDirect": 6617
+      "issuesOpened": 142,
+      "issuesClosed": 84,
+      "commits": 240,
+      "prsMerged": 88,
+      "locAdded": 73208,
+      "locRemoved": 7571,
+      "locAddedViaPR": 37635,
+      "locAddedDirect": 35573
     }
   ],
   "daily": {
@@ -873,18 +873,19 @@
     "2026-07-06": 14,
     "2026-07-07": 49,
     "2026-07-08": 93,
-    "2026-07-09": 45,
-    "2026-07-10": 11
+    "2026-07-09": 48,
+    "2026-07-10": 27,
+    "2026-07-11": 9
   },
   "languages": {
-    "TypeScript": 24496786,
-    "HTML": 12531601,
+    "TypeScript": 24717698,
+    "HTML": 12538072,
     "Python": 6606416,
-    "JavaScript": 1413231,
-    "Shell": 1078158,
+    "JavaScript": 1413284,
+    "Shell": 1083960,
     "Swift": 911634,
     "Kotlin": 825827,
-    "Bicep": 681318,
+    "Bicep": 689085,
     "Rust": 568184,
     "C#": 528788,
     "CSS": 366966,
@@ -1535,12 +1536,12 @@
       "_id": "3f9cf9c2",
       "alias": "Ancient Hedgehog",
       "totals": {
-        "issuesOpened": 321,
-        "issuesClosed": 280,
-        "commits": 217,
-        "prsMerged": 216,
-        "locAdded": 114408,
-        "locRemoved": 9244
+        "issuesOpened": 323,
+        "issuesClosed": 282,
+        "commits": 220,
+        "prsMerged": 219,
+        "locAdded": 115111,
+        "locRemoved": 9281
       },
       "series": [
         {
@@ -2139,13 +2140,13 @@
         },
         {
           "weekStart": "2026-07-06",
-          "issuesOpened": 5,
-          "issuesClosed": 6,
-          "commits": 9,
-          "prsMerged": 9,
-          "locAdded": 2614,
-          "locRemoved": 1133,
-          "locAddedViaPR": 2614,
+          "issuesOpened": 7,
+          "issuesClosed": 8,
+          "commits": 12,
+          "prsMerged": 12,
+          "locAdded": 3317,
+          "locRemoved": 1170,
+          "locAddedViaPR": 3317,
           "locAddedDirect": 0
         }
       ],
@@ -2165,11 +2166,13 @@
         "2026-07-02": 4,
         "2026-07-01": 12,
         "2026-06-30": 12,
+        "2026-07-11": 2,
+        "2026-07-10": 1,
         "2026-07-09": 7,
         "2026-07-08": 2
       },
       "languages": {
-        "TypeScript": 3102705,
+        "TypeScript": 3135505,
         "CSS": 146884,
         "JavaScript": 25431,
         "PLpgSQL": 23385,
@@ -6062,10 +6065,10 @@
       "totals": {
         "issuesOpened": 0,
         "issuesClosed": 0,
-        "commits": 148,
-        "prsMerged": 39,
-        "locAdded": 60483,
-        "locRemoved": 2681
+        "commits": 151,
+        "prsMerged": 40,
+        "locAdded": 63576,
+        "locRemoved": 2815
       },
       "series": [
         {
@@ -6666,11 +6669,11 @@
           "weekStart": "2026-07-06",
           "issuesOpened": 0,
           "issuesClosed": 0,
-          "commits": 79,
-          "prsMerged": 36,
-          "locAdded": 20544,
-          "locRemoved": 1007,
-          "locAddedViaPR": 16052,
+          "commits": 82,
+          "prsMerged": 37,
+          "locAdded": 23637,
+          "locRemoved": 1141,
+          "locAddedViaPR": 19145,
           "locAddedDirect": 4492
         }
       ],
@@ -6679,14 +6682,15 @@
         "2026-06-07": 30,
         "2026-06-06": 3,
         "2026-07-05": 28,
+        "2026-07-10": 3,
         "2026-07-09": 13,
         "2026-07-08": 53,
         "2026-07-07": 6,
         "2026-07-06": 7
       },
       "languages": {
-        "JavaScript": 359738,
-        "HTML": 38232,
+        "JavaScript": 359791,
+        "HTML": 44703,
         "Shell": 5603
       }
     },
@@ -19474,12 +19478,12 @@
       "_id": "29107299",
       "alias": "Fuzzy Kingfisher",
       "totals": {
-        "issuesOpened": 1896,
-        "issuesClosed": 1700,
-        "commits": 1450,
-        "prsMerged": 758,
-        "locAdded": 944742,
-        "locRemoved": 293746
+        "issuesOpened": 1913,
+        "issuesClosed": 1712,
+        "commits": 1472,
+        "prsMerged": 725,
+        "locAdded": 958563,
+        "locRemoved": 294762
       },
       "series": [
         {
@@ -20078,14 +20082,14 @@
         },
         {
           "weekStart": "2026-07-06",
-          "issuesOpened": 117,
-          "issuesClosed": 64,
-          "commits": 89,
-          "prsMerged": 56,
-          "locAdded": 24015,
-          "locRemoved": 2276,
-          "locAddedViaPR": 24015,
-          "locAddedDirect": 0
+          "issuesOpened": 134,
+          "issuesClosed": 76,
+          "commits": 111,
+          "prsMerged": 23,
+          "locAdded": 37836,
+          "locRemoved": 3292,
+          "locAddedViaPR": 8880,
+          "locAddedDirect": 28956
         }
       ],
       "daily": {
@@ -20196,18 +20200,19 @@
         "2026-07-01": 9,
         "2026-06-30": 12,
         "2026-06-29": 3,
-        "2026-07-10": 11,
-        "2026-07-09": 25,
+        "2026-07-11": 7,
+        "2026-07-10": 23,
+        "2026-07-09": 28,
         "2026-07-08": 25,
         "2026-07-07": 22,
         "2026-07-06": 6
       },
       "languages": {
-        "TypeScript": 13085541,
+        "TypeScript": 13273653,
         "HTML": 813830,
-        "Bicep": 529597,
+        "Bicep": 537364,
         "JavaScript": 195484,
-        "Shell": 182742,
+        "Shell": 188544,
         "Python": 154980,
         "CSS": 59453,
         "Dockerfile": 59318,
