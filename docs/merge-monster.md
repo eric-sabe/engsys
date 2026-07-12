@@ -203,6 +203,15 @@ mm:ready ──► preflight ──► [rebase if conflicting] ──► mark re
 - **Post-merge:** verify the intended issues auto-closed (and reopen
   mis-closes), comment a digest on the PR, notify the owner if follow-up is
   needed, then re-evaluate the whole queue for new conflicts/staleness.
+- **Post-merge cleanup:** on a clean merge (no red flags — not contentious,
+  not a revert candidate, no follow-up work parked in the worktree), delete
+  the remote branch and any local branch for the merged ref (worktree or
+  not), and remove the branch's local worktree if it exists and
+  `git status --porcelain` is empty (tracked + untracked clean). The forced
+  removal deliberately destroys ignored files too — `node_modules`, `dist`,
+  local `.env` copies; anything worth keeping must be committed or the tree
+  left dirty. Never the main checkout, the monster's own cwd, or a dirty
+  tree — dirty trees are journaled for the operator.
 - **No head-of-line blocking:** an escalated PR is set aside with a diagnosis
   and MM moves to the next PR.
 

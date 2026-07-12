@@ -119,6 +119,17 @@ the branch head moved since your snapshot, re-verify before touching it.
 - Post-merge: verify intended issues auto-closed (reopen mis-closes), digest
   comment on the PR, re-evaluate the whole queue for new conflicts/staleness,
   journal it.
+- Post-merge cleanup (clean merges only — skip if the merge was contentious,
+  is a revert candidate, or the PR carries follow-up work in its worktree):
+  delete the remote branch (`gh api -X DELETE repos/<repo>/git/refs/heads/<branch>`)
+  and any local branch for the merged ref (`git branch -D <branch>`, worktree
+  or not). If a local worktree exists for the branch **and** `git -C <wt>
+  status --porcelain` is empty (tracked + untracked clean), `git worktree
+  remove <wt> --force` + `git worktree prune`. `--force` here deliberately
+  destroys ignored files too — `node_modules`, `dist`, local `.env` copies —
+  that is the point of the cleanup; anything worth keeping must be committed
+  or the tree left dirty. Never remove the main checkout, your own cwd, or a
+  dirty tree — journal dirty trees for the operator instead.
 
 ## Dependabot (idle work only)
 
