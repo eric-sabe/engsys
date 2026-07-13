@@ -200,7 +200,9 @@ mm:ready ──► preflight ──► [rebase if conflicting] ──► mark re
 - **Merge method:** configured per repo — typically merge-commit for
   multi-commit batch PRs (preserves per-issue commits), squash for
   single-issue PRs.
-- **Post-merge:** verify the intended issues auto-closed (and reopen
+- **Post-merge:** remove all `mm:*` labels (labels are live pipeline state —
+  a merged PR's status is GitHub's MERGED state, and a lingering `mm:active`
+  misreports the queue), verify the intended issues auto-closed (and reopen
   mis-closes), comment a digest on the PR, notify the owner if follow-up is
   needed, then re-evaluate the whole queue for new conflicts/staleness.
 - **Post-merge cleanup:** on a clean merge (no red flags — not contentious,

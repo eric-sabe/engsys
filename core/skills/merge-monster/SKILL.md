@@ -116,7 +116,10 @@ the branch head moved since your snapshot, re-verify before touching it.
 
 - Method from config: `multi_commit` → `gh pr merge N --merge`;
   `single_commit` → `--squash`. Never `--admin`.
-- Post-merge: verify intended issues auto-closed (reopen mis-closes), digest
+- Post-merge: **remove all `mm:*` labels** (`gh pr edit N --remove-label
+  mm:active`) — labels are LIVE pipeline state; a merged PR's status is
+  GitHub's MERGED state, and a lingering `mm:active` misreports the queue.
+  Then verify intended issues auto-closed (reopen mis-closes), digest
   comment on the PR, re-evaluate the whole queue for new conflicts/staleness,
   journal it.
 - Post-merge cleanup (clean merges only — skip if the merge was contentious,
