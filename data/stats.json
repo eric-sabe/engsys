@@ -1,18 +1,18 @@
 {
-  "generatedAt": "2026-07-14T06:51:34.042Z",
+  "generatedAt": "2026-07-15T06:52:46.223Z",
   "window": {
     "from": "2025-06-27",
-    "to": "2026-07-14",
+    "to": "2026-07-15",
     "bucket": "week"
   },
   "repoCount": 33,
   "totals": {
     "issuesOpened": 3101,
     "issuesClosed": 2824,
-    "commits": 4630,
-    "prsMerged": 1382,
-    "locAdded": 2860316,
-    "locRemoved": 1155162
+    "commits": 4638,
+    "prsMerged": 1385,
+    "locAdded": 2863934,
+    "locRemoved": 1155256
   },
   "series": [
     {
@@ -624,11 +624,11 @@
       "weekStart": "2026-07-13",
       "issuesOpened": 5,
       "issuesClosed": 4,
-      "commits": 6,
-      "prsMerged": 6,
-      "locAdded": 175,
-      "locRemoved": 73,
-      "locAddedViaPR": 175,
+      "commits": 14,
+      "prsMerged": 9,
+      "locAdded": 3793,
+      "locRemoved": 167,
+      "locAddedViaPR": 3793,
       "locAddedDirect": 0
     }
   ],
@@ -888,14 +888,15 @@
     "2026-07-10": 27,
     "2026-07-11": 20,
     "2026-07-12": 25,
-    "2026-07-13": 6
+    "2026-07-13": 7,
+    "2026-07-14": 7
   },
   "languages": {
     "TypeScript": 24861669,
-    "HTML": 12550741,
+    "HTML": 12556718,
     "Python": 6606416,
     "JavaScript": 1415809,
-    "Shell": 1084048,
+    "Shell": 1084855,
     "Swift": 911634,
     "Kotlin": 825827,
     "Bicep": 694982,
@@ -6139,10 +6140,10 @@
       "totals": {
         "issuesOpened": 0,
         "issuesClosed": 0,
-        "commits": 157,
-        "prsMerged": 42,
-        "locAdded": 68914,
-        "locRemoved": 3025
+        "commits": 165,
+        "prsMerged": 45,
+        "locAdded": 72532,
+        "locRemoved": 3119
       },
       "series": [
         {
@@ -6754,11 +6755,11 @@
           "weekStart": "2026-07-13",
           "issuesOpened": 0,
           "issuesClosed": 0,
-          "commits": 0,
-          "prsMerged": 0,
-          "locAdded": 0,
-          "locRemoved": 0,
-          "locAddedViaPR": 0,
+          "commits": 8,
+          "prsMerged": 3,
+          "locAdded": 3618,
+          "locRemoved": 94,
+          "locAddedViaPR": 3618,
           "locAddedDirect": 0
         }
       ],
@@ -6773,12 +6774,14 @@
         "2026-07-09": 13,
         "2026-07-08": 53,
         "2026-07-07": 6,
-        "2026-07-06": 7
+        "2026-07-06": 7,
+        "2026-07-14": 7,
+        "2026-07-13": 1
       },
       "languages": {
         "JavaScript": 360564,
-        "HTML": 57372,
-        "Shell": 5603
+        "HTML": 63349,
+        "Shell": 6410
       }
     },
     {
