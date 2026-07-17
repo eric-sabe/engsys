@@ -1,18 +1,18 @@
 {
-  "generatedAt": "2026-07-16T06:56:58.769Z",
+  "generatedAt": "2026-07-17T06:54:34.954Z",
   "window": {
     "from": "2025-06-27",
-    "to": "2026-07-16",
+    "to": "2026-07-17",
     "bucket": "week"
   },
-  "repoCount": 33,
+  "repoCount": 34,
   "totals": {
-    "issuesOpened": 3101,
+    "issuesOpened": 3104,
     "issuesClosed": 2824,
-    "commits": 4638,
-    "prsMerged": 1385,
-    "locAdded": 2863934,
-    "locRemoved": 1155256
+    "commits": 4658,
+    "prsMerged": 1393,
+    "locAdded": 2891322,
+    "locRemoved": 1155592
   },
   "series": [
     {
@@ -622,14 +622,14 @@
     },
     {
       "weekStart": "2026-07-13",
-      "issuesOpened": 5,
+      "issuesOpened": 8,
       "issuesClosed": 4,
-      "commits": 14,
-      "prsMerged": 9,
-      "locAdded": 3793,
-      "locRemoved": 167,
-      "locAddedViaPR": 3793,
-      "locAddedDirect": 0
+      "commits": 34,
+      "prsMerged": 17,
+      "locAdded": 31181,
+      "locRemoved": 503,
+      "locAddedViaPR": 31024,
+      "locAddedDirect": 157
     }
   ],
   "daily": {
@@ -889,20 +889,23 @@
     "2026-07-11": 20,
     "2026-07-12": 25,
     "2026-07-13": 7,
-    "2026-07-14": 7
+    "2026-07-14": 7,
+    "2026-07-15": 2,
+    "2026-07-16": 3,
+    "2026-07-17": 15
   },
   "languages": {
     "TypeScript": 24861669,
-    "HTML": 12556718,
+    "HTML": 12591620,
     "Python": 6606416,
-    "JavaScript": 1415809,
-    "Shell": 1084855,
+    "JavaScript": 1708826,
+    "Shell": 1098236,
     "Swift": 911634,
     "Kotlin": 825827,
     "Bicep": 694982,
     "Rust": 568184,
     "C#": 528788,
-    "CSS": 366966,
+    "CSS": 386800,
     "PowerShell": 253262,
     "HCL": 210969,
     "Dockerfile": 81604,
@@ -918,7 +921,7 @@
       "_id": "591ceaac",
       "alias": "Cozy Cheetah",
       "totals": {
-        "issuesOpened": 1,
+        "issuesOpened": 4,
         "issuesClosed": 0,
         "commits": 13,
         "prsMerged": 9,
@@ -1533,7 +1536,7 @@
         },
         {
           "weekStart": "2026-07-13",
-          "issuesOpened": 0,
+          "issuesOpened": 3,
           "issuesClosed": 0,
           "commits": 1,
           "prsMerged": 1,
@@ -6140,10 +6143,10 @@
       "totals": {
         "issuesOpened": 0,
         "issuesClosed": 0,
-        "commits": 165,
-        "prsMerged": 45,
-        "locAdded": 72532,
-        "locRemoved": 3119
+        "commits": 176,
+        "prsMerged": 49,
+        "locAdded": 77464,
+        "locRemoved": 3320
       },
       "series": [
         {
@@ -6755,11 +6758,11 @@
           "weekStart": "2026-07-13",
           "issuesOpened": 0,
           "issuesClosed": 0,
-          "commits": 8,
-          "prsMerged": 3,
-          "locAdded": 3618,
-          "locRemoved": 94,
-          "locAddedViaPR": 3618,
+          "commits": 19,
+          "prsMerged": 7,
+          "locAdded": 8550,
+          "locRemoved": 295,
+          "locAddedViaPR": 8550,
           "locAddedDirect": 0
         }
       ],
@@ -6775,13 +6778,16 @@
         "2026-07-08": 53,
         "2026-07-07": 6,
         "2026-07-06": 7,
+        "2026-07-17": 6,
+        "2026-07-16": 3,
+        "2026-07-15": 2,
         "2026-07-14": 7,
         "2026-07-13": 1
       },
       "languages": {
         "JavaScript": 360564,
-        "HTML": 63349,
-        "Shell": 6410
+        "HTML": 75282,
+        "Shell": 7663
       }
     },
     {
@@ -21017,6 +21023,40 @@
       "languages": {
         "HTML": 1483592,
         "JavaScript": 93268
+      }
+    },
+    {
+      "_id": "54feb1a2",
+      "alias": "Fuzzy Dolphin",
+      "totals": {
+        "issuesOpened": 0,
+        "issuesClosed": 0,
+        "commits": 9,
+        "prsMerged": 4,
+        "locAdded": 22456,
+        "locRemoved": 135
+      },
+      "series": [
+        {
+          "weekStart": "2026-07-13",
+          "issuesOpened": 0,
+          "issuesClosed": 0,
+          "commits": 9,
+          "prsMerged": 4,
+          "locAdded": 22456,
+          "locRemoved": 135,
+          "locAddedViaPR": 22299,
+          "locAddedDirect": 157
+        }
+      ],
+      "daily": {
+        "2026-07-17": 9
+      },
+      "languages": {
+        "JavaScript": 293017,
+        "HTML": 22969,
+        "CSS": 19834,
+        "Shell": 12128
       }
     }
   ]
