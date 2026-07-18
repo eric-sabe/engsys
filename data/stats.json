@@ -1,18 +1,18 @@
 {
-  "generatedAt": "2026-07-17T06:54:34.954Z",
+  "generatedAt": "2026-07-18T06:45:20.802Z",
   "window": {
     "from": "2025-06-27",
-    "to": "2026-07-17",
+    "to": "2026-07-18",
     "bucket": "week"
   },
   "repoCount": 34,
   "totals": {
-    "issuesOpened": 3104,
-    "issuesClosed": 2824,
-    "commits": 4658,
-    "prsMerged": 1393,
-    "locAdded": 2891322,
-    "locRemoved": 1155592
+    "issuesOpened": 3127,
+    "issuesClosed": 2844,
+    "commits": 4706,
+    "prsMerged": 1406,
+    "locAdded": 2903330,
+    "locRemoved": 1156161
   },
   "series": [
     {
@@ -622,13 +622,13 @@
     },
     {
       "weekStart": "2026-07-13",
-      "issuesOpened": 8,
-      "issuesClosed": 4,
-      "commits": 34,
-      "prsMerged": 17,
-      "locAdded": 31181,
-      "locRemoved": 503,
-      "locAddedViaPR": 31024,
+      "issuesOpened": 31,
+      "issuesClosed": 24,
+      "commits": 82,
+      "prsMerged": 30,
+      "locAdded": 43189,
+      "locRemoved": 1072,
+      "locAddedViaPR": 43032,
       "locAddedDirect": 157
     }
   ],
@@ -892,24 +892,25 @@
     "2026-07-14": 7,
     "2026-07-15": 2,
     "2026-07-16": 3,
-    "2026-07-17": 15
+    "2026-07-17": 57,
+    "2026-07-18": 6
   },
   "languages": {
     "TypeScript": 24861669,
-    "HTML": 12591620,
+    "HTML": 12597371,
     "Python": 6606416,
-    "JavaScript": 1708826,
+    "JavaScript": 2069454,
     "Shell": 1098236,
     "Swift": 911634,
     "Kotlin": 825827,
     "Bicep": 694982,
     "Rust": 568184,
     "C#": 528788,
-    "CSS": 386800,
+    "CSS": 389686,
     "PowerShell": 253262,
     "HCL": 210969,
-    "Dockerfile": 81604,
-    "PLpgSQL": 55512,
+    "Dockerfile": 83021,
+    "PLpgSQL": 65346,
     "Handlebars": 16188,
     "Go Template": 7185,
     "Makefile": 3659,
@@ -6143,10 +6144,10 @@
       "totals": {
         "issuesOpened": 0,
         "issuesClosed": 0,
-        "commits": 176,
-        "prsMerged": 49,
-        "locAdded": 77464,
-        "locRemoved": 3320
+        "commits": 179,
+        "prsMerged": 50,
+        "locAdded": 79587,
+        "locRemoved": 3371
       },
       "series": [
         {
@@ -6758,11 +6759,11 @@
           "weekStart": "2026-07-13",
           "issuesOpened": 0,
           "issuesClosed": 0,
-          "commits": 19,
-          "prsMerged": 7,
-          "locAdded": 8550,
-          "locRemoved": 295,
-          "locAddedViaPR": 8550,
+          "commits": 22,
+          "prsMerged": 8,
+          "locAdded": 10673,
+          "locRemoved": 346,
+          "locAddedViaPR": 10673,
           "locAddedDirect": 0
         }
       ],
@@ -6778,7 +6779,7 @@
         "2026-07-08": 53,
         "2026-07-07": 6,
         "2026-07-06": 7,
-        "2026-07-17": 6,
+        "2026-07-17": 9,
         "2026-07-16": 3,
         "2026-07-15": 2,
         "2026-07-14": 7,
@@ -6786,7 +6787,7 @@
       },
       "languages": {
         "JavaScript": 360564,
-        "HTML": 75282,
+        "HTML": 80747,
         "Shell": 7663
       }
     },
@@ -21029,34 +21030,37 @@
       "_id": "54feb1a2",
       "alias": "Fuzzy Dolphin",
       "totals": {
-        "issuesOpened": 0,
-        "issuesClosed": 0,
-        "commits": 9,
-        "prsMerged": 4,
-        "locAdded": 22456,
-        "locRemoved": 135
+        "issuesOpened": 23,
+        "issuesClosed": 20,
+        "commits": 54,
+        "prsMerged": 16,
+        "locAdded": 32341,
+        "locRemoved": 653
       },
       "series": [
         {
           "weekStart": "2026-07-13",
-          "issuesOpened": 0,
-          "issuesClosed": 0,
-          "commits": 9,
-          "prsMerged": 4,
-          "locAdded": 22456,
-          "locRemoved": 135,
-          "locAddedViaPR": 22299,
+          "issuesOpened": 23,
+          "issuesClosed": 20,
+          "commits": 54,
+          "prsMerged": 16,
+          "locAdded": 32341,
+          "locRemoved": 653,
+          "locAddedViaPR": 32184,
           "locAddedDirect": 157
         }
       ],
       "daily": {
-        "2026-07-17": 9
+        "2026-07-18": 6,
+        "2026-07-17": 48
       },
       "languages": {
-        "JavaScript": 293017,
-        "HTML": 22969,
-        "CSS": 19834,
-        "Shell": 12128
+        "JavaScript": 653645,
+        "HTML": 23255,
+        "CSS": 22720,
+        "Shell": 12128,
+        "PLpgSQL": 9834,
+        "Dockerfile": 1417
       }
     }
   ]
