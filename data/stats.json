@@ -1,18 +1,18 @@
 {
-  "generatedAt": "2026-07-24T06:58:19.017Z",
+  "generatedAt": "2026-07-25T06:54:06.785Z",
   "window": {
     "from": "2025-06-27",
-    "to": "2026-07-24",
+    "to": "2026-07-25",
     "bucket": "week"
   },
-  "repoCount": 35,
+  "repoCount": 36,
   "totals": {
-    "issuesOpened": 3147,
-    "issuesClosed": 2860,
-    "commits": 4820,
-    "prsMerged": 1438,
-    "locAdded": 2960791,
-    "locRemoved": 1157224
+    "issuesOpened": 3159,
+    "issuesClosed": 2876,
+    "commits": 4867,
+    "prsMerged": 1446,
+    "locAdded": 2990556,
+    "locRemoved": 1158551
   },
   "series": [
     {
@@ -633,14 +633,14 @@
     },
     {
       "weekStart": "2026-07-20",
-      "issuesOpened": 20,
-      "issuesClosed": 13,
-      "commits": 75,
-      "prsMerged": 18,
-      "locAdded": 49603,
-      "locRemoved": 773,
-      "locAddedViaPR": 32422,
-      "locAddedDirect": 17181
+      "issuesOpened": 32,
+      "issuesClosed": 29,
+      "commits": 122,
+      "prsMerged": 26,
+      "locAdded": 79368,
+      "locRemoved": 2100,
+      "locAddedViaPR": 46675,
+      "locAddedDirect": 32693
     }
   ],
   "daily": {
@@ -909,14 +909,15 @@
     "2026-07-20": 23,
     "2026-07-21": 3,
     "2026-07-23": 24,
-    "2026-07-24": 25
+    "2026-07-24": 56,
+    "2026-07-25": 16
   },
   "languages": {
-    "TypeScript": 25223419,
-    "HTML": 12646650,
+    "TypeScript": 25519962,
+    "HTML": 12673101,
     "Python": 6606416,
-    "JavaScript": 2282180,
-    "Shell": 1111554,
+    "JavaScript": 2283707,
+    "Shell": 1123474,
     "Swift": 911634,
     "Kotlin": 825827,
     "Bicep": 694982,
@@ -925,9 +926,9 @@
     "CSS": 394336,
     "PowerShell": 253262,
     "HCL": 210969,
+    "Svelte": 90263,
     "Dockerfile": 83021,
     "PLpgSQL": 65346,
-    "Svelte": 28058,
     "Handlebars": 16188,
     "Go Template": 7185,
     "Makefile": 3659,
@@ -3573,10 +3574,10 @@
       "totals": {
         "issuesOpened": 0,
         "issuesClosed": 0,
-        "commits": 22,
+        "commits": 23,
         "prsMerged": 6,
-        "locAdded": 18910,
-        "locRemoved": 1555
+        "locAdded": 18919,
+        "locRemoved": 1556
       },
       "series": [
         {
@@ -4199,12 +4200,12 @@
           "weekStart": "2026-07-20",
           "issuesOpened": 0,
           "issuesClosed": 0,
-          "commits": 4,
+          "commits": 5,
           "prsMerged": 2,
-          "locAdded": 209,
-          "locRemoved": 1,
+          "locAdded": 218,
+          "locRemoved": 2,
           "locAddedViaPR": 209,
-          "locAddedDirect": 0
+          "locAddedDirect": 9
         }
       ],
       "daily": {
@@ -4215,6 +4216,7 @@
         "2026-07-03": 5,
         "2026-07-02": 5,
         "2026-07-07": 2,
+        "2026-07-25": 1,
         "2026-07-23": 2,
         "2026-07-20": 2
       },
@@ -6219,10 +6221,10 @@
       "totals": {
         "issuesOpened": 0,
         "issuesClosed": 0,
-        "commits": 194,
-        "prsMerged": 55,
-        "locAdded": 91835,
-        "locRemoved": 3683
+        "commits": 197,
+        "prsMerged": 56,
+        "locAdded": 95303,
+        "locRemoved": 4857
       },
       "series": [
         {
@@ -6845,11 +6847,11 @@
           "weekStart": "2026-07-20",
           "issuesOpened": 0,
           "issuesClosed": 0,
-          "commits": 9,
-          "prsMerged": 3,
-          "locAdded": 8222,
-          "locRemoved": 188,
-          "locAddedViaPR": 8222,
+          "commits": 12,
+          "prsMerged": 4,
+          "locAdded": 11690,
+          "locRemoved": 1362,
+          "locAddedViaPR": 11690,
           "locAddedDirect": 0
         }
       ],
@@ -6872,13 +6874,14 @@
         "2026-07-15": 2,
         "2026-07-14": 7,
         "2026-07-13": 1,
+        "2026-07-24": 3,
         "2026-07-23": 3,
         "2026-07-21": 3,
         "2026-07-20": 3
       },
       "languages": {
         "JavaScript": 360564,
-        "HTML": 108836,
+        "HTML": 114047,
         "Shell": 7663
       }
     },
@@ -21183,37 +21186,72 @@
       "_id": "1027db67",
       "alias": "Snowy Osprey",
       "totals": {
-        "issuesOpened": 20,
-        "issuesClosed": 13,
-        "commits": 34,
-        "prsMerged": 9,
-        "locAdded": 36749,
-        "locRemoved": 384
+        "issuesOpened": 32,
+        "issuesClosed": 29,
+        "commits": 68,
+        "prsMerged": 16,
+        "locAdded": 47534,
+        "locRemoved": 524
       },
       "series": [
         {
           "weekStart": "2026-07-20",
-          "issuesOpened": 20,
-          "issuesClosed": 13,
-          "commits": 34,
-          "prsMerged": 9,
-          "locAdded": 36749,
-          "locRemoved": 384,
-          "locAddedViaPR": 19568,
+          "issuesOpened": 32,
+          "issuesClosed": 29,
+          "commits": 68,
+          "prsMerged": 16,
+          "locAdded": 47534,
+          "locRemoved": 524,
+          "locAddedViaPR": 30353,
           "locAddedDirect": 17181
         }
       ],
       "daily": {
-        "2026-07-24": 25,
+        "2026-07-25": 9,
+        "2026-07-24": 50,
         "2026-07-23": 9
       },
       "languages": {
-        "TypeScript": 361750,
-        "Svelte": 28058,
-        "HTML": 21174,
+        "TypeScript": 658293,
+        "Svelte": 90263,
+        "HTML": 21526,
         "Shell": 12125,
         "JavaScript": 1527,
         "CSS": 358
+      }
+    },
+    {
+      "_id": "2f1be9fa",
+      "alias": "Restless Crocodile",
+      "totals": {
+        "issuesOpened": 0,
+        "issuesClosed": 0,
+        "commits": 9,
+        "prsMerged": 0,
+        "locAdded": 15503,
+        "locRemoved": 12
+      },
+      "series": [
+        {
+          "weekStart": "2026-07-20",
+          "issuesOpened": 0,
+          "issuesClosed": 0,
+          "commits": 9,
+          "prsMerged": 0,
+          "locAdded": 15503,
+          "locRemoved": 12,
+          "locAddedViaPR": 0,
+          "locAddedDirect": 15503
+        }
+      ],
+      "daily": {
+        "2026-07-25": 6,
+        "2026-07-24": 3
+      },
+      "languages": {
+        "HTML": 20888,
+        "Shell": 11920,
+        "JavaScript": 1527
       }
     }
   ]
