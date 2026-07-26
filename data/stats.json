@@ -1,18 +1,18 @@
 {
-  "generatedAt": "2026-07-25T06:54:06.785Z",
+  "generatedAt": "2026-07-26T07:01:59.859Z",
   "window": {
     "from": "2025-06-27",
-    "to": "2026-07-25",
+    "to": "2026-07-26",
     "bucket": "week"
   },
   "repoCount": 36,
   "totals": {
-    "issuesOpened": 3159,
-    "issuesClosed": 2876,
-    "commits": 4867,
-    "prsMerged": 1446,
-    "locAdded": 2990556,
-    "locRemoved": 1158551
+    "issuesOpened": 3183,
+    "issuesClosed": 2882,
+    "commits": 4890,
+    "prsMerged": 1453,
+    "locAdded": 3009273,
+    "locRemoved": 1159353
   },
   "series": [
     {
@@ -633,13 +633,13 @@
     },
     {
       "weekStart": "2026-07-20",
-      "issuesOpened": 32,
-      "issuesClosed": 29,
-      "commits": 122,
-      "prsMerged": 26,
-      "locAdded": 79368,
-      "locRemoved": 2100,
-      "locAddedViaPR": 46675,
+      "issuesOpened": 56,
+      "issuesClosed": 35,
+      "commits": 145,
+      "prsMerged": 33,
+      "locAdded": 98085,
+      "locRemoved": 2902,
+      "locAddedViaPR": 65392,
       "locAddedDirect": 32693
     }
   ],
@@ -910,23 +910,24 @@
     "2026-07-21": 3,
     "2026-07-23": 24,
     "2026-07-24": 56,
-    "2026-07-25": 16
+    "2026-07-25": 31,
+    "2026-07-26": 8
   },
   "languages": {
-    "TypeScript": 25519962,
-    "HTML": 12673101,
+    "TypeScript": 25604888,
+    "HTML": 12745303,
     "Python": 6606416,
-    "JavaScript": 2283707,
+    "JavaScript": 2451651,
     "Shell": 1123474,
     "Swift": 911634,
     "Kotlin": 825827,
     "Bicep": 694982,
     "Rust": 568184,
     "C#": 528788,
-    "CSS": 394336,
+    "CSS": 431880,
     "PowerShell": 253262,
     "HCL": 210969,
-    "Svelte": 90263,
+    "Svelte": 147867,
     "Dockerfile": 83021,
     "PLpgSQL": 65346,
     "Handlebars": 16188,
@@ -6221,10 +6222,10 @@
       "totals": {
         "issuesOpened": 0,
         "issuesClosed": 0,
-        "commits": 197,
-        "prsMerged": 56,
-        "locAdded": 95303,
-        "locRemoved": 4857
+        "commits": 200,
+        "prsMerged": 57,
+        "locAdded": 97861,
+        "locRemoved": 4948
       },
       "series": [
         {
@@ -6847,11 +6848,11 @@
           "weekStart": "2026-07-20",
           "issuesOpened": 0,
           "issuesClosed": 0,
-          "commits": 12,
-          "prsMerged": 4,
-          "locAdded": 11690,
-          "locRemoved": 1362,
-          "locAddedViaPR": 11690,
+          "commits": 15,
+          "prsMerged": 5,
+          "locAdded": 14248,
+          "locRemoved": 1453,
+          "locAddedViaPR": 14248,
           "locAddedDirect": 0
         }
       ],
@@ -6874,6 +6875,7 @@
         "2026-07-15": 2,
         "2026-07-14": 7,
         "2026-07-13": 1,
+        "2026-07-25": 3,
         "2026-07-24": 3,
         "2026-07-23": 3,
         "2026-07-21": 3,
@@ -6881,7 +6883,7 @@
       },
       "languages": {
         "JavaScript": 360564,
-        "HTML": 114047,
+        "HTML": 120027,
         "Shell": 7663
       }
     },
@@ -21186,38 +21188,39 @@
       "_id": "1027db67",
       "alias": "Snowy Osprey",
       "totals": {
-        "issuesOpened": 32,
-        "issuesClosed": 29,
-        "commits": 68,
-        "prsMerged": 16,
-        "locAdded": 47534,
-        "locRemoved": 524
+        "issuesOpened": 56,
+        "issuesClosed": 35,
+        "commits": 88,
+        "prsMerged": 22,
+        "locAdded": 63693,
+        "locRemoved": 1235
       },
       "series": [
         {
           "weekStart": "2026-07-20",
-          "issuesOpened": 32,
-          "issuesClosed": 29,
-          "commits": 68,
-          "prsMerged": 16,
-          "locAdded": 47534,
-          "locRemoved": 524,
-          "locAddedViaPR": 30353,
+          "issuesOpened": 56,
+          "issuesClosed": 35,
+          "commits": 88,
+          "prsMerged": 22,
+          "locAdded": 63693,
+          "locRemoved": 1235,
+          "locAddedViaPR": 46512,
           "locAddedDirect": 17181
         }
       ],
       "daily": {
-        "2026-07-25": 9,
+        "2026-07-26": 8,
+        "2026-07-25": 21,
         "2026-07-24": 50,
         "2026-07-23": 9
       },
       "languages": {
-        "TypeScript": 658293,
-        "Svelte": 90263,
-        "HTML": 21526,
-        "Shell": 12125,
-        "JavaScript": 1527,
-        "CSS": 358
+        "TypeScript": 743219,
+        "JavaScript": 169471,
+        "Svelte": 147867,
+        "HTML": 87748,
+        "CSS": 37902,
+        "Shell": 12125
       }
     },
     {
