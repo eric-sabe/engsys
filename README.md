@@ -67,8 +67,71 @@ node /path/to/engsys/install verify  --into .
 > Tip: from a clone you can also `cd engsys && npm link` once to get the bare
 > `engsys` command on your PATH, then use it exactly like Option A.
 
-The installer is **zero-dependency** Node (≥18) — it adds nothing to your
+The installer is **zero-dependency** Node (≥20.11) — it adds nothing to your
 project's dependency tree and runs the same on macOS, Windows, and Linux.
+
+## Worker providers (optional): Codex, DeepSeek, Grok
+
+engsys can dispatch **implement / review / critique / investigate** work to
+external model providers under one hard contract — packages in, machine-checked
+receipts out, with cross-family review as the merge gate (the reviewer's model
+family must differ from the author's). Design: [`docs/multi-provider-spec.md`](docs/multi-provider-spec.md);
+day-to-day procedure: `core/workflows/worker-dispatch.md` (installed to
+`.claude/workflows/`).
+
+**1. One-time machine setup** (per provider you want):
+
+```bash
+# Codex (OpenAI) — CLI worker with its own sandbox; ChatGPT plan or API billing
+npm install -g @openai/codex
+codex login            # browser sign-in; `codex login status` to confirm
+```
+
+```bash
+# DeepSeek — runs through an env-remapped `claude` CLI; metered API billing.
+# Create + fund a key at platform.deepseek.com, then put it where non-interactive
+# shells see it (~/.zshenv on macOS/zsh — .zshrc alone won't reach agent shells):
+echo 'export DEEPSEEK_API_KEY="sk-..."' >> ~/.zshenv
+```
+
+```bash
+# Grok (xAI) — API worker, review/critique/investigate lane only.
+# Create a key at console.x.ai:
+echo 'export XAI_API_KEY="xai-..."' >> ~/.zshenv
+```
+
+> nvm users: global npm packages don't follow you across node versions — after
+> `nvm use`/upgrades, re-run `npm install -g @openai/codex` (login state
+> survives in `~/.codex/`).
+
+**2. Enable providers in `engsys.config.yaml`** — flip `enabled: true` per
+worker in the `providers:` block (the example config ships the full block with
+per-role models and routing), then `engsys install|update --into .`. This
+installs `.claude/scripts/worker-run.mjs` + `worker-package.mjs`, per-provider
+adapters, worker briefs, and renders the routing table into `CLAUDE.md`.
+
+**3. Check readiness** — `engsys verify --into .` now prints a provider doctor
+matrix (binary present, auth valid, key accepted) alongside drift detection:
+
+```text
+provider doctor:
+  READY     codex — codex-cli 0.147.0
+  READY     deepseek — claude 2.x, remapped to https://api.deepseek.com/anthropic
+  READY     grok — xAI API reachable, key accepted
+  READY     anthropic — claude 2.x
+```
+
+**4. Naturalize the worker briefs** — run `/naturalize` and fill
+`.claude/workflows/briefs/project-brief-overlay.md` (house invariants, failure
+corpus, the exact verify commands). Review packages **refuse to build** while
+it's unfilled — a reviewer with no local priors is a review in name only.
+
+Two properties worth knowing before the first dispatch: workers never commit,
+push, or open PRs (the conductor commits per issue with a
+`Worker: <provider>/<model>` trailer), and a worker run that can't prove its
+protocol — missing receipt, wrong package hash, mutated tree on a read-only
+role — exits `2` ("did not run"), which is never read as findings and never as
+a pass.
 
 ## Commands
 

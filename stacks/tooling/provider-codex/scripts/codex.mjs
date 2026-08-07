@@ -17,7 +17,7 @@ export function check() {
 	if (probe.status !== 0) {
 		return { ready: false, detail: `\`codex --version\` exited ${probe.status} — check \`codex login\` has an active session.` };
 	}
-	return { ready: true, detail: `codex ${String(probe.stdout || '').trim()}` };
+	return { ready: true, detail: String(probe.stdout || '').trim() };
 }
 
 export function run({ frame, worktree, model, effort, timeoutSec, transcriptPath, lastMessagePath }) {

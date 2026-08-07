@@ -355,10 +355,15 @@ to `deepseek-v4-flash`; the adapter must read the returned model id from the
 JSON result and **exit 2 on mismatch**. A Flash run billed as a Pro review is a
 false green with extra steps.
 
-**provider-grok** — review / critique / rescue lane only (routing below). The
-concrete harness (existing Grok plugin vs. a thin xAI-API runner) is the one
-open implementation question, confirmed at M2 kickoff (§ 10). The contract does
-not care: package in, receipt out, or it is not a worker channel yet.
+**provider-grok** — review / critique / rescue lane only (routing below).
+**Harness decided 2026-08-07: the thin xAI-API runner** (packaged-diff lane) —
+chosen on ground truth: no Grok plugin exists on the operator's machine, and
+the API path keeps the lane self-contained. Requires `XAI_API_KEY`. The
+trade-off is explicit: no tools, so the adapter inlines the whole package plus
+the `base...HEAD` diff into one request (size-capped, refusing loudly when
+over); Grok cannot run gates and its brief requires disclosing that. Its
+verdict is one family's read of packaged evidence — the adversarial-diversity
+lane, never the sole gate on work whose verification requires execution.
 
 **provider-anthropic** — the explicit fallback, not ambient: a fresh `claude -p`
 (or subagent) run under the same package/receipt contract. This is what makes
@@ -510,10 +515,11 @@ before any new provider or any parallelism exists.
 
 ## 10. Risks & open questions
 
-- **Grok harness** — the one unresolved implementation choice (plugin vs. thin
-  xAI-API runner vs. compat-endpoint remap). Confirm at M2 kickoff; the
-  contract isolates the blast radius to one adapter file. Until it emits
-  receipts, Grok is a best-effort critique assistant, not a worker channel.
+- **Grok harness** — RESOLVED (2026-08-07): thin xAI-API runner, packaged-diff
+  lane (§ 6.2). Residual risk shifts to what that lane cannot do: no gate
+  execution, so a Grok CLEAN on execution-dependent work is weaker than a
+  tool-capable family's CLEAN — routing and the dual-review rule on
+  `risk: high` absorb this.
 - **Receipt compliance variance.** Codex honors last-line contracts today;
   DeepSeek/Grok discipline is unproven. Mitigation: the footer demand sits in
   the stdin frame's final lines (recency), and exit 2 + retry-once-smaller +

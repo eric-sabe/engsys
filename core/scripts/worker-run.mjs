@@ -104,11 +104,13 @@ function loadProviders() {
 }
 
 // --check: readiness probe only. Used by `engsys verify`'s provider doctor.
+// Adapter check()/run() may be sync or async (API-backed adapters like grok
+// are async); await handles both.
 if (flag('check')) {
 	const provider = arg('provider');
 	if (!provider) unavailable('--check requires --provider.', 'e.g. --check --provider codex');
 	const adapter = await loadAdapter(provider);
-	const r = adapter.check();
+	const r = await adapter.check();
 	console.log(`worker-run: ${provider} ${r.ready ? 'READY' : 'NOT READY'} — ${r.detail}`);
 	process.exit(r.ready ? 0 : 2);
 }
@@ -337,7 +339,7 @@ const lastMessagePath = join(packageDir, 'last-message.txt');
 for (const p of [transcriptPath, lastMessagePath]) rmSync(p, { force: true });
 
 const adapter = await loadAdapter(provider);
-const probe = adapter.check();
+const probe = await adapter.check();
 if (!probe.ready) {
 	unavailable(`provider "${provider}" is not ready: ${probe.detail}`, 'Fix the install/auth, or dispatch the next provider in the chain.');
 }
@@ -414,7 +416,7 @@ writeFileSync(join(packageDir, 'frame.txt'), frame);
 // Run the adapter.
 // ---------------------------------------------------------------------------
 
-const run = adapter.run({
+const run = await adapter.run({
 	frame,
 	worktree,
 	packageDir,
