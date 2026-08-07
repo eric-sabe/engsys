@@ -44,7 +44,8 @@ providers:
         critique: deepseek-v4-pro
         investigate: deepseek-v4-pro
     grok:
-      enabled: false          # review/critique/investigate lane; harness confirmed at M2
+      enabled: false          # review/critique/investigate lane only
+      via: auto               # cli (Grok Build subscription) | api (XAI_API_KEY, metered) | auto (prefer cli)
       models:
         review: grok-4.5
         critique: grok-4.5

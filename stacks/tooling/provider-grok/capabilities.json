@@ -1,12 +1,12 @@
 {
   "name": "grok",
   "family": "xai",
-  "harness": "thin xAI-API runner (packaged-diff lane, no tools)",
+  "harness": "dual-route: Grok Build CLI (subscription, read-only sandbox, tool-capable) or thin xAI-API runner (metered, packaged-diff, no tools); via: cli | api | auto",
   "can_gh": false,
   "can_network": true,
   "writes_tree": false,
   "runs_tests": false,
   "commits": false,
   "roles": ["review", "critique", "investigate"],
-  "env": ["XAI_API_KEY"]
+  "env": ["XAI_API_KEY (api route)", "GROK_BINARY (optional cli override)"]
 }

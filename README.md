@@ -95,8 +95,18 @@ echo 'export DEEPSEEK_API_KEY="sk-..."' >> ~/.zshenv
 ```
 
 ```bash
-# Grok (xAI) — API worker, review/critique/investigate lane only.
-# Create a key at console.x.ai:
+# Grok (xAI) — review/critique/investigate lane only. Two routes; `via: auto`
+# in the config prefers the subscription CLI and falls back to the API key.
+#
+# Route A — subscription (Grok Build CLI, SuperGrok tiers; flat-rate,
+# tool-capable in a read-only sandbox — the same engine xAI's grok-build
+# Claude Code plugin shells out to):
+curl -fsSL https://x.ai/cli/install.sh | bash
+grok                   # sign in once; `grok models` succeeding = logged in
+```
+
+```bash
+# Route B — metered API key (packaged-diff lane, no tools; console.x.ai):
 echo 'export XAI_API_KEY="xai-..."' >> ~/.zshenv
 ```
 

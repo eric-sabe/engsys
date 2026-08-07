@@ -105,12 +105,15 @@ function loadProviders() {
 
 // --check: readiness probe only. Used by `engsys verify`'s provider doctor.
 // Adapter check()/run() may be sync or async (API-backed adapters like grok
-// are async); await handles both.
+// are async); await handles both. The provider's config block is passed so
+// multi-route adapters (grok: subscription CLI vs API key) probe the route
+// the config actually selects.
 if (flag('check')) {
 	const provider = arg('provider');
 	if (!provider) unavailable('--check requires --provider.', 'e.g. --check --provider codex');
 	const adapter = await loadAdapter(provider);
-	const r = await adapter.check();
+	const conf = (loadProviders().workers || {})[provider] || {};
+	const r = await adapter.check(conf);
 	console.log(`worker-run: ${provider} ${r.ready ? 'READY' : 'NOT READY'} — ${r.detail}`);
 	process.exit(r.ready ? 0 : 2);
 }
@@ -339,7 +342,7 @@ const lastMessagePath = join(packageDir, 'last-message.txt');
 for (const p of [transcriptPath, lastMessagePath]) rmSync(p, { force: true });
 
 const adapter = await loadAdapter(provider);
-const probe = await adapter.check();
+const probe = await adapter.check(pconf);
 if (!probe.ready) {
 	unavailable(`provider "${provider}" is not ready: ${probe.detail}`, 'Fix the install/auth, or dispatch the next provider in the chain.');
 }
@@ -426,6 +429,7 @@ const run = await adapter.run({
 	timeoutSec,
 	transcriptPath,
 	lastMessagePath,
+	providerConfig: pconf,
 });
 
 function logRun(exit, extra = {}) {

@@ -356,14 +356,19 @@ JSON result and **exit 2 on mismatch**. A Flash run billed as a Pro review is a
 false green with extra steps.
 
 **provider-grok** — review / critique / rescue lane only (routing below).
-**Harness decided 2026-08-07: the thin xAI-API runner** (packaged-diff lane) —
-chosen on ground truth: no Grok plugin exists on the operator's machine, and
-the API path keeps the lane self-contained. Requires `XAI_API_KEY`. The
-trade-off is explicit: no tools, so the adapter inlines the whole package plus
-the `base...HEAD` diff into one request (size-capped, refusing loudly when
-over); Grok cannot run gates and its brief requires disclosing that. Its
-verdict is one family's read of packaged evidence — the adversarial-diversity
-lane, never the sole gate on work whose verification requires execution.
+**Harness decided 2026-08-07, revised same day to dual-route** (`via: cli |
+api | auto`, auto prefers cli). The `cli` route is the **subscription** path:
+the Grok Build CLI (`grok`, SuperGrok tiers) invoked the way xAI's own
+grok-build Claude Code plugin shells out to it — `-p` prompt, explore agent,
+plan permission mode, **read-only sandbox**, plain output; login probed by
+`grok models` succeeding; binary overridable via `$GROK_BINARY`. Tool-capable:
+Grok opens the package and reads the repo itself. The `api` route is the
+**metered** fallback (`XAI_API_KEY`): no tools, so the adapter inlines the
+whole package plus the `base...HEAD` diff into one request (size-capped,
+refusing loudly when over). The chosen route is printed on every run — which
+route a verdict came from changes what it could have seen. Either way Grok
+generally cannot *run* gates; its brief requires disclosing that, and its
+verdict is never the sole gate on execution-dependent work.
 
 **provider-anthropic** — the explicit fallback, not ambient: a fresh `claude -p`
 (or subagent) run under the same package/receipt contract. This is what makes
@@ -515,11 +520,13 @@ before any new provider or any parallelism exists.
 
 ## 10. Risks & open questions
 
-- **Grok harness** — RESOLVED (2026-08-07): thin xAI-API runner, packaged-diff
-  lane (§ 6.2). Residual risk shifts to what that lane cannot do: no gate
-  execution, so a Grok CLEAN on execution-dependent work is weaker than a
-  tool-capable family's CLEAN — routing and the dual-review rule on
-  `risk: high` absorb this.
+- **Grok harness** — RESOLVED (2026-08-07): dual-route, subscription CLI
+  preferred with metered-API fallback (§ 6.2). Residual risks: the read-only
+  lane cannot execute gates, so a Grok CLEAN on execution-dependent work is
+  weaker than a tool-capable family's CLEAN (routing and the `risk: high`
+  dual-review rule absorb this); and the CLI-route invocation mirrors the
+  official plugin's flags, which are beta-era — a flag rename in a Grok Build
+  release surfaces as a loud exit 2, never a silent degrade.
 - **Receipt compliance variance.** Codex honors last-line contracts today;
   DeepSeek/Grok discipline is unproven. Mitigation: the footer demand sits in
   the stdin frame's final lines (recency), and exit 2 + retry-once-smaller +

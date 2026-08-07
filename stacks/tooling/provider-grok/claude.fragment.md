@@ -3,14 +3,18 @@
 Grok's lane is **adversarial review, critique, and stuck-loop rescue** — never
 implementation. See § Worker providers and `.claude/workflows/worker-dispatch.md`.
 
-- Harness: **thin xAI-API runner** (packaged-diff lane). Requires `XAI_API_KEY`
-  in the environment. The adapter inlines the whole package plus the
-  `base...HEAD` diff into one request.
-- **No tools.** Grok cannot open files or run the gates; its brief requires it
-  to disclose that, and its verdict is one family's read of the packaged
-  evidence. Use it for family-diverse adversarial reads — never as the sole
-  gate on work whose verification depends on running anything.
-- Oversized changes (package + diff past the adapter's cap) refuse loudly —
-  route those reviews to a tool-capable provider instead.
-- Best fit: second family on Anthropic-authored judgment surfaces, alternate
-  plans when a loop is stuck, and design/copy critique.
+Two routes, one contract (`providers.workers.grok.via: cli | api | auto`;
+auto prefers the subscription CLI):
+
+- **`cli` (subscription)** — the Grok Build CLI (`grok`), signed in with a
+  SuperGrok subscription; the same engine xAI's grok-build Claude Code plugin
+  shells out to. Tool-capable in a **read-only sandbox**: Grok opens the
+  package and reads the repo itself. Login probe: `grok models` succeeds.
+- **`api` (metered)** — `XAI_API_KEY`; the adapter inlines the whole package
+  plus the `base...HEAD` diff into one request. No tools; oversized changes
+  refuse loudly (route those to the CLI route or a tool-capable provider).
+
+Either route may be unable to **run** the gates; the brief requires disclosing
+that, and a Grok verdict is never the sole gate on work whose verification
+depends on execution. Best fit: second family on Anthropic-authored judgment
+surfaces, alternate plans when a loop is stuck, and design/copy critique.
