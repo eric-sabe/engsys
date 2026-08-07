@@ -36,7 +36,12 @@ const grokBinary = () => process.env.GROK_BINARY || 'grok';
 
 function cliStatus() {
 	// `grok models` succeeding is the login probe the official plugin uses.
-	const probe = spawnSync(grokBinary(), ['models'], { encoding: 'utf8', timeout: 20_000 });
+	// 60s, not 20s: Grok Build indexes the repo's Claude Code config on its
+	// FIRST run in a directory, and in a large repo that cold start blew a 20s
+	// probe — the doctor reported a logged-in CLI as NOT READY, then READY on
+	// the warm re-run. A readiness probe that fails on cold cache is a flaky
+	// instrument; warm runs answer in ~3s either way.
+	const probe = spawnSync(grokBinary(), ['models'], { encoding: 'utf8', timeout: 60_000 });
 	if (probe.error?.code === 'ENOENT') {
 		return { ready: false, detail: `the \`${grokBinary()}\` CLI is not on PATH (install: curl -fsSL https://x.ai/cli/install.sh | bash; or set GROK_BINARY).` };
 	}
