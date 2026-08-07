@@ -7,7 +7,9 @@ and `.claude/workflows/worker-dispatch.md` for the procedure.
 - Best fit: high-volume mechanical work, tests, boilerplate (**Flash**) and
   capable low-cost implement/review overflow (**Pro**). Its value is parallel
   overflow capacity and family diversity, not primarily savings.
-- Requires `DEEPSEEK_API_KEY` in the environment (metered billing).
+- Requires `DEEPSEEK_API_KEY` (metered billing) — from the environment or a
+  gitignored `.env` (project root, main checkout, or `~/.config/engsys/env`;
+  the worker scripts load these automatically, env vars winning).
 - The adapter builds the child env from an allowlist (the worker never inherits
   this session) and **asserts the responding model id** — DeepSeek's compat
   endpoint silently aliases unknown model names to `deepseek-v4-flash`.

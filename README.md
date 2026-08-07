@@ -88,27 +88,38 @@ codex login            # browser sign-in; `codex login status` to confirm
 ```
 
 ```bash
-# DeepSeek — runs through an env-remapped `claude` CLI; metered API billing.
-# Create + fund a key at platform.deepseek.com, then put it where non-interactive
-# shells see it (~/.zshenv on macOS/zsh — .zshrc alone won't reach agent shells):
-echo 'export DEEPSEEK_API_KEY="sk-..."' >> ~/.zshenv
-```
-
-```bash
-# Grok (xAI) — review/critique/investigate lane only. Two routes; `via: auto`
-# in the config prefers the subscription CLI and falls back to the API key.
-#
-# Route A — subscription (Grok Build CLI, SuperGrok tiers; flat-rate,
-# tool-capable in a read-only sandbox — the same engine xAI's grok-build
-# Claude Code plugin shells out to):
+# Grok (xAI), subscription route — the Grok Build CLI (SuperGrok tiers;
+# flat-rate, tool-capable in a read-only sandbox — the same engine xAI's
+# grok-build Claude Code plugin shells out to). `via: auto` in the config
+# prefers this route and falls back to an API key:
 curl -fsSL https://x.ai/cli/install.sh | bash
 grok                   # sign in once; `grok models` succeeding = logged in
 ```
 
+**API keys go in a gitignored `.env`, not your shell profile.** DeepSeek
+(create + fund a key at platform.deepseek.com) and Grok's metered API route
+(console.x.ai) are key-based. The worker scripts load, in order — real
+environment variables always winning over files:
+
+1. `$ENGSYS_ENV_FILE` — explicit override, any path
+2. `<project>/.env` — the repo you're dispatching from (**gitignore it**)
+3. the main checkout's `.env` when running in a git worktree (worktrees don't
+   share untracked files; the loader hops to the main checkout so dispatches
+   from worktrees still find your keys)
+4. `~/.config/engsys/env` — machine-wide, outside any repo
+
 ```bash
-# Route B — metered API key (packaged-diff lane, no tools; console.x.ai):
-echo 'export XAI_API_KEY="xai-..."' >> ~/.zshenv
+# in the project (or in ~/.config/engsys/env for machine-wide):
+cat >> .env <<'KEYS'
+DEEPSEEK_API_KEY=sk-...
+XAI_API_KEY=xai-...
+KEYS
+grep -qx '.env' .gitignore || echo '.env' >> .gitignore
 ```
+
+The loader warns loudly if a `.env` it reads is tracked by git — a committed
+`.env` publishes its keys to every clone; gitignore it and rotate anything it
+held.
 
 > nvm users: global npm packages don't follow you across node versions — after
 > `nvm use`/upgrades, re-run `npm install -g @openai/codex` (login state

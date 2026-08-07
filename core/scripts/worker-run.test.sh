@@ -17,6 +17,7 @@ trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/scripts/workers"
 cp "$HERE/worker-run.mjs" "$T/scripts/"
 cp "$HERE/worker-package.mjs" "$T/scripts/"
+cp "$HERE/_env.mjs" "$T/scripts/"
 
 cat > "$T/scripts/workers/test.mjs" <<'EOF'
 // Controllable adapter: the "worker" is whatever the test says it said.
@@ -223,6 +224,14 @@ if [ "$got" -eq 2 ] && echo "$OUT" | grep -q "twice in a row"; then
 else
   FAIL=$((FAIL+1)); echo "  FAIL want=2+refusal got=$got  anti-thrash"; echo "$OUT" | head -6
 fi
+
+# 19. Credentials via gitignored .env, not shell env: the adapter's control
+# variable travels through the repo .env → loader → process.env → adapter.
+clear_env; mkpkg c19 review 0 0
+printf 'Done.\nRECEIPT: package=%s issues=#1\nVERDICT: CLEAN\n' "$H8" > "$T/envmsg.txt"
+printf 'WORKER_TEST_MSG=%s\n' "$T/envmsg.txt" > "$T/repo/.env"
+run_case 0 "adapter env supplied by repo .env (loader path)" --package "$PKG"
+rm -f "$T/repo/.env"
 
 echo
 echo "$PASS/$N passed."
