@@ -21,6 +21,55 @@ stack:
 # Issue tracker (PRs / CI always stay on GitHub — this is a separate axis).
 issue_tracker: github   # github | linear | jira
 
+# Worker providers (docs/multi-provider-spec.md). Each enabled worker selects
+# stacks/tooling/provider-<name>/ and renders into .claude/scripts/providers.json
+# (machine-readable routing) + a CLAUDE.md table. No block = no worker layer.
+# Enable a worker by flipping `enabled: true`; models are per-role defaults that
+# worker-run --model can override per dispatch (e.g. Sol/Pro escalation).
+providers:
+  conductor: anthropic
+  workers:
+    codex:
+      enabled: false
+      models:
+        implement: gpt-5.6-terra
+        review: gpt-5.6-sol
+        critique: gpt-5.6-sol
+        investigate: gpt-5.6-terra
+    deepseek:
+      enabled: false          # requires DEEPSEEK_API_KEY in the environment
+      models:
+        implement: deepseek-v4-flash
+        review: deepseek-v4-pro
+        critique: deepseek-v4-pro
+        investigate: deepseek-v4-pro
+    grok:
+      enabled: false          # review/critique/investigate lane; harness confirmed at M2
+      models:
+        review: grok-4.5
+        critique: grok-4.5
+        investigate: grok-4.5
+    anthropic:
+      enabled: false          # explicit worker lane (fresh claude session), review-chain terminal fallback
+      models:
+        implement: sonnet
+        review: opus
+        critique: opus
+        investigate: sonnet
+  routing:
+    implement_default: codex
+    review: cross_family      # hard rule: reviewer family ≠ author family
+    review_fallback_chain: [codex, grok, deepseek, anthropic]  # walked minus the author's family
+    overflow: deepseek
+    critique: grok
+  parallel:
+    enabled: false            # stays false until the spec § 8.3 preconditions pass
+    max_workers: 3
+    require_nonoverlapping_touches: true
+  timeouts:                   # seconds, per role
+    implement: 3600
+    review: 2700
+
 agents:
   core: all             # 'all' or an explicit list, e.g. [melvin, isabelle, bert] — includes gary (design critic)
   extra: [sandy]        # opt-in personas from optional-agents/ (sandy, jos, steve)

@@ -1,0 +1,11 @@
+{
+  "name": "anthropic",
+  "family": "anthropic",
+  "harness": "fresh claude -p child session (never the conductor's)",
+  "can_gh": false,
+  "can_network": true,
+  "writes_tree": true,
+  "runs_tests": true,
+  "commits": false,
+  "roles": ["implement", "review", "critique", "investigate"]
+}

@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(claude --version)",
+      "Bash(node .claude/scripts/worker-package.mjs:*)",
+      "Bash(node .claude/scripts/worker-run.mjs:*)"
+    ]
+  }
+}

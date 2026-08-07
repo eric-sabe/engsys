@@ -290,13 +290,19 @@ core/workflows/briefs/
   critique.md  investigate.md
 ```
 
-Each brief carries a fenced `ENGSYS:PROJECT-BRIEF` region. Naturalization fills
-it with the project's house-defect corpus, invariants, and real gate commands —
-same mechanism as CLAUDE.md's PROJECT-FACTS, same drift protection from
-`verify`. The renderer refuses to install a brief whose project region is empty
-for `review-correctness` (a reviewer with no local priors is a review in name
-only — the letter-check generalized). Provider packs may append only a thin
-adapter note (≤ 10 lines: "no `gh` in sandbox", "read-only lane").
+The project half lives in **one project-owned overlay file**,
+`.claude/workflows/briefs/project-brief-overlay.md` — seeded once from a
+template at install, filled by `/naturalize` (house-defect corpus, invariants,
+framework traps, the exact verify commands), never overwritten by `update`.
+The package builder appends it to every role brief, so one source feeds all
+roles without duplication. (Implementation note: this replaced the draft's
+fenced-region-per-brief design — a managed-vs-owned file split is cleaner than
+five generated files with preserved regions, and it keeps core briefs
+hash-verifiable by `engsys verify`.) The builder refuses to build a
+`review-correctness` package while the overlay still carries its TODO sentinel
+(a reviewer with no local priors is a review in name only — the letter-check
+generalized). Provider packs append only a thin adapter note ("no `gh` in
+sandbox", "read-only lane").
 
 Project-closeout gains one step: newly memorialized failure families get
 promoted into the project brief region, not just `docs/agent-lessons/` — the

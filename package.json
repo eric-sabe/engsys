@@ -15,11 +15,11 @@
     "engsys.config.example.yaml"
   ],
   "scripts": {
-    "test": "node lib/selftest.js",
+    "test": "node lib/selftest.js && bash core/scripts/worker-run.test.sh && bash core/scripts/worker-package.test.sh",
     "prepublishOnly": "node lib/selftest.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20.11"
   },
   "keywords": [
     "claude",

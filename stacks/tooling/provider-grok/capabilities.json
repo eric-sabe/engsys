@@ -1,0 +1,11 @@
+{
+  "name": "grok",
+  "family": "xai",
+  "harness": "UNCONFIRMED (spec § 10 — decide at M2: Grok plugin vs thin xAI-API runner)",
+  "can_gh": false,
+  "can_network": false,
+  "writes_tree": false,
+  "runs_tests": false,
+  "commits": false,
+  "roles": ["review", "critique", "investigate"]
+}

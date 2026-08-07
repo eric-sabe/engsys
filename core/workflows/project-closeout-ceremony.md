@@ -54,7 +54,7 @@ Then classify by **mistake family**, not by individual fix. For each family ask:
 
 Automatic behaviors that apply to **anyone** in the repo go in the repo, not personal memory:
 
-- A **new, recurring** failure family → a new `docs/agent-lessons/<slug>.md` (trigger / failure mode / correct behavior / check / source).
+- A **new, recurring** failure family → a new `docs/agent-lessons/<slug>.md` (trigger / failure mode / correct behavior / check / source). **If a worker layer is installed**, also promote the family into `.claude/workflows/briefs/project-brief-overlay.md` (§ House failure corpus) — that file feeds every worker/reviewer brief directly, so the lesson starts hunting instead of waiting to be read.
 - A family already documented but still recurring → strengthen the existing lesson + add the new variant + a Start-of-PR-check line.
 - A reusable workflow/agent/command gap exposed by the run → update the relevant `.claude/workflows/*.md`, `.claude/agents/*.md`, or `CLAUDE.md`.
 - **Generalizable lessons** (not tied to this project's stack/domain) → also open a PR back to the engsys `lessons-library/` so other projects inherit them.
