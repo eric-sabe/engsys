@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(codex --version)",
+      "Bash(codex exec:*)",
+      "Bash(node .claude/scripts/worker-package.mjs:*)",
+      "Bash(node .claude/scripts/worker-run.mjs:*)"
+    ]
+  }
+}

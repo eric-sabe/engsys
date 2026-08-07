@@ -28,6 +28,17 @@ Do this:
    values. For iOS, that's the Xcode project path, scheme, simulator UDID, bundle
    id; for cloud, the resource group / account / naming suffix.
 
+3b. **Fill the project brief overlay (worker-layer installs only).** If
+   `.claude/workflows/briefs/project-brief-overlay.md` exists, fill every
+   section and remove the `TODO(naturalize)` sentinels: hard invariants, the
+   house failure corpus (mine `docs/agent-lessons/` and past review findings —
+   "here is how this repo fails" is the highest-leverage worker context),
+   framework traps, the **exact verify commands** (worker packages extract the
+   fenced block into `verify.md`), and notes for reviewers. Review packages
+   refuse to build while the sentinel remains — a reviewer with no local priors
+   is a review in name only. This file is project-owned: `engsys update` never
+   touches it, and project closeout promotes new failure families into it.
+
 4. **Fold in imported AI config (if any).** If `docs/imported-ai-config/` exists,
    the installer found pre-existing Copilot/Cursor/etc. config and snapshotted it.
    Read each file and:

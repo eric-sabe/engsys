@@ -11,7 +11,7 @@
 
 const path = require('path');
 const fs = require('fs');
-const { runInstall, runUninstall, runVerify, ENGSYS_VERSION } = require('./lib/commands');
+const { runInstall, runUninstall, runVerify, runEnableProviders, ENGSYS_VERSION } = require('./lib/commands');
 const { exists } = require('./lib/util');
 
 const engsysRoot = __dirname;
@@ -49,7 +49,13 @@ Commands:
       Re-render from current engsys + config. Preserves CLAUDE.md project facts
       and hand-added permissions; prunes files orphaned by deselected packs.
   verify  --into <path>
-      Check installed files against the lock (drift detection).
+      Check installed files against the lock (drift detection), plus a provider
+      readiness matrix (binary/auth/key) when a worker layer is installed.
+  enable-providers <names> --into <path> [--dry-run]
+      One-command path onto the multi-provider worker layer for an existing
+      install: appends a providers: block (comma-separated names from: codex,
+      deepseek, grok, anthropic) with per-role model defaults to the project
+      config, then runs update. Refuses if the config already has one.
   uninstall --into <path> [--dry-run]
       Remove everything engsys added and restore the project's prior files (from
       .claude/.engsys-backup/). The project's own agents/files are left intact.
@@ -167,6 +173,38 @@ function main() {
     process.exit(0);
   }
 
+  if (cmd === 'enable-providers') {
+    if (!args.into) { console.error('error: --into <path> is required'); process.exit(1); }
+    const names = (args._[1] || '').split(/[\s,]+/).filter(Boolean);
+    if (!names.length) {
+      console.error('error: name the providers to enable, e.g. `engsys enable-providers codex,deepseek --into .`');
+      process.exit(1);
+    }
+    const into = path.resolve(args.into);
+    let r;
+    try {
+      r = runEnableProviders({ engsysRoot, into, config: args.config, dryRun: args.dryRun, providers: names });
+    } catch (e) {
+      console.error(`error: ${e.message}`);
+      process.exit(1);
+    }
+    if (args.dryRun) {
+      console.log(`engsys enable-providers (dry run — nothing written) → would append to ${r.configPath}:`);
+      console.log(r.block);
+      process.exit(0);
+    }
+    console.log(`engsys enable-providers → ${names.join(', ')} appended to ${path.relative(into, r.configPath)}, then:`);
+    console.log(report(r.result, 'update'));
+    console.log('');
+    console.log('Worker-layer next steps:');
+    console.log('  - API keys (deepseek; grok api route) go in a gitignored .env — project root,');
+    console.log('    the main checkout when using worktrees, or ~/.config/engsys/env.');
+    console.log('  - Fill .claude/workflows/briefs/project-brief-overlay.md via /naturalize —');
+    console.log('    review packages refuse to build while it is unfilled.');
+    console.log(`  - \`engsys verify --into ${args.into}\` prints the provider readiness matrix.`);
+    process.exit(0);
+  }
+
   if (cmd === 'uninstall') {
     if (!args.into) { console.error('error: --into <path> is required'); process.exit(1); }
     const into = path.resolve(args.into);
@@ -184,6 +222,14 @@ function main() {
     if (!args.into) { console.error('error: --into <path> is required'); process.exit(1); }
     const into = path.resolve(args.into);
     const r = runVerify({ into });
+    // The provider doctor is informational: readiness is environmental (a
+    // missing binary on CI is not drift), so it never changes the exit code.
+    if (r.doctor) {
+      console.log('provider doctor:');
+      for (const row of r.doctor) {
+        console.log(`  ${row.ready ? 'READY    ' : 'NOT READY'} ${row.provider} — ${row.detail}`);
+      }
+    }
     if (r.ok) {
       console.log(`verify: OK — ${Object.keys(r.lock.managed).length} managed files match (engsys ${r.lock.engsysVersion}).`);
       process.exit(0);

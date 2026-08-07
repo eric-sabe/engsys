@@ -67,8 +67,99 @@ node /path/to/engsys/install verify  --into .
 > Tip: from a clone you can also `cd engsys && npm link` once to get the bare
 > `engsys` command on your PATH, then use it exactly like Option A.
 
-The installer is **zero-dependency** Node (≥18) — it adds nothing to your
+The installer is **zero-dependency** Node (≥20.11) — it adds nothing to your
 project's dependency tree and runs the same on macOS, Windows, and Linux.
+
+## Worker providers (optional): Codex, DeepSeek, Grok
+
+engsys can dispatch **implement / review / critique / investigate** work to
+external model providers under one hard contract — packages in, machine-checked
+receipts out, with cross-family review as the merge gate (the reviewer's model
+family must differ from the author's). Design: [`docs/multi-provider-spec.md`](docs/multi-provider-spec.md);
+day-to-day procedure: `core/workflows/worker-dispatch.md` (installed to
+`.claude/workflows/`).
+
+**1. One-time machine setup** (per provider you want):
+
+```bash
+# Codex (OpenAI) — CLI worker with its own sandbox; ChatGPT plan or API billing
+npm install -g @openai/codex
+codex login            # browser sign-in; `codex login status` to confirm
+```
+
+```bash
+# Grok (xAI), subscription route — the Grok Build CLI (SuperGrok tiers;
+# flat-rate, tool-capable in a read-only sandbox — the same engine xAI's
+# grok-build Claude Code plugin shells out to). `via: auto` in the config
+# prefers this route and falls back to an API key:
+curl -fsSL https://x.ai/cli/install.sh | bash
+grok                   # sign in once; `grok models` succeeding = logged in
+```
+
+**API keys go in a gitignored `.env`, not your shell profile.** DeepSeek
+(create + fund a key at platform.deepseek.com) and Grok's metered API route
+(console.x.ai) are key-based. The worker scripts load, in order — real
+environment variables always winning over files:
+
+1. `$ENGSYS_ENV_FILE` — explicit override, any path
+2. `<project>/.env` — the repo you're dispatching from (**gitignore it**)
+3. the main checkout's `.env` when running in a git worktree (worktrees don't
+   share untracked files; the loader hops to the main checkout so dispatches
+   from worktrees still find your keys)
+4. `~/.config/engsys/env` — machine-wide, outside any repo
+
+```bash
+# in the project (or in ~/.config/engsys/env for machine-wide):
+cat >> .env <<'KEYS'
+DEEPSEEK_API_KEY=sk-...
+XAI_API_KEY=xai-...
+KEYS
+grep -qx '.env' .gitignore || echo '.env' >> .gitignore
+```
+
+The loader warns loudly if a `.env` it reads is tracked by git — a committed
+`.env` publishes its keys to every clone; gitignore it and rotate anything it
+held.
+
+> nvm users: global npm packages don't follow you across node versions — after
+> `nvm use`/upgrades, re-run `npm install -g @openai/codex` (login state
+> survives in `~/.codex/`).
+
+**2. Enable providers** — one command on a new *or existing* install:
+
+```bash
+engsys enable-providers codex,deepseek,grok,anthropic --into .
+```
+
+It appends a `providers:` block with per-role model defaults to your config
+(refusing if one already exists — edit that directly) and runs `update`, which
+installs `.claude/scripts/worker-run.mjs` + `worker-package.mjs`, per-provider
+adapters, worker briefs, and renders the routing table into `CLAUDE.md`.
+Prefer hand-editing? The example config ships the full block; flip
+`enabled: true` per worker and run `update` yourself.
+
+**3. Check readiness** — `engsys verify --into .` now prints a provider doctor
+matrix (binary present, auth valid, key accepted) alongside drift detection:
+
+```text
+provider doctor:
+  READY     codex — codex-cli 0.147.0
+  READY     deepseek — claude 2.x, remapped to https://api.deepseek.com/anthropic
+  READY     grok — xAI API reachable, key accepted
+  READY     anthropic — claude 2.x
+```
+
+**4. Naturalize the worker briefs** — run `/naturalize` and fill
+`.claude/workflows/briefs/project-brief-overlay.md` (house invariants, failure
+corpus, the exact verify commands). Review packages **refuse to build** while
+it's unfilled — a reviewer with no local priors is a review in name only.
+
+Two properties worth knowing before the first dispatch: workers never commit,
+push, or open PRs (the conductor commits per issue with a
+`Worker: <provider>/<model>` trailer), and a worker run that can't prove its
+protocol — missing receipt, wrong package hash, mutated tree on a read-only
+role — exits `2` ("did not run"), which is never read as findings and never as
+a pass.
 
 ## Commands
 
@@ -77,7 +168,8 @@ project's dependency tree and runs the same on macOS, Windows, and Linux.
 | `init [--into <path>]` | Scaffold `engsys.config.yaml` from the bundled example (default: current dir). Handy after a global `npm install`. |
 | `install --into <path>` | First-time materialization of `.claude/`, `CLAUDE.md`, settings, `.mcp.json`. |
 | `update --into <path>` | Re-render from current engsys + config. Preserves the CLAUDE.md PROJECT-FACTS region and any hand-added permissions; heals drift in managed files. |
-| `verify --into <path>` | Compares installed managed files against the lockfile; reports missing/modified. |
+| `verify --into <path>` | Compares installed managed files against the lockfile; reports missing/modified. Prints the provider readiness matrix when a worker layer is installed. |
+| `enable-providers <names> --into <path>` | Appends a `providers:` block (from `codex,deepseek,grok,anthropic`) with per-role model defaults to the project config, then runs `update`. |
 | `uninstall --into <path>` | Removes everything engsys added and restores the project's prior files. |
 | `--dry-run` | (install/update/uninstall) print the plan, write nothing. |
 

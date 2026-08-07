@@ -152,7 +152,27 @@ Given the reconciled sections, enrich with: testability assessment; unit/integra
 
 Given the full reconciled spec, ask Jody to: convert it into a phased project plan; define phases that map to future implementation PR batches; create ordered, labeled tracker issues (with dependencies, acceptance criteria, owner persona, labels, test obligations) via the issue-tracker skill's `create-issue` operation; create the tracker board with the skill's `create-board` operation; add issues to the board (`add-to-board`) and set Phase/Priority/Owner/Status fields with `set-board-field` (on GitHub these run `gh project` / `gh api graphql`); enrich the spec with project number, issue list, phase order, dependencies, and implementation handoff notes.
 
-Jody's output must be concrete enough that Isabelle can implement each phase using [agent-implementation-workflow.md](agent-implementation-workflow.md).
+**Every issue body ends with an `engsys:issue-meta` block** — machine-readable fields inside an HTML comment so the rendered issue stays clean. The worker package builder consumes `touches` (→ binding churn list), `spec_refs` (→ extracted spec slices), `no_external` (→ provider-boundary routing), and `risk` (→ dual-review trigger) **today**; `depends_on` orders issues inside a package and, later, feeds the parallel dispatcher (multi-provider spec § 8):
+
+```markdown
+<!-- engsys:issue-meta
+depends_on: [12, 15]
+touches: ["src/lib/points/**", "src/routes/awards/+page*"]
+risk: low
+needs_judgment: false
+spec_refs: ["docs/specs/foo.md#Receipt drawer"]
+no_external: false
+-->
+```
+
+- `depends_on`: issue numbers this one builds on (empty list is fine, absence is not).
+- `touches`: the file globs the issue may change — think hard here; an honest churn list is what makes overlap detection and review scoping work.
+- `risk`: `low | med | high` — `high` means two review families must return CLEAN.
+- `needs_judgment`: `true` routes to the orchestrator's personas, never to a worker.
+- `spec_refs`: `path#Heading` slices the builder extracts verbatim into the contract.
+- `no_external`: `true` pins the issue to anthropic/openai lanes (sensitive content).
+
+Jody's output must be concrete enough that Isabelle can implement each phase using [agent-implementation-workflow.md](agent-implementation-workflow.md), and each issue's meta block must parse — the Phase 6 sanity check fails on a missing or malformed block.
 
 ---
 
@@ -210,7 +230,7 @@ Set each item's Phase/Priority/Owner via the skill's `set-board-field` operation
 
 Run a fresh general-purpose or planning subagent with **no prior design-loop context**. Give it the final spec path, project number, issue numbers, and the rule: one phase = one implementation PR; each issue = one commit.
 
-Ask it to verify: the spec goal maps to phases and issues; every acceptance criterion has an issue; every security requirement has an issue or explicit AC; every testing requirement has an issue or AC; dependencies are ordered correctly; phase boundaries are implementation-friendly; labels and owners match conventions; no duplicate/missing/vague issues; no hidden work outside the project; **the project has `Phase`, `Priority`, `Owner` fields populated for every item** (re-query via the skill's `query-board` — if any item is missing a `Phase`, the sanity check fails and Jody must fix it before handoff).
+Ask it to verify: the spec goal maps to phases and issues; every acceptance criterion has an issue; every security requirement has an issue or explicit AC; every testing requirement has an issue or AC; dependencies are ordered correctly; phase boundaries are implementation-friendly; labels and owners match conventions; no duplicate/missing/vague issues; no hidden work outside the project; **the project has `Phase`, `Priority`, `Owner` fields populated for every item** (re-query via the skill's `query-board` — if any item is missing a `Phase`, the sanity check fails and Jody must fix it before handoff); **every issue body carries a parseable `engsys:issue-meta` block** (§ 4G) whose `depends_on` numbers exist in the project, whose `risk` is `low|med|high`, and whose `touches` globs are non-empty for implementation issues — a missing or malformed block fails the sanity check the same way a missing `Phase` does.
 
 Merge sanity-check fixes into the spec. If issues must change, update the tracker immediately.
 

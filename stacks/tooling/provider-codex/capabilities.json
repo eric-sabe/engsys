@@ -1,0 +1,11 @@
+{
+  "name": "codex",
+  "family": "openai",
+  "harness": "codex exec (workspace-write sandbox)",
+  "can_gh": false,
+  "can_network": false,
+  "writes_tree": true,
+  "runs_tests": true,
+  "commits": false,
+  "roles": ["implement", "review", "critique", "investigate"]
+}
