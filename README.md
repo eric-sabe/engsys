@@ -125,11 +125,18 @@ held.
 > `nvm use`/upgrades, re-run `npm install -g @openai/codex` (login state
 > survives in `~/.codex/`).
 
-**2. Enable providers in `engsys.config.yaml`** — flip `enabled: true` per
-worker in the `providers:` block (the example config ships the full block with
-per-role models and routing), then `engsys install|update --into .`. This
+**2. Enable providers** — one command on a new *or existing* install:
+
+```bash
+engsys enable-providers codex,deepseek,grok,anthropic --into .
+```
+
+It appends a `providers:` block with per-role model defaults to your config
+(refusing if one already exists — edit that directly) and runs `update`, which
 installs `.claude/scripts/worker-run.mjs` + `worker-package.mjs`, per-provider
 adapters, worker briefs, and renders the routing table into `CLAUDE.md`.
+Prefer hand-editing? The example config ships the full block; flip
+`enabled: true` per worker and run `update` yourself.
 
 **3. Check readiness** — `engsys verify --into .` now prints a provider doctor
 matrix (binary present, auth valid, key accepted) alongside drift detection:
@@ -161,7 +168,8 @@ a pass.
 | `init [--into <path>]` | Scaffold `engsys.config.yaml` from the bundled example (default: current dir). Handy after a global `npm install`. |
 | `install --into <path>` | First-time materialization of `.claude/`, `CLAUDE.md`, settings, `.mcp.json`. |
 | `update --into <path>` | Re-render from current engsys + config. Preserves the CLAUDE.md PROJECT-FACTS region and any hand-added permissions; heals drift in managed files. |
-| `verify --into <path>` | Compares installed managed files against the lockfile; reports missing/modified. |
+| `verify --into <path>` | Compares installed managed files against the lockfile; reports missing/modified. Prints the provider readiness matrix when a worker layer is installed. |
+| `enable-providers <names> --into <path>` | Appends a `providers:` block (from `codex,deepseek,grok,anthropic`) with per-role model defaults to the project config, then runs `update`. |
 | `uninstall --into <path>` | Removes everything engsys added and restores the project's prior files. |
 | `--dry-run` | (install/update/uninstall) print the plan, write nothing. |
 
