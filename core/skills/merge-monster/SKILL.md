@@ -82,7 +82,10 @@ fresh, nothing else merges. Full design: `docs/merge-monster.md` in engsys
 
 ## Preflight (verify the enqueuer's claims)
 
-`gh pr view N --json isDraft,mergeable,mergeStateStatus,reviewThreads,baseRefName,body,comments,files,commits`
+`<skill-dir>/scripts/mm-preflight.sh --repo <repo> --pr N` — `gh pr view --json`
+has no `reviewThreads` field (thread resolution is GraphQL-only); this script
+stitches `isDraft,mergeable,mergeStateStatus,baseRefName,body,comments,files,commits`
+from `gh pr view` together with a `reviewThreads` GraphQL query into one object.
 
 - all review threads resolved (the ruleset will block otherwise)
 - `ready_requirements.review_marker` comment present, if configured

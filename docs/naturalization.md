@@ -21,11 +21,15 @@ engsys verify --into .      # confirm nothing drifted
 - The fenced `PROJECT-FACTS` region of `CLAUDE.md` (between the
   `ENGSYS:PROJECT-FACTS:START/END` markers). `engsys update` regenerates
   everything *outside* this region and never overwrites what's inside.
-- `<naturalize: ...>` / `<proj>` / `<rg>` / `<env>` / `<suffix>` placeholders that
-  packs left in `.mcp.json`, hooks, and the spliced CLAUDE.md fragments.
+- `<naturalize: ...>` / `<proj>` / `<rg>` / `<env>` / `<suffix>` placeholders in
+  `.mcp.json`. This one is safe to hand-edit in place: `engsys update`
+  deep-merges each mcpServer entry and only refreshes fields still carrying the
+  literal `<naturalize: ...>` marker, so a naturalized value survives every
+  future update.
 - The project's `engsys.config.yaml` `naturalize:` block (model_strategy,
   hook_patterns, invariants) — edit there and re-run `engsys update` rather than
-  hand-editing generated files.
+  hand-editing generated files. `invariants` renders as a bullet list appended
+  to the PROJECT-FACTS seed on first install.
 
 ## What naturalization must NOT touch
 
@@ -35,7 +39,12 @@ engsys verify --into .      # confirm nothing drifted
   differences belong in *packs*, selected via config — not in edits to a
   persona. If Melvin feels "too generic," the fix is a richer
   `cloud-architecture-<cloud>` pack in engsys, not a per-project edit.
-- Content outside the PROJECT-FACTS fence in CLAUDE.md.
+- Content outside the PROJECT-FACTS fence in CLAUDE.md — this includes the
+  `## Stack` section, which is a pack's `claude.fragment.md` spliced in
+  verbatim and fully regenerated on every `engsys update`. Any `<!-- naturalize:
+  ... -->` comment there is an installer-owned example, not a fill-in-the-blank
+  — a hand-edit is silently reverted by the next update. Capture the resolved
+  facts in the PROJECT-FACTS region instead.
 
 ## Good project facts
 
