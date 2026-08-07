@@ -1,0 +1,12 @@
+{
+  "name": "deepseek",
+  "family": "deepseek",
+  "harness": "claude -p env-remapped to api.deepseek.com/anthropic",
+  "can_gh": false,
+  "can_network": true,
+  "writes_tree": true,
+  "runs_tests": true,
+  "commits": false,
+  "roles": ["implement", "review", "critique", "investigate"],
+  "env": ["DEEPSEEK_API_KEY"]
+}

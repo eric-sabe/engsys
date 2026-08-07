@@ -1,18 +1,18 @@
 {
-  "generatedAt": "2026-07-16T06:56:58.769Z",
+  "generatedAt": "2026-08-07T06:30:01.752Z",
   "window": {
     "from": "2025-06-27",
-    "to": "2026-07-16",
+    "to": "2026-08-07",
     "bucket": "week"
   },
-  "repoCount": 33,
+  "repoCount": 36,
   "totals": {
-    "issuesOpened": 3101,
-    "issuesClosed": 2824,
-    "commits": 4638,
-    "prsMerged": 1385,
-    "locAdded": 2863934,
-    "locRemoved": 1155256
+    "issuesOpened": 3532,
+    "issuesClosed": 3153,
+    "commits": 5089,
+    "prsMerged": 1590,
+    "locAdded": 3264440,
+    "locRemoved": 1167212
   },
   "series": [
     {
@@ -622,13 +622,46 @@
     },
     {
       "weekStart": "2026-07-13",
-      "issuesOpened": 5,
-      "issuesClosed": 4,
-      "commits": 14,
-      "prsMerged": 9,
-      "locAdded": 3793,
-      "locRemoved": 167,
-      "locAddedViaPR": 3793,
+      "issuesOpened": 31,
+      "issuesClosed": 27,
+      "commits": 121,
+      "prsMerged": 44,
+      "locAdded": 51047,
+      "locRemoved": 1362,
+      "locAddedViaPR": 50890,
+      "locAddedDirect": 157
+    },
+    {
+      "weekStart": "2026-07-20",
+      "issuesOpened": 72,
+      "issuesClosed": 58,
+      "commits": 203,
+      "prsMerged": 47,
+      "locAdded": 122884,
+      "locRemoved": 3192,
+      "locAddedViaPR": 90191,
+      "locAddedDirect": 32693
+    },
+    {
+      "weekStart": "2026-07-27",
+      "issuesOpened": 199,
+      "issuesClosed": 147,
+      "commits": 103,
+      "prsMerged": 85,
+      "locAdded": 170501,
+      "locRemoved": 4222,
+      "locAddedViaPR": 170500,
+      "locAddedDirect": 1
+    },
+    {
+      "weekStart": "2026-08-03",
+      "issuesOpened": 134,
+      "issuesClosed": 101,
+      "commits": 38,
+      "prsMerged": 38,
+      "locAdded": 59867,
+      "locRemoved": 3347,
+      "locAddedViaPR": 59867,
       "locAddedDirect": 0
     }
   ],
@@ -889,24 +922,48 @@
     "2026-07-11": 20,
     "2026-07-12": 25,
     "2026-07-13": 7,
-    "2026-07-14": 7
+    "2026-07-14": 7,
+    "2026-07-15": 2,
+    "2026-07-16": 3,
+    "2026-07-17": 57,
+    "2026-07-18": 13,
+    "2026-07-19": 32,
+    "2026-07-20": 23,
+    "2026-07-21": 3,
+    "2026-07-23": 24,
+    "2026-07-24": 56,
+    "2026-07-25": 31,
+    "2026-07-26": 66,
+    "2026-07-27": 31,
+    "2026-07-28": 19,
+    "2026-07-29": 8,
+    "2026-07-30": 13,
+    "2026-07-31": 9,
+    "2026-08-01": 10,
+    "2026-08-02": 13,
+    "2026-08-03": 6,
+    "2026-08-04": 6,
+    "2026-08-05": 12,
+    "2026-08-06": 9,
+    "2026-08-07": 5
   },
   "languages": {
-    "TypeScript": 24861669,
-    "HTML": 12556718,
+    "TypeScript": 31762701,
+    "HTML": 12774280,
     "Python": 6606416,
-    "JavaScript": 1415809,
-    "Shell": 1084855,
+    "JavaScript": 2482547,
+    "Shell": 1141640,
     "Swift": 911634,
     "Kotlin": 825827,
+    "Svelte": 712317,
     "Bicep": 694982,
     "Rust": 568184,
     "C#": 528788,
-    "CSS": 366966,
+    "CSS": 433810,
     "PowerShell": 253262,
     "HCL": 210969,
-    "Dockerfile": 81604,
-    "PLpgSQL": 55512,
+    "Dockerfile": 83021,
+    "PLpgSQL": 65346,
     "Handlebars": 16188,
     "Go Template": 7185,
     "Makefile": 3659,
@@ -918,7 +975,7 @@
       "_id": "591ceaac",
       "alias": "Cozy Cheetah",
       "totals": {
-        "issuesOpened": 1,
+        "issuesOpened": 4,
         "issuesClosed": 0,
         "commits": 13,
         "prsMerged": 9,
@@ -1533,13 +1590,24 @@
         },
         {
           "weekStart": "2026-07-13",
-          "issuesOpened": 0,
+          "issuesOpened": 3,
           "issuesClosed": 0,
           "commits": 1,
           "prsMerged": 1,
           "locAdded": 7,
           "locRemoved": 2,
           "locAddedViaPR": 7,
+          "locAddedDirect": 0
+        },
+        {
+          "weekStart": "2026-07-20",
+          "issuesOpened": 0,
+          "issuesClosed": 0,
+          "commits": 0,
+          "prsMerged": 0,
+          "locAdded": 0,
+          "locRemoved": 0,
+          "locAddedViaPR": 0,
           "locAddedDirect": 0
         }
       ],
@@ -1563,12 +1631,12 @@
       "_id": "3f9cf9c2",
       "alias": "Ancient Hedgehog",
       "totals": {
-        "issuesOpened": 326,
-        "issuesClosed": 285,
-        "commits": 224,
-        "prsMerged": 223,
-        "locAdded": 116205,
-        "locRemoved": 9289
+        "issuesOpened": 329,
+        "issuesClosed": 286,
+        "commits": 226,
+        "prsMerged": 225,
+        "locAdded": 116307,
+        "locRemoved": 9342
       },
       "series": [
         {
@@ -2186,6 +2254,39 @@
           "locRemoved": 3,
           "locAddedViaPR": 102,
           "locAddedDirect": 0
+        },
+        {
+          "weekStart": "2026-07-20",
+          "issuesOpened": 0,
+          "issuesClosed": 0,
+          "commits": 0,
+          "prsMerged": 0,
+          "locAdded": 0,
+          "locRemoved": 0,
+          "locAddedViaPR": 0,
+          "locAddedDirect": 0
+        },
+        {
+          "weekStart": "2026-07-27",
+          "issuesOpened": 3,
+          "issuesClosed": 1,
+          "commits": 2,
+          "prsMerged": 2,
+          "locAdded": 102,
+          "locRemoved": 53,
+          "locAddedViaPR": 102,
+          "locAddedDirect": 0
+        },
+        {
+          "weekStart": "2026-08-03",
+          "issuesOpened": 0,
+          "issuesClosed": 0,
+          "commits": 0,
+          "prsMerged": 0,
+          "locAdded": 0,
+          "locRemoved": 0,
+          "locAddedViaPR": 0,
+          "locAddedDirect": 0
         }
       ],
       "daily": {
@@ -2209,10 +2310,11 @@
         "2026-07-10": 1,
         "2026-07-09": 7,
         "2026-07-08": 2,
-        "2026-07-13": 1
+        "2026-07-13": 1,
+        "2026-07-29": 2
       },
       "languages": {
-        "TypeScript": 3172687,
+        "TypeScript": 3172639,
         "CSS": 146884,
         "JavaScript": 25431,
         "PLpgSQL": 23385,
@@ -3530,10 +3632,10 @@
       "totals": {
         "issuesOpened": 0,
         "issuesClosed": 0,
-        "commits": 18,
-        "prsMerged": 4,
-        "locAdded": 18701,
-        "locRemoved": 1554
+        "commits": 23,
+        "prsMerged": 6,
+        "locAdded": 18919,
+        "locRemoved": 1556
       },
       "series": [
         {
@@ -4151,6 +4253,28 @@
           "locRemoved": 0,
           "locAddedViaPR": 0,
           "locAddedDirect": 0
+        },
+        {
+          "weekStart": "2026-07-20",
+          "issuesOpened": 0,
+          "issuesClosed": 0,
+          "commits": 5,
+          "prsMerged": 2,
+          "locAdded": 218,
+          "locRemoved": 2,
+          "locAddedViaPR": 209,
+          "locAddedDirect": 9
+        },
+        {
+          "weekStart": "2026-07-27",
+          "issuesOpened": 0,
+          "issuesClosed": 0,
+          "commits": 0,
+          "prsMerged": 0,
+          "locAdded": 0,
+          "locRemoved": 0,
+          "locAddedViaPR": 0,
+          "locAddedDirect": 0
         }
       ],
       "daily": {
@@ -4160,11 +4284,14 @@
         "2026-06-22": 2,
         "2026-07-03": 5,
         "2026-07-02": 5,
-        "2026-07-07": 2
+        "2026-07-07": 2,
+        "2026-07-25": 1,
+        "2026-07-23": 2,
+        "2026-07-20": 2
       },
       "languages": {
         "Rust": 384789,
-        "HTML": 315676
+        "HTML": 315680
       }
     },
     {
@@ -5536,10 +5663,10 @@
       "totals": {
         "issuesOpened": 0,
         "issuesClosed": 1,
-        "commits": 15,
-        "prsMerged": 0,
-        "locAdded": 5561,
-        "locRemoved": 718
+        "commits": 18,
+        "prsMerged": 1,
+        "locAdded": 6080,
+        "locRemoved": 733
       },
       "series": [
         {
@@ -6124,14 +6251,60 @@
           "locRemoved": 0,
           "locAddedViaPR": 0,
           "locAddedDirect": 0
+        },
+        {
+          "weekStart": "2026-07-13",
+          "issuesOpened": 0,
+          "issuesClosed": 0,
+          "commits": 2,
+          "prsMerged": 1,
+          "locAdded": 518,
+          "locRemoved": 14,
+          "locAddedViaPR": 518,
+          "locAddedDirect": 0
+        },
+        {
+          "weekStart": "2026-07-20",
+          "issuesOpened": 0,
+          "issuesClosed": 0,
+          "commits": 0,
+          "prsMerged": 0,
+          "locAdded": 0,
+          "locRemoved": 0,
+          "locAddedViaPR": 0,
+          "locAddedDirect": 0
+        },
+        {
+          "weekStart": "2026-07-27",
+          "issuesOpened": 0,
+          "issuesClosed": 0,
+          "commits": 1,
+          "prsMerged": 0,
+          "locAdded": 1,
+          "locRemoved": 1,
+          "locAddedViaPR": 0,
+          "locAddedDirect": 1
+        },
+        {
+          "weekStart": "2026-08-03",
+          "issuesOpened": 0,
+          "issuesClosed": 0,
+          "commits": 0,
+          "prsMerged": 0,
+          "locAdded": 0,
+          "locRemoved": 0,
+          "locAddedViaPR": 0,
+          "locAddedDirect": 0
         }
       ],
       "daily": {
         "2026-06-10": 2,
-        "2026-06-09": 13
+        "2026-06-09": 13,
+        "2026-07-19": 2,
+        "2026-07-28": 1
       },
       "languages": {
-        "JavaScript": 46534
+        "JavaScript": 65143
       }
     },
     {
@@ -6140,10 +6313,10 @@
       "totals": {
         "issuesOpened": 0,
         "issuesClosed": 0,
-        "commits": 165,
-        "prsMerged": 45,
-        "locAdded": 72532,
-        "locRemoved": 3119
+        "commits": 215,
+        "prsMerged": 62,
+        "locAdded": 110054,
+        "locRemoved": 5404
       },
       "series": [
         {
@@ -6755,11 +6928,44 @@
           "weekStart": "2026-07-13",
           "issuesOpened": 0,
           "issuesClosed": 0,
-          "commits": 8,
-          "prsMerged": 3,
-          "locAdded": 3618,
-          "locRemoved": 94,
-          "locAddedViaPR": 3618,
+          "commits": 28,
+          "prsMerged": 10,
+          "locAdded": 14699,
+          "locRemoved": 470,
+          "locAddedViaPR": 14699,
+          "locAddedDirect": 0
+        },
+        {
+          "weekStart": "2026-07-20",
+          "issuesOpened": 0,
+          "issuesClosed": 0,
+          "commits": 18,
+          "prsMerged": 6,
+          "locAdded": 16299,
+          "locRemoved": 1507,
+          "locAddedViaPR": 16299,
+          "locAddedDirect": 0
+        },
+        {
+          "weekStart": "2026-07-27",
+          "issuesOpened": 0,
+          "issuesClosed": 0,
+          "commits": 12,
+          "prsMerged": 4,
+          "locAdded": 10142,
+          "locRemoved": 402,
+          "locAddedViaPR": 10142,
+          "locAddedDirect": 0
+        },
+        {
+          "weekStart": "2026-08-03",
+          "issuesOpened": 0,
+          "issuesClosed": 0,
+          "commits": 0,
+          "prsMerged": 0,
+          "locAdded": 0,
+          "locRemoved": 0,
+          "locAddedViaPR": 0,
           "locAddedDirect": 0
         }
       ],
@@ -6775,13 +6981,28 @@
         "2026-07-08": 53,
         "2026-07-07": 6,
         "2026-07-06": 7,
+        "2026-07-19": 3,
+        "2026-07-18": 3,
+        "2026-07-17": 9,
+        "2026-07-16": 3,
+        "2026-07-15": 2,
         "2026-07-14": 7,
-        "2026-07-13": 1
+        "2026-07-13": 1,
+        "2026-07-26": 3,
+        "2026-07-25": 3,
+        "2026-07-24": 3,
+        "2026-07-23": 3,
+        "2026-07-21": 3,
+        "2026-07-20": 3,
+        "2026-07-30": 3,
+        "2026-07-29": 3,
+        "2026-07-28": 3,
+        "2026-07-27": 3
       },
       "languages": {
         "JavaScript": 360564,
-        "HTML": 63349,
-        "Shell": 6410
+        "HTML": 148637,
+        "Shell": 7663
       }
     },
     {
@@ -19579,12 +19800,12 @@
       "_id": "29107299",
       "alias": "Fuzzy Kingfisher",
       "totals": {
-        "issuesOpened": 1927,
+        "issuesOpened": 1928,
         "issuesClosed": 1733,
-        "commits": 1499,
-        "prsMerged": 778,
-        "locAdded": 954481,
-        "locRemoved": 295418
+        "commits": 1501,
+        "prsMerged": 780,
+        "locAdded": 954829,
+        "locRemoved": 295690
       },
       "series": [
         {
@@ -20202,6 +20423,39 @@
           "locRemoved": 68,
           "locAddedViaPR": 66,
           "locAddedDirect": 0
+        },
+        {
+          "weekStart": "2026-07-20",
+          "issuesOpened": 0,
+          "issuesClosed": 0,
+          "commits": 0,
+          "prsMerged": 0,
+          "locAdded": 0,
+          "locRemoved": 0,
+          "locAddedViaPR": 0,
+          "locAddedDirect": 0
+        },
+        {
+          "weekStart": "2026-07-27",
+          "issuesOpened": 1,
+          "issuesClosed": 0,
+          "commits": 2,
+          "prsMerged": 2,
+          "locAdded": 348,
+          "locRemoved": 272,
+          "locAddedViaPR": 348,
+          "locAddedDirect": 0
+        },
+        {
+          "weekStart": "2026-08-03",
+          "issuesOpened": 0,
+          "issuesClosed": 0,
+          "commits": 0,
+          "prsMerged": 0,
+          "locAdded": 0,
+          "locRemoved": 0,
+          "locAddedViaPR": 0,
+          "locAddedDirect": 0
         }
       ],
       "daily": {
@@ -20319,7 +20573,8 @@
         "2026-07-08": 25,
         "2026-07-07": 22,
         "2026-07-06": 6,
-        "2026-07-13": 4
+        "2026-07-13": 4,
+        "2026-07-27": 2
       },
       "languages": {
         "TypeScript": 13380442,
@@ -21017,6 +21272,186 @@
       "languages": {
         "HTML": 1483592,
         "JavaScript": 93268
+      }
+    },
+    {
+      "_id": "54feb1a2",
+      "alias": "Fuzzy Dolphin",
+      "totals": {
+        "issuesOpened": 23,
+        "issuesClosed": 23,
+        "commits": 113,
+        "prsMerged": 31,
+        "locAdded": 40078,
+        "locRemoved": 1005
+      },
+      "series": [
+        {
+          "weekStart": "2026-07-13",
+          "issuesOpened": 23,
+          "issuesClosed": 23,
+          "commits": 85,
+          "prsMerged": 27,
+          "locAdded": 35655,
+          "locRemoved": 805,
+          "locAddedViaPR": 35498,
+          "locAddedDirect": 157
+        },
+        {
+          "weekStart": "2026-07-20",
+          "issuesOpened": 0,
+          "issuesClosed": 0,
+          "commits": 28,
+          "prsMerged": 4,
+          "locAdded": 4423,
+          "locRemoved": 200,
+          "locAddedViaPR": 4423,
+          "locAddedDirect": 0
+        },
+        {
+          "weekStart": "2026-07-27",
+          "issuesOpened": 0,
+          "issuesClosed": 0,
+          "commits": 0,
+          "prsMerged": 0,
+          "locAdded": 0,
+          "locRemoved": 0,
+          "locAddedViaPR": 0,
+          "locAddedDirect": 0
+        }
+      ],
+      "daily": {
+        "2026-07-19": 27,
+        "2026-07-18": 10,
+        "2026-07-17": 48,
+        "2026-07-23": 10,
+        "2026-07-20": 18
+      },
+      "languages": {
+        "JavaScript": 846235,
+        "CSS": 27012,
+        "HTML": 23267,
+        "Shell": 13321,
+        "PLpgSQL": 9834,
+        "Dockerfile": 1417
+      }
+    },
+    {
+      "_id": "1027db67",
+      "alias": "Snowy Osprey",
+      "totals": {
+        "issuesOpened": 401,
+        "issuesClosed": 305,
+        "commits": 267,
+        "prsMerged": 150,
+        "locAdded": 306216,
+        "locRemoved": 8312
+      },
+      "series": [
+        {
+          "weekStart": "2026-07-20",
+          "issuesOpened": 72,
+          "issuesClosed": 58,
+          "commits": 143,
+          "prsMerged": 35,
+          "locAdded": 86441,
+          "locRemoved": 1471,
+          "locAddedViaPR": 69260,
+          "locAddedDirect": 17181
+        },
+        {
+          "weekStart": "2026-07-27",
+          "issuesOpened": 195,
+          "issuesClosed": 146,
+          "commits": 86,
+          "prsMerged": 77,
+          "locAdded": 159908,
+          "locRemoved": 3494,
+          "locAddedViaPR": 159908,
+          "locAddedDirect": 0
+        },
+        {
+          "weekStart": "2026-08-03",
+          "issuesOpened": 134,
+          "issuesClosed": 101,
+          "commits": 38,
+          "prsMerged": 38,
+          "locAdded": 59867,
+          "locRemoved": 3347,
+          "locAddedViaPR": 59867,
+          "locAddedDirect": 0
+        }
+      ],
+      "daily": {
+        "2026-07-26": 63,
+        "2026-07-25": 21,
+        "2026-07-24": 50,
+        "2026-07-23": 9,
+        "2026-08-02": 13,
+        "2026-08-01": 10,
+        "2026-07-31": 9,
+        "2026-07-30": 10,
+        "2026-07-29": 3,
+        "2026-07-28": 15,
+        "2026-07-27": 26,
+        "2026-08-07": 5,
+        "2026-08-06": 9,
+        "2026-08-05": 12,
+        "2026-08-04": 6,
+        "2026-08-03": 6
+      },
+      "languages": {
+        "TypeScript": 6901080,
+        "Svelte": 712317,
+        "JavaScript": 200367,
+        "HTML": 88115,
+        "CSS": 39832,
+        "Shell": 30291
+      }
+    },
+    {
+      "_id": "2f1be9fa",
+      "alias": "Restless Crocodile",
+      "totals": {
+        "issuesOpened": 0,
+        "issuesClosed": 0,
+        "commits": 9,
+        "prsMerged": 0,
+        "locAdded": 15503,
+        "locRemoved": 12
+      },
+      "series": [
+        {
+          "weekStart": "2026-07-20",
+          "issuesOpened": 0,
+          "issuesClosed": 0,
+          "commits": 9,
+          "prsMerged": 0,
+          "locAdded": 15503,
+          "locRemoved": 12,
+          "locAddedViaPR": 0,
+          "locAddedDirect": 15503
+        },
+        {
+          "weekStart": "2026-07-27",
+          "issuesOpened": 0,
+          "issuesClosed": 0,
+          "commits": 0,
+          "prsMerged": 0,
+          "locAdded": 0,
+          "locRemoved": 0,
+          "locAddedViaPR": 0,
+          "locAddedDirect": 0
+        }
+      ],
+      "daily": {
+        "2026-07-25": 6,
+        "2026-07-24": 3
+      },
+      "languages": {
+        "HTML": 20888,
+        "Shell": 11920,
+        "JavaScript": 1527
       }
     }
   ]

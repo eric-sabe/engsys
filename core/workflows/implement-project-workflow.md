@@ -110,17 +110,22 @@ After resolving all findings, classify the _batch outcome_:
 
 ## Phase 3.5: Objective Independent Review (before any merge)
 
-This is the merge gate the `/implement-project` command enforces. Once the phase PR is open and the implementer's local review is clean, the **orchestrator** (not the implementer) launches a *fresh, independent* reviewer subagent — general-purpose on **Opus**, with **no stake in the code**. It must:
+This is the merge gate the `/implement-project` command enforces. Once the phase PR is open and the implementer's local review is clean, the **orchestrator** (never the implementer) dispatches a *fresh, independent* reviewer with **no stake in the code**.
 
-- re-run the full pre-push gate from scratch (confirm or refute the author's numbers);
-- verify **each** issue's acceptance criteria against the diff;
-- probe security/correctness;
-- hunt for regressions and reconciliation artifacts (duplicate/dead code, dropped work, stray exports).
+**With a worker layer installed** (`.claude/scripts/providers.json` exists), the gate is **cross-family** — see [worker-dispatch.md](worker-dispatch.md):
 
-It ends with a decisive **`VERDICT: CLEAN`** (no Critical/Warning — safe to merge) or **`VERDICT: FINDINGS`** (severity-tagged, `file:line`). **Never merge a phase PR that has not passed this gate.**
+1. Determine the **author family** from the phase commits' `Worker:` trailers (no trailer = the orchestrator's own family, anthropic).
+2. Build a review package (`worker-package.mjs --role review`) and walk the `review_fallback_chain` **minus the author's family**. A different provider family is a stronger form of "no stake" than a fresh instance of the same model — same-family reviewers share blind spots, and that miss is documented (campos27 S8: the same-family reviewer read the sweep as safely scoped; the other family found the gap).
+3. Worker exit `2` (did not run) → log loudly, next provider in the chain. Exit `2` is never findings and never a pass.
+4. Chain exhausted → **stop and report**. Same-family review runs only with explicit operator sign-off, recorded as an exception on the PR.
+5. Phases whose issues carry `risk: high` (engsys:issue-meta): **two** families must return CLEAN before merge.
+
+**Without a worker layer**, the prior form stands: launch a fresh general-purpose reviewer subagent on **Opus**.
+
+Either way the reviewer must: re-run the full gate from scratch (confirm or refute the author's numbers); verify **each** issue's acceptance criteria against the diff; probe security/correctness; hunt for regressions and reconciliation artifacts (duplicate/dead code, dropped work, stray exports). It ends with a decisive **`VERDICT: CLEAN`** or **`VERDICT: FINDINGS`** (severity-tagged, `file:line`). **Never merge a phase PR that has not passed this gate.**
 
 - **CLEAN** → safe to merge; proceed to Phase 4.
-- **FINDINGS** → route back to the implementer to fix + re-review, or **stop** and report if it exposes a product/architecture decision.
+- **FINDINGS** → route back to the implementer to fix + re-review (worker fix rounds go through the `--findings` / `FINDING-ACK` loop in worker-dispatch.md), or **stop** and report if it exposes a product/architecture decision.
 
 ---
 
