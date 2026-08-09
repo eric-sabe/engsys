@@ -1,18 +1,18 @@
 {
-  "generatedAt": "2026-08-08T06:19:47.921Z",
+  "generatedAt": "2026-08-09T06:20:50.897Z",
   "window": {
     "from": "2025-06-27",
-    "to": "2026-08-08",
+    "to": "2026-08-09",
     "bucket": "week"
   },
   "repoCount": 36,
   "totals": {
-    "issuesOpened": 3540,
-    "issuesClosed": 3196,
-    "commits": 5105,
-    "prsMerged": 1606,
-    "locAdded": 3311518,
-    "locRemoved": 1169322
+    "issuesOpened": 3545,
+    "issuesClosed": 3238,
+    "commits": 5114,
+    "prsMerged": 1615,
+    "locAdded": 3334245,
+    "locRemoved": 1169925
   },
   "series": [
     {
@@ -655,13 +655,13 @@
     },
     {
       "weekStart": "2026-08-03",
-      "issuesOpened": 142,
-      "issuesClosed": 144,
-      "commits": 54,
-      "prsMerged": 54,
-      "locAdded": 106945,
-      "locRemoved": 5457,
-      "locAddedViaPR": 106945,
+      "issuesOpened": 147,
+      "issuesClosed": 186,
+      "commits": 63,
+      "prsMerged": 63,
+      "locAdded": 129672,
+      "locRemoved": 6060,
+      "locAddedViaPR": 129672,
       "locAddedDirect": 0
     }
   ],
@@ -946,17 +946,17 @@
     "2026-08-05": 12,
     "2026-08-06": 9,
     "2026-08-07": 18,
-    "2026-08-08": 3
+    "2026-08-08": 12
   },
   "languages": {
-    "TypeScript": 32592760,
+    "TypeScript": 33324400,
     "HTML": 12774280,
     "Python": 6606416,
-    "JavaScript": 2648492,
+    "JavaScript": 2661119,
     "Shell": 1160671,
     "Swift": 911634,
+    "Svelte": 837377,
     "Kotlin": 825827,
-    "Svelte": 789412,
     "Bicep": 694982,
     "Rust": 568184,
     "C#": 528788,
@@ -21353,12 +21353,12 @@
       "_id": "1027db67",
       "alias": "Snowy Osprey",
       "totals": {
-        "issuesOpened": 409,
-        "issuesClosed": 344,
-        "commits": 280,
-        "prsMerged": 163,
-        "locAdded": 349245,
-        "locRemoved": 10386
+        "issuesOpened": 414,
+        "issuesClosed": 386,
+        "commits": 289,
+        "prsMerged": 172,
+        "locAdded": 371972,
+        "locRemoved": 10989
       },
       "series": [
         {
@@ -21385,13 +21385,13 @@
         },
         {
           "weekStart": "2026-08-03",
-          "issuesOpened": 142,
-          "issuesClosed": 140,
-          "commits": 51,
-          "prsMerged": 51,
-          "locAdded": 102896,
-          "locRemoved": 5421,
-          "locAddedViaPR": 102896,
+          "issuesOpened": 147,
+          "issuesClosed": 182,
+          "commits": 60,
+          "prsMerged": 60,
+          "locAdded": 125623,
+          "locRemoved": 6024,
+          "locAddedViaPR": 125623,
           "locAddedDirect": 0
         }
       ],
@@ -21407,7 +21407,7 @@
         "2026-07-29": 3,
         "2026-07-28": 15,
         "2026-07-27": 26,
-        "2026-08-08": 3,
+        "2026-08-08": 12,
         "2026-08-07": 15,
         "2026-08-06": 9,
         "2026-08-05": 12,
@@ -21415,9 +21415,9 @@
         "2026-08-03": 6
       },
       "languages": {
-        "TypeScript": 7731139,
-        "Svelte": 789412,
-        "JavaScript": 270733,
+        "TypeScript": 8462779,
+        "Svelte": 837377,
+        "JavaScript": 283360,
         "HTML": 88115,
         "CSS": 39832,
         "Shell": 31367
