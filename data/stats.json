@@ -1,18 +1,18 @@
 {
-  "generatedAt": "2026-08-13T06:37:37.638Z",
+  "generatedAt": "2026-08-14T06:35:50.455Z",
   "window": {
     "from": "2025-06-27",
-    "to": "2026-08-13",
+    "to": "2026-08-14",
     "bucket": "week"
   },
   "repoCount": 36,
   "totals": {
-    "issuesOpened": 3649,
-    "issuesClosed": 3306,
-    "commits": 5178,
-    "prsMerged": 1644,
-    "locAdded": 3407595,
-    "locRemoved": 1174162
+    "issuesOpened": 3653,
+    "issuesClosed": 3319,
+    "commits": 5202,
+    "prsMerged": 1652,
+    "locAdded": 3412802,
+    "locRemoved": 1178305
   },
   "series": [
     {
@@ -666,13 +666,13 @@
     },
     {
       "weekStart": "2026-08-10",
-      "issuesOpened": 72,
-      "issuesClosed": 46,
-      "commits": 59,
-      "prsMerged": 24,
-      "locAdded": 53040,
-      "locRemoved": 3493,
-      "locAddedViaPR": 21895,
+      "issuesOpened": 76,
+      "issuesClosed": 59,
+      "commits": 83,
+      "prsMerged": 32,
+      "locAdded": 58247,
+      "locRemoved": 7636,
+      "locAddedViaPR": 27102,
       "locAddedDirect": 31145
     }
   ],
@@ -961,16 +961,17 @@
     "2026-08-09": 5,
     "2026-08-10": 6,
     "2026-08-11": 27,
-    "2026-08-12": 25,
-    "2026-08-13": 1
+    "2026-08-12": 30,
+    "2026-08-13": 6,
+    "2026-08-14": 14
   },
   "languages": {
-    "TypeScript": 35107489,
+    "TypeScript": 35116016,
     "HTML": 12774280,
     "Python": 6606416,
     "JavaScript": 2671602,
     "Shell": 1173886,
-    "Svelte": 1011872,
+    "Svelte": 1017111,
     "Swift": 911634,
     "Kotlin": 825827,
     "Bicep": 721349,
@@ -19840,12 +19841,12 @@
       "_id": "29107299",
       "alias": "Fuzzy Kingfisher",
       "totals": {
-        "issuesOpened": 1950,
-        "issuesClosed": 1743,
-        "commits": 1531,
-        "prsMerged": 795,
-        "locAdded": 960668,
-        "locRemoved": 296576
+        "issuesOpened": 1952,
+        "issuesClosed": 1753,
+        "commits": 1552,
+        "prsMerged": 800,
+        "locAdded": 964755,
+        "locRemoved": 300704
       },
       "series": [
         {
@@ -20499,13 +20500,13 @@
         },
         {
           "weekStart": "2026-08-10",
-          "issuesOpened": 22,
-          "issuesClosed": 10,
-          "commits": 30,
-          "prsMerged": 15,
-          "locAdded": 5839,
-          "locRemoved": 886,
-          "locAddedViaPR": 5839,
+          "issuesOpened": 24,
+          "issuesClosed": 20,
+          "commits": 51,
+          "prsMerged": 20,
+          "locAdded": 9926,
+          "locRemoved": 5014,
+          "locAddedViaPR": 9926,
           "locAddedDirect": 0
         }
       ],
@@ -20626,11 +20627,13 @@
         "2026-07-06": 6,
         "2026-07-13": 4,
         "2026-07-27": 2,
-        "2026-08-12": 11,
+        "2026-08-14": 11,
+        "2026-08-13": 5,
+        "2026-08-12": 16,
         "2026-08-11": 19
       },
       "languages": {
-        "TypeScript": 13500797,
+        "TypeScript": 13493848,
         "HTML": 813830,
         "Bicep": 569628,
         "Shell": 201083,
@@ -21393,12 +21396,12 @@
       "_id": "1027db67",
       "alias": "Snowy Osprey",
       "totals": {
-        "issuesOpened": 496,
-        "issuesClosed": 444,
-        "commits": 323,
-        "prsMerged": 186,
-        "locAdded": 439483,
-        "locRemoved": 14340
+        "issuesOpened": 498,
+        "issuesClosed": 447,
+        "commits": 326,
+        "prsMerged": 189,
+        "locAdded": 440603,
+        "locRemoved": 14355
       },
       "series": [
         {
@@ -21436,13 +21439,13 @@
         },
         {
           "weekStart": "2026-08-10",
-          "issuesOpened": 50,
-          "issuesClosed": 36,
-          "commits": 29,
-          "prsMerged": 9,
-          "locAdded": 47201,
-          "locRemoved": 2607,
-          "locAddedViaPR": 16056,
+          "issuesOpened": 52,
+          "issuesClosed": 39,
+          "commits": 32,
+          "prsMerged": 12,
+          "locAdded": 48321,
+          "locRemoved": 2622,
+          "locAddedViaPR": 17176,
           "locAddedDirect": 31145
         }
       ],
@@ -21465,14 +21468,15 @@
         "2026-08-05": 12,
         "2026-08-04": 6,
         "2026-08-03": 6,
+        "2026-08-14": 3,
         "2026-08-13": 1,
         "2026-08-12": 14,
         "2026-08-11": 8,
         "2026-08-10": 6
       },
       "languages": {
-        "TypeScript": 10125513,
-        "Svelte": 1011872,
+        "TypeScript": 10140989,
+        "Svelte": 1017111,
         "JavaScript": 293843,
         "HTML": 88115,
         "CSS": 40660,
