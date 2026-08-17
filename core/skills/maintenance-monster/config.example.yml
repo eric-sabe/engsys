@@ -1,0 +1,105 @@
+# Maintenance Monster per-repo config — copy to .claude/maintenance-monster.yml
+# and edit. Read by the model at session start; scripts take flags, never
+# parse YAML. Design spec: docs/maintenance-monster.md.
+
+repo: owner/name
+default_branch: main
+session_name: <ns>-maintain # advertised in the ledger (discovery); e.g. acme-maintain
+ledger_issue: 0 # printed by scripts/mnt-setup.sh --repo owner/name — distinct from Merge Monster's own ledger
+
+state_dir: logs/maintenance-monster # working memory: state.md, journal, .watch/ (keep gitignored)
+poll_interval: 30 # seconds — mnt-watch.sh cadence
+heartbeat_minutes: 30 # ScheduleWakeup fallback tick
+stale_lock_minutes: 45 # continuous watchdog: own Monitor + heartbeat, mirrors Merge Monster
+
+# Phase gate. Phase 1 = watch + triage + REPORT only, no auto-PRs. Flip to
+# auto_drive only once triage quality is proven against real findings — no
+# code change needed, this is the only switch.
+phase: read_only # read_only (Phase 1) | auto_drive (Phase 2+)
+
+# Poll cadence per watch surface. `on: push` surfaces are driven by mnt-watch's
+# terminal-conclusion check on default-branch push/dispatch runs, not a poll.
+watch:
+  dependabot_prs: { poll: 300 }
+  dependabot_alerts: { poll: 900 }
+  codeql_alerts: { poll: 900 }
+  secret_scan: { on: push } # Secret Scan workflow_run
+  trivy_main_red: { on: push } # push-only image scan — see guardrail in SKILL.md
+  base_images: { poll: 86400 } # slow-moving; daily is plenty
+  # Optional: cloud app-credential expiry sweep (daily tick). Any cert/secret on
+  # a listed app ending within warn_days -> ESCALATE with the rotation runbook;
+  # never rotate autonomously. Shown for Entra (az ad app credential list);
+  # adapt the read command per cloud. Omit the block to skip.
+  # entra_app_credentials:
+  #   poll: 86400
+  #   warn_days: 30
+  #   apps:
+  #     - app_id: 00000000-0000-0000-0000-000000000000 # what it is / where the runbook lives
+
+# Disposition classes — every finding must land in exactly one. Anything that
+# doesn't clearly match auto_fix or expert_assist falls to unknown_disposition
+# (escalate), never silently to auto.
+auto_fix:
+  [
+    patch_dev,
+    minor_dev,
+    patch_ci,
+    ci_action_major,
+    grouped_patch,
+    lockfile_cleanup,
+    scoped_override,
+  ]
+expert_assist: [risky_major, docker_base, runtime_dep]
+escalate:
+  [
+    breaking_major,
+    engine_bump,
+    prod_iac,
+    secret,
+    migration,
+    product_risk_judgment,
+  ]
+unknown_disposition: escalate # fail-safe: anything unclassified escalates, never auto
+
+# Expert routing — who gets dispatched to triage/fix each category.
+routing: { security: nyx, ci: aaron, code: isabelle, rca: bert }
+
+max_concurrent_fix_prs: 3 # caps a vuln wave from becoming a PR storm (Phase 2+)
+fix_attempts_max: 2 # fix-agent dispatches per finding before escalating
+
+suppression:
+  signoff_label: risk-accepted # operator-only; the gate for any dismissal — no label, no suppression
+
+escalation:
+  slack_channel: "" # shared with Merge Monster — one channel to watch; empty → GitHub-only
+  channel_id: C0XXXXXXXXX # the escalation Slack channel id
+
+# Cross-session messaging (docs/merge-monster-messaging.md) — reused as-is.
+# Omit the whole block to keep pure poll-based/GitHub-only behavior.
+messaging:
+  notify_mm: true # SendMessage the merge orchestrator when a fix PR is queued (Phase 2+)
+  mm_session_name: <ns>-mm # nudge target (also discoverable via MM's own ledger)
+  namespace_prefix: <ns>- # only ever address / trust names with this prefix (e.g. acme-)
+  inbound: accept # required crossSessionInbound value for the autonomous session
+
+
+# Subagent liveness (docs/subagent-liveness-design.md) — same substrate as
+# Merge Monster (scripts in .claude/skills/merge-monster/scripts/); state is
+# namespaced by state_dir so the two registries never collide. Omit the block
+# to run without the watchdog.
+# liveness:
+#   stale_minutes: 10             # transcript-silence threshold for AGENT_STALE
+#   stale_probe: true             # STALE alone is probe-worthy; only OVERDUE mounts the ladder
+#   deadline_minutes:
+#     default: 30
+#     triage: 30                  # expert triage reads
+#     fix: 45                     # Phase 2+ fix agents
+#   extension_max: 1              # one journalled extension, then the ladder
+#   respawn_max: 2                # generations per unit before escalate
+#   probe_retry_minutes: 5        # failed probe ≠ death: bounded retries…
+#   probe_retries_max: 2          # …then classify only on independent evidence
+
+# Optional: path to the repo's Dependabot triage playbook (phase model the
+# triage step follows). Empty/absent -> classify from first principles using
+# the disposition classes above.
+triage_playbook: "" # e.g. docs/agent-lessons/dependabot-triage.md

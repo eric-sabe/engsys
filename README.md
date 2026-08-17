@@ -223,6 +223,60 @@ settings.fragment.json     { permissions: {allow,deny}, mcpServers }
 The installer copies skills/agents/hooks, splices fragments, merges permissions
 and MCP servers, and records everything in `.claude/engsys.lock`.
 
+## The always-on fleet (monsters + sessions)
+
+For repos with an always-on machine, engsys ships a composable fleet of
+long-running sessions — installed like everything else, configured per repo:
+
+- **Merge Monster** (`/merge-monster`) — owns the merge baton: orders the
+  `mm:ready` queue, pilots PRs through ready → CI → merge, escalates with
+  diagnosis. Skill: `core/skills/merge-monster/`; design: `docs/merge-monster.md`.
+- **Maintenance Monster** (`/maintenance-monster`) — owns the security/
+  dependency surface (Dependabot, code/secret scanning, image scans): watches,
+  triages, reports (Phase 1) or drives fixes into `mm:ready` PRs Merge Monster
+  merges (Phase 2). Sole Dependabot owner when running. Design:
+  `docs/maintenance-monster.md`.
+- **Cross-session messaging** — best-effort latency layer over the GitHub
+  source of truth; named sessions under a `<ns>-` namespace fence,
+  validate-before-act on every inbound message. Design: `docs/agent-messaging.md`.
+- **Subagent liveness** — spawn registry + transcript-staleness watchdog +
+  probe-then-classify + fence-before-respawn, so no orchestrator ever idles on
+  a quietly-dead worker. Skill: `core/skills/subagent-liveness/`; design:
+  `docs/subagent-liveness.md`.
+- **The fleet launcher** (`core/skills/agent-sessions/`) — roster-file driven
+  tmux launcher with per-role permission modes (bypass only for the unattended
+  monsters), remote control, and duplicate-name safety.
+
+Quickstart, per repo: install engsys → `mm-setup.sh` / `mnt-setup.sh` → write
+the two configs + `.claude/agent-sessions.roster` → run the launcher on the
+always-on machine.
+
+### Roster defaults — yours to change
+
+`roster.example` ships an opinionated five-role fleet; every line of it is a
+choice, not a requirement:
+
+- **Roles**: `mm` (merge orchestrator) + `maintain` (security/dependency
+  watchdog) + `build` / `investigate` / `design` interactive workers. Add,
+  drop, or rename roles freely — only the `<NAMESPACE>-` prefix is enforced.
+- **Permission modes, per role**: the two monsters run
+  `--dangerously-skip-permissions` (unattended by design — their skills carry
+  validate-before-act and a ledger kill switch); edit-heavy workers run
+  `--permission-mode acceptEdits` (edits flow, Bash stays allowlist-gated);
+  read-heavy workers keep default gating. Tighten or loosen per role to
+  taste — the reasoning is in the agent-sessions SKILL.md § Permission modes.
+- **`MODEL=`** (commented out by default): pin every session to a specific
+  model when your orchestration experience warrants it — e.g. the reference
+  deployment pins `--model claude-opus-4-8` for orchestration sessions,
+  having found it stronger there than newer defaults. Leave unset to use
+  each session's default model; override per-session via the extra-flags
+  field instead of the global.
+- **`--remote-control`** on every session: transcripts and permission prompts
+  reach the operator's other devices. Drop it for air-gapped setups.
+- **`ENV_FILE=`**: the hook for a durable machine identity (e.g. a
+  certificate-credential cloud service principal) so no session depends on an
+  interactive login surviving the night.
+
 ## Feedback loop
 
 Project closeouts mine local review findings into `docs/agent-lessons/`. When a

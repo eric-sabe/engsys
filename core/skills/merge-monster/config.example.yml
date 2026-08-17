@@ -37,6 +37,9 @@ local_gate: ""
 dependabot:
   # Categories eligible for auto-merge after the local gate passes.
   # Majors, runtime deps, Docker bases, engine bumps are NEVER auto.
+  # Running a maintenance-monster session as the sole Dependabot owner?
+  # Set this to [] so MM never idle-merges a raw Dependabot PR out from
+  # under the watchdog — it will arrive back as a triaged mm:ready PR.
   auto_merge: [patch_dev, minor_dev, patch_ci, minor_ci, grouped_patch]
 
 escalation:
@@ -44,3 +47,35 @@ escalation:
 
 fix_attempts_max: 2          # fix-agent dispatches per PR before escalating
 ci_reruns_max: 1             # flake re-runs per PR per cause
+
+# Optional cross-session messaging (docs/agent-messaging.md in engsys). Omit the
+# whole block to keep pure poll-based behavior — messaging is a best-effort
+# latency layer and correctness never depends on a message arriving.
+# messaging:
+#   session_name: <ns>-mm         # this session's addressable --name (e.g. acme-mm)
+#   notify_author: true           # nudge the handoff `session:` on bounce/escalate/merge
+#   namespace_prefix: <ns>-       # only address / trust names with this prefix (the namespace fence)
+#   inbound: accept               # required crossSessionInbound value for an autonomous session
+#   operator_slack:               # optional: read operator replies to escalations (gated, best-effort)
+#     enabled: false
+#     channel_id: C0XXXXXXXXX     # the escalation Slack channel id
+#     operator_user_ids: [UXXXXXXXXX]  # allowlist — a reply from anyone else is ignored
+
+# Optional subagent liveness (docs/subagent-liveness.md in engsys; scripts
+# mm-agent-reg.sh + mm-agent-watch.sh in this skill's scripts/). Registry row +
+# per-class deadline on every spawn; watchdog Monitor emits AGENT_OVERDUE /
+# AGENT_STALE; probe before declaring death; fence before respawn. Omit the
+# block to run without the watchdog (spawn discipline still recommended).
+# liveness:
+#   stale_minutes: 10             # transcript-silence threshold for AGENT_STALE
+#   stale_probe: true             # STALE alone is probe-worthy; only OVERDUE mounts the ladder
+#   deadline_minutes:             # per task class; expiry triggers a PROBE, never execution
+#     default: 30
+#     rebase: 10
+#     review: 30
+#     fix: 45
+#     dependabot_gate: 30
+#   extension_max: 1              # one journalled extension, then the ladder
+#   respawn_max: 2                # generations per unit before escalate
+#   probe_retry_minutes: 5        # failed probe ≠ death: bounded retries…
+#   probe_retries_max: 2          # …then classify only on independent evidence

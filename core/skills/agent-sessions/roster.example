@@ -1,0 +1,22 @@
+# Agent-session roster — copy to .claude/agent-sessions.roster and edit.
+# Read by the agent-sessions skill's launch-agent-sessions.sh.
+#
+# Header (KEY=VALUE):
+NAMESPACE=acme
+# TMUX_SESSION=acme                      # default: NAMESPACE
+# ENV_FILE=~/.config/acme/agents.env     # optional; sourced into every session
+# MODEL=--model claude-opus-4-8          # optional; appended to every session
+#
+# Sessions: <name>|<workdir>|<initial prompt>|<extra flags>
+#   name MUST start with "NAMESPACE-" — the messaging trust fence.
+#   workdir empty → the repo the launcher runs from.
+#
+# Permission-mode guidance (full rationale: SKILL.md § Permission modes):
+#   monsters (unattended)      → --dangerously-skip-permissions
+#   edit-heavy interactive     → --permission-mode acceptEdits
+#   read-heavy interactive     → (default gating)
+acme-mm||/merge-monster|--remote-control --dangerously-skip-permissions
+acme-maintain||/maintenance-monster|--remote-control --dangerously-skip-permissions
+acme-build|||--remote-control --permission-mode acceptEdits
+acme-investigate|||--remote-control
+acme-design|||--remote-control --permission-mode acceptEdits
