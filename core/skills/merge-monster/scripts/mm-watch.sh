@@ -85,7 +85,16 @@ while true; do
   fi
 
   # --- terminal check states on the ACTIVE PR -------------------------------
+  # checks.tsv is a session-cumulative union of seen (name,state) pairs, NOT a
+  # last-snapshot: the GitHub rollup set can flicker between polls (pagination /
+  # superseded runs), and snapshot-diffing re-emits every line that vanishes and
+  # returns. Reset only when the active PR changes.
   ACTIVE=$(cat "$DIR/active" 2>/dev/null || true)
+  LASTPR=$(cat "$W/checks.pr" 2>/dev/null || true)
+  if [ "$ACTIVE" != "$LASTPR" ]; then
+    : > "$W/checks.tsv"
+    printf '%s' "$ACTIVE" > "$W/checks.pr"
+  fi
   if [ -n "$ACTIVE" ]; then
     if OUT=$(gh pr view "$ACTIVE" -R "$REPO" --json statusCheckRollup --jq '
         .statusCheckRollup[]?
@@ -97,10 +106,9 @@ while true; do
       comm -13 "$W/checks.tsv" "$W/checks.new" | while IFS="$(printf '\t')" read -r name state; do
         [ -n "$name" ] && echo "CHECK #$ACTIVE $name: $state"
       done
-      mv "$W/checks.new" "$W/checks.tsv"
+      sort -u "$W/checks.tsv" "$W/checks.new" > "$W/checks.union" && mv "$W/checks.union" "$W/checks.tsv"
+      rm -f "$W/checks.new"
     fi
-  else
-    : > "$W/checks.tsv"   # no active PR → clear so the next one diffs fresh
   fi
 
   # --- default branch went red ----------------------------------------------

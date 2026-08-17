@@ -379,3 +379,23 @@ Deliberately out of v1 scope; the design leaves each a clean seam.
 5. Start a session on the always-on machine: `/merge-monster`.
 6. First week: watch `state.md` and the journal; tune conflict magnets and
    Dependabot policy.
+
+## 16. Siblings (2026-08 additions)
+
+Merge Monster is one of a family that composes into a full always-on fleet:
+
+- **[maintenance-monster.md](maintenance-monster.md)** — the security/
+  dependency watchdog (`<ns>-maintain`): sole Dependabot owner, watches
+  alerts/scans, triages, and (Phase 2+) hands MM already-triaged `mm:ready`
+  fix PRs. Producer/consumer, separate batons, no merge-step overlap. When
+  it runs, set MM's `dependabot.auto_merge: []`.
+- **[agent-messaging.md](agent-messaging.md)** — cross-session messaging as a
+  best-effort latency layer over the GitHub source of truth: named sessions,
+  the `<ns>-` namespace fence, validate-before-act, operator-Slack loop.
+- **[subagent-liveness.md](subagent-liveness.md)** — worker-death detection:
+  spawn registry + transcript-staleness watchdog + probe-then-classify +
+  fence-before-respawn, shared by both monsters (and any session, via the
+  `subagent-liveness` skill).
+- The **`agent-sessions` skill** (`core/skills/agent-sessions/`) — the fleet
+  launcher: roster file, per-role permission modes, remote control, tmux
+  operations.

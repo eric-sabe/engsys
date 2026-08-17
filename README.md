@@ -223,6 +223,34 @@ settings.fragment.json     { permissions: {allow,deny}, mcpServers }
 The installer copies skills/agents/hooks, splices fragments, merges permissions
 and MCP servers, and records everything in `.claude/engsys.lock`.
 
+## The always-on fleet (monsters + sessions)
+
+For repos with an always-on machine, engsys ships a composable fleet of
+long-running sessions — installed like everything else, configured per repo:
+
+- **Merge Monster** (`/merge-monster`) — owns the merge baton: orders the
+  `mm:ready` queue, pilots PRs through ready → CI → merge, escalates with
+  diagnosis. Skill: `core/skills/merge-monster/`; design: `docs/merge-monster.md`.
+- **Maintenance Monster** (`/maintenance-monster`) — owns the security/
+  dependency surface (Dependabot, code/secret scanning, image scans): watches,
+  triages, reports (Phase 1) or drives fixes into `mm:ready` PRs Merge Monster
+  merges (Phase 2). Sole Dependabot owner when running. Design:
+  `docs/maintenance-monster.md`.
+- **Cross-session messaging** — best-effort latency layer over the GitHub
+  source of truth; named sessions under a `<ns>-` namespace fence,
+  validate-before-act on every inbound message. Design: `docs/agent-messaging.md`.
+- **Subagent liveness** — spawn registry + transcript-staleness watchdog +
+  probe-then-classify + fence-before-respawn, so no orchestrator ever idles on
+  a quietly-dead worker. Skill: `core/skills/subagent-liveness/`; design:
+  `docs/subagent-liveness.md`.
+- **The fleet launcher** (`core/skills/agent-sessions/`) — roster-file driven
+  tmux launcher with per-role permission modes (bypass only for the unattended
+  monsters), remote control, and duplicate-name safety.
+
+Quickstart, per repo: install engsys → `mm-setup.sh` / `mnt-setup.sh` → write
+the two configs + `.claude/agent-sessions.roster` → run the launcher on the
+always-on machine.
+
 ## Feedback loop
 
 Project closeouts mine local review findings into `docs/agent-lessons/`. When a
