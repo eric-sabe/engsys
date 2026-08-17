@@ -251,6 +251,32 @@ Quickstart, per repo: install engsys → `mm-setup.sh` / `mnt-setup.sh` → writ
 the two configs + `.claude/agent-sessions.roster` → run the launcher on the
 always-on machine.
 
+### Roster defaults — yours to change
+
+`roster.example` ships an opinionated five-role fleet; every line of it is a
+choice, not a requirement:
+
+- **Roles**: `mm` (merge orchestrator) + `maintain` (security/dependency
+  watchdog) + `build` / `investigate` / `design` interactive workers. Add,
+  drop, or rename roles freely — only the `<NAMESPACE>-` prefix is enforced.
+- **Permission modes, per role**: the two monsters run
+  `--dangerously-skip-permissions` (unattended by design — their skills carry
+  validate-before-act and a ledger kill switch); edit-heavy workers run
+  `--permission-mode acceptEdits` (edits flow, Bash stays allowlist-gated);
+  read-heavy workers keep default gating. Tighten or loosen per role to
+  taste — the reasoning is in the agent-sessions SKILL.md § Permission modes.
+- **`MODEL=`** (commented out by default): pin every session to a specific
+  model when your orchestration experience warrants it — e.g. the reference
+  deployment pins `--model claude-opus-4-8` for orchestration sessions,
+  having found it stronger there than newer defaults. Leave unset to use
+  each session's default model; override per-session via the extra-flags
+  field instead of the global.
+- **`--remote-control`** on every session: transcripts and permission prompts
+  reach the operator's other devices. Drop it for air-gapped setups.
+- **`ENV_FILE=`**: the hook for a durable machine identity (e.g. a
+  certificate-credential cloud service principal) so no session depends on an
+  interactive login surviving the night.
+
 ## Feedback loop
 
 Project closeouts mine local review findings into `docs/agent-lessons/`. When a
