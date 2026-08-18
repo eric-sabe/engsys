@@ -140,6 +140,56 @@
   .detail .top .cmd{font-family:var(--mono);font-size:13px;color:var(--cyan);background:rgba(52,224,210,.07);border:1px solid var(--cyan-dim);padding:3px 9px;border-radius:6px}
   .detail ul{margin:.4em 0 0;padding-left:18px} .detail li{margin:.3em 0;color:#cdd7e2;font-size:14px}
 
+  /* runtime stack (fleet) */
+  .stackwrap{display:grid;grid-template-columns:24px 1fr 24px;gap:12px;margin-top:26px;align-items:stretch}
+  .rail{position:relative}
+  .rail:before{content:'';position:absolute;left:50%;top:14px;bottom:14px;width:1px;background:var(--line)}
+  .rail span{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%) rotate(180deg);writing-mode:vertical-rl;
+    font-family:var(--mono);font-size:10px;letter-spacing:1.4px;text-transform:uppercase;color:var(--dim);
+    background:var(--bg);padding:10px 0;white-space:nowrap}
+  .rail.right span{transform:translate(-50%,-50%)}
+  .rail:after{position:absolute;left:50%;transform:translateX(-50%);font-size:12px;color:var(--dim)}
+  .rail.left:after{content:'\2193';bottom:-2px}
+  .rail.right:after{content:'\2191';top:-2px}
+  .stack{display:grid;gap:9px}
+  .band{display:grid;grid-template-columns:auto 1fr;gap:4px 16px;text-align:left;width:100%;cursor:pointer;
+    background:linear-gradient(180deg,var(--panel),var(--panel-2));border:1px solid var(--line);
+    border-left:3px solid var(--c);border-radius:12px;padding:13px 16px;color:var(--ink);font:inherit;transition:.15s}
+  .band:hover{border-color:var(--c)}
+  .band.on{border-color:var(--c);box-shadow:0 0 0 1px var(--c),0 6px 22px rgba(0,0,0,.35)}
+  .band .bt{font-family:var(--mono);font-size:10.5px;letter-spacing:1px;text-transform:uppercase;color:var(--c);align-self:center;min-width:118px}
+  .band .bh{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+  .band .bh b{font-size:15px}
+  .band .bh span{font-size:12.5px;color:var(--muted)}
+  .band .bchips{grid-column:2;display:flex;gap:6px;flex-wrap:wrap;margin-top:2px}
+  .band .bchip{font-family:var(--mono);font-size:10.5px;color:var(--muted);background:var(--panel-2);
+    border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+  .band .bchip.c1{color:var(--violet);border-color:var(--violet-dim)}
+  .band .bchip.c2{color:var(--cyan);border-color:var(--cyan-dim)}
+  .band .bchip.c3{color:var(--amber);border-color:var(--amber-dim)}
+  @media(max-width:720px){.stackwrap{grid-template-columns:1fr}.rail{display:none}
+    .band{grid-template-columns:1fr}.band .bchips{grid-column:1}.band .bt{min-width:0}}
+
+  /* fleet flow svg */
+  .flow{margin-top:14px}
+  .flow svg{width:100%;height:auto;display:block}
+  .flow .nd rect{fill:var(--panel);stroke:var(--line);stroke-width:1.2;rx:10}
+  .flow .nd.mm rect{stroke:var(--cyan-dim)}
+  .flow .nd.mnt rect{stroke:var(--amber-dim)}
+  .flow .nd.sup rect{stroke:var(--green-dim);stroke-dasharray:5 4}
+  .flow .nd .t{fill:var(--ink);font-size:14px;font-weight:700;font-family:var(--sans)}
+  .flow .nd .u{fill:var(--muted);font-family:var(--mono);font-size:10px}
+  .flow .ed{fill:none;stroke-width:1.8}
+  .flow .ed.ship{stroke:var(--cyan)}
+  .flow .ed.sec{stroke:var(--amber)}
+  .flow .ed.sup{stroke:var(--green);stroke-dasharray:5 4}
+  .flow .el{font-family:var(--mono);font-size:10.5px;paint-order:stroke;stroke:var(--bg);stroke-width:3.5px}
+  .flow .el.ship{fill:var(--cyan)} .flow .el.sec{fill:var(--amber)} .flow .el.sup{fill:var(--green)}
+  .legend{display:flex;gap:18px;flex-wrap:wrap;margin-top:10px;font-size:12px;color:var(--muted)}
+  .legend i{display:inline-block;width:20px;height:0;border-top:2px solid;vertical-align:middle;margin-right:7px}
+  .legend .l1 i{border-color:var(--cyan)} .legend .l2 i{border-color:var(--amber)} .legend .l3 i{border-color:var(--green);border-top-style:dashed}
+  @media(max-width:820px){.flow{overflow-x:auto}.flow svg{min-width:720px}}
+
   /* packs */
   .packgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(168px,1fr));gap:12px;margin-top:24px}
   .pk{background:linear-gradient(180deg,var(--panel),var(--panel-2));border:1px solid var(--line);border-radius:12px;padding:14px 15px}
@@ -202,6 +252,7 @@
     <a href="#layers">Three layers</a>
     <a href="#team">The team</a>
     <a href="#pipeline">Pipeline</a>
+    <a href="#fleet">Fleet</a>
     <a href="#packs">Packs</a>
     <a href="#installer">Install &amp; use</a>
     <a href="#lessons">Lessons</a>
@@ -214,6 +265,7 @@
   <a href="#layers">Three layers</a>
   <a href="#team">The team</a>
   <a href="#pipeline">Pipeline</a>
+  <a href="#fleet">Fleet</a>
   <a href="#packs">Packs</a>
   <a href="#installer">Install &amp; use</a>
   <a href="#lessons">Lessons</a>
@@ -223,7 +275,7 @@
 <header class="hero"><div class="wrap">
   <div class="kicker">A portable engineering org for Claude Code</div>
   <h1>Stop using AI to write code.<br><span>Install an engineering team instead.</span></h1>
-  <p class="thesis">engsys is a full team of specialized AI agents — designer, planner, implementer, reviewer, security, architect, tester, librarian — that you install into any project with one command. <b>The personas stay the same everywhere; you swap stack "packs," not prompts.</b></p>
+  <p class="thesis">engsys is a full team of specialized AI agents — designer, planner, implementer, reviewer, security, architect, tester, librarian — that you install into any project with one command. <b>The personas stay the same everywhere; you swap stack "packs," not prompts.</b> And an always-on fleet — a merge orchestrator and a security watchdog — keeps shipping while you sleep.</p>
   <div class="cmd-row">
     <div class="cmdbox"><span class="pr">$</span> <span class="tx" id="cmd">engsys install --into .</span><button id="copy">copy</button></div>
     <a class="btn" href="#installer">Install &amp; use →</a>
@@ -271,7 +323,7 @@
 <section id="pipeline"><div class="wrap">
   <div class="kicker">How work moves</div>
   <h2>Spec to closeout, on rails</h2>
-  <p class="lede">Slash commands call the agents by name, so the process runs the same way every time. Review findings loop a phase back; closeout lessons loop into your next project.</p>
+  <p class="lede">Slash commands call the agents by name, so the process runs the same way every time. Review findings loop a phase back, the merge orchestrator pilots ready&thinsp;→&thinsp;CI&thinsp;→&thinsp;merge, and closeout lessons loop into your next project.</p>
   <div class="track" id="track"></div>
   <div class="trackNav">
     <button class="fbtn" id="trackPrev" aria-label="Previous stage">&larr; Prev</button>
@@ -279,6 +331,28 @@
     <button class="fbtn" id="trackNext" aria-label="Next stage">Next &rarr;</button>
   </div>
   <div class="detail" id="stationDetail"></div>
+</div></section>
+
+<section id="fleet"><div class="wrap">
+  <div class="kicker">The always-on layer</div>
+  <h2>A team that doesn&rsquo;t log off</h2>
+  <p class="lede">Two long-running &ldquo;monsters&rdquo; own the loops humans drop: one pilots every PR through ready&thinsp;&rarr;&thinsp;CI&thinsp;&rarr;&thinsp;merge, the other watches the security and dependency surface. What makes that safe to run unattended is a stack, not a prompt &mdash; click a layer.</p>
+
+  <div class="stackwrap">
+    <div class="rail left"><span>each layer trusts only the one below</span></div>
+    <div class="stack" id="stackBands"></div>
+    <div class="rail right"><span>recovery flows upward</span></div>
+  </div>
+  <div class="detail" id="stackDetail"></div>
+
+  <h3 style="margin-top:38px">How the monsters compose</h3>
+  <p class="muted" style="font-size:14px;max-width:70ch">Producer / consumer with separate batons: the watchdog triages and hands over already-reviewed fix PRs; the orchestrator is the only thing that merges. Underneath both, a cron-driven supervisor relaunches whichever one rotates or crashes &mdash; recovery works with the whole fleet dark.</p>
+  <div class="flow" id="fleetFlow"></div>
+  <div class="legend">
+    <span class="l1"><i></i>ship flow</span>
+    <span class="l2"><i></i>security flow</span>
+    <span class="l3"><i></i>deterministic recovery (no LLM)</span>
+  </div>
 </div></section>
 
 <section id="packs"><div class="wrap">
@@ -439,11 +513,13 @@ const STATIONS=[
   {lbl:'Design + plan',cmd:'/generate-project',pts:['Leith turns the goal into a spec with testable acceptance criteria.','Melvin, Nyx, and Gary pressure-test architecture, security, and comprehension; Marcelo adds the test strategy.','Jody breaks it into a dependency-ordered board of issues.']},
   {lbl:'Implement',cmd:'/implement-project',pts:['Isabelle works each issue in an isolated worktree, one phase = one PR.','Matches existing patterns, writes tests, runs the pre-push gate before pushing.','Opens the PR already locally reviewed.']},
   {lbl:'Review',cmd:'objective gate',pts:['A fresh reviewer with no stake re-runs the gate and checks each acceptance criterion.','Binary verdict: clean, or findings with file:line.','No merge without a clean independent pass.']},
+  {lbl:'Merge',cmd:'/merge-monster',pts:['Authors never mark ready or merge — finish the PR, label it mm:ready, hand off.','The orchestrator preflights the enqueuer\'s claims, then pilots ready → CI → merge, one active PR at a time.','Bounced PRs come back with exactly what\'s missing; a red default branch outranks everything.']},
   {lbl:'Close out',cmd:'/project-closeout',pts:['Verify everything merged, clean up worktrees and branches.','Mine the review findings; generalize recurring ones into lessons.','Promote durable lessons back to the shared library.']},
 ];
 const LOOPS=[
   {from:2,to:1,label:'findings loop back'},
-  {from:3,to:0,label:'lessons seed the next project'},
+  {from:3,to:1,label:'bounced PRs loop back'},
+  {from:4,to:0,label:'lessons seed the next project'},
 ];
 const track=document.getElementById('track'), sd=document.getElementById('stationDetail');
 (function(){
@@ -514,6 +590,93 @@ const track=document.getElementById('track'), sd=document.getElementById('statio
 function paintStation(i){const s=STATIONS[i];sd.innerHTML=`<div class="top"><span class="cmd">${s.cmd}</span><h3 style="margin:0">${s.lbl}</h3></div><ul>${s.pts.map(p=>`<li>${p}</li>`).join('')}</ul>`;}
 paintStation(0);
 
+// ---- runtime stack (fleet) ----
+const LAYERS=[
+  {t:'Layer 5 · Operator',c:'var(--violet)',h:'You, on any device',sub:'only judgment escalates',
+   chips:['remote control','escalations','kill switches','risk sign-off'],
+   pts:['Every session runs with remote control: transcripts and permission prompts follow you to whatever device you\u2019re near.',
+        'Only judgment reaches you \u2014 a stale-but-alive session that needs a probe, a failed relaunch, a suppression that needs risk sign-off, a migration ack.',
+        'Kill switches stay yours: close a monster\u2019s ledger issue and it stands down. Automation never overrides an intentional stop.']},
+  {t:'Layer 4 · Judgment',c:'var(--cyan)',h:'The sessions',sub:'LLM where it earns its keep \u2014 context is cache',
+   chips:['merge orchestrator','security watchdog','build / investigate / design','subagents'],
+   pts:['A named, namespaced fleet on an always-on machine \u2014 monsters run unattended; interactive roles stay permission-gated.',
+        'Context is cache: sessions flush what they learn to durable state the moment they learn it, and rotate at pressure instead of enduring lossy compaction.',
+        'Heavy reading goes to dispatched subagents that return conclusions \u2014 a session\u2019s context holds decisions, never logs.']},
+  {t:'Layer 3 · Durable truth',c:'var(--amber)',h:'GitHub + state files',sub:'what survives any death',
+   chips:['ledgers + heartbeats','labels + PRs','state.md + journals','spawn registry'],
+   pts:['GitHub is the source of truth: pinned ledger issues with heartbeats, mm:*/mnt:* labels as live pipeline state, PRs and issues as the durable record.',
+        'Per-session files \u2014 the queue table, decision journals, the subagent spawn registry \u2014 are rewritten every wake.',
+        'Any session can die at any moment; a replacement reconciles from this layer in one startup cycle. Signals only decide when to reconcile, never what is true.']},
+  {t:'Layer 2 · Substrate',c:'var(--green)',h:'Deterministic scripts',sub:'no LLM in the guarantee path',
+   chips:['installer','watch scripts','liveness watchdog','fleet supervisor · launchd'],
+   pts:['The installer materializes the system faithfully; watch scripts turn GitHub churn into one-line events so sessions sleep free between them.',
+        'The liveness watchdog catches quietly-dead subagents (registry + transcript staleness); generations are fenced before any respawn.',
+        'The fleet supervisor relaunches a rotated or crashed monster under launchd \u2014 it keeps working when every session is dark. Models judge; scripts guarantee.']},
+  {t:'Layer 1 · Identity',c:'var(--dim)',h:'Persona \u00b7 packs \u00b7 project facts',sub:'the install-time split everything stands on',
+   base:true,
+   pts:['The original three-layer split (above): who does the work, which stack they work on, and what\u2019s true about this repo \u2014 kept ruthlessly separate.',
+        'Laid down deterministically by the installer; personas never change per project, packs swap instead of prompts being rewritten.',
+        'Everything higher in the stack \u2014 sessions, monsters, supervision \u2014 assumes this layer is exactly what the lockfile says it is (engsys verify).']},
+];
+const bandsEl=document.getElementById('stackBands'), stackDetail=document.getElementById('stackDetail');
+bandsEl.innerHTML=LAYERS.map((L,i)=>{
+  const chips=L.base
+    ? '<span class="bchip c1">persona \u2014 who</span><span class="bchip c2">packs \u2014 which stack</span><span class="bchip c3">facts \u2014 this repo</span>'
+    : L.chips.map(c=>`<span class="bchip">${c}</span>`).join('');
+  return `<button class="band" style="--c:${L.c}" data-i="${i}" aria-pressed="false">
+    <span class="bt">${L.t}</span>
+    <span class="bh"><b>${L.h}</b><span>${L.sub}</span></span>
+    <span class="bchips">${chips}</span>
+  </button>`;
+}).join('');
+function pickLayer(i){
+  [...bandsEl.children].forEach((b,j)=>{b.classList.toggle('on',j===i);b.setAttribute('aria-pressed',j===i);});
+  const L=LAYERS[i];
+  stackDetail.innerHTML=`<div class="top"><span class="cmd" style="color:${L.c};border-color:currentColor;background:transparent">${L.t}</span><h3 style="margin:0">${L.h}</h3></div><ul>${L.pts.map(x=>`<li>${x}</li>`).join('')}</ul>`;
+}
+bandsEl.addEventListener('click',e=>{const b=e.target.closest('.band');if(b)pickLayer(+b.dataset.i);});
+pickLayer(1);
+
+// ---- fleet flow diagram ----
+(function(){
+  const NS='http://www.w3.org/2000/svg';
+  function fel(t,a,p){const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);(p)&&p.appendChild(e);return e;}
+  const W=1100,H=330;
+  const svg=fel('svg',{viewBox:`0 0 ${W} ${H}`,role:'img','aria-label':'Merge Monster and Maintenance Monster compose as producer and consumer, with a deterministic fleet supervisor relaunching either one'},document.getElementById('fleetFlow'));
+  const defs=fel('defs',{},svg);
+  [['fa-ship','#34e0d2'],['fa-sec','#f5b13d'],['fa-sup','#46d39a']].forEach(([id,c])=>{
+    const m=fel('marker',{id,viewBox:'0 0 8 8',refX:7,refY:4,markerWidth:7,markerHeight:7,orient:'auto-start-reverse'},defs);
+    fel('path',{d:'M0,0.5 L7.5,4 L0,7.5 z',fill:c},m);
+  });
+  function node(x,y,w,h,cls,title,sub){
+    const g=fel('g',{class:'nd '+cls},svg);
+    fel('rect',{x,y,width:w,height:h,rx:10},g);
+    const t=fel('text',{class:'t',x:x+w/2,y:y+(sub?h/2-4:h/2+5),'text-anchor':'middle'},g); t.textContent=title;
+    if(sub){const u=fel('text',{class:'u',x:x+w/2,y:y+h/2+16,'text-anchor':'middle'},g); u.textContent=sub;}
+    return {x,y,w,h};
+  }
+  function edge(d,cls,marker){fel('path',{class:'ed '+cls,d,'marker-end':`url(#${marker})`},svg);}
+  function elabel(x,y,cls,txt,anchor){const t=fel('text',{class:'el '+cls,x,y,'text-anchor':anchor||'middle'},svg);t.textContent=txt;}
+
+  const A=node(28,58,196,54,'','Your PRs','finished \u00b7 draft \u00b7 mm:ready');
+  const B=node(420,44,260,72,'mm','\ud83e\uddcc Merge Monster','own ledger \u00b7 one mm:active');
+  const C=node(886,58,186,54,'','Merged','labels stripped \u00b7 cleaned');
+  const D=node(28,196,196,58,'','Security surface','Dependabot \u00b7 CodeQL \u00b7 scans');
+  const E=node(420,190,260,72,'mnt','\ud83d\udd27 Maintenance Monster','own ledger \u00b7 sole Dependabot owner');
+  const F=node(760,196,240,58,'sup','Fleet supervisor','launchd \u00b7 every 5 min \u00b7 no LLM');
+
+  edge(`M ${A.x+A.w} 85 L ${B.x-8} 85`,'ship','fa-ship');            elabel(322,76,'ship','hand off');
+  edge(`M ${B.x+B.w} 85 L ${C.x-8} 85`,'ship','fa-ship');            elabel(783,76,'ship','ready \u2192 CI \u2192 merge');
+  edge(`M ${D.x+D.w} 225 L ${E.x-8} 225`,'sec','fa-sec');            elabel(322,216,'sec','watch \u2192 triage');
+  edge(`M ${E.x+E.w/2+40} ${E.y} C ${E.x+E.w/2+40} 150, ${B.x+B.w/2+40} 160, ${B.x+B.w/2+40} ${B.y+B.h+8}`,'sec','fa-sec');
+  elabel(608,158,'sec','triaged fix PRs \u00b7 mm:ready','start');
+  edge(`M ${F.x+60} ${F.y} C ${F.x+30} 140, ${B.x+B.w+40} 120, ${B.x+B.w+8} 96`,'sup','fa-sup');
+  edge(`M ${F.x-8} 225 L ${E.x+E.w+8} 225`,'sup','fa-sup');
+  elabel(F.x+120,F.y+80,'sup','relaunch on \u201crotation requested\u201d or crash');
+  elabel(553,306,'', 'both heartbeat their own pinned ledger issue \u2014 close it and that monster stands down');
+  svg.lastChild.setAttribute('fill','var(--dim)');
+})();
+
 // packs
 const PACKS=[
   {h:'cloud',v:'<b>aws</b> · <b>azure</b> · <b>gcp</b> · <b>cloudflare</b>'},
@@ -560,6 +723,7 @@ document.getElementById('take').innerHTML=[
   {b:'Make the boring part deterministic',p:'If a step can be skipped, don’t ask a model to do it — let a script. Save the model for judgment.'},
   {b:'Compose, don’t fork',p:'Mixed stacks should add up, not branch off. Detachable packs beat copy-paste every time.'},
   {b:'Close the loop',p:'Mine what you learned, generalize it, seed it forward. A system that doesn’t compound is just a snapshot.'},
+  {b:'No LLM in the guarantee path',p:'Watchdogs, supervisors, and installers are scripts under cron. Models judge; scripts guarantee. A dead fleet still restarts.'},
 ].map(x=>`<div class="tk"><b>${x.b}</b><p>${x.p}</p></div>`).join('');
 
 // scroll progress + copy
