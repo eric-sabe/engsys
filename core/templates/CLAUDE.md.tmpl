@@ -80,7 +80,15 @@ Imported into [`.claude/commands/`](.claude/commands/):
 
 ## Hooks
 
-A `PostToolUse` hook on `Edit|Write|MultiEdit` runs `.claude/hooks/post-edit-reminders.sh`, which emits one-time nudges after edits to sensitive files. It is wired in [`.claude/settings.json`](.claude/settings.json).
+A `PostToolUse` hook on `Edit|Write|MultiEdit` runs `.claude/hooks/post-edit-reminders.sh`, which emits one-time nudges after edits to sensitive files. A `SessionStart` hook (matcher `compact`) runs `.claude/hooks/post-compact-reground.sh` right after any context compaction. Both are wired in [`.claude/settings.json`](.claude/settings.json).
+
+## Context compaction
+
+Context is cache; files and this repo are truth. Standing rules for every session, and doubly for long-runners (the monsters, fleet roles):
+
+- Write what you'd miss the moment you learn it — per-PR quirks onto the PR, decisions into the relevant journal/state file, durable lessons into the lessons dir. Never save flushing for session end.
+- After a compaction (a summary at the top of your context, plus the re-ground hook's note): re-read your skill's SKILL.md + config + state files and reconcile against live GitHub before acting. Treat summarized precision (PR numbers, SHAs, counters) as unverified.
+- Long-running orchestrators prefer **rotation over marathon compaction**: at high context pressure with nothing in flight, post a digest, final heartbeat, ask the operator for a relaunch, and stop — restart recovers from durable state.
 
 ## Memory & rules
 

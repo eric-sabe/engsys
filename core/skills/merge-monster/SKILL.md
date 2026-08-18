@@ -288,6 +288,37 @@ GitHub before acting — Slack grants the human decision, never a bypass of a ha
 rule (still no merging red checks, unresolved threads, or ruleset blocks; still
 no `--admin`). Ambiguous → re-ask, never guess.
 
+## Context discipline (compaction & rotation)
+
+**Context is cache; files and GitHub are truth.** A compaction — or a session
+death, which is the same event with worse manners — must cost you nothing but
+warm cache. That only holds if you never *rely* on context for anything you
+haven't written down:
+
+- **Flush at the moment you learn it, never at session end.** Per-PR quirks
+  (a flaky CI leg, an author constraint) → a comment on that PR, where the
+  next reader finds it without remembering it. Attempt/extension counters and
+  flake observations → the journal. Durable lessons → the repo's lessons
+  location, immediately. Queue truth → `state.md` every wake (already
+  required). If losing it would hurt, it belongs in a file — now.
+- **After ANY compaction, treat yourself as resuming**: re-read this
+  SKILL.md, the config, and `state.md`, then re-snapshot live GitHub
+  (§ Session startup 1–2) before acting. A summary of your rules is not your
+  rules — the files on disk are always sharper than the summary's memory of
+  them.
+- **Keep the burn low.** Never read raw CI logs, full `gh ... --json` dumps,
+  or `gh run watch` streams inline — dispatch a subagent to read and return
+  conclusions (three sentences, not five hundred lines); keep `--jq`
+  projections tight. Your context should hold decisions, never logs.
+- **Prefer rotation over marathon compaction.** A voluntary restart at a
+  quiet boundary beats an involuntary summarization at an arbitrary one.
+  When context pressure is high (compaction warnings) and nothing is
+  `mm:active`: post a session-end digest to the ledger, final heartbeat with
+  status "rotation requested", notify the operator (escalation channel /
+  remote control) to relaunch, and stop. The relaunch recovers from durable
+  state in one startup cycle — that is what the ledger/reconcile design is
+  for.
+
 ## Shutdown (`STOP` event, user interrupt, or pause request)
 
 Finish or safely park the in-flight PR (never abandon between "marked ready"
