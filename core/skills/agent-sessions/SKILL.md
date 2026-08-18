@@ -91,6 +91,32 @@ operator's interactive cloud login surviving the night.
   steering, answer permission prompts. Usually the better lens for the
   monsters than the raw terminal.
 
+## Autonomous rotation (fleet supervisor)
+
+Long-running monsters rotate instead of enduring lossy compaction — and the
+relaunch must not wait on a human. `<skill-dir>/scripts/fleet-supervisor.sh`
+runs under launchd/cron every ~5 minutes with **no LLM in the restart path**
+(recovery works even when the whole fleet is dark):
+
+| Ledger heartbeat | Process | Action |
+| --- | --- | --- |
+| "rotation requested" (exact phrase) | exited | kill window, relaunch |
+| stale, issue open | exited | relaunch (crash recovery) |
+| "session end" | exited | leave — deliberate stop |
+| ledger **closed** | any | never touch — kill switch wins |
+| stale | **alive** | never kill; escalate once on the ledger |
+
+The stale-but-alive row is deliberate: a live process is never killed on
+staleness alone — that's probe-then-classify territory (subagent-liveness),
+a judgment call for the operator or the maintenance watchdog, not a script.
+
+Setup: copy `fleet-supervisor.conf.example` → `.claude/fleet-supervisor.conf`
+(sessions, ledger issues, stale thresholds), and `launchd.plist.example` →
+`~/Library/LaunchAgents/` with `REPO_ROOT` filled in (Linux: cron/systemd
+timer, same cadence). ALIVE detection is shell-fallback based, not
+process-name based — the claude binary renames its process to its version
+string.
+
 ## Related
 
 - Merge orchestrator: [merge-monster](../merge-monster/SKILL.md)

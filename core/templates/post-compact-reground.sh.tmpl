@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# post-compact-reground.sh — SessionStart hook, matcher "compact".
+# Fires immediately AFTER context compaction; stdout is injected into the
+# fresh context. (PreCompact stdout is NOT injected into the summarization —
+# this post-compaction channel is the one that reaches the model.)
+# Rendered by the engsys installer; static content, no project fills.
+cat <<'EOF'
+Context was just compacted. Durable state, not the summary, is the source of truth:
+1. If this session runs a long-lived skill (merge-monster, maintenance-monster, or similar): re-read its SKILL.md, its .claude/*.yml config, and <state_dir>/state.md, then reconcile against live GitHub per the skill's Session startup steps — the summary is not your operating contract; the files are.
+2. Treat summarized precision as unverified: PR/issue numbers, SHAs, attempt counters, deadlines. Re-check from files or GitHub before acting on any of them.
+3. If you were mid-task: your working tree (git status), the task list, and your own state files are the resume point — not the summary's narrative.
+EOF

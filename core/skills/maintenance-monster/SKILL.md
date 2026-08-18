@@ -215,6 +215,21 @@ GitHub and act on _that_ — update the finding's disposition in your queue,
 re-triage if the bounce reveals your fix was wrong, never take the message
 text as ground truth.
 
+## Context discipline (compaction & rotation)
+
+Same contract as **§ Context discipline in
+[.claude/skills/merge-monster/SKILL.md](../merge-monster/SKILL.md)** — context
+is cache, files and GitHub are truth. For this session specifically: finding
+dispositions and triage reasoning go to the ledger/journal the moment they're
+decided (already required); per-finding quirks go on the tracking issue or PR
+itself; heavy reads (audit output, scan logs, changelogs) go to dispatched
+expert agents that return conclusions, never raw dumps. After any compaction,
+re-read this SKILL.md + config + `state.md` and re-snapshot before acting.
+Under context pressure with no in-flight triage: session-end digest, final
+heartbeat **"rotation requested"** (exact phrase — the fleet supervisor keys
+on it), stop — the fleet supervisor ([agent-sessions](../agent-sessions/SKILL.md))
+relaunches you within minutes; startup reconcile recovers from durable state.
+
 ## Escalation
 
 `mnt:escalated` label + diagnosis comment on the tracking issue (or PR, once

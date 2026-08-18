@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd job for the fleet supervisor (macOS always-on machine).
+  1. Replace REPO_ROOT below with your repo's absolute path.
+  2. cp to ~/Library/LaunchAgents/com.<yourproject>.fleet-supervisor.plist
+  3. launchctl load ~/Library/LaunchAgents/com.<yourproject>.fleet-supervisor.plist
+  On Linux, an equivalent cron/systemd timer running the script from the repo
+  root every 5 minutes does the same job.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.yourproject.fleet-supervisor</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>.claude/skills/agent-sessions/scripts/fleet-supervisor.sh</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>REPO_ROOT</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>StartInterval</key>
+  <integer>300</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/tmp/fleet-supervisor.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/fleet-supervisor.log</string>
+</dict>
+</plist>

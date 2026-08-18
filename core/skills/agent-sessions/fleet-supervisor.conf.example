@@ -1,0 +1,10 @@
+# fleet-supervisor.conf — copy to .claude/fleet-supervisor.conf and edit.
+# Read by the agent-sessions skill's fleet-supervisor.sh (launchd, ~5 min).
+# Only ledger-bearing monster sessions belong here; interactive roles have no
+# heartbeat contract and are never auto-relaunched.
+TMUX_SESSION=acme
+LAUNCH_CMD=bash .claude/skills/agent-sessions/scripts/launch-agent-sessions.sh
+# <session>|<ledger issue>|<stale minutes>   (stale = heartbeat older than this;
+# mirror each monster's stale_lock_minutes + grace)
+acme-mm|0|60
+acme-maintain|0|60
