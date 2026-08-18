@@ -88,7 +88,7 @@ Context is cache; files and this repo are truth. Standing rules for every sessio
 
 - Write what you'd miss the moment you learn it — per-PR quirks onto the PR, decisions into the relevant journal/state file, durable lessons into the lessons dir. Never save flushing for session end.
 - After a compaction (a summary at the top of your context, plus the re-ground hook's note): re-read your skill's SKILL.md + config + state files and reconcile against live GitHub before acting. Treat summarized precision (PR numbers, SHAs, counters) as unverified.
-- Long-running orchestrators prefer **rotation over marathon compaction**: at high context pressure with nothing in flight, post a digest, final heartbeat, ask the operator for a relaunch, and stop — restart recovers from durable state.
+- Long-running orchestrators prefer **rotation over marathon compaction**: at high context pressure with nothing in flight, post a digest, final heartbeat **"rotation requested"** (exact phrase), and stop — the fleet supervisor (agent-sessions skill) relaunches within minutes; restart recovers from durable state. Operator only on relaunch failure or a stale-but-alive session.
 
 ## Memory & rules
 

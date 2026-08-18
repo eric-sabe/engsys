@@ -226,8 +226,9 @@ itself; heavy reads (audit output, scan logs, changelogs) go to dispatched
 expert agents that return conclusions, never raw dumps. After any compaction,
 re-read this SKILL.md + config + `state.md` and re-snapshot before acting.
 Under context pressure with no in-flight triage: session-end digest, final
-heartbeat "rotation requested", notify the operator, stop — a relaunch
-recovers from durable state in one startup cycle.
+heartbeat **"rotation requested"** (exact phrase — the fleet supervisor keys
+on it), stop — the fleet supervisor ([agent-sessions](../agent-sessions/SKILL.md))
+relaunches you within minutes; startup reconcile recovers from durable state.
 
 ## Escalation
 
