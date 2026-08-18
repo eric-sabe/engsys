@@ -314,10 +314,12 @@ haven't written down:
   quiet boundary beats an involuntary summarization at an arbitrary one.
   When context pressure is high (compaction warnings) and nothing is
   `mm:active`: post a session-end digest to the ledger, final heartbeat with
-  status "rotation requested", notify the operator (escalation channel /
-  remote control) to relaunch, and stop. The relaunch recovers from durable
-  state in one startup cycle — that is what the ledger/reconcile design is
-  for.
+  status **"rotation requested"** (exact phrase — the fleet supervisor keys
+  on it), and stop. No operator involved: the fleet supervisor (see the
+  [agent-sessions](../agent-sessions/SKILL.md) skill) relaunches you within
+  minutes, and startup reconcile recovers everything from durable state.
+  The operator only appears when a relaunch fails or a stale-but-alive
+  session needs a probe.
 
 ## Shutdown (`STOP` event, user interrupt, or pause request)
 
