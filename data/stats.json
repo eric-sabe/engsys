@@ -1,18 +1,18 @@
 {
-  "generatedAt": "2026-08-29T06:22:32.625Z",
+  "generatedAt": "2026-08-30T06:23:33.755Z",
   "window": {
     "from": "2025-06-27",
-    "to": "2026-08-29",
+    "to": "2026-08-30",
     "bucket": "week"
   },
-  "repoCount": 37,
+  "repoCount": 38,
   "totals": {
-    "issuesOpened": 3834,
-    "issuesClosed": 3460,
-    "commits": 5533,
-    "prsMerged": 1774,
-    "locAdded": 3530354,
-    "locRemoved": 1186532
+    "issuesOpened": 3835,
+    "issuesClosed": 3464,
+    "commits": 5545,
+    "prsMerged": 1776,
+    "locAdded": 3535690,
+    "locRemoved": 1186621
   },
   "series": [
     {
@@ -688,14 +688,14 @@
     },
     {
       "weekStart": "2026-08-24",
-      "issuesOpened": 33,
-      "issuesClosed": 17,
-      "commits": 46,
-      "prsMerged": 20,
-      "locAdded": 15898,
-      "locRemoved": 405,
-      "locAddedViaPR": 15898,
-      "locAddedDirect": 0
+      "issuesOpened": 34,
+      "issuesClosed": 21,
+      "commits": 58,
+      "prsMerged": 22,
+      "locAdded": 21234,
+      "locRemoved": 494,
+      "locAddedViaPR": 18683,
+      "locAddedDirect": 2551
     }
   ],
   "daily": {
@@ -999,11 +999,12 @@
     "2026-08-25": 17,
     "2026-08-26": 10,
     "2026-08-27": 3,
-    "2026-08-28": 4
+    "2026-08-28": 11,
+    "2026-08-29": 5
   },
   "languages": {
-    "TypeScript": 37828037,
-    "HTML": 12876372,
+    "TypeScript": 37931197,
+    "HTML": 13266666,
     "Python": 6606416,
     "JavaScript": 2672246,
     "Shell": 1329161,
@@ -19928,12 +19929,12 @@
       "_id": "29107299",
       "alias": "Fuzzy Kingfisher",
       "totals": {
-        "issuesOpened": 2131,
-        "issuesClosed": 1882,
-        "commits": 1857,
-        "prsMerged": 907,
-        "locAdded": 1046027,
-        "locRemoved": 308203
+        "issuesOpened": 2132,
+        "issuesClosed": 1886,
+        "commits": 1867,
+        "prsMerged": 909,
+        "locAdded": 1048812,
+        "locRemoved": 308282
       },
       "series": [
         {
@@ -20609,13 +20610,13 @@
         },
         {
           "weekStart": "2026-08-24",
-          "issuesOpened": 33,
-          "issuesClosed": 17,
-          "commits": 34,
-          "prsMerged": 16,
-          "locAdded": 5313,
-          "locRemoved": 152,
-          "locAddedViaPR": 5313,
+          "issuesOpened": 34,
+          "issuesClosed": 21,
+          "commits": 44,
+          "prsMerged": 18,
+          "locAdded": 8098,
+          "locRemoved": 231,
+          "locAddedViaPR": 8098,
           "locAddedDirect": 0
         }
       ],
@@ -20749,13 +20750,14 @@
         "2026-08-19": 17,
         "2026-08-18": 51,
         "2026-08-17": 37,
-        "2026-08-28": 1,
+        "2026-08-29": 3,
+        "2026-08-28": 8,
         "2026-08-26": 7,
         "2026-08-25": 17,
         "2026-08-24": 9
       },
       "languages": {
-        "TypeScript": 15535539,
+        "TypeScript": 15638699,
         "HTML": 813830,
         "Bicep": 677587,
         "Shell": 279992,
@@ -21702,6 +21704,37 @@
       },
       "languages": {
         "HTML": 60234
+      }
+    },
+    {
+      "_id": "4c8df26d",
+      "alias": "Glacial Kingfisher",
+      "totals": {
+        "issuesOpened": 0,
+        "issuesClosed": 0,
+        "commits": 2,
+        "prsMerged": 0,
+        "locAdded": 2551,
+        "locRemoved": 10
+      },
+      "series": [
+        {
+          "weekStart": "2026-08-24",
+          "issuesOpened": 0,
+          "issuesClosed": 0,
+          "commits": 2,
+          "prsMerged": 0,
+          "locAdded": 2551,
+          "locRemoved": 10,
+          "locAddedViaPR": 0,
+          "locAddedDirect": 2551
+        }
+      ],
+      "daily": {
+        "2026-08-29": 2
+      },
+      "languages": {
+        "HTML": 390294
       }
     }
   ]
