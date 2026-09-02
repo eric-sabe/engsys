@@ -1,18 +1,18 @@
 {
-  "generatedAt": "2026-09-01T06:27:11.431Z",
+  "generatedAt": "2026-09-02T06:30:57.456Z",
   "window": {
     "from": "2025-06-27",
-    "to": "2026-09-01",
+    "to": "2026-09-02",
     "bucket": "week"
   },
   "repoCount": 38,
   "totals": {
-    "issuesOpened": 3870,
-    "issuesClosed": 3472,
-    "commits": 5566,
-    "prsMerged": 1789,
-    "locAdded": 3543292,
-    "locRemoved": 1186743
+    "issuesOpened": 3880,
+    "issuesClosed": 3480,
+    "commits": 5598,
+    "prsMerged": 1799,
+    "locAdded": 3551499,
+    "locRemoved": 1187365
   },
   "series": [
     {
@@ -699,13 +699,13 @@
     },
     {
       "weekStart": "2026-08-31",
-      "issuesOpened": 34,
-      "issuesClosed": 5,
-      "commits": 12,
-      "prsMerged": 8,
-      "locAdded": 4646,
-      "locRemoved": 82,
-      "locAddedViaPR": 4646,
+      "issuesOpened": 44,
+      "issuesClosed": 13,
+      "commits": 44,
+      "prsMerged": 18,
+      "locAdded": 12853,
+      "locRemoved": 704,
+      "locAddedViaPR": 12853,
       "locAddedDirect": 0
     }
   ],
@@ -1013,15 +1013,16 @@
     "2026-08-28": 11,
     "2026-08-29": 7,
     "2026-08-30": 7,
-    "2026-08-31": 10,
-    "2026-09-01": 2
+    "2026-08-31": 11,
+    "2026-09-01": 30,
+    "2026-09-02": 3
   },
   "languages": {
-    "TypeScript": 37992449,
+    "TypeScript": 38242017,
     "HTML": 13272914,
     "Python": 6606416,
-    "JavaScript": 2704630,
-    "Shell": 1331188,
+    "JavaScript": 2710687,
+    "Shell": 1343632,
     "Svelte": 1017111,
     "Swift": 911634,
     "Bicep": 843867,
@@ -1032,7 +1033,7 @@
     "PowerShell": 253262,
     "HCL": 210969,
     "PLpgSQL": 108184,
-    "Dockerfile": 84281,
+    "Dockerfile": 84821,
     "Handlebars": 16188,
     "Go Template": 8592,
     "Makefile": 3659,
@@ -19955,12 +19956,12 @@
       "_id": "29107299",
       "alias": "Fuzzy Kingfisher",
       "totals": {
-        "issuesOpened": 2167,
-        "issuesClosed": 1894,
-        "commits": 1885,
-        "prsMerged": 921,
-        "locAdded": 1053942,
-        "locRemoved": 308331
+        "issuesOpened": 2177,
+        "issuesClosed": 1902,
+        "commits": 1917,
+        "prsMerged": 931,
+        "locAdded": 1062149,
+        "locRemoved": 308953
       },
       "series": [
         {
@@ -20647,13 +20648,13 @@
         },
         {
           "weekStart": "2026-08-31",
-          "issuesOpened": 34,
-          "issuesClosed": 5,
-          "commits": 9,
-          "prsMerged": 7,
-          "locAdded": 2174,
-          "locRemoved": 9,
-          "locAddedViaPR": 2174,
+          "issuesOpened": 44,
+          "issuesClosed": 13,
+          "commits": 41,
+          "prsMerged": 17,
+          "locAdded": 10381,
+          "locRemoved": 631,
+          "locAddedViaPR": 10381,
           "locAddedDirect": 0
         }
       ],
@@ -20793,18 +20794,19 @@
         "2026-08-26": 7,
         "2026-08-25": 17,
         "2026-08-24": 9,
-        "2026-09-01": 2,
-        "2026-08-31": 7
+        "2026-09-02": 3,
+        "2026-09-01": 30,
+        "2026-08-31": 8
       },
       "languages": {
-        "TypeScript": 15699951,
+        "TypeScript": 15949519,
         "HTML": 813830,
         "Bicep": 692146,
-        "Shell": 282019,
-        "JavaScript": 229620,
+        "Shell": 294463,
+        "JavaScript": 235677,
         "Python": 154980,
         "PLpgSQL": 71069,
-        "Dockerfile": 60578,
+        "Dockerfile": 61118,
         "CSS": 60146,
         "PowerShell": 17729
       }
