@@ -1,18 +1,18 @@
 {
-  "generatedAt": "2026-09-07T06:33:21.052Z",
+  "generatedAt": "2026-09-08T06:25:53.374Z",
   "window": {
     "from": "2025-06-27",
-    "to": "2026-09-07",
+    "to": "2026-09-08",
     "bucket": "week"
   },
   "repoCount": 39,
   "totals": {
-    "issuesOpened": 3917,
-    "issuesClosed": 3516,
-    "commits": 5680,
-    "prsMerged": 1839,
-    "locAdded": 3596989,
-    "locRemoved": 1190146
+    "issuesOpened": 3962,
+    "issuesClosed": 3540,
+    "commits": 5721,
+    "prsMerged": 1855,
+    "locAdded": 3612560,
+    "locRemoved": 1191129
   },
   "series": [
     {
@@ -710,13 +710,13 @@
     },
     {
       "weekStart": "2026-09-07",
-      "issuesOpened": 0,
-      "issuesClosed": 0,
-      "commits": 0,
-      "prsMerged": 0,
-      "locAdded": 0,
-      "locRemoved": 0,
-      "locAddedViaPR": 0,
+      "issuesOpened": 45,
+      "issuesClosed": 24,
+      "commits": 41,
+      "prsMerged": 16,
+      "locAdded": 15571,
+      "locRemoved": 983,
+      "locAddedViaPR": 15571,
       "locAddedDirect": 0
     }
   ],
@@ -1030,17 +1030,19 @@
     "2026-09-03": 26,
     "2026-09-04": 14,
     "2026-09-05": 12,
-    "2026-09-06": 5
+    "2026-09-06": 5,
+    "2026-09-07": 27,
+    "2026-09-08": 14
   },
   "languages": {
-    "TypeScript": 39148645,
-    "HTML": 13290651,
+    "TypeScript": 39415944,
+    "HTML": 13293680,
     "Python": 6606416,
-    "JavaScript": 2924546,
-    "Shell": 1350100,
+    "JavaScript": 3024902,
+    "Shell": 1381275,
     "Svelte": 1017111,
     "Swift": 911634,
-    "Bicep": 877219,
+    "Bicep": 881772,
     "Kotlin": 825827,
     "Rust": 568184,
     "C#": 528788,
@@ -6445,10 +6447,10 @@
       "totals": {
         "issuesOpened": 0,
         "issuesClosed": 0,
-        "commits": 245,
-        "prsMerged": 72,
-        "locAdded": 137565,
-        "locRemoved": 6464
+        "commits": 248,
+        "prsMerged": 73,
+        "locAdded": 138307,
+        "locRemoved": 6488
       },
       "series": [
         {
@@ -7137,11 +7139,11 @@
           "weekStart": "2026-09-07",
           "issuesOpened": 0,
           "issuesClosed": 0,
-          "commits": 0,
-          "prsMerged": 0,
-          "locAdded": 0,
-          "locRemoved": 0,
-          "locAddedViaPR": 0,
+          "commits": 3,
+          "prsMerged": 1,
+          "locAdded": 742,
+          "locRemoved": 24,
+          "locAddedViaPR": 742,
           "locAddedDirect": 0
         }
       ],
@@ -7183,11 +7185,12 @@
         "2026-09-05": 3,
         "2026-09-04": 3,
         "2026-09-02": 3,
-        "2026-08-31": 3
+        "2026-08-31": 3,
+        "2026-09-07": 3
       },
       "languages": {
         "JavaScript": 360564,
-        "HTML": 201398,
+        "HTML": 204427,
         "Shell": 7663
       }
     },
@@ -19986,12 +19989,12 @@
       "_id": "29107299",
       "alias": "Fuzzy Kingfisher",
       "totals": {
-        "issuesOpened": 2214,
-        "issuesClosed": 1938,
-        "commits": 1983,
-        "prsMerged": 965,
-        "locAdded": 1091414,
-        "locRemoved": 311020
+        "issuesOpened": 2259,
+        "issuesClosed": 1962,
+        "commits": 2021,
+        "prsMerged": 980,
+        "locAdded": 1106243,
+        "locRemoved": 311979
       },
       "series": [
         {
@@ -20689,13 +20692,13 @@
         },
         {
           "weekStart": "2026-09-07",
-          "issuesOpened": 0,
-          "issuesClosed": 0,
-          "commits": 0,
-          "prsMerged": 0,
-          "locAdded": 0,
-          "locRemoved": 0,
-          "locAddedViaPR": 0,
+          "issuesOpened": 45,
+          "issuesClosed": 24,
+          "commits": 38,
+          "prsMerged": 15,
+          "locAdded": 14829,
+          "locRemoved": 959,
+          "locAddedViaPR": 14829,
           "locAddedDirect": 0
         }
       ],
@@ -20841,14 +20844,16 @@
         "2026-09-03": 26,
         "2026-09-02": 25,
         "2026-09-01": 30,
-        "2026-08-31": 8
+        "2026-08-31": 8,
+        "2026-09-08": 14,
+        "2026-09-07": 24
       },
       "languages": {
-        "TypeScript": 16856147,
+        "TypeScript": 17123446,
         "HTML": 813830,
-        "Bicep": 725498,
-        "Shell": 300931,
-        "JavaScript": 274610,
+        "Bicep": 730051,
+        "JavaScript": 374966,
+        "Shell": 332106,
         "Python": 154980,
         "PLpgSQL": 71069,
         "Dockerfile": 62277,
