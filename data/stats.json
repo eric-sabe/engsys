@@ -1,18 +1,18 @@
 {
-  "generatedAt": "2026-09-09T06:26:29.335Z",
+  "generatedAt": "2026-09-10T06:25:58.349Z",
   "window": {
     "from": "2025-06-27",
-    "to": "2026-09-09",
+    "to": "2026-09-10",
     "bucket": "week"
   },
   "repoCount": 39,
   "totals": {
-    "issuesOpened": 3996,
-    "issuesClosed": 3571,
-    "commits": 5766,
-    "prsMerged": 1868,
-    "locAdded": 3624383,
-    "locRemoved": 1193967
+    "issuesOpened": 4011,
+    "issuesClosed": 3580,
+    "commits": 5789,
+    "prsMerged": 1878,
+    "locAdded": 3632846,
+    "locRemoved": 1194676
   },
   "series": [
     {
@@ -710,13 +710,13 @@
     },
     {
       "weekStart": "2026-09-07",
-      "issuesOpened": 79,
-      "issuesClosed": 55,
-      "commits": 86,
-      "prsMerged": 29,
-      "locAdded": 27394,
-      "locRemoved": 3821,
-      "locAddedViaPR": 27394,
+      "issuesOpened": 94,
+      "issuesClosed": 64,
+      "commits": 109,
+      "prsMerged": 39,
+      "locAdded": 35857,
+      "locRemoved": 4530,
+      "locAddedViaPR": 35857,
       "locAddedDirect": 0
     }
   ],
@@ -1033,17 +1033,18 @@
     "2026-09-06": 5,
     "2026-09-07": 27,
     "2026-09-08": 54,
-    "2026-09-09": 5
+    "2026-09-09": 25,
+    "2026-09-10": 3
   },
   "languages": {
-    "TypeScript": 39726316,
-    "HTML": 13293680,
+    "TypeScript": 39881311,
+    "HTML": 13299165,
     "Python": 6606416,
     "JavaScript": 3024902,
     "Shell": 1385020,
     "Svelte": 1017111,
+    "Bicep": 919133,
     "Swift": 911634,
-    "Bicep": 902531,
     "Kotlin": 825827,
     "Rust": 568184,
     "C#": 528788,
@@ -6448,10 +6449,10 @@
       "totals": {
         "issuesOpened": 0,
         "issuesClosed": 0,
-        "commits": 248,
-        "prsMerged": 73,
-        "locAdded": 138307,
-        "locRemoved": 6488
+        "commits": 251,
+        "prsMerged": 74,
+        "locAdded": 140060,
+        "locRemoved": 6523
       },
       "series": [
         {
@@ -7140,11 +7141,11 @@
           "weekStart": "2026-09-07",
           "issuesOpened": 0,
           "issuesClosed": 0,
-          "commits": 3,
-          "prsMerged": 1,
-          "locAdded": 742,
-          "locRemoved": 24,
-          "locAddedViaPR": 742,
+          "commits": 6,
+          "prsMerged": 2,
+          "locAdded": 2495,
+          "locRemoved": 59,
+          "locAddedViaPR": 2495,
           "locAddedDirect": 0
         }
       ],
@@ -7187,11 +7188,12 @@
         "2026-09-04": 3,
         "2026-09-02": 3,
         "2026-08-31": 3,
+        "2026-09-09": 3,
         "2026-09-07": 3
       },
       "languages": {
         "JavaScript": 360564,
-        "HTML": 204427,
+        "HTML": 209912,
         "Shell": 7663
       }
     },
@@ -19990,12 +19992,12 @@
       "_id": "29107299",
       "alias": "Fuzzy Kingfisher",
       "totals": {
-        "issuesOpened": 2293,
-        "issuesClosed": 1993,
-        "commits": 2066,
-        "prsMerged": 993,
-        "locAdded": 1118066,
-        "locRemoved": 314817
+        "issuesOpened": 2308,
+        "issuesClosed": 2002,
+        "commits": 2086,
+        "prsMerged": 1002,
+        "locAdded": 1124776,
+        "locRemoved": 315491
       },
       "series": [
         {
@@ -20693,13 +20695,13 @@
         },
         {
           "weekStart": "2026-09-07",
-          "issuesOpened": 79,
-          "issuesClosed": 55,
-          "commits": 83,
-          "prsMerged": 28,
-          "locAdded": 26652,
-          "locRemoved": 3797,
-          "locAddedViaPR": 26652,
+          "issuesOpened": 94,
+          "issuesClosed": 64,
+          "commits": 103,
+          "prsMerged": 37,
+          "locAdded": 33362,
+          "locRemoved": 4471,
+          "locAddedViaPR": 33362,
           "locAddedDirect": 0
         }
       ],
@@ -20846,14 +20848,15 @@
         "2026-09-02": 25,
         "2026-09-01": 30,
         "2026-08-31": 8,
-        "2026-09-09": 5,
+        "2026-09-10": 3,
+        "2026-09-09": 22,
         "2026-09-08": 54,
         "2026-09-07": 24
       },
       "languages": {
-        "TypeScript": 17433818,
+        "TypeScript": 17588813,
         "HTML": 813830,
-        "Bicep": 750810,
+        "Bicep": 767412,
         "JavaScript": 374966,
         "Shell": 335851,
         "Python": 154980,
