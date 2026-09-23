@@ -95,6 +95,15 @@
             "command": ".claude/hooks/post-compact-reground.sh"
           }
         ]
+      },
+      {
+        "matcher": "clear|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/post-clear-reground.sh"
+          }
+        ]
       }
     ]
   }

@@ -80,7 +80,17 @@ Imported into [`.claude/commands/`](.claude/commands/):
 
 ## Hooks
 
-A `PostToolUse` hook on `Edit|Write|MultiEdit` runs `.claude/hooks/post-edit-reminders.sh`, which emits one-time nudges after edits to sensitive files. A `SessionStart` hook (matcher `compact`) runs `.claude/hooks/post-compact-reground.sh` right after any context compaction. Both are wired in [`.claude/settings.json`](.claude/settings.json).
+A `PostToolUse` hook on `Edit|Write|MultiEdit` runs `.claude/hooks/post-edit-reminders.sh`, which emits one-time nudges after edits to sensitive files. Two `SessionStart` re-ground hooks keep a reset session on the rails: matcher `compact` → `.claude/hooks/post-compact-reground.sh` (after any context compaction); matcher `clear|resume` → `.claude/hooks/post-clear-reground.sh` (after a `/clear` or a `--continue`/`--resume`, which reload CLAUDE.md and the memory index but drop any loaded skill and the memory-file bodies — the hook re-injects the § Subagent orchestration discipline and nudges role sessions to re-invoke their skill). Run `/fleet-prime` to re-ground on demand. All are wired in [`.claude/settings.json`](.claude/settings.json).
+
+## Subagent orchestration
+
+How to dispatch and track subagents. This discipline lives in scattered memory files whose bodies only load on recall — so the essentials are pinned here (always loaded, survives `/clear`). The `subagent-liveness` skill is the detailed substrate.
+
+- **Dispatch style decides whether the result comes back.** An **async background agent** (no `name`) returns its result to you automatically via a task-notification — use it when you just want an answer. A **named teammate** (`name:` set) is addressable but goes **idle holding its result**; you must message it to pull it. Don't route a "give me findings" job through a named teammate and then wait for a report that never pushes.
+- **Never fire-and-forget.** After spawning any background/async agent, wait for its completion notification (or track it) before you report or move on. Never narrate, assume, or predict a pending agent's result — the completion notification is the only source of its output.
+- **Long runners (> a few minutes)** — implementation, investigation, reviews, builds: use the `subagent-liveness` skill (register at spawn, watch for overdue/stale, probe before declaring death).
+- **Short, single-concern agents; verify state live.** Prefer several focused agents over one god-agent, and read PR / issue / CI / merge state from GitHub, not from memory — a merge can leave a PR OPEN; confirm it actually merged before "done".
+- **If a merge orchestrator owns the merge baton:** you don't merge. Finish the PR (local review clean + pre-push gate green, threads resolved), leave it a draft, and hand off per your merge-orchestration protocol.
 
 ## Context compaction
 
