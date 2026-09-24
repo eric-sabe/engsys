@@ -45,6 +45,9 @@ how confident a disposition looks.
 
 ## Session startup
 
+> **Invoke each script as its own Bash call, by literal path.** Substitute `<engsys-root>` / `<skill-dir>` with the actual path from your context — no `cd` (you are already in the repo), no shell variables, no `&&`/`;` chaining, and no `mkdir` (the scripts create their state dirs). In plugin installs engsys auto-approves exactly that form for its bookkeeping scripts; any other shape asks for permission.
+
+
 1. Read the config. `mkdir -p <state_dir>` and load prior `state.md` /
    journal if present (you may be resuming).
 2. Reconcile reality: run `<skill-dir>/scripts/mnt-snapshot.sh --repo <repo>

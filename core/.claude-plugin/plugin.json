@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "engsys",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "engsys core — a stack-agnostic engineering team for Claude Code: personas, merge/maintenance orchestrators with subagent liveness, dev commands, and workflows. Pair with engsys-<stack> pack plugins.",
   "author": {
     "name": "eric-sabe"

@@ -102,6 +102,11 @@ prompt when opening the project. In plugin mode:
   are `engsys:<agent>`. A project command/skill/agent with the same bare name overrides for that repo.
 - Paths in engsys content are written `<engsys-root>/…` (the plugin root here; `.claude/` in a copy
   install), so the same content works in both modes.
+- engsys's bookkeeping scripts (liveness registry/watchdog, monster watch/snapshot/heartbeat) live under a
+  per-user, per-version plugin-cache path that no portable permission rule can match, so the core plugin
+  ships a `PreToolUse` hook that auto-approves exactly one shape: a single invocation of one of those scripts
+  by its literal path inside the plugin (no variables, chaining, pipes, redirects, or globs). Anything else
+  asks as usual, and deny/ask rules still apply. Copy installs get equivalent static allow rules.
 - The multi-provider worker layer is copy-mode only for now.
 
 Plugin artifacts are generated from the pack sources by `npm run build:plugins` (all under
