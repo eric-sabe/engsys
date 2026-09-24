@@ -45,6 +45,8 @@ Name **the one question the explainer answers** (it becomes the subtitle). Name 
 Mixed shapes are normal — a workflow with a feedback loop is a flow plus a marked back-edge, not two diagrams. Full recipes and traps: [references/visual-grammar.md](references/visual-grammar.md).
 
 ### 3. Model the data
+**Research before modeling — accuracy is the product.** Pull exact names, numbers, commands, and flows from the sources (fan out exploration subagents that return verbatim values, not summaries) into a digest first. One false claim discredits the whole page; if a fact can't be verified, say so rather than dress it up.
+
 Write the `EXPLAINER` object first — nodes (id, label, group, detail), edges (from, to, kind), steps (title, body, focus). If the data model is muddy, the diagram will be too. Get the model reviewed against the source of truth (code, spec) before styling anything.
 
 ### 4. Build from the starter
@@ -68,6 +70,15 @@ Open the file in a browser (use the `webapp-testing` or `chrome-devtools` skill 
 - [ ] Zero console errors; zero network requests
 - [ ] Every visible string passed the copy rules
 - [ ] File opens from `file://` with no server
+
+**Verify headlessly, not by eye.** Screenshots miss empty containers and silent JS halts: load the file in a headless browser, assert zero console errors *and* the expected element count per section, and cache-bust (`?v=2`, `?v=3`) between reloads — a stale copy will send you chasing a bug you already fixed.
+
+**Traps that silently break these pages:**
+
+- **Duplicate ids — the number-one failure.** A `<section id="x">` and an inner `<div id="x">`: `getElementById` returns the section, a render's `innerHTML = ''` wipes its static controls, a later lookup returns null and throws, and everything below dies. Unique ids everywhere (`x` for the anchor, `xGrid` for the container).
+- **Lint-hostile glyphs.** Write arrows/bullets/dots as HTML entities (`&rarr;`, `&middot;`) so the raw file stays ASCII-clean for prose/slop linters while the page still renders the symbol.
+- **Hidden external references.** Before calling it portable, grep for `src=`, `<link`, `@import`, `url(`, `http` — expect none beyond an inline data-URI favicon (which also prevents a 404).
+- **Making-of commentary.** No "about this page" box, provenance lines, or source-listing footer — show the subject, not how the page was built. Remove debugging leftovers.
 
 ## Files
 

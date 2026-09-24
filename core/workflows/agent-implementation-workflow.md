@@ -97,12 +97,13 @@ When all issue commits are complete, validate locally **and run the local code r
 ```bash
 git fetch origin                       # local main is often stale in a worktree
 <the project's pre-push gate / precheck>   # build, lint, format, unit tests, path-gated gates
-<a local code review against origin/main>  # built-in /code-review skill, or the project's CLI reviewer
+<the gate reviewer against origin/main>   # built-in /code-review skill, or the project's CLI reviewer
+<the advisory reviewer, if configured>     # same diff; never blocks
 ```
 
 If any gate fails, fix locally and re-run. The project's pre-push gate (and the local pre-push hook, if it has one) is the contract; see `/pre-push`.
 
-For the review: fix **Critical** and **Warning** findings, **Info** at discretion, then re-run once to confirm clean. Cap the loop at ~2 passes — don't grind. Keep the findings — you'll post them on the PR in Phase 4.
+For the gate review: fix **Critical** and **Warning** findings, **Info** at discretion, then re-run once to confirm clean. Cap the loop at ~2 passes — don't grind. Keep the findings — you'll post them on the PR in Phase 4. An **advisory** reviewer (if the project runs one) is never must-fix: fix what's obviously real, note the rest, and never block on it or grind on it. Reviews are deliberate invocations, not part of the pre-push hook (a multi-minute review shouldn't block every push). Roles, markers, and commands: `.claude/skills/code-review/SKILL.md`.
 
 ---
 
@@ -132,7 +133,7 @@ gh pr create \
 rm tmp/pr-body-<phase-or-project-slug>.md
 ```
 
-If the project gates expensive CI (E2E / a11y / flake matrices) behind the ready-for-review transition, draft-first defers it until you flip the PR ready.
+If the project gates expensive CI (E2E / a11y / flake matrices) behind the ready-for-review transition, draft-first defers it until you flip the PR ready. Create it as draft explicitly even if a workflow auto-demotes ready PRs — don't rely on the automation.
 
 Link/close the work items per the skill's `link-pr` operation. On GitHub that means one closing keyword per issue in the PR body — GitHub only closes the first issue when multiple are comma-separated on one line (`Closes #1, #2, #3` closes only `#1`):
 
@@ -160,6 +161,8 @@ gh pr comment <pr-number> --body-file tmp/review-findings-<pr>.md
 ```
 
 If the review surfaced zero findings, still post the comment with "0 findings" so closeout has a complete corpus.
+
+If the project runs an advisory reviewer, stamp its comment now that the PR exists — under its **own** marker, upserted in place on re-runs (one per PR). Advisory only; don't block Phase 5 on it.
 
 ---
 
@@ -211,6 +214,8 @@ After the local review findings are handled and learning updates are committed:
 - Human squash-merges the PR when satisfied.
 
 Agents do not merge their own implementation PRs unless the human explicitly asks.
+
+**Merge Monster override:** if the repo runs Merge Monster (`.claude/merge-monster.yml` exists) and its baton is fresh (pinned ledger heartbeat within `stale_lock_minutes`), do **not** mark the PR ready or merge — leave it draft, label it `mm:ready`, optionally add an `<!-- mm-handoff -->` comment, and stop. The orchestrator owns the ready transition (the CI trigger) and the merge. Protocol: [merge-monster-protocol.md](merge-monster-protocol.md).
 
 ---
 
@@ -274,7 +279,7 @@ git push --force-with-lease origin agent/<child-slug>
 | **Commit by issue**        | Each issue gets its own implementation commit with a `#issue` reference. **File-overlap exception** (Phase 2): co-commit issues that touch the same files, cite all issue numbers in the subject. The PR body's `Closes #` lines still auto-close every issue on merge. |
 | **Validate before PR**     | Run the project's pre-push gate / precheck (build, lint, tests, plus path-gated checks for E2E, migrations, IaC, containers). The local pre-push hook runs it automatically if the project has one. See `/pre-push`. |
 | **Draft-first PR**         | Always `gh pr create --draft`. Mark **Ready for review** (`gh pr ready`) only after the local review is resolved and the gate is green — that triggers any expensive ready-for-review CI matrix. |
-| **Local review**          | Run a local code review **before push** (Phase 3); fix Critical + Warning, re-run clean (~2 passes max). After opening the PR, post findings onto the work item (skill `comment-issue`) as one marked comment for closeout to mine.        |
+| **Local review**          | Run the gate reviewer **before push** (Phase 3); fix Critical + Warning, re-run clean (~2 passes max). An advisory reviewer, if configured, never blocks. After opening the PR, post gate findings onto the work item (skill `comment-issue`) as one marked comment for closeout to mine. |
 | **Reflect before handoff** | Update `docs/agent-lessons/`, the agent profile, and rules/instructions when the PR reveals a reusable lesson; PR generalizable lessons back to the engsys lessons-library.                      |
 | **tmp/ always**            | Commit messages, PR bodies, issue bodies — never HEREDOC or pipe                                                                                                                                |
 | **No commit pause**        | A start/implement command for this workflow authorizes routine commits, branch push, PR creation, and local-review fixes                                                                        |
