@@ -1,6 +1,6 @@
 # 🧌 Merge Monster — design spec
 
-**Status:** v1 design, ratified 2026-07-06 (design session, FeedFrwd/keystone).
+**Status:** v1 design, ratified 2026-07-06 (design session, first deployment).
 **Component:** `core/skills/merge-monster/` (+ `core/commands/merge-monster.md`,
 `core/workflows/merge-monster-protocol.md`).
 **Audience:** anyone operating, extending, or porting the orchestrator.
@@ -81,7 +81,7 @@ Events emitted by `mm-watch.sh` (one line each):
 | `CHECK #N <name>: <state>` | a required/watched check on the **active** PR reached a terminal state |
 | `CONFLICT #N` | a queued PR's `mergeStateStatus` turned `DIRTY` |
 | `DEPENDABOT #N <title>` | new Dependabot PR opened |
-| `MAIN_RED <workflow>` | latest default-branch run concluded failure |
+| `MAIN_RED <workflow>` | newest non-scheduled default-branch run concluded failure (merge-gating only; each failing run fires once) |
 | `STOP` | the ledger issue was closed (kill switch) |
 
 The script reads the currently active PR number from a state file
@@ -397,5 +397,7 @@ Merge Monster is one of a family that composes into a full always-on fleet:
   fence-before-respawn, shared by both monsters (and any session, via the
   `subagent-liveness` skill).
 - The **`agent-sessions` skill** (`core/skills/agent-sessions/`) — the fleet
-  launcher: roster file, per-role permission modes, remote control, tmux
-  operations.
+  launcher (roster file, per-role permission modes, remote control, identity
+  preflights, tmux operations) and the fleet supervisor that relaunches any
+  number of ledger-bearing monsters. Both can run from a separate fleet repo
+  that also holds the monster configs (the "fleet config dir").

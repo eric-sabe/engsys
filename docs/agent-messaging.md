@@ -1,19 +1,20 @@
 # Merge Monster — cross-session agent communication (design)
 
-> **Provenance:** design + worked example from FeedFrwd/keystone, the first
+> **Provenance:** design + worked example from the first production
 > deployment (2026-08). The normative, project-agnostic contract lives in the
 > skills (`core/skills/merge-monster`, `maintenance-monster`,
-> `subagent-liveness`, `agent-sessions`) — read `keystone-<role>` here as
-> `<your-namespace>-<role>`, and keystone issue/PR numbers as the case study.
+> `subagent-liveness`, `agent-sessions`). The example uses the namespace
+> `acme-` and repo `acme/app` — read `acme-<role>` as `<your-namespace>-<role>`;
+> issue/PR numbers are illustrative.
 
 Status: **Phase 0 + Phase 1 build.** This doc and the Phase 1 skill/protocol
 changes land together in one PR, held unmerged until the next Claude Code
 **session reset** (when the ad-hoc live sessions are torn down and relaunched
-under the `keystone-<role>` names below — see [Rollout](#rollout)). Nothing here
+under the `acme-<role>` names below — see [Rollout](#rollout)). Nothing here
 changes a _running_ session's behavior: a live session has already loaded its
 skill, and messaging is off unless the `messaging:` config block is present.
 Phase 2 (the GitHub channel) stays future. See the
-[enqueue protocol](prompts/merge-monster-protocol.md) for how sessions
+[enqueue protocol](../core/workflows/merge-monster-protocol.md) for how sessions
 coordinate today.
 
 ## The problem
@@ -93,23 +94,23 @@ Because addressing is by name and scoped to the OS user — not the project — 
 several projects' sessions on one Mac mini, isolation is **convention enforced
 in the skill**, not a platform ACL.
 
-- Every FeedFrwd/keystone session is named **`keystone-<role>`**. Set at launch
-  with `--name` (see [the launch script](../scripts/launch-keystone-sessions.sh)).
+- Every acme/app session is named **`acme-<role>`**. Set at launch
+  with `--name` (see [the launch script](../core/skills/agent-sessions/scripts/launch-agent-sessions.sh)).
   The durable role set fired up on every cold start:
 
   | Session                | Role                                                                                                                                                                                                               |
   | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-  | `keystone-mm`          | Merge orchestrator (owns the merge baton)                                                                                                                                                                          |
-  | `keystone-build`       | Implementation — ship features / fix bugs                                                                                                                                                                          |
-  | `keystone-maintain`    | Security/dependency watchdog (`/maintenance-monster`, Phase 1 read-only) — watches Dependabot PRs + GHAS/CodeQL, triages, and reports; from Phase 2 drives fixes into `mm:ready` PRs for `keystone-mm` (see below) |
-  | `keystone-investigate` | Bug investigation / root cause / issue filing                                                                                                                                                                      |
-  | `keystone-design`      | Product / UX design + specs                                                                                                                                                                                        |
+  | `acme-mm`          | Merge orchestrator (owns the merge baton)                                                                                                                                                                          |
+  | `acme-build`       | Implementation — ship features / fix bugs                                                                                                                                                                          |
+  | `acme-maintain`    | Security/dependency watchdog (`/maintenance-monster`, Phase 1 read-only) — watches Dependabot PRs + GHAS/CodeQL, triages, and reports; from Phase 2 drives fixes into `mm:ready` PRs for `acme-mm` (see below) |
+  | `acme-investigate` | Bug investigation / root cause / issue filing                                                                                                                                                                      |
+  | `acme-design`      | Product / UX design + specs                                                                                                                                                                                        |
 
-  Ad-hoc sessions (e.g. `keystone-p70` for a specific project push) follow the
+  Ad-hoc sessions (e.g. `acme-p70` for a specific project push) follow the
   same prefix.
 
-- The merge orchestrator is **`keystone-mm`**. Per-repo prefixing is what makes
-  **multiple Merge Monsters on one machine** safe: `keystone-mm` and
+- The merge orchestrator is **`acme-mm`**. Per-repo prefixing is what makes
+  **multiple Merge Monsters on one machine** safe: `acme-mm` and
   `campos-mm` never collide. (If two sessions ever _do_ share a name, Claude
   Code keeps the name on the first and renames the second to a variant, making
   addressing ambiguous — the prefix avoids that. Disambiguate any residual
@@ -121,8 +122,8 @@ in the skill**, not a platform ACL.
 Do not scan all peers and guess. Each side advertises its address through a
 repo-scoped surface:
 
-- **Merge Monster** writes its own addressable name (`keystone-mm`) into the
-  **ledger issue** (#2792) session-start digest. An enqueuer reads the MM
+- **Merge Monster** writes its own addressable name (`acme-mm`) into the
+  **ledger issue** session-start digest. An enqueuer reads the MM
   address from _its own repo's ledger_ — inherently repo-scoped.
 - **Authoring sessions** advertise _their_ name in the PR's `mm-handoff` block
   (below). The PR is in MM's repo, so the mapping is repo-scoped too.
@@ -143,7 +144,7 @@ line.
 
 project: 70
 phase: P3
-session: keystone-p70 # addressable name — the nudge target
+session: acme-p70 # addressable name — the nudge target
 machine: mac-mini # optional: same-machine socket vs needs Remote Control
 notify: true # optional: author opt-out of nudges
 depends_on: [3130]
@@ -159,7 +160,7 @@ On a state change the author would act on — **bounced**, **escalated**,
 **merged**, **blocked-needs-you** — after the GitHub action (label + comment):
 
 1. Read `session` from the handoff.
-2. Filter `ListAgents` to `keystone-*` (the namespace fence); match the name
+2. Filter `ListAgents` to `acme-*` (the namespace fence); match the name
    (disambiguate by cwd if needed).
 3. **Match + reachable** → `SendMessage` a one-line nudge referencing the PR and
    the action.
@@ -175,14 +176,14 @@ nudge targets: a peer message can't grant consent, so those stay human-routed
 ## Receive validation (the real safety net)
 
 Nothing at the platform level stops a confused other-project session from poking
-`keystone-mm`. Because a peer message **cannot approve anything or change
+`acme-mm`. Because a peer message **cannot approve anything or change
 configuration**, and MM already re-verifies everything against GitHub before
 acting, a stray message is at worst ignorable noise. Make that explicit:
 
 Act on an inbound message only if **both**:
 
-1. the sender is a `keystone-*` session, **and**
-2. the referenced PR / issue actually exists in `FeedFrwd/keystone`.
+1. the sender is a `acme-*` session, **and**
+2. the referenced PR / issue actually exists in `acme/app`.
 
 A "merge #999" from `campos-mm` references a PR not in our repo → no-op. Treat
 every inbound message as an untrusted hint that triggers a GitHub re-check, never
@@ -191,7 +192,7 @@ as an instruction to act on directly.
 ## Operator replies over Slack (closing the escalation loop)
 
 Today an escalation is fire-and-forward: MM posts `mm:escalated` + a diagnosis to
-`#engineering-escalation`, and the operator has to come back to GitHub and act
+`#eng-escalation`, and the operator has to come back to GitHub and act
 (merge, label, comment) for MM to notice on its next poll. MM can instead **read
 the operator's Slack reply** and act on it, closing the loop without a GitHub
 round-trip. This is the one inbound path where a message _can_ carry operator
@@ -199,8 +200,8 @@ round-trip. This is the one inbound path where a message _can_ carry operator
 
 - **Mechanism, not a channel.** No stock channel bridges Slack (channels ship
   Telegram / Discord / iMessage only), so this is **poll-based** via the Slack
-  MCP (`slack_read_channel` / `slack_read_thread` on `#engineering-escalation`,
-  `C0B741GHA3A`), read on MM's existing wake cycle — not an event push. To
+  MCP (`slack_read_channel` / `slack_read_thread` on `#eng-escalation`,
+  `C0XXXXXXXXX`), read on MM's existing wake cycle — not an event push. To
   correlate reliably, MM posts each escalation as a thread it records the
   `message_ts` for, then re-reads that thread for replies.
 - **Best-effort, GitHub still authoritative.** The Slack MCP is claude.ai-authed;
@@ -210,7 +211,7 @@ round-trip. This is the one inbound path where a message _can_ carry operator
   the degradation principle above.
 - **Three gates before an operator Slack reply is acted on** (all required):
   1. **Verified operator.** The reply's Slack `user` id is on an explicit
-     operator allowlist (e.g. `U0A4ANMJQ3H`) — never an arbitrary channel member
+     operator allowlist (e.g. `UXXXXXXXXX`) — never an arbitrary channel member
      or a bot post.
   2. **Correlated.** The reply is in (or references) an escalation _MM itself
      posted_, matched by recorded thread `message_ts` or the PR/issue number in
@@ -242,14 +243,14 @@ absence of it is exactly today's behavior:
 
 ```yaml
 messaging:
-  session_name: keystone-mm # MM's own addressable name; advertised in the ledger
+  session_name: acme-mm # MM's own addressable name; advertised in the ledger
   notify_author: true # send nudges on bounce/escalate/merge
-  namespace_prefix: keystone- # only ever address / trust names with this prefix
+  namespace_prefix: acme- # only ever address / trust names with this prefix
   inbound: accept # documents the required crossSessionInbound value
   operator_slack: # optional: read operator replies to escalations (best-effort)
     enabled: false # off by default → escalations stay fire-and-forward
-    channel_id: C0B741GHA3A # #engineering-escalation
-    operator_user_ids: [U0A4ANMJQ3H] # allowlist; a reply from anyone else is ignored
+    channel_id: C0XXXXXXXXX # #eng-escalation
+    operator_user_ids: [UXXXXXXXXX] # allowlist; a reply from anyone else is ignored
 ```
 
 ## Phase 2 — GitHub channel
@@ -281,13 +282,13 @@ there.
 ## Rollout
 
 1. **Phase 0 + 1 (this PR).** The naming convention, the
-   [launch script](../scripts/launch-keystone-sessions.sh), **and** the messaging
-   behavior: MM advertises `keystone-mm` in the ledger; the `mm-handoff`
+   [launch script](../core/skills/agent-sessions/scripts/launch-agent-sessions.sh), **and** the messaging
+   behavior: MM advertises `acme-mm` in the ledger; the `mm-handoff`
    `session` field; MM's bounce/escalate/merge nudge with graceful degradation;
    receive validation; the optional operator-Slack reply loop. Merged at the next
    **session reset** — at reset the operator stops the ad-hoc live sessions
    _first_, then runs the launch script, so no duplicate-name collision (a second
-   `keystone-mm` alongside a live one would be renamed to a variant and break
+   `acme-mm` alongside a live one would be renamed to a variant and break
    addressing). The launch script's whole-server duplicate-name check is the
    backstop, not the plan.
 2. **Phase 2 (channel).** The GitHub webhook-receiver channel, if Phase 1 earns
@@ -310,7 +311,7 @@ there.
   session. Verified present on the mini; treat as best-effort (§ Operator replies
   over Slack).
 
-## Related: the maintenance watchdog (`keystone-maintain`)
+## Related: the maintenance watchdog (`acme-maintain`)
 
 Merge Monster's sibling, now specified in
 [maintenance-monster.md](maintenance-monster.md) and built alongside this in the
@@ -321,16 +322,16 @@ _security/dependency surface_: it stays on top of Dependabot PRs, GHAS / CodeQL
 findings, and vulnerability advisories, triages them with the expert agents
 (nyx for security, aaron for CI/IaC, isabelle for fixes), escalates when it
 needs a human, and **drives the resulting fixes into the normal PR process** —
-where `keystone-mm` then merges them. The two compose cleanly: `keystone-maintain`
-produces `mm:ready` PRs; `keystone-mm` consumes them.
+where `acme-mm` then merges them. The two compose cleanly: `acme-maintain`
+produces `mm:ready` PRs; `acme-mm` consumes them.
 
 It reuses the primitives above — **its own** ledger/baton (a pinned issue
-distinct from MM's #2792), the `keystone-*` namespace, and the same nudges (it
-`SendMessage`s `keystone-mm` when a fix PR is queued; `keystone-mm` nudges it
-back on a bounce, addressed via the `mm-handoff` `session: keystone-maintain`).
-Per the resolved design decisions, `keystone-maintain` is the **sole owner of
+distinct from MM's), the `acme-*` namespace, and the same nudges (it
+`SendMessage`s `acme-mm` when a fix PR is queued; `acme-mm` nudges it
+back on a bounce, addressed via the `mm-handoff` `session: acme-maintain`).
+Per the resolved design decisions, `acme-maintain` is the **sole owner of
 Dependabot** (MM's `dependabot.auto_merge` is retired), runs as a **continuous
 watchdog** with its own Monitor + heartbeat, and **shares
-`#engineering-escalation`**. The existing
-[Dependabot triage playbook](agent-lessons/dependabot-triage.md) is its phase
+`#eng-escalation`**. The repo's
+Dependabot triage playbook (config `triage_playbook`), if any, is its phase
 model.

@@ -9,7 +9,7 @@
 cat <<'EOF'
 Context was just cleared or resumed. CLAUDE.md and the memory INDEX reloaded, but your prior conversation, any loaded skill, and the memory-file BODIES did NOT. Re-ground before acting:
 
-1. ROLE SKILL — if this session runs a long-lived role skill (merge-monster, maintenance-monster, or similar): re-invoke it, or re-read its SKILL.md + config + <state_dir>/state.md, then reconcile against live GitHub per its Session-startup steps. A /clear drops the skill; a launch script that primes the role via a first-turn slash command does NOT re-fire it after a clear.
+1. ROLE SKILL — if this session runs a long-lived role skill (merge-monster, maintenance-monster, or similar): re-invoke it, or re-read its SKILL.md + config (.claude/*.yml, or the fleet-config-dir copy whose path heads state.md) + <state_dir>/state.md, then reconcile against live GitHub per its Session-startup steps. A /clear drops the skill; a launch script that primes the role via a first-turn slash command does NOT re-fire it after a clear.
 
 2. SUBAGENT ORCHESTRATION — the discipline most easily lost on a clear:
    - Dispatch that reports back vs. goes idle: an async background agent (no name) returns its result to you automatically via a task-notification; a NAMED teammate agent goes idle holding its result and you must message it to pull it. Prefer async dispatch when you just want an answer back.

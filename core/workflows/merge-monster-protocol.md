@@ -32,7 +32,14 @@ ledger** issue:
    project: 62              # project / phase, for ordering
    phase: P3
    notes: touches the lockfile; anything the orchestrator should know
+   session: <ns>-build      # optional: your addressable --name, so MM can nudge you
    ```
+
+   The optional `session:` line is the nudge target: if Merge Monster runs
+   with messaging enabled, it `SendMessage`s that session on a bounce,
+   escalation, or merge (best-effort — the PR comment + label stay the
+   durable record). Only names under the fleet's namespace prefix are
+   addressed or trusted.
 
 4. You're done. Merge Monster will reply on the PR: `mm:queued` with a
    position + reasoning, then pilot it through ready → CI → merge. If
