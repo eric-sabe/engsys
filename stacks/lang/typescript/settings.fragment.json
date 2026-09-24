@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx tsc:*)",
+      "Bash(node --version:*)",
+      "Bash(pnpm --version:*)",
+      "Bash(npm --version:*)",
+      "Bash(prettier --check:*)",
+      "Bash(prettier --list-different:*)",
+      "Bash(npx prettier --check:*)",
+      "Bash(npx prettier --list-different:*)"
+    ]
+  },
+  "mcpServers": {}
+}

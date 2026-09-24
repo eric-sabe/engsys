@@ -18,6 +18,8 @@ Local loop:
 5. CI opens a migration PR; review the generated SQL.
 6. Merge — auto-deploy follows.
 
+This pack deny-rules `prisma migrate deploy` / `migrate reset` for agents (they honor `DATABASE_URL`, which can point at a shared env). Give agents a **localhost-only** migrate script (hard-codes the local URL, cannot reach a cloud DB) so they can apply migrations locally. After a migration-bearing PR merges, apply it to the local DB before running integration/E2E suites that seed data — otherwise seeds fail on missing columns (Prisma `P2022`) and whole specs abort in setup.
+
 ### Schema conventions
 
 - **Naming**: camelCase fields in Prisma, snake_case in the DB via `@map`.
@@ -46,4 +48,4 @@ rg 'COPY services/database/' services/*/Dockerfile   # find all consumers
 docker build -f services/<service>/Dockerfile -t db-probe .
 ```
 
-**Pre-push gate:** when the Prisma schema is touched, run `prisma generate && <build>`, then rebuild dependent services.
+**Pre-push gate:** when the Prisma schema is touched, run `prisma generate && <build>`, then rebuild dependent services. A post-edit reminder (this pack's hook) nudges this after any `*.prisma` edit; add a project `hook_patterns` entry for the database package's `index.ts` to nudge the COPY check.

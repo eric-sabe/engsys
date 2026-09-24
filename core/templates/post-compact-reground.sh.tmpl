@@ -3,6 +3,7 @@
 # Fires immediately AFTER context compaction; stdout is injected into the
 # fresh context. (PreCompact stdout is NOT injected into the summarization —
 # this post-compaction channel is the one that reaches the model.)
+# Must be fast and fail-open: static text only, no network calls, no state reads.
 # Rendered by the engsys installer; static content, no project fills.
 cat <<'EOF'
 Context was just compacted. Durable state, not the summary, is the source of truth:

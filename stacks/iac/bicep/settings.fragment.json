@@ -8,7 +8,10 @@
       "Bash(az deployment group what-if:*)",
       "Bash(az deployment sub what-if:*)",
       "Bash(az deployment group list:*)",
-      "Bash(azd provision --preview:*)"
+      "Bash(azd provision --preview:*)",
+      "Bash(az bicep version:*)",
+      "Bash(az bicep lint:*)",
+      "Bash(bicep lint:*)"
     ],
     "deny": [
       "Bash(az deployment group create:*)",
