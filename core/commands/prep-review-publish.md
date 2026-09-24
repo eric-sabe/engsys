@@ -3,7 +3,7 @@ description: Publish a staged review package to a shared drive (as native Doc/Sl
 argument-hint: <slug> [--channel #name] [--republish]
 ---
 
-Publish a review package previously staged by `/prep-review`. Full workflow reference: [.claude/workflows/review-workflow.md](.claude/workflows/review-workflow.md).
+Publish a review package previously staged by `/prep-review`. Full workflow reference: [<engsys-root>/workflows/review-workflow.md](<engsys-root>/workflows/review-workflow.md).
 
 Slug: $ARGUMENTS
 

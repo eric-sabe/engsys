@@ -3,7 +3,7 @@ description: Stage a markdown proposal for stakeholder review — generate a rev
 argument-hint: <path-to-markdown> [--as doc|slides|auto] [--force]
 ---
 
-Stage a review package for stakeholders who live outside the repo (no source access — reviewing via Docs/Slides + chat). Full workflow reference: [.claude/workflows/review-workflow.md](.claude/workflows/review-workflow.md).
+Stage a review package for stakeholders who live outside the repo (no source access — reviewing via Docs/Slides + chat). Full workflow reference: [<engsys-root>/workflows/review-workflow.md](<engsys-root>/workflows/review-workflow.md).
 
 Source: $ARGUMENTS
 

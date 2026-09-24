@@ -23,7 +23,7 @@ fresh, nothing else merges. Full design: `docs/merge-monster.md` in engsys
   after `/clear` re-reads the same file.
 - Labels + ledger issue exist (`<skill-dir>/scripts/mm-setup.sh --repo
 <owner/name>` is idempotent; run it if unsure). `<skill-dir>` is this
-  skill's directory (`.claude/skills/merge-monster` when installed).
+  skill's directory (`<engsys-root>/skills/merge-monster` when installed).
 - `gh` authed with `repo` scope; `jq` on PATH.
 - Optional, recommended: wire `<skill-dir>/scripts/mm-session-sync.sh` as a
   `SessionStart` hook (matcher `startup`) in the repo's `.claude/settings.json`

@@ -3,7 +3,7 @@ description: Draft the ADR from a reviewed proposal, close the loop in chat, pro
 argument-hint: <slug>
 ---
 
-Close out a review: ADR + chat thread reply + promote the final spec. Full workflow reference: [.claude/workflows/review-workflow.md](.claude/workflows/review-workflow.md).
+Close out a review: ADR + chat thread reply + promote the final spec. Full workflow reference: [<engsys-root>/workflows/review-workflow.md](<engsys-root>/workflows/review-workflow.md).
 
 Slug: $ARGUMENTS
 

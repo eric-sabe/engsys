@@ -55,9 +55,9 @@ address space. Isolation is by convention, enforced in the skills:
 ## Launching
 
 ```bash
-cp .claude/skills/agent-sessions/roster.example .claude/agent-sessions.roster
+cp <engsys-root>/skills/agent-sessions/roster.example .claude/agent-sessions.roster
 # edit: NAMESPACE, roles, flags, optional ENV_FILE / MODEL
-bash .claude/skills/agent-sessions/scripts/launch-agent-sessions.sh
+bash <engsys-root>/skills/agent-sessions/scripts/launch-agent-sessions.sh
 ```
 
 The launcher: writes/patches `~/.claude/<ns>-messaging-settings.json` with

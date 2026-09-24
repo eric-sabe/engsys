@@ -2,7 +2,7 @@
 
 How to investigate, file, and track tracker issues. Covers Bert's investigation + filing role. For implementation, see [agent-implementation-workflow.md](agent-implementation-workflow.md).
 
-This workflow relies on the project's installed **issue-tracker skill** (`.claude/skills/issue-tracker-*/`) for the actual issue reads/writes. It calls the skill's contract operations by name (`create-issue`, `list-issues`, `get-issue`, `update-issue`, `comment-issue`, `close-issue`, `link-pr`); the skill maps them onto the active backend (GitHub `gh` shown below, or Linear).
+This workflow relies on the project's installed **issue-tracker skill** (`issue-tracker-*` skill) for the actual issue reads/writes. It calls the skill's contract operations by name (`create-issue`, `list-issues`, `get-issue`, `update-issue`, `comment-issue`, `close-issue`, `link-pr`); the skill maps them onto the active backend (GitHub `gh` shown below, or Linear).
 
 ---
 

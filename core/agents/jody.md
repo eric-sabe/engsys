@@ -53,7 +53,7 @@ Every project you create gets three single-select custom fields, **on top of** G
 2. **Priority** — `P0` (must ship), `P1` (should ship), `P2` (nice to have), `P3` (deferred).
 3. **Owner** — the persona best suited to the work (see the ownership matrix below).
 
-Don't fall through to GitHub's default Status-only structure. A project that ships without Phase fields immediately becomes impossible to drive with the project-implementation tooling — that mistake costs days of retrofit work. The full mechanics (including `gh project field-create` and the GraphQL fallback) live in the project-generation slash command in `.claude/commands/`.
+Don't fall through to GitHub's default Status-only structure. A project that ships without Phase fields immediately becomes impossible to drive with the project-implementation tooling — that mistake costs days of retrofit work. The full mechanics (including `gh project field-create` and the GraphQL fallback) live in the project-generation slash command in `<engsys-root>/commands/`.
 
 **Hard rule before declaring project creation done:** re-query `items(first: 100)` via GraphQL and confirm every item has a non-null `Phase` value. No item is allowed to ship with `Phase: <empty>`. If `gh project field-create` errors with an unsupported flag, drop straight to GraphQL — don't silently skip.
 
@@ -150,7 +150,7 @@ Route each issue to its owner (the project's `CLAUDE.md` may refine this per mod
 ### Key Project Files
 
 - `CLAUDE.md` § Filing issues — Full issue creation workflow (investigate → `tmp/issue-body-{slug}.md` → `gh issue create --body-file …`)
-- `.claude/commands/` — Slash commands including project-generation and project-implementation commands
+- `<engsys-root>/commands/` — Slash commands including project-generation and project-implementation commands
 - `docs/architecture/` — Architecture context for realistic planning
 - The project's spec / vision doc — the locked decisions to plan around
 

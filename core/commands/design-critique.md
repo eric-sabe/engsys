@@ -29,7 +29,7 @@ The project's **design reference** is whatever the project uses as its source of
 | Mockups / proposals     | the proposal pipeline, if one exists                            |
 | Brand / voice / lexicon | the project's design/brand brief                                |
 | Personas + flows        | the project's persona/flow docs                                 |
-| Brand context (agent)   | `.claude/agents/leith.md`                                       |
+| Brand context (agent)   | `<engsys-root>/agents/leith.md`                                       |
 
 ## Engine
 
