@@ -15,6 +15,8 @@ monsters run, for sessions without a baton. The scripts are shared —
 - `<engsys-root>/skills/merge-monster/scripts/mm-agent-reg.sh` (spawn registry)
 - `<engsys-root>/skills/merge-monster/scripts/mm-agent-watch.sh` (watchdog Monitor)
 
+> **Invoke each script as its own Bash call, by literal path.** Substitute `<engsys-root>` / `<skill-dir>` with the actual path from your context — no `cd` (you are already in the repo), no shell variables, no `&&`/`;` chaining, and no `mkdir` (the scripts create their state dirs). In plugin installs engsys auto-approves exactly that form for its bookkeeping scripts; any other shape asks for permission.
+
 **State dir** — pick ONE per-session identifier at skill load and reuse it for
 **every** registry and watchdog command this session ever runs:
 `logs/agent-liveness/<session-id>`. Your Claude Code session name (the
@@ -24,7 +26,7 @@ no concurrent session shares it; otherwise append a uniquifier (e.g.
 identity — never derive it from an individual agent's name (each agent would
 get its own registry and watchdog, and fencing/respawn tracking falls apart),
 and never let two live sessions share one (their generations would fence each
-other). `mkdir -p` it once. The `--name` in the commands below is different:
+other). The scripts create it on first use. The `--name` in the commands below is different:
 it names the individual **agent** inside this session's registry.
 
 **Defaults** (no config file for generic sessions — these mirror the monsters'

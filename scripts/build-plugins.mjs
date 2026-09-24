@@ -76,6 +76,11 @@ out.set('core/.claude-plugin/plugin.json', json({
 }));
 out.set('core/.claude-plugin/hooks.json', json({
   hooks: {
+    // Auto-approve engsys's own bookkeeping scripts when invoked as a single literal-path command
+    // (their plugin-cache path can't be pre-approved by a portable permission rule).
+    PreToolUse: [
+      { matcher: 'Bash', hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/approve-own-scripts.mjs"' }] },
+    ],
     SessionStart: [
       { hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/engsys-context.mjs"' }] },
       { matcher: 'compact', hooks: [{ type: 'command', command: 'bash "${CLAUDE_PLUGIN_ROOT}/templates/post-compact-reground.sh.tmpl"' }] },

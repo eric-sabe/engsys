@@ -5,7 +5,7 @@
   },
   "metadata": {
     "description": "engsys — an AI engineering team for any Claude Code project, as plugins: the stack-agnostic core plus one plugin per stack pack.",
-    "version": "1.1.0"
+    "version": "1.1.1"
   },
   "plugins": [
     {

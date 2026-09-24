@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "engsys-terraform",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "engsys stack pack — iac: terraform. Adds terraform-specific skills and guidance to the engsys core plugin.",
   "author": {
     "name": "eric-sabe"
