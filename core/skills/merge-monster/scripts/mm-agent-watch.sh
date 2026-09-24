@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# mm-agent-watch.sh — subagent liveness watchdog (docs/subagent-liveness-design.md
+# mm-agent-watch.sh — subagent liveness watchdog (docs/subagent-liveness.md
 # §3 Layer 2). Sibling of mm-watch.sh; runs under a persistent Monitor and emits
 # ONE LINE PER STATE CHANGE for rows in the spawn registry (agents.tsv, written
 # via mm-agent-reg.sh). The orchestrator's fallback tick re-arms this script if

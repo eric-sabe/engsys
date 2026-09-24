@@ -2,22 +2,27 @@
 #
 # launch-agent-sessions.sh — stand up a fleet of named, cross-session-messaging
 # ready Claude Code sessions for a project, as tmux windows on an always-on
-# machine. Generalized from the FeedFrwd/keystone launcher (2026-08-16).
+# machine.
 #
 # The fleet is declared in a ROSTER FILE (default: .claude/agent-sessions.roster
-# in the repo the launcher runs from — see roster.example next to this script).
+# under the cwd — the target repo, or a separate fleet repo that drives one or
+# more target repos via per-session workdirs; see roster.example).
 # Header lines are KEY=VALUE; session lines are pipe-delimited:
 #
 #   NAMESPACE=acme                 # required: session-name prefix (the trust fence)
 #   TMUX_SESSION=acme              # optional: tmux session name (default: NAMESPACE)
 #   ENV_FILE=~/.config/acme/agents.env   # optional: sourced into every session
-#   MODEL=--model claude-opus-4-8  # optional: appended to every session
+#   MODEL=--model <model-id>       # optional: appended to every session
+#   PREFLIGHT=<command>            # optional, repeatable: run before launching
+#                                  # (e.g. a cloud/gh identity-refresh script);
+#                                  # failure warns, never blocks the launch
 #   <name>|<workdir>|<initial prompt>|<extra claude flags>
 #
 #   <name>            must start with "NAMESPACE-" (enforced) — messaging is
 #                     scoped to the OS user, not the project, so the prefix IS
 #                     the isolation: peers only trust names under their prefix.
-#   <workdir>         empty → the repo root the launcher runs from.
+#   <workdir>         empty → the cwd the launcher runs from; a leading ~ is
+#                     expanded. From a fleet repo, set it per session.
 #   <initial prompt>  sent as the session's first turn (e.g. /merge-monster);
 #                     empty for a plain interactive session.
 #   <extra flags>     appended verbatim. Use --dangerously-skip-permissions ONLY
@@ -42,7 +47,7 @@ ONLY=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --roster) ROSTER="$2"; shift 2 ;;
-    -h | --help) sed -n '2,35p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,42p' "$0"; exit 0 ;;
     *) ONLY="$1"; shift ;;
   esac
 done
@@ -56,15 +61,20 @@ command -v claude >/dev/null 2>&1 || { echo "error: claude not found on PATH" >&
 # Parse roster
 # ---------------------------------------------------------------------------
 NAMESPACE="" TMUX_SESSION="" ENV_FILE="" MODEL=""
-SESSIONS=()
+SESSIONS=() PREFLIGHTS=()
 while IFS= read -r line; do
   line="${line%%$'\r'}"
+  case "$line" in
+    [A-Z]*=*) # header: drop a trailing " # comment" and trailing blanks
+      line=$(printf '%s' "$line" | sed -e 's/[[:space:]][[:space:]]*#.*$//' -e 's/[[:space:]]*$//') ;;
+  esac
   case "$line" in
     '' | \#*) continue ;;
     NAMESPACE=*) NAMESPACE="${line#NAMESPACE=}" ;;
     TMUX_SESSION=*) TMUX_SESSION="${line#TMUX_SESSION=}" ;;
     ENV_FILE=*) ENV_FILE="${line#ENV_FILE=}"; ENV_FILE="${ENV_FILE/#\~/$HOME}" ;;
     MODEL=*) MODEL="${line#MODEL=}" ;;
+    PREFLIGHT=*) PREFLIGHTS+=("${line#PREFLIGHT=}") ;;
     *\|*) SESSIONS+=("$line") ;;
     *) echo "error: unrecognized roster line: $line" >&2; exit 1 ;;
   esac
@@ -105,6 +115,15 @@ if [ -n "$ENV_FILE" ] && [ ! -f "$ENV_FILE" ]; then
   ENV_FILE=""
 fi
 
+# Optional preflights (identity refresh etc.). Run on EVERY invocation —
+# including the supervisor's single-session relaunches — so a durable identity
+# is re-checked before a session that depends on it starts. Fail-open: a
+# failed preflight warns and the fleet starts anyway (surfaces that need the
+# identity will error visibly instead of the whole fleet staying dark).
+for pf in ${PREFLIGHTS[@]+"${PREFLIGHTS[@]}"}; do
+  bash -c "$pf" || echo "warning: preflight failed (sessions start anyway): $pf" >&2
+done
+
 # ---------------------------------------------------------------------------
 # Launch
 # ---------------------------------------------------------------------------
@@ -116,6 +135,8 @@ launch_one() {
     *) echo "error: session name '$name' must start with '${NAMESPACE}-' (the namespace fence)" >&2; return 1 ;;
   esac
   [ -n "$workdir" ] || workdir="$REPO"
+  workdir="${workdir/#\~/$HOME}"
+  [ -d "$workdir" ] || { echo "error: workdir for '$name' not found: $workdir" >&2; return 1; }
 
   local cmd
   cmd="cd $(printf %q "$workdir") && "

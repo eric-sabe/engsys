@@ -1,27 +1,30 @@
 # Maintenance Monster — security & dependency watchdog (design)
 
-> **Provenance:** design + worked example from FeedFrwd/keystone, the first
+> **Provenance:** design + worked example from the first production
 > deployment (2026-08). The normative, project-agnostic contract lives in the
 > skills (`core/skills/merge-monster`, `maintenance-monster`,
-> `subagent-liveness`, `agent-sessions`) — read `keystone-<role>` here as
-> `<your-namespace>-<role>`, and keystone issue/PR numbers as the case study.
+> `subagent-liveness`, `agent-sessions`). The example uses the namespace
+> `acme-` and repo `acme/app` — read `acme-<role>` as `<your-namespace>-<role>`;
+> issue/PR numbers are illustrative.
 
-Status: **Phase 0 + Phase 1 (read-only) build.** The `keystone-maintain` session
+Status (historical — what shipped first): **Phase 0 + Phase 1 (read-only)
+build.** The live phase is always the `phase:` key in the repo's
+`maintenance-monster.yml`; read that, not this line. The `acme-maintain` session
 runs the `/maintenance-monster` skill built alongside this spec; Phase 1 is
 watch + triage + **report** only (no auto-PRs). Held unmerged until the next
-Claude Code **session reset** (when `keystone-maintain` is launched by the
-[launch script](../scripts/launch-keystone-sessions.sh)). The four operator
+Claude Code **session reset** (when `acme-maintain` is launched by the
+[launch script](../core/skills/agent-sessions/scripts/launch-agent-sessions.sh)). The four operator
 decisions are **resolved** — see [Resolved decisions](#resolved-decisions).
-Parallels [Merge Monster](prompts/merge-monster-protocol.md) and reuses the
-agent-comms primitives in [merge-monster-messaging.md](merge-monster-messaging.md).
+Parallels [Merge Monster](../core/workflows/merge-monster-protocol.md) and reuses the
+agent-comms primitives in [agent-messaging.md](agent-messaging.md).
 
 ## The gap today
 
 Dependency and security maintenance is reactive and fragmented. Dependabot opens
 PRs; GHAS / CodeQL alerts pile up on the security tab; the push-only Trivy
 image-scan reds `main` on newly-disclosed CVEs (e.g. #3046 → #3052 this cycle);
-`pnpm audit` advisories accrue. The [Dependabot triage
-playbook](agent-lessons/dependabot-triage.md) captures _how_ to handle these, but
+`pnpm audit` advisories accrue. The repo's Dependabot triage
+playbook (config `triage_playbook`) captures _how_ to handle these, but
 it runs on-demand when a human remembers. Merge Monster only sweeps "easy"
 Dependabot PRs in idle time and escalates the rest — it is a _merger_, not a
 proactive _owner_ of the security surface.
@@ -36,20 +39,20 @@ process. Either way it escalates to a human when a call is theirs to make.
 The two are deliberately separate and composable:
 
 - **Maintenance Monster produces** — it opens fix PRs and labels them `mm:ready`
-  (with an `mm-handoff` `session: keystone-maintain`). It **never merges.**
+  (with an `mm-handoff` `session: acme-maintain`). It **never merges.**
 - **Merge Monster consumes** — it pilots those `mm:ready` PRs through
   ready → CI → merge like any other.
 
-Each holds its **own** baton (its own ledger issue, distinct from MM's #2792) so
+Each holds its **own** baton (its own ledger issue, distinct from MM's) so
 their heartbeats don't collide. Maintenance Monster respects MM's merge baton by
 definition: it hands off and never touches the merge step.
 
-**Dependabot ownership (resolved):** `keystone-maintain` is the **sole owner of
+**Dependabot ownership (resolved):** `acme-maintain` is the **sole owner of
 Dependabot**. MM's `dependabot.auto_merge` config is **retired** (removed from
 `.claude/merge-monster.yml` in this PR) so the two never race for the same PR —
 MM merges Dependabot PRs only once Maintenance has triaged them and labeled them
 `mm:ready`, exactly like any other hand-off. Trade-off accepted: when
-`keystone-maintain` is down, nothing auto-handles Dependabot until it is back —
+`acme-maintain` is down, nothing auto-handles Dependabot until it is back —
 the surface moves slowly and the continuous watchdog (below) keeps that window
 short.
 
@@ -62,8 +65,8 @@ short.
 | GHAS / CodeQL     | code-scanning alerts (the `code_scanning` ruleset)                     | `gh api .../code-scanning/alerts`    |
 | Secret scanning   | gitleaks CI failures (GH-native push-protection is **not** subscribed) | `Secret Scan` workflow_run           |
 | Trivy image scan  | HIGH/CRITICAL image CVEs — **push-only**, reds `main`                  | `services-ci` on push/dispatch       |
-| `pnpm audit`      | residual transitive CVEs                                               | `scripts/ci-bulk-advisory-audit.mjs` |
-| Base images       | stale ACR base images                                                  | `scripts/acr-sync-base-images.sh`    |
+| `pnpm audit`      | residual transitive CVEs                                               | the repo's advisory-audit script     |
+| Base images       | stale registry base images                                             | the repo's base-image sync script    |
 
 ## The loop (parallel to `mm-watch`)
 
@@ -76,7 +79,7 @@ short.
    fix-availability, then route to the right expert (below).
 4. **Dispose** — into one of the four classes below.
 5. **Drive** — **auto-fix:** branch, apply, local CLI review + `pnpm precheck`,
-   open the PR, label `mm:ready` + `mm-handoff`, nudge `keystone-mm`.
+   open the PR, label `mm:ready` + `mm-handoff`, nudge `acme-mm`.
    **Expert-assisted:** same, but open as a plain draft and add `mm:ready`
    **only after** a human has reviewed. **Escalate:** `mnt:escalated` +
    diagnosis + operator ping (no PR driven).
@@ -100,7 +103,7 @@ default explicit).
   a product/risk judgment.
 - **Suppress — with sign-off** (accepted risk / false positive): a defer needs a
   tracking issue **and** a scoped `dependabot.yml` ignore (Phase 4) or a
-  justified Trivy/CodeQL dismissal (`scripts/dismiss-trivy-unfixed.sh`), **never
+  justified Trivy/CodeQL dismissal (a repo dismissal script), **never
   silently**, and never without a human sign-off recorded on the issue.
 
 ## Expert routing
@@ -140,16 +143,16 @@ force_all=true` (never rely on the default-branch default when `--ref` is
 
 ## Coordination & messaging
 
-Reuses [merge-monster-messaging.md](merge-monster-messaging.md): on queuing a fix
-PR it nudges `keystone-mm`; on a bounce/escalation from MM it receives the nudge
-back. Same `keystone-*` namespace fence and validate-before-act discipline.
+Reuses [agent-messaging.md](agent-messaging.md): on queuing a fix
+PR it nudges `acme-mm`; on a bounce/escalation from MM it receives the nudge
+back. Same `acme-*` namespace fence and validate-before-act discipline.
 
 ## Config sketch — `.claude/maintenance-monster.yml`
 
 ```yaml
-repo: FeedFrwd/keystone
-session_name: keystone-maintain # advertised in its own ledger (discovery)
-ledger_issue: <new pinned issue, distinct from MM #2792 — created by mnt-setup.sh>
+repo: acme/app
+session_name: acme-maintain # advertised in its own ledger (discovery)
+ledger_issue: <new pinned issue, distinct from MM — created by mnt-setup.sh>
 state_dir: logs/maintenance-monster
 heartbeat_minutes: 30
 stale_lock_minutes: 45 # continuous watchdog: own Monitor + heartbeat, mirrors MM
@@ -187,13 +190,13 @@ max_concurrent_fix_prs: 3
 fix_attempts_max: 2
 suppression: { signoff_label: risk-accepted } # operator-only; the gate for any dismissal
 escalation: {
-    slack_channel: "#engineering-escalation",
-    channel_id: C0B741GHA3A,
+    slack_channel: "#eng-escalation",
+    channel_id: C0XXXXXXXXX,
   } # shared with MM
 messaging: # reuses merge-monster-messaging.md
-  notify_mm: true # SendMessage keystone-mm when a fix PR is queued
-  mm_session_name: keystone-mm # nudge target (also discoverable via MM's ledger)
-  namespace_prefix: keystone-
+  notify_mm: true # SendMessage acme-mm when a fix PR is queued
+  mm_session_name: acme-mm # nudge target (also discoverable via MM's ledger)
+  namespace_prefix: acme-
   inbound: accept # required crossSessionInbound value for the autonomous session
 ```
 
@@ -229,21 +232,20 @@ Settled with the operator (2026-08-15); baked into the config and guardrails
 above.
 
 1. **Dependabot ownership → sole owner.** MM's `dependabot.auto_merge` is
-   **retired**; `keystone-maintain` owns Dependabot end-to-end and hands
+   **retired**; `acme-maintain` owns Dependabot end-to-end and hands
    `mm:ready` PRs to MM. Accepted trade-off: a coverage gap while maintenance is
    down (short, given the continuous watchdog).
-2. **Escalation channel → shared.** Uses MM's `#engineering-escalation`
-   (`C0B741GHA3A`) — one place to watch.
+2. **Escalation channel → shared.** Uses MM's `#eng-escalation`
+   (`C0XXXXXXXXX`) — one place to watch.
 3. **Suppression sign-off → `risk-accepted` label.** Operator-only label on the
    tracking issue is the gate for any dismissal; Maintenance/nyx proposes, the
    operator applies it.
-4. **Cadence → continuous watchdog.** Always-on `keystone-maintain` with its own
+4. **Cadence → continuous watchdog.** Always-on `acme-maintain` with its own
    persistent `Monitor` + heartbeat/baton, mirroring Merge Monster, rather than a
    scheduled sweep.
 
 ## Starting material
 
-The [Dependabot triage playbook](agent-lessons/dependabot-triage.md) (the phase
-model), the Merge Monster skill (as the orchestrator template), and the existing
-scripts: `ci-bulk-advisory-audit.mjs`, `acr-sync-base-images.sh`,
-`acr-prune-sha-tags.sh`, `dismiss-trivy-unfixed.sh`.
+The repo's Dependabot triage playbook (the phase model), the Merge Monster
+skill (as the orchestrator template), and the repo's existing advisory-audit,
+base-image sync/prune, and scanner-dismissal scripts.
