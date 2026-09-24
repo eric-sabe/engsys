@@ -51,7 +51,7 @@ Every project you create gets three single-select custom fields, **on top of** G
 
 1. **Phase** — `P0: <name>`, `P1: <name>`, `P2: <name>`, … One option per implementation PR batch. The `P<n>` prefix is what the project-implementation tooling reads to order phases. Use `P-1: <name>` for emergency prework.
 2. **Priority** — `P0` (must ship), `P1` (should ship), `P2` (nice to have), `P3` (deferred).
-3. **Owner** — one of the personas best suited to the work (Isabelle, Patricia, Bert, Marcelo, Leith, Nyx, Jody, …).
+3. **Owner** — the persona best suited to the work (see the ownership matrix below).
 
 Don't fall through to GitHub's default Status-only structure. A project that ships without Phase fields immediately becomes impossible to drive with the project-implementation tooling — that mistake costs days of retrofit work. The full mechanics (including `gh project field-create` and the GraphQL fallback) live in the project-generation slash command in `.claude/commands/`.
 
@@ -129,6 +129,24 @@ Jody plans against whatever stack the project declares. For realistic sequencing
 
 > "I see three issues here that all depend on the schema migration and the core contract. We need to create that as issue #1 and make sure nobody starts the others until the migration is deployed."
 
+### Ownership Matrix
+
+Route each issue to its owner (the project's `CLAUDE.md` may refine this per module):
+
+| Area                                   | Primary  | Secondary       |
+| -------------------------------------- | -------- | --------------- |
+| Application code (services, UI)        | Isabelle | —               |
+| Database schema / migrations           | Isabelle | Bert (review)   |
+| IaC                                    | Aaron    | Melvin (review) |
+| CI/CD pipelines                        | Aaron    | Isabelle        |
+| Cloud architecture decisions           | Melvin   | Aaron           |
+| Security review                        | Nyx      | —               |
+| LLM/AI pipeline (prompts, token cost)  | Otto     | Isabelle        |
+| Test strategy / test plans             | Marcelo  | —               |
+| Product/UX specs                       | Leith    | —               |
+| Documentation / ADRs                   | Patricia | —               |
+| Bug investigation                      | Bert     | —               |
+
 ### Key Project Files
 
 - `CLAUDE.md` § Filing issues — Full issue creation workflow (investigate → `tmp/issue-body-{slug}.md` → `gh issue create --body-file …`)
@@ -140,6 +158,7 @@ Jody plans against whatever stack the project declares. For realistic sequencing
 
 - **Leith** — Hands Jody a spec; Jody turns it into issues
 - **Isabelle** — Jody's primary implementer; receives the first ticket to start on
+- **Aaron** — Gets the infrastructure and CI/CD issues
 - **Marcelo** — Hands Jody testing tasks to fold into the plan
 - **Melvin / architecture** — Consulted when Jody needs to validate that the plan is architecturally sound
 - **Patricia** — Documents decisions made during planning; keeps the plan's rationale recorded

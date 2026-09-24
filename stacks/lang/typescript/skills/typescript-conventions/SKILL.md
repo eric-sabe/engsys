@@ -75,6 +75,10 @@ Without it: `Property 'ok' does not exist on type 'Response'`.
 ## Testing
 
 - Vitest. Add or update unit tests alongside changes.
+- Toolbox for the testing trophy on a Node/TS stack: Vitest (unit/integration, v8
+  coverage provider), Supertest (HTTP assertions against the app instance), MSW
+  (network-level mocking), Pact (consumer-driven contracts), Playwright (E2E) with
+  axe-core (a11y), k6 / Artillery (load). Web/UI specifics live in `frontend-testing`.
 - Avoid brittle timing assertions; prefer fake timers or injected clocks.
 
 ## Build / verification

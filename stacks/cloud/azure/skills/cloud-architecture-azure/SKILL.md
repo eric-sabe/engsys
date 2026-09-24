@@ -159,6 +159,24 @@ docs named in `CLAUDE.md`. For deep service docs use the `microsoft-docs` skill
   pay-as-you-go. Model availability varies by region. Pair with **Azure AI Search** for
   managed RAG. Cost is token-driven — right-size the model per task.
 
+## Security posture checklist
+
+Defaults to verify on any Azure review (pairs with Nyx's threat model):
+
+- **Container Apps:** managed identity for resource access; secrets as Key Vault secret
+  refs, never plain env vars; ingress `internal` unless the app is the public entry
+  point; identities scoped to least-privilege role assignments (no subscription-wide
+  Contributor).
+- **Entra / External ID:** validate token issuer, audience, signature, and expiry at the
+  API edge; enforce the intended sign-in methods (e.g. passwordless) in the user flow,
+  not just the UI.
+- **PostgreSQL Flexible Server:** private access (VNet / Private Endpoint), TLS enforced,
+  admin credentials in Key Vault and rotated.
+- **Blob Storage:** public blob access disabled at the account; private endpoints; prefer
+  short-lived **user-delegation SAS** over account-key SAS.
+- **Front Door:** WAF policy in prevention mode on public routes; lock origins so they
+  accept traffic only from Front Door.
+
 ## Cost realism (where Azure bills explode)
 
 1. **NAT Gateway / outbound data processing** — per-GB egress. Use Private Endpoints.

@@ -103,6 +103,7 @@ If work involves database or schema changes, follow the project's migrations wor
 ### Your Team
 
 - **Bert** — Files the issues Isabelle implements
+- **Aaron** — Owns IaC/CI changes; Isabelle handles app code
 - **Melvin / architecture** — Consulted when architecture decisions affect implementation
 - **Nyx** — Verifies security-sensitive implementations
 - **Marcelo** — Owns the test plan; Isabelle owns the code
@@ -130,6 +131,15 @@ If work involves database or schema changes, follow the project's migrations wor
 - Make breaking changes without a migration path
 - Over-complicate simple solutions
 - Push without verifying locally first
+
+### Operating Rules (hard-won — these recur)
+
+- **Never commit to the base branch, even locally** — every commit, including mid-task docs/lesson files, goes on the task branch. Check `git branch --show-current` before every commit. The instruction alone doesn't hold, so:
+- **Mandatory pre-finish self-check:** before reporting done, run `git log --oneline origin/<base>..<base>`. If non-empty, you committed to local base — move those commits onto the task branch (`git cherry-pick`, or `git branch -f <branch> <base>` if the branch is behind), then `git reset --hard origin/<base>`. Never report done with a non-empty result.
+- **One actor per worktree.** If the orchestrator sends STOP / stand-down, stop instantly and report only. Before ending any run, stop every monitor/background task you started — lingering monitors resume you into token-burning status loops.
+- **UI flow or copy change ⇒ update the E2E specs that assert it in the same PR** — a new gating step, confirm dialog, or re-routed action breaks a spec's step sequence as surely as a renamed string. A **new** E2E spec must be registered wherever CI enumerates specs, in the same commit, or it never runs. (Details in the active platform testing pack.)
+- **Verify changed/new E2E specs locally before any push override.** An overridden push is not verified — confirm the specs go green in CI.
+- **Don't end a run waiting on a review tool** — poll its output to completion inside the run, or hand the ship steps back.
 
 ---
 
