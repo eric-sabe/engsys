@@ -40,7 +40,7 @@ Slug: $ARGUMENTS
      > "Drag `docs/reviews/<slug>/<Derived>.docx` into this folder: `<folder URL>`. I'll detect it automatically — no need to paste anything back. Note: the drive may not auto-prompt to convert .docx → native Doc; that's fine, .docx editing supports comments and suggesting natively."
    - **Poll the folder** every ~7s for up to ~3 min: re-list the folder, diff against `baseline_ids`. New file → grab it.
    - If polling times out: print the folder URL again and ask the operator to paste the new file's URL manually (fallback).
-   - Once detected: fetch metadata to capture `mimeType`, `title`, `web_view_link`.
+   - Once detected: fetch metadata to capture `mimeType`, `title`, `web_view_link`. Acceptable types: `.docx`, `.pptx`, or the drive's native Doc/Slides types — all support comments.
    - **Do not** attempt to create the file via base64 upload — the base64 round-trip through LLM context is impractically slow.
 
 6. **Persist Drive state**:

@@ -85,6 +85,8 @@ For the chosen phase, follow [agent-implementation-workflow.md](agent-implementa
 7. Push once, open one **draft** PR via `gh pr create --draft` (PR creation stays on GitHub), linking/closing each work item per the skill's `link-pr` operation (GitHub: `Closes #<num>` on its own line for every issue in the phase), then post the local review findings onto the work item via the skill's `comment-issue` operation (on GitHub, the marked PR comment).
 8. Once the local review is clean and the gate is green, mark **Ready for review** (`gh pr ready <n>`) to trigger any expensive ready-for-review CI matrix.
 
+> **After a calibration / operator-gate phase, reconcile downstream issue literals.** If an earlier phase ratified numeric parameters (weights, thresholds, caps) the spec had listed as "illustrative", the later phases' issue bodies were written before the gate and still cite the old numbers verbatim — including in worked-example boundary tests. The ratified decision is the source of truth, not the issue body: diff each remaining phase's literals against the ratification record and inject an explicit override into the dispatch ("issue says X; ratified value is Y; use Y"). An implementer ships whatever the issue says, and build/lint/test stay green on the wrong value.
+
 ---
 
 ## Phase 3: Triage Review Findings, Then Decide

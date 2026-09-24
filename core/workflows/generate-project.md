@@ -124,6 +124,8 @@ Launch Leith and Melvin in parallel when possible, then Nyx and Gary in parallel
 
 Subagents do not automatically know parent context. Include enough detail in every prompt for autonomous work.
 
+**Spawn-prompt MUSTs** (learned more than once): every design-loop agent returns a *long* artifact (a full spec section), and long inline replies often arrive truncated — as a bare idle notification instead of the content — costing a re-request round-trip. So instruct each agent to **`Write` its section to `tmp/<agent>-<topic>.md` and reply with just the path + a short summary**, then `Read` the file to merge. Also explicitly forbid long-running commands (review CLIs, the full precheck, builds): a full-tool agent will otherwise invoke them on its own, and a review CLI stuck connecting can hang until its timeout and make the agent look dead.
+
 ### 4A: Leith — Product/UX
 
 Enrich the spec with: product problem and target persona; user stories and jobs-to-be-done; happy path, sad paths, empty/loading/error states; information architecture and navigation entry points; UI behavior, copy intent, accessibility expectations; acceptance criteria from a user perspective; product tradeoffs and recommended scope boundaries. Returns structured markdown for `Product and UX Specification`.

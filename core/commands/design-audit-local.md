@@ -48,6 +48,7 @@ lsof -nP -iTCP:<dev-port> -sTCP:LISTEN
 
 - **Listening** → proceed.
 - **Down** → tell the operator to start the project's dev server and stop.
+- **Dev server up but data-backing services down** (API, DB, workers — project-defined ports) → the surface renders, but data-backed sections will be empty or error. Tell the operator which services to start and ask whether to proceed with static-state auditing or wait.
 
 **Worktree bootstrap — check this when the session runs inside a git worktree.** A freshly created worktree may have no installed dependencies. Detect a worktree:
 
@@ -56,7 +57,7 @@ lsof -nP -iTCP:<dev-port> -sTCP:LISTEN
 [ "$(cd "$(git rev-parse --git-dir)" && pwd)" != "$(cd "$(git rev-parse --git-common-dir)" && pwd)" ] && echo "worktree"
 ```
 
-Bootstrap per the project (install deps + any codegen) before the dev server can start.
+Bootstrap per the project (install deps + env files + any codegen/workspace builds) before the dev server can start. Tell the operator it's happening — a worktree's first run is not a quick restart.
 
 **Worktree gotcha — check this explicitly.** Hot reload only picks up edits if the dev server's working directory is inside *this* checkout. If the server is running from a different worktree or the main checkout, every fix will appear to do nothing. If you can't confirm the server's cwd, say so and ask the operator to restart it from this directory.
 
@@ -67,6 +68,7 @@ If the browser-control MCP tools are unavailable, stop and tell the operator —
 1. Resolve `$ARGUMENTS` to a live surface and its route (confirm by navigating, don't assume) — the surface→route→source mapping is project-defined.
 2. If the surface carries a **demo/state switcher** (so you can reach empty/loading/error and any lifecycle states without a backend), use it to cover those states.
 3. If `$ARGUMENTS` is ambiguous, ask the operator once with `AskUserQuestion`.
+4. If the surface is behind auth, sign in with the project's **local dev-auth bypass** (declared in `CLAUDE.md` / the local-dev guide) and note which seeded tenant/user you landed on — it bounds which data states you can reach. No bypass available → report it and stop.
 
 ## Phase 2: Side-by-side capture
 
@@ -89,6 +91,7 @@ Walk the live surface against the reference. Because this is the *running* app, 
 **Live-only checks — capture these too** (a static `/design-audit` misses them):
 
 - Console messages — JS errors, framework warnings, prop-type complaints.
+- Network requests — failed (4xx/5xx) calls behind empty sections; a "design gap" is sometimes a broken fetch.
 - Layout shift / flashes on load.
 
 For each divergence, log a gap (Phase 5 format). Triage immediately into two buckets:
@@ -136,7 +139,7 @@ Final report to the operator:
 - **Fixed live** — count + one line each. These are uncommitted edits on this branch.
 - **Escalated** — gaps that need a spec or are unbuilt features. Recommend `/design-audit <surface>` for a full remediation spec, or `/file-issue` per gap.
 - **Blocked** — gaps that resisted 3 fix attempts, with the blocker.
-- **Live-only findings** — console errors, a11y misses.
+- **Live-only findings** — console errors, failed requests, a11y misses.
 - **State coverage** — which lifecycle/empty/error states you verified, which you couldn't (and why).
 - **Next step** — remind the operator the fixes are uncommitted: run `/pre-push` to gate, then commit per `CLAUDE.md` § Git / PR conventions. Don't auto-commit or auto-push.
 

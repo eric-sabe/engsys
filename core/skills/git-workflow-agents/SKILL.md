@@ -67,15 +67,24 @@ git worktree add ../worktrees/issue-42-tenant-validation -b agent/42-tenant-vali
 # Navigate to worktree
 cd ../worktrees/issue-42-tenant-validation
 
-# Copy environment config from the main checkout
+# Copy environment config from the main checkout — ALL of it (in a monorepo, every
+# per-package env file, not just the root one)
 cp ../../<project>/.env.local .env.local
 
 # Install dependencies (isolated) — use the project's package/dependency manager
 <install-deps-command>
 
+# Regenerate + build workspace artifacts that are gitignored (generated clients, built
+# shared packages) — stale or absent ones cause phantom failures that look like main is broken
+<codegen-command>
+
 # Verify setup
 <build-command>
 ```
+
+> **Running the gate from a worktree:** nothing loads `.env` files into the process environment for
+> you. If a gate step reads secrets from the process env (e.g. a test runner), export the env file
+> first (`set -a && source <env-file> && set +a`) before running it.
 
 #### Step 4: Confirm Isolation
 
@@ -387,8 +396,9 @@ git branch | grep "agent/" | xargs git branch -D
 - [ ] Issue assigned to me
 - [ ] Branch created: `agent/<issue>-<slug>`
 - [ ] Worktree created with `-b` flag
-- [ ] `.env.local` copied from main
+- [ ] All env files copied from main (every per-package one in a monorepo)
 - [ ] Dependencies installed
+- [ ] Gitignored generated artifacts regenerated/built (stale ⇒ phantom build/test errors)
 - [ ] Build passes
 - [ ] Working in worktree, not main repo
 
