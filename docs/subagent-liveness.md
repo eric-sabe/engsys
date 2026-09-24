@@ -1,10 +1,11 @@
 # Subagent Liveness & Death Detection — design
 
-> **Provenance:** design + worked example from FeedFrwd/keystone, the first
+> **Provenance:** design + worked example from the first production
 > deployment (2026-08). The normative, project-agnostic contract lives in the
 > skills (`core/skills/merge-monster`, `maintenance-monster`,
-> `subagent-liveness`, `agent-sessions`) — read `keystone-<role>` here as
-> `<your-namespace>-<role>`, and keystone issue/PR numbers as the case study.
+> `subagent-liveness`, `agent-sessions`). The example uses the namespace
+> `acme-` and repo `acme/app` — read `acme-<role>` as `<your-namespace>-<role>`;
+> issue/PR numbers are illustrative.
 
 Status: **implemented** (layers 0–4, 2026-08-16 — see §9; defaults pending
 operator ratification). Companion to

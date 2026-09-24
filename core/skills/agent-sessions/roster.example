@@ -1,15 +1,21 @@
 # Agent-session roster — copy to .claude/agent-sessions.roster and edit.
-# Read by the agent-sessions skill's launch-agent-sessions.sh.
+# Read by the agent-sessions skill's launch-agent-sessions.sh. It can live in
+# the target repo, or in a separate fleet repo that drives one or more target
+# repos (then give every session an absolute <workdir>).
 #
 # Header (KEY=VALUE):
 NAMESPACE=acme
 # TMUX_SESSION=acme                      # default: NAMESPACE
 # ENV_FILE=~/.config/acme/agents.env     # optional; sourced into every session
-# MODEL=--model claude-opus-4-8          # optional; appended to every session
+# MODEL=--model <model-id>               # optional; appended to every session
+# PREFLIGHT=bash ~/bin/cloud-login.sh ~/.config/acme/agents.env   # optional,
+# PREFLIGHT=gh auth status               # repeatable; fail-open identity checks
 #
 # Sessions: <name>|<workdir>|<initial prompt>|<extra flags>
 #   name MUST start with "NAMESPACE-" — the messaging trust fence.
-#   workdir empty → the repo the launcher runs from.
+#   workdir empty → the directory the launcher runs from; ~ is expanded.
+#   A fleet that keeps monster configs outside the repo passes the directory
+#   in the initial prompt: /merge-monster fleet config dir: /abs/path
 #
 # Permission-mode guidance (full rationale: SKILL.md § Permission modes):
 #   monsters (unattended)      → --dangerously-skip-permissions
@@ -17,6 +23,9 @@ NAMESPACE=acme
 #   read-heavy interactive     → (default gating)
 acme-mm||/merge-monster|--remote-control --dangerously-skip-permissions
 acme-maintain||/maintenance-monster|--remote-control --dangerously-skip-permissions
+# Any further ledger-bearing role (its own skill + baton) is just another line;
+# register it in fleet-supervisor.conf too so it is auto-relaunched:
+# acme-<role>||/<role-skill>|--remote-control --dangerously-skip-permissions
 acme-build|||--remote-control --permission-mode acceptEdits
 acme-investigate|||--remote-control
 acme-design|||--remote-control --permission-mode acceptEdits

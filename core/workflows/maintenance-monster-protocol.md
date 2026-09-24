@@ -22,7 +22,10 @@ Monster's ledger — with the same heartbeat-freshness contract:
 
 ## What it produces (and doesn't)
 
-- **Phase 1 (current default): read-only.** It watches, dedups, triages, and
+The live phase is the `phase:` key in `.claude/maintenance-monster.yml` (or
+the fleet config dir's copy) — check it, not this doc.
+
+- **Phase 1 (`read_only`, the default): read-only.** It watches, dedups, triages, and
   **reports** — findings land in its ledger/journal with a disposition and
   reasoning, and it escalates anything that needs a human. It opens **no
   fix PRs** in this phase.

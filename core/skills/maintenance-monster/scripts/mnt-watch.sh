@@ -43,6 +43,11 @@ touch "$W/deps_pr.tsv" "$W/dep_alerts.tsv" "$W/codeql_alerts.tsv" "$W/secretrun.
 # events.
 emit_diff() {
   old="$1"; new="$2"; addp="$3"; remp="${4:-}"
+  # Guard: a transient-empty fetch (gh hiccup/rate-limit returning 0 rows with
+  # exit 0) must NOT wipe a populated baseline — the next good fetch would then
+  # re-emit the full set as new (a spurious event storm). Empty new + non-empty
+  # old → skip this cycle and keep the baseline.
+  if [ ! -s "$new" ] && [ -s "$old" ]; then rm -f "$new"; return; fi
   cut -f1 "$old" | sort -u > "$old.k"
   cut -f1 "$new" | sort -u > "$new.k"
   comm -13 "$old.k" "$new.k" | while IFS= read -r key; do
@@ -95,12 +100,16 @@ while true; do
       --jq '.[0] | "\(.databaseId)\t\(.conclusion)"' 2>/dev/null); then
     RUNID=$(echo "$OUT" | cut -f1)
     CONCL=$(echo "$OUT" | cut -f2)
-    LAST=$(cat "$W/secretrun.txt" 2>/dev/null || true)
+    LAST=$(cat "$W/secretrun.txt" 2>/dev/null || echo 0)
     if [ -n "$CONCL" ] && [ "$CONCL" != "null" ]; then
-      if [ "$CONCL" = "failure" ] && [ "$RUNID" != "$LAST" ]; then
-        echo "SECRET_ALERT $RUNID"
+      # Guard against GitHub transiently serving a STALE older run as "latest"
+      # (seen in practice → repeated false alerts). Run ids increase
+      # monotonically, so only act on a genuinely newer id; ignore older reads
+      # entirely (no emit, no state regression).
+      if [ "${RUNID:-0}" -gt "${LAST:-0}" ] 2>/dev/null; then
+        if [ "$CONCL" = "failure" ]; then echo "SECRET_ALERT $RUNID"; fi
+        echo "$RUNID" > "$W/secretrun.txt"
       fi
-      echo "$RUNID" > "$W/secretrun.txt"
     fi
   fi
 
@@ -115,12 +124,13 @@ while true; do
       --jq '.[0] | "\(.databaseId)\t\(.conclusion)"' 2>/dev/null); then
     RUNID=$(echo "$OUT" | cut -f1)
     CONCL=$(echo "$OUT" | cut -f2)
-    LAST=$(cat "$W/trivyrun.txt" 2>/dev/null || true)
+    LAST=$(cat "$W/trivyrun.txt" 2>/dev/null || echo 0)
     if [ -n "$CONCL" ] && [ "$CONCL" != "null" ]; then
-      if [ "$CONCL" = "failure" ] && [ "$RUNID" != "$LAST" ]; then
-        echo "TRIVY_RED $RUNID"
+      # Same stale-read guard as SECRET_ALERT: require a strictly newer run id.
+      if [ "${RUNID:-0}" -gt "${LAST:-0}" ] 2>/dev/null; then
+        if [ "$CONCL" = "failure" ]; then echo "TRIVY_RED $RUNID"; fi
+        echo "$RUNID" > "$W/trivyrun.txt"
       fi
-      echo "$RUNID" > "$W/trivyrun.txt"
     fi
   fi
 

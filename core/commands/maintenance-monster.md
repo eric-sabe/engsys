@@ -1,6 +1,9 @@
 ---
 description: Start a Maintenance Monster watchdog session — own the security/dependency baton, continuously watch Dependabot PRs + alerts, code/secret scanning, and push-only image scans, dedup + triage each finding, and report (Phase 1) or drive safe fixes into mm:ready PRs for Merge Monster (Phase 2+)
+argument-hint: "[fleet config dir: /abs/path]"
 ---
+
+Arguments (optional): $ARGUMENTS
 
 Run the **maintenance-monster** skill (`.claude/skills/maintenance-monster/SKILL.md`) as a long-lived watchdog session.
 
@@ -10,7 +13,7 @@ Monster — the two hold separate batons and compose as producer/consumer. See
 
 Before starting the loop:
 
-1. Read `.claude/maintenance-monster.yml` (if missing: copy `config.example.yml` from the skill, run `.claude/skills/maintenance-monster/scripts/mnt-setup.sh --repo <owner/name>`, fill it in, and confirm with the user before proceeding).
+1. Read the config: `.claude/maintenance-monster.yml` in this repo; if absent, `maintenance-monster.yml` in the fleet config dir named in the arguments or session context (`fleet config dir: /abs/path` — see the skill's § Prerequisites). If neither exists: copy `config.example.yml` from the skill, run `.claude/skills/maintenance-monster/scripts/mnt-setup.sh --repo <owner/name>`, fill it in, and confirm with the user before proceeding.
 2. Follow SKILL.md § Session startup: reconcile live GitHub state, refresh the heartbeat, arm the persistent Monitor(s), schedule the fallback tick.
 3. Then run the loop until the ledger issue is closed (kill switch) or the user stops you.
 

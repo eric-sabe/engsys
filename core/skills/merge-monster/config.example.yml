@@ -1,4 +1,6 @@
-# Merge Monster per-repo config — copy to .claude/merge-monster.yml and edit.
+# Merge Monster per-repo config — copy to .claude/merge-monster.yml (or to
+# merge-monster.yml in a fleet config dir outside the repo — see SKILL.md
+# § Prerequisites) and edit.
 # Read by the model at session start; scripts take flags, never parse YAML.
 # Design spec: docs/merge-monster.md in engsys.
 

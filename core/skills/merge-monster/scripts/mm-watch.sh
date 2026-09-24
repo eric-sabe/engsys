@@ -10,6 +10,8 @@
 #   CONFLICT #N            a queued/ready PR turned DIRTY (needs rebase)
 #   DEPENDABOT #N <title>  new Dependabot PR opened
 #   MAIN_RED <workflow>    latest default-branch run concluded failure
+#                          (merge-gating only: skips event=schedule; deduped
+#                          by run id so a persistent failure fires once)
 #   STOP                   ledger issue closed (kill switch) — script exits
 #
 # The active PR number is read each cycle from <state-dir>/active, so one
@@ -112,20 +114,26 @@ while true; do
   fi
 
   # --- default branch went red ----------------------------------------------
-  if OUT=$(gh run list -R "$REPO" --branch "$DEFBRANCH" --limit 1 \
-      --json databaseId,conclusion,workflowName \
-      --jq '.[0] | "\(.databaseId)\t\(.conclusion)\t\(.workflowName)"' 2>/dev/null); then
+  # MAIN_RED is for MERGE-GATING failures only. Scheduled runs (nightly suites,
+  # cron jobs) red a background surface, not the merge queue, so a persistent
+  # scheduled failure must NOT keep waking the orchestrator. Two guards:
+  #   1. Evaluate the newest NON-schedule run (filtered in the query), so a
+  #      scheduled run on top of the list can't hide a real failure beneath it.
+  #   2. Dedup by run id in a set file: each failing run emits at most once,
+  #      even if it keeps resurfacing as "newest".
+  # In-progress runs are never recorded, so one still emits once it concludes
+  # failure.
+  if OUT=$(gh run list -R "$REPO" --branch "$DEFBRANCH" --limit 20 \
+      --json databaseId,conclusion,workflowName,event \
+      --jq 'map(select(.event != "schedule")) | .[0] | select(.)
+            | "\(.databaseId)\t\(.conclusion)\t\(.workflowName)"' 2>/dev/null); then
     RUNID=$(echo "$OUT" | cut -f1)
     CONCL=$(echo "$OUT" | cut -f2)
     WF=$(echo "$OUT" | cut -f3)
-    LAST=$(cat "$W/mainrun.txt" 2>/dev/null || true)
-    # Only record runs with a terminal conclusion — recording an in-progress
-    # run id would suppress its MAIN_RED when it later concludes failure.
-    if [ -n "$CONCL" ] && [ "$CONCL" != "null" ]; then
-      if [ "$CONCL" = "failure" ] && [ "$RUNID" != "$LAST" ]; then
-        echo "MAIN_RED $WF"
-      fi
-      echo "$RUNID" > "$W/mainrun.txt"
+    if [ -n "$RUNID" ] && [ "$CONCL" = "failure" ] \
+       && ! grep -qxF "$RUNID" "$W/main-red.tsv" 2>/dev/null; then
+      echo "MAIN_RED $WF"
+      echo "$RUNID" >> "$W/main-red.tsv"
     fi
   fi
 
