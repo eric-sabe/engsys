@@ -2,18 +2,58 @@
 # Post-edit reminders — one-time nudges after edits to sensitive files.
 # Wired in .claude/settings.json under hooks.PostToolUse (Edit|Write|MultiEdit).
 # Keep this list short and high-signal: invariants accrete as the codebase grows.
+#
+# Two sources of reminders:
+#   1. Project cases (below) — rendered from naturalize.hook_patterns in engsys.config.yaml.
+#   2. Stack-pack reminders — each selected pack may ship
+#      .claude/hooks/post-edit-reminders.<pack>.sh, called with the edited path as $1.
+#      They run only when no project case matched, so a project pattern overrides a
+#      pack default for the same file.
+#
+# Output contract: a PostToolUse hook's plain stdout is shown only to the user (transcript
+# mode), NOT to the model. Reminders are therefore emitted as JSON
+# hookSpecificOutput.additionalContext so the model actually sees them. Fail-open:
+# any parsing problem exits 0 silently.
 set -euo pipefail
 
 # The hook receives the tool payload on stdin as JSON. Extract the edited file's path.
 payload="$(cat || true)"
-file_path="$(printf '%s' "$payload" | grep -oE '"file_path"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 | sed -E 's/.*:[[:space:]]*"([^"]+)"/\1/')"
+file_path="$(printf '%s' "$payload" | grep -oE '"file_path"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 | sed -E 's/.*:[[:space:]]*"([^"]+)"/\1/' || true)"
 [ -z "${file_path:-}" ] && exit 0
+
+hook_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+pack_reminders() {
+  local h
+  for h in "$hook_dir"/post-edit-reminders.*.sh; do
+    [ -f "$h" ] || continue
+    bash "$h" "$file_path" 2>/dev/null || true
+  done
+}
 
 # Per-project reminder cases. Each case matches a path glob and echoes a short nudge.
 # The installer injects project-specific cases below.
+all_reminders() {
 case "$file_path" in
 {{REMINDER_CASES}}
-  *) ;;
+  *) pack_reminders ;;
 esac
+}
 
+reminders="$(all_reminders)"
+
+[ -z "$reminders" ] && exit 0
+
+json_escape() {
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\t'/\\t}
+  s=${s//$'\r'/}
+  s=${s//$'\n'/\\n}
+  printf '%s' "$s"
+}
+
+printf '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"%s"}}\n' \
+  "$(json_escape "$reminders")"
 exit 0

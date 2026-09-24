@@ -12,8 +12,8 @@ This skill is the same registry + watchdog + probe/fence discipline the
 monsters run, for sessions without a baton. The scripts are shared —
 **one substrate, every session**:
 
-- `.claude/skills/merge-monster/scripts/mm-agent-reg.sh` (spawn registry)
-- `.claude/skills/merge-monster/scripts/mm-agent-watch.sh` (watchdog Monitor)
+- `<engsys-root>/skills/merge-monster/scripts/mm-agent-reg.sh` (spawn registry)
+- `<engsys-root>/skills/merge-monster/scripts/mm-agent-watch.sh` (watchdog Monitor)
 
 **State dir** — pick ONE per-session identifier at skill load and reuse it for
 **every** registry and watchdog command this session ever runs:
@@ -48,7 +48,7 @@ it names the individual **agent** inside this session's registry.
    back via `--gen`):
 
    ```bash
-   .claude/skills/merge-monster/scripts/mm-agent-reg.sh spawn \
+   <engsys-root>/skills/merge-monster/scripts/mm-agent-reg.sh spawn \
      --state-dir logs/agent-liveness/<session-id> --name <agent-name> \
      --task "<issue/PR ref>" --class <fix|review|rebase|default> --deadline-min <N>
    ```
@@ -64,7 +64,7 @@ it names the individual **agent** inside this session's registry.
    Monitor; re-arm it if it dies:
 
    ```bash
-   bash .claude/skills/merge-monster/scripts/mm-agent-watch.sh \
+   bash <engsys-root>/skills/merge-monster/scripts/mm-agent-watch.sh \
      --state-dir logs/agent-liveness/<session-id> --stale-min 10
    ```
 
@@ -75,7 +75,7 @@ it names the individual **agent** inside this session's registry.
 ## On `AGENT_OVERDUE` / `AGENT_STALE`
 
 Follow **§ Subagent liveness in
-[.claude/skills/merge-monster/SKILL.md](../merge-monster/SKILL.md)** — it is
+[<engsys-root>/skills/merge-monster/SKILL.md](../merge-monster/SKILL.md)** — it is
 the canonical statement of probe-then-classify and the fence-first recovery
 ladder. The short form: reconcile durable state first (did the work actually
 land?); probe via `SendMessage` (a reply = alive-but-slow → one journalled

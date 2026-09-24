@@ -228,8 +228,9 @@ Final response to operator:
 - **No surface-level scans.** Open every relevant file. Read every design-system component the surface uses. The whole point of this command is the fine eye.
 - **Use the system, don't reinvent it.** Hand-rolled markup that duplicates a design-system component is a finding even if it looks identical — the system is the contract.
 - **Token compliance is not optional.** Any color/spacing/type/radius/shadow not from the project's tokens is a P1, even if visually close.
+- **Don't repeat prior attempts.** If a gap was attempted before, find the closed PR and understand why it failed before proposing the same fix.
 - **Don't auto-create issues yet.** The user reviews the spec first. Issue creation happens via `/generate-project` on the operator's command.
 - **Cite, don't summarize.** Findings reference the reference side and `<surface file>:<line>` so the reviewer can verify each gap in 30 seconds.
-- **States count.** A design that breaks down on empty/error/lifecycle states is a finding — those states are the product, not error cases.
+- **States count.** A design that breaks down on empty/error/lifecycle states is a finding — those states are the product, not error cases. It's a *sanity* finding, not a fidelity one, even when the implementation matches the reference exactly.
 
 See `CLAUDE.md` § Filing issues for how the eventual issues should be shaped.

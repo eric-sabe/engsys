@@ -6,12 +6,15 @@ description: Stand up and operate a fleet of named, long-running Claude Code ses
 # Agent sessions — the project fleet
 
 One always-on machine runs a set of named Claude Code sessions per project:
-the two monsters (`<ns>-mm` merge orchestrator, `<ns>-maintain` security/
-dependency watchdog) plus interactive worker roles (`build`, `investigate`,
-`design`, …). This skill owns the launcher, the roster format, and the
-operational judgment (naming, permissions, inspection).
+the ledger-bearing monsters (`<ns>-mm` merge orchestrator, `<ns>-maintain`
+security/dependency watchdog, and any further baton-holding role you add —
+the fleet is not limited to two) plus interactive worker roles (`build`,
+`investigate`, `design`, …). This skill owns the launcher, the roster format,
+the fleet supervisor, and the operational judgment (naming, permissions,
+inspection).
 
-Scripts: `<skill-dir>/scripts/launch-agent-sessions.sh` (the launcher) and
+Scripts: `<skill-dir>/scripts/launch-agent-sessions.sh` (the launcher),
+`<skill-dir>/scripts/fleet-supervisor.sh` (the relauncher), and
 `roster.example` (copy to `.claude/agent-sessions.roster`, edit).
 
 ## Why names + namespace matter
@@ -52,21 +55,46 @@ address space. Isolation is by convention, enforced in the skills:
 ## Launching
 
 ```bash
-cp .claude/skills/agent-sessions/roster.example .claude/agent-sessions.roster
+cp <engsys-root>/skills/agent-sessions/roster.example .claude/agent-sessions.roster
 # edit: NAMESPACE, roles, flags, optional ENV_FILE / MODEL
-bash .claude/skills/agent-sessions/scripts/launch-agent-sessions.sh
+bash <engsys-root>/skills/agent-sessions/scripts/launch-agent-sessions.sh
 ```
 
 The launcher: writes/patches `~/.claude/<ns>-messaging-settings.json` with
-`crossSessionInbound: accept`; injects the optional `ENV_FILE` into every
-window's command line (a pre-existing tmux server does NOT inherit launcher
-exports); refuses duplicate window names; starts each session as a tmux
-window named for its role.
+`crossSessionInbound: accept`; runs any `PREFLIGHT=` commands; injects the
+optional `ENV_FILE` into every window's command line (a pre-existing tmux
+server does NOT inherit launcher exports); refuses duplicate window names
+(whole tmux server) and names outside the namespace; starts each session as
+a tmux window named for its role (`new-window -t <session>:` — the trailing
+colon means "next free index"; without it the second launch fails).
 
 `ENV_FILE` is the hook for a durable machine identity (cloud credentials,
 inference endpoints) — e.g. a certificate-credential service principal with
 least-privilege read+inference roles, so no session ever depends on the
-operator's interactive cloud login surviving the night.
+operator's interactive cloud login surviving the night. `PREFLIGHT=` lines
+(repeatable) are the matching refresh hook: a cloud-login script, `gh auth
+status`, anything that should re-check the identity before sessions start.
+They run on every invocation, including the supervisor's single-session
+relaunches, and are fail-open (warn, launch anyway). For identities that
+expire between launches, add a sibling launchd/cron job running the same
+login script every few hours.
+
+## Running from a fleet repo
+
+The launcher and supervisor need not live in the repo they drive. A separate
+fleet repo (roster, supervisor conf, monster configs, launchd jobs) can run
+sessions against one or more target repos:
+
+- **Roster**: give every session an absolute `<workdir>` (the target checkout).
+- **Supervisor**: set `REPO=owner/name` in the conf, or a 4th
+  `|owner/name` field per session for a multi-repo fleet. Without either it
+  falls back to `gh repo view` in its cwd (the in-repo mode).
+- **Monster configs**: each monster reads `.claude/<monster>.yml` from its
+  repo if present; otherwise from the **fleet config dir** named in its
+  session context. Pass it in the roster's initial prompt —
+  `/merge-monster fleet config dir: /abs/fleet/configs/<repo>` — and put
+  `merge-monster.yml` / `maintenance-monster.yml` there. An in-repo config
+  always wins.
 
 ## Reset-time runbook
 
@@ -111,11 +139,17 @@ staleness alone — that's probe-then-classify territory (subagent-liveness),
 a judgment call for the operator or the maintenance watchdog, not a script.
 
 Setup: copy `fleet-supervisor.conf.example` → `.claude/fleet-supervisor.conf`
-(sessions, ledger issues, stale thresholds), and `launchd.plist.example` →
-`~/Library/LaunchAgents/` with `REPO_ROOT` filled in (Linux: cron/systemd
-timer, same cadence). ALIVE detection is shell-fallback based, not
-process-name based — the claude binary renames its process to its version
-string.
+(one line per ledger-bearing session — as many as you run — with its ledger
+issue, stale threshold, and optionally its repo), and `launchd.plist.example`
+→ `~/Library/LaunchAgents/` with `REPO_ROOT` set to the directory holding the
+conf (Linux: cron/systemd timer, same cadence). ALIVE detection is
+shell-fallback based, not process-name based — the claude binary renames its
+process to its version string.
+
+Any new baton-holding role joins the supervisor by honoring the same
+contract: a ledger issue whose body carries a `last: <ISO8601Z> — status:
+<text>` heartbeat line, the exact phrases "rotation requested" / "session
+end", and closing the issue as its kill switch.
 
 ## Related
 

@@ -3,7 +3,7 @@ description: Pull the current Drive doc body back, render feedback.md, classify 
 argument-hint: <slug>
 ---
 
-Collect feedback on a published review. Full workflow reference: [.claude/workflows/review-workflow.md](.claude/workflows/review-workflow.md).
+Collect feedback on a published review. Full workflow reference: [<engsys-root>/workflows/review-workflow.md](<engsys-root>/workflows/review-workflow.md).
 
 Slug: $ARGUMENTS
 

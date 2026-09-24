@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# mm-agent-reg.sh — subagent spawn registry (docs/subagent-liveness-design.md §3
+# mm-agent-reg.sh — subagent spawn registry (docs/subagent-liveness.md §3
 # Layer 1). One TSV per orchestrator (namespaced by --state-dir, so Merge
 # Monster and Maintenance Monster never collide). Rows are keyed by
 # (name, gen): `gen` is the attempt generation — the fencing token the recovery

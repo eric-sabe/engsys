@@ -54,6 +54,36 @@ tooling.
 - Run only the spec/test files affected by the diff, not the full matrix, in the standard path.
 - Gates for optional tooling (container engine, IaC CLI, cloud CLI) skip gracefully when the
   tool is not installed — a missing optional tool must not fail the push.
+- A gate the diff **triggered** never skips silently. If it needs a runtime that is installed but
+  down (e.g. the container engine isn't started), fail fast up front with the remediation command
+  rather than skipping or failing deep into the run.
+
+## Local == CI (heavy gates)
+
+When the gate runs E2E/integration suites, make the local run mirror a CI leg — otherwise it fails
+for reasons CI never sees, or passes for reasons CI won't:
+
+- **Same isolation groups as CI.** Run specs group-by-group the way the CI matrix does, not the
+  whole suite against one environment (cross-spec fixture pollution and rate-limit accumulation fail
+  specs unrelated to your diff). Keep the local grouping and the CI matrix in one source or add a
+  drift check that fails the gate; unregistered specs run as a trailing ungrouped set.
+- **Self-provisioned, disposable environment.** The gate creates a fresh test DB per group
+  (drop → create → migrate → seed) and flushes any cache holding rate-limit/lockout state — never
+  touching the developer's dev data. It uses a canonical test env, not the developer's local
+  secrets file (whose values nothing in the test stack accepts).
+- **Servers from the code just built.** Let the test runner boot the app from the build the gate
+  just produced, exactly like CI — stale images become impossible by construction.
+- **Lease shared resources.** If several agent sessions may run the gate on one machine, don't
+  hardcode ports/DB names — acquire a slot from a small lease pool, export what the grant provides,
+  and release **unconditionally** (explicit call + `EXIT` trap) so a crashed run can't leak a slot
+  and starve the pool. Do the same for manual runs outside the gate.
+- **Retry parity.** Give unit and E2E suites the same **one-retry** budget locally and in CI (no env
+  forks) so a healthy spec can't fail under parallel-machine load. A genuinely broken test still
+  fails both attempts; report pass-on-retry as a flake worth filing. Keep the budget at 1 — more
+  starts masking real flakiness.
+
+A red heavy gate: classify flake vs regression (the maintenance lane, if the project has one)
+before reaching for the bypass.
 
 ## Full Suite Locally
 
@@ -73,8 +103,9 @@ diff, force it:
 
 ## Review before push (local code review)
 
-Review is local — run a local code review with the built-in `/code-review` skill **before** you
-push so the PR opens already-reviewed and CI minutes aren't spent on a post-push review loop.
+Review is local — run the gate reviewer (the built-in `/code-review` skill unless `CLAUDE.md` names
+another) **before** you push so the PR opens already-reviewed and CI minutes aren't spent on a
+post-push review loop.
 
 ```bash
 git fetch origin   # local main is often stale — compare against the remote

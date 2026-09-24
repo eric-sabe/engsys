@@ -78,7 +78,7 @@ node .claude/scripts/worker-run.mjs --package tmp/worker-package/<run-id>
    explicit operator sign-off, recorded as a same-family exception in the PR.
 4. `risk: high` phases (from the issues' engsys:issue-meta): **two** families
    must return CLEAN before merge.
-5. A design-lens pass (`--brief .claude/workflows/briefs/review-design.md`)
+5. A design-lens pass (`--brief <engsys-root>/workflows/briefs/review-design.md`)
    never substitutes for the correctness gate — both run on user-facing work.
 
 ## Fix rounds

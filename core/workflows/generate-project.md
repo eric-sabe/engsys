@@ -18,7 +18,7 @@ build a feature spec/plan for <goal>
 - Batch clarifying questions. Ask once, wait for answers, then proceed.
 - Use subagents for perspective, not delegation drift. The parent agent owns the spec and reconciles conflicts.
 - Make the spec the shared source of truth. Every subagent enriches `docs/specs/<slug>.md` directly or returns structured content for the parent to merge.
-- Tracker project + issue writes go through the project's installed **issue-tracker skill** (`.claude/skills/issue-tracker-*/`) and its contract operations (`create-issue`, `create-board`, `add-to-board`, `set-board-field`, `query-board`). The skill maps them onto the active backend; on GitHub it uses `gh` (ProjectV2 MCP tools are unsupported there, so the skill drives `gh project` / `gh api graphql`).
+- Tracker project + issue writes go through the project's installed **issue-tracker skill** (`issue-tracker-*` skill) and its contract operations (`create-issue`, `create-board`, `add-to-board`, `set-board-field`, `query-board`). The skill maps them onto the active backend; on GitHub it uses `gh` (ProjectV2 MCP tools are unsupported there, so the skill drives `gh project` / `gh api graphql`).
 - Write issue bodies to `tmp/` and create them via the skill's `create-issue` operation (GitHub: `gh issue create --body-file`). Never HEREDOC issue bodies — the tmp/-file discipline is universal.
 - Issue-body invariants (every one of these has been a sanity-check finding at least once):
   - Every body carries one context line: `Part of [<project name> — project <N>](<board url>) · spec: docs/specs/<slug>.md`. Section citations ("spec §2.2") are unresolvable without it.
@@ -50,7 +50,7 @@ Read:
 - `docs/agent-lessons/` (and the engsys lessons-library if linked)
 - `docs/architecture/` relevant pages
 - project rules / `CLAUDE.md`
-- `.claude/agents/{leith,melvin,nyx,marcelo,jody}.md`
+- `<engsys-root>/agents/{leith,melvin,nyx,marcelo,jody}.md`
 - Existing specs in `docs/specs/`
 - Related source files, routes, services, schemas, UI components, tests, seed scripts
 - Provided attachments and linked resources
@@ -124,6 +124,8 @@ Launch Leith and Melvin in parallel when possible, then Nyx and Gary in parallel
 
 Subagents do not automatically know parent context. Include enough detail in every prompt for autonomous work.
 
+**Spawn-prompt MUSTs** (learned more than once): every design-loop agent returns a *long* artifact (a full spec section), and long inline replies often arrive truncated — as a bare idle notification instead of the content — costing a re-request round-trip. So instruct each agent to **`Write` its section to `tmp/<agent>-<topic>.md` and reply with just the path + a short summary**, then `Read` the file to merge. Also explicitly forbid long-running commands (review CLIs, the full precheck, builds): a full-tool agent will otherwise invoke them on its own, and a review CLI stuck connecting can hang until its timeout and make the agent look dead.
+
 ### 4A: Leith — Product/UX
 
 Enrich the spec with: product problem and target persona; user stories and jobs-to-be-done; happy path, sad paths, empty/loading/error states; information architecture and navigation entry points; UI behavior, copy intent, accessibility expectations; acceptance criteria from a user perspective; product tradeoffs and recommended scope boundaries. Returns structured markdown for `Product and UX Specification`.
@@ -178,7 +180,7 @@ Jody's output must be concrete enough that Isabelle can implement each phase usi
 
 ## Phase 5: Tracker Project Mechanics
 
-All project and issue writes go through the issue-tracker skill's contract operations — `create-board`, `create-issue`, `add-to-board`, `set-board-field`, `query-board`. The skill (`.claude/skills/issue-tracker-*/`) carries the backend specifics; the GitHub commands below are what that skill runs on a GitHub project.
+All project and issue writes go through the issue-tracker skill's contract operations — `create-board`, `create-issue`, `add-to-board`, `set-board-field`, `query-board`. The skill (`issue-tracker-*` skill) carries the backend specifics; the GitHub commands below are what that skill runs on a GitHub project.
 
 On GitHub, check auth and project scope first:
 
@@ -240,7 +242,7 @@ Merge sanity-check fixes into the spec. If issues must change, update the tracke
 
 Before reporting back, reflect: did tool choice slow the workflow? Did subagents lack context because prompts were too thin? Did board creation require steps the issue-tracker skill should document (e.g. undocumented `gh`/GraphQL steps on GitHub)? Did any agent disagree in a way future agents should anticipate? Did attachments need a better parsing pattern? Did the spec miss a section until late?
 
-Actions: create/update `docs/agent-lessons/` (PR generalizable lessons back to the engsys lessons-library); update relevant `.claude/agents/*.md` if a role should change; update rules / prompt docs if a behavior should become automatic. Keep memory concise and LLM-optimized: trigger, failure mode, correct behavior, commands/files.
+Actions: create/update `docs/agent-lessons/` (PR generalizable lessons back to the engsys lessons-library); update relevant `<engsys-root>/agents/*.md` if a role should change; update rules / prompt docs if a behavior should become automatic. Keep memory concise and LLM-optimized: trigger, failure mode, correct behavior, commands/files.
 
 ---
 

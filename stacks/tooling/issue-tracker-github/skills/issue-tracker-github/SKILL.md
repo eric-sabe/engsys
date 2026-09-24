@@ -241,6 +241,19 @@ Symptom / Cause / Fix.
   ```
   Don't trust cached label lists from prior runs — query the live list each time.
 
+### `gh project item-add` succeeds silently; `item-list` pages at 30 and lags
+
+- **Symptom:** An agent concludes a board write failed (and blames the token or account)
+  because `gh project item-add` printed nothing, or because the just-added issue doesn't
+  appear in `gh project item-list`.
+- **Cause:** `item-add` exits 0 with **no stdout** on success. `item-list` returns only
+  **30 items by default** and is eventually consistent, so a fresh add on a larger board
+  is often missing from the listing.
+- **Fix:** Confirm writes with `--format json` on `item-add` (returns the created item) or
+  from the issue side (`gh issue view <n> --json projectItems`, authoritative). Always pass
+  `--limit 400` (or higher) to `item-list`, and never verify a fresh add against it. Only
+  on an actual `INSUFFICIENT_SCOPES` error: `gh auth refresh -h github.com --scopes project`.
+
 ### ProjectV2 single-select fields are GraphQL-only
 
 - **Symptom:** A fresh `gh project create` board has only built-in fields (`Title`,

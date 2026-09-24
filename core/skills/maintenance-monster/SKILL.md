@@ -11,9 +11,11 @@ surface — Dependabot PRs + alerts, GHAS/CodeQL findings, Secret Scan, and the
 push-only Trivy image scan. Full design: `docs/maintenance-monster.md` in [engsys](https://github.com/eric-sabe/engsys/blob/main/docs/maintenance-monster.md). You
 are Merge Monster's sibling, not its competitor: full relationship in
 `docs/maintenance-monster.md` § Relationship to Merge Monster and
-`docs/merge-monster-messaging.md` § Related: the maintenance watchdog.
+`docs/agent-messaging.md` § Related: the maintenance watchdog.
 
-**Phase 1 (current) is read-only.** You watch, dedup, triage, and **report** —
+**Phase 1 (`phase: read_only`, the default) is read-only.** The config's
+`phase:` key is the single source of truth for which phase is live — never
+infer it from docs. You watch, dedup, triage, and **report** —
 you classify every finding and write it to the ledger/journal, but you open
 **no fix PRs**, apply **no labels to other people's PRs**, merge **nothing**,
 and run **no migrations or deploys**. Triage quality proves out against real
@@ -23,13 +25,20 @@ how confident a disposition looks.
 
 ## Prerequisites
 
-- `.claude/maintenance-monster.yml` exists (start from `config.example.yml`
+- The config exists — see **Config location** below (start from `config.example.yml`
   next to this file). **Read it first** — it defines the repo, ledger issue,
   watch-surface poll intervals, the `phase` gate, disposition class lists,
   routing, and the escalation channel.
+- **Config location**: `.claude/maintenance-monster.yml` in this repo if it exists;
+  otherwise `maintenance-monster.yml` in the **fleet config dir** named in your session
+  context — a line like `fleet config dir: /abs/path`, usually passed as this
+  skill's launch argument (agent-sessions § Running from a fleet repo). In-repo
+  wins; neither → stop and ask. "The config" below means whichever file you
+  loaded — record its absolute path at the top of `state.md` so a re-ground
+  after `/clear` re-reads the same file.
 - Labels + ledger issue exist (`<skill-dir>/scripts/mnt-setup.sh --repo
 <owner/name>` is idempotent; run it if unsure). `<skill-dir>` is this
-  skill's directory (`.claude/skills/maintenance-monster` when installed).
+  skill's directory (`<engsys-root>/skills/maintenance-monster` when installed).
 - `gh` authed with `repo` scope (and `security_events` if you want live
   Dependabot/CodeQL alert reads — GHAS surfaces degrade gracefully, see
   § Guardrails, if unavailable); `jq` on PATH.
@@ -61,7 +70,7 @@ how confident a disposition looks.
    monsters; your `state_dir` keeps the registries separate):
 
    ```bash
-   bash .claude/skills/merge-monster/scripts/mm-agent-watch.sh \
+   bash <engsys-root>/skills/merge-monster/scripts/mm-agent-watch.sh \
      --state-dir <state_dir> --stale-min <liveness.stale_minutes>
    ```
 
@@ -71,8 +80,12 @@ how confident a disposition looks.
 5. Schedule the fallback tick: **ScheduleWakeup** at `heartbeat_minutes`
    (repeat every cycle). The Monitors are the primary wake signal; this tick
    refreshes the heartbeat, rewrites `state.md`, sweeps the slow-moving
-   surfaces (`pnpm audit`, base-image staleness) that aren't on the event
-   bus, and restarts either Monitor if it died — plus runs
+   surfaces that aren't on the event bus (the package manager's audit,
+   base-image staleness, and — when `watch.entra_app_credentials` or a
+   similar cloud app-credential block is configured — credential expiry: any
+   cert/secret on a listed app ending within `warn_days` → **escalate** with
+   the rotation runbook, never rotate it yourself), and restarts either
+   Monitor if it died — plus runs
    `mm-agent-watch.sh --once` as a synchronous backstop scan for overdue
    subagents.
 
@@ -183,16 +196,16 @@ does the analysis.
 ## Subagent liveness (optional — `liveness:` config block)
 
 Same substrate as Merge Monster — follow **§ Subagent liveness in
-[.claude/skills/merge-monster/SKILL.md](../merge-monster/SKILL.md)** with
+[<engsys-root>/skills/merge-monster/SKILL.md](../merge-monster/SKILL.md)** with
 `<state_dir>` = this config's `state_dir` and the shared scripts at
-`.claude/skills/merge-monster/scripts/mm-agent-{reg,watch}.sh`. Applies to
+`<engsys-root>/skills/merge-monster/scripts/mm-agent-{reg,watch}.sh`. Applies to
 every expert agent you dispatch (§ Expert routing): register on spawn with
 `--class triage` (or `fix`, Phase 2+), carry the resume-reconcile line in the
 spawn prompt, close the row on completion, probe before classifying, fence
 before respawning. Escalations for a dead-twice triage agent go to your own
 `mnt:escalated` path, not MM's.
 
-## Cross-session messaging (reuses `docs/merge-monster-messaging.md`)
+## Cross-session messaging (reuses `docs/agent-messaging.md`)
 
 A **best-effort latency layer** over the GitHub source of truth — the same
 primitives Merge Monster uses, under the same `<ns>-*` namespace fence.
@@ -218,7 +231,7 @@ text as ground truth.
 ## Context discipline (compaction & rotation)
 
 Same contract as **§ Context discipline in
-[.claude/skills/merge-monster/SKILL.md](../merge-monster/SKILL.md)** — context
+[<engsys-root>/skills/merge-monster/SKILL.md](../merge-monster/SKILL.md)** — context
 is cache, files and GitHub are truth. For this session specifically: finding
 dispositions and triage reasoning go to the ledger/journal the moment they're
 decided (already required); per-finding quirks go on the tracking issue or PR

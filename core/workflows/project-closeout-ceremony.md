@@ -4,7 +4,7 @@ Run this **every time a project's last PR merges** (the final phase of `/impleme
 
 **Trigger:** the project's last open PR is MERGED (operator confirms, or `gh pr view` shows MERGED for every phase + follow-up PR). Also run it after a deliberate project-pause if no more phases are coming soon.
 
-Work-item reads (board status, finding records) and closing the board go through the project's installed **issue-tracker skill** (`.claude/skills/issue-tracker-*/`) via `list-issues` / `get-issue` / `query-board` / `close-board`. PR state, PR comments, and CI alerts stay on `gh` / GitHub (PRs are a code-host concern).
+Work-item reads (board status, finding records) and closing the board go through the project's installed **issue-tracker skill** (`issue-tracker-*` skill) via `list-issues` / `get-issue` / `query-board` / `close-board`. PR state, PR comments, and CI alerts stay on `gh` / GitHub (PRs are a code-host concern).
 
 **Why it exists:** review comments tend to get addressed inline, one at a time — yet a post-hoc mining pass routinely reveals several were the _same mistake family repeating across PRs_ (e.g. cross-method TOCTOU 4×, missing migration constraints 4×). Fixing inline isn't learning; generalizing the family into the checklist is. This ceremony forces that step instead of leaving it to chance.
 
@@ -54,9 +54,9 @@ Then classify by **mistake family**, not by individual fix. For each family ask:
 
 Automatic behaviors that apply to **anyone** in the repo go in the repo, not personal memory:
 
-- A **new, recurring** failure family → a new `docs/agent-lessons/<slug>.md` (trigger / failure mode / correct behavior / check / source). **If a worker layer is installed**, also promote the family into `.claude/workflows/briefs/project-brief-overlay.md` (§ House failure corpus) — that file feeds every worker/reviewer brief directly, so the lesson starts hunting instead of waiting to be read.
+- A **new, recurring** failure family → a new `docs/agent-lessons/<slug>.md` (trigger / failure mode / correct behavior / check / source). **If a worker layer is installed**, also promote the family into `<engsys-root>/workflows/briefs/project-brief-overlay.md` (§ House failure corpus) — that file feeds every worker/reviewer brief directly, so the lesson starts hunting instead of waiting to be read.
 - A family already documented but still recurring → strengthen the existing lesson + add the new variant + a Start-of-PR-check line.
-- A reusable workflow/agent/command gap exposed by the run → update the relevant `.claude/workflows/*.md`, `.claude/agents/*.md`, or `CLAUDE.md`.
+- A reusable workflow/agent/command gap exposed by the run → update the relevant `<engsys-root>/workflows/*.md`, `<engsys-root>/agents/*.md`, or `CLAUDE.md`.
 - **Generalizable lessons** (not tied to this project's stack/domain) → also open a PR back to the engsys `lessons-library/` so other projects inherit them.
 - Commit on an `agent/project-<num>-reflection-lessons` branch → one docs PR. (Docs-only; if a local markdown-lint hook can't spawn, `--no-verify` is acceptable — the pre-push local review is the md backstop.)
 

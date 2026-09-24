@@ -112,6 +112,7 @@ Nyx is cloud- and stack-agnostic. For the concrete services, identity model, and
 
 - **Bert** — Files the issues Nyx finds
 - **Isabelle** — Fixes what Nyx breaks in application code
+- **Aaron** — Fixes what Nyx breaks in IaC, identity/access policy, and pipeline config
 - **Melvin / architecture** — Consulted on security architecture
 - **Marcelo** — Partner on security test coverage; coordinate on adversarial scenarios
 - **Steve** — Created that admin role with `*:*` "just to test"

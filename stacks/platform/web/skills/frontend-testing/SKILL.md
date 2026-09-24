@@ -81,6 +81,8 @@ grep -n "singleFork\|fileParallelism" node_modules/vitest/dist/chunks/*.d.ts
 
 **Separate configs for gated suites.** When a suite needs external infra (live DB, LLM key, docker stack), give it its own config so plain `pnpm test` never triggers it: `vitest.config.ts` (unit), `vitest.e2e.config.ts`, `vitest.ai-regression.config.ts`, with matching `test:e2e` / `test:ai-regression` scripts. Put the env gate (`if (!process.env.INGESTION_E2E) return`) in the spec so `pnpm test` skips the whole file rather than silently passing.
 
+**Retry parity (one retry, local == CI).** Set `retry: 1` as an inline literal in each package's `vitest.config.ts` — importing it from a shared repo-root module can break that package's `tsc` build (TS6059, file outside `rootDir`). Jest packages mirror it with `jest.retryTimes(1, { logErrorsBeforeRetry: true })` in their setup file; Playwright uses `retries: 1`. Pass-on-retry shows as flaky in the summary — file it, don't ignore it.
+
 ## Fake timers: the act() pattern
 
 Advancing fake timers fires `setTimeout` callbacks synchronously, which call `setState` inside the hook. Without `act`, React queues but doesn't flush the update and the assertion sees stale state. But `testing-library/no-unnecessary-act` (error) flags any `act()` wrapping an RTL utility.

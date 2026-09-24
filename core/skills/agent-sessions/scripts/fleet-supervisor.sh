@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # fleet-supervisor.sh — deterministic relauncher for ledger-bearing monster
-# sessions (Merge Monster, Maintenance Monster). Runs under launchd every few
-# minutes; NO LLM in the restart path, so recovery works even when the whole
-# fleet is dark.
+# sessions (Merge Monster, Maintenance Monster, or any other baton-holding role
+# that keeps a heartbeat on a ledger issue — list as many as you run). Runs
+# under launchd every few minutes; NO LLM in the restart path, so recovery
+# works even when the whole fleet is dark.
 #
 # Decision table (per configured session):
 #   ledger issue CLOSED                          → never touch (kill switch)
@@ -17,21 +18,24 @@
 #                                                  docs/subagent-liveness.md
 #                                                  in engsys)
 #
-# Config: .claude/fleet-supervisor.conf
+# Config: .claude/fleet-supervisor.conf (or pass a path as $1)
 #   TMUX_SESSION=<tmux session the fleet runs in>
 #   LAUNCH_CMD=<command that launches ONE session; supervisor appends name>
-#   <session-name>|<ledger-issue>|<stale-minutes>     (one line per monster)
+#   REPO=<owner/name>          optional default repo holding the ledgers
+#   <session-name>|<ledger-issue>|<stale-minutes>[|<owner/name>]
+#                              one line per monster; the 4th field overrides
+#                              REPO= for that session (multi-repo fleets)
+# Repo resolution per session: 4th field → REPO= → `gh repo view` in the cwd
+# (the last is the single-repo mode where the supervisor runs inside the
+# target repo; a separate fleet repo must set REPO= or the 4th field).
 #
-# State/log: logs/fleet-supervisor/ (escalation latches + supervisor.log).
-# Requires: gh (authed), tmux, jq. Run from the repo root (launchd sets
-# WorkingDirectory).
+# State/log: logs/fleet-supervisor/ under the cwd (escalation latches +
+# supervisor.log). Requires: gh (authed), tmux, jq. launchd sets
+# WorkingDirectory — the fleet directory, or the target repo root.
 set -euo pipefail
 
 CONF="${1:-.claude/fleet-supervisor.conf}"
 [ -f "$CONF" ] || { echo "fleet-supervisor: config not found: $CONF" >&2; exit 1; }
-
-REPO_SLUG=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)
-[ -n "$REPO_SLUG" ] || { echo "fleet-supervisor: cannot resolve repo (gh auth / cwd?)" >&2; exit 1; }
 
 STATE_DIR="logs/fleet-supervisor"
 mkdir -p "$STATE_DIR"
@@ -56,7 +60,7 @@ if ! mkdir "$LOCKDIR" 2>/dev/null; then
 fi
 trap 'rmdir "$LOCKDIR" 2>/dev/null || true' EXIT
 
-TMUX_SESSION="" LAUNCH_CMD=""
+TMUX_SESSION="" LAUNCH_CMD="" DEFAULT_REPO=""
 SESSIONS=()
 while IFS= read -r line; do
   line="${line%%$'\r'}"
@@ -64,11 +68,23 @@ while IFS= read -r line; do
     '' | \#*) continue ;;
     TMUX_SESSION=*) TMUX_SESSION="${line#TMUX_SESSION=}" ;;
     LAUNCH_CMD=*) LAUNCH_CMD="${line#LAUNCH_CMD=}" ;;
+    REPO=*) DEFAULT_REPO="${line#REPO=}" ;;
     *\|*) SESSIONS+=("$line") ;;
     *) echo "fleet-supervisor: bad conf line: $line" >&2; exit 1 ;;
   esac
 done < "$CONF"
 [ -n "$TMUX_SESSION" ] && [ -n "$LAUNCH_CMD" ] || { echo "fleet-supervisor: conf must set TMUX_SESSION and LAUNCH_CMD" >&2; exit 1; }
+
+# Backward-compatible fallback: the repo the cwd belongs to (resolved lazily,
+# once, and only if some session names no repo).
+CWD_REPO="" CWD_REPO_TRIED=0
+cwd_repo() {
+  if [ "$CWD_REPO_TRIED" = 0 ]; then
+    CWD_REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)
+    CWD_REPO_TRIED=1
+  fi
+  printf '%s' "$CWD_REPO"
+}
 
 # ISO8601Z → epoch, portable (BSD date first — this runs on macOS; GNU fallback)
 iso_to_epoch() {
@@ -85,17 +101,20 @@ pane_cmd() {
 NOW=$(date +%s)
 
 for spec in "${SESSIONS[@]}"; do
-  IFS='|' read -r name ledger stale_min <<<"$spec"
+  IFS='|' read -r name ledger stale_min repo <<<"$spec"
   [ -n "$name" ] && [ -n "$ledger" ] && [ -n "$stale_min" ] || { log "SKIP bad line: $spec"; continue; }
+  REPO_SLUG="${repo:-$DEFAULT_REPO}"
+  [ -n "$REPO_SLUG" ] || REPO_SLUG=$(cwd_repo)
+  [ -n "$REPO_SLUG" ] || { log "$name: cannot resolve repo (set REPO= or the 4th field; gh auth?) — skipping"; continue; }
 
   # --- ledger: kill switch + heartbeat ---------------------------------------
   if ! ISSUE=$(gh issue view "$ledger" -R "$REPO_SLUG" --json state,body 2>/dev/null); then
-    log "$name: ledger #$ledger unreadable (gh error) — skipping this cycle"
+    log "$name: ledger $REPO_SLUG#$ledger unreadable (gh error) — skipping this cycle"
     continue
   fi
   STATE=$(jq -r .state <<<"$ISSUE")
   if [ "$STATE" = "CLOSED" ]; then
-    log "$name: ledger #$ledger CLOSED (kill switch) — not touching"
+    log "$name: ledger $REPO_SLUG#$ledger CLOSED (kill switch) — not touching"
     continue
   fi
   HB=$(jq -r .body <<<"$ISSUE" | sed -n 's/^last: \([0-9TZ:-]*\) — status: \(.*\)$/\1|\2/p' | head -1)
@@ -131,7 +150,7 @@ for spec in "${SESSIONS[@]}"; do
       # hung-or-thinking: never kill; escalate once per incident
       if [ ! -f "$LATCH" ]; then
         gh issue comment "$ledger" -R "$REPO_SLUG" --body "⚠️ fleet-supervisor: heartbeat stale (last: ${HB_TS:-never}) but the \`$name\` process is still alive. Not touching it — a live process is never killed on staleness alone (probe-then-classify is a judgment call, not a script's). Needs a probe: operator or maintenance watchdog." >/dev/null \
-          && touch "$LATCH" && log "$name: STALE+ALIVE — escalated on ledger #$ledger"
+          && touch "$LATCH" && log "$name: STALE+ALIVE — escalated on ledger $REPO_SLUG#$ledger"
       else
         log "$name: STALE+ALIVE — already escalated, holding"
       fi

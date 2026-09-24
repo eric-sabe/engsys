@@ -6,7 +6,7 @@ Invocation: `/implement-project <number>` (e.g. `/implement-project 21`).
 
 This workflow is the explicit authorization for the routine implementation cycle — see [agent-implementation-workflow.md § Start Command Authorization](agent-implementation-workflow.md).
 
-Board reads/writes (Phase/Priority/Owner/Status) and work-item operations go through the project's installed **issue-tracker skill** (`.claude/skills/issue-tracker-*/`) via its contract operations (`query-board`, `set-board-field`, `update-issue`, `comment-issue`, `link-pr`). The skill maps them onto the active backend; the GitHub `gh` / `gh api graphql` commands shown below are what it runs on a GitHub project. PR creation (`gh pr create`) and CI stay on GitHub.
+Board reads/writes (Phase/Priority/Owner/Status) and work-item operations go through the project's installed **issue-tracker skill** (`issue-tracker-*` skill) via its contract operations (`query-board`, `set-board-field`, `update-issue`, `comment-issue`, `link-pr`). The skill maps them onto the active backend; the GitHub `gh` / `gh api graphql` commands shown below are what it runs on a GitHub project. PR creation (`gh pr create`) and CI stay on GitHub.
 
 ---
 
@@ -84,6 +84,8 @@ For the chosen phase, follow [agent-implementation-workflow.md](agent-implementa
 6. **Run a local code review against `origin/main` before push.** Fix Critical + Warning findings, re-run once to confirm clean, cap at ~2 passes.
 7. Push once, open one **draft** PR via `gh pr create --draft` (PR creation stays on GitHub), linking/closing each work item per the skill's `link-pr` operation (GitHub: `Closes #<num>` on its own line for every issue in the phase), then post the local review findings onto the work item via the skill's `comment-issue` operation (on GitHub, the marked PR comment).
 8. Once the local review is clean and the gate is green, mark **Ready for review** (`gh pr ready <n>`) to trigger any expensive ready-for-review CI matrix.
+
+> **After a calibration / operator-gate phase, reconcile downstream issue literals.** If an earlier phase ratified numeric parameters (weights, thresholds, caps) the spec had listed as "illustrative", the later phases' issue bodies were written before the gate and still cite the old numbers verbatim — including in worked-example boundary tests. The ratified decision is the source of truth, not the issue body: diff each remaining phase's literals against the ratification record and inject an explicit override into the dispatch ("issue says X; ratified value is Y; use Y"). An implementer ships whatever the issue says, and build/lint/test stay green on the wrong value.
 
 ---
 

@@ -3,9 +3,9 @@ description: Generate a feature spec, plan, and tracker project from a goal (mul
 argument-hint: <goal description, plus any attachment paths or links>
 ---
 
-Follow the 8-phase workflow in [.claude/workflows/generate-project.md](.claude/workflows/generate-project.md).
+Follow the 8-phase workflow in [<engsys-root>/workflows/generate-project.md](<engsys-root>/workflows/generate-project.md).
 
-Tracker project + issue writes go through the project's installed **issue-tracker skill** (`.claude/skills/issue-tracker-*/`) and its named operations (`create-issue`, `create-board`, `add-to-board`, `set-board-field`, `query-board`) — the same flow works whether the tracker is GitHub or Linear. On GitHub the skill carries the `gh project` / `gh api graphql` specifics.
+Tracker project + issue writes go through the project's installed **issue-tracker skill** (`issue-tracker-*` skill) and its named operations (`create-issue`, `create-board`, `add-to-board`, `set-board-field`, `query-board`) — the same flow works whether the tracker is GitHub or Linear. On GitHub the skill carries the `gh project` / `gh api graphql` specifics.
 
 Goal: $ARGUMENTS
 
@@ -13,7 +13,7 @@ Goal: $ARGUMENTS
 
 You (the main session) are the orchestrator. Subagents enrich the spec; you reconcile and own the merge.
 
-**Subagents** (`.claude/agents/`):
+**Subagents** (`<engsys-root>/agents/`):
 
 - **leith** — product/UX, user stories, acceptance criteria from a user perspective
 - **melvin** — architecture, service impact, data/consistency, scale/latency/cost
@@ -31,7 +31,7 @@ You (the main session) are the orchestrator. Subagents enrich the spec; you reco
 5. **Design loop** — Leith and Melvin in parallel, then Nyx and Gary in parallel, reconcile findings, then Marcelo, then Jody.
 6. **Tracker project mechanics** — use the issue-tracker skill's `create-board` / `add-to-board` / `set-board-field` operations to stand up the board and set Phase/Priority/Owner (on GitHub these run `gh project` / `gh api graphql` for ProjectV2; the `github` MCP doesn't do projects). Issue bodies in `tmp/issue-body-<slug>.md` via `create-issue` — never heredoc.
 7. **Sanity check** — fresh subagent (e.g. `Plan` or `general-purpose`) reviews spec/project/issues with no design-loop context.
-8. **Reflect** — durable lessons → `docs/agent-lessons/` (and PR generalizable ones back to the engsys `lessons-library/`); agent role changes → `.claude/agents/*.md`; automatic behaviors → `CLAUDE.md` or `.claude/commands/*.md`.
+8. **Reflect** — durable lessons → `docs/agent-lessons/` (and PR generalizable ones back to the engsys `lessons-library/`); agent role changes → `<engsys-root>/agents/*.md`; automatic behaviors → `CLAUDE.md` or `<engsys-root>/commands/*.md`.
 
 ## Key invariants
 
@@ -43,4 +43,4 @@ You (the main session) are the orchestrator. Subagents enrich the spec; you reco
 - Issue bodies in `tmp/issue-body-<slug>.md`, created via the skill's `create-issue` operation (GitHub: `gh issue create --body-file …`). Never HEREDOC.
 - Final report: spec path, project URL, issues by phase, subagent contributions, sanity-check result, learning updates, open questions, explicit request for operator review before implementation starts.
 
-See `CLAUDE.md` for the project's tool-preference order and filing-issue conventions, and the installed issue-tracker skill (`.claude/skills/issue-tracker-*/`) for the concrete board/issue mechanics on the active tracker.
+See `CLAUDE.md` for the project's tool-preference order and filing-issue conventions, and the installed issue-tracker skill (`issue-tracker-*` skill) for the concrete board/issue mechanics on the active tracker.

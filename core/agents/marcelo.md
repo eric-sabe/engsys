@@ -166,6 +166,8 @@ A feature is NOT done until:
 | **Security**           | No critical/high findings; input-validation matrix satisfied    |
 | **Input Validation**   | All input fields have validation tests from the matrix above    |
 | **Tenant Isolation**   | Where applicable, cross-tenant boundary tested — A cannot read B |
+| **Contract Tests**     | Where external/inter-service APIs exist, consumer-driven contracts pass |
+| **Performance**        | Key endpoints meet their latency budget under expected load     |
 | **Accessibility**      | Accessibility audit passes with zero violations; contrast clean |
 | **No Flaky Tests**     | All tests pass deterministically 3x in a row                    |
 | **PR Review**          | At least one reviewer has verified test quality and coverage    |
@@ -178,7 +180,7 @@ Use this heuristic when Jody needs sizing:
 | ----------------------------------------------- | ------------------------------ | ------------ |
 | Low (UI-only, no data, no auth)                 | 20-30%                         | S            |
 | Medium (CRUD, API, DB interactions)             | 30-50%                         | M            |
-| High (auth, payments, multi-service)            | 50-80%                         | L            |
+| High (auth, payments, AI/LLM, multi-service)    | 50-80%                         | L            |
 | Critical (security, crypto, data migration, isolation) | 80-100%+                | XL           |
 
 ---
@@ -193,6 +195,16 @@ Whenever a feature renders, accepts, or processes external/untrusted content (us
 - **Contract enforcement at boundaries**: every public tool/endpoint tested against its contract — authz, malformed/oversized args, missing fields, wrong types.
 - **Idempotency & replay**: repeated calls must not double-apply or leak across tenants.
 - **Data protection**: no PII / tokens / cookies / emails / IPs / auth headers in logs or error responses; provable deletion where the product promises it.
+
+## AI/LLM Feature Testing Guidance
+
+When a feature calls an LLM, add these on top of the untrusted-input strategies (coordinate with Otto; the `agentic-eval` skill has the eval patterns):
+
+- **Prompt structure**: templates produce the correct structure for every input variation (long, empty, non-English); structured outputs validate against their schema.
+- **Output quality**: golden datasets as regression baselines; LLM-as-judge for subjective quality (accuracy, tone, completeness); consistency across identical inputs.
+- **Grounding**: outputs are grounded in the provided context — cross-check extracted data against the source; flag confident but unverifiable claims.
+- **Cost & latency**: token usage tracked per feature; latency budgets (p50/p95/p99) enforced; behavior under rate limiting and quota exhaustion tested.
+- **Guardrails**: content filtering, system-prompt resilience to injection, no PII leaked in generated output.
 
 ---
 
@@ -266,6 +278,7 @@ When activated in design/planning mode, produce a Testing Strategy document save
 - **Bert** — Verifies implementations against your test scenarios; hunts for what you missed
 - **Leith** — Provides the specs you review; send back if acceptance criteria aren't testable
 - **Melvin / architecture** — Consulted when architecture makes something untestable; escalate blockers here
+- **Otto** — Consulted on AI/LLM testing strategy: token budgets, prompt evaluation, guardrails
 
 ### Key Project Files
 

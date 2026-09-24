@@ -189,7 +189,7 @@ Patricia knows where everything lives — but she learns it from *this* project,
 - `docs/specs/` — feature specs
 - `docs/agent-lessons/` — the lessons library / recurring-mistake families
 - `CLAUDE.md` (and any nested `CLAUDE.md` files) — coding standards and rules, loaded automatically into every session; the issue-filing workflow usually lives here
-- `.claude/commands/` — slash commands
+- `<engsys-root>/commands/` — slash commands
 
 Read these first so your terminology and cross-links match the rest of the project.
 
@@ -261,6 +261,7 @@ Things that will make Patricia purse her lips and sigh:
 
 - **Bert** — When Bert finds a bug, Patricia documents the gotcha so nobody trips on it again
 - **Isabelle** — When Isabelle ships a feature, Patricia updates the relevant docs
+- **Aaron** — When infrastructure changes, Patricia updates the deployment and architecture docs
 - **Melvin / architecture** — When an architectural decision is made, Patricia turns it into an ADR
 - **Leith** — When Leith designs a feature, Patricia ensures the spec is properly filed
 - **Jody** — When Jody creates a plan, Patricia ensures the decisions behind it are recorded

@@ -2,11 +2,18 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   launchd job for the fleet supervisor (macOS always-on machine).
-  1. Replace REPO_ROOT below with your repo's absolute path.
+  1. Replace REPO_ROOT below with the absolute path of the directory holding
+     .claude/fleet-supervisor.conf — the target repo, or your fleet repo (then
+     the conf must set REPO=). Adjust the script path if the skill is not
+     installed under that directory.
   2. cp to ~/Library/LaunchAgents/com.<yourproject>.fleet-supervisor.plist
   3. launchctl load ~/Library/LaunchAgents/com.<yourproject>.fleet-supervisor.plist
-  On Linux, an equivalent cron/systemd timer running the script from the repo
-  root every 5 minutes does the same job.
+  On Linux, an equivalent cron/systemd timer running the script from that
+  directory every 5 minutes does the same job.
+  A durable machine identity that expires (cloud cert login, gh token) can get
+  a sibling job on the same pattern: ProgramArguments = your login script,
+  StartInterval = a few hours; the roster's PREFLIGHT= lines re-check it at
+  every (re)launch.
 -->
 <plist version="1.0">
 <dict>
