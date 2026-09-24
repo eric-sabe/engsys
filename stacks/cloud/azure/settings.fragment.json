@@ -26,14 +26,36 @@
       "Bash(az monitor metrics list:*)",
       "Bash(az monitor log-analytics query:*)",
       "Bash(azd provision --preview:*)",
-      "Bash(azd env list:*)"
+      "Bash(azd env list:*)",
+      "Bash(az containerapp logs show:*)",
+      "Bash(az containerapp revision show:*)",
+      "Bash(az containerapp env list:*)",
+      "Bash(az containerapp env show:*)",
+      "Bash(az postgres flexible-server firewall-rule list:*)",
+      "Bash(az servicebus namespace list:*)",
+      "Bash(az servicebus namespace show:*)",
+      "Bash(az servicebus topic list:*)",
+      "Bash(az servicebus topic show:*)",
+      "Bash(az servicebus topic subscription list:*)",
+      "Bash(az servicebus topic subscription show:*)",
+      "Bash(az keyvault secret list:*)",
+      "Bash(az acr repository list:*)",
+      "Bash(az acr repository show:*)",
+      "Bash(az monitor app-insights query:*)",
+      "Bash(az role assignment list:*)",
+      "Bash(az ad signed-in-user show:*)",
+      "Bash(az network vnet list:*)",
+      "Bash(az network vnet show:*)"
     ],
     "deny": [
       "Bash(az deployment group create:*)",
       "Bash(az deployment sub create:*)",
       "Bash(az group delete:*)",
       "Bash(az resource delete:*)",
-      "Bash(azd up:*)"
+      "Bash(azd up:*)",
+      "Bash(az keyvault secret set:*)",
+      "Bash(az keyvault delete:*)",
+      "Bash(az keyvault purge:*)"
     ]
   },
   "mcpServers": {
