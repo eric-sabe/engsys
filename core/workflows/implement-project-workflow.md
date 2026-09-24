@@ -6,7 +6,7 @@ Invocation: `/implement-project <number>` (e.g. `/implement-project 21`).
 
 This workflow is the explicit authorization for the routine implementation cycle — see [agent-implementation-workflow.md § Start Command Authorization](agent-implementation-workflow.md).
 
-Board reads/writes (Phase/Priority/Owner/Status) and work-item operations go through the project's installed **issue-tracker skill** (`.claude/skills/issue-tracker-*/`) via its contract operations (`query-board`, `set-board-field`, `update-issue`, `comment-issue`, `link-pr`). The skill maps them onto the active backend; the GitHub `gh` / `gh api graphql` commands shown below are what it runs on a GitHub project. PR creation (`gh pr create`) and CI stay on GitHub.
+Board reads/writes (Phase/Priority/Owner/Status) and work-item operations go through the project's installed **issue-tracker skill** (`issue-tracker-*` skill) via its contract operations (`query-board`, `set-board-field`, `update-issue`, `comment-issue`, `link-pr`). The skill maps them onto the active backend; the GitHub `gh` / `gh api graphql` commands shown below are what it runs on a GitHub project. PR creation (`gh pr create`) and CI stay on GitHub.
 
 ---
 

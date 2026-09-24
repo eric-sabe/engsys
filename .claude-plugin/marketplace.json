@@ -1,0 +1,117 @@
+{
+  "name": "engsys",
+  "owner": {
+    "name": "eric-sabe"
+  },
+  "metadata": {
+    "description": "engsys — an AI engineering team for any Claude Code project, as plugins: the stack-agnostic core plus one plugin per stack pack.",
+    "version": "1.1.0"
+  },
+  "plugins": [
+    {
+      "name": "engsys",
+      "source": "./core",
+      "description": "engsys core: personas, orchestrators, commands, workflows (stack-agnostic)."
+    },
+    {
+      "name": "engsys-aws",
+      "source": "./stacks/cloud/aws",
+      "description": "engsys cloud pack: aws"
+    },
+    {
+      "name": "engsys-azure",
+      "source": "./stacks/cloud/azure",
+      "description": "engsys cloud pack: azure"
+    },
+    {
+      "name": "engsys-cloudflare",
+      "source": "./stacks/cloud/cloudflare",
+      "description": "engsys cloud pack: cloudflare"
+    },
+    {
+      "name": "engsys-gcp",
+      "source": "./stacks/cloud/gcp",
+      "description": "engsys cloud pack: gcp"
+    },
+    {
+      "name": "engsys-mongo",
+      "source": "./stacks/db/mongo",
+      "description": "engsys db pack: mongo"
+    },
+    {
+      "name": "engsys-prisma",
+      "source": "./stacks/db/prisma",
+      "description": "engsys db pack: prisma"
+    },
+    {
+      "name": "engsys-mobile-growth",
+      "source": "./stacks/domain/mobile-growth",
+      "description": "engsys domain pack: mobile-growth"
+    },
+    {
+      "name": "engsys-bicep",
+      "source": "./stacks/iac/bicep",
+      "description": "engsys iac pack: bicep"
+    },
+    {
+      "name": "engsys-cdk",
+      "source": "./stacks/iac/cdk",
+      "description": "engsys iac pack: cdk"
+    },
+    {
+      "name": "engsys-terraform",
+      "source": "./stacks/iac/terraform",
+      "description": "engsys iac pack: terraform"
+    },
+    {
+      "name": "engsys-kotlin",
+      "source": "./stacks/lang/kotlin",
+      "description": "engsys lang pack: kotlin"
+    },
+    {
+      "name": "engsys-python",
+      "source": "./stacks/lang/python",
+      "description": "engsys lang pack: python"
+    },
+    {
+      "name": "engsys-shell",
+      "source": "./stacks/lang/shell",
+      "description": "engsys lang pack: shell"
+    },
+    {
+      "name": "engsys-swift",
+      "source": "./stacks/lang/swift",
+      "description": "engsys lang pack: swift"
+    },
+    {
+      "name": "engsys-typescript",
+      "source": "./stacks/lang/typescript",
+      "description": "engsys lang pack: typescript"
+    },
+    {
+      "name": "engsys-android",
+      "source": "./stacks/platform/android",
+      "description": "engsys platform pack: android"
+    },
+    {
+      "name": "engsys-ios",
+      "source": "./stacks/platform/ios",
+      "description": "engsys platform pack: ios"
+    },
+    {
+      "name": "engsys-web",
+      "source": "./stacks/platform/web",
+      "description": "engsys platform pack: web"
+    },
+    {
+      "name": "engsys-issue-tracker-github",
+      "source": "./stacks/tooling/issue-tracker-github",
+      "description": "engsys tooling pack: issue-tracker-github"
+    },
+    {
+      "name": "engsys-issue-tracker-linear",
+      "source": "./stacks/tooling/issue-tracker-linear",
+      "description": "engsys tooling pack: issue-tracker-linear"
+    }
+  ]
+}

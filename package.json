@@ -1,6 +1,6 @@
 {
   "name": "engsys",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Canonical home for the Claude Code engineering system — agents, commands, skills, stack packs, and a deterministic installer.",
   "bin": {
     "engsys": "./install"
@@ -15,8 +15,9 @@
     "engsys.config.example.yaml"
   ],
   "scripts": {
-    "test": "node lib/selftest.js && bash core/scripts/worker-run.test.sh && bash core/scripts/worker-package.test.sh",
-    "prepublishOnly": "node lib/selftest.js"
+    "test": "node lib/selftest.js && node scripts/build-plugins.mjs --check && bash core/scripts/worker-run.test.sh && bash core/scripts/worker-package.test.sh",
+    "prepublishOnly": "node lib/selftest.js && node scripts/build-plugins.mjs --check",
+    "build:plugins": "node scripts/build-plugins.mjs"
   },
   "engines": {
     "node": ">=20.11"

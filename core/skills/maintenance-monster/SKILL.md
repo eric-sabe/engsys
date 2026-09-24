@@ -38,7 +38,7 @@ how confident a disposition looks.
   after `/clear` re-reads the same file.
 - Labels + ledger issue exist (`<skill-dir>/scripts/mnt-setup.sh --repo
 <owner/name>` is idempotent; run it if unsure). `<skill-dir>` is this
-  skill's directory (`.claude/skills/maintenance-monster` when installed).
+  skill's directory (`<engsys-root>/skills/maintenance-monster` when installed).
 - `gh` authed with `repo` scope (and `security_events` if you want live
   Dependabot/CodeQL alert reads — GHAS surfaces degrade gracefully, see
   § Guardrails, if unavailable); `jq` on PATH.
@@ -70,7 +70,7 @@ how confident a disposition looks.
    monsters; your `state_dir` keeps the registries separate):
 
    ```bash
-   bash .claude/skills/merge-monster/scripts/mm-agent-watch.sh \
+   bash <engsys-root>/skills/merge-monster/scripts/mm-agent-watch.sh \
      --state-dir <state_dir> --stale-min <liveness.stale_minutes>
    ```
 
@@ -196,9 +196,9 @@ does the analysis.
 ## Subagent liveness (optional — `liveness:` config block)
 
 Same substrate as Merge Monster — follow **§ Subagent liveness in
-[.claude/skills/merge-monster/SKILL.md](../merge-monster/SKILL.md)** with
+[<engsys-root>/skills/merge-monster/SKILL.md](../merge-monster/SKILL.md)** with
 `<state_dir>` = this config's `state_dir` and the shared scripts at
-`.claude/skills/merge-monster/scripts/mm-agent-{reg,watch}.sh`. Applies to
+`<engsys-root>/skills/merge-monster/scripts/mm-agent-{reg,watch}.sh`. Applies to
 every expert agent you dispatch (§ Expert routing): register on spawn with
 `--class triage` (or `fix`, Phase 2+), carry the resume-reconcile line in the
 spawn prompt, close the row on completion, probe before classifying, fence
@@ -231,7 +231,7 @@ text as ground truth.
 ## Context discipline (compaction & rotation)
 
 Same contract as **§ Context discipline in
-[.claude/skills/merge-monster/SKILL.md](../merge-monster/SKILL.md)** — context
+[<engsys-root>/skills/merge-monster/SKILL.md](../merge-monster/SKILL.md)** — context
 is cache, files and GitHub are truth. For this session specifically: finding
 dispositions and triage reasoning go to the ledger/journal the moment they're
 decided (already required); per-finding quirks go on the tracking issue or PR

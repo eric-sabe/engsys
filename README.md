@@ -70,6 +70,44 @@ node /path/to/engsys/install verify  --into .
 The installer is **zero-dependency** Node (≥20.11) — it adds nothing to your
 project's dependency tree and runs the same on macOS, Windows, and Linux.
 
+**Option C — install as Claude Code plugins** (nothing copied into the project):
+
+This repo is also a Claude Code **plugin marketplace**: the `engsys` core plugin (personas,
+orchestrators, commands, workflows) plus one `engsys-<value>` plugin per stack pack
+(`engsys-azure`, `engsys-bicep`, `engsys-typescript`, `engsys-web`, `engsys-prisma`,
+`engsys-issue-tracker-github`, …). Pin it per project in the project's committed
+`.claude/settings.json`, so upgrades are a deliberate one-line ref bump:
+
+```json
+{
+  "extraKnownMarketplaces": {
+    "engsys": { "source": { "source": "github", "repo": "eric-sabe/engsys", "ref": "v1.1.0" }, "autoUpdate": false }
+  },
+  "enabledPlugins": {
+    "engsys@engsys": true,
+    "engsys-typescript@engsys": true,
+    "engsys-web@engsys": true
+  }
+}
+```
+
+Declaring plugins doesn't install them — install once per machine (`claude plugin marketplace add
+eric-sabe/engsys#v1.1.0`, then `claude plugin install engsys@engsys` and each pack), or accept the
+prompt when opening the project. In plugin mode:
+
+- **The project's own `CLAUDE.md` is its project facts.** The core plugin injects the generic engsys
+  conventions at session start; each pack plugin injects its own guidance, MCP servers, and post-edit
+  reminders. Permissions and project hook patterns stay in the project's settings.
+- **Names are namespaced**: commands/skills are `/engsys:<name>` (e.g. `/engsys:implement-issue`), agents
+  are `engsys:<agent>`. A project command/skill/agent with the same bare name overrides for that repo.
+- Paths in engsys content are written `<engsys-root>/…` (the plugin root here; `.claude/` in a copy
+  install), so the same content works in both modes.
+- The multi-provider worker layer is copy-mode only for now.
+
+Plugin artifacts are generated from the pack sources by `npm run build:plugins` (all under
+`.claude-plugin/` dirs plus pack-root `.mcp.json`, never copied by the installer); `npm test` fails if
+they're stale.
+
 ## Worker providers (optional): Codex, DeepSeek, Grok
 
 engsys can dispatch **implement / review / critique / investigate** work to

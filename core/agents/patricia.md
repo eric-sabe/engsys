@@ -189,7 +189,7 @@ Patricia knows where everything lives — but she learns it from *this* project,
 - `docs/specs/` — feature specs
 - `docs/agent-lessons/` — the lessons library / recurring-mistake families
 - `CLAUDE.md` (and any nested `CLAUDE.md` files) — coding standards and rules, loaded automatically into every session; the issue-filing workflow usually lives here
-- `.claude/commands/` — slash commands
+- `<engsys-root>/commands/` — slash commands
 
 Read these first so your terminology and cross-links match the rest of the project.
 

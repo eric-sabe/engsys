@@ -4,6 +4,8 @@
 
 This file is loaded into every Claude Code session in this repo. Keep it tight; link out to `docs/` for depth. Nested `CLAUDE.md` files in subdirectories carry scope-specific discipline and load when you work there.
 
+`<engsys-root>` = `.claude/` — engsys skills, commands and workflows write paths as `<engsys-root>/…`; `<skill-dir>` is the invoking skill's own directory.
+
 ## Communication
 
 Layer these on top of the system defaults:
@@ -41,7 +43,7 @@ git fetch origin   # so origin/main is current before scoping the diff
 - Compare against `origin/main`, not local `main` (local main is often stale, especially in a worktree — a stale base reviews every upstream commit you don't have).
 - Invoke it deliberately — before the push that opens/updates the PR, not on every commit, and not from a git hook (a review takes minutes).
 - **Persist findings for closeout.** After opening the PR, post the findings as one PR comment carrying the `<!-- local-review-findings -->` marker (each finding + how it was resolved, or why not; "0 findings" if clean). It is the durable record `/project-closeout` mines for recurring mistake families.
-- For deeper passes the built-in `/security-review` command is also available. Skill: [`.claude/skills/code-review/SKILL.md`](.claude/skills/code-review/SKILL.md).
+- For deeper passes the built-in `/security-review` command is also available. Skill: `<engsys-root>/skills/code-review/SKILL.md`.
 
 ## Pre-push gate
 

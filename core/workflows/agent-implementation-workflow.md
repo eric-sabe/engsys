@@ -4,7 +4,7 @@ Implement tracker issues using Git worktrees for isolation. The default unit is 
 
 If a project has no phases, implement all selected issues in one PR. If there is only one issue, the PR naturally contains one issue. Do not split into one PR per issue unless the human explicitly asks.
 
-Work-item operations (claim, fetch state, record findings, link/close) go through the project's installed **issue-tracker skill** (`.claude/skills/issue-tracker-*/`) via its contract operations (`get-issue`, `update-issue`, `comment-issue`, `link-pr`). The skill maps them onto the active backend; the GitHub `gh` commands shown below are what it runs on a GitHub project. PR creation (`gh pr create`), CI, and worktree/git mechanics stay on GitHub regardless of tracker.
+Work-item operations (claim, fetch state, record findings, link/close) go through the project's installed **issue-tracker skill** (`issue-tracker-*` skill) via its contract operations (`get-issue`, `update-issue`, `comment-issue`, `link-pr`). The skill maps them onto the active backend; the GitHub `gh` commands shown below are what it runs on a GitHub project. PR creation (`gh pr create`), CI, and worktree/git mechanics stay on GitHub regardless of tracker.
 
 ## Start Command Authorization
 
@@ -103,7 +103,7 @@ git fetch origin                       # local main is often stale in a worktree
 
 If any gate fails, fix locally and re-run. The project's pre-push gate (and the local pre-push hook, if it has one) is the contract; see `/pre-push`.
 
-For the gate review: fix **Critical** and **Warning** findings, **Info** at discretion, then re-run once to confirm clean. Cap the loop at ~2 passes — don't grind. Keep the findings — you'll post them on the PR in Phase 4. An **advisory** reviewer (if the project runs one) is never must-fix: fix what's obviously real, note the rest, and never block on it or grind on it. Reviews are deliberate invocations, not part of the pre-push hook (a multi-minute review shouldn't block every push). Roles, markers, and commands: `.claude/skills/code-review/SKILL.md`.
+For the gate review: fix **Critical** and **Warning** findings, **Info** at discretion, then re-run once to confirm clean. Cap the loop at ~2 passes — don't grind. Keep the findings — you'll post them on the PR in Phase 4. An **advisory** reviewer (if the project runs one) is never must-fix: fix what's obviously real, note the rest, and never block on it or grind on it. Reviews are deliberate invocations, not part of the pre-push hook (a multi-minute review shouldn't block every push). Roles, markers, and commands: `<engsys-root>/skills/code-review/SKILL.md`.
 
 ---
 
@@ -194,7 +194,7 @@ Ask:
 Actions:
 
 - Create or update LLM-optimized notes in `docs/agent-lessons/`.
-- Update the relevant agent profile (`.claude/agents/*.md`) if role behavior should change.
+- Update the relevant agent profile (`<engsys-root>/agents/*.md`) if role behavior should change.
 - Create or update rules, prompt docs, or other instructions when the lesson should be automatically applied.
 - If the lesson generalizes beyond this project, open a PR back to the engsys `lessons-library/`.
 - Commit these learning/instruction changes as a final PR commit.
