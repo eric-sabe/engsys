@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx prisma generate:*)",
+      "Bash(npx prisma format:*)",
+      "Bash(npx prisma validate:*)",
+      "Bash(npx prisma --version:*)",
+      "Bash(pnpm prisma generate:*)",
+      "Bash(pnpm prisma format:*)",
+      "Bash(pnpm prisma validate:*)"
+    ],
+    "deny": [
+      "Bash(prisma migrate deploy:*)",
+      "Bash(npx prisma migrate deploy:*)",
+      "Bash(pnpm prisma migrate deploy:*)",
+      "Bash(npm exec prisma migrate deploy:*)",
+      "Bash(npx prisma migrate reset:*)",
+      "Bash(pnpm prisma migrate reset:*)"
+    ]
+  },
+  "mcpServers": {}
+}

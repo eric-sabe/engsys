@@ -5,6 +5,7 @@
 # of memory files do not. This stdout is injected into the fresh context so the
 # session re-grounds its fleet + subagent operating discipline before acting.
 # Sibling of post-compact-reground.sh (matcher "compact").
+# Must be fast and fail-open: static text only, no network calls, no state reads.
 # Rendered by the engsys installer; static content, no project fills.
 cat <<'EOF'
 Context was just cleared or resumed. CLAUDE.md and the memory INDEX reloaded, but your prior conversation, any loaded skill, and the memory-file BODIES did NOT. Re-ground before acting:

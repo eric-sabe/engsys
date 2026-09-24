@@ -2,7 +2,7 @@
 
 {{PROJECT_DESCRIPTION}}
 
-This file is loaded into every Claude Code session in this repo. Keep it tight; link out to `docs/` for depth.
+This file is loaded into every Claude Code session in this repo. Keep it tight; link out to `docs/` for depth. Nested `CLAUDE.md` files in subdirectories carry scope-specific discipline and load when you work there.
 
 ## Communication
 
@@ -16,6 +16,12 @@ Layer these on top of the system defaults:
 
 {{MODEL_STRATEGY}}
 
+Pick the right agent first, then the model — the wrong agent burns context whatever the tier. Agents set their default tier in `model:` frontmatter (use tier aliases, not dated IDs); override per call with `model:` on the Agent tool.
+
+- **Escalate** (execution → judgement tier, or judgement → top tier) for: architectural or significant design choices; cross-cutting refactors spanning services; high ambiguity the spec doesn't resolve; concurrency, data migrations, or anything where subtle side effects bite; performance-critical or security-sensitive paths; synthesizing conflicting sources.
+- **Stay on the execution tier** for: well-specified bug fixes, features against established patterns, tests, docs, mechanical refactors/renames, pipeline/IaC changes against clear templates.
+- Downgrade a judgement-default agent only when the task is genuinely mechanical for its domain (rare). Reserve the top tier for real escalation — it's the most expensive.
+
 ## Worker providers
 
 {{PROVIDER_ROUTING}}
@@ -24,34 +30,57 @@ Layer these on top of the system defaults:
 
 ## Code review (local, before push)
 
-Review happens **locally before `git push`** — run a local code review with the built-in `/code-review` skill so PRs open already-reviewed.
+Review happens **locally before `git push`** — run a local code review with the built-in `/code-review` skill so PRs open already-reviewed and CI minutes aren't burned on a post-push review loop. A clean local review means the first CI run is also the last.
 
 ```bash
 git fetch origin   # so origin/main is current before scoping the diff
 # then run a local code review with the built-in /code-review skill against origin/main
 ```
 
-Triage: fix **Critical** + **Warning**; **Info** at discretion. Cap at ~2 passes. Compare against `origin/main`, not local `main` (local main is often stale). For deeper passes the built-in `/security-review` command is also available. Skill: [`.claude/skills/code-review/SKILL.md`](.claude/skills/code-review/SKILL.md).
+- Triage: fix **Critical** + **Warning**; **Info** at discretion. Re-run once to confirm clean; cap at ~2 passes — don't grind.
+- Compare against `origin/main`, not local `main` (local main is often stale, especially in a worktree — a stale base reviews every upstream commit you don't have).
+- Invoke it deliberately — before the push that opens/updates the PR, not on every commit, and not from a git hook (a review takes minutes).
+- **Persist findings for closeout.** After opening the PR, post the findings as one PR comment carrying the `<!-- local-review-findings -->` marker (each finding + how it was resolved, or why not; "0 findings" if clean). It is the durable record `/project-closeout` mines for recurring mistake families.
+- For deeper passes the built-in `/security-review` command is also available. Skill: [`.claude/skills/code-review/SKILL.md`](.claude/skills/code-review/SKILL.md).
+
+## Pre-push gate
+
+Local review first, then the project's pre-push check (`/pre-push`; the exact command is in Project facts) before **every** push. It inspects `git diff origin/main...HEAD`, runs the subset of CI gates relevant to the diff, and fails fast. **Do not push if it fails**; fix locally.
+
+- Never `--no-verify` past a git hook — fix the violation. If the project documents an emergency bypass, anything it skipped (e.g. an E2E suite) is **not verified** until you see it green in CI before merge.
+- Know what the gate does **not** cover (suites it never selects, deploy/CI matrices it doesn't simulate). "Pre-push passed" is not "CI will pass" for those — run them the way CI does or defer the verdict to CI and confirm before merge.
+- Renamed/removed UI copy or a changed interaction flow on a tested screen breaks E2E selectors — grep the E2E specs for the old string before pushing.
 
 ## Git / PR conventions
 
 - **Never** `git push origin main`. Direct main commits go via PR.
-- **Open PRs as draft** (`gh pr create --draft`); mark Ready only after the local CLI review is resolved and checks are green.
+- **Open PRs as draft** (`gh pr create --draft`); mark Ready only after the local review is resolved and the pre-push gate is green — the ready transition often triggers the expensive CI matrix.
 - Branches: `agent/<phase-or-project-slug>` for batches, `agent/<n>-<slug>` for single-issue work.
-- Commit messages: `type(scope): subject (#issue)`. Types: `feat | fix | chore | docs | test | refactor | style | perf | build | ci | revert`. No `enh:` — use `feat:`.
-- PR closes syntax: **one keyword per line**. `Closes #1, #2` only closes #1 — use `Closes #1` then `Closes #2` on separate lines.
-- Stacked branches: after each upstream merge, `git fetch origin && git rebase origin/main`; already-applied commits → `git rebase --skip`; then `git push --force-with-lease`. **Never** `git push --force`.
+- Commit messages: `type(scope): subject (#issue)`. Types: `feat | fix | chore | docs | test | refactor | style | perf | build | ci | revert`. No `enh:` — use `feat:` for new behavior, `style:` for visual-only polish.
+- Batch shape: one project phase = one branch/worktree/PR; a single issue = one PR. Each issue gets its own commit referencing `#issue`. Push **once**, after local validation — CI minutes cost money.
+- PR closes syntax: **one keyword per line**. `Closes #1, #2` only closes #1 — use `Closes #1` then `Closes #2` on separate lines. If a comma-list already merged, close the rest by hand with a `Completed in PR #<pr>.` comment.
+- Stacked branches: after each upstream merge, `git fetch origin && git rebase origin/main`; already-applied commits → `git rebase --skip` (not `--abort`); confirm with `git log --oneline origin/main..HEAD`; then `git push --force-with-lease origin <branch>`. **Never** `git push --force`.
+- Secret scanning: if a pre-commit secret scanner is configured, install it locally. A verified false positive gets a narrow path/regex allowlist entry — never allowlist a real secret; rotate it.
+- Lockfile conflicts: regenerate with the package manager and `git add` the result — never hand-merge a lockfile.
+- Post-merge cleanup: `git checkout main && git pull --ff-only origin main`; `git worktree remove <path>` + `git worktree prune`; delete the merged local branch.
 - Write PR/issue/commit bodies to a file under `tmp/` with the Write tool, then pass `--body-file`/`--file`. **No heredocs** — they mangle newlines.
 - Commit/push only when the user asks. End commit messages with the `Co-Authored-By: Claude` trailer.
+
+## Deferring work
+
+Out-of-scope follow-ups found during a PR: **always** file a tracking issue — no silent deferrals, no "fix later" TODOs without a number.
+
+1. Title cites the parent (e.g. "Follow-up to #123"); body has acceptance criteria + context and a `Deferred from #123` line; same labels as the parent.
+2. Add it to the **same board/project as the parent**, in a sensible phase (issue-tracker skill `add-to-board`).
 
 ## Filing issues
 
 1. **Investigate first** — search, root cause, real fix. No band-aids.
-2. **Write the body to `tmp/issue-body-{slug}.md`** with the Write tool (no heredocs).
-3. **Create with `gh`**: `gh issue create --body-file tmp/issue-body-{slug}.md`.
+2. **Write the body to `tmp/issue-body-{slug}.md`** with the Write tool (no heredocs), starting from the matching issue template (bug / feature / enhancement / content / infrastructure).
+3. **Create with `gh`**: `gh issue create --body-file tmp/issue-body-{slug}.md`. Labels: type + area — verify they exist first (`gh label list`).
 4. Report back: issue number, URL, short RCA + fix summary, labels.
 
-Quality over speed. Typos / one-liners — just fix.
+Quality over speed. Unsure whether it's worth an issue? Ask "file it or fix it?" — typos / one-liners, just fix.
 
 ## Tool preference order
 
@@ -80,7 +109,7 @@ Imported into [`.claude/commands/`](.claude/commands/):
 
 ## Hooks
 
-A `PostToolUse` hook on `Edit|Write|MultiEdit` runs `.claude/hooks/post-edit-reminders.sh`, which emits one-time nudges after edits to sensitive files. Two `SessionStart` re-ground hooks keep a reset session on the rails: matcher `compact` → `.claude/hooks/post-compact-reground.sh` (after any context compaction); matcher `clear|resume` → `.claude/hooks/post-clear-reground.sh` (after a `/clear` or a `--continue`/`--resume`, which reload CLAUDE.md and the memory index but drop any loaded skill and the memory-file bodies — the hook re-injects the § Subagent orchestration discipline and nudges role sessions to re-invoke their skill). Run `/fleet-prime` to re-ground on demand. All are wired in [`.claude/settings.json`](.claude/settings.json).
+A `PostToolUse` hook on `Edit|Write|MultiEdit` runs `.claude/hooks/post-edit-reminders.sh`, which injects a short reminder into context after edits to sensitive files — project patterns from `naturalize.hook_patterns`, plus each stack pack's `post-edit-reminders.<pack>.sh` defaults (e.g. schema or IaC edits). Two `SessionStart` re-ground hooks keep a reset session on the rails: matcher `compact` → `.claude/hooks/post-compact-reground.sh` (after any context compaction); matcher `clear|resume` → `.claude/hooks/post-clear-reground.sh` (after a `/clear` or a `--continue`/`--resume`, which reload CLAUDE.md and the memory index but drop any loaded skill and the memory-file bodies — the hook re-injects the § Subagent orchestration discipline and nudges role sessions to re-invoke their skill). Run `/fleet-prime` to re-ground on demand. All are wired in [`.claude/settings.json`](.claude/settings.json).
 
 ## Subagent orchestration
 

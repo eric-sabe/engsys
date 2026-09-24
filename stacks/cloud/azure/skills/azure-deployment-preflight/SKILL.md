@@ -168,6 +168,19 @@ Summarize: validation + what-if results (creates / modifies / **deletes** /
 replacements), stale deployments cleaned, naming overrides applied, SKU/tier issues, and
 whether it's safe to deploy. Note any `ProviderNoRbac` fallback (permission gap).
 
+## Error handling
+
+Keep going on errors — capture every issue in the report.
+
+| Error | Action |
+| --- | --- |
+| Not logged in / token expired | Note it; suggest `az login --tenant <tenant-id>` / `azd auth login` |
+| Wrong subscription | `az account set --subscription <id>`, re-run Step 1 |
+| Permission denied on what-if | Retry with `ProviderNoRbac`; note the permission gap |
+| Bicep syntax error | Record all errors (file:line), continue with other files |
+| Tool not installed | Note it; skip that step |
+| Resource group not found | Note it; confirm the name/env before suggesting creation |
+
 ## Tool requirements
 
 `az` CLI 2.76+ (for `--validation-level`), `azd` (azd projects), `bicep` CLI, `gh` (if
