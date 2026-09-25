@@ -168,9 +168,9 @@ working-tree files.
 Commit WIP (`wip: save progress (#42)`), optionally push to preserve it, create/switch to the other
 issue's worktree, and return later by `cd`-ing back.
 
-## GitHub via gh CLI (preferred) and MCP (fallback)
+## GitHub via the gh CLI
 
-Prefer `gh` CLI for issues, PRs, Actions, and project boards. Examples:
+Use `gh` for issues, PRs, Actions, and project boards. Examples:
 
 ```bash
 gh issue create --repo <owner>/<repo> --title "..." --body-file tmp/issue-body.md --label "bug"
@@ -178,9 +178,8 @@ gh issue view 42 --repo <owner>/<repo>
 gh pr create --base main --head agent/42-foo --title "fix(scope): ..." --body-file tmp/pr-body-42.md
 ```
 
-The `github` MCP server (configured in `.mcp.json`) is a fallback for when `gh` auth or network
-fails. ProjectV2 (project boards) must always use `gh project` / `gh api graphql` — MCP does not
-support them.
+ProjectV2 (project boards) use `gh project` / `gh api graphql`. There is no GitHub MCP fallback:
+the GitHub MCP server's tool schemas and responses are large and chatty; `gh … --json --jq` returns exactly what's needed.
 
 ## Git Worktree Command Reference
 

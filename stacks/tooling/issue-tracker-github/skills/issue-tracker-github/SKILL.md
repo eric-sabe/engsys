@@ -96,8 +96,7 @@ gh issue close <id> --repo <owner>/<repo> --comment "Resolved by #<pr>"
 
 ## Boards (GitHub ProjectV2)
 
-The GitHub MCP does **not** support Projects — always use `gh project` / `gh api graphql`
-for board operations. ProjectV2 lives at the **user or org** level (not the repo), so
+Board operations use `gh project` / `gh api graphql`. ProjectV2 lives at the **user or org** level (not the repo), so
 board ops take `--owner <owner>` and the project **number**. Custom fields (Phase,
 Priority, Owner) are ProjectV2 fields.
 

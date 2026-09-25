@@ -2,7 +2,7 @@
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "engsys-issue-tracker-github",
   "version": "1.1.2",
-  "description": "engsys stack pack — tooling: issue-tracker-github. Adds issue-tracker-github-specific skills and guidance and MCP servers to the engsys core plugin.",
+  "description": "engsys stack pack — tooling: issue-tracker-github. Adds issue-tracker-github-specific skills and guidance to the engsys core plugin.",
   "author": {
     "name": "eric-sabe"
   },

@@ -24,7 +24,7 @@ Do not attempt to invent phases on the fly — that's Jody's job and requires th
 
 ## Phase 0: Read the Board
 
-Use the issue-tracker skill's **`query-board`** operation to fetch the project's fields + items grouped by Phase. On GitHub the skill runs `gh api graphql` (the `github` MCP doesn't support ProjectV2), querying `projectV2(number:)` for: field definitions (`ProjectV2SingleSelectField { id name options }`) and items (`content { ... on Issue { number title state url } }` plus their `fieldValues`).
+Use the issue-tracker skill's **`query-board`** operation to fetch the project's fields + items grouped by Phase. On GitHub the skill runs `gh api graphql`, querying `projectV2(number:)` for: field definitions (`ProjectV2SingleSelectField { id name options }`) and items (`content { ... on Issue { number title state url } }` plus their `fieldValues`).
 
 ```bash
 gh api graphql -f query='
