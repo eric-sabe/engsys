@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "engsys-issue-tracker-linear",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "engsys stack pack — tooling: issue-tracker-linear. Adds issue-tracker-linear-specific skills and guidance and MCP servers to the engsys core plugin.",
   "author": {
     "name": "eric-sabe"

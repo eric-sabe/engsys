@@ -19,13 +19,14 @@ NAMESPACE=acme
 #
 # Permission-mode guidance (full rationale: SKILL.md § Permission modes):
 #   monsters (unattended)      → --dangerously-skip-permissions
-#   edit-heavy interactive     → --permission-mode acceptEdits
-#   read-heavy interactive     → (default gating)
+#   interactive (attended)     → --permission-mode auto --add-dir <worktrees dir>
+#     (worktrees live beside the checkout, ../worktrees/<name>, i.e. OUTSIDE the
+#      session's working dir — without --add-dir every edit/cd there prompts)
 acme-mm||/merge-monster|--remote-control --dangerously-skip-permissions
 acme-maintain||/maintenance-monster|--remote-control --dangerously-skip-permissions
 # Any further ledger-bearing role (its own skill + baton) is just another line;
 # register it in fleet-supervisor.conf too so it is auto-relaunched:
 # acme-<role>||/<role-skill>|--remote-control --dangerously-skip-permissions
-acme-build|||--remote-control --permission-mode acceptEdits
-acme-investigate|||--remote-control
-acme-design|||--remote-control --permission-mode acceptEdits
+acme-build|||--add-dir ~/src/worktrees --remote-control --permission-mode auto
+acme-investigate|||--add-dir ~/src/worktrees --remote-control --permission-mode auto
+acme-design|||--add-dir ~/src/worktrees --remote-control --permission-mode auto

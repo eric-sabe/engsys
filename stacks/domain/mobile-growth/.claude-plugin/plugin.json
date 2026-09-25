@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "engsys-mobile-growth",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "engsys stack pack — domain: mobile-growth. Adds mobile-growth-specific skills to the engsys core plugin.",
   "author": {
     "name": "eric-sabe"

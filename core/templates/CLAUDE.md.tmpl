@@ -23,6 +23,9 @@ Pick the right agent first, then the model — the wrong agent burns context wha
 - **Escalate** (execution → judgement tier, or judgement → top tier) for: architectural or significant design choices; cross-cutting refactors spanning services; high ambiguity the spec doesn't resolve; concurrency, data migrations, or anything where subtle side effects bite; performance-critical or security-sensitive paths; synthesizing conflicting sources.
 - **Stay on the execution tier** for: well-specified bug fixes, features against established patterns, tests, docs, mechanical refactors/renames, pipeline/IaC changes against clear templates.
 - Downgrade a judgement-default agent only when the task is genuinely mechanical for its domain (rare). Reserve the top tier for real escalation — it's the most expensive.
+- **Raise effort before switching tier.** Many tasks that look like they need a bigger model only need more thinking: step effort up (`medium` → `high` → `xhigh`) on the current tier first, and escalate tier when effort alone isn't enough. Subagents inherit the session's effort.
+- **Security-sensitive roles:** some models run a cybersecurity classifier that silently re-runs a flagged request on a different model (losing that turn's reasoning) or refuses outright. For threat modeling, offensive-security review, or security escalation, pin the role to a model that doesn't apply that classifier (a full model ID in the agent's `model:` frontmatter or on the Agent call) instead of relying on a tier alias, and escalate security work with effort on that model rather than by moving to another tier.
+- **Unattended fleets:** tier aliases move when the client updates. Long-running or scheduled sessions should pin what each alias resolves to (`ANTHROPIC_DEFAULT_<TIER>_MODEL` in the session environment for each alias the project uses) and set `--model` / `--effort` per session, so a model change is a deliberate config change.
 
 ## Worker providers
 

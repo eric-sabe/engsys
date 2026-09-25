@@ -81,7 +81,7 @@ orchestrators, commands, workflows) plus one `engsys-<value>` plugin per stack p
 ```json
 {
   "extraKnownMarketplaces": {
-    "engsys": { "source": { "source": "github", "repo": "eric-sabe/engsys", "ref": "v1.1.0" }, "autoUpdate": false }
+    "engsys": { "source": { "source": "github", "repo": "eric-sabe/engsys", "ref": "v1.1.2" }, "autoUpdate": false }
   },
   "enabledPlugins": {
     "engsys@engsys": true,
@@ -92,7 +92,7 @@ orchestrators, commands, workflows) plus one `engsys-<value>` plugin per stack p
 ```
 
 Declaring plugins doesn't install them — install once per machine (`claude plugin marketplace add
-eric-sabe/engsys#v1.1.0`, then `claude plugin install engsys@engsys` and each pack), or accept the
+eric-sabe/engsys#v1.1.2`, then `claude plugin install engsys@engsys` and each pack), or accept the
 prompt when opening the project. In plugin mode:
 
 - **The project's own `CLAUDE.md` is its project facts.** The core plugin injects the generic engsys
@@ -304,10 +304,12 @@ choice, not a requirement:
   drop, or rename roles freely — only the `<NAMESPACE>-` prefix is enforced.
 - **Permission modes, per role**: the two monsters run
   `--dangerously-skip-permissions` (unattended by design — their skills carry
-  validate-before-act and a ledger kill switch); edit-heavy workers run
-  `--permission-mode acceptEdits` (edits flow, Bash stays allowlist-gated);
-  read-heavy workers keep default gating. Tighten or loosen per role to
-  taste — the reasoning is in the agent-sessions SKILL.md § Permission modes.
+  validate-before-act and a ledger kill switch); interactive workers run
+  `--permission-mode auto --add-dir <worktrees dir>` (routine actions flow,
+  risky ones ask; `--add-dir` because agent worktrees live beside the
+  checkout, outside the session's working directory). Tighten or loosen per
+  role to taste — the reasoning is in the agent-sessions SKILL.md
+  § Permission modes.
 - **`MODEL=`** (commented out by default): pin every session to a specific
   model when your orchestration experience warrants it — e.g. the reference
   deployment pins `--model claude-opus-4-8` for orchestration sessions,

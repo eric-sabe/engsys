@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "engsys-swift",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "engsys stack pack — lang: swift. Adds swift-specific skills to the engsys core plugin.",
   "author": {
     "name": "eric-sabe"
