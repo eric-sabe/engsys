@@ -304,10 +304,12 @@ choice, not a requirement:
   drop, or rename roles freely — only the `<NAMESPACE>-` prefix is enforced.
 - **Permission modes, per role**: the two monsters run
   `--dangerously-skip-permissions` (unattended by design — their skills carry
-  validate-before-act and a ledger kill switch); edit-heavy workers run
-  `--permission-mode acceptEdits` (edits flow, Bash stays allowlist-gated);
-  read-heavy workers keep default gating. Tighten or loosen per role to
-  taste — the reasoning is in the agent-sessions SKILL.md § Permission modes.
+  validate-before-act and a ledger kill switch); interactive workers run
+  `--permission-mode auto --add-dir <worktrees dir>` (routine actions flow,
+  risky ones ask; `--add-dir` because agent worktrees live beside the
+  checkout, outside the session's working directory). Tighten or loosen per
+  role to taste — the reasoning is in the agent-sessions SKILL.md
+  § Permission modes.
 - **`MODEL=`** (commented out by default): pin every session to a specific
   model when your orchestration experience warrants it — e.g. the reference
   deployment pins `--model claude-opus-4-8` for orchestration sessions,

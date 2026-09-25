@@ -39,11 +39,16 @@ address space. Isolation is by convention, enforced in the skills:
   trap — the nudge arrives, the session sits at a dialog until a human
   notices. Safe ONLY because their skills carry validate-before-act, hard
   rules, and a ledger-issue kill switch.
-- **Edit-heavy interactive roles** (`build`, `design`):
-  `--permission-mode acceptEdits`. Edits flow; Bash stays behind the repo's
-  allowlist, which is where the real protection lives.
-- **Read-heavy roles** (`investigate`): default gating. Read tools don't
-  prompt anyway; the rare prompt is exactly the moment worth a look.
+- **Interactive roles** (`build`, `investigate`, `design`):
+  `--permission-mode auto --add-dir <worktrees dir>`. Auto mode approves
+  routine actions and still asks on risky ones; the repo's deny rules apply
+  on top. **`--add-dir` is required:** agents work in git worktrees beside the
+  checkout (`../worktrees/<name>`, skill `git-workflow-agents`), which is
+  outside the session's working directory — without it every edit there, and
+  every command that `cd`s there, prompts, in any mode short of a bypass.
+  Put `--add-dir` anywhere in the extra flags (the launcher places the prompt
+  first, so list-valued flags can't swallow it). `acceptEdits` is the fallback
+  where auto mode isn't available — it still needs `--add-dir`.
 - **Never bypass a generic session.** All sessions share
   `crossSessionInbound: accept`; the monsters can afford it because their
   skills carry discipline. A skill-less session's permission gate IS its

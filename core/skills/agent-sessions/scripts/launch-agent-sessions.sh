@@ -25,7 +25,8 @@
 #                     expanded. From a fleet repo, set it per session.
 #   <initial prompt>  sent as the session's first turn (e.g. /merge-monster);
 #                     empty for a plain interactive session.
-#   <extra flags>     appended verbatim. Use --dangerously-skip-permissions ONLY
+#   <extra flags>     appended verbatim (after the prompt, so list-valued flags
+#                     like --add-dir are safe). Use --dangerously-skip-permissions ONLY
 #                     for a session that runs fully unattended (see SKILL.md
 #                     § Permission modes), and understand it composes with
 #                     crossSessionInbound=accept so nudges still arrive.
@@ -144,9 +145,12 @@ launch_one() {
     cmd+="set -a && . $(printf %q "$ENV_FILE") && set +a && "
   fi
   cmd+="claude --name $(printf %q "$name") --settings $(printf %q "$SETTINGS_FILE")"
+  # The prompt goes BEFORE the model/extra flags: several claude flags take a
+  # list (--add-dir, --allowedTools, …) and would swallow a trailing prompt as
+  # one more value — the session would start with no instruction.
+  [ -n "$prompt" ] && cmd+=" $(printf %q "$prompt")"
   [ -n "$MODEL" ] && cmd+=" $MODEL"
   [ -n "$extra" ] && cmd+=" $extra"
-  [ -n "$prompt" ] && cmd+=" $(printf %q "$prompt")"
 
   # A duplicate logical name ANYWHERE the same user runs claude makes Claude
   # Code suffix this one (name-2), which breaks name addressing. Reject a name
