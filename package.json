@@ -1,6 +1,6 @@
 {
   "name": "engsys",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Canonical home for the Claude Code engineering system \u2014 agents, commands, skills, stack packs, and a deterministic installer.",
   "bin": {
     "engsys": "./install"

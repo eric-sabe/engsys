@@ -81,7 +81,7 @@ orchestrators, commands, workflows) plus one `engsys-<value>` plugin per stack p
 ```json
 {
   "extraKnownMarketplaces": {
-    "engsys": { "source": { "source": "github", "repo": "eric-sabe/engsys", "ref": "v1.1.0" }, "autoUpdate": false }
+    "engsys": { "source": { "source": "github", "repo": "eric-sabe/engsys", "ref": "v1.1.2" }, "autoUpdate": false }
   },
   "enabledPlugins": {
     "engsys@engsys": true,
@@ -92,7 +92,7 @@ orchestrators, commands, workflows) plus one `engsys-<value>` plugin per stack p
 ```
 
 Declaring plugins doesn't install them — install once per machine (`claude plugin marketplace add
-eric-sabe/engsys#v1.1.0`, then `claude plugin install engsys@engsys` and each pack), or accept the
+eric-sabe/engsys#v1.1.2`, then `claude plugin install engsys@engsys` and each pack), or accept the
 prompt when opening the project. In plugin mode:
 
 - **The project's own `CLAUDE.md` is its project facts.** The core plugin injects the generic engsys
