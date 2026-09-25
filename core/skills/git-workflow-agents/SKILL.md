@@ -28,7 +28,7 @@ Git worktrees provide independent working directories while sharing the same `.g
 gh issue edit 42 --repo <owner>/<repo> --add-assignee @me
 ```
 
-The `github` MCP server (in [.mcp.json](../../../.mcp.json)) is a fallback for when `gh` auth or network fails. Project board operations (priorities, fields, statuses) **must** still use `gh project` / `gh api graphql` — the MCP server doesn't support ProjectV2.
+Everything GitHub goes through `gh` — including project board operations (priorities, fields, statuses) via `gh project` / `gh api graphql`. No GitHub MCP server.
 
 #### Step 2: Create Worktree and Branch
 
@@ -288,8 +288,8 @@ the project's infrastructure CLAUDE.md / stack fragment for the exact commands.
 See root CLAUDE.md § Tool preference order:
 
 - Use `gh` CLI first (issues, PRs, Actions, Projects, GraphQL, `--format json`).
-- The `github` MCP server (in `.mcp.json`) is a fallback for when `gh` auth/network fails.
-- ProjectV2 (project boards) **always** use `gh project` / `gh api graphql` — MCP does not support them.
+- ProjectV2 (project boards): `gh project` / `gh api graphql`.
+- No GitHub MCP server — its schemas and responses are chatty; `gh --json --jq` is precise.
 
 ## Directory Structure
 
@@ -463,7 +463,7 @@ This workflow integrates with root [CLAUDE.md](../../../CLAUDE.md) § Filing iss
 
 - One issue, one branch, one worktree
 - Use tmp/ folder for complex content
-- Prefer `gh` CLI (`github` MCP is a fallback only)
+- `gh` CLI for everything GitHub (no GitHub MCP)
 - Follow IaC-first principle
 - **Always verify locally before pushing**
 - **Batch commits before pushing**

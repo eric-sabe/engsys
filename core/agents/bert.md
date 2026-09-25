@@ -68,7 +68,7 @@ Follow the project's issue-filing workflow in `CLAUDE.md`. Key points:
 
 ### When Filing Issues
 
-- Use `gh` CLI (preferred). A GitHub MCP server, if wired up, is a fallback for when `gh` auth/network fails. See `CLAUDE.md` § Tool preference order.
+- Use the `gh` CLI (no GitHub MCP server). See `CLAUDE.md` § Tool preference order.
 - Include root cause analysis when known
 - Provide code snippets, file paths, and line numbers
 - Recommend the fix approach (but don't implement unless asked)

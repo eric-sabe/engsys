@@ -18,7 +18,7 @@ build a feature spec/plan for <goal>
 - Batch clarifying questions. Ask once, wait for answers, then proceed.
 - Use subagents for perspective, not delegation drift. The parent agent owns the spec and reconciles conflicts.
 - Make the spec the shared source of truth. Every subagent enriches `docs/specs/<slug>.md` directly or returns structured content for the parent to merge.
-- Tracker project + issue writes go through the project's installed **issue-tracker skill** (`issue-tracker-*` skill) and its contract operations (`create-issue`, `create-board`, `add-to-board`, `set-board-field`, `query-board`). The skill maps them onto the active backend; on GitHub it uses `gh` (ProjectV2 MCP tools are unsupported there, so the skill drives `gh project` / `gh api graphql`).
+- Tracker project + issue writes go through the project's installed **issue-tracker skill** (`issue-tracker-*` skill) and its contract operations (`create-issue`, `create-board`, `add-to-board`, `set-board-field`, `query-board`). The skill maps them onto the active backend; on GitHub it uses `gh` (the skill drives `gh project` / `gh api graphql`).
 - Write issue bodies to `tmp/` and create them via the skill's `create-issue` operation (GitHub: `gh issue create --body-file`). Never HEREDOC issue bodies — the tmp/-file discipline is universal.
 - Issue-body invariants (every one of these has been a sanity-check finding at least once):
   - Every body carries one context line: `Part of [<project name> — project <N>](<board url>) · spec: docs/specs/<slug>.md`. Section citations ("spec §2.2") are unresolvable without it.

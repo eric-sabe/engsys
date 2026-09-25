@@ -93,8 +93,8 @@ Prefer the most direct, scriptable tool first; fall back to MCP, then manual:
 
 | Need                          | First                            | Fallback                                    |
 | ----------------------------- | -------------------------------- | ------------------------------------------- |
-| GitHub issues / PRs / Actions | `gh` CLI                         | `github` MCP (when `gh` auth/network fails) |
-| GitHub ProjectV2 (boards)     | `gh project` / `gh api graphql`  | — MCP can't do ProjectV2                    |
+| GitHub issues / PRs / Actions | `gh` CLI                         | — (`gh` only; no GitHub MCP — too chatty)   |
+| GitHub ProjectV2 (boards)     | `gh project` / `gh api graphql`  | —                                           |
 | Browser automation (testing)  | `playwright` MCP                 | direct Playwright API                       |
 | Browser debugging (UI)        | `chrome-devtools` MCP            | manual DevTools                             |
 

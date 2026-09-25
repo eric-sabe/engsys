@@ -1,68 +1,34 @@
 ---
 name: github-issues
-description: 'Create, update, and manage GitHub issues using MCP tools. Use this skill when users want to create bug reports, feature requests, or task issues, update existing issues, add labels/assignees/milestones, or manage issue workflows. Triggers on requests like "create an issue", "file a bug", "request a feature", "update issue X", or any GitHub issue management task.'
+description: 'Create, update, and manage GitHub issues with the gh CLI. Use this skill when users want to create bug reports, feature requests, or task issues, update existing issues, add labels/assignees/milestones, or manage issue workflows. Triggers on requests like "create an issue", "file a bug", "request a feature", "update issue X", or any GitHub issue management task.'
 ---
 
 # GitHub Issues
 
-Manage GitHub issues using `gh` CLI (preferred) with `user-github` MCP server as fallback.
-
-**Important:** The GitHub MCP does **not** support GitHub Projects (ProjectV2). For project board operations (priorities, status, custom fields, waves), always use `gh project` or `gh api graphql`.
-
-## Tool Priority
-
-1. **`gh` CLI** (preferred) — full coverage, projects support, GraphQL access
-2. **GitHub MCP** (fallback) — use when `gh` CLI has auth or connectivity issues
-
-## Available MCP Tools (fallback only)
-
-| Tool                             | Purpose                |
-| -------------------------------- | ---------------------- |
-| `mcp__github__create_issue`      | Create new issues      |
-| `mcp__github__update_issue`      | Update existing issues |
-| `mcp__github__get_issue`         | Fetch issue details    |
-| `mcp__github__search_issues`     | Search issues          |
-| `mcp__github__add_issue_comment` | Add comments           |
-| `mcp__github__list_issues`       | List repository issues |
+Manage GitHub issues with the **`gh` CLI** — issues, labels, assignees, milestones, comments, and
+Projects (`gh project` / `gh api graphql`). Don't use a GitHub MCP server for this: its tool schemas
+and responses are large and chatty, while `gh … --json <fields> --jq <filter>` returns exactly what
+you asked for.
 
 ## Workflow
 
-1. **Determine action**: Create, update, or query?
-2. **Gather context**: Get repo info, existing labels, milestones if needed
-3. **Structure content**: Use appropriate template from [references/templates.md](references/templates.md)
-4. **Execute**: Use `gh` CLI first; fall back to MCP tools if CLI has issues
-5. **Confirm**: Report the issue URL to user
+1. **Determine action**: create, update, or query?
+2. **Gather context**: repo, existing labels, milestones if needed (`gh label list`, `gh api repos/<owner>/<repo>/milestones`)
+3. **Structure content**: use the matching template from [references/templates.md](references/templates.md)
+4. **Execute** with `gh` (below)
+5. **Confirm**: report the issue URL
 
 ## Creating Issues
 
-### Using gh CLI (preferred)
+Write the body to a file first (long bodies and backticks survive intact), then:
 
 ```bash
-# Write body to tmp/ file first, then:
 gh issue create \
   --repo <owner>/<repo> \
-  --title "🐛 Bug: Description" \
+  --title "[Bug] Description" \
   --body-file tmp/issue-body-slug.md \
-  --label "bug,<component>"
-```
-
-### Using MCP (fallback)
-
-### Required Parameters
-
-```text
-owner: repository owner (org or user)
-repo: repository name
-title: clear, actionable title
-body: structured markdown content
-```
-
-### Optional Parameters
-
-```text
-labels: ["bug", "enhancement", "documentation", ...]
-assignees: ["username1", "username2"]
-milestone: milestone number (integer)
+  --label "bug,<component>" \
+  [--assignee <user>] [--milestone "<milestone title>"]
 ```
 
 ### Title Guidelines
@@ -87,47 +53,47 @@ Always use the templates in [references/templates.md](references/templates.md). 
 
 ## Updating Issues
 
-Use `mcp__github__update_issue` with:
+Change only what's needed — fetch first so you don't clobber fields:
 
-```text
-owner, repo, issue_number (required)
-title, body, state, labels, assignees, milestone (optional - only changed fields)
+```bash
+gh issue view <n> --repo <owner>/<repo> --json title,body,labels,assignees,milestone,state
+gh issue edit <n> --repo <owner>/<repo> [--title …] [--body-file …] \
+  [--add-label …] [--remove-label …] [--add-assignee …] [--milestone "…"]
+gh issue comment <n> --repo <owner>/<repo> --body-file tmp/comment.md
+gh issue close <n> --repo <owner>/<repo> [--comment "…"]   # or: gh issue reopen <n>
 ```
 
-State values: `open`, `closed`
+## Querying Issues
+
+```bash
+gh issue list --repo <owner>/<repo> --state open --label bug --json number,title,labels --jq '.[] | "\(.number) \(.title)"'
+gh search issues --repo <owner>/<repo> "<text>" --json number,title,state
+```
 
 ## Examples
 
-### Example 1: Bug Report
+### Bug report
 
-**User**: "Create a bug issue - the login page crashes when using SSO"
+**User**: "Create a bug issue — the login page crashes when using SSO"
 
-**Action**: Call `mcp__github__create_issue` with:
+Write `tmp/issue-sso-crash.md` from the Bug Report template (description, steps to reproduce,
+expected vs actual behavior, environment, context), then:
 
-```json
-{
-  "owner": "github",
-  "repo": "awesome-copilot",
-  "title": "[Bug] Login page crashes when using SSO",
-  "body": "## Description\nThe login page crashes when users attempt to authenticate using SSO.\n\n## Steps to Reproduce\n1. Navigate to login page\n2. Click 'Sign in with SSO'\n3. Page crashes\n\n## Expected Behavior\nSSO authentication should complete and redirect to dashboard.\n\n## Actual Behavior\nPage becomes unresponsive and displays error.\n\n## Environment\n- Browser: [To be filled]\n- OS: [To be filled]\n\n## Additional Context\nReported by user.",
-  "labels": ["bug"]
-}
+```bash
+gh issue create --repo <owner>/<repo> --title "[Bug] Login page crashes when using SSO" \
+  --body-file tmp/issue-sso-crash.md --label bug
 ```
 
-### Example 2: Feature Request
+### Feature request
 
 **User**: "Create a feature request for dark mode with high priority"
 
-**Action**: Call `mcp__github__create_issue` with:
+Write `tmp/issue-dark-mode.md` from the Feature Request template (summary, motivation, proposed
+solution, acceptance criteria), then:
 
-```json
-{
-  "owner": "github",
-  "repo": "awesome-copilot",
-  "title": "[Feature] Add dark mode support",
-  "body": "## Summary\nAdd dark mode theme option for improved user experience and accessibility.\n\n## Motivation\n- Reduces eye strain in low-light environments\n- Increasingly expected by users\n- Improves accessibility\n\n## Proposed Solution\nImplement theme toggle with system preference detection.\n\n## Acceptance Criteria\n- [ ] Toggle switch in settings\n- [ ] Persists user preference\n- [ ] Respects system preference by default\n- [ ] All UI components support both themes\n\n## Alternatives Considered\nNone specified.\n\n## Additional Context\nHigh priority request.",
-  "labels": ["enhancement", "high-priority"]
-}
+```bash
+gh issue create --repo <owner>/<repo> --title "[Feature] Add dark mode support" \
+  --body-file tmp/issue-dark-mode.md --label "enhancement,high-priority"
 ```
 
 ## Common Labels
