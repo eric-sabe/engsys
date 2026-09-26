@@ -81,6 +81,14 @@ out.set('core/.claude-plugin/hooks.json', json({
     PreToolUse: [
       { matcher: 'Bash', hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/approve-own-scripts.mjs"' }] },
     ],
+    // Hand-back guard: a subagent can't hand back "still running, I'll continue once…" (nothing would
+    // wake it), and a session can't end its turn on an unhandled INCOMPLETE hand-back.
+    SubagentStop: [
+      { hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/handback-guard.mjs" subagent' }] },
+    ],
+    Stop: [
+      { hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/handback-guard.mjs" stop' }] },
+    ],
     SessionStart: [
       { hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/engsys-context.mjs"' }] },
       { matcher: 'compact', hooks: [{ type: 'command', command: 'bash "${CLAUDE_PLUGIN_ROOT}/templates/post-compact-reground.sh.tmpl"' }] },

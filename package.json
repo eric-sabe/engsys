@@ -15,7 +15,7 @@
     "engsys.config.example.yaml"
   ],
   "scripts": {
-    "test": "node lib/selftest.js && node scripts/build-plugins.mjs --check && node --test core/.claude-plugin/approve-own-scripts.test.mjs && bash core/skills/agent-sessions/scripts/fleet-supervisor.test.sh && bash core/scripts/worker-run.test.sh && bash core/scripts/worker-package.test.sh",
+    "test": "node lib/selftest.js && node scripts/build-plugins.mjs --check && node --test core/.claude-plugin/approve-own-scripts.test.mjs core/.claude-plugin/handback-guard.test.mjs && bash core/skills/agent-sessions/scripts/fleet-supervisor.test.sh && bash core/scripts/worker-run.test.sh && bash core/scripts/worker-package.test.sh",
     "prepublishOnly": "node lib/selftest.js && node scripts/build-plugins.mjs --check",
     "build:plugins": "node scripts/build-plugins.mjs"
   },
