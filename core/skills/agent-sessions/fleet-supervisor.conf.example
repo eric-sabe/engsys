@@ -7,6 +7,9 @@ LAUNCH_CMD=bash .claude/skills/agent-sessions/scripts/launch-agent-sessions.sh -
 # Repo holding the ledgers. Omit to use `gh repo view` in the cwd (supervisor
 # running inside the target repo); REQUIRED when it runs from a fleet repo.
 REPO=owner/name
+# Minutes a live session must sit idle after its "rotation requested" heartbeat
+# before it is relaunched (it can't exit itself). Default 3.
+# ROTATE_GRACE_MIN=3
 # <session>|<ledger issue>|<stale minutes>[|<owner/name>]
 #   stale = heartbeat older than this; mirror the monster's stale_lock_minutes
 #   + grace. The optional 4th field overrides REPO= (multi-repo fleets).
