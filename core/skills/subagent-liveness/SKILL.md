@@ -42,6 +42,11 @@ it names the individual **agent** inside this session's registry.
 | extensions per attempt | 1 (the script enforces it) |
 | respawn generations before escalating | 2 |
 
+> **Hand-backs are final.** A subagent that ends its turn is never woken again — not by its own
+> background work finishing. It must wait and finish, or hand back `STATUS: INCOMPLETE — <what remains>`;
+> you must act on an INCOMPLETE hand-back (resume via SendMessage, take over, or watch) before ending
+> your turn. The engsys plugin's `handback-guard` hooks enforce both sides.
+
 ## On every long-running spawn
 
 1. **Name it**; never use one-shot `Explore`/`Plan` for work you need to track
