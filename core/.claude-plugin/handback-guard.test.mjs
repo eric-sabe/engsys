@@ -27,6 +27,7 @@ test('classify: explicit statuses', () => {
   const inc = classify('Stopped at the review.\n**STATUS:** INCOMPLETE — review pass 2 not run; resume me to apply fixes');
   assert.equal(inc.status, 'INCOMPLETE');
   assert.equal(inc.remains, 'review pass 2 not run; resume me to apply fixes');
+  assert.equal(classify('`STATUS: INCOMPLETE — push pending`').remains, 'push pending');
 });
 
 test('classify: weak phrases do not override an explicit COMPLETE; strong ones do', () => {

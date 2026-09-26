@@ -18,6 +18,9 @@
 //
 // Every block happens at most once per stop attempt (`stop_hook_active`) and per hand-back, so a
 // session is never trapped. Fail-open: any error → allow (exit 0, no output).
+//
+// Env: ENGSYS_HANDBACK_DIR (state dir; default <tmpdir>/engsys-handbacks), ENGSYS_HANDBACK_DEBUG=<file>
+// (opt-in: append each hook input, message truncated, for diagnosis).
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -59,7 +62,7 @@ export function classify(message) {
   const strong = STRONG.some((re) => re.test(m));
   const weak = WEAK.some((re) => re.test(m));
   const pending = strong || (!status && weak);
-  const stated = s ? s[2].replace(/^[\s*_`—–:-]+/, '').trim() : '';
+  const stated = s ? s[2].replace(/^[\s*_`—–:-]+/, '').replace(/[\s*_`]+$/, '').trim() : '';
   return { status, pending, remains: stated || (pending ? pendingSentence(m) : '') };
 }
 
@@ -133,6 +136,10 @@ async function main() {
   let raw = '';
   for await (const chunk of process.stdin) raw += chunk;
   const input = JSON.parse(raw);
+  if (process.env.ENGSYS_HANDBACK_DEBUG) { // opt-in: what the hook actually receives
+    const { last_assistant_message: m, ...rest } = input;
+    fs.appendFileSync(process.env.ENGSYS_HANDBACK_DEBUG, `${JSON.stringify({ mode, ...rest, last_assistant_message: String(m || '').slice(0, 160) })}\n`);
+  }
   let reason = null;
   if (mode === 'subagent') {
     reason = subagentDecision(input);
