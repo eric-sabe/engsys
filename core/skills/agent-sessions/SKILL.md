@@ -134,10 +134,19 @@ runs under launchd/cron every ~5 minutes with **no LLM in the restart path**
 | Ledger heartbeat | Process | Action |
 | --- | --- | --- |
 | "rotation requested" (exact phrase) | exited | kill window, relaunch |
+| "rotation requested" | **alive, idle at its prompt** ≥ `ROTATE_GRACE_MIN` (default 3) after that heartbeat | kill window, relaunch — once per rotation heartbeat |
 | stale, issue open | exited | relaunch (crash recovery) |
 | "session end" | exited | leave — deliberate stop |
 | ledger **closed** | any | never touch — kill switch wins |
 | stale | **alive** | never kill; escalate once on the ledger |
+
+**A Claude session can't exit itself.** A monster that honors a rotation
+request posts its digest + final `rotation requested` heartbeat, stops its
+loop, and then sits at the prompt with its process still alive — so the
+supervisor relaunches an alive session too, but only after that heartbeat,
+only once it's idle (no turn running), and only once per heartbeat (the
+relaunched session is never mistaken for the old one; if it never heartbeats,
+the stale-but-alive row below applies instead).
 
 The stale-but-alive row is deliberate: a live process is never killed on
 staleness alone — that's probe-then-classify territory (subagent-liveness),

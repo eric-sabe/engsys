@@ -8,6 +8,15 @@
 # Decision table (per configured session):
 #   ledger issue CLOSED                          → never touch (kill switch)
 #   heartbeat "rotation requested" + proc exited → kill window, relaunch
+#   heartbeat "rotation requested" + proc ALIVE,  → kill window, relaunch. A
+#     idle at its prompt ≥ ROTATE_GRACE_MIN          Claude session can't exit
+#     after that heartbeat                           itself: a monster that has
+#                                                    posted its final heartbeat
+#                                                    and stopped sits at the
+#                                                    prompt. Done once per
+#                                                    rotation heartbeat, so the
+#                                                    relaunched session is never
+#                                                    mistaken for the old one.
 #   heartbeat stale + proc exited (issue open)   → relaunch (crash recovery)
 #   heartbeat "session end"       + proc exited  → leave (deliberate stop)
 #   heartbeat stale + proc ALIVE                 → NEVER kill; escalate once
@@ -22,6 +31,9 @@
 #   TMUX_SESSION=<tmux session the fleet runs in>
 #   LAUNCH_CMD=<command that launches ONE session; supervisor appends name>
 #   REPO=<owner/name>          optional default repo holding the ledgers
+#   ROTATE_GRACE_MIN=<minutes> optional (default 3): how long a live session
+#                              must sit idle after its "rotation requested"
+#                              heartbeat before it is relaunched
 #   <session-name>|<ledger-issue>|<stale-minutes>[|<owner/name>]
 #                              one line per monster; the 4th field overrides
 #                              REPO= for that session (multi-repo fleets)
@@ -60,7 +72,7 @@ if ! mkdir "$LOCKDIR" 2>/dev/null; then
 fi
 trap 'rmdir "$LOCKDIR" 2>/dev/null || true' EXIT
 
-TMUX_SESSION="" LAUNCH_CMD="" DEFAULT_REPO=""
+TMUX_SESSION="" LAUNCH_CMD="" DEFAULT_REPO="" ROTATE_GRACE_MIN=3
 SESSIONS=()
 while IFS= read -r line; do
   line="${line%%$'\r'}"
@@ -69,6 +81,7 @@ while IFS= read -r line; do
     TMUX_SESSION=*) TMUX_SESSION="${line#TMUX_SESSION=}" ;;
     LAUNCH_CMD=*) LAUNCH_CMD="${line#LAUNCH_CMD=}" ;;
     REPO=*) DEFAULT_REPO="${line#REPO=}" ;;
+    ROTATE_GRACE_MIN=*) ROTATE_GRACE_MIN="${line#ROTATE_GRACE_MIN=}" ;;
     *\|*) SESSIONS+=("$line") ;;
     *) echo "fleet-supervisor: bad conf line: $line" >&2; exit 1 ;;
   esac
@@ -96,6 +109,27 @@ iso_to_epoch() {
 # Foreground command of the session's tmux pane; empty if window gone.
 pane_cmd() {
   tmux list-panes -t "${TMUX_SESSION}:$1" -F '#{pane_current_command}' 2>/dev/null | head -1
+}
+
+# Claude Code shows "esc to interrupt" while a turn is running; absent = idle at the prompt.
+pane_busy() {
+  tmux capture-pane -p -t "${TMUX_SESSION}:$1" -S -15 2>/dev/null | grep -q 'esc to interrupt'
+}
+
+# Kill the window (if any) and launch the session fresh; report on the ledger.
+relaunch() { # relaunch <name> <ledger> <repo> <reason>
+  local name="$1" ledger="$2" repo="$3" reason="$4"
+  log "$name: relaunching — $reason"
+  tmux kill-window -t "${TMUX_SESSION}:$name" 2>/dev/null || true
+  # LAUNCH_CMD is intentionally word-split (it is a command line, not a path)
+  # shellcheck disable=SC2086
+  if $LAUNCH_CMD "$name" >>"$LOG" 2>&1; then
+    log "$name: relaunched"
+    gh issue comment "$ledger" -R "$repo" --body "🔁 fleet-supervisor: relaunched \`$name\` ($reason, $(date -u +%Y-%m-%dT%H:%M:%SZ)). Startup reconcile recovers state from this ledger + state.md." >/dev/null || true
+  else
+    log "$name: RELAUNCH FAILED — see $LOG"
+    gh issue comment "$ledger" -R "$repo" --body "🚨 fleet-supervisor: relaunch of \`$name\` FAILED ($reason). Operator needed — see logs/fleet-supervisor/supervisor.log on the host." >/dev/null || true
+  fi
 }
 
 NOW=$(date +%s)
@@ -144,9 +178,25 @@ for spec in "${SESSIONS[@]}"; do
   ENDED=0;    case "$HB_STATUS" in *[Ss]ession\ end*) ENDED=1 ;; esac
 
   LATCH="$STATE_DIR/$name.escalated"
+  ROTATED="$STATE_DIR/$name.rotated" # the rotation heartbeat we already relaunched for
+  MARKED=0; [ -f "$ROTATED" ] && [ "$(cat "$ROTATED")" = "$HB_TS" ] && MARKED=1
 
   if [ "$ALIVE" = "1" ]; then
-    if [ "$STALE" = "1" ] && [ "$ROTATION" = "0" ]; then
+    # (relaunched for this rotation but the new session never heartbeated → falls to the stale branch)
+    if [ "$ROTATION" = "1" ] && ! { [ "$MARKED" = "1" ] && [ "$STALE" = "1" ]; }; then
+      rm -f "$LATCH"
+      AGE=$(( (NOW - ${HB_EPOCH:-$NOW}) / 60 ))
+      if [ "$MARKED" = "1" ]; then
+        log "$name: relaunched for this rotation (${HB_TS}) — waiting for the new session's first heartbeat"
+      elif [ -z "$HB_EPOCH" ] || [ "$AGE" -lt "$ROTATE_GRACE_MIN" ]; then
+        log "$name: rotation requested ${AGE}m ago — letting it settle (grace ${ROTATE_GRACE_MIN}m)"
+      elif pane_busy "$name"; then
+        log "$name: rotation requested but the session is still mid-turn — waiting"
+      else
+        relaunch "$name" "$ledger" "$REPO_SLUG" "rotation requested; session idle at its prompt ${AGE}m after its final heartbeat"
+        printf '%s\n' "$HB_TS" >"$ROTATED"
+      fi
+    elif [ "$STALE" = "1" ]; then
       # hung-or-thinking: never kill; escalate once per incident
       if [ ! -f "$LATCH" ]; then
         gh issue comment "$ledger" -R "$REPO_SLUG" --body "⚠️ fleet-supervisor: heartbeat stale (last: ${HB_TS:-never}) but the \`$name\` process is still alive. Not touching it — a live process is never killed on staleness alone (probe-then-classify is a judgment call, not a script's). Needs a probe: operator or maintenance watchdog." >/dev/null \
@@ -173,17 +223,8 @@ for spec in "${SESSIONS[@]}"; do
       '' | zsh | -zsh | bash | -bash | sh | -sh | fish | -fish) : ;;
       *) log "$name: pane became live between classify and act ($RECHECK) — aborting relaunch"; continue ;;
     esac
-    log "$name: relaunching — $REASON"
-    tmux kill-window -t "${TMUX_SESSION}:$name" 2>/dev/null || true
-    # LAUNCH_CMD is intentionally word-split (it is a command line, not a path)
-    # shellcheck disable=SC2086
-    if $LAUNCH_CMD "$name" >>"$LOG" 2>&1; then
-      log "$name: relaunched"
-      gh issue comment "$ledger" -R "$REPO_SLUG" --body "🔁 fleet-supervisor: relaunched \`$name\` ($REASON, $(date -u +%Y-%m-%dT%H:%M:%SZ)). Startup reconcile recovers state from this ledger + state.md." >/dev/null || true
-    else
-      log "$name: RELAUNCH FAILED — see $LOG"
-      gh issue comment "$ledger" -R "$REPO_SLUG" --body "🚨 fleet-supervisor: relaunch of \`$name\` FAILED ($REASON). Operator needed — see logs/fleet-supervisor/supervisor.log on the host." >/dev/null || true
-    fi
+    relaunch "$name" "$ledger" "$REPO_SLUG" "$REASON"
+    if [ "$ROTATION" = "1" ]; then printf '%s\n' "$HB_TS" >"$ROTATED"; fi
   elif [ "$ENDED" = "1" ]; then
     log "$name: process exited after 'session end' — deliberate stop, leaving it"
   else
