@@ -1,4 +1,7 @@
 # Agent-session roster — copy to .claude/agent-sessions.roster and edit.
+# (Fleet kit users: this same format is your instance's fleet/roster.tmpl, with
+# __NAME__ placeholders resolved from fleet/fleet.conf; `fleet launch` renders
+# it. Don't copy this file — see docs/fleet-guide.md.)
 # Read by the agent-sessions skill's launch-agent-sessions.sh. It can live in
 # the target repo, or in a separate fleet repo that drives one or more target
 # repos (then give every session an absolute <workdir>).
