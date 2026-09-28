@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# review.sh — paired local review: one GATE reviewer plus one ADVISORY reviewer on the same diff.
+#
+#   1. GATE      — its exit code is this script's exit code. Fix what it blocks on.
+#   2. ADVISORY  — runs after the gate, on the same base. It NEVER blocks: if it fails to
+#                  run, this script warns and still exits with the gate's code. When the
+#                  branch already has a PR, the advisory command gets ADVISORY_POST_FLAG so it
+#                  can upsert its own marker comment; with no PR it prints only.
+#
+# Why paired: while you evaluate a second reviewer, running both on every branch yields a
+# labelled pair per PR (see docs/review-methodology.md and core/scripts/review-bakeoff.mjs).
+#
+# Deliberate invocation only — do NOT wire this into a pre-push hook; a multi-minute review
+# would tax every push.
+#
+# Adopt: copy to <repo>/scripts/review.sh (drop the .tmpl), `chmod +x`, edit the block below.
+set -uo pipefail
+
+# ===================================== CONFIGURATION =====================================
+# Edit these defaults, or override any of them from the environment for one run.
+#
+# GATE_CMD      Required. The gate reviewer's command line. Runs via `bash -c`, so it may use
+#               $BASE_REF and $REVIEW_HEAD_SHA. It must exit non-zero when the change is not
+#               clean (or when it could not run). Example: 'my-gate-reviewer --base "$BASE_REF"'
+# ADVISORY_CMD  Optional. The advisory reviewer's command line (same rules). It must exit 0
+#               or non-zero freely: the result is only a warning. Leave empty to skip.
+#               Example: 'my-advisory-reviewer --base "$BASE_REF"'
+# ADVISORY_POST_FLAG  Appended to ADVISORY_CMD when the branch has a PR, so the reviewer
+#               upserts its marker comment. Default: --post
+# BASE_REF      What both reviewers diff against. Use the remote-tracking ref, never the local
+#               branch: a stale local base reviews every upstream commit you do not have.
+# REMOTE        The remote fetched before reviewing.
+GATE_CMD="${GATE_CMD-}"
+ADVISORY_CMD="${ADVISORY_CMD-}"
+ADVISORY_POST_FLAG="${ADVISORY_POST_FLAG---post}"
+BASE_REF="${BASE_REF-origin/main}"
+REMOTE="${REMOTE-origin}"
+# =========================================================================================
+
+if [[ -z "$GATE_CMD" ]]; then
+  echo "review.sh: GATE_CMD is not configured — edit the CONFIGURATION block at the top." >&2
+  exit 2
+fi
+
+# A stale base silently invalidates BOTH reviews (they scope the diff against it), so a
+# fetch failure is fatal, not ignorable.
+if ! git fetch "$REMOTE"; then
+  echo "Unable to refresh $REMOTE — aborting review (a stale base would invalidate both reviews)." >&2
+  exit 1
+fi
+
+# A review is valid for one commit. Hand the reviewers the SHA so they can name it in what
+# they post; a verdict that does not say which commit it covers cannot be checked at merge.
+REVIEW_HEAD_SHA="$(git rev-parse HEAD 2>/dev/null || true)"
+export BASE_REF REVIEW_HEAD_SHA
+
+echo "=== Gate review (blocks) — ${REVIEW_HEAD_SHA:0:12} vs $BASE_REF ==="
+bash -c "$GATE_CMD"
+gate_exit=$?
+
+if [[ -n "$ADVISORY_CMD" ]]; then
+  echo ""
+  echo "=== Advisory review (never blocks) ==="
+  post_flag=""
+  # `gh pr view` exits non-zero both when the branch has no PR and on real failures (auth,
+  # network, not a repo). Only the first is "no PR yet"; do not misread the rest as it.
+  if ! command -v gh >/dev/null 2>&1; then
+    echo "⚠ gh not found — could not determine PR state (advisory will print only)." >&2
+  elif pr_state=$(gh pr view --json number 2>&1); then
+    post_flag="$ADVISORY_POST_FLAG"
+  elif grep -qi "no pull requests found" <<<"$pr_state"; then
+    echo "No PR for this branch yet — the advisory reviewer will print only." \
+      "After 'gh pr create', re-run it with $ADVISORY_POST_FLAG to stamp the PR."
+  else
+    echo "⚠ Could not determine PR state (advisory will print only):" >&2
+    echo "$pr_state" >&2
+  fi
+  if ! bash -c "$ADVISORY_CMD $post_flag"; then
+    echo "⚠ The advisory reviewer could not run (advisory — not blocking)." \
+      "Check its credentials and configuration." >&2
+  fi
+fi
+
+exit "$gate_exit"
