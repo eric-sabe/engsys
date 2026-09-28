@@ -1,0 +1,20 @@
+# {{ORG}} fleet supervisor config: TEMPLATE rendered by `fleet supervise` into .fleet/supervisor.conf.
+# Its presence enables the supervisor job (jobs/launchd: fleet-supervisor, every 5 minutes), which
+# relaunches a monster that crashed or asked to rotate and never touches a live one.
+# LAUNCH_CMD and TMUX_SESSION default to this instance's own; they need no lines here.
+# Repo holding the ledgers.
+REPO={{PIN_REPO}}
+# Minutes a live session must sit idle after its "rotation requested" heartbeat before it is relaunched.
+# ROTATE_GRACE_MIN=3
+#
+# <session>|<ledger issue>|<stale minutes>[|<owner/name>]
+# Only ledger-bearing monsters belong here. The ledger number is 0 until you create the ledgers:
+#   <engsys>/core/skills/merge-monster/scripts/mm-setup.sh --repo {{PIN_REPO}}
+#   <engsys>/core/skills/maintenance-monster/scripts/mnt-setup.sh --repo {{PIN_REPO}}
+# Each prints its ledger issue number: put it in place of the 0 below AND in that monster's config
+# (ledger_issue in the repo's merge-monster.yml / maintenance-monster.yml). The supervisor skips a
+# session whose ledger it cannot read, so a 0 is skipped (and logged) every cycle until it is filled in.
+# Stale minutes = the monster's stale_lock_minutes plus a grace period (its config default is 45).
+# A monster for another repo takes the optional 4th field: acme-other-mm|0|60|owner/other-repo
+{{NAMESPACE}}-mm|0|60
+{{NAMESPACE}}-maintain|0|60

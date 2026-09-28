@@ -6,12 +6,13 @@
 //   ./install install --into <path> [--config <file>] [--dry-run] [--force]
 //   ./install update  --into <path> [--config <file>] [--dry-run]
 //   ./install verify  --into <path>
+//   ./install fleet init --into <dir> --org <slug> --namespace <ns> --pin-repo <owner/repo> --pin-dir <path> [...]
 //
 // The engsys source root is the directory this script lives in.
 
 const path = require('path');
 const fs = require('fs');
-const { runInstall, runUninstall, runVerify, runEnableProviders, ENGSYS_VERSION } = require('./lib/commands');
+const { runInstall, runUninstall, runVerify, runEnableProviders, runFleetInit, fleetInitReport, ENGSYS_VERSION } = require('./lib/commands');
 const { exists } = require('./lib/util');
 
 const engsysRoot = __dirname;
@@ -24,6 +25,15 @@ function parseArgs(argv) {
     else if (a === '--force') args.force = true;
     else if (a === '--into') args.into = argv[++i];
     else if (a === '--config') args.config = argv[++i];
+    else if (a === '--org') args.org = argv[++i];
+    else if (a === '--namespace') args.namespace = argv[++i];
+    else if (a === '--pin-repo') args.pinRepo = argv[++i];
+    else if (a === '--pin-dir') args.pinDir = argv[++i];
+    else if (a === '--instance-marketplace') args.instanceMarketplace = argv[++i];
+    else if (a === '--identity') args.identity = argv[++i];
+    else if (a === '--cloud') args.cloud = argv[++i];
+    else if (a === '--engsys-dir') args.engsysDir = argv[++i];
+    else if (a === '--worktrees-dir') args.worktreesDir = argv[++i];
     else if (a === '--help' || a === '-h') args.help = true;
     else args._.push(a);
   }
@@ -56,6 +66,22 @@ Commands:
       install: appends a providers: block (comma-separated names from: codex,
       deepseek, grok, anthropic) with per-role model defaults to the project
       config, then runs update. Refuses if the config already has one.
+  fleet init --into <dir> --org <slug> --namespace <ns> --pin-repo <owner/repo> --pin-dir <path>
+             [--instance-marketplace <name>] [--identity github-app|none] [--cloud azure|none]
+             [--engsys-dir <path>] [--worktrees-dir <path>] [--dry-run] [--force]
+      Scaffold a new fleet instance repo (config, roster, env and supervisor templates, the
+      scripts/fleet shim, README, ownership register; optionally the instance plugin) that the
+      engsys fleet kit runs as-is. Refuses to overwrite existing files unless --force. Prints the
+      next steps: ledgers, identity, plugin pins, sync, launch.
+        --org <slug>                  machine-path and launchd-label slug (~/.config/<org>/, com.<org>.fleet.*)
+        --namespace <ns>              session-name prefix (<ns>-mm, <ns>-maintain, <ns>-build, ...)
+        --pin-repo <owner/repo>       the repo whose .claude/settings.json holds the plugin pins
+        --pin-dir <path>              its local checkout on the fleet host (the sessions' workdir)
+        --instance-marketplace <name> also scaffold the instance plugin (marketplace, SessionStart hook, per-repo configs)
+        --identity github-app|none    github-app sets GH_APP_ENV=~/.config/<org>/gh-app.env (default none)
+        --cloud azure|none            azure adds the service-principal env source + login job (default none)
+        --engsys-dir <path>           pinned engsys checkout on the host (default ~/git/engsys)
+        --worktrees-dir <path>        agent worktrees (default: <pin-dir's parent>/worktrees)
   uninstall --into <path> [--dry-run]
       Remove everything engsys added and restore the project's prior files (from
       .claude/.engsys-backup/). The project's own agents/files are left intact.
@@ -158,6 +184,32 @@ function main() {
     console.log(`engsys init → wrote ${path.relative(process.cwd(), dest) || dest}`);
     console.log('  Edit it (pick cloud / iac / lang / platform / db / agents), then:');
     console.log(`    engsys install --into ${args.into || '.'}`);
+    process.exit(0);
+  }
+
+  if (cmd === 'fleet') {
+    const sub = args._[1];
+    if (sub !== 'init') {
+      console.error(`error: ${sub ? `unknown fleet command: ${sub}` : 'fleet needs a subcommand'} (only \`fleet init\` lives here; day-to-day fleet commands are scripts/fleet in an instance)`);
+      process.exit(1);
+    }
+    if (!args.into) { console.error('error: --into <dir> is required'); process.exit(1); }
+    const into = path.resolve(args.into);
+    let r;
+    try {
+      r = runFleetInit({
+        engsysRoot, into, force: args.force, dryRun: args.dryRun,
+        org: args.org, namespace: args.namespace, pinRepo: args.pinRepo, pinDir: args.pinDir,
+        instanceMarketplace: args.instanceMarketplace, identity: args.identity, cloud: args.cloud,
+        engsysDir: args.engsysDir, worktreesDir: args.worktreesDir,
+      });
+    } catch (e) {
+      console.error(`error: ${e.message}`);
+      process.exit(1);
+    }
+    const tag = args.dryRun ? ' (dry run — nothing written)' : '';
+    console.log(`engsys fleet init${tag} → ${into}`);
+    console.log(fleetInitReport(r, { into: args.into }));
     process.exit(0);
   }
 

@@ -1,0 +1,14 @@
+# OS and editor cruft
+.DS_Store
+*.swp
+
+# Machine-local rendered fleet state (fleet/*.tmpl is rendered into here) and runtime logs
+.fleet/
+logs/
+
+# Secrets and credentials: never committed. Env files hold pointers to keys; the keys themselves stay on the host.
+*.pem
+*.key
+*.env
+# ...but the env templates are the point of this repo
+!*.env.tmpl
