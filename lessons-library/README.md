@@ -66,6 +66,7 @@ lessons relevant to its chosen stack. For now, promotion is manual via PR.
 - [prove-causation-before-acting](prove-causation-before-acting.md) — observe at the deciding boundary before fixing.
 - [re-read-state-before-acting](re-read-state-before-acting.md) — re-read at the moment you act, not at session start.
 - [gate-changes-on-measurement-not-vibes](gate-changes-on-measurement-not-vibes.md) — eval/golden-set, not intuition.
+- [llm-review-verify-demotes-and-truncation-fails-loud](llm-review-verify-demotes-and-truncation-fails-loud.md) — verify passes demote and never delete; verifier not weaker than generator; a truncated response is an error, not "no findings".
 - [shift-correctness-left-and-distrust-false-greens](shift-correctness-left-and-distrust-false-greens.md) — pre-push checks; a gate that didn't run is a false green.
 - [each-review-layer-catches-a-different-bug-class](each-review-layer-catches-a-different-bug-class.md) — hygiene, threat-model, static-analysis and advisory reviewers have different blind spots.
 - [review-and-ci-are-per-commit-not-per-pr](review-and-ci-are-per-commit-not-per-pr.md) — verdicts name a SHA; an appended commit needs re-review and fresh CI.

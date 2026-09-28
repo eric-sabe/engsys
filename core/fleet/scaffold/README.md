@@ -51,4 +51,7 @@ tmux attach -t {{NAMESPACE}}          # look at the sessions (detach: Ctrl-b d)
 - Azure service principal: `stacks/cloud/azure/fleet/README.md` in the engsys repo
 {{/if}}
 - Merge Monster and Maintenance Monster: the `merge-monster` and `maintenance-monster` skills in engsys
+{{#if resource_broker}}
+- Resource Broker (the optional third monster) and its pool: the `resource-broker` and `durable-lease` skills in engsys
+{{/if}}
 - Who owns what, and how to hand the fleet over: [`docs/TRANSITION.md`](docs/TRANSITION.md)

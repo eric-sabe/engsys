@@ -1,0 +1,64 @@
+# Resource Broker per-repo config: copy to resource-broker.yml in the fleet config dir (or to
+# .claude/resource-broker.yml in the repo; in-repo wins) and edit. Read by the model at session
+# start; the scripts read the keys marked [script] themselves (small reader: top-level keys plus one
+# level of nesting, no lists), and every one of those also has a flag.
+# Skill: SKILL.md next to this file. Pool primitives: the durable-lease skill.
+
+repo: owner/name
+session_name: <ns>-broker # advertised in the ledger (discovery); the async-grant nudge target
+ledger_issue: 0 # printed by scripts/broker-setup.sh --repo owner/name; distinct from the Merge/Maintenance ledgers [script]
+
+state_dir: logs/resource-broker # working memory: state.md, journal, .watch/ (keep gitignored) [script]
+poll_interval: 30 # seconds: the active-reap tick of broker-watch.sh [script]
+heartbeat_minutes: 30 # ScheduleWakeup fallback tick
+stale_lock_minutes: 60 # mirrors the fleet supervisor conf's threshold for this session
+
+# The pool this broker arbitrates. The pool file is durable-lease's JSON format (slot table, provision /
+# reset / health commands, grantEnv ...): see the durable-lease skill. acme-pool.json next to this
+# file is a starting point.
+lease:
+  pool_file: acme-pool.json # relative to THIS file's directory, or absolute [script]
+  store: "" # LEASE_STORE, an absolute path shared with every hook and agent that takes slots.
+  # Empty = <git toplevel of the cwd>/logs/leases (fine for one checkout; set it once worktrees are involved) [script]
+  owner: <ns>-broker # the --owner for pump / reconcile / host windows [script]
+  owner_pattern: '^<ns>-[a-z0-9][a-z0-9-]{0,62}$' # LEASE_OWNER_PATTERN: fences the store to this namespace. Empty = any safe token [script]
+
+# Optional host-tier actions (restart a container runtime, say). Absent = the broker refuses host
+# windows. A restart command must never destroy data: broker-host-window.sh refuses one that reads as
+# destructive (delete, destroy, prune, wipe, purge, rm).
+host:
+  health_cmd: "" # exits 0 when the host resources are healthy; polled after a restart [script]
+  restart_cmd: "" # e.g. a runtime "restart"; never a delete or reset [script]
+  window_minutes: 30 # TTL of the slot leases a window holds (the safety net if the script dies) [script]
+
+# The decide-vs-actuate seam. The broker ACTUATES: it grants and reaps leases, runs the provision /
+# reset / health commands, relays grant nudges, and runs host windows when directed. It never DECIDES
+# whether an environment is healthy or whether a failure is a flake or a regression; the session that
+# owns that decision (below) directs it, and the broker executes.
+owns: [lease_actuation, per_slot_reset, active_reaping, host_window_actuation]
+does_not_own: [environment_health_decisions, flake_vs_regression, migration_history_reconciliation]
+
+escalation:
+  slack_channel: "" # shared with the other monsters; empty = GitHub-only (broker:escalated label + ledger comment)
+
+# Cross-session messaging (docs/agent-messaging.md), reused as-is. Omit the block to run without it.
+messaging:
+  session_name: <ns>-broker
+  decider_session_name: <ns>-maintain # the ONLY session whose env-mutation directives the broker acts on
+  merge_session_name: <ns>-mm # told when a host window drains and clears, so it can hold gated merges
+  namespace_prefix: <ns>- # only ever address / trust names with this prefix
+  inbound: accept # required crossSessionInbound value for this session
+
+# Subagent liveness (docs/subagent-liveness.md): the same substrate as the other monsters (scripts in
+# <engsys-root>/skills/merge-monster/scripts/: mm-agent-reg.sh, mm-agent-watch.sh); state is namespaced
+# by state_dir. The broker mostly runs fast synchronous CLI calls, so leave this out unless you dispatch
+# long-running investigations.
+# liveness:
+#   stale_minutes: 10
+#   stale_probe: true
+#   deadline_minutes:
+#     default: 15
+#   extension_max: 1
+#   respawn_max: 2
+#   probe_retry_minutes: 5
+#   probe_retries_max: 2

@@ -89,6 +89,9 @@ from the vault, then `scripts/fleet sync`, `scripts/fleet launch` and `scripts/f
 | Session namespace | `{{NAMESPACE}}-*` |
 | Merge Monster ledger | `{{PIN_REPO}}` issue TODO |
 | Maintenance Monster ledger | `{{PIN_REPO}}` issue TODO |
+{{#if resource_broker}}
+| Resource Broker ledger | `{{PIN_REPO}}` issue TODO |
+{{/if}}
 | Kill switch | Close a ledger issue; the monster stops and the supervisor leaves it alone |
 
 ## 6. External services

@@ -2,7 +2,7 @@
 name: code-review
 description: 'Local code review before push — a gate reviewer (must be clean) plus an optional advisory reviewer on the same diff, with findings persisted under stable PR-comment markers. Default code-review skill. Trigger for any explicit review request AND autonomously when the agent thinks a review is needed (code/PR/quality/security).'
 metadata:
-  version: '0.3.0'
+  version: '0.4.0'
 ---
 
 # Local Code Review
@@ -44,6 +44,28 @@ Reviews are deliberate invocations, **not** part of the pre-push hook — a mult
 shouldn't block every push. Run them before the push that opens/updates the PR.
 
 For deeper, security-focused passes, the built-in `/security-review` command is also available.
+
+## Running a paired review (methodology, wrapper, bake-off)
+
+The rules behind the two roles above live in engsys `docs/review-methodology.md`. The ones to keep in
+your head while reviewing:
+
+- The advisory reviewer never blocks. The gate's exit code decides the push.
+- A verify pass may only **demote** a finding (lower severity, `unconfirmed`, reason shown), never delete
+  it, and the verifier is never weaker than the generator.
+- A truncated or non-clean model stop is an error, never "no findings".
+- Match marker comments by leading position and author; each review names the commit it covered, and a
+  commit pushed after the review reopens it.
+
+**One command for both reviewers.** Copy `core/templates/review/review.sh.tmpl` (plugin mode:
+`templates/review/review.sh.tmpl`) to `scripts/review.sh` and fill in `GATE_CMD`, `ADVISORY_CMD` and
+`BASE_REF` in its config block. It fetches first (a failed fetch is fatal), runs the gate, then the
+advisory reviewer, passing `--post` only when the branch has a PR. Its exit code is the gate's.
+
+**Deciding whether the advisory reviewer earns the gate.** After a few dozen PRs carry both markers, run
+`node core/scripts/review-bakeoff.mjs harvest ...` then `score ...` (overlap, unique findings, precision
+from an operator label file, cost per useful finding). Set the switch criterion before looking at the data.
+See the methodology doc, section 7, for the comment formats the scorer reads.
 
 ## External review CLIs
 

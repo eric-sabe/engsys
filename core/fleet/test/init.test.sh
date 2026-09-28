@@ -219,6 +219,47 @@ file_has "TRANSITION.md: still complete" "$MIN/docs/TRANSITION.md" "Change log"
 if bash -n "$MIN/scripts/fleet"; then ok "bash -n scripts/fleet"; else bad "bash -n scripts/fleet"; fi
 if [ -x "$MIN/scripts/fleet" ]; then ok "shim is executable"; else bad "shim is executable"; fi
 
+echo "== B2. --resource-broker: the optional third monster"
+RB="$T/rb"
+run init --into "$RB" "${INIT_COMMON[@]}" --pin-dir "$HOME/git/app" --resource-broker
+rc_is "init --resource-broker exits 0" 0
+has "…next steps create the broker ledger too" "$OUT" "~/git/engsys/core/skills/resource-broker/scripts/broker-setup.sh --repo acme/app"
+has "…and point at the pool file to edit" "$OUT" "fleet/repos/acme/app/acme-pool.json"
+eq "file set: the minimal set plus the broker config and the pool file" "$(file_list "$RB")" "$(printf '%s\n' $MIN_FILES fleet/repos/acme/app/resource-broker.yml fleet/repos/acme/app/acme-pool.json | LC_ALL=C sort | paste -sd' ' -)"
+eq "no {{…}} token is left" "$(grep -rlF '{{' "$RB" | paste -sd' ' -)" ""
+file_has "roster: the broker is a monster with the launch prompt and no permission prompts" "$RB/fleet/roster.tmpl" "acme-broker|__PIN_DIR__|/engsys:resource-broker fleet config dir: __FLEET_REPO__/fleet/repos/acme/app|--model __BROKER_MODEL__ --effort __BROKER_EFFORT__ --remote-control --dangerously-skip-permissions"
+file_has "supervisor.conf: the broker with a 0 ledger placeholder" "$RB/fleet/supervisor.conf.tmpl" "acme-broker|0|60"
+file_has "supervisor.conf: its setup script is listed" "$RB/fleet/supervisor.conf.tmpl" "resource-broker/scripts/broker-setup.sh --repo acme/app"
+file_has "fleet.conf: the broker's model" "$RB/fleet/fleet.conf" "BROKER_MODEL=claude-opus-5-5"
+file_has "fleet.conf: …and effort" "$RB/fleet/fleet.conf" "BROKER_EFFORT=low"
+file_has "TRANSITION.md: the broker ledger is in the ownership register" "$RB/docs/TRANSITION.md" "Resource Broker ledger"
+BCFG="$RB/fleet/repos/acme/app"
+file_has "resource-broker.yml: repo filled in" "$BCFG/resource-broker.yml" "repo: acme/app"
+file_has "…session name" "$BCFG/resource-broker.yml" "session_name: acme-broker"
+file_has "…owner" "$BCFG/resource-broker.yml" "owner: acme-broker"
+file_has "…the owner fence is the namespace" "$BCFG/resource-broker.yml" "owner_pattern: '^acme-[a-z0-9][a-z0-9-]{0,62}\$'"
+file_has "…the decider is the maintenance lane" "$BCFG/resource-broker.yml" "decider_session_name: acme-maintain"
+file_hasnt "…no leftover <ns>" "$BCFG/resource-broker.yml" "<ns>"
+if jq -e '.name == "acme-pool" and .bookkeeper == "acme-broker" and (.slots | length) == 2' "$BCFG/acme-pool.json" >/dev/null 2>&1; then ok "the pool file is valid JSON with two slots and the namespaced names"; else bad "the pool file is valid JSON with two slots and the namespaced names"; fi
+# the scaffolded config and pool file work with the real reader and pool CLI
+run bash "$CORE_SRC/skills/resource-broker/scripts/broker-config.sh" --config-dir "$BCFG"
+rc_is "the broker's config reader finds the scaffolded config in the fleet config dir" 0
+has "…and reads its pool file key" "$OUT" "lease.pool_file: acme-pool.json"
+run node "$CORE_SRC/lib/lease/pool-cli.mjs" status --pool "$BCFG/acme-pool.json" --store "$T/rb-store" --owner-pattern '^acme-[a-z0-9][a-z0-9-]{0,62}$'
+rc_is "pool-cli loads the scaffolded pool file" 0
+eq "…both slots free" "$(jq -r '[.slots[].state] | join(",")' <<<"$OUT")" "free,free"
+# a namespace other than acme renames the pool file and the owners inside it
+ZED="$T/zed"
+run init --into "$ZED" --org zed --namespace zed --pin-repo zed/app --pin-dir "$HOME/git/app" --resource-broker
+rc_is "another namespace scaffolds" 0
+if [ -f "$ZED/fleet/repos/zed/app/zed-pool.json" ]; then ok "the pool file is named for the namespace"; else bad "the pool file is named for the namespace" "$(file_list "$ZED")"; fi
+file_has "…the config names it" "$ZED/fleet/repos/zed/app/resource-broker.yml" "pool_file: zed-pool.json"
+file_has "…and its bookkeeper satisfies the config's fence" "$ZED/fleet/repos/zed/app/zed-pool.json" '"bookkeeper": "zed-broker"'
+# without the flag there is no broker anywhere
+file_hasnt "no flag: no broker in the roster" "$MIN/fleet/roster.tmpl" "broker"
+file_hasnt "no flag: none in the supervisor conf" "$MIN/fleet/supervisor.conf.tmpl" "broker"
+file_hasnt "no flag: no broker model keys" "$MIN/fleet/fleet.conf" "BROKER"
+
 echo "== C. refusing to overwrite, --force, --dry-run, validation"
 sum_before="$(cat "$MIN"/fleet/fleet.conf "$MIN"/README.md | cksum)"
 run init --into "$MIN" "${INIT_COMMON[@]}" --pin-dir "$HOME/git/app"
@@ -422,6 +463,31 @@ hasnt "jobs: no azure login" "$OUT" "az-sp-login"
 run "$INST/scripts/fleet" supervise
 rc_is "supervise ticks" 0
 has "supervisor.conf rendered" "$(cat "$STATE/supervisor.conf")" "acme-mm|0|60"
+
+echo "-- resource broker scaffold: the kit launches and supervises the third monster"
+INST="$RB"; STATE="$INST/.fleet"
+rm -rf "$FAKE/tmux" "$HOME/git/worktrees"; : >"$FAKE/tmux.log"
+run "$INST/scripts/fleet" launch
+rc_is "scripts/fleet launch exits 0" 0
+eq "roster: every token rendered (BROKER_MODEL and BROKER_EFFORT included)" "$(unrendered "$STATE/roster")" ""
+R="$(cat "$STATE/roster")"
+CFG="$INST/fleet/repos/acme/app"
+has "roster: the broker line, rendered" "$R" "acme-broker|$P|/engsys:resource-broker fleet config dir: $CFG|--model claude-opus-5-5 --effort low --remote-control --dangerously-skip-permissions"
+eq "six windows launched" "$(grep -c . "$FAKE/tmux/windows")" 6
+has "the broker runs in the session env with its prompt before the flags" "$(launched acme-broker)" "set -a && . $STATE/env/session.env && set +a && claude --name acme-broker"
+has "…and the command file's prompt" "$(launched acme-broker)" "/engsys:resource-broker"
+if [ -f "$CFG/resource-broker.yml" ] && [ -f "$CFG/acme-pool.json" ]; then ok "the config dir the prompt names holds the broker config and its pool file"; else bad "the config dir the prompt names holds the broker config and its pool file"; fi
+run "$INST/scripts/fleet" supervise
+rc_is "supervise ticks" 0
+has "supervisor.conf rendered with the broker" "$(cat "$STATE/supervisor.conf")" "acme-broker|0|60"
+(
+  export FLEET_INSTANCE="$INST"
+  # shellcheck source=/dev/null
+  . "$E/core/fleet/lib/fleet-env.sh"
+  eq "kit: the broker is a supervisor monster" "$(fleet_ledger_sessions | paste -sd' ' -)" "acme-mm acme-maintain acme-broker"
+  eq "kit: it is in the roster" "$(fleet_roster_sessions | paste -sd' ' -)" "acme-mm acme-maintain acme-broker acme-build acme-investigate acme-design"
+) || bad "kit library checks aborted (resource broker)"
+if [ -f "$CORE_SRC/commands/resource-broker.md" ] && grep -Fq 'argument-hint: "[fleet config dir: /abs/path]"' "$CORE_SRC/commands/resource-broker.md"; then ok "the /engsys:resource-broker command exists and takes the fleet config dir"; else bad "the /engsys:resource-broker command exists and takes the fleet config dir"; fi
 
 # =============================================================================================
 pass="$(wc -l <"$T/pass.log" | tr -d ' ')"; fail="$(wc -l <"$T/fail.log" | tr -d ' ')"

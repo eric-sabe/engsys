@@ -81,7 +81,7 @@ orchestrators, commands, workflows) plus one `engsys-<value>` plugin per stack p
 ```json
 {
   "extraKnownMarketplaces": {
-    "engsys": { "source": { "source": "github", "repo": "eric-sabe/engsys", "ref": "v1.3.0" }, "autoUpdate": false }
+    "engsys": { "source": { "source": "github", "repo": "eric-sabe/engsys", "ref": "v1.4.0" }, "autoUpdate": false }
   },
   "enabledPlugins": {
     "engsys@engsys": true,
@@ -92,7 +92,7 @@ orchestrators, commands, workflows) plus one `engsys-<value>` plugin per stack p
 ```
 
 Declaring plugins doesn't install them — install once per machine (`claude plugin marketplace add
-eric-sabe/engsys#v1.3.0`, then `claude plugin install engsys@engsys` and each pack), or accept the
+eric-sabe/engsys#v1.4.0`, then `claude plugin install engsys@engsys` and each pack), or accept the
 prompt when opening the project. In plugin mode:
 
 - **The project's own `CLAUDE.md` is its project facts.** The core plugin injects the generic engsys
@@ -237,7 +237,8 @@ core/               stack-agnostic — always installed
                     required-check skip), husky hooks, precheck + worktree-bootstrap skeletons
   fleet/            fleet kit: fleet sync · pin · restart · launch · supervise · install-jobs,
                     identity (GitHub App bot), launchd jobs, `engsys fleet init` scaffold
-  lib/              agent-safety libraries: untrusted-data envelope, hermetic child git
+  lib/              agent-safety libraries (untrusted-data envelope, hermetic child git) and
+                    lease/: durable lease + resource pool (host-resource coordination)
 
 stacks/             detachable capability packs — pick per project (scalar or list)
   cloud/            aws · azure · gcp · cloudflare
@@ -250,7 +251,7 @@ stacks/             detachable capability packs — pick per project (scalar or 
 
 optional-agents/    opt-in: sandy (marketing), jos (monetization), steve (morale)
 lessons-library/    curated cross-project lessons (seeded into projects on install)
-docs/               architecture · naturalization · fleet-guide · merge/maintenance monsters · …
+docs/               architecture · naturalization · fleet-guide · review-methodology · monsters · …
 lib/  install       the zero-dep Node installer
 index.html          single-page visual explainer
 team-images/        team roster art (lib/generate-team-avatars.mjs (re)generates it)
@@ -365,7 +366,10 @@ canary order for adopting an engsys release. Related: the
 [identity kit](core/fleet/identity/README.md), the
 [Azure service-principal login](stacks/cloud/azure/fleet/README.md), the
 [`agent-sessions` skill](core/skills/agent-sessions/SKILL.md) (launcher, roster, supervisor), and the
-[merge](docs/merge-monster.md) and [maintenance](docs/maintenance-monster.md) monsters.
+[merge](docs/merge-monster.md) and [maintenance](docs/maintenance-monster.md) monsters, and the optional
+[resource broker](core/skills/resource-broker/SKILL.md) for shared host resources (on the
+[durable lease](core/skills/durable-lease/SKILL.md)). Reviewing agent PRs with more than one reviewer:
+[review methodology](docs/review-methodology.md).
 
 ## Feedback loop
 

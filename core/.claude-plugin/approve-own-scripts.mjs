@@ -30,6 +30,9 @@ export const ALLOWED = new Set([
   'maintenance-monster/scripts/mnt-watch.sh',
   'maintenance-monster/scripts/mnt-snapshot.sh',
   'maintenance-monster/scripts/mnt-heartbeat.sh',
+  'resource-broker/scripts/broker-watch.sh',
+  'resource-broker/scripts/broker-heartbeat.sh',
+  'resource-broker/scripts/broker-reconcile.sh',
 ]);
 
 // Characters that can chain, redirect, substitute, expand, or escape. Rejected anywhere (after an

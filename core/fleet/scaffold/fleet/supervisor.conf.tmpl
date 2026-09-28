@@ -11,6 +11,9 @@ REPO={{PIN_REPO}}
 # Only ledger-bearing monsters belong here. The ledger number is 0 until you create the ledgers:
 #   <engsys>/core/skills/merge-monster/scripts/mm-setup.sh --repo {{PIN_REPO}}
 #   <engsys>/core/skills/maintenance-monster/scripts/mnt-setup.sh --repo {{PIN_REPO}}
+{{#if resource_broker}}
+#   <engsys>/core/skills/resource-broker/scripts/broker-setup.sh --repo {{PIN_REPO}}
+{{/if}}
 # Each prints its ledger issue number: put it in place of the 0 below AND in that monster's config
 # (ledger_issue in the repo's merge-monster.yml / maintenance-monster.yml). The supervisor skips a
 # session whose ledger it cannot read, so a 0 is skipped (and logged) every cycle until it is filled in.
@@ -18,3 +21,6 @@ REPO={{PIN_REPO}}
 # A monster for another repo takes the optional 4th field: acme-other-mm|0|60|owner/other-repo
 {{NAMESPACE}}-mm|0|60
 {{NAMESPACE}}-maintain|0|60
+{{#if resource_broker}}
+{{NAMESPACE}}-broker|0|60
+{{/if}}
