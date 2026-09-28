@@ -114,7 +114,7 @@ fleet_refresh_refs
 
 fleet_check_engsys() { # the host scripts must come from the same engsys release as the plugins
   [ -n "$ENGSYS_REF" ] || fleet_die "no engsys pin found in $PIN_SETTINGS"
-  [ -d "$ENGSYS_DIR/.git" ] || fleet_die "engsys checkout not found at $ENGSYS_DIR — git clone <engsys repo> $ENGSYS_DIR, then run: fleet sync"
+  [ -e "$ENGSYS_DIR/.git" ] || fleet_die "engsys checkout not found at $ENGSYS_DIR — git clone <engsys repo> $ENGSYS_DIR, then run: fleet sync"
   local have
   have="$(fleet_git_at "$ENGSYS_DIR")"
   [ "$have" = "$ENGSYS_REF" ] || echo "fleet: WARNING engsys checkout is at '$have', the pin is '$ENGSYS_REF' — run: fleet sync" >&2

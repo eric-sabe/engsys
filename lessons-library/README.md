@@ -33,6 +33,8 @@ One lesson per file. Keep them LLM-optimized and trigger-first:
 
 ### Stack-specific lessons
 
+The installer seeds a stack-tagged lesson only into projects that install a matching pack (`pnpm` → `lang/typescript`, `react`/`web` → `platform/web`, `prisma` → `db/prisma`; otherwise the pack whose name equals the tag). Untagged lessons are seeded everywhere.
+
 Most lessons are stack-agnostic. A lesson that only applies when a project uses a
 particular tool or framework carries both of:
 
