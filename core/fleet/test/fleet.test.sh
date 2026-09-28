@@ -445,6 +445,8 @@ S_ENV="$(cat "$STATE/env/session.env")"; X_ENV="$(cat "$STATE/env/security.env")
 has "session env rendered from the (v0.2.0) template" "$S_ENV" 'MODEL_ALIAS="model-m"'
 has "…including the new line" "$S_ENV" "EXTRA=v2"
 has "session env gets the identity lines" "$S_ENV" "GIT_AUTHOR_NAME=fleet-bot"
+has "session env puts the gh shim first on PATH" "$S_ENV" "core/fleet/identity/bin"
+has "session env drops an inherited GH_TOKEN" "$S_ENV" "unset GH_TOKEN GITHUB_TOKEN"
 has "security env sources the session env" "$X_ENV" ". \"$STATE/env/session.env\""
 has "security env overrides the model" "$X_ENV" 'MODEL_ALIAS="model-s"'
 has "every rendered env gets the identity lines" "$X_ENV" "GIT_AUTHOR_NAME=fleet-bot"
@@ -619,6 +621,7 @@ reset_tmux
 run fleet launch
 rc_is "launch works without an identity" 0
 hasnt "env files carry no identity lines" "$(cat "$STATE/env/session.env")" "GIT_AUTHOR_NAME"
+hasnt "env files carry no gh shim without identity" "$(cat "$STATE/env/session.env")" "core/fleet/identity/bin"
 run fleet install-jobs --dry-run
 has "gh-app-login job is not installed without GH_APP_ENV" "$OUT" "skipped: com.acme.fleet.gh-app-login (GH_APP_ENV is not set)"
 rm -f "$HOME/.config/acme/fleet.local.conf"
