@@ -1,0 +1,17 @@
+{
+  "name": "{{INSTANCE_MARKETPLACE}}",
+  "owner": {
+    "name": "{{ORG}}"
+  },
+  "metadata": {
+    "description": "{{ORG}}'s layer on top of engsys: fleet context, per-repo monster configs and org skills.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "{{INSTANCE_MARKETPLACE}}",
+      "source": "./plugin",
+      "description": "{{ORG}} fleet context and per-repo monster configs."
+    }
+  ]
+}

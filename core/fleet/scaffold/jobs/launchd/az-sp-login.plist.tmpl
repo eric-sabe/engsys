@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd job: keep the fleet host's Azure service-principal login healthy (isolated AZURE_CONFIG_DIR,
+  certificate credential), via stacks/cloud/azure/fleet/az-sp-login.sh in the engsys checkout.
+  TEMPLATE: rendered and loaded by `fleet install-jobs` (do not copy by hand). It renders to the label
+  com.<FLEET_ORG>.fleet.az-sp-login.
+  Runs at load and every 6 hours; a fast no-op when the profile is already logged in as the right principal.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>__LABEL__</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__ENGSYS_DIR__/stacks/cloud/azure/fleet/az-sp-login.sh</string>
+    <string>__AZURE_SP_ENV__</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>StartInterval</key>
+  <integer>21600</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/az-sp-login.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/az-sp-login.log</string>
+</dict>
+</plist>
