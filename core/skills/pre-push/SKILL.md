@@ -48,6 +48,16 @@ The first column is the project's actual path globs; the second is the project's
 This skill defines the **discipline** (diff-aware, fast, gracefully degrading), not the specific
 tooling.
 
+**Reference skeleton (in the engsys repo):** `core/templates/repo-gates/scripts/precheck.sh.tmpl` implements this contract
+as a table-driven selector. You declare gates as `name|path-regex|command` rows and keep the generic
+machinery: the branch diff against `origin/main`, the docs / agent-config-only fast path that skips
+the build gate (an empty diff still runs it), `fail()` setting `FAILED` plus an ERR trap so a gate
+cannot print `[FAIL]` and exit 0, a Docker preflight for gates flagged `@docker`, the `PUSH_OVERRIDE=1`
+escape, and a summary that exits non-zero on any failure. Its README (`core/templates/repo-gates/README.md`)
+covers adopting it, the husky `pre-push` hook that calls it, and `worktree-bootstrap.sh.tmpl`, which links
+the husky shim so pushes from a worktree still hit the gate. Start from it rather than writing a
+gate script from scratch.
+
 ## Design Constraints
 
 - Target: fast enough to run on every push (aim for under ~10 min for a single changed spec).
@@ -122,7 +132,9 @@ the local review findings as a PR comment for the closeout ceremony to mine. Ful
 
 Draft PRs should skip the expensive full matrices (browser/e2e, a11y, flake audits) in CI; keep
 those for Ready-for-review. If your CI opens PRs as ready by default, add a workflow that demotes
-opened-as-ready PRs to draft automatically.
+opened-as-ready PRs to draft automatically (template:
+`core/templates/repo-gates/github/workflows/auto-draft-pr.yml`; it needs the repo setting "Allow GitHub
+Actions to create and approve pull requests" and comments when that setting is missing).
 
 Workflow:
 

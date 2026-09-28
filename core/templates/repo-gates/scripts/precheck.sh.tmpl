@@ -1,0 +1,282 @@
+#!/usr/bin/env bash
+# precheck.sh — shift-left CI gate. Run before every push (the husky pre-push
+# hook calls it). Copy to scripts/precheck.sh, then edit the CONFIG block.
+#
+# It computes the files changed on this branch (`git diff origin/main...HEAD`),
+# selects the gates whose path-regex matches, and runs only those. The gate
+# TABLE is the only part you edit; the machinery below it is generic.
+#
+# Usage:
+#   bash scripts/precheck.sh                  # standard, diff-driven run
+#   bash scripts/precheck.sh --full           # run every gate regardless of the diff
+#   bash scripts/precheck.sh --dry-run        # print which gates would run, run none
+#   PUSH_OVERRIDE=1 bash scripts/precheck.sh  # skip everything (CI is the only safety net)
+#
+# Contract this file keeps (each one exists because the failure it prevents happened):
+#   - fail() sets FAILED itself, so a gate cannot print [FAIL] and still exit 0.
+#   - `trap 'FAILED=1' ERR` plus an EXIT summary: an unexpected error mid-run
+#     never yields a green exit.
+#   - A gate the diff TRIGGERED never skips silently. A triggered gate that needs
+#     Docker fails FAST, before the slow gates, with the remediation command.
+#   - An unresolvable base ref runs every gate (fail closed) rather than gating
+#     on an empty diff.
+#   - Docs / agent-config-only diffs skip the build gate (they cannot change the
+#     build); an EMPTY diff still runs it.
+
+set -Eeuo pipefail
+
+# >>> CONFIG (edit this block; everything below it is generic machinery)
+
+# The ref the branch diff is computed against.
+BASE_REF="${PRECHECK_BASE:-origin/main}"
+
+# Field separator inside a GATES row. The path-regex field is an ERE, so it cannot
+# contain this string: with the default `|`, write `\.[jt]sx?$` rather than
+# `\.(ts|js)$`. If you need alternation, set a different separator, e.g. '@@'.
+GATE_SEP='|'
+
+# Files matching this ERE cannot change the build. A diff made ONLY of such files
+# skips the gate whose regex field is `:build`.
+DOCS_ONLY_REGEX='(\.md$|^docs/|^\.claude/|^\.agents/)'
+
+# Shown when a triggered gate needs Docker and the daemon is unavailable.
+DOCKER_REMEDIATION="start your container engine (Docker Desktop / OrbStack / colima), wait until 'docker info' works, then re-run"
+
+# GATES: one row per gate, `name<SEP>path-regex<SEP>command`, run in table order.
+#
+#   name        Label shown in output. Optional flag suffixes, appended with '@':
+#                 @docker      the gate needs a running Docker daemon (preflight,
+#                              before anything slow runs)
+#                 @needs-build if this gate is selected, the `:build` gate runs too,
+#                              even on a docs-only diff (e.g. e2e serves built output)
+#   path-regex  An ERE tested against every changed path (a gate is selected when
+#               any path matches), or one of two tokens:
+#                 :build   run on an empty diff or any diff with a non-docs file
+#                          (the docs / agent-config fast path skips it)
+#                 :always  run on every invocation, even an empty diff
+#   command     Run with `bash -c` from the repo root; exit 0 = pass. It may contain
+#               the separator (it is the rest of the row). Exported to it:
+#                 PRECHECK_GATE_FILES  the changed paths matching this gate's regex
+#                 PRECHECK_CHANGED     every changed path (newline-separated)
+#               A gate for optional tooling should skip itself when the tool is
+#               absent (see the workflows row), so a missing optional tool never
+#               fails the push.
+GATES=(
+  'build+lint|:build|npm run build && npm run lint'
+  'unit-tests|\.[jt]sx?$|npm test'
+  'markdown|\.md$|npx --no-install markdownlint-cli2 "**/*.md"'
+  'e2e@docker@needs-build|e2e/|npm run test:e2e'
+  'docker-smoke@docker|Dockerfile|docker build -q -f Dockerfile . -t precheck-smoke'
+  'workflows|^\.github/workflows/|command -v actionlint >/dev/null 2>&1 && actionlint || echo "actionlint not installed; validate the workflow by hand"'
+  'repo-config-guard|:always|test "$(git config --get core.bare || echo false)" != true'
+)
+
+# <<< CONFIG
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+# ---------------------------------------------------------------------------
+# Escape hatch
+# ---------------------------------------------------------------------------
+if [[ "${PUSH_OVERRIDE:-0}" == "1" ]]; then
+  echo ""
+  echo "  PUSH_OVERRIDE=1: skipping all precheck gates."
+  echo "  You are responsible for any CI failures this causes."
+  echo ""
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+  BOLD=$'\033[1m'; RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'; RESET=$'\033[0m'
+else
+  BOLD=''; RED=''; GREEN=''; YELLOW=''; RESET=''
+fi
+
+pass() { echo "${GREEN}[PASS]${RESET} $1"; }
+# fail() marks the run failed itself: a gate cannot print [FAIL] yet pass.
+fail() { echo "${RED}[FAIL]${RESET} $1"; FAILED=1; }
+info() { echo "${YELLOW}[INFO]${RESET} $1"; }
+header() { printf '\n%s=== %s ===%s\n' "$BOLD" "$1" "$RESET"; }
+
+FAILED=0
+FINISHED=0
+trap 'FAILED=1' ERR
+
+# EXIT trap: if the script dies before the summary (an unexpected error under
+# `set -e`), say so, and never let that path exit 0.
+on_exit() {
+  local status=$?
+  if [[ "$FINISHED" != 1 ]]; then
+    echo ""
+    echo "${RED}${BOLD}PRECHECK ABORTED: unexpected error (exit $status). Do not push.${RESET}"
+    [[ "$status" -eq 0 ]] && exit 1
+  fi
+}
+trap on_exit EXIT
+
+START_TIME=$(date +%s)
+
+FULL=0
+DRY_RUN=0
+for arg in "$@"; do
+  case "$arg" in
+    --full) FULL=1 ;;
+    --dry-run) DRY_RUN=1 ;;
+    -h|--help) sed -n '2,17p' "${BASH_SOURCE[0]}"; FINISHED=1; exit 0 ;;
+    *) echo "precheck: unknown argument: $arg" >&2; FINISHED=1; exit 2 ;;
+  esac
+done
+
+# ---------------------------------------------------------------------------
+# Parse and validate the gate table (loud, up front: a typo must not silently
+# drop a gate).
+# ---------------------------------------------------------------------------
+NAMES=(); FLAGS=(); REGEXES=(); CMDS=()
+for row in ${GATES[@]+"${GATES[@]}"}; do
+  if [[ "$row" != *"$GATE_SEP"*"$GATE_SEP"* ]]; then
+    echo "precheck: malformed GATES row (need name${GATE_SEP}path-regex${GATE_SEP}command): $row" >&2
+    FINISHED=1; exit 2
+  fi
+  head="${row%%"$GATE_SEP"*}"
+  rest="${row#*"$GATE_SEP"}"
+  NAMES+=("${head%%@*}")
+  if [[ "$head" == *@* ]]; then FLAGS+=("@${head#*@}@"); else FLAGS+=("@"); fi
+  REGEXES+=("${rest%%"$GATE_SEP"*}")
+  CMDS+=("${rest#*"$GATE_SEP"}")
+done
+GATE_COUNT=${#NAMES[@]}
+if [[ "$GATE_COUNT" -eq 0 ]]; then
+  echo "precheck: no gates configured; edit the GATES table in the CONFIG block." >&2
+  FINISHED=1; exit 2
+fi
+
+has_flag() { [[ "${FLAGS[$1]}" == *"@$2@"* ]]; }
+
+# ---------------------------------------------------------------------------
+# Determine changed files (branch diff vs BASE_REF)
+# ---------------------------------------------------------------------------
+header "Detecting changed files"
+
+BASE_OK=1
+if git remote get-url origin >/dev/null 2>&1; then
+  git fetch origin --quiet 2>/dev/null || true
+fi
+if git rev-parse --verify --quiet "${BASE_REF}^{commit}" >/dev/null; then
+  CHANGED="$(git diff --name-only "${BASE_REF}...HEAD")"
+else
+  BASE_OK=0
+  CHANGED=""
+  info "Cannot resolve $BASE_REF; cannot tell what changed, so running EVERY gate."
+fi
+[[ "$BASE_OK" == 0 ]] && FULL=1
+
+if [[ -z "$CHANGED" && "$BASE_OK" == 1 ]]; then
+  info "No changed files vs $BASE_REF. Running :build and :always gates only."
+fi
+[[ -n "$CHANGED" ]] && printf '%s\n' "$CHANGED" | sed 's/^/  /'
+export PRECHECK_CHANGED="$CHANGED"
+
+# Docs / agent-config-only diff? (non-empty diff whose every path is docs-only)
+BUILD_INPUTS="$(printf '%s\n' "$CHANGED" | grep -vE "$DOCS_ONLY_REGEX" | grep -v '^$' | head -1 || true)"
+
+# ---------------------------------------------------------------------------
+# Select gates (pass 1), then promote build for @needs-build (pass 2)
+# ---------------------------------------------------------------------------
+SEL=(); MATCHES=(); BUILD_IDX=()
+for ((i = 0; i < GATE_COUNT; i++)); do
+  SEL[i]=0; MATCHES[i]=""
+  regex="${REGEXES[$i]}"
+  case "$regex" in
+    :always) SEL[i]=1 ;;
+    :build)
+      BUILD_IDX+=("$i")
+      if [[ "$FULL" == 1 || -z "$CHANGED" || -n "$BUILD_INPUTS" ]]; then SEL[i]=1; fi
+      ;;
+    *)
+      m=""
+      [[ -n "$CHANGED" ]] && m="$(printf '%s\n' "$CHANGED" | grep -E -- "$regex" || true)"
+      if [[ "$FULL" == 1 || -n "$m" ]]; then SEL[i]=1; fi
+      MATCHES[i]="$m"
+      ;;
+  esac
+done
+for ((i = 0; i < GATE_COUNT; i++)); do
+  if [[ "${SEL[$i]}" == 1 ]] && has_flag "$i" needs-build; then
+    for b in ${BUILD_IDX[@]+"${BUILD_IDX[@]}"}; do SEL[b]=1; done
+  fi
+done
+
+# ---------------------------------------------------------------------------
+# Docker preflight: fail here, before any slow gate, with an exact remediation
+# instead of a confusing mid-run error.
+# ---------------------------------------------------------------------------
+DOCKER_GATES=""
+for ((i = 0; i < GATE_COUNT; i++)); do
+  if [[ "${SEL[$i]}" == 1 ]] && has_flag "$i" docker; then DOCKER_GATES+=" ${NAMES[$i]}"; fi
+done
+if [[ -n "$DOCKER_GATES" && "$DRY_RUN" == 0 ]]; then
+  if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+    header "Docker preflight"
+    fail "Docker is not available, but this diff selected gate(s) that need it:${DOCKER_GATES}"
+    echo "  Remediation: ${DOCKER_REMEDIATION}"
+    echo "  Or bypass (CI is then the only safety net): PUSH_OVERRIDE=1 git push ..."
+    echo ""
+    FINISHED=1
+    exit 1
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# Run the selected gates
+# ---------------------------------------------------------------------------
+RAN=0; PASSED=0; SKIPPED=""
+for ((i = 0; i < GATE_COUNT; i++)); do
+  name="${NAMES[$i]}"
+  if [[ "${SEL[$i]}" != 1 ]]; then
+    SKIPPED+=" $name"
+    if [[ "${REGEXES[$i]}" == ":build" ]]; then
+      info "Gate $name: skipped (only Markdown / docs / agent config changed)"
+    fi
+    continue
+  fi
+  if [[ "$DRY_RUN" == 1 ]]; then
+    echo "[DRY-RUN] would run: $name"
+    continue
+  fi
+  header "Gate: $name"
+  RAN=$((RAN + 1))
+  export PRECHECK_GATE_FILES="${MATCHES[$i]}"
+  if bash -c "${CMDS[$i]}"; then
+    PASSED=$((PASSED + 1))
+    pass "$name"
+  else
+    fail "$name: fix the failure above before pushing"
+  fi
+done
+
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
+ELAPSED=$(( $(date +%s) - START_TIME ))
+header "Precheck complete"
+echo "  Gates run: $RAN, passed: $PASSED, failed: $((RAN - PASSED))"
+[[ -n "$SKIPPED" ]] && echo "  Skipped (not selected by this diff):${SKIPPED}"
+echo "  Time: ${ELAPSED}s"
+
+FINISHED=1
+if [[ "$FAILED" -eq 1 ]]; then
+  echo ""
+  echo "${RED}${BOLD}PRECHECK FAILED: do not push.${RESET}"
+  echo "  Fix the failures above, then re-run: bash scripts/precheck.sh"
+  echo ""
+  echo "  Emergency bypass (use with care):"
+  echo "    PUSH_OVERRIDE=1 git push ..."
+  exit 1
+fi
+echo ""
+echo "${GREEN}${BOLD}PRECHECK PASSED: safe to push.${RESET}"
+echo ""

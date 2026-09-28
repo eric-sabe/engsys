@@ -1,0 +1,99 @@
+name: Auto-convert opened PR to draft
+
+# Demotes any newly-opened non-draft PR to draft so that expensive CI jobs
+# (browser matrices, accessibility audits, flake audits) are skipped until the
+# author marks it Ready for review. Pair it with draft-gated jobs in your main
+# CI: `if: github.event.pull_request.draft == false`, and remember to list
+# `ready_for_review` in that workflow's `pull_request.types` (see the
+# github-actions skill, section 3) so marking Ready actually schedules them.
+#
+# Exclusions:
+#   - Dependabot PRs (dependency bumps should run the full gate immediately)
+#   - PRs whose title starts with "Release" (release automation needs full CI)
+#
+# Required one-time repo setting (an operator action; a token scope is not
+# enough):
+#   Settings -> Actions -> General -> Workflow permissions ->
+#   enable "Allow GitHub Actions to create and approve pull requests"
+# With the setting off, the convertPullRequestToDraft mutation returns
+# FORBIDDEN even though the job has `pull-requests: write`. This workflow does
+# not fail the PR in that case: it posts a comment that names the setting, so
+# the author knows the PR was NOT demoted and what to change.
+#
+# Manual equivalent: `gh pr create --draft`, then mark it ready only when you
+# want the full CI to fire.
+
+on:
+  pull_request:
+    types: [opened]
+
+concurrency:
+  group: auto-draft-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  enforce-draft:
+    # toLower() is not a valid expression function; use three startsWith checks.
+    if: |
+      github.event.pull_request.draft == false &&
+      github.actor != 'dependabot[bot]' &&
+      !startsWith(github.event.pull_request.title, 'Release') &&
+      !startsWith(github.event.pull_request.title, 'release') &&
+      !startsWith(github.event.pull_request.title, 'RELEASE')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Convert to draft
+        id: convert
+        # The comment step below reports the outcome, so a failed conversion
+        # must not fail the job (and must not stop that step from running).
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Pass the node id via env rather than inline template expansion, so a
+          # value with shell metacharacters can never reach the shell parser.
+          PR_NODE_ID: ${{ github.event.pull_request.node_id }}
+        run: |
+          # shellcheck disable=SC2016 # $id is a GraphQL variable, not a shell one
+          # Capture stdout and stderr so the comment step can inspect the real
+          # error text. Use the GITHUB_OUTPUT heredoc form: `gh api` returns
+          # multi-line JSON on failure, and `key=value` truncates after line 1.
+          if ! convert_output=$(gh api graphql \
+              -F id="$PR_NODE_ID" \
+              -f query='mutation($id:ID!){ convertPullRequestToDraft(input:{pullRequestId:$id}){ pullRequest{ id isDraft } } }' \
+              2>&1); then
+            {
+              echo "convert_error<<__CONVERT_EOF__"
+              echo "${convert_output}"
+              echo "__CONVERT_EOF__"
+            } >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+      - name: Comment with the outcome
+        # Run whether the conversion succeeded or failed (but not when the run
+        # was cancelled).
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          CONVERT_OUTCOME: ${{ steps.convert.outcome }}
+          CONVERT_ERROR: ${{ steps.convert.outputs.convert_error }}
+        run: |
+          if [ "$CONVERT_OUTCOME" = "success" ]; then
+            body="Auto-converted to draft to defer expensive CI. Mark **Ready for review** once your local review is resolved; that triggers the full gate."
+          elif printf '%s' "$CONVERT_ERROR" | grep -qiE "FORBIDDEN|Resource not accessible"; then
+            body=":warning: **Auto-draft conversion failed.** This PR was not converted to draft. The repo setting **Settings -> Actions -> General -> Workflow permissions -> Allow GitHub Actions to create and approve pull requests** must be enabled for the conversion to work. Please convert to draft manually, or ask a maintainer to enable the setting."
+          else
+            # Keep the error to a sane length and strip backticks so it cannot
+            # break out of the inline code span below.
+            err="$(printf '%s' "$CONVERT_ERROR" | tr -d '`' | head -c 500)"
+            body=":warning: **Auto-draft conversion failed.** This PR was not converted to draft. Unexpected error: \`${err}\`. Please convert to draft manually and investigate the workflow run."
+          fi
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body "$body"

@@ -1,0 +1,66 @@
+// markdownlint-cli2 config: a correctness-only allowlist.
+//
+// Copy to .markdownlint-cli2.jsonc at the repo root.
+//
+// Tuned for engineering docs (long prose, lots of code fences, occasional
+// inline HTML, dev-only localhost URLs). The rules enabled are the ones whose
+// violation breaks rendering or links, which reviewers reliably flag on PRs:
+// catching them locally beats a post-push review loop.
+{
+  "config": {
+    // ALLOWLIST model: default off, enable only the rules we actually enforce.
+    // (`default: true` silently enforces ~55 rules, contradicting any curation
+    // the comments describe, and a large backlog accumulates. Enforce a
+    // deliberate subset and keep the repo at zero.)
+    "default": false,
+
+    // Principle: enforce CORRECTNESS (rules whose violation breaks rendering or
+    // links), skip pure STYLE.
+    //
+    // -- Structure / whitespace (broken render) ------------------------------
+    "MD031": true, // blank lines around fenced code blocks
+    "MD022": true, // blank lines around headings
+    "MD032": true, // blank lines around lists (else they render as one paragraph)
+    "MD058": true, // blank lines around tables
+    "MD012": true, // no multiple consecutive blank lines
+    "MD009": { "br_spaces": 0 }, // no trailing whitespace
+    "MD047": true, // file ends with a single newline
+    "MD018": true, // space after # in atx headings (#Heading renders as text)
+    // -- Fences / code / emphasis (broken render) ----------------------------
+    "MD040": true, // language identifier on fenced code blocks
+    "MD038": true, // no space inside code spans
+    "MD037": true, // no spaces inside emphasis markers (** bold ** renders literally)
+    "MD036": true, // emphasis used as a heading
+    // -- Links / tables (broken links / broken tables) -----------------------
+    "MD039": true, // no space inside link text
+    "MD042": true, // no empty links [text]()
+    "MD051": true, // link fragments (#anchors) must resolve
+    "MD052": true, // reference links must use defined labels
+    "MD056": true // table column count must be consistent
+
+    // -- Considered and intentionally NOT enforced (pure style) --------------
+    // MD013 line length, MD024 duplicate headings, MD025 multiple H1,
+    // MD026 heading punctuation, MD029 ordered-list prefix, MD028 blockquote
+    // blanks, MD033 inline HTML, MD034 bare URLs, MD041 first-line-h1,
+    // MD049/MD050 emphasis-marker style, MD001 heading increment.
+    // These fire heavily on engineering docs for low value; off by default.
+  },
+
+  // No `globs` here on purpose: the lint-staged hook passes specific files, and
+  // `globs` UNIONs with argv (linting every .md in the repo even when one file
+  // is staged). For an explicit whole-repo run, glob `**/*.md` on the command
+  // line (`npx markdownlint-cli2 "**/*.md"`).
+  "ignores": [
+    "**/node_modules/**",
+    "**/dist/**",
+    "**/build/**",
+    "**/coverage/**",
+    "**/CHANGELOG.md", // usually auto-generated
+    "tmp/**", // scratch space
+    "logs/**", // runtime output, machine-written, not authored docs
+    ".claude/worktrees/**", // transient full-repo copies: never lint these
+    ".agents/**", // vendored skills: not yours to lint
+    "**/playwright-report/**", // generated test artifacts
+    "**/test-results/**" // generated test artifacts (failure context files)
+  ]
+}
