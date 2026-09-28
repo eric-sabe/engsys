@@ -81,7 +81,7 @@ orchestrators, commands, workflows) plus one `engsys-<value>` plugin per stack p
 ```json
 {
   "extraKnownMarketplaces": {
-    "engsys": { "source": { "source": "github", "repo": "eric-sabe/engsys", "ref": "v1.1.3" }, "autoUpdate": false }
+    "engsys": { "source": { "source": "github", "repo": "eric-sabe/engsys", "ref": "v1.2.0" }, "autoUpdate": false }
   },
   "enabledPlugins": {
     "engsys@engsys": true,
@@ -92,7 +92,7 @@ orchestrators, commands, workflows) plus one `engsys-<value>` plugin per stack p
 ```
 
 Declaring plugins doesn't install them — install once per machine (`claude plugin marketplace add
-eric-sabe/engsys#v1.1.3`, then `claude plugin install engsys@engsys` and each pack), or accept the
+eric-sabe/engsys#v1.2.0`, then `claude plugin install engsys@engsys` and each pack), or accept the
 prompt when opening the project. In plugin mode:
 
 - **The project's own `CLAUDE.md` is its project facts.** The core plugin injects the generic engsys
@@ -233,6 +233,9 @@ core/               stack-agnostic — always installed
                     github-actions, merge-monster, pre-push, refactor, …
   workflows/        long-form procedure docs the commands reference
   templates/        CLAUDE.md, settings, hook, ADR + issue templates
+  fleet/            fleet kit: fleet sync · pin · restart · launch · supervise · install-jobs,
+                    identity (GitHub App bot), launchd jobs, `engsys fleet init` scaffold
+  lib/              agent-safety libraries: untrusted-data envelope, hermetic child git
 
 stacks/             detachable capability packs — pick per project (scalar or list)
   cloud/            aws · azure · gcp · cloudflare
@@ -245,7 +248,7 @@ stacks/             detachable capability packs — pick per project (scalar or 
 
 optional-agents/    opt-in: sandy (marketing), jos (monetization), steve (morale)
 lessons-library/    curated cross-project lessons (seeded into projects on install)
-docs/               architecture · naturalization
+docs/               architecture · naturalization · fleet-guide · merge/maintenance monsters · …
 lib/  install       the zero-dep Node installer
 index.html          single-page visual explainer
 team-images/        team roster art (lib/generate-team-avatars.mjs (re)generates it)
@@ -321,6 +324,46 @@ choice, not a requirement:
 - **`ENV_FILE=`**: the hook for a durable machine identity (e.g. a
   certificate-credential cloud service principal) so no session depends on an
   interactive login surviving the night.
+
+## The always-on fleet: engsys fleet kit
+
+engsys can run as an **always-on fleet** on one machine: a merge orchestrator, a security and dependency
+watchdog, and interactive worker roles, each a named long-running Claude Code session in tmux, relaunched
+by a supervisor that has no LLM in its restart path. The **fleet kit** (`core/fleet/`) is the host tooling
+for it:
+
+- **`fleet sync` / `fleet restart`**: your config, context and org skills live in a small *instance repo*;
+  engsys stays a tag-pinned upstream. One `fleet sync` makes the host match the pins without touching a
+  running session, and `fleet restart --stale` cycles sessions onto the new versions when you choose.
+- **`fleet pin`**: cut a release of your instance plugin and open a reviewed, refs-only pin PR.
+- **An identity that is not a person**: a GitHub App bot, scoped to the fleet's own processes through
+  environment-carried git config and a `gh` shim, so nothing global is written and a person's own git and
+  `gh` are untouched. An optional Azure service-principal login ships in the Azure pack.
+- **`fleet install-jobs`**: renders and loads the launchd jobs (supervisor, identity health check).
+- **`engsys fleet init`**: scaffolds the instance repo, and `/engsys:fleet-bootstrap` walks an agent through
+  the whole bring-up, stopping wherever a human must create a credential.
+
+**Quickstart** (macOS; the host needs `git`, `gh`, `jq`, `tmux`, `node` in `/opt/homebrew/bin`, and Claude
+Code from Homebrew; details in the guide):
+
+```bash
+git clone https://github.com/eric-sabe/engsys ~/git/engsys            # the pinned checkout the kit runs from
+~/git/engsys/install fleet init --into ~/git/acme-fleet --org acme --namespace acme \
+  --pin-repo owner/repo --pin-dir ~/git/repo --instance-marketplace acme --identity github-app
+#   ...a human creates the GitHub App and places its key (core/fleet/identity/README.md),
+#   creates the ledgers (mm-setup.sh, mnt-setup.sh), and pins the release tags in owner/repo's .claude/settings.json
+~/git/acme-fleet/scripts/fleet sync                                   # checkouts + plugins to the pins
+~/git/acme-fleet/scripts/fleet launch                                 # start the sessions
+~/git/acme-fleet/scripts/fleet install-jobs                           # supervisor + identity jobs
+```
+
+Read the [fleet guide](docs/fleet-guide.md) for the decisions (plugin vs copy mode, one repo vs several,
+the instance-layer pattern, identity, models), the generic host setup, and day-2 operations including the
+canary order for adopting an engsys release. Related: the
+[identity kit](core/fleet/identity/README.md), the
+[Azure service-principal login](stacks/cloud/azure/fleet/README.md), the
+[`agent-sessions` skill](core/skills/agent-sessions/SKILL.md) (launcher, roster, supervisor), and the
+[merge](docs/merge-monster.md) and [maintenance](docs/maintenance-monster.md) monsters.
 
 ## Feedback loop
 

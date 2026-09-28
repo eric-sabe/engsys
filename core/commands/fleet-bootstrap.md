@@ -76,12 +76,15 @@ exists and is a git checkout; if not, tell the human to `git clone` it there, th
 Run `engsys fleet init` (or, from the checkout, `node "$ENGSYS_DIR/install" fleet init ...`). It refuses to
 guess: pass every flag from the facts.
 
-<!-- verify-against: fleet-init -->
 ```bash
 engsys fleet init --into <instance dir> --org <slug> --namespace <ns> \
   --pin-repo <owner/repo> --pin-dir <path> \
-  [--instance-marketplace <name>] [--identity github-app|none] [--cloud azure|none]
+  [--instance-marketplace <name>] [--identity github-app|none] [--cloud azure|none] \
+  [--engsys-dir <path>] [--worktrees-dir <path>] [--dry-run]
 ```
+
+Run it with `--dry-run` first and show the operator the file list. Never pass `--force` without their
+explicit go-ahead.
 
 If `<instance dir>` already exists and is not empty, stop and ask; never overwrite the operator's files.
 Afterwards read what it produced (`fleet/fleet.conf`, `fleet/roster.tmpl`, `fleet/env/*.env.tmpl`,

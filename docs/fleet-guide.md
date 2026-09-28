@@ -436,7 +436,6 @@ printf 'protocol=https\nhost=github.com\n\n' | git credential-osxkeychain erase
 
 #### Step 1: scaffold
 
-<!-- verify-against: fleet-init -->
 ```bash
 engsys fleet init --into ~/git/acme-fleet --org acme --namespace acme \
   --pin-repo owner/repo --pin-dir ~/git/repo \
@@ -453,6 +452,10 @@ engsys fleet init --into ~/git/acme-fleet --org acme --namespace acme \
 | `--instance-marketplace <name>` | optional. Also scaffold an instance plugin under this marketplace name |
 | `--identity github-app\|none` | wire in the GitHub App identity kit (`GH_APP_ENV`) or not |
 | `--cloud azure\|none` | wire in the Azure service-principal login or not |
+| `--engsys-dir <path>` | the host's pinned engsys checkout (`ENGSYS_DIR`); default `~/git/engsys` |
+| `--worktrees-dir <path>` | agent worktrees (`WORKTREES_DIR`); default `<pin-dir's parent>/worktrees` |
+| `--dry-run` | print what would be written; write nothing |
+| `--force` | overwrite existing scaffold files (without it, init refuses and lists the collisions) |
 
 It renders `fleet/fleet.conf`, `fleet/roster.tmpl` (the merge and maintenance monsters plus build,
 investigate and design roles), `fleet/env/session.env.tmpl` (model alias pins) and
@@ -460,8 +463,10 @@ investigate and design roles), `fleet/env/session.env.tmpl` (model alias pins) a
 `docs/TRANSITION.md` and a README. With `--instance-marketplace` it also renders the plugin skeleton:
 `marketplace.json`, `plugin.json`, a generic SessionStart `fleet-context` hook (it injects
 `fleet config dir:`, the repo's `context.md` and `context/org.md`), `context/org.md`, and
-`repos/<owner>/<repo>/` configs copied from the monsters' `config.example.yml` files. It prints the next
-steps, which are the ones below.
+`repos/<owner>/<repo>/` configs copied from the monsters' `config.example.yml` files. Without
+`--instance-marketplace` there is no hook to inject the config dir, so the monster configs go to
+`fleet/repos/<owner>/<repo>/` and the roster passes `fleet config dir: …` in the monsters' prompts. It
+prints the next steps, which are the ones below.
 
 `fleet init` is also reachable as `fleet init ...` from the kit's dispatcher; that simply calls
 `engsys fleet init`. Edit the roster to taste, commit, and push.
@@ -584,7 +589,7 @@ once (section 6.4).
 | Step | Command | What it does | Touches running sessions? |
 |---|---|---|---|
 | **status** | `fleet status` | pins vs host (checkouts, marketplaces, plugins) and which sessions are behind | no |
-| **pin** | `fleet pin --engsys vX.Y.Z` · `fleet pin --fleet next` · both | release your instance plugin, open the pin PR, get it reviewed and labeled, wait for the merge, then sync | no |
+| **pin** | `fleet pin --engsys vX.Y.Z` · `fleet pin --release next` · both | release your instance plugin, open the pin PR, get it reviewed and labeled, wait for the merge, then sync | no |
 | **sync** | `fleet sync` | make the host match the merged pins | no |
 | **restart** | `fleet restart --stale` · `fleet restart acme-build` | cycle sessions onto what is installed, whenever you are ready | **yes** |
 
@@ -612,12 +617,11 @@ either checkout (it names the checkout). It never restarts anything.
 
 ### Recipes
 
-<!-- verify-against: pin.sh -->
 **Ship an instance change** (anything merged to the instance repo's default branch: context, configs,
 models in `fleet/fleet.conf`, roster, host templates):
 
 ```bash
-fleet pin --fleet next
+fleet pin --release next
 ```
 
 `next` is the next patch tag (`v0.1.1` to `v0.1.2`), or pass an explicit `vX.Y.Z`. The release is a stamp
@@ -641,7 +645,7 @@ consume upstream engsys, the tag already exists; if you consume your own fork, r
 on the host:
 
 ```bash
-fleet pin --engsys vX.Y.Z            # add --fleet next to ship an instance change in the same PR
+fleet pin --engsys vX.Y.Z            # add --release next to ship an instance change in the same PR
 ```
 
 **Then, when the sessions can go down:**
@@ -695,7 +699,7 @@ engsys is upstream. Read before you adopt, and adopt one session first.
 
 ### Rollback
 
-`fleet pin --engsys <previous> --fleet <previous>` (existing tags are reused as-is), then
+`fleet pin --engsys <previous> --release <previous>` (existing tags are reused as-is), then
 `fleet restart --stale`. Because sessions keep their loaded versions until restarted, a bad release that
 you have not yet restarted onto costs nothing but a pin PR. For an emergency without a PR, set
 `ENGSYS_REF` and/or `INSTANCE_REF` in `~/.config/<org>/fleet.local.conf`. `fleet sync` will follow that
@@ -721,8 +725,10 @@ Then restart open sessions.
 Models are **instance configuration**: knobs in `fleet/fleet.conf`, rendered into env files and roster
 flags by `fleet launch`. engsys sets no model policy; this section is the pattern that works.
 
-<!-- verify-against: fleet-init -->
-The scaffold creates the first knobs; the names below are conventions, not requirements. Any key you
+The scaffold creates the first knobs (`OPUS_MODEL`…`HAIKU_MODEL`, `SECURITY_MODEL`, and `<ROLE>_MODEL` /
+`<ROLE>_EFFORT` for `MM`, `MAINTAIN`, `BUILD`, `INVESTIGATE`, `DESIGN`); the names are conventions, not
+requirements. Its defaults: the merge monster on the judgment tier at high effort, the maintenance monster
+on `SECURITY_MODEL` (keep `MAINTAIN_MODEL` equal to it), interactive roles on the judgment tier at medium. Any key you
 define in `fleet.conf` is available to every template as `__KEY__`.
 
 ### Alias pins
@@ -747,7 +753,7 @@ not inherit exports, so the launcher writes the env into each window's command l
 Put `--model` and `--effort` in the roster line's extra flags, fed by per-role knobs:
 
 ```
-acme-mm|__PIN_DIR__|/engsys:merge-monster|--model __MERGE_MODEL__ --effort __MERGE_EFFORT__ --remote-control --dangerously-skip-permissions
+acme-mm|__PIN_DIR__|/engsys:merge-monster|--model __MM_MODEL__ --effort __MM_EFFORT__ --remote-control --dangerously-skip-permissions
 acme-build|||--add-dir __WORKTREES_DIR__ --model __BUILD_MODEL__ --effort __BUILD_EFFORT__ --remote-control --permission-mode auto
 ```
 
@@ -767,7 +773,7 @@ The launcher's optional 5th roster field does this without a second roster. A se
 **replaces** the roster-level `ENV_FILE` for that session:
 
 ```
-acme-maintain|__PIN_DIR__|/engsys:maintenance-monster|--model __SECURITY_MODEL__ --remote-control --dangerously-skip-permissions|__ENV_DIR__/security.env
+acme-maintain|__PIN_DIR__|/engsys:maintenance-monster|--model __MAINTAIN_MODEL__ --effort __MAINTAIN_EFFORT__ --remote-control --dangerously-skip-permissions|__ENV_DIR__/security.env
 ```
 
 ```
@@ -791,7 +797,7 @@ is what you pinned against.
 ### Changing a model, and rolling a change out
 
 1. Edit the knob in `fleet/fleet.conf`, PR it to the instance repo.
-2. `fleet pin --fleet next` (release, pin, sync). Alternatively try a value on one host first by putting it
+2. `fleet pin --release next` (release, pin, sync). Alternatively try a value on one host first by putting it
    in `~/.config/<org>/fleet.local.conf` and running `fleet restart <session>`.
 3. `fleet restart <session>` when it can go down. Monsters pick the new env on relaunch.
 4. Stage it: interactive roles first, then the monsters after a week of clean journals. Before promoting an
@@ -884,7 +890,6 @@ format) overrides it per machine. Environment values for `ENGSYS_REF` / `INSTANC
 | `PIN_WAIT_MAX_MIN` | no | Default 240 |
 | anything else | | Instance-defined template variables (model knobs, and so on) |
 
-<!-- verify-against: pin.sh -->
 `REVIEW_*`, `READY_LABEL`, `PREPUSH_SETUP_CMD` and `PIN_WAIT_MAX_MIN` are read by `fleet pin`.
 
 ### Template variables
