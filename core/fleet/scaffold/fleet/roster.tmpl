@@ -25,6 +25,12 @@ PREFLIGHT=bash __ENGSYS_DIR__/stacks/cloud/azure/fleet/az-sp-login.sh __AZURE_SP
 {{NAMESPACE}}-mm|__PIN_DIR__|/engsys:merge-monster{{CONFIG_DIR_ARG}}|--model __MM_MODEL__ --effort __MM_EFFORT__ --remote-control --dangerously-skip-permissions
 # The maintenance lane runs in its own env (the 5th field): alias pins for the security model.
 {{NAMESPACE}}-maintain|__PIN_DIR__|/engsys:maintenance-monster{{CONFIG_DIR_ARG}}|--model __MAINTAIN_MODEL__ --effort __MAINTAIN_EFFORT__ --remote-control --dangerously-skip-permissions|__ENV_DIR__/security.env
+{{#if resource_broker}}
+# The resource broker (optional third monster) arbitrates the host's scarce shared resources, a pool of
+# slots such as test ports and databases, among the sessions: it reaps grants whose holder died and relays
+# grant nudges. It actuates access; the environment-health decisions stay with the maintenance lane.
+{{NAMESPACE}}-broker|__PIN_DIR__|/engsys:resource-broker{{CONFIG_DIR_ARG}}|--model __BROKER_MODEL__ --effort __BROKER_EFFORT__ --remote-control --dangerously-skip-permissions
+{{/if}}
 #
 # Interactive roles: attended, never auto-relaunched. Worktrees live outside the session's working
 # directory, so --add-dir is what stops every edit there from prompting.

@@ -25,9 +25,13 @@
 //   heartbeat  --slot ID --owner OWNER --token T
 //   reset      --slot ID --owner OWNER --token T
 //                Re-run the reset (default: provision) + health commands on a slot you hold.
+//   reprovision --slot ID --owner OWNER [--ttl MIN]
+//                Broker op: take a slot NOBODY holds, run reset + health, release it. A held slot
+//                is refused (code "held"); its holder uses `reset`.
 //   health     --slot ID
 //                Run the health command for a slot (no lease needed).
-//   status       Pool overview: slots, queue (positions + ETAs), moving avg.
+//   status       Pool overview: slots (attrs, kind, state, holder), queue (positions + ETAs),
+//                moving avg, and where the state lives (store, poolDir).
 //   pump       --owner OWNER
 //                One maintenance pass: reap stale slot leases (dead-man's switch), drop silent
 //                queue entries. The lazy path runs this inside every acquire/request anyway.
@@ -36,7 +40,7 @@
 //
 // Common flags: --pool FILE, --store DIR, --owner-pattern REGEX, --pretty,
 //   --provision-cmd CMD, --reset-cmd CMD, --health-cmd CMD, --nudge-cmd CMD
-// Env: LEASE_POOL_FILE (pool file), LEASE_STORE (default logs/leases), LEASE_OWNER_PATTERN,
+// Env: LEASE_POOL_FILE (pool file), LEASE_STORE (default <git toplevel>/logs/leases), LEASE_OWNER_PATTERN,
 //      POOL_TTL_MINUTES, POOL_POLL_MS, POOL_WAITER_TIMEOUT_MS, POOL_PROVISION_CMD,
 //      POOL_RESET_CMD, POOL_HEALTH_CMD, POOL_NUDGE_CMD. Flags win over env, env over the pool
 //      file. Legacy aliases: E2E_LEASE_TTL_MINUTES, E2E_LEASE_POLL_MS,
@@ -57,7 +61,7 @@ import { fileURLToPath } from "node:url";
 import { LeaseUsageError } from "./durable-lease.mjs";
 import { createPool, DEFAULT_TTL_MINUTES } from "./pool.mjs";
 
-const OPS = new Set(["acquire", "request", "claim", "release", "heartbeat", "reset", "health", "status", "pump", "waiter"]);
+const OPS = new Set(["acquire", "request", "claim", "release", "heartbeat", "reset", "reprovision", "health", "status", "pump", "waiter"]);
 const SELF = fileURLToPath(import.meta.url);
 const BOOLEAN_FLAGS = new Set(["force", "pretty", "shell", "no-wait"]);
 /** Flags forwarded verbatim to the detached waiter so it builds the same pool. */
@@ -65,7 +69,7 @@ const PASSTHROUGH_FLAGS = ["pool", "store", "owner-pattern", "provision-cmd", "r
 
 function usageFail(message) {
   process.stderr.write(`pool-cli: ${message}\n`);
-  process.stderr.write("usage: pool-cli <acquire|request|claim|release|heartbeat|reset|health|status|pump> [flags]\n");
+  process.stderr.write("usage: pool-cli <acquire|request|claim|release|heartbeat|reset|reprovision|health|status|pump> [flags]\n");
   process.exit(2);
 }
 
@@ -235,6 +239,10 @@ async function main() {
     }
     case "reset": {
       const result = pool.resetSlot({ slotId: need("slot"), owner: need("owner"), token: need("token") });
+      return out(result, result.ok ? 0 : 1);
+    }
+    case "reprovision": {
+      const result = pool.reprovisionSlot({ slotId: need("slot"), owner: need("owner"), ttlMinutes });
       return out(result, result.ok ? 0 : 1);
     }
     case "health": {

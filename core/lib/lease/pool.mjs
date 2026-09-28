@@ -350,7 +350,7 @@ function envCommand(env, ...names) {
  * @param {object} opts
  * @param {object|string} opts.pool a normalized pool (loadPool / normalizePool), a raw pool
  *   definition object, or a path to a pool file
- * @param {string} [opts.store] lease store dir (see createLeaseStore: option > $LEASE_STORE > logs/leases). `dir` is an alias.
+ * @param {string} [opts.store] lease store dir (see createLeaseStore: option > $LEASE_STORE > <git toplevel>/logs/leases). `dir` is an alias.
  * @param {RegExp|string} [opts.ownerPattern] owner fence (option > $LEASE_OWNER_PATTERN > default)
  * @param {() => number} [opts.now] clock — injectable for tests
  * @param {(slot: object) => void} [opts.provision] grant-time provisioner — replaces the configured
@@ -860,6 +860,32 @@ export function createPool({
     return { ok: true, code: "reset", slot_id: slot.id };
   }
 
+  /**
+   * Broker-side reprovision of a slot NOBODY holds: takes the slot's lease under `owner` (so no
+   * waiter can be granted it meanwhile), runs the reset command and the health check, and
+   * releases it again. A held slot is refused (`code: "held"`): its holder resets it with
+   * `resetSlot`. The lease duration is not recorded in the ETA statistics, since no run happened.
+   * Additive: no existing operation or on-disk record changes.
+   */
+  function reprovisionSlot({ slotId, owner, ttlMinutes: leaseTtl = ttl }) {
+    const slot = requireSlot(slotId);
+    const res = store.acquire({ kind: slot.kind, owner, ttlMinutes: leaseTtl, payload: { reprovision: true } });
+    if (!res.ok) return { ok: false, code: "held", slot_id: slot.id, holder: res.holder };
+    if (res.tookOverExpired) journal({ event: "slot_takeover_on_reprovision", slot_id: slot.id, previous: res.previous });
+    let outcome;
+    try {
+      runReset(slot);
+      runHealth(slot);
+      outcome = { ok: true, code: "reprovisioned", slot_id: slot.id };
+    } catch (err) {
+      outcome = { ok: false, code: "reset_failed", slot_id: slot.id, error: String(err?.message ?? err) };
+    } finally {
+      store.release({ kind: slot.kind, owner, token: res.record.token });
+    }
+    journal({ event: outcome.ok ? "slot_reprovisioned" : "slot_reprovision_failed", slot_id: slot.id, owner, ...(outcome.error ? { error: outcome.error } : {}) });
+    return outcome;
+  }
+
   /** Run the health check for a slot (read-only; no lease needed). */
   function healthCheck({ slotId }) {
     const slot = requireSlot(slotId);
@@ -885,6 +911,8 @@ export function createPool({
     }));
     return {
       ok: true,
+      store: dir,
+      poolDir,
       slots: slotStates().map(({ slot, status }) => ({
         slot_id: slot.id,
         kind: slot.kind,
@@ -923,6 +951,7 @@ export function createPool({
     release,
     heartbeat,
     resetSlot,
+    reprovisionSlot,
     healthCheck,
     poolStatus,
     pump,

@@ -8,9 +8,9 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -428,16 +428,32 @@ test("owner pattern: CLI honors LEASE_OWNER_PATTERN and --owner-pattern (flag be
 });
 
 // ---------------------------------------------------------------------------
-// Store location: --store / store option > LEASE_STORE > logs/leases under the cwd.
+// Store location: --store / store option > LEASE_STORE > logs/leases under the git toplevel of
+// the cwd (the cwd itself when not in a git work tree).
 // ---------------------------------------------------------------------------
 
-test("store: defaults to logs/leases under the cwd; LEASE_STORE overrides; the option beats env", async (t) => {
-  const cwd = tempStoreDir(t);
-  assert.equal(defaultStoreDir(cwd), join(cwd, "logs", "leases"));
+/** Run `fn` with git kept from discovering any repo above `ceiling` (a non-git temp dir is then really non-git). */
+function withGitCeiling(ceiling, fn) {
+  const prev = process.env.GIT_CEILING_DIRECTORIES;
+  process.env.GIT_CEILING_DIRECTORIES = dirname(ceiling);
+  try {
+    return fn();
+  } finally {
+    if (prev === undefined) delete process.env.GIT_CEILING_DIRECTORIES;
+    else process.env.GIT_CEILING_DIRECTORIES = prev;
+  }
+}
 
-  const viaDefault = await runCli(["acquire", "--kind", "k", "--owner", "ci-main", "--ttl", "5"], { cwd, env: { LEASE_STORE: "" } });
+const HERMETIC_GIT = { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+
+test("store: outside git it defaults to logs/leases under the cwd; LEASE_STORE overrides; the option beats env", async (t) => {
+  const cwd = tempStoreDir(t);
+  withGitCeiling(cwd, () => assert.equal(defaultStoreDir(cwd), join(cwd, "logs", "leases")));
+
+  const noGit = { LEASE_STORE: "", GIT_CEILING_DIRECTORIES: dirname(cwd) };
+  const viaDefault = await runCli(["acquire", "--kind", "k", "--owner", "ci-main", "--ttl", "5"], { cwd, env: noGit });
   assert.equal(viaDefault.code, 0, viaDefault.stderr);
-  assert.ok(existsSync(join(cwd, "logs", "leases", "k.json")), "default store is <cwd>/logs/leases");
+  assert.ok(existsSync(join(cwd, "logs", "leases", "k.json")), "outside git the default store is <cwd>/logs/leases");
 
   const envDir = join(cwd, "from-env");
   const viaEnv = await runCli(["acquire", "--kind", "k", "--owner", "ci-main", "--ttl", "5"], { cwd, env: { LEASE_STORE: envDir } });
@@ -452,6 +468,33 @@ test("store: defaults to logs/leases under the cwd; LEASE_STORE overrides; the o
   assert.equal(createLeaseStore({ dir: optDir, env: { LEASE_STORE: envDir } }).dir, optDir);
   assert.equal(createLeaseStore({ store: optDir, env: { LEASE_STORE: envDir } }).dir, optDir);
   assert.equal(createLeaseStore({ env: { LEASE_STORE: envDir } }).dir, envDir);
+});
+
+test("store: inside a git repo the default is logs/leases under the toplevel, from any subdirectory", async (t) => {
+  const repo = realpathSync(tempStoreDir(t));
+  execFileSync("git", ["init", "-q", repo], { env: { ...process.env, ...HERMETIC_GIT } });
+  const deep = join(repo, "packages", "app", "src");
+  mkdirSync(deep, { recursive: true });
+  const top = join(repo, "logs", "leases");
+
+  assert.equal(defaultStoreDir(repo), top);
+  assert.equal(defaultStoreDir(deep), top, "a subdirectory resolves to the same store as the toplevel");
+
+  // A hook started at the toplevel and an agent started deep inside must see each other's leases.
+  const env = { LEASE_STORE: "", ...HERMETIC_GIT };
+  const hook = await runCli(["acquire", "--kind", "shared", "--owner", "ci-main", "--ttl", "5"], { cwd: repo, env });
+  assert.equal(hook.code, 0, hook.stderr);
+  assert.ok(existsSync(join(top, "shared.json")), "the toplevel store holds the lease");
+  const agent = await runCli(["status", "--kind", "shared"], { cwd: deep, env });
+  assert.equal(JSON.parse(agent.stdout).state, "held", "the subdirectory process reads the same store");
+  assert.ok(!existsSync(join(deep, "logs")), "no store is created beside the subdirectory");
+  assert.equal(createLeaseStore({ env: {} }).dir, defaultStoreDir(process.cwd()), "createLeaseStore uses the same default");
+
+  // LEASE_STORE and --store still win over the git default.
+  const pinned = join(repo, "elsewhere");
+  const viaEnv = await runCli(["acquire", "--kind", "k", "--owner", "ci-main", "--ttl", "5"], { cwd: deep, env: { ...env, LEASE_STORE: pinned } });
+  assert.equal(viaEnv.code, 0, viaEnv.stderr);
+  assert.ok(existsSync(join(pinned, "k.json")));
 });
 
 test("on-disk format: record fields, file layout and journal shape are the documented stable format", (t) => {

@@ -66,8 +66,11 @@ Then only `acme-*` owners can acquire, and `reconcile` reaps expired leases of `
 the directory). Owners are session identities, so use the same one for `acquire`, `heartbeat` and
 `release`; a gate typically takes `LEASE_OWNER` from its environment with a default like `ci-local`.
 
-The store defaults to `logs/leases` under the current directory. Set `LEASE_STORE` (or `--store`)
-to share one store between checkouts or worktrees on the host; keep it out of git.
+The store defaults to `logs/leases` under the **git toplevel** of the current directory (the current
+directory itself outside a git work tree), so a hook and an agent started from different
+subdirectories of one checkout share a store. A linked worktree has its own toplevel: set
+`LEASE_STORE` (or `--store`) to one absolute path to share a store between worktrees or checkouts on
+the host, and keep it out of git.
 
 ## The lease CLI
 
@@ -195,8 +198,9 @@ $POOL claim   --request <id> --owner agent-7        # the grant, or the current 
 $POOL heartbeat --slot 1 --owner ci-main --token "$POOL_LEASE_TOKEN"
 $POOL reset     --slot 1 --owner ci-main --token "$POOL_LEASE_TOKEN"   # re-run reset + health on a slot you hold
 $POOL release   --slot 1 --owner ci-main --token "$POOL_LEASE_TOKEN"
+$POOL reprovision --slot 2 --owner broker           # broker op: reset + health on a slot NOBODY holds (a held slot is refused)
 $POOL health    --slot 1                            # run the health command; no lease needed
-$POOL status                                        # slots, queue positions + ETAs, moving average
+$POOL status                                        # slots (attrs, kind, state, holder), queue positions + ETAs, moving average, store + poolDir
 $POOL pump --owner broker                           # one reap + drop-stale maintenance pass
 ```
 
@@ -214,7 +218,7 @@ refusal (saturated, timeout, not owner, provision or health failed) · `2` usage
 - **Liveness both ways.** A slot whose holder stops heartbeating is reaped after its TTL; a queue entry
   whose waiter stops polling is dropped after 90 s. Reaping is lazy (every acquire, request, release
   and pump does it), so it works with no broker running. A broker session may call `pump` on an
-  interval for *active* reaping.
+  interval for *active* reaping: the `resource-broker` skill is exactly that session.
 - **The nudge is latency, not truth.** For an async `request`, the detached waiter grants itself when
   its turn comes and fires a nudge: a JSON line appended to `<store>/<pool name>/nudges.jsonl` and
   piped to the nudge command's stdin when one is configured. Point that command at whatever your
@@ -356,8 +360,9 @@ LEASE_REFERENCE_IMPL=/path/to/other/durable-lease.mjs node --test core/lib/lease
 ## Gotchas
 
 - Same host only (see above). Never put the store on a network filesystem.
-- The default store is relative to the **cwd**. A hook and an agent started from different
-  directories will not see each other's leases unless `LEASE_STORE` is set to one absolute path.
+- The default store is `<git toplevel>/logs/leases`, so different subdirectories of one checkout agree.
+  Different checkouts or linked worktrees do not: set `LEASE_STORE` to one absolute path, in the
+  environment of every hook, agent and broker that should share leases.
 - Never put secrets in a lease `payload`: it is readable by anything that can read the store.
 - Do not `release --force` from automation; it bypasses the fencing token. Use `reap` for a dead
   lease, which refuses a live one.

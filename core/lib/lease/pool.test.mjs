@@ -15,8 +15,8 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { execFile, execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -434,6 +434,26 @@ test("CLI: --shell emits export lines for the hook; heartbeat keeps the lease al
   assert.equal(JSON.parse(rel.stdout).released, true);
 });
 
+test("CLI: without --store or LEASE_STORE the pool store is <git toplevel>/logs/leases, shared by every subdirectory", async (t) => {
+  const repo = realpathSync(tempStoreDir(t));
+  execFileSync("git", ["init", "-q", repo], { env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
+  const deep = join(repo, "apps", "web");
+  mkdirSync(deep, { recursive: true });
+  const run = (args, cwd) =>
+    new Promise((resolvePromise) => {
+      execFile(process.execPath, [CLI, ...args], { cwd, env: { ...CLI_ENV, LEASE_STORE: "" } }, (error, stdout, stderr) =>
+        resolvePromise({ code: error?.code ?? 0, stdout, stderr }),
+      );
+    });
+  const granted = await run(["acquire", "--owner", "acme-build", "--no-wait"], repo);
+  assert.equal(JSON.parse(granted.stdout).ok, true, granted.stderr);
+  assert.ok(existsSync(join(repo, "logs", "leases", "e2e-pool", "queue.json")) || existsSync(join(repo, "logs", "leases", "e2e-slot-1.json")));
+  const seen = await run(["status"], deep);
+  const held = JSON.parse(seen.stdout).slots.filter((s) => s.state === "held");
+  assert.equal(held.length, 1, "a process in a subdirectory sees the slot the toplevel process took");
+  assert.ok(!existsSync(join(deep, "logs")), "no second store appears in the subdirectory");
+});
+
 // ---------------------------------------------------------- slot catalog --
 
 test("slot catalog: the fixture pool's DBs / cache indices / ports are distinct and never overlap", () => {
@@ -572,6 +592,55 @@ test("health command runs after provision; a failing check releases the slot and
   assert.equal(bad.code, 1, bad.stderr);
   const good = await runCli(["acquire", "--owner", "acme-build", "--no-wait"], store, { POOL_HEALTH_CMD: "true" });
   assert.equal(JSON.parse(good.stdout).ok, true, good.stderr);
+});
+
+test("reprovision: the broker resets a slot nobody holds (lease taken, reset + health, released); a held slot is refused", (t) => {
+  const calls = [];
+  const { pool } = fakePool(t, {
+    reset: (slot) => calls.push(`reset ${slot.id}`),
+    health: (slot) => calls.push(`health ${slot.id}`),
+  });
+  const { grant } = grantSelf(pool, "acme-build");
+  const other = pool.slots.find((s) => s.id !== grant.slot_id).id;
+  calls.length = 0; // the grant itself ran health
+
+  const free = pool.reprovisionSlot({ slotId: other, owner: "acme-broker" });
+  assert.deepEqual(free, { ok: true, code: "reprovisioned", slot_id: other });
+  assert.deepEqual(calls, [`reset ${other}`, `health ${other}`]);
+  assert.equal(pool.poolStatus().slots.find((s) => s.slot_id === other).state, "free", "the slot is released again");
+  assert.deepEqual(pool.poolStatus().queue, [], "nothing was queued");
+
+  const held = pool.reprovisionSlot({ slotId: grant.slot_id, owner: "acme-broker" });
+  assert.equal(held.ok, false);
+  assert.equal(held.code, "held");
+  assert.equal(held.holder, "acme-build");
+  assert.equal(calls.length, 2, "a held slot is never reset from under its holder");
+  assert.equal(pool.poolStatus().slots.find((s) => s.slot_id === grant.slot_id).holder, "acme-build");
+});
+
+test("reprovision: a failing reset or health check is reported, and the slot is still released", (t) => {
+  const { pool } = fakePool(t, {
+    reset: () => {
+      throw new Error("slot 1 reset failed (boom)");
+    },
+  });
+  const res = pool.reprovisionSlot({ slotId: 1, owner: "acme-broker" });
+  assert.equal(res.ok, false);
+  assert.equal(res.code, "reset_failed");
+  assert.match(res.error, /boom/);
+  assert.equal(pool.poolStatus().slots.find((s) => s.slot_id === 1).state, "free");
+});
+
+test("status reports where the pool state lives (store, poolDir), so a broker can tail nudges.jsonl", async (t) => {
+  const store = tempStoreDir(t);
+  const status = JSON.parse((await runCli(["status"], store)).stdout);
+  assert.equal(realpathSync(status.store), realpathSync(store));
+  assert.equal(realpathSync(status.poolDir), realpathSync(join(store, "e2e-pool")));
+  const re = await runCli(["reprovision", "--slot", "1", "--owner", "acme-broker"], store, { POOL_RESET_CMD: "true", POOL_HEALTH_CMD: "true" });
+  assert.equal(JSON.parse(re.stdout).code, "reprovisioned", re.stderr);
+  const bad = await runCli(["reprovision", "--slot", "2", "--owner", "acme-broker"], store, { POOL_RESET_CMD: "exit 4 #" });
+  assert.equal(bad.code, 1);
+  assert.equal(JSON.parse(bad.stdout).code, "reset_failed");
 });
 
 test("reset op re-runs the reset command on a slot you hold (token-verified) with POOL_ACTION=reset; health op is read-only", async (t) => {

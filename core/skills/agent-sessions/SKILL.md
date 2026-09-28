@@ -200,6 +200,7 @@ end", and closing the issue as its kill switch.
 
 - Merge orchestrator: [merge-monster](../merge-monster/SKILL.md)
 - Security/dependency watchdog: [maintenance-monster](../maintenance-monster/SKILL.md)
+- Shared host resource pool arbiter (optional third monster): [resource-broker](../resource-broker/SKILL.md)
 - Worker-death detection every session should use:
   [subagent-liveness](../subagent-liveness/SKILL.md)
 - Running and upgrading a fleet from an instance repo: `docs/fleet-guide.md` in

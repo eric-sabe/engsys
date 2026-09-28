@@ -69,6 +69,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 
@@ -82,9 +83,31 @@ export const DEFAULT_OWNER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$/;
 /** Lease kinds are filesystem-safe slugs (they name the record file). Fixed: part of the format. */
 export const KIND_PATTERN = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 
-/** Default store: `logs/leases` relative to the current working directory. */
+/** The git toplevel of `dir`, or null when `dir` is not inside a work tree (or git is unavailable). */
+function gitToplevel(dir) {
+  try {
+    const res = spawnSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd: dir,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 5_000,
+    });
+    const top = res.status === 0 ? res.stdout.trim() : "";
+    return top || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Default store: `logs/leases` under the git toplevel of the working directory, so a hook and an
+ * agent started from different subdirectories of one checkout share a store. Outside a git work
+ * tree (or without git) it falls back to the working directory itself. A linked worktree has its
+ * own toplevel: to share a store between worktrees, set `LEASE_STORE` to one absolute path.
+ */
 export function defaultStoreDir(cwd = process.cwd()) {
-  return join(resolve(cwd), "logs", "leases");
+  const base = resolve(cwd);
+  return join(gitToplevel(base) ?? base, "logs", "leases");
 }
 
 /** Thrown for caller mistakes (bad owner/kind/ttl/config) — distinct from operational outcomes. */
@@ -150,7 +173,7 @@ function validateTtl(ttlMinutes) {
  *
  * @param {object} [opts]
  * @param {string} [opts.store] store directory. Precedence: this option, then `$LEASE_STORE`,
- *   then `logs/leases` under the current working directory. (`dir` is accepted as an alias.)
+ *   then `logs/leases` under the git toplevel of the cwd (the cwd itself outside git). (`dir` is accepted as an alias.)
  * @param {RegExp|string} [opts.ownerPattern] owner fence. Precedence: this option, then
  *   `$LEASE_OWNER_PATTERN`, then DEFAULT_OWNER_PATTERN. Must be anchored.
  * @param {() => number} [opts.now] clock (ms since epoch) — injectable for tests
