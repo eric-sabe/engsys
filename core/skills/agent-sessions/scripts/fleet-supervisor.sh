@@ -108,7 +108,8 @@ iso_to_epoch() {
 
 # Foreground command of the session's tmux pane; empty if window gone.
 pane_cmd() {
-  tmux list-panes -t "${TMUX_SESSION}:$1" -F '#{pane_current_command}' 2>/dev/null | head -1
+  # tmux exits non-zero for a missing window/session; that must read as "gone", not abort the tick
+  tmux list-panes -t "${TMUX_SESSION}:$1" -F '#{pane_current_command}' 2>/dev/null | head -1 || true
 }
 
 # Claude Code shows "esc to interrupt" while a turn is running; absent = idle at the prompt.

@@ -77,5 +77,8 @@ expect "  …and no second relaunch" "!^launch"
 reset; ledger 10 "session end"; pane exited; run
 expect "exited after session end → left stopped" "!^launch"
 
+reset; ledger 90 "ok — merging #12"; rm -f "$T/pane-acme-mm"; run   # no window at all (tmux server gone): tmux exits non-zero
+expect "no window + stale heartbeat → relaunch, the tick is not aborted" "^launch acme-mm"
+
 echo "$pass passed, $fail failed."
 [ "$fail" = 0 ]
