@@ -72,14 +72,22 @@ its holder resets it with `reset`. No pool-file change is needed.
   `LEASE_STORE`), `lease.owner` [script], `lease.owner_pattern` [script] (the owner fence) ·
   `host.health_cmd`, `host.restart_cmd`, `host.window_minutes` [script] (optional) · `escalation`,
   `messaging`, `liveness` (read by you).
+- **Paths in the config:** `lease.pool_file` and `lease.store` are read the same way: a leading `~` expands
+  to `$HOME`, a relative path resolves against the config file's directory (not the cwd), an absolute path is
+  used as is. A `--pool` / `--store` flag is taken verbatim.
 - **The pool file** named by `lease.pool_file` (relative to the config's directory) is durable-lease's JSON
   format. Every client that takes slots (hooks, gates, agents) must use the **same pool file, store and
   owner fence** as you, and owners that satisfy the fence. The default store (`<main checkout>/logs/leases`)
   is shared by every linked worktree of the repo; set `LEASE_STORE` (or `--store`) only when clients run
   from a different clone.
-- The ledger issue exists (`<skill-dir>/scripts/broker-setup.sh --repo <owner/name>` is idempotent and also
-  creates the `broker:*` labels; run it if unsure). `<skill-dir>` is this skill's directory
-  (`<engsys-root>/skills/resource-broker` when installed).
+- The ledger issue exists and carries the heartbeat markers: run
+  `<skill-dir>/scripts/broker-setup.sh --config <config>` (idempotent; it also creates the `broker:*`
+  labels and pins the issue if it is not pinned). With `ledger_issue` set, it **adopts** that issue
+  whatever its title: it checks the issue is open (a closed one is the kill switch and is refused), never
+  creates another, and adds the `<!-- broker-heartbeat -->` marker pair only if the body lacks it (see
+  **The ledger and the heartbeat**), so running it is always safe. With `ledger_issue` empty or 0 it finds
+  or creates the ledger by its title and prints the number to put in the config. `<skill-dir>` is this
+  skill's directory (`<engsys-root>/skills/resource-broker` when installed).
 - `gh` authed with `repo` scope; `jq` and `node` (>= 20) on PATH.
 - The scripts find `pool-cli.mjs` relative to this skill (`core/lib/lease/`, next to `core/skills/`);
   set `POOL_CLI` (and `LEASE_CLI`) if the library lives elsewhere.
@@ -188,6 +196,13 @@ escalate instead. Use `--dry-run` to see what it would do. **Never** run a destr
 delete, prune or wipe of the runtime or its volumes): restart only, and let the operator do anything
 beyond that. Do not build proactive or idle-inferred host refreshes; act only when directed.
 
+**Never skip or shorten the pre-window hold and broadcast because you *believe* a peer session (the merge
+session or the decider) is down.** That belief comes from memory, or from a heartbeat you read earlier, and
+can be stale. Always send the hold message and post the ledger note. A message to an absent session is
+harmless; skipping the hold while that session is live lets merges run on a restarting environment. If a
+peer's liveness matters to a decision, re-read its ledger heartbeat live (`gh issue view`) at decision time,
+and say which timestamp you read.
+
 ## Subagent liveness (optional: `liveness:` config block)
 
 Same substrate as the other monsters: follow **Subagent liveness in
@@ -236,6 +251,13 @@ last: 2026-01-01T12:00:00Z — status: <text>
 <!-- /broker-heartbeat -->
 ```
 
+`broker-setup.sh` puts that block in place. Adopting an existing ledger (`ledger_issue` set): a body that
+already has exactly one broker pair is left alone; a `last: <ISO> — status: <text>` line outside a broker
+pair is wrapped in one, together with an older marker pair directly around it (those lines stay intact
+inside the new pair, until the first heartbeat rewrites the block); a body with no such line gets a pair
+appended with a fresh line, status `adopted by resource broker`. A body with an unpaired or repeated broker
+marker is refused, never guessed at.
+
 `broker-heartbeat.sh` rewrites the middle line (UTC ISO-8601, an em dash, then the status); the fleet
 supervisor parses exactly that line. Statuses it reads: **"rotation requested"** (relaunch me), **"session
 end"** (a deliberate stop; leave me). Anything else is a working status. Closing the ledger issue is the
@@ -271,4 +293,6 @@ against the live lease store first, and it never grants consent · never actuate
 a name prefix alone: require the exact decider identity **and** its own ledger record · never treat a
 missed nudge as a lost grant: the durable record and `claim` are what is real · never put a fencing token
 or grant env in a message · tolerate the operator acting on the pool out from under you (reconcile,
-journal the anomaly, continue).
+journal the anomaly, continue) · never skip the pre-window hold and broadcast on a belief that a peer is
+down: a remembered or earlier-read heartbeat is stale, so always send it and re-read the peer's ledger live
+if liveness matters.

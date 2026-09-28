@@ -83,11 +83,33 @@ export const DEFAULT_OWNER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$/;
 /** Lease kinds are filesystem-safe slugs (they name the record file). Fixed: part of the format. */
 export const KIND_PATTERN = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 
+// The env vars git uses to locate the repository it operates on. A git hook (e.g. pre-push) exports
+// GIT_DIR / GIT_WORK_TREE, and an inherited value overrides the child's `cwd`, so the store would
+// resolve for the hook's repo instead of the caller's directory. Every child `git` here runs with
+// them removed. (Inlined rather than imported from ../git-env.mjs so this file stays a
+// self-contained, liftable single-file primitive.)
+const GIT_LOCATION_VARS = [
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_INDEX_FILE",
+  "GIT_COMMON_DIR",
+  "GIT_PREFIX",
+  "GIT_OBJECT_DIRECTORY",
+];
+
+/** The current environment minus the git repo-location variables. */
+function scrubbedGitEnv() {
+  const env = { ...process.env };
+  for (const key of GIT_LOCATION_VARS) delete env[key];
+  return env;
+}
+
 /** The git toplevel of `dir`, or null when `dir` is not inside a work tree (or git is unavailable). */
 function gitToplevel(dir) {
   try {
     const res = spawnSync("git", ["rev-parse", "--show-toplevel"], {
       cwd: dir,
+      env: scrubbedGitEnv(),
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
       timeout: 5_000,
@@ -113,6 +135,7 @@ function gitMainRoot(dir) {
   try {
     const res = spawnSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], {
       cwd: dir,
+      env: scrubbedGitEnv(),
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
       timeout: 5_000,

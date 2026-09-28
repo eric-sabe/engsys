@@ -15,6 +15,8 @@ import { tmpdir } from "node:os";
 import { basename, join, dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { scrubbedGitEnv } from "../git-env.mjs";
+
 import {
   createLeaseStore,
   defaultStoreDir,
@@ -446,6 +448,10 @@ function withGitCeiling(ceiling, fn) {
 
 const HERMETIC_GIT = { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
 
+// Env for the tests' own setup `git` calls: the location vars scrubbed, so the suite also passes when it
+// is itself run under a git hook (which exports GIT_DIR / GIT_WORK_TREE).
+const setupGitEnv = (extra = {}) => ({ ...scrubbedGitEnv(), ...HERMETIC_GIT, ...extra });
+
 test("store: outside git it defaults to logs/leases under the cwd; LEASE_STORE overrides; the option beats env", async (t) => {
   const cwd = tempStoreDir(t);
   withGitCeiling(cwd, () => assert.equal(defaultStoreDir(cwd), join(cwd, "logs", "leases")));
@@ -472,7 +478,7 @@ test("store: outside git it defaults to logs/leases under the cwd; LEASE_STORE o
 
 test("store: a linked worktree shares the main checkout's store", async (t) => {
   const repo = realpathSync(tempStoreDir(t));
-  const g = (args, cwd) => execFileSync("git", args, { cwd, env: { ...process.env, ...HERMETIC_GIT, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid" } });
+  const g = (args, cwd) => execFileSync("git", args, { cwd, env: setupGitEnv({ GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid" }) });
   g(["init", "-q", repo]);
   g(["commit", "-q", "--allow-empty", "-m", "seed"], repo);
   const wt = join(dirname(repo), `${basename(repo)}-wt`);
@@ -483,9 +489,38 @@ test("store: a linked worktree shares the main checkout's store", async (t) => {
   assert.equal(defaultStoreDir(join(wt)), defaultStoreDir(repo));
 });
 
+test("store: an inherited GIT_DIR / GIT_WORK_TREE (a git hook) does not redirect the store", async (t) => {
+  const repo = realpathSync(tempStoreDir(t));
+  const other = realpathSync(tempStoreDir(t));
+  for (const dir of [repo, other]) execFileSync("git", ["init", "-q", dir], { env: setupGitEnv() });
+  const deep = join(repo, "packages", "app");
+  mkdirSync(deep, { recursive: true });
+
+  const names = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_PREFIX", "GIT_OBJECT_DIRECTORY"];
+  const saved = Object.fromEntries(names.map((n) => [n, process.env[n]]));
+  t.after(() => {
+    for (const n of names) {
+      if (saved[n] === undefined) delete process.env[n];
+      else process.env[n] = saved[n];
+    }
+  });
+  // What a pre-push hook exports: the hook's repo, unrelated to the directory being asked about.
+  process.env.GIT_DIR = join(other, ".git");
+  process.env.GIT_WORK_TREE = other;
+  process.env.GIT_COMMON_DIR = join(other, ".git");
+  process.env.GIT_INDEX_FILE = join(other, ".git", "index");
+  process.env.GIT_OBJECT_DIRECTORY = join(other, ".git", "objects");
+  process.env.GIT_PREFIX = "sub/";
+
+  const store = join(repo, "logs", "leases");
+  assert.equal(defaultStoreDir(repo), store, "resolves for the cwd's repo, not the hook's");
+  assert.equal(defaultStoreDir(deep), store, "a subdirectory too");
+  assert.notEqual(defaultStoreDir(repo), join(other, "logs", "leases"));
+});
+
 test("store: inside a git repo the default is logs/leases under the toplevel, from any subdirectory", async (t) => {
   const repo = realpathSync(tempStoreDir(t));
-  execFileSync("git", ["init", "-q", repo], { env: { ...process.env, ...HERMETIC_GIT } });
+  execFileSync("git", ["init", "-q", repo], { env: setupGitEnv() });
   const deep = join(repo, "packages", "app", "src");
   mkdirSync(deep, { recursive: true });
   const top = join(repo, "logs", "leases");

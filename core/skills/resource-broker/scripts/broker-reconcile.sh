@@ -43,7 +43,7 @@ broker_fill_var OWNER lease.owner
 broker_fill_var SESSION_NAME session_name
 [ -n "$OWNER" ] || OWNER="${SESSION_NAME:-resource-broker}"
 broker_fill_path POOL_FILE lease.pool_file
-broker_fill_var STORE lease.store
+broker_fill_path STORE lease.store
 broker_fill_var OWNER_PATTERN lease.owner_pattern
 broker_setup_pool || exit 1
 
