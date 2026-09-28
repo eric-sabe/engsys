@@ -45,6 +45,7 @@ git -C "$T/repo" init -q
 cat >"$T/bin/gh" <<'SH'
 #!/usr/bin/env bash
 echo "gh $*" >>"$FAKE/gh.log"
+ARGS="$*"
 D="$FAKE/gh/issues"; mkdir -p "$D"
 sub="${1:-} ${2:-}"; shift 2 || true
 num="" title="" body="" bodyfile="" addl="" reml=""
@@ -73,6 +74,7 @@ case "$sub" in
     printf '%s' "$title" >"$D/$n/title"; printf '%s\n' "$body" >"$D/$n/body"; printf OPEN >"$D/$n/state"
     echo "https://github.com/acme/app/issues/$n" ;;
   "issue view")
+    [ -d "$D/$num" ] || { echo "GraphQL: Could not resolve to an Issue with the number of $num." >&2; exit 1; }
     case "${jqexpr:-}" in
       .state) cat "$D/$num/state" ;;
       .body) cat "$D/$num/body" ;;
@@ -82,7 +84,12 @@ case "$sub" in
     [ -z "$addl" ] || echo "+$addl" >>"$D/$num/labels"
     [ -z "$reml" ] || echo "-$reml" >>"$D/$num/labels" ;;
   "issue reopen"|"issue close") exit 0 ;;
-  "api repos/acme/app/issues/"*) echo "NODE_ID" ;;
+  "api repos/acme/app/issues/"*) echo "NODE_${sub##*/}" ;;
+  "api graphql") # the pin mutation records the node id; the isPinned query reads it back
+    [[ "$ARGS" =~ id=(NODE_[0-9]+) ]] || exit 0
+    if [[ "$ARGS" == *pinIssue* ]]; then echo "${BASH_REMATCH[1]}" >>"$FAKE/pinned"
+    elif [ -f "$FAKE/pinned" ] && grep -qx "${BASH_REMATCH[1]}" "$FAKE/pinned"; then echo true
+    else echo false; fi ;;
   api*) exit 0 ;;
 esac
 exit 0
@@ -239,6 +246,139 @@ has "…loudly" "$OUT" "expected exactly one <!-- broker-heartbeat -->"
 eq "…and never edited" "$(grep -c 'issue edit' "$FAKE/gh.log" || true)" "$before"
 cp "$T/body.good" "$FAKE/gh/issues/101/body"
 
+echo "== C2. setup adopts a configured ledger issue instead of creating one"
+mkissue() { # mkissue <n> <state> <body text>: a pre-existing issue under some other title
+  mkdir -p "$FAKE/gh/issues/$1"
+  printf '%s' "Broker baton (old title)" >"$FAKE/gh/issues/$1/title"; printf '%s' "$2" >"$FAKE/gh/issues/$1/state"
+  printf '%s\n' "$3" >"$FAKE/gh/issues/$1/body"
+}
+nmark() { grep -c -- "$2" <<<"$1" || true; }
+write_cfg "$T/adopt.yml" 201
+FOREIGN='Ledger for the acme broker.
+
+<!-- acme-heartbeat -->
+last: 2026-01-01T12:00:00Z — status: legacy running
+<!-- /acme-heartbeat -->
+
+Notes: keep this line.'
+mkissue 201 OPEN "$FOREIGN"
+mkissue 202 OPEN 'Just a ledger, no heartbeat line anywhere.'
+mkissue 203 OPEN 'Head text.
+last: 2026-02-02T02:02:02Z — status: plain
+Tail text.'
+mkissue 204 CLOSED 'closed ledger'
+: >"$FAKE/gh.log"; rm -f "$FAKE/pinned"
+run bash "$S/broker-setup.sh" --config "$T/adopt.yml"
+rc_is "adopting an issue with foreign markers around a heartbeat line exits 0" 0
+G="$(cat "$FAKE/gh.log")"
+hasnt "…never creating another issue" "$G" "gh issue create"
+hasnt "…nor even searching for one by title" "$G" "gh issue list"
+has "…says it is adopting #201" "$OUT" "adopting configured ledger issue #201"
+has "…and what it did to the body" "$OUT" "wrapped the existing heartbeat line, and the older <!-- acme-heartbeat --> pair around it"
+has "…creates the labels" "$G" "gh label create broker:escalated -R acme/app --force"
+has "…pins it" "$OUT" "pinned issue #201"
+has "…prints the config lines with the adopted number" "$OUT" "ledger_issue: 201"
+BODY="$(cat "$FAKE/gh/issues/201/body")"
+eq "exactly one broker open marker" "$(nmark "$BODY" '<!-- broker-heartbeat -->')" 1
+eq "…and one broker close marker" "$(nmark "$BODY" '<!-- /broker-heartbeat -->')" 1
+has "the foreign open marker is kept" "$BODY" "<!-- acme-heartbeat -->"
+has "…the foreign close marker" "$BODY" "<!-- /acme-heartbeat -->"
+has "…the heartbeat line itself" "$BODY" "last: 2026-01-01T12:00:00Z — status: legacy running"
+has "…and the surrounding text" "$BODY" "Notes: keep this line."
+has "…and the head text" "$BODY" "Ledger for the acme broker."
+ln() { grep -n -x -- "$2" <<<"$1" | head -1 | cut -d: -f1; }
+o=$(ln "$BODY" '<!-- broker-heartbeat -->'); fo=$(ln "$BODY" '<!-- acme-heartbeat -->'); fc=$(ln "$BODY" '<!-- /acme-heartbeat -->'); c=$(ln "$BODY" '<!-- /broker-heartbeat -->')
+if [ "$o" -lt "$fo" ] && [ "$fo" -lt "$fc" ] && [ "$fc" -lt "$c" ]; then ok "the broker pair wraps the older pair, foreign lines intact inside"; else bad "the broker pair wraps the older pair, foreign lines intact inside" "$BODY"; fi
+PARSED="$(printf '%s\n' "$BODY" | sed -n 's/^last: \([0-9TZ:-]*\) — status: \(.*\)$/\1|\2/p' | head -1)"   # fleet-supervisor.sh's own parse
+eq "the supervisor's parse still reads the adopted line" "$PARSED" "2026-01-01T12:00:00Z|legacy running"
+run bash "$S/broker-heartbeat.sh" --config "$T/adopt.yml" --status "adopted"
+rc_is "broker-heartbeat.sh now succeeds on the adopted body" 0
+BODY="$(cat "$FAKE/gh/issues/201/body")"
+PARSED="$(printf '%s\n' "$BODY" | sed -n 's/^last: \([0-9TZ:-]*\) — status: \(.*\)$/\1|\2/p' | head -1)"
+eq "…and the supervisor's parse reads its line" "${PARSED#*|}" "adopted"
+eq "…leaving one broker pair" "$(nmark "$BODY" '<!-- broker-heartbeat -->')/$(nmark "$BODY" '<!-- /broker-heartbeat -->')" "1/1"
+has "…and the text outside it" "$BODY" "Notes: keep this line."
+# a second run changes nothing
+cp "$FAKE/gh/issues/201/body" "$T/body.201"; : >"$FAKE/gh.log"
+run bash "$S/broker-setup.sh" --config "$T/adopt.yml"
+rc_is "a second setup exits 0" 0
+has "…reports the body unchanged" "$OUT" "already has the broker heartbeat markers: unchanged"
+has "…and the issue already pinned" "$OUT" "issue #201 is already pinned"
+G="$(cat "$FAKE/gh.log")"
+hasnt "…no body edit" "$G" "gh issue edit"
+hasnt "…no create" "$G" "gh issue create"
+hasnt "…no second pin" "$G" "pinIssue"
+if cmp -s "$T/body.201" "$FAKE/gh/issues/201/body"; then ok "…and the body is byte-identical"; else bad "…and the body is byte-identical"; fi
+
+# no heartbeat line: a pair is appended
+write_cfg "$T/adopt2.yml" 202
+run bash "$S/broker-setup.sh" --config "$T/adopt2.yml"
+rc_is "adopting a body with no heartbeat line exits 0" 0
+has "…says it appended a block" "$OUT" "appended a broker heartbeat block"
+BODY="$(cat "$FAKE/gh/issues/202/body")"
+has "the original text is kept" "$BODY" "Just a ledger, no heartbeat line anywhere."
+eq "one broker pair" "$(nmark "$BODY" '<!-- broker-heartbeat -->')/$(nmark "$BODY" '<!-- /broker-heartbeat -->')" "1/1"
+has "…with a fresh line, status 'adopted by resource broker'" "$BODY" "— status: adopted by resource broker"
+PARSED="$(printf '%s\n' "$BODY" | sed -n 's/^last: \([0-9TZ:-]*\) — status: \(.*\)$/\1|\2/p' | head -1)"
+eq "…that the supervisor's parse reads" "${PARSED#*|}" "adopted by resource broker"
+run bash "$S/broker-heartbeat.sh" --config "$T/adopt2.yml"
+rc_is "broker-heartbeat.sh succeeds on it" 0
+cp "$FAKE/gh/issues/202/body" "$T/body.202"; : >"$FAKE/gh.log"
+run bash "$S/broker-setup.sh" --config "$T/adopt2.yml"
+if cmp -s "$T/body.202" "$FAKE/gh/issues/202/body" && ! grep -q "issue edit" "$FAKE/gh.log"; then ok "a second run on it is a no-op"; else bad "a second run on it is a no-op"; fi
+
+# a heartbeat line with no enclosing markers; --ledger works without a config
+run bash "$S/broker-setup.sh" --repo acme/app --ledger 203
+rc_is "--ledger adopts without a config" 0
+has "…says it wrapped the line" "$OUT" "wrapped the existing heartbeat line in the broker heartbeat markers"
+BODY="$(cat "$FAKE/gh/issues/203/body")"
+eq "the line sits between the markers, the rest untouched" "$(printf '%s' "$BODY" | tr '\n' '|')" "Head text.|<!-- broker-heartbeat -->|last: 2026-02-02T02:02:02Z — status: plain|<!-- /broker-heartbeat -->|Tail text."
+# a body edited in the web UI has CRLF line endings
+mkdir -p "$FAKE/gh/issues/205"; printf 'x' >"$FAKE/gh/issues/205/title"; printf OPEN >"$FAKE/gh/issues/205/state"
+printf 'Head\r\n<!-- old -->\r\nlast: 2026-03-03T03:03:03Z — status: crlf\r\n<!-- /old -->\r\nTail\r\n' >"$FAKE/gh/issues/205/body"
+run bash "$S/broker-setup.sh" --repo acme/app --ledger 205 --no-pin
+rc_is "a CRLF body is adopted" 0
+has "…wrapping the older pair too" "$OUT" "the older <!-- old --> pair around it"
+run bash "$S/broker-heartbeat.sh" --repo acme/app --issue 205
+rc_is "…and the heartbeat then succeeds" 0
+
+# refusals: closed, missing, malformed
+: >"$FAKE/gh.log"
+run bash "$S/broker-setup.sh" --repo acme/app --ledger 204
+rc_is "a closed ledger issue is an error" 1
+has "…naming the kill switch" "$OUT" "is CLOSED"
+run bash "$S/broker-setup.sh" --repo acme/app --ledger 299
+rc_is "a missing ledger issue is an error" 1
+has "…which says it could not read it" "$OUT" "could not read the configured ledger issue #299"
+mkissue 206 OPEN '<!-- broker-heartbeat -->
+last: 2026-01-01T00:00:00Z — status: x'
+run bash "$S/broker-setup.sh" --repo acme/app --ledger 206
+rc_is "a body with an unpaired broker marker is refused" 1
+has "…loudly" "$OUT" "expected one pair or none"
+run bash "$S/broker-setup.sh" --repo acme/app --ledger abc
+rc_is "a non-numeric ledger is a usage error" 2
+G="$(cat "$FAKE/gh.log")"
+hasnt "none of the refusals created an issue" "$G" "gh issue create"
+hasnt "…or edited one" "$G" "gh issue edit"
+hasnt "…or created labels first" "$G" "gh label create"
+eq "…and the closed issue's body is untouched" "$(cat "$FAKE/gh/issues/204/body")" "closed ledger"
+
+# no ledger configured (empty ledger_issue): create by title, exactly as before
+rm -rf "$FAKE/gh/issues/2"??; mv "$FAKE/gh" "$FAKE/gh.saved"; rm -f "$FAKE/pinned"
+write_cfg "$T/empty.yml" ""
+: >"$FAKE/gh.log"
+run bash "$S/broker-setup.sh" --config "$T/empty.yml"
+rc_is "an empty ledger_issue still creates by title" 0
+G="$(cat "$FAKE/gh.log")"
+has "…searching by title first" "$G" "gh issue list -R acme/app --state all"
+has "…creating the issue" "$G" "gh issue create -R acme/app --title 🛰️ Resource Broker ledger"
+has "…reporting it" "$OUT" "created ledger issue #101"
+has "…with the heartbeat block" "$(cat "$FAKE/gh/issues/101/body")" "last: never — status: not running"
+run bash "$S/broker-setup.sh" --config "$T/empty.yml"
+has "…and a second run finds it" "$OUT" "found existing ledger issue #101 (OPEN)"
+has "…already pinned" "$OUT" "issue #101 is already pinned"
+rm -rf "$FAKE/gh"; mv "$FAKE/gh.saved" "$FAKE/gh"
+
 echo "== D. watch: a stale grant is reaped, a waiter is seen, silent waiters are dropped"
 W="bash $S/broker-watch.sh --config-dir $CFG --once"
 rm -rf "$STATE"
@@ -370,6 +510,38 @@ run bash -c "cd '$T/repo/sub' && bash '$S/broker-reconcile.sh' --config '$T/nost
 rc_is "reconcile from a subdirectory with no configured store" 0
 if [ -d "$T/repo/logs/leases/acme-pool" ]; then ok "the store is at the git toplevel"; else bad "the store is at the git toplevel" "$(find "$T/repo" -name logs -not -path '*/.git/*')"; fi
 if [ ! -e "$T/repo/sub/logs" ]; then ok "…and not beside the subdirectory"; else bad "…and not beside the subdirectory"; fi
+
+echo "== H2. lease.store: a leading ~ expands, a relative path resolves against the config's directory"
+mkdir -p "$T/cwdx" "$T/cfgrel"
+release_all_slots; touch "$FAKE/runtime-up" # the host window (health_cmd) needs the runtime up; it drains an idle pool
+cp "$CFG/acme-pool.json" "$CFG/provision-slot.sh" "$CFG/check-slot.sh" "$T/cfgrel/"
+# shellcheck disable=SC2088 # the literal ~ is the point: the config holds it unexpanded
+write_cfg "$T/cfgrel/tilde.yml" 101 '~/tilde-store'
+write_cfg "$T/cfgrel/rel.yml" 101 'rel-store'
+write_cfg "$T/cfgrel/dotrel.yml" 101 './sub/dot-store'
+for how in reconcile host-window watch; do
+  rm -rf "$HOME/tilde-store" "$T/cfgrel/rel-store" "$T/cfgrel/sub"
+  case "$how" in
+    reconcile) cmd="bash '$S/broker-reconcile.sh'" ;;
+    watch) cmd="bash '$S/broker-watch.sh' --once" ;;
+    host-window) cmd="bash '$S/broker-host-window.sh' --restart-cmd 'true' --reason t" ;;
+  esac
+  run bash -c "cd '$T/cwdx' && $cmd --config '$T/cfgrel/tilde.yml'"
+  rc_is "$how: a ~/… lease.store runs" 0
+  if [ -d "$HOME/tilde-store/acme-pool" ]; then ok "$how: ~/tilde-store resolves under \$HOME"; else bad "$how: ~/tilde-store resolves under \$HOME" "$OUT"; fi
+  if [ ! -e "$T/cwdx/~" ] && [ ! -e "$T/cfgrel/~" ]; then ok "$how: no directory named ~ is created"; else bad "$how: no directory named ~ is created" "$(ls -a "$T/cwdx" "$T/cfgrel")"; fi
+  run bash -c "cd '$T/cwdx' && $cmd --config '$T/cfgrel/rel.yml'"
+  rc_is "$how: a relative lease.store runs" 0
+  if [ -d "$T/cfgrel/rel-store/acme-pool" ]; then ok "$how: rel-store resolves against the config's directory"; else bad "$how: rel-store resolves against the config's directory" "$OUT"; fi
+  if [ ! -e "$T/cwdx/rel-store" ]; then ok "$how: …not against the cwd"; else bad "$how: …not against the cwd"; fi
+done
+run bash -c "cd '$T/cwdx' && bash '$S/broker-reconcile.sh' --config '$T/cfgrel/dotrel.yml'"
+if [ -d "$T/cfgrel/./sub/dot-store/acme-pool" ]; then ok "a ./sub/… lease.store resolves against the config's directory"; else bad "a ./sub/… lease.store resolves against the config's directory" "$OUT"; fi
+# an explicit --store still wins, verbatim
+rm -rf "$T/flag-store" "$HOME/tilde-store"
+run bash -c "cd '$T/cwdx' && bash '$S/broker-reconcile.sh' --config '$T/cfgrel/tilde.yml' --store '$T/flag-store'"
+if [ -d "$T/flag-store/acme-pool" ] && [ ! -e "$HOME/tilde-store" ]; then ok "--store beats lease.store"; else bad "--store beats lease.store" "$OUT"; fi
+rm -rf "$HOME/tilde-store"; rm -f "$FAKE/runtime-up" "$FAKE/host.log"
 
 echo "== I. host window: drain, lock, act, verify, all-clear"
 release_all_slots; rm -f "$FAKE/host.log" "$FAKE/runtime-up"

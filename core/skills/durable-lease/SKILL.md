@@ -362,7 +362,8 @@ LEASE_REFERENCE_IMPL=/path/to/other/durable-lease.mjs node --test core/lib/lease
 - Same host only (see above). Never put the store on a network filesystem.
 - The default store is `<main checkout>/logs/leases`, so subdirectories and linked worktrees of one repo
   agree. Separate clones do not: set `LEASE_STORE` to one absolute path in the environment of every hook,
-  agent and broker that should share leases.
+  agent and broker that should share leases. The default resolves for the directory the process runs in,
+  even under a git hook that exports `GIT_DIR` / `GIT_WORK_TREE` (the resolver ignores those).
 - Never put secrets in a lease `payload`: it is readable by anything that can read the store.
 - Do not `release --force` from automation; it bypasses the fencing token. Use `reap` for a dead
   lease, which refuses a live one.

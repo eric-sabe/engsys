@@ -23,6 +23,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { createPool, loadPool, normalizePool, PoolConfigError, renderTemplate, slotEnv } from "./pool.mjs";
 import { LeaseUsageError } from "./durable-lease.mjs";
+import { scrubbedGitEnv } from "../git-env.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI = join(HERE, "pool-cli.mjs");
@@ -436,7 +437,7 @@ test("CLI: --shell emits export lines for the hook; heartbeat keeps the lease al
 
 test("CLI: without --store or LEASE_STORE the pool store is <git toplevel>/logs/leases, shared by every subdirectory", async (t) => {
   const repo = realpathSync(tempStoreDir(t));
-  execFileSync("git", ["init", "-q", repo], { env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
+  execFileSync("git", ["init", "-q", repo], { env: { ...scrubbedGitEnv(), GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
   const deep = join(repo, "apps", "web");
   mkdirSync(deep, { recursive: true });
   const run = (args, cwd) =>

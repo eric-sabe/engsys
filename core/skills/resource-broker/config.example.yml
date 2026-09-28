@@ -6,7 +6,11 @@
 
 repo: owner/name
 session_name: <ns>-broker # advertised in the ledger (discovery); the async-grant nudge target
-ledger_issue: 0 # printed by scripts/broker-setup.sh --repo owner/name; distinct from the Merge/Maintenance ledgers [script]
+ledger_issue: 0 # the broker's ledger issue number; distinct from the Merge/Maintenance ledgers [script]
+# 0 or empty: scripts/broker-setup.sh --repo owner/name finds or creates one by its title and prints the number.
+# Set to an existing issue (any title): broker-setup.sh ADOPTS it, never creating another. It must be open; it
+# adds the <!-- broker-heartbeat --> marker pair the heartbeat script edits, only if the body lacks it, and is
+# safe to re-run.
 
 state_dir: logs/resource-broker # working memory: state.md, journal, .watch/ (keep gitignored) [script]
 poll_interval: 30 # seconds: the active-reap tick of broker-watch.sh [script]
@@ -18,8 +22,10 @@ stale_lock_minutes: 60 # mirrors the fleet supervisor conf's threshold for this 
 # file is a starting point.
 lease:
   pool_file: acme-pool.json # relative to THIS file's directory, or absolute [script]
-  store: "" # LEASE_STORE, an absolute path shared with every hook and agent that takes slots.
-  # Empty = <git toplevel of the cwd>/logs/leases (fine for one checkout; set it once worktrees are involved) [script]
+  store: "" # LEASE_STORE: one directory shared with every hook and agent that takes slots [script]
+  # Treated like pool_file: a leading ~ expands to $HOME, a relative path resolves against THIS file's directory,
+  # an absolute path is used as is (so a quoted "~/leases" is safe: no directory named ~ is created).
+  # Empty = <main checkout of the cwd's repo>/logs/leases (shared by its linked worktrees; set it when clients run from another clone)
   owner: <ns>-broker # the --owner for pump / reconcile / host windows [script]
   owner_pattern: '^<ns>-[a-z0-9][a-z0-9-]{0,62}$' # LEASE_OWNER_PATTERN: fences the store to this namespace. Empty = any safe token [script]
 
