@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd job: the fleet's deterministic, LLM-free monster relauncher (fleet supervise).
+  TEMPLATE — rendered and loaded by `fleet install-jobs` (do not copy by hand). An instance can
+  override it with a same-named file in <instance>/jobs/launchd/.
+  Every 5 minutes. Installed only when the instance has fleet/supervisor.conf.tmpl.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>__LABEL__</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__ENGSYS_DIR__/core/fleet/bin/fleet</string>
+    <string>--instance</string>
+    <string>__FLEET_REPO__</string>
+    <string>supervise</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__FLEET_REPO__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>StartInterval</key>
+  <integer>300</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/fleet-supervisor.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/fleet-supervisor.log</string>
+</dict>
+</plist>

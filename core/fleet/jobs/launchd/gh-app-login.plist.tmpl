@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd job: keep the fleet host's GitHub identity healthy (App token check + env-scoped git
+  identity verification), via core/fleet/identity/gh-app-login.sh.
+  TEMPLATE — rendered and loaded by `fleet install-jobs` (do not copy by hand). An instance can
+  override it with a same-named file in <instance>/jobs/launchd/.
+  Runs at load and every 30 minutes; a fast no-op when healthy. Installed only when GH_APP_ENV is set.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>__LABEL__</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__ENGSYS_DIR__/core/fleet/identity/gh-app-login.sh</string>
+    <string>__GH_APP_ENV__</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>GH_APP_ENV_FILE</key>
+    <string>__GH_APP_ENV__</string>
+  </dict>
+  <key>StartInterval</key>
+  <integer>1800</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/gh-app-login.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/gh-app-login.log</string>
+</dict>
+</plist>

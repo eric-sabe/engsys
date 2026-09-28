@@ -73,6 +73,15 @@ server does NOT inherit launcher exports); refuses duplicate window names
 a tmux window named for its role (`new-window -t <session>:` — the trailing
 colon means "next free index"; without it the second launch fails).
 
+A session line may carry an optional 5th field, `name|workdir|prompt|extra|env`:
+a per-session env file (absolute, or relative to the roster's directory) that
+**replaces** the roster-level `ENV_FILE` for that session only. Use it to run
+lanes with different environments (say, another model-alias set for a security
+role) from one roster instead of a second roster; source the shared env from
+inside the lane's file if it should build on it. A missing per-session file is
+an error for that session (it never silently falls back to `ENV_FILE`). With
+the 5th field present the extra flags must not contain a literal `|`.
+
 `ENV_FILE` is the hook for a durable machine identity (cloud credentials,
 inference endpoints) — e.g. a certificate-credential service principal with
 least-privilege read+inference roles, so no session ever depends on the

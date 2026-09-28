@@ -11,9 +11,14 @@ NAMESPACE=acme
 # PREFLIGHT=bash ~/bin/cloud-login.sh ~/.config/acme/agents.env   # optional,
 # PREFLIGHT=gh auth status               # repeatable; fail-open identity checks
 #
-# Sessions: <name>|<workdir>|<initial prompt>|<extra flags>
+# Sessions: <name>|<workdir>|<initial prompt>|<extra flags>[|<env file>]
 #   name MUST start with "NAMESPACE-" — the messaging trust fence.
 #   workdir empty → the directory the launcher runs from; ~ is expanded.
+#   env file (optional 5th field): a per-session env file, absolute or relative
+#     to this roster's directory. It REPLACES ENV_FILE for that session, so one
+#     roster can carry lanes with different environments. Extra flags must then
+#     not contain a "|". Example (a lane with its own model aliases):
+#       acme-security||/maintenance-monster|--dangerously-skip-permissions|env/security.env
 #   A fleet that keeps monster configs outside the repo passes the directory
 #   in the initial prompt: /merge-monster fleet config dir: /abs/path
 #

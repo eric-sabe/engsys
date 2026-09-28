@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# fleet — one entry point for operating an engsys fleet from its host.
+#
+#   fleet [--instance <dir>] <command> [args]
+#
+#   status                        pins vs host, and which sessions are behind
+#   pin ...                       release the instance + open the pin PR (see `fleet pin --help`)
+#   sync [--check]                host checkouts + plugin reinstall to match the pins (no restarts)
+#   restart [--stale|--all|<name>...] [--force]
+#                                 cycle sessions when you're ready (no args = status)
+#   launch [<name>]               start missing sessions (all, or one)
+#   supervise                     one supervisor tick (what the launchd job runs)
+#   install-jobs [--dry-run] [--only <job>] [--unload]
+#                                 render + (re)load the launchd jobs
+#   init ...                      scaffold a new fleet instance (engsys fleet init)
+#
+# The instance is --instance <dir>, else $FLEET_INSTANCE, else the git toplevel of the current
+# directory. An instance's scripts/fleet shim normally does this for you:
+#   exec "$ENGSYS_DIR/core/fleet/bin/fleet" --instance <root> "$@"
+set -euo pipefail
+
+KIT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+
+instance="${FLEET_INSTANCE:-}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --instance) instance="${2:?fleet: --instance needs a directory}"; shift 2 ;;
+    --instance=*) instance="${1#--instance=}"; shift ;;
+    *) break ;;
+  esac
+done
+cmd="${1:-status}"; [ $# -gt 0 ] && shift
+
+case "$cmd" in
+  -h | --help | help) sed -n '2,/^set -/{/^set -/!p;}' "$0"; exit 0 ;;
+  init) # the engsys CLI (this kit lives at <engsys>/core/fleet); no instance needed yet
+    exec "$KIT/../../install" fleet init "$@" ;;
+  status | pin | sync | restart | launch | supervise | install-jobs) ;;
+  *) echo "fleet: unknown command '$cmd' (fleet help)" >&2; exit 2 ;;
+esac
+
+[ -n "$instance" ] || instance="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+[ -n "$instance" ] || { echo "fleet: no instance — pass --instance <dir>, set FLEET_INSTANCE, or run inside the instance repo" >&2; exit 1; }
+FLEET_INSTANCE="$(cd "$instance" 2>/dev/null && pwd -P)" || { echo "fleet: instance directory not found: $instance" >&2; exit 1; }
+export FLEET_INSTANCE
+
+case "$cmd" in
+  status) bash "$KIT/sync.sh" --check || true; echo; exec bash "$KIT/restart.sh" --status ;;
+  pin)
+    [ -f "$KIT/pin.sh" ] || { echo "fleet pin: not implemented yet" >&2; exit 1; }
+    exec bash "$KIT/pin.sh" "$@" ;;
+  sync) exec bash "$KIT/sync.sh" "$@" ;;
+  restart) exec bash "$KIT/restart.sh" "$@" ;;
+  launch) exec bash "$KIT/launch.sh" "$@" ;;
+  supervise) exec bash "$KIT/supervise.sh" "$@" ;;
+  install-jobs) exec bash "$KIT/install-jobs.sh" "$@" ;;
+esac
