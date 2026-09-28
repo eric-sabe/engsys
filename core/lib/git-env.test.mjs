@@ -148,3 +148,15 @@ describe('hermetic git helper', () => {
     assert.match(out, /Env Author <env@example\.invalid>/);
   });
 });
+
+test('isolateConfig drops environment-scoped git config (e.g. an injected bot identity)', () => {
+  const env = scrubbedGitEnv({
+    GIT_CONFIG_COUNT: '2', GIT_CONFIG_KEY_0: 'user.name', GIT_CONFIG_VALUE_0: 'bot',
+    GIT_CONFIG_KEY_1: 'user.email', GIT_CONFIG_VALUE_1: 'bot@example.invalid',
+    GIT_CONFIG_PARAMETERS: "'core.bare'='true'", PATH: '/usr/bin',
+  }, { isolateConfig: true });
+  for (const k of ['GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_1', 'GIT_CONFIG_PARAMETERS']) {
+    assert.equal(env[k], undefined, k);
+  }
+  assert.equal(env.PATH, '/usr/bin');
+});

@@ -36,7 +36,8 @@ export const GIT_LOCATION_VARS = Object.freeze([
  *
  * Options:
  *   isolateConfig  also ignore the machine's system/global git config (`GIT_CONFIG_NOSYSTEM=1`,
- *                  `GIT_CONFIG_GLOBAL=/dev/null`) and drop an inherited `GIT_CONFIG`. Use it for
+ *                  `GIT_CONFIG_GLOBAL=/dev/null`) and drop an inherited `GIT_CONFIG` plus any
+ *                  environment-scoped config (`GIT_CONFIG_COUNT`/`KEY_n`/`VALUE_n`, `GIT_CONFIG_PARAMETERS`). Use it for
  *                  throwaway temp repos so their behavior can't depend on, or leak into, the
  *                  developer's config.
  */
@@ -46,6 +47,12 @@ export function scrubbedGitEnv(base = process.env, opts = {}) {
   if (opts.isolateConfig) {
     // An inherited GIT_CONFIG would force git to read that exact file, defeating the isolation.
     delete env.GIT_CONFIG;
+    // Environment-scoped config (GIT_CONFIG_COUNT/KEY_n/VALUE_n, GIT_CONFIG_PARAMETERS) outranks every
+    // file — e.g. a fleet session's bot identity and credential helper — so drop it too.
+    delete env.GIT_CONFIG_PARAMETERS;
+    for (const k of Object.keys(env)) {
+      if (k === 'GIT_CONFIG_COUNT' || /^GIT_CONFIG_(KEY|VALUE)_\d+$/.test(k)) delete env[k];
+    }
     env.GIT_CONFIG_NOSYSTEM = '1';
     env.GIT_CONFIG_GLOBAL = '/dev/null';
   }
