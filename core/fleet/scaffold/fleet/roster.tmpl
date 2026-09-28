@@ -1,0 +1,33 @@
+# {{ORG}} fleet roster: TEMPLATE rendered by `fleet launch` into .fleet/roster.
+# Format: the engsys agent-sessions roster (<engsys>/core/skills/agent-sessions/roster.example).
+# Double-underscore tokens are filled from fleet/fleet.conf at launch time; a token that names an
+# unset key fails the launch rather than starting a session half-configured.
+NAMESPACE={{NAMESPACE}}
+ENV_FILE=__ENV_DIR__/session.env
+{{#if github_app}}
+PREFLIGHT=bash __ENGSYS_DIR__/core/fleet/identity/gh-app-login.sh __GH_APP_ENV__
+{{/if}}
+{{#if azure}}
+PREFLIGHT=bash __ENGSYS_DIR__/stacks/cloud/azure/fleet/az-sp-login.sh __AZURE_SP_ENV__
+{{/if}}
+#
+# <name>|<workdir>|<initial prompt>|<extra flags>[|<env file>]
+# Names start with the namespace (the messaging trust fence). Models and effort come from fleet/fleet.conf.
+{{#if marketplace}}
+# The monsters find their per-repo config through the "fleet config dir:" line that the instance
+# plugin's SessionStart hook injects (plugin/repos/<owner>/<repo>/).
+{{/if}}
+{{#unless marketplace}}
+# The monsters read their per-repo config from the fleet config dir passed in the prompt.
+{{/unless}}
+#
+# Monsters: unattended, each owns one ledger issue (register them in fleet/supervisor.conf.tmpl).
+{{NAMESPACE}}-mm|__PIN_DIR__|/engsys:merge-monster{{CONFIG_DIR_ARG}}|--model __MM_MODEL__ --effort __MM_EFFORT__ --remote-control --dangerously-skip-permissions
+# The maintenance lane runs in its own env (the 5th field): alias pins for the security model.
+{{NAMESPACE}}-maintain|__PIN_DIR__|/engsys:maintenance-monster{{CONFIG_DIR_ARG}}|--model __MAINTAIN_MODEL__ --effort __MAINTAIN_EFFORT__ --remote-control --dangerously-skip-permissions|__ENV_DIR__/security.env
+#
+# Interactive roles: attended, never auto-relaunched. Worktrees live outside the session's working
+# directory, so --add-dir is what stops every edit there from prompting.
+{{NAMESPACE}}-build|__PIN_DIR__||--add-dir __WORKTREES_DIR__ --model __BUILD_MODEL__ --effort __BUILD_EFFORT__ --remote-control --permission-mode __INTERACTIVE_PERMISSION_MODE__
+{{NAMESPACE}}-investigate|__PIN_DIR__||--add-dir __WORKTREES_DIR__ --model __INVESTIGATE_MODEL__ --effort __INVESTIGATE_EFFORT__ --remote-control --permission-mode __INTERACTIVE_PERMISSION_MODE__
+{{NAMESPACE}}-design|__PIN_DIR__||--add-dir __WORKTREES_DIR__ --model __DESIGN_MODEL__ --effort __DESIGN_EFFORT__ --remote-control --permission-mode __INTERACTIVE_PERMISSION_MODE__

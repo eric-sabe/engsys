@@ -1,0 +1,9 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "{{INSTANCE_MARKETPLACE}}",
+  "version": "0.1.0",
+  "description": "{{ORG}}'s layer on top of engsys: fleet context and per-repo monster configs for {{ORG}} repos.",
+  "author": {
+    "name": "{{ORG}}"
+  }
+}

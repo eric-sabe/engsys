@@ -2,6 +2,14 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   launchd job for the fleet supervisor (macOS always-on machine).
+
+  PLUGIN MODE / FLEET KIT (recommended): do not copy this file. `fleet install-jobs`
+  renders and loads the supervisor job for you from core/fleet/jobs/launchd/
+  (an instance can override it with a same-named file in its jobs/launchd/), and it
+  runs the supervisor from the pinned engsys checkout, never from the plugin cache,
+  whose path changes with every version. See docs/fleet-guide.md in engsys.
+
+  COPY MODE (manual): this skill's scripts were copied into the project's .claude/.
   1. Replace REPO_ROOT below with the absolute path of the directory holding
      .claude/fleet-supervisor.conf — the target repo, or your fleet repo (then
      the conf must set REPO=). Adjust the script path if the skill is not
@@ -10,6 +18,9 @@
   3. launchctl load ~/Library/LaunchAgents/com.<yourproject>.fleet-supervisor.plist
   On Linux, an equivalent cron/systemd timer running the script from that
   directory every 5 minutes does the same job.
+
+  The PATH below must have node and gh where launchd can find them
+  (/opt/homebrew/bin first on Apple Silicon Homebrew; not nvm or fnm).
   A durable machine identity that expires (cloud cert login, gh token) can get
   a sibling job on the same pattern: ProgramArguments = your login script,
   StartInterval = a few hours; the roster's PREFLIGHT= lines re-check it at
@@ -22,7 +33,7 @@
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
-    <string>.claude/skills/agent-sessions/scripts/fleet-supervisor.sh</string>
+    <string>.claude/skills/agent-sessions/scripts/fleet-supervisor.sh</string>   <!-- copy mode; the fleet kit template uses the pinned engsys checkout -->
   </array>
   <key>WorkingDirectory</key>
   <string>REPO_ROOT</string>

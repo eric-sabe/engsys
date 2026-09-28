@@ -16,7 +16,7 @@ dies** so it never sits idle on a corpse.
 
 Sources: code.claude.com docs — `sub-agents`, `agent-view`,
 `cross-session-messaging`, `workflows`, `agents`, `channels` (fetched
-2026-08-16); `.claude/skills/merge-monster/SKILL.md`, `scripts/mm-watch.sh`,
+2026-08-16); `<engsys-root>/skills/merge-monster/SKILL.md`, `scripts/mm-watch.sh`,
 `scripts/mm-heartbeat.sh`.
 
 ## 1. Problem statement
@@ -225,12 +225,12 @@ available today.
 Shipped as one substrate shared by both monsters (state namespaced per
 orchestrator by `state_dir`, so the registries never collide):
 
-- **Registry (Layer 1)** — `.claude/skills/merge-monster/scripts/mm-agent-reg.sh`
+- **Registry (Layer 1)** — `<engsys-root>/skills/merge-monster/scripts/mm-agent-reg.sh`
   (`spawn` / `update` / `extend` / `fence` / `get` / `active` over
   `<state_dir>/agents.tsv`). Rows keyed by (name, generation); `extend`
   enforces the single-extension rule (exit 3 on a second attempt); `fence`
   marks the prior generation before any respawn.
-- **Watchdog (Layer 2)** — `.claude/skills/merge-monster/scripts/mm-agent-watch.sh`,
+- **Watchdog (Layer 2)** — `<engsys-root>/skills/merge-monster/scripts/mm-agent-watch.sh`,
   a persistent Monitor emitting `AGENT_OVERDUE` (once per name/gen/deadline —
   an extension re-arms exactly one more) and `AGENT_STALE` (fresh→stale
   transition latch; a transcript write re-arms). `--once` gives the fallback
@@ -240,8 +240,14 @@ orchestrator by `state_dir`, so the registries never collide):
 - **Probe/classify + ladder (Layers 3–4)** — orchestrator behavior, wired into
   both skills: § Subagent liveness in `merge-monster/SKILL.md` (canonical) and
   a pointer section in `maintenance-monster/SKILL.md`.
-- **Config** — `liveness:` blocks in `.claude/merge-monster.yml`,
-  `.claude/maintenance-monster.yml`, and both `config.example.yml`s.
+- **Config** — `liveness:` blocks in each monster's config
+  (`merge-monster.yml` / `maintenance-monster.yml`, from the repo's
+  `.claude/` or the fleet config dir), and both `config.example.yml`s.
+
+`<engsys-root>` is where engsys content is installed: `.claude/` in a copy-mode
+install, the plugin root in plugin mode (the `engsys` core plugin). The same
+paths work in both, and in a fleet run by the fleet kit
+([fleet-guide.md](fleet-guide.md)).
 
 **§7 decisions — defaults chosen, pending operator tuning:**
 

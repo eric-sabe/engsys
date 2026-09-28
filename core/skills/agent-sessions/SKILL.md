@@ -59,6 +59,10 @@ address space. Isolation is by convention, enforced in the skills:
 
 ## Launching
 
+Under the **fleet kit**, `fleet launch` renders your instance's `fleet/roster.tmpl` and runs this
+launcher for you (see [docs/fleet-guide.md](https://github.com/eric-sabe/engsys/blob/main/docs/fleet-guide.md));
+the rest of this section describes the launcher itself, which is also what you run by hand in copy mode:
+
 ```bash
 cp <engsys-root>/skills/agent-sessions/roster.example .claude/agent-sessions.roster
 # edit: NAMESPACE, roles, flags, optional ENV_FILE / MODEL
@@ -72,6 +76,15 @@ server does NOT inherit launcher exports); refuses duplicate window names
 (whole tmux server) and names outside the namespace; starts each session as
 a tmux window named for its role (`new-window -t <session>:` — the trailing
 colon means "next free index"; without it the second launch fails).
+
+A session line may carry an optional 5th field, `name|workdir|prompt|extra|env`:
+a per-session env file (absolute, or relative to the roster's directory) that
+**replaces** the roster-level `ENV_FILE` for that session only. Use it to run
+lanes with different environments (say, another model-alias set for a security
+role) from one roster instead of a second roster; source the shared env from
+inside the lane's file if it should build on it. A missing per-session file is
+an error for that session (it never silently falls back to `ENV_FILE`). With
+the 5th field present the extra flags must not contain a literal `|`.
 
 `ENV_FILE` is the hook for a durable machine identity (cloud credentials,
 inference endpoints) — e.g. a certificate-credential service principal with
@@ -102,6 +115,16 @@ sessions against one or more target repos:
   always wins.
 
 ## Reset-time runbook
+
+**With the fleet kit** (`core/fleet/`, plugin mode; see
+[docs/fleet-guide.md](https://github.com/eric-sabe/engsys/blob/main/docs/fleet-guide.md)),
+`fleet restart` does all of this for you, in the right order and per role:
+`fleet restart` shows which sessions are behind, `fleet restart --stale` (or
+`<name>...`, or `--all`) cycles them. Monsters get a rotation request and the
+supervisor relaunches them; idle interactive roles are `/exit`ed and relaunched;
+busy ones are skipped unless `--force`. Run `fleet sync` first if the pins moved.
+
+**By hand** (copy mode, or no kit):
 
 1. Stop the old sessions (tmux windows / Ctrl-C the claude processes) —
    duplicate names break addressing, and a stopped session's skill state
@@ -152,13 +175,21 @@ The stale-but-alive row is deliberate: a live process is never killed on
 staleness alone — that's probe-then-classify territory (subagent-liveness),
 a judgment call for the operator or the maintenance watchdog, not a script.
 
-Setup: copy `fleet-supervisor.conf.example` → `.claude/fleet-supervisor.conf`
-(one line per ledger-bearing session — as many as you run — with its ledger
-issue, stale threshold, and optionally its repo), and `launchd.plist.example`
-→ `~/Library/LaunchAgents/` with `REPO_ROOT` set to the directory holding the
-conf (Linux: cron/systemd timer, same cadence). ALIVE detection is
-shell-fallback based, not process-name based — the claude binary renames its
-process to its version string.
+Setup, **fleet kit (plugin mode; recommended):** put the conf lines in your
+instance repo's `fleet/supervisor.conf.tmpl` and run `fleet install-jobs`; the
+kit renders the conf, sets `LAUNCH_CMD` and `TMUX_SESSION`, and loads the
+launchd job from the pinned engsys checkout (`fleet supervise` is one tick).
+Plugin mode has no `.claude/skills/agent-sessions/` in the project, so the two
+example files here are for reference, not for copying.
+
+Setup, **copy mode (manual):** copy `fleet-supervisor.conf.example` →
+`.claude/fleet-supervisor.conf` (one line per ledger-bearing session — as many
+as you run — with its ledger issue, stale threshold, and optionally its repo),
+and `launchd.plist.example` → `~/Library/LaunchAgents/` with `REPO_ROOT` set to
+the directory holding the conf (Linux: cron/systemd timer, same cadence).
+
+Either way, ALIVE detection is shell-fallback based, not process-name based —
+the claude binary renames its process to its version string.
 
 Any new baton-holding role joins the supervisor by honoring the same
 contract: a ledger issue whose body carries a `last: <ISO8601Z> — status:
@@ -171,5 +202,7 @@ end", and closing the issue as its kill switch.
 - Security/dependency watchdog: [maintenance-monster](../maintenance-monster/SKILL.md)
 - Worker-death detection every session should use:
   [subagent-liveness](../subagent-liveness/SKILL.md)
+- Running and upgrading a fleet from an instance repo: `docs/fleet-guide.md` in
+  [engsys](https://github.com/eric-sabe/engsys/blob/main/docs/fleet-guide.md)
 - Messaging design: `docs/agent-messaging.md` in
   [engsys](https://github.com/eric-sabe/engsys/blob/main/docs/agent-messaging.md)

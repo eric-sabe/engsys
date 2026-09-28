@@ -16,7 +16,7 @@
 #   PREFLIGHT=<command>            # optional, repeatable: run before launching
 #                                  # (e.g. a cloud/gh identity-refresh script);
 #                                  # failure warns, never blocks the launch
-#   <name>|<workdir>|<initial prompt>|<extra claude flags>
+#   <name>|<workdir>|<initial prompt>|<extra claude flags>[|<env file>]
 #
 #   <name>            must start with "NAMESPACE-" (enforced) — messaging is
 #                     scoped to the OS user, not the project, so the prefix IS
@@ -30,6 +30,16 @@
 #                     for a session that runs fully unattended (see SKILL.md
 #                     § Permission modes), and understand it composes with
 #                     crossSessionInbound=accept so nudges still arrive.
+#                     With the optional 5th field present, the extra flags
+#                     must not contain a literal "|".
+#   <env file>        optional: an env file for THIS session only — absolute,
+#                     or relative to the roster file's directory (~ expanded).
+#                     It REPLACES the roster-level ENV_FILE for the session
+#                     (source the shared one from inside it if you want both),
+#                     so one roster can hold lanes with different environments
+#                     (e.g. a different model alias set). A missing file is an
+#                     error for that session — an explicit per-session
+#                     environment never silently falls back.
 #
 # USAGE
 #   launch-agent-sessions.sh [--roster FILE] [session-name]
@@ -48,12 +58,13 @@ ONLY=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --roster) ROSTER="$2"; shift 2 ;;
-    -h | --help) sed -n '2,42p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,53p' "$0"; exit 0 ;;
     *) ONLY="$1"; shift ;;
   esac
 done
 
 REPO="$(pwd)"
+ROSTER_DIR="$(cd "$(dirname "$ROSTER")" 2>/dev/null && pwd)" || ROSTER_DIR="$REPO"
 [ -f "$ROSTER" ] || { echo "error: roster not found: $ROSTER (see the agent-sessions skill's roster.example)" >&2; exit 1; }
 command -v tmux >/dev/null 2>&1 || { echo "error: tmux not found on PATH" >&2; exit 1; }
 command -v claude >/dev/null 2>&1 || { echo "error: claude not found on PATH" >&2; exit 1; }
@@ -129,7 +140,7 @@ done
 # Launch
 # ---------------------------------------------------------------------------
 launch_one() {
-  local name="$1" workdir="$2" prompt="$3" extra="$4"
+  local name="$1" workdir="$2" prompt="$3" extra="$4" env_file="${5:-}"
 
   case "$name" in
     "$NAMESPACE"-*) ;;
@@ -139,10 +150,19 @@ launch_one() {
   workdir="${workdir/#\~/$HOME}"
   [ -d "$workdir" ] || { echo "error: workdir for '$name' not found: $workdir" >&2; return 1; }
 
+  # Per-session env (5th roster field) replaces the roster-level ENV_FILE.
+  local session_env="$ENV_FILE"
+  if [ -n "$env_file" ]; then
+    env_file="${env_file/#\~/$HOME}"
+    case "$env_file" in /*) ;; *) env_file="$ROSTER_DIR/$env_file" ;; esac
+    [ -f "$env_file" ] || { echo "error: env file for '$name' not found: $env_file" >&2; return 1; }
+    session_env="$env_file"
+  fi
+
   local cmd
   cmd="cd $(printf %q "$workdir") && "
-  if [ -n "$ENV_FILE" ]; then
-    cmd+="set -a && . $(printf %q "$ENV_FILE") && set +a && "
+  if [ -n "$session_env" ]; then
+    cmd+="set -a && . $(printf %q "$session_env") && set +a && "
   fi
   cmd+="claude --name $(printf %q "$name") --settings $(printf %q "$SETTINGS_FILE")"
   # The prompt goes BEFORE the model/extra flags: several claude flags take a
@@ -175,12 +195,12 @@ launch_one() {
 
 launched=0
 for spec in "${SESSIONS[@]}"; do
-  IFS='|' read -r name workdir prompt extra <<<"$spec"
+  IFS='|' read -r name workdir prompt extra env_file <<<"$spec"
   [ -z "$name" ] && continue
   if [ -n "$ONLY" ] && [ "$ONLY" != "$name" ]; then
     continue
   fi
-  launch_one "$name" "$workdir" "$prompt" "$extra"
+  launch_one "$name" "$workdir" "$prompt" "$extra" "$env_file"
   launched=$((launched + 1))
 done
 

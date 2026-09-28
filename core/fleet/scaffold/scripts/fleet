@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# fleet — this instance's entry point. A thin shim: it finds the pinned engsys checkout and hands over
+# to the engsys fleet kit, naming this repo as the instance.
+#
+#   scripts/fleet status | sync | launch | restart | pin | supervise | install-jobs | help
+#
+# ENGSYS_DIR comes from fleet/fleet.conf; ~/.config/<FLEET_ORG>/fleet.local.conf overrides it per machine.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+
+conf_get() { # conf_get <file> <KEY> → the last KEY=value line's value ('' if absent or no file)
+  [ -f "$1" ] || return 0
+  sed -n "s/^$2=//p" "$1" | tail -n 1 | sed 's/[[:space:]]*$//'
+}
+
+org="$(conf_get "$ROOT/fleet/fleet.conf" FLEET_ORG)"
+engsys_dir="$(conf_get "$ROOT/fleet/fleet.conf" ENGSYS_DIR)"
+if [ -n "$org" ]; then
+  override="$(conf_get "$HOME/.config/$org/fleet.local.conf" ENGSYS_DIR)"
+  [ -z "$override" ] || engsys_dir="$override"
+fi
+[ -n "$engsys_dir" ] || engsys_dir="$HOME/git/engsys"
+case "$engsys_dir" in \~ | \~/*) engsys_dir="$HOME${engsys_dir#\~}" ;; esac
+
+if [ ! -x "$engsys_dir/core/fleet/bin/fleet" ]; then
+  echo "fleet: engsys checkout not found at $engsys_dir" >&2
+  echo "       git clone <engsys repo> $engsys_dir (or set ENGSYS_DIR in fleet/fleet.conf), then run: scripts/fleet sync" >&2
+  exit 1
+fi
+exec "$engsys_dir/core/fleet/bin/fleet" --instance "$ROOT" "$@"

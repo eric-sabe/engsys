@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# gh (fleet shim) — run the real GitHub CLI as the fleet's GitHub App bot.
+#
+# Put this directory FIRST on PATH for fleet sessions (the launcher does). Every
+# invocation fetches a current App installation token from gh-app-token.mjs
+# (cached; re-minted only near its 1-hour expiry), exports it as GH_TOKEN, and
+# execs the real gh. Long-lived sessions therefore never hold a stale token.
+# GH_APP_ENV_FILE must point at the App env file (the fleet environment sets it).
+#
+# Break-glass: call the real gh by absolute path (e.g. /opt/homebrew/bin/gh) to
+# act as whoever that gh is logged in as. Note that installation tokens have no
+# "user": `gh api /user`, `@me`, and `gh auth status` don't describe the bot.
+set -euo pipefail
+
+SHIM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+
+# First `gh` on PATH that is not this shim.
+REAL_GH=""
+IFS=: read -r -a _dirs <<<"${PATH}"
+for d in "${_dirs[@]}"; do
+  [ -n "$d" ] || continue
+  if [ -x "$d/gh" ] && [ "$(cd "$d" 2>/dev/null && pwd -P)" != "$SHIM_DIR" ]; then
+    REAL_GH="$d/gh"
+    break
+  fi
+done
+[ -n "$REAL_GH" ] || { echo "gh (fleet shim): real gh not found on PATH" >&2; exit 127; }
+
+if ! TOKEN="$(node "$SHIM_DIR/../gh-app-token.mjs")"; then
+  echo "gh (fleet shim): could not obtain a GitHub App token — run gh-app-login.sh (next to gh-app-token.mjs) for a diagnosis" >&2
+  exit 1
+fi
+
+GH_TOKEN="$TOKEN" exec "$REAL_GH" "$@"
