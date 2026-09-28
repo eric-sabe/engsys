@@ -1,0 +1,25 @@
+{
+  "name": "e2e-pool",
+  "kindPrefix": "e2e-slot-",
+  "queueLockKind": "e2e-pool-queue",
+  "nudgeEvent": "e2e-lease-granted",
+  "shellPrefix": "E2E_LEASE",
+  "bookkeeper": "acme-e2e",
+  "ttlMinutes": 30,
+  "provision": "bash scripts/provision-slot.sh --slot",
+  "grantEnv": {
+    "E2E_API_PORT": "{ports.api}",
+    "E2E_DASHBOARD_PORT": "{ports.dashboard}",
+    "DATABASE_URL": "postgresql://acme:acme@localhost:5432/{db}?schema=public",
+    "REDIS_URL": "redis://localhost:6379/{redisDb}"
+  },
+  "grantFields": {
+    "ports": "{ports}",
+    "DATABASE_URL": "postgresql://acme:acme@localhost:5432/{db}?schema=public",
+    "REDIS_URL": "redis://localhost:6379/{redisDb}"
+  },
+  "slots": [
+    { "id": 1, "ports": { "api": 3000, "dashboard": 3001 }, "db": "acme_test_1", "redisDb": 1 },
+    { "id": 2, "ports": { "api": 3100, "dashboard": 3101 }, "db": "acme_test_2", "redisDb": 2 }
+  ]
+}
