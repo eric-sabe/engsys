@@ -1,6 +1,6 @@
 ---
 name: github-actions
-description: GitHub Actions workflow authoring guidance — the `${{ }}` expression function set, shell-injection and multi-line-output safety in `run:` steps, draft-gated CI triggers, and GraphQL rate-limit handling. Activate when editing `.github/workflows/*.yml`/`*.yaml`, authoring or reviewing GitHub Actions workflows, or debugging a CI gate that runs/skips unexpectedly.
+description: GitHub Actions workflow authoring guidance — the `${{ }}` expression function set, shell-injection and multi-line-output safety in `run:` steps, draft-gated CI triggers, GraphQL rate-limit handling, and the required-check patterns (skip companion for path-filtered CI, `!cancelled()` aggregator). Activate when editing `.github/workflows/*.yml`/`*.yaml`, authoring or reviewing GitHub Actions workflows, or debugging a CI gate that runs/skips unexpectedly.
 ---
 
 # GitHub Actions
@@ -174,6 +174,82 @@ A burst of parallel mutations drains it in minutes; the error is
 gh api rate_limit --jq '.resources'   # compare .graphql.remaining vs .core.remaining
 ```
 
+## 5. A path-filtered CI leaves its required check pending: add a skip companion
+
+If the main CI is path-filtered (`on.pull_request.paths: [...]`) and one of its jobs is a **required
+status check**, a PR that touches none of those paths never starts the workflow. The required check
+never reports, stays "Expected, waiting for status", and the PR **can never merge** (a docs-only PR
+is the classic victim). A job skipped by `if:` inside a running workflow reports `skipped`, which
+satisfies a required check; a workflow filtered out by `paths:` reports nothing, which does not.
+
+The fix is a companion workflow that fires on the **complement** of the main CI's paths and posts a
+green check with the **same name**:
+
+```yaml
+# .github/workflows/ci-summary-skip.yml
+on:
+  pull_request:
+    branches: [main]
+    paths-ignore:            # mirrors the main CI's `paths:` EXACTLY
+      - "src/**"
+      - "package*.json"
+jobs:
+  ci-summary:
+    name: CI Summary         # identical to the required check's name
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "No CI run needed; satisfying the required check."
+```
+
+Rules: `paths-ignore` must mirror the main CI's `paths` exactly (drift either re-blocks PRs or
+double-charges mixed ones); the job `name:` must match the required check's name; when both
+workflows fire on one PR, GitHub keeps the most recent status, so the real CI outcome wins. Add
+"companion `paths-ignore` still mirrors `paths`" to the review checklist of any PR that edits the
+main CI's `paths`. Template: `core/templates/repo-gates/github/workflows/required-check-skip.yml.example`.
+
+## 6. Required aggregator jobs: `if: ${{ !cancelled() }}`, never `always()`
+
+Make the required check ONE aggregator job that `needs:` every gating leg and fails on any
+non-success result, so the ruleset lists a single context and legs can change without editing it.
+The gotcha is its `if:`:
+
+```yaml
+ci-summary:
+  name: CI Summary
+  needs: [unit, integration, e2e]
+  if: ${{ !cancelled() }}      # NOT always()
+  runs-on: ubuntu-latest
+  steps:
+    - env:
+        UNIT: ${{ needs.unit.result }}
+        E2E: ${{ needs.e2e.result }}
+      run: |
+        for leg in "unit:$UNIT" "e2e:$E2E"; do
+          case "${leg#*:}" in
+            success|skipped) ;;                      # skipped = a draft- or path-gated leg
+            *) echo "::error::${leg%%:*} ${leg#*:}"; exit 1 ;;
+          esac
+        done
+```
+
+- **`always()` leaves a red corpse.** A newer push to the same PR cancels the in-flight run
+  (concurrency supersession). With `always()` the aggregator still runs on that cancelled run, sees
+  every leg `cancelled`, exits 1, and the required context sits at `failure` on that head SHA. The
+  superseding green run cannot clear it; the PR stays blocked until someone re-runs the dead run.
+- **`!cancelled()` fixes it without weakening the gate.** On a cancelled run the aggregator is
+  skipped, so the required context records `skipped` (a passing state). It still runs on success and
+  on genuine failures (`!cancelled()` is true for both), so a red leg still fails the gate.
+- **A single leg cancelled by its own timeout** while the run is live is a different case. Treat it
+  as a failure for any leg that must complete; only a deliberately flake-tolerant leg should accept
+  `cancelled`, and **never** a security or correctness proof ("did not run" must not be laundered
+  into "passed").
+- Register every new gating job in both `needs:` and the result check, or it silently does not gate
+  merges. Pass results through `env:` (section 2), not inline `${{ }}` in the script.
+
+Templates and a worked comment block: `core/templates/repo-gates/` (see its README; the
+`auto-draft-pr.yml`, `secret-scan.yml` and skip-companion workflows there follow every rule in this
+skill and are safe starting points).
+
 ## Review checklist (any workflow PR)
 
 ```text
@@ -187,4 +263,9 @@ gh api rate_limit --jq '.resources'   # compare .graphql.remaining vs .core.rema
     pull_request: types: list, so marking Ready actually schedules the gate.
 [ ] GraphQL-heavy steps tolerate a rate limit (defer, don't fail the run) and mutate
     sequentially rather than in parallel.
+[ ] A required check on a path-filtered workflow has a skip companion whose `paths-ignore`
+    mirrors the main CI's `paths` exactly, with an identical check name.
+[ ] A required aggregator job uses `if: ${{ !cancelled() }}` (not `always()`), lists every
+    gating leg in `needs:` and in its result check, and never accepts `cancelled` for a
+    security or correctness leg.
 ```

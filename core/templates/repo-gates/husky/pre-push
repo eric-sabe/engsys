@@ -1,0 +1,26 @@
+#!/usr/bin/env sh
+# pre-push — copy to .husky/pre-push (and make it executable).
+#
+# Written for husky v9+, which needs no `. "$(dirname -- "$0")/_/husky.sh"`
+# line. On husky v8, add that line right below this header.
+#
+# Runs the shift-left precheck gate before every push. The gate selects the
+# subset of CI checks relevant to your diff (see scripts/precheck.sh, from
+# precheck.sh.tmpl).
+#
+# Emergency bypass: PUSH_OVERRIDE=1 git push ...
+# Use only when you are certain CI will pass and local execution is blocked
+# (for example, a container engine is unavailable). CI is then the only safety
+# net.
+#
+# Override the gate command without editing this file:
+#   PRECHECK_CMD="npm run precheck" git push ...
+
+if [ "${PUSH_OVERRIDE:-0}" = "1" ]; then
+  echo ""
+  echo "  PUSH_OVERRIDE=1: pre-push gate skipped."
+  echo ""
+  exit 0
+fi
+
+sh -c "${PRECHECK_CMD:-bash scripts/precheck.sh}"
