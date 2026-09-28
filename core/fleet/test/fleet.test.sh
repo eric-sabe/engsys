@@ -10,56 +10,9 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 KIT_SRC="$(cd "$HERE/.." && pwd -P)"      # core/fleet
 CORE_SRC="$(cd "$KIT_SRC/.." && pwd -P)"  # core
-T="$(cd "$(mktemp -d)" && pwd -P)"
-PIDS=()
-cleanup() {
-  local p
-  for p in ${PIDS[@]+"${PIDS[@]}"}; do pkill -P "$p" 2>/dev/null || true; kill "$p" 2>/dev/null || true; done
-  rm -rf "$T"
-}
-trap cleanup EXIT
+# shellcheck source=sandbox.sh
+. "$HERE/sandbox.sh"
 
-# Results are counted in files so assertions inside subshells count too.
-: >"$T/pass.log"; : >"$T/fail.log"
-ok() { echo . >>"$T/pass.log"; echo "  ok   $1"; }
-bad() { echo . >>"$T/fail.log"; echo "  FAIL $1"; shift; if [ $# -gt 0 ]; then printf '%s\n' "$@" | sed 's/^/         /'; fi; }
-has() { # has <desc> <text> <fixed substring>
-  if grep -Fq -- "$3" <<<"$2"; then ok "$1"; else bad "$1" "want: $3" "got:" "$2"; fi
-}
-hasnt() { # hasnt <desc> <text> <fixed substring>
-  if grep -Fq -- "$3" <<<"$2"; then bad "$1" "did not want: $3" "got:" "$2"; else ok "$1"; fi
-}
-matches() { # matches <desc> <text> <extended regex>
-  if grep -Eq -- "$3" <<<"$2"; then ok "$1"; else bad "$1" "want /$3/" "got:" "$2"; fi
-}
-eq() { # eq <desc> <actual> <expected>
-  if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "want: $3" "got:  $2"; fi
-}
-RC=0 OUT=""
-run() { RC=0; OUT="$("$@" 2>&1)" || RC=$?; }
-rc_is() { # rc_is <desc> <expected rc> — checks the last `run`
-  if [ "$RC" = "$2" ]; then ok "$1"; else bad "$1" "want rc $2, got $RC; output:" "$OUT"; fi
-}
-
-# --- sandbox environment ---------------------------------------------------------------------
-export HOME="$T/home" FAKE="$T/fake" GIT_CONFIG_GLOBAL="$T/home/.gitconfig" GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
-mkdir -p "$HOME/.config/acme" "$HOME/git" "$T/bin" "$FAKE" "$T/remotes" "$T/seed"
-unset FLEET_INSTANCE ENGSYS_REF INSTANCE_REF PIN_SETTINGS GH_TOKEN GITHUB_TOKEN FLEET_CLAUDE_CONFIG_DIR CLAUDE_CONFIG_DIR TMUX_SESSION LOG_DIR
-cat >"$HOME/.gitconfig" <<EOF
-[user]
-	name = Sandbox
-	email = sandbox@example.invalid
-[init]
-	defaultBranch = main
-[advice]
-	detachedHead = false
-[commit]
-	gpgsign = false
-[tag]
-	gpgsign = false
-[url "file://$T/remotes/"]
-	insteadOf = https://github.com/
-EOF
 : >"$FAKE/shim.log"; : >"$FAKE/claude.log"; : >"$FAKE/tmux.log"; : >"$FAKE/gh.log"; : >"$FAKE/cr.log"; : >"$FAKE/launchctl.log"
 
 # --- stubs -----------------------------------------------------------------------------------
@@ -153,14 +106,7 @@ SH
 chmod +x "$T/bin/"*
 export PATH="$T/bin:$PATH"
 
-# --- remotes ---------------------------------------------------------------------------------
-seed_repo() { # seed_repo <slug> <dir> — a work repo wired (via insteadOf) to a fresh bare remote
-  git init -q --bare "$T/remotes/$1.git"
-  git init -q "$2"
-  git -C "$2" remote add origin "https://github.com/$1.git"
-}
-commit_all() { git -C "$1" add -A && git -C "$1" commit -q -m "$2"; }
-push_all() { git -C "$1" push -q origin main --tags; }
+# --- remotes (seed_repo / commit_all / push_all come from sandbox.sh) ---
 
 # engsys (the kit + the agent-sessions launcher), tagged v1.0.0 / v1.1.0 / v1.2.0
 E="$T/seed/engsys"
@@ -627,7 +573,4 @@ has "gh-app-login job is not installed without GH_APP_ENV" "$OUT" "skipped: com.
 rm -f "$HOME/.config/acme/fleet.local.conf"
 
 # =============================================================================================
-pass="$(wc -l <"$T/pass.log" | tr -d ' ')"; fail="$(wc -l <"$T/fail.log" | tr -d ' ')"
-echo
-echo "fleet.test: $pass passed, $fail failed"
-[ "$fail" = 0 ]
+finish fleet.test
