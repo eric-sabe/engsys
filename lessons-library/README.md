@@ -68,6 +68,8 @@ lessons relevant to its chosen stack. For now, promotion is manual via PR.
 - [co-commit-entangled-work](co-commit-entangled-work.md) — co-commit file-sharing issues; skip already-merged commits on rebase.
 - [stray-control-bytes-hide-changes](stray-control-bytes-hide-changes.md) — control bytes turn files binary and silence review.
 - [long-agent-runs-checkpoint-not-poll](long-agent-runs-checkpoint-not-poll.md) — checkpoint into short runs; end agents at PR-open.
+- [git-core-bare-flip-breaks-all-worktrees](git-core-bare-flip-breaks-all-worktrees.md) — hooks export `GIT_DIR`; scrub it in test git calls, guard `core.bare` on push.
+- [match-marker-comments-by-leading-position-and-author](match-marker-comments-by-leading-position-and-author.md) — leading-position + author match for marker comments; never `includes()` or `--edit-last`.
 
 ### Ops & deploy
 - [deploy-by-digest-and-verify-the-running-revision](deploy-by-digest-and-verify-the-running-revision.md) — immutable digest; verify the active revision.
