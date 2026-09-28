@@ -1,8 +1,20 @@
-# fleet-supervisor.conf — copy to .claude/fleet-supervisor.conf and edit.
+# fleet-supervisor.conf — an example of the supervisor's conf format.
+#
+# Two ways to use it:
+#   * Fleet kit (plugin mode; recommended): don't copy this file. Put these
+#     lines in your instance repo's fleet/supervisor.conf.tmpl; `fleet supervise`
+#     renders it, fills in LAUNCH_CMD and TMUX_SESSION for you, and the
+#     `fleet install-jobs` launchd job runs it. See docs/fleet-guide.md and
+#     core/fleet/ in engsys. (`engsys fleet init` scaffolds the template.)
+#   * Copy mode (manual): copy this file to .claude/fleet-supervisor.conf and
+#     edit; LAUNCH_CMD below points at the copied launcher.
+#
 # Read by the agent-sessions skill's fleet-supervisor.sh (launchd, ~5 min).
 # Only ledger-bearing monster sessions belong here — as many as you run;
 # interactive roles have no heartbeat contract and are never auto-relaunched.
 TMUX_SESSION=acme
+# Copy mode: the launcher copied into the project. Under the fleet kit, omit
+# this line (the kit sets it to `fleet --instance <dir> launch`).
 LAUNCH_CMD=bash .claude/skills/agent-sessions/scripts/launch-agent-sessions.sh --roster .claude/agent-sessions.roster
 # Repo holding the ledgers. Omit to use `gh repo view` in the cwd (supervisor
 # running inside the target repo); REQUIRED when it runs from a fleet repo.

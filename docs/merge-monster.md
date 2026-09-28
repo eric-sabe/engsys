@@ -355,9 +355,18 @@ Deliberately out of v1 scope; the design leaves each a clean seam.
 
 ## 14. Portability & requirements
 
-- **Ships as** an engsys core skill — installed into any project by the
-  engsys installer (`core/skills/` is always-all), alongside the
-  `/merge-monster` command and the enqueue-protocol workflow doc.
+- **Ships as** an engsys core skill, alongside the `/merge-monster` command
+  and the enqueue-protocol workflow doc, in either install mode:
+  - **Copy mode:** installed into any project by the engsys installer
+    (`core/skills/` is always-all), so it lives under `.claude/skills/`.
+  - **Plugin mode:** part of the `engsys` core plugin; the command is
+    `/engsys:merge-monster`, and `<engsys-root>` is the plugin root. Its
+    scripts run from the plugin cache (the plugin's hook auto-approves
+    exactly those bookkeeping scripts).
+  - **Fleet kit:** for an always-on machine, `core/fleet/` (see
+    [fleet-guide.md](fleet-guide.md)) launches and supervises the session
+    from an instance repo. Host jobs run from the pinned engsys checkout
+    (`ENGSYS_DIR`), never from the plugin cache.
 - **Requires:** `gh` (authed, `repo` scope; `project` scope if phase ordering
   reads GitHub Projects), `jq`, bash, and a Claude Code environment with the
   Monitor tool. Optional: a Slack integration for escalations.
@@ -369,6 +378,34 @@ Deliberately out of v1 scope; the design leaves each a clean seam.
 
 ## 15. Rollout checklist (per repo)
 
+Pick the path that matches how the fleet runs. The steps are the same in
+spirit: configure, run `mm-setup.sh`, add the enqueue convention, start the
+session, tune.
+
+**A. Fleet kit (plugin mode; recommended for an always-on machine).** Follow
+[fleet-guide.md](fleet-guide.md) §6, or run `/engsys:fleet-bootstrap`. For a
+repo the fleet serves:
+
+1. Put `merge-monster.yml` in the repo's fleet config dir (in the instance
+   plugin: `repos/<owner>/<repo>/`), starting from the skill's
+   `config.example.yml`. An in-repo `.claude/merge-monster.yml` wins if the
+   repo carries one.
+2. Run `mm-setup.sh --repo <owner/name>` from the pinned engsys checkout
+   (`$ENGSYS_DIR/core/skills/merge-monster/scripts/mm-setup.sh`), ideally as
+   the fleet's GitHub App identity; record the ledger issue number in the
+   config and in `fleet/supervisor.conf.tmpl` (`<session>|<ledger>|<stale>`,
+   with a 4th `|owner/name` field in a multi-repo fleet).
+3. Add the enqueue convention + baton rule to the repo's `CLAUDE.md`
+   (template in `core/workflows/merge-monster-protocol.md`).
+4. Add the session to `fleet/roster.tmpl` with the prompt
+   `/merge-monster fleet config dir: <path>`, then `fleet sync`,
+   `fleet launch <name>` and `fleet install-jobs` (the supervisor job
+   relaunches it from then on).
+5. First week: watch `state.md` and the journal; tune conflict magnets and
+   Dependabot policy.
+
+**B. Copy mode (a single repo, no fleet kit).**
+
 1. Install the skill (engsys installer, or copy `core/skills/merge-monster/`
    + `core/commands/merge-monster.md` into `.claude/`).
 2. Write `.claude/merge-monster.yml` (start from `config.example.yml`).
@@ -376,7 +413,9 @@ Deliberately out of v1 scope; the design leaves each a clean seam.
    the config.
 4. Add the enqueue convention + baton rule to the repo's `CLAUDE.md` (template
    in `core/workflows/merge-monster-protocol.md`).
-5. Start a session on the always-on machine: `/merge-monster`.
+5. Start a session on the always-on machine: `/merge-monster`. To relaunch it
+   automatically, set up the supervisor by hand (see the `agent-sessions`
+   skill).
 6. First week: watch `state.md` and the journal; tune conflict magnets and
    Dependabot policy.
 
@@ -401,3 +440,6 @@ Merge Monster is one of a family that composes into a full always-on fleet:
   preflights, tmux operations) and the fleet supervisor that relaunches any
   number of ledger-bearing monsters. Both can run from a separate fleet repo
   that also holds the monster configs (the "fleet config dir").
+- The **fleet kit** (`core/fleet/`, [fleet-guide.md](fleet-guide.md)) — the
+  host tooling that runs the launcher and supervisor for you from an instance
+  repo: pins, sync, restart, launchd jobs, and the GitHub App identity.
