@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+#
+# worktree-bootstrap.sh — turn a fresh git worktree into a runnable workspace.
+# Copy to scripts/worktree-bootstrap.sh, then edit the CONFIG block.
+#
+# Why: a new `git worktree` has its own working copy but none of the gitignored
+# bits a running app needs: no installed dependencies, no local env files, no
+# generated or built workspace packages. Running the app in such a worktree
+# fails confusingly (missing modules, config pointed at the wrong place). And
+# the husky hook shim (`.husky/_/`) is gitignored and generated only in the
+# main checkout, so without it `git push` from a worktree fails inside the hook
+# BEFORE the precheck gate runs, which makes PUSH_OVERRIDE=1 ineffective too.
+# This script supplies all of it.
+#
+# Idempotent: each step is skipped when already satisfied; safe to re-run.
+# No-op in the main checkout (do your one-time setup there by hand).
+#
+# Usage (from inside the worktree):
+#   bash scripts/worktree-bootstrap.sh
+
+set -euo pipefail
+
+# >>> CONFIG (edit this block; everything below it is generic machinery)
+
+# 1. Dependencies. Skipped when INSTALL_SENTINEL already exists; set INSTALL_CMD=""
+#    to skip the step entirely.
+INSTALL_CMD="npm ci"
+INSTALL_SENTINEL="node_modules"
+
+# 2. Env files to copy from the main checkout when the worktree lacks them.
+#    Globs, relative to the repo root, expanded in the MAIN checkout. Existing
+#    files are never overwritten. These are usually secrets-bearing and
+#    gitignored, so list only what a worktree really needs.
+ENV_GLOBS=(
+  ".env"
+  ".env.local"
+  "packages/*/.env.local"
+)
+
+# 3. Codegen / build steps, run in order, one row each: `name|sentinel|command`.
+#    A step is skipped when its sentinel path already exists (leave the sentinel
+#    empty to run it every time). Commands run with `bash -c` from the repo root
+#    and may contain '|'. Example rows:
+#      'Generate client|generated/client|npm run codegen'
+#      'Build shared packages|packages/shared/dist|npm run build --workspace shared'
+CODEGEN_STEPS=(
+)
+
+# 4. The husky hook shim directory (husky v9 generates it as .husky/_). Set to ""
+#    if you do not use husky.
+HUSKY_SHIM_DIR=".husky/_"
+
+# <<< CONFIG
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+# A worktree's --git-dir lives under <main>/.git/worktrees/<name>; the main
+# checkout's --git-dir IS --git-common-dir. Equal => not a worktree.
+git_dir="$(cd "$(git rev-parse --git-dir)" && pwd -P)"
+common_dir="$(cd "$(git rev-parse --git-common-dir)" && pwd -P)"
+
+if [ "$git_dir" = "$common_dir" ]; then
+  echo "==> Main checkout (not a worktree): nothing to bootstrap."
+  exit 0
+fi
+
+# The first entry of `git worktree list --porcelain` is always the main
+# worktree. (`dirname "$common_dir"` would be wrong for a bare-repo layout or a
+# repo with a separate git dir.)
+main_root="$(git worktree list --porcelain | awk '/^worktree /{ sub(/^worktree /, ""); print; exit }')"
+echo "==> Worktree:      $ROOT"
+echo "==> Main checkout: $main_root"
+
+# 1 — Dependencies.
+if [ -z "$INSTALL_CMD" ]; then
+  echo "==> [1/4] No INSTALL_CMD configured: skipping dependency install."
+elif [ -n "$INSTALL_SENTINEL" ] && [ -e "$INSTALL_SENTINEL" ]; then
+  echo "==> [1/4] $INSTALL_SENTINEL present: skipping install."
+else
+  echo "==> [1/4] Installing dependencies ($INSTALL_CMD)..."
+  bash -c "$INSTALL_CMD"
+fi
+
+# 2 — Env files. Copy whatever the main checkout has that the worktree lacks.
+echo "==> [2/4] Syncing env files from the main checkout..."
+copied=0
+shopt -s nullglob
+for pat in ${ENV_GLOBS[@]+"${ENV_GLOBS[@]}"}; do
+  # The pattern is intentionally unquoted so it expands as a glob.
+  # shellcheck disable=SC2086
+  for src in "$main_root"/$pat; do
+    [ -f "$src" ] || continue
+    rel="${src#"$main_root"/}"
+    dest="$ROOT/$rel"
+    [ -e "$dest" ] && continue
+    mkdir -p "$(dirname "$dest")"
+    cp -p "$src" "$dest"
+    echo "          + copied $rel"
+    copied=$((copied + 1))
+  done
+done
+shopt -u nullglob
+if [ "$copied" -eq 0 ]; then
+  echo "          nothing to copy (already present, or none in the main checkout)."
+fi
+
+# 3 — Codegen / build steps.
+n_steps=${#CODEGEN_STEPS[@]}
+if [ "$n_steps" -eq 0 ]; then
+  echo "==> [3/4] No codegen steps configured."
+else
+  for row in "${CODEGEN_STEPS[@]}"; do
+    step_name="${row%%|*}"
+    rest="${row#*|}"
+    step_sentinel="${rest%%|*}"
+    step_cmd="${rest#*|}"
+    if [ -n "$step_sentinel" ] && [ -e "$step_sentinel" ]; then
+      echo "==> [3/4] $step_name: $step_sentinel present, skipping."
+    else
+      echo "==> [3/4] $step_name..."
+      bash -c "$step_cmd"
+    fi
+  done
+fi
+
+# 4 — Husky hook shim. `core.hooksPath` points at the shim dir repo-wide, but
+#     the shim dir is gitignored and only generated in the main checkout (by
+#     `husky` in the `prepare` lifecycle). Symlinking it from the main checkout
+#     is idempotent and avoids re-running the whole prepare lifecycle; the shim
+#     content is static and resolves the hook scripts relative to the worktree.
+if [ -z "$HUSKY_SHIM_DIR" ]; then
+  echo "==> [4/4] No HUSKY_SHIM_DIR configured: skipping hook shim link."
+elif [ -d "$HUSKY_SHIM_DIR" ] || [ -L "$HUSKY_SHIM_DIR" ]; then
+  echo "==> [4/4] $HUSKY_SHIM_DIR already present: skipping hook shim link."
+elif [ -d "$main_root/$HUSKY_SHIM_DIR" ]; then
+  mkdir -p "$(dirname "$HUSKY_SHIM_DIR")"
+  ln -s "$main_root/$HUSKY_SHIM_DIR" "$HUSKY_SHIM_DIR"
+  echo "==> [4/4] Linked $HUSKY_SHIM_DIR from the main checkout: worktree pushes will now run the pre-push gate."
+else
+  echo "==> [4/4] WARNING: $main_root/$HUSKY_SHIM_DIR not found. Install dependencies in the main checkout"
+  echo "    first (so husky generates it), then re-run this script. Until then a push from this"
+  echo "    worktree will fail inside the hook, and PUSH_OVERRIDE=1 will not help."
+fi
+
+echo
+echo "==> Worktree bootstrapped. Run the app from THIS directory so it sees edits made on this branch."

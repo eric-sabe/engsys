@@ -1,0 +1,108 @@
+name: CI Summary (skip-paths)
+
+# Companion to your main CI workflow (call it ci.yml). Copy this to
+# .github/workflows/ci-summary-skip.yml (dropping the .example suffix) and edit
+# the marked lines.
+#
+# THE PROBLEM. Your main CI runs only when certain paths change (`on.pull_request.paths`),
+# for cost reasons. But the aggregator job `CI Summary` is a REQUIRED status check
+# in the branch ruleset. On a docs-only PR the main workflow never starts, so the
+# required check never reports and stays "Expected - waiting for status" forever:
+# the PR cannot merge. (A job skipped by `if:` inside a running workflow reports
+# as skipped, which satisfies a required check. A workflow filtered out by
+# `paths:` reports nothing at all, which does not.)
+#
+# THE FIX. This workflow fires when the main CI would NOT (a `paths-ignore`
+# mirroring the main CI's `paths`) and posts a green check with the SAME check
+# name, so the required context is satisfied.
+#
+# When BOTH workflows fire (a PR touching a mix of paths, if your filters
+# overlap), GitHub keeps the most recent status as the check's effective
+# result, so the main CI's real outcome wins.
+#
+# PATH-FILTER CONTRACT. `paths-ignore` below must mirror `paths` in the main CI
+# EXACTLY. Keep them in sync (a review-checklist item). Drift has two failure
+# modes: a path in neither list leaves PRs blocked again (bad); a path in both
+# double-charges mixed PRs (harmless).
+#
+# NAME CONTRACT. The job `name:` must be identical to the required check's name
+# and to the aggregator job's `name:` in the main CI.
+
+on:
+  pull_request:
+    branches: [main]
+    # EDIT: mirror the main CI's `paths:` list exactly.
+    paths-ignore:
+      - "src/**"
+      - "package*.json"
+      - "tsconfig*.json"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ci-summary:
+    name: CI Summary # EDIT: must match the required check's name
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Post success
+        run: |
+          echo "No CI run needed: the PR touches none of the main CI's trigger paths."
+          echo "The main CI would have been skipped; satisfying the required check."
+
+# ---------------------------------------------------------------------------
+# THE AGGREGATOR PATTERN (lives in the MAIN CI workflow, not in this file).
+#
+# One job named exactly like the required check gathers every gating leg, so
+# the ruleset lists ONE required context and legs can be added or renamed
+# without touching the ruleset. Sketch (keep it in ci.yml, shown here as a
+# comment so this example file stays a single valid workflow):
+#
+#   ci-summary:
+#     name: CI Summary
+#     needs: [unit, integration, e2e]          # every leg that must gate merge
+#     if: ${{ !cancelled() }}                  # NOT always(): see below
+#     runs-on: ubuntu-latest
+#     steps:
+#       - name: Check leg results
+#         env:
+#           UNIT: ${{ needs.unit.result }}
+#           INTEGRATION: ${{ needs.integration.result }}
+#           E2E: ${{ needs.e2e.result }}
+#         run: |
+#           for leg in "unit:$UNIT" "integration:$INTEGRATION" "e2e:$E2E"; do
+#             name="${leg%%:*}"; result="${leg#*:}"
+#             case "$result" in
+#               success|skipped) ;;            # skipped = a draft-gated or path-gated leg
+#               *) echo "::error::${name} ${result}"; exit 1 ;;
+#             esac
+#           done
+#
+# WHY `!cancelled()` AND NOT `always()`. The aggregator is a REQUIRED context,
+# so whatever conclusion it lands on becomes a merge gate. With `always()` the
+# job also runs when the WHOLE RUN was cancelled, which happens whenever
+# concurrency supersession cancels an in-flight run after a newer push to the
+# same PR. On a cancelled run every leg reports `cancelled`, the strict check
+# above exits 1, and the required context is left at conclusion=failure on
+# that head SHA. The superseding green run cannot clear that corpse, so the PR
+# stays BLOCKED until someone manually re-runs the dead run. `!cancelled()`
+# skips the aggregator when the run is cancelled, so the required context
+# records `skipped` (a passing state), never `failure`. It still RUNS on
+# success and on genuine failures, so a red leg still fails the gate: the gate
+# is not weakened, only the supersede-cancel corpse is removed.
+#
+# A single leg cancelled on its own (a job timeout) while the run is NOT
+# cancelled is a different case: the `*)` branch above blocks it, which is
+# right for a leg that must complete. For a leg you deliberately tolerate
+# (a known-flaky browser matrix), add `cancelled` to that leg's accepted
+# results. Never do that for a security or correctness proof: "did not run"
+# must not be laundered into "passed".
+#
+# Register every new gating job in BOTH the `needs:` list and the result
+# check, or it silently does not gate merges.
+# ---------------------------------------------------------------------------

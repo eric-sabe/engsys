@@ -1,0 +1,44 @@
+#!/usr/bin/env sh
+# pre-commit — copy to .husky/pre-commit (and make it executable).
+#
+# Written for husky v9+, which needs no `. "$(dirname -- "$0")/_/husky.sh"`
+# line. On husky v8, add that line right below this header.
+
+# 1. Format / lint staged files. The rules live in your lint-staged config
+#    (see lint-staged.example.json). Override the runner if you don't use npm,
+#    e.g. LINT_STAGED_CMD="pnpm exec lint-staged".
+LINT_STAGED_CMD="${LINT_STAGED_CMD:-npx --no-install lint-staged}"
+# shellcheck disable=SC2086 # intentional word splitting: the command may carry arguments
+$LINT_STAGED_CMD || exit 1
+
+# 2. Secret scan on staged changes (gitleaks).
+#    This is an EARLY-FEEDBACK layer only. The non-bypassable enforcement is
+#    the `secret-scan` CI job: a pre-commit hook is trivially skipped with
+#    `git commit --no-verify`, so CI is the real backstop.
+#
+#    If gitleaks is not installed locally we print a loud warning and let the
+#    commit through (CI will still catch leaks). A missing scanner must never
+#    pass silently, but it should not hard-block onboarding either.
+if command -v gitleaks >/dev/null 2>&1; then
+  # `gitleaks git --staged` scans only `git diff --cached`. It exits non-zero
+  # on a finding, which fails the commit.
+  if ! gitleaks git --staged --redact --no-banner; then
+    echo ""
+    echo "  ERROR: gitleaks detected a potential secret in your staged changes."
+    echo "    Review the finding above. If it is a real secret: remove it,"
+    echo "    rotate the credential, and re-stage."
+    echo "    If it is a verified false positive: add a narrow allowlist entry"
+    echo "    (path or regex) to .gitleaks.toml. Do NOT commit real secrets."
+    echo ""
+    exit 1
+  fi
+else
+  echo ""
+  echo "  WARNING: gitleaks is NOT installed, so the local secret scan was skipped."
+  echo "     Your commit was NOT scanned for secrets locally."
+  echo "     Install it so leaks are caught before they reach a push:"
+  echo "         brew install gitleaks      # macOS"
+  echo "         https://github.com/gitleaks/gitleaks#installing"
+  echo "     (CI still runs the secret-scan job as a backstop.)"
+  echo ""
+fi

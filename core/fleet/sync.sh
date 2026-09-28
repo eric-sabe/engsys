@@ -90,7 +90,7 @@ main() {
   fi
 
   # --- 3. engsys host checkout (the kit's own code — re-exec from it) ----------------------------
-  [ -d "$ENGSYS_DIR/.git" ] || fleet_die "engsys checkout not found at $ENGSYS_DIR — git clone <engsys repo> $ENGSYS_DIR"
+  [ -e "$ENGSYS_DIR/.git" ] || fleet_die "engsys checkout not found at $ENGSYS_DIR — git clone <engsys repo> $ENGSYS_DIR"
   local have_engsys
   have_engsys="$(fleet_git_at "$ENGSYS_DIR")"
   if [ "$have_engsys" != "$want_engsys" ]; then

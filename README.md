@@ -81,7 +81,7 @@ orchestrators, commands, workflows) plus one `engsys-<value>` plugin per stack p
 ```json
 {
   "extraKnownMarketplaces": {
-    "engsys": { "source": { "source": "github", "repo": "eric-sabe/engsys", "ref": "v1.2.0" }, "autoUpdate": false }
+    "engsys": { "source": { "source": "github", "repo": "eric-sabe/engsys", "ref": "v1.3.0" }, "autoUpdate": false }
   },
   "enabledPlugins": {
     "engsys@engsys": true,
@@ -92,7 +92,7 @@ orchestrators, commands, workflows) plus one `engsys-<value>` plugin per stack p
 ```
 
 Declaring plugins doesn't install them — install once per machine (`claude plugin marketplace add
-eric-sabe/engsys#v1.2.0`, then `claude plugin install engsys@engsys` and each pack), or accept the
+eric-sabe/engsys#v1.3.0`, then `claude plugin install engsys@engsys` and each pack), or accept the
 prompt when opening the project. In plugin mode:
 
 - **The project's own `CLAUDE.md` is its project facts.** The core plugin injects the generic engsys
@@ -233,6 +233,8 @@ core/               stack-agnostic — always installed
                     github-actions, merge-monster, pre-push, refactor, …
   workflows/        long-form procedure docs the commands reference
   templates/        CLAUDE.md, settings, hook, ADR + issue templates
+                    + repo-gates/: agent-PR workflow templates (auto-draft, secret scan,
+                    required-check skip), husky hooks, precheck + worktree-bootstrap skeletons
   fleet/            fleet kit: fleet sync · pin · restart · launch · supervise · install-jobs,
                     identity (GitHub App bot), launchd jobs, `engsys fleet init` scaffold
   lib/              agent-safety libraries: untrusted-data envelope, hermetic child git

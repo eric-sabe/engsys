@@ -57,8 +57,8 @@ is_alive() { # the launcher runs claude from the window's login shell; shell in 
 started_at() { # epoch the session's claude process started ('' if none)
   local pp pid lstart
   pp="$(tmux list-panes -t "$(win "$1")" -F '#{pane_pid}' 2>/dev/null | head -1)"
-  [ -n "$pp" ] || return 0
-  pid="$(pgrep -P "$pp" | head -1)"
+  case "$pp" in '' | *[!0-9]*) return 0 ;; esac
+  pid="$(pgrep -P "$pp" 2>/dev/null | head -1)"
   [ -n "$pid" ] || return 0
   lstart="$(LC_ALL=C ps -o lstart= -p "$pid" | sed 's/  */ /g; s/^ //; s/ *$//')"
   LC_ALL=C date -j -f '%a %b %d %T %Y' "$lstart" +%s 2>/dev/null || date -d "$lstart" +%s 2>/dev/null || true
