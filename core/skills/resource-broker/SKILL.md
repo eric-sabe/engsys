@@ -74,8 +74,9 @@ its holder resets it with `reset`. No pool-file change is needed.
   `messaging`, `liveness` (read by you).
 - **The pool file** named by `lease.pool_file` (relative to the config's directory) is durable-lease's JSON
   format. Every client that takes slots (hooks, gates, agents) must use the **same pool file, store and
-  owner fence** as you, and owners that satisfy the fence. Set `LEASE_STORE` in their environment (or pass
-  `--store`); a linked worktree has its own default store, so do not rely on the default across worktrees.
+  owner fence** as you, and owners that satisfy the fence. The default store (`<main checkout>/logs/leases`)
+  is shared by every linked worktree of the repo; set `LEASE_STORE` (or `--store`) only when clients run
+  from a different clone.
 - The ledger issue exists (`<skill-dir>/scripts/broker-setup.sh --repo <owner/name>` is idempotent and also
   creates the `broker:*` labels; run it if unsure). `<skill-dir>` is this skill's directory
   (`<engsys-root>/skills/resource-broker` when installed).

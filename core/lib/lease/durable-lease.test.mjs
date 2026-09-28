@@ -12,7 +12,7 @@ import { execFile, execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname, resolve } from "node:path";
+import { basename, join, dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
@@ -468,6 +468,19 @@ test("store: outside git it defaults to logs/leases under the cwd; LEASE_STORE o
   assert.equal(createLeaseStore({ dir: optDir, env: { LEASE_STORE: envDir } }).dir, optDir);
   assert.equal(createLeaseStore({ store: optDir, env: { LEASE_STORE: envDir } }).dir, optDir);
   assert.equal(createLeaseStore({ env: { LEASE_STORE: envDir } }).dir, envDir);
+});
+
+test("store: a linked worktree shares the main checkout's store", async (t) => {
+  const repo = realpathSync(tempStoreDir(t));
+  const g = (args, cwd) => execFileSync("git", args, { cwd, env: { ...process.env, ...HERMETIC_GIT, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid" } });
+  g(["init", "-q", repo]);
+  g(["commit", "-q", "--allow-empty", "-m", "seed"], repo);
+  const wt = join(dirname(repo), `${basename(repo)}-wt`);
+  g(["worktree", "add", "-q", "--detach", wt], repo);
+  t.after(() => rmSync(wt, { recursive: true, force: true }));
+  const main = join(repo, "logs", "leases");
+  assert.equal(defaultStoreDir(wt), main, "a worktree resolves to the main checkout's store");
+  assert.equal(defaultStoreDir(join(wt)), defaultStoreDir(repo));
 });
 
 test("store: inside a git repo the default is logs/leases under the toplevel, from any subdirectory", async (t) => {

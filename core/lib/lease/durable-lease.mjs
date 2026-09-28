@@ -71,7 +71,7 @@ import {
 } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { join, resolve } from "node:path";
+import { join, resolve, basename, dirname } from "node:path";
 
 const RECORD_VERSION = 1;
 
@@ -105,9 +105,29 @@ function gitToplevel(dir) {
  * tree (or without git) it falls back to the working directory itself. A linked worktree has its
  * own toplevel: to share a store between worktrees, set `LEASE_STORE` to one absolute path.
  */
+// The main checkout of the repo `dir` belongs to — shared by all its linked worktrees (agents work in
+// worktrees; a monster in the main checkout and a gate in a worktree must see one store). Falls back to
+// the worktree's own toplevel when the common git dir isn't a conventional `<root>/.git` (bare repo,
+// separate git dir), and to null outside git.
+function gitMainRoot(dir) {
+  try {
+    const res = spawnSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], {
+      cwd: dir,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 5_000,
+    });
+    const common = res.status === 0 ? res.stdout.trim() : "";
+    if (common && basename(common) === ".git") return dirname(common);
+  } catch {
+    /* fall through */
+  }
+  return gitToplevel(dir);
+}
+
 export function defaultStoreDir(cwd = process.cwd()) {
   const base = resolve(cwd);
-  return join(gitToplevel(base) ?? base, "logs", "leases");
+  return join(gitMainRoot(base) ?? base, "logs", "leases");
 }
 
 /** Thrown for caller mistakes (bad owner/kind/ttl/config) — distinct from operational outcomes. */

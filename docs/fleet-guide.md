@@ -42,6 +42,7 @@ heartbeat line. Closing the ledger issue is the kill switch.
 |---|---|---|---|
 | Merge Monster | `<ns>-mm` | owns the merge baton: orders the queue, pilots PRs through ready, CI and merge | [`merge-monster`](../core/skills/merge-monster/SKILL.md), design in [`merge-monster.md`](merge-monster.md) |
 | Maintenance Monster | `<ns>-maintain` | owns the security and dependency baton: Dependabot, alerts, scans, triage, safe fixes | [`maintenance-monster`](../core/skills/maintenance-monster/SKILL.md), design in [`maintenance-monster.md`](maintenance-monster.md) |
+| Resource Broker (optional) | `<ns>-broker` | arbitrates a pool of scarce host resources (for example local E2E environments) among sessions: grants slots, reaps stale grants, nudges waiters, runs host-maintenance windows | [`resource-broker`](../core/skills/resource-broker/SKILL.md), on the [`durable-lease`](../core/skills/durable-lease/SKILL.md) primitive |
 | any further baton-holder | `<ns>-<role>` | its own skill and ledger, same contract | yours |
 
 **Interactive roles** are attended sessions a person steers, usually through remote control from
@@ -58,6 +59,14 @@ by "monsters".
 **Ledgers** are the fleet's shared memory and its control surface. Everything a monster knows, it
 reconciles from live GitHub on startup, so a session can be killed and relaunched at any time with no
 local state to migrate. That property is what makes rotation, upgrades and rollbacks cheap.
+
+**Shared host resources** (a local test database, a port range, a GPU) are taken through a **durable
+lease** (`core/lib/lease/`): a file-backed lease with heartbeat expiry and a fencing token, plus a resource
+**pool** of slots whose provisioning is your command. Gates, agents and the broker share one store (by
+default `<main checkout>/logs/leases`, so every worktree of the repo sees it). `engsys fleet init
+--resource-broker` adds the broker monster and a starter pool file. Details: the
+[`durable-lease`](../core/skills/durable-lease/SKILL.md) and
+[`resource-broker`](../core/skills/resource-broker/SKILL.md) skills.
 
 Messaging between sessions is scoped to the OS user, not the project, so every session name starts
 with the fleet **namespace** (`acme-`). Peers only trust names under their own prefix, and monsters

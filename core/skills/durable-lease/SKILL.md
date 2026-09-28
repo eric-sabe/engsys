@@ -66,11 +66,11 @@ Then only `acme-*` owners can acquire, and `reconcile` reaps expired leases of `
 the directory). Owners are session identities, so use the same one for `acquire`, `heartbeat` and
 `release`; a gate typically takes `LEASE_OWNER` from its environment with a default like `ci-local`.
 
-The store defaults to `logs/leases` under the **git toplevel** of the current directory (the current
-directory itself outside a git work tree), so a hook and an agent started from different
-subdirectories of one checkout share a store. A linked worktree has its own toplevel: set
-`LEASE_STORE` (or `--store`) to one absolute path to share a store between worktrees or checkouts on
-the host, and keep it out of git.
+The store defaults to `logs/leases` under the repo's **main checkout** (the current directory itself
+outside git): every subdirectory and every **linked worktree** of one repository resolves to the same
+store, so a monster in the main checkout and a gate or agent in `../worktrees/<name>` coordinate without
+configuration. Set `LEASE_STORE` (or `--store`) to one absolute path only to share a store across
+*different* repositories or clones, and keep it out of git (`logs/` is gitignored).
 
 ## The lease CLI
 
@@ -360,9 +360,9 @@ LEASE_REFERENCE_IMPL=/path/to/other/durable-lease.mjs node --test core/lib/lease
 ## Gotchas
 
 - Same host only (see above). Never put the store on a network filesystem.
-- The default store is `<git toplevel>/logs/leases`, so different subdirectories of one checkout agree.
-  Different checkouts or linked worktrees do not: set `LEASE_STORE` to one absolute path, in the
-  environment of every hook, agent and broker that should share leases.
+- The default store is `<main checkout>/logs/leases`, so subdirectories and linked worktrees of one repo
+  agree. Separate clones do not: set `LEASE_STORE` to one absolute path in the environment of every hook,
+  agent and broker that should share leases.
 - Never put secrets in a lease `payload`: it is readable by anything that can read the store.
 - Do not `release --force` from automation; it bypasses the fencing token. Use `reap` for a dead
   lease, which refuses a live one.
