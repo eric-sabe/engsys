@@ -41,6 +41,21 @@ An org owner does this once, in the web console (there is no CLI for App creatio
    | Dependabot alerts | Read-only | `vulnerability_alerts` | a maintenance lane reading Dependabot alerts |
    | Code scanning alerts | Read-only | `security_events` | a maintenance lane reading code scanning |
    | **Code quality** | Read-only | `code_quality` | GitHub Code Quality findings (`GET /repos/{owner}/{repo}/code-quality/findings`), a separate surface from code scanning |
+   | Code scanning alerts | **Read and write** | `security_events` (`:write`) | dismissing alerts through the Maintenance Monster's standing false-positive policies (`fp_policies`); see below. Replaces the read-only row above |
+
+   **Code scanning: write is optional.** Reading alerts needs only `security_events:read`. The write level is
+   needed by exactly one thing: `mnt-fp-dismiss.sh` PATCHes an alert to `dismissed` (`PATCH /repos/{owner}/{repo}/code-scanning/alerts/{n}`),
+   and only for rules a reviewed `fp_policies` entry covers. A fleet that does not use `fp_policies` should
+   leave code scanning at read-only. Without write the dismiss script stops with a message naming this
+   permission and changes nothing, so the monster falls back to proposing dismissals for the operator's
+   `risk-accepted` label. To use it: set **Code scanning alerts** to **Read and write** on the App
+   (section "Changing permissions" below: the installation must accept the change), then add
+   `security_events:write` to `GH_APP_REQUIRED_PERMS` so `--check` verifies it. Setting that variable
+   **replaces** the default list, so keep the defaults:
+
+   ```bash
+   GH_APP_REQUIRED_PERMS=contents:write,pull_requests:write,issues:write,actions:write,workflows:write,checks:read,statuses:read,metadata:read,security_events:write
+   ```
 
 5. **Organization permissions**, optional: **Projects: Read and write** (`organization_projects`), needed
    only if the fleet uses `gh project` (org ProjectV2 boards).

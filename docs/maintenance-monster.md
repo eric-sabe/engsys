@@ -104,7 +104,174 @@ default explicit).
 - **Suppress — with sign-off** (accepted risk / false positive): a defer needs a
   tracking issue **and** a scoped `dependabot.yml` ignore (Phase 4) or a
   justified Trivy/CodeQL dismissal (a repo dismissal script), **never
-  silently**, and never without a human sign-off recorded on the issue.
+  silently**, and never without a human sign-off recorded on the issue. The
+  one exception is a **standing false-positive policy**
+  ([below](#standing-false-positive-policies)): for a code-scanning rule the
+  operator has reviewed, the sign-off is the reviewed policy, not each alert.
+
+## Standing false-positive policies
+
+Some code-scanning rules re-open a fresh alert on every new PR that touches the
+same harmless pattern, and each one blocks a merge until a human dismisses it.
+Sign-off per alert is toil with no security value, but a blanket auto-dismiss is
+unsafe: **a heuristic cannot prove that a rule has no true positives.** (A new
+password field, hashed with a built-in hash into a differently named column,
+would slip past a grep for "bcrypt".) So the sign-off moves from each alert to a
+**reviewed standing policy**, and the judgment about each alert stays with the
+monster, on the code:
+
+| Step | Who | What it proves |
+| --- | --- | --- |
+| Policy review | the operator, once, as a reviewed change to the config | the rule is a false positive *for these shapes*, and which structural facts must hold for that to stay true |
+| `mnt-fp-candidates.sh` | script, read-only | the tripwire holds at the alert's commit **and** at the default branch |
+| Per-alert judgment | the monster | this alert's code clearly matches a `known_fp_shapes` entry |
+| `mnt-fp-dismiss.sh` | script, the only mutating path | re-checks the above for that one alert, then dismisses with an auditable comment |
+
+### The policy
+
+```yaml
+fp_policies:
+  - id: password-hash-on-passwordless # stable slug, [a-z0-9-]
+    rule: js/insufficient-password-hash # exact code-scanning rule id
+    tool: CodeQL # optional; default any tool
+    approved_by: "<who> <yyyy-mm-dd> <link to the reviewed change that added this policy>" # REQUIRED
+    known_fp_shapes: # prose the monster checks each alert's code against (at least one)
+      - HMAC-SHA256 signing/verification of a canonical request string with a shared secret
+      - hashing a high-entropy generated secret (API key, token) for lookup
+      - test, fixture or seed code
+    paths: # optional: the alert's file must match include and not match exclude
+      include: ["**/*.ts"]
+      exclude: []
+    tripwire: # ALL must hold at the alert's commit AND at the default branch
+      - { type: absent_regex, glob: "**/schema.prisma", pattern: "password", ignore_case: true }
+      - { type: absent_dependency, manifests: "**/package.json", names: [bcrypt, bcryptjs, argon2, scrypt, pbkdf2] }
+      - { type: absent_path, glob: "**/password*.ts" }
+```
+
+- **Tripwire types** are exactly `absent_regex` (no file matching `glob` contains
+  a match for the JavaScript regular expression `pattern`, tested with the `m`
+  flag; `ignore_case` is optional), `absent_dependency` (no `names` entry in `dependencies`,
+  `devDependencies` or `optionalDependencies` of any `package.json` matching
+  `manifests`) and `absent_path` (no file matches `glob`). A `glob` matches the
+  full repo-relative path: `*` and `?` stay inside one directory, `**/` spans
+  any number of directories, including none. A glob that matches no files at
+  all makes an `absent_*` check pass; `files_scanned` in the JSON output shows
+  how many files each check actually looked at.
+- **Invalid policies are errors, never candidates.** A policy is invalid, and
+  `mnt-fp-candidates.sh` reports `ERROR` and produces no `CANDIDATE` for it, when
+  the `id` is not a slug, `approved_by` is missing or blank, `known_fp_shapes` is
+  empty, `approved_by` still holds a template placeholder (any `<…>` token, such as
+  `<who>` or `<link …>`), `tripwire` is empty or has an unknown `type`, a check lacks a required
+  key or a regex does not compile, a key is unknown (a typo such as `tripwires:`
+  must not silently disable a check), or two policies share an `id`. The other
+  policies in the file are unaffected.
+- **Reading the config.** The rest of the monster's scripts take flags and never
+  read YAML. `fp_policies` needs nested lists, so `scripts/mnt-fp.mjs` (zero
+  dependencies) reads exactly that block plus the top-level `default_branch` and
+  `state_dir`. It understands block and flow collections, quoted and plain
+  scalars and comments; it rejects anchors, tags and block scalars, so a policy
+  that uses them is invalid instead of misread. Quote a shape that contains
+  `": "`.
+
+### Where alerts are read: the default branch and every open PR
+
+The toil this removes is on **pull requests**: the ruleset's code-scanning gate
+blocks a PR on a new high-severity alert in that PR's own analysis, so by the time
+an alert reaches the default branch, the PR was already blocked and someone
+already dismissed it by hand. `mnt-fp-candidates.sh` therefore reads the default
+branch's open alerts and, for each open PR (from `gh pr list --state open`, widened
+until the list is no longer full), that PR's alerts at `ref=refs/pull/<n>/merge`,
+falling back to `refs/pull/<n>/head` when the merge ref is 404 or empty. Results
+are deduped by alert number; an alert that shows up on several refs keeps each
+instance, and the tripwire must hold at **every** instance's commit. `--prs
+all|none|<n,n>` (default `all`) chooses which PRs to scan.
+
+An instance commit missing locally is fetched with `git fetch origin <sha>`, then,
+for a PR instance, from `refs/pull/<n>/merge` / `/head` into scratch refs under
+`refs/mnt-fp/`. `mnt-fp-dismiss.sh` re-fetches the same way when the alert's
+instance is on a PR ref. It re-checks the alert GitHub returns for that number
+(its `most_recent_instance`), whereas the candidate list checked every instance it
+found, so the list is the stricter of the two. Scanning N PRs costs one to two `gh`
+calls each.
+
+### The two gates, and why both
+
+A tripwire is checked at the **alert's own commit** and at the **default
+branch**. Checking only the default branch would wrongly clear a PR that
+introduces the very thing the policy assumes absent, on its own branch, while
+`main` is still clean. Checking only the alert's commit would let a policy keep
+firing after the assumption broke on `main`. Both must hold, for every check.
+
+The candidates script fetches the default branch explicitly
+(`git fetch origin "+refs/heads/$B:refs/remotes/origin/$B"`) and **fails closed
+if that fetch fails**: a stale `origin/main` is never read. It fetches an alert's
+commit if the clone lacks it, runs child `git` with the repo-location variables
+(`GIT_DIR` and friends) removed so a hook's environment cannot redirect it, and
+treats any `gh` or `git` error as `ERROR`. The scope of an error matches what it
+can affect. A problem shared by every alert of a policy fails the **whole policy
+closed** (no `CANDIDATE` for it): an invalid policy, a failed fetch of the default
+branch, a default-branch tripwire that cannot be evaluated, or an unreadable
+default-branch alert list. A problem with **one alert** (`ERROR alert <n>: …`, e.g. a
+PR that was force-pushed so its commit is gone) or **one PR** (`ERROR pr <n>: …`, its
+alerts could not be listed) is reported for that alert or PR only, and the others
+still evaluate.
+
+### Outputs
+
+`mnt-fp-candidates.sh --repo owner/name --config FILE [--policy ID] [--json]`,
+one line per alert:
+
+```
+CANDIDATE <alert#> <policy> <path>:<line> <sha> [pr=<n>]
+TRIPWIRE_FAILED <alert#> <policy> <check> <commit|main> <detail> [pr=<n>]
+OUT_OF_SCOPE <alert#> <policy> <path> <why> [pr=<n>]
+ERROR <reason>
+```
+
+`pr=<n>` is appended when the alert instance is on that pull request. Flags beyond
+those above: `--prs all|none|<n,n>` (default `all`), `--repo-dir DIR` (the local
+clone; default the current directory) and `--default-branch NAME`.
+
+`--json` prints one array instead, each element carrying `status`, `alert`,
+`policy`, `html_url`, `severity`, `pr`, `path`, `line`, `sha`, every `instances[]`
+and the per-check `tripwire` results (`type`, `index`, `where`, `sha`, `pr`, `ok`,
+`detail`).
+
+`mnt-fp-dismiss.sh --repo R --config FILE --alert N --policy ID --shape "…"
+--evidence "…"` first re-runs that alert's evaluation (the tripwire may have
+tripped since the list was made). It dismisses only if the result is still a
+`CANDIDATE` **and** `--shape` equals one of the policy's `known_fp_shapes`
+verbatim. The PATCH sets `state=dismissed`, `dismissed_reason="false positive"`
+and `dismissed_comment` to `fp-policy <id>: <shape> — <evidence>`, cut to GitHub's
+280-character limit. It appends a line to `<state_dir>/fp-dispositions.jsonl`
+(checked writable before the PATCH). It **refuses**, with a non-zero exit and no
+PATCH, when the tripwire now fails, the alert is out of scope or already closed,
+the policy is invalid, the shape does not match, or a `git`/`gh` call fails.
+
+### What the monster does with it
+
+On each CodeQL tick it runs the candidates script. For a `CANDIDATE` it reads the
+flagged code at the alert's commit and dismisses **only** if the code clearly
+matches a known shape; unsure means the ordinary propose-with-`risk-accepted`
+path. On `TRIPWIRE_FAILED` it escalates once and dismisses nothing under that
+policy until the operator either retires the policy (the rule now has true
+positives) or lands a reviewed fix to the check. On `ERROR` it dismisses nothing
+that tick. The weekly digest lists every policy dismissal from the journal for
+audit. The monster never edits a policy: `approved_by` is the operator's
+standing sign-off, and only a reviewed change may add or alter one.
+
+### Permissions and approval
+
+Dismissing needs the GitHub App permission **Code scanning alerts: Read and
+write** (`security_events: write`), an *optional* permission required only for
+`fp_policies` dismissals; the read-only lanes need only `security_events: read`.
+See [the fleet identity kit](../core/fleet/identity/README.md) for adding it to
+the App and to `GH_APP_REQUIRED_PERMS`. On HTTP 403 the dismiss script says so.
+
+`mnt-fp-candidates.sh` never mutates, so the plugin's PreToolUse hook and the
+copy-mode settings template auto-approve it, like the other bookkeeping scripts.
+`mnt-fp-dismiss.sh` mutates, so it is **not** auto-approved: attended sessions
+prompt for it.
 
 ## Expert routing
 
@@ -120,7 +287,8 @@ default explicit).
 Mirrors the playbook's "never auto" set: major version bumps, runtime deps,
 Docker base images, engine bumps; any suppression / accepted-risk call; anything
 touching prod IaC, secrets, or migrations (agents are deny-ruled from prod
-migrations/deploys — that applies here too).
+migrations/deploys — that applies here too). Editing an `fp_policies` entry is
+also operator-only: the monster never changes a policy.
 
 ## Guardrails
 
@@ -128,7 +296,10 @@ migrations/deploys — that applies here too).
   issue + rationale, and the operator sign-off is recorded as a **`risk-accepted`
   label** on that issue (auditable, greppable, closeout-mineable) — the label is
   the gate: no `risk-accepted`, no suppression. Maintenance Monster (or nyx)
-  proposes; only the operator applies the label.
+  proposes; only the operator applies the label. The exception is an alert
+  covered by an approved `fp_policies` entry, dismissed through
+  `mnt-fp-dismiss.sh`; that leaves the dismissal comment, a journal line and a
+  weekly-digest entry instead of an issue.
 - **Validate the fix against the _right_ gate, bound to the fix commit.** Trivy
   image-scan runs on **push/dispatch, not PR** — a green PR does not prove a CVE
   fix. Dispatch `gh workflow run services-ci.yml --ref "$FIX_REF" -f
@@ -189,6 +360,7 @@ routing: { security: nyx, ci: aaron, code: isabelle, rca: bert }
 max_concurrent_fix_prs: 3
 fix_attempts_max: 2
 suppression: { signoff_label: risk-accepted } # operator-only; the gate for any dismissal
+# fp_policies: optional standing false-positive policies, see below
 escalation: {
     slack_channel: "#eng-escalation",
     channel_id: C0XXXXXXXXX,

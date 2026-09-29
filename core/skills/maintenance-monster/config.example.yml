@@ -1,7 +1,8 @@
 # Maintenance Monster per-repo config — copy to .claude/maintenance-monster.yml
 # (or to maintenance-monster.yml in a fleet config dir outside the repo — see
-# SKILL.md § Prerequisites) and edit. Read by the model at session start; scripts take flags, never
-# parse YAML. Design spec: docs/maintenance-monster.md.
+# SKILL.md § Prerequisites) and edit. Read by the model at session start; scripts take flags and do
+# not parse YAML — the one exception is the fp_policies block, which the mnt-fp-* scripts read.
+# Design spec: docs/maintenance-monster.md.
 
 repo: owner/name
 default_branch: main
@@ -70,6 +71,35 @@ fix_attempts_max: 2 # fix-agent dispatches per finding before escalating
 
 suppression:
   signoff_label: risk-accepted # operator-only; the gate for any dismissal — no label, no suppression
+
+# Standing false-positive policies (optional; omit to keep every dismissal behind `risk-accepted`).
+# The operator signs off ONCE, on a reviewed change that adds the policy, instead of per alert.
+# scripts/mnt-fp-candidates.sh finds open code-scanning alerts a policy covers and proves its
+# tripwire holds; you judge each alert's code against known_fp_shapes; scripts/mnt-fp-dismiss.sh
+# re-checks and is the only path that dismisses. See SKILL.md § Standing false-positive policies.
+# A policy is INVALID (an error, never a candidate) when it has: an id that is not a [a-z0-9-] slug,
+# no approved_by (or one still holding a <...> placeholder like the one below), an empty
+# known_fp_shapes, no tripwire, an unknown tripwire type, or an unknown key. Replace the placeholder
+# with the real sign-off before uncommenting.
+# Quote a shape that contains ": ". Globs match the full repo path (* stays in one directory,
+# **/ spans directories); absent_regex patterns are JavaScript regular expressions.
+# fp_policies:
+#   - id: password-hash-on-passwordless # stable slug, [a-z0-9-]
+#     rule: js/insufficient-password-hash # exact code-scanning rule id
+#     tool: CodeQL # optional; default any tool
+#     approved_by: "<who> <yyyy-mm-dd> <link to the reviewed change that added this policy>" # REQUIRED
+#     known_fp_shapes: # prose you check each alert's code against (at least one)
+#       - HMAC-SHA256 signing/verification of a canonical request string with a shared secret
+#       - hashing a high-entropy generated secret (API key, token) for lookup
+#       - test, fixture or seed code
+#     paths: # optional: the alert's file must match include and not match exclude
+#       include: ["**/*.ts"]
+#       exclude: []
+#     tripwire: # ALL must hold at the alert's commit AND at the default branch
+#       - { type: absent_regex, glob: "**/schema.prisma", pattern: "password", ignore_case: true }
+#       - { type: absent_dependency, manifests: "**/package.json", names: [bcrypt, bcryptjs, argon2, scrypt, pbkdf2] }
+#       - { type: absent_path, glob: "**/password*.ts" }
+
 
 escalation:
   slack_channel: "" # shared with Merge Monster — one channel to watch; empty → GitHub-only

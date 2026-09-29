@@ -97,6 +97,16 @@ test('hook: emits an allow decision for an approvable Bash call, nothing otherwi
   }
 });
 
+test('approves the read-only false-positive candidate finder, never the dismisser', () => {
+  const mnt = path.join(P.root, 'skills/maintenance-monster/scripts');
+  fs.mkdirSync(mnt, { recursive: true });
+  for (const f of ['mnt-fp-candidates.sh', 'mnt-fp-dismiss.sh']) fs.writeFileSync(path.join(mnt, f), '#!/usr/bin/env bash\n', { mode: 0o755 });
+  const args = '--repo acme/app --config /etc/fleet/maintenance-monster.yml --json';
+  assert.equal(approvable(`${mnt}/mnt-fp-candidates.sh ${args}`, P.root), 'maintenance-monster/scripts/mnt-fp-candidates.sh');
+  assert.equal(approvable(`bash ${mnt}/mnt-fp-candidates.sh ${args}`, P.root), 'maintenance-monster/scripts/mnt-fp-candidates.sh');
+  assert.equal(approvable(`${mnt}/mnt-fp-dismiss.sh ${args} --alert 1 --policy p --shape s --evidence e`, P.root), null);
+});
+
 test('copy-mode settings template allows exactly the same scripts (lockstep)', async () => {
   const { ALLOWED } = await import('./approve-own-scripts.mjs');
   const tmpl = fs.readFileSync(path.join(path.dirname(HOOK), '..', 'templates', 'settings.json.tmpl'), 'utf8');

@@ -13,7 +13,9 @@ are Merge Monster's sibling, not its competitor: full relationship in
 `docs/maintenance-monster.md` § Relationship to Merge Monster and
 `docs/agent-messaging.md` § Related: the maintenance watchdog.
 
-**Phase 1 (`phase: read_only`, the default) is read-only.** The config's
+**Phase 1 (`phase: read_only`, the default) is read-only** (one operator-opted-in
+exception: a dismissal through an approved `fp_policies` entry, below — the
+operator's review of that policy is the opt-in, and no policy means no exception). The config's
 `phase:` key is the single source of truth for which phase is live — never
 infer it from docs. You watch, dedup, triage, and **report** —
 you classify every finding and write it to the ledger/journal, but you open
@@ -41,7 +43,10 @@ how confident a disposition looks.
   skill's directory (`<engsys-root>/skills/maintenance-monster` when installed).
 - `gh` authed with `repo` scope (and `security_events` if you want live
   Dependabot/CodeQL alert reads — GHAS surfaces degrade gracefully, see
-  § Guardrails, if unavailable); `jq` on PATH.
+  § Guardrails, if unavailable); `jq` and `node` on PATH. Only if the config has
+  `fp_policies:` and you will dismiss through them: the token also needs code
+  scanning **write** (`security_events: write`), and a local clone of the repo
+  whose `origin` is the repo (§ Standing false-positive policies).
 
 ## Session startup
 
@@ -90,7 +95,10 @@ how confident a disposition looks.
    the rotation runbook, never rotate it yourself), and restarts either
    Monitor if it died — plus runs
    `mm-agent-watch.sh --once` as a synchronous backstop scan for overdue
-   subagents.
+   subagents. When `fp_policies:` is configured it also runs
+   `mnt-fp-candidates.sh` (§ Standing false-positive policies), so a tripped
+   tripwire surfaces even when no new alert fired, and posts the weekly
+   policy-disposition digest when one is due.
 
 ## The loop — on every wake (event or tick)
 
@@ -99,7 +107,9 @@ how confident a disposition looks.
    - `DEPENDABOT_PR #N <title>` → dedup against the queue (don't re-triage
      something already classified); triage (below).
    - `DEP_ALERT <id> <pkg> <sev>` / `CODEQL_ALERT <id> <rule> <sev>` → dedup
-     on advisory/alert id; triage.
+     on advisory/alert id; triage. For a `CODEQL_ALERT` whose rule an
+     `fp_policies:` entry names, run § Standing false-positive policies first,
+     then triage whatever it leaves open.
    - `SECRET_ALERT <run>` / `TRIVY_RED <run>` → these are urgent (they red
      the default branch's protections) — triage immediately, ahead of the
      queue.
@@ -152,7 +162,101 @@ in the config is `escalate` for exactly this reason.
   Trivy/CodeQL dismissal, but never apply the suppression yourself — it takes
   effect only once the **operator** applies the `risk-accepted` label to the
   tracking issue (`suppression.signoff_label` in config). No label, no
-  suppression, ever.
+  suppression, ever. The one exception is a code-scanning alert covered by an
+  approved `fp_policies` entry: the operator's sign-off is then the reviewed
+  policy itself, and you dismiss only through `mnt-fp-dismiss.sh` (§ Standing
+  false-positive policies).
+
+## Standing false-positive policies
+
+An optional config block, `fp_policies:`, moves the operator's sign-off from each
+alert to a **reviewed standing policy**. A policy names one exact code-scanning
+rule, the *shapes* of code that are known false positives for it, and a
+structural **tripwire** that must hold for the policy to apply at all.
+`approved_by` records who signed it off, when, and links the reviewed change
+that added it: that change review is the operator's `risk-accepted` for every
+alert the policy covers. Full schema: `config.example.yml`; rationale:
+`docs/maintenance-monster.md` § Standing false-positive policies.
+
+Three pieces, each with one job:
+
+- **`scripts/mnt-fp-candidates.sh`** (read-only, auto-approved) finds open
+  code-scanning alerts a policy covers, on the default branch **and on every
+  open pull request** (the alerts that block a merge live on PR refs:
+  `refs/pull/<n>/merge`, falling back to `/head`), and proves the tripwire holds
+  at the alert's own commit **and** at the freshly fetched default branch. It
+  never dismisses. A tripwire is a grep-style check, so it can prove a structural
+  precondition still holds; it cannot prove a given alert is a false positive.
+- **You** make the per-alert judgment by reading the code.
+- **`scripts/mnt-fp-dismiss.sh`** (mutating, **not** auto-approved) re-runs the
+  evaluation for that one alert and only then dismisses.
+
+Run it on each CodeQL tick (a matching `CODEQL_ALERT` event, and the fallback
+tick), from the repo clone, as its own Bash call by literal path:
+
+```bash
+<skill-dir>/scripts/mnt-fp-candidates.sh --repo <repo> --config <config-file>
+```
+
+`--prs all|none|<n,n>` narrows which PRs are scanned (default `all`, every open
+PR; `<n,n>` a comma list of PR numbers). Do not narrow it on the routine tick:
+the PR alerts are the ones blocking merges.
+
+Act on each output line:
+
+- `CANDIDATE <alert#> <policy> <path>:<line> <sha> [pr=<n>]`: read the flagged code **at
+  the alert's commit** (a trailing `pr=<n>` means the alert is on that pull
+  request, and `<sha>` is fetched from its ref): `git show <sha>:<path>`, about 30 lines either side of
+  `<line>`, plus whatever the surrounding function calls if the answer depends
+  on it. Decide whether it **clearly** matches one of that policy's
+  `known_fp_shapes`. If it does, dismiss with that shape copied **verbatim** and
+  a one-line description of what the code actually does:
+
+  ```bash
+  <skill-dir>/scripts/mnt-fp-dismiss.sh --repo <repo> --config <config-file> \
+    --alert <alert#> --policy <policy> --shape "<the shape, verbatim>" \
+    --evidence "<what this code does, one line, at most 200 characters>"
+  ```
+
+  **If you are unsure, or it does not clearly match, do not dismiss.** Leave the
+  alert open and take today's path: propose a tracking issue and wait for the
+  operator's `risk-accepted` label (§ Triage, "Suppress"). A new password
+  field, a user-chosen secret, or code that merely resembles a shape is not a
+  match. Journal the judgment either way.
+- `DISMISSED …` (from the dismiss script): journal it (`journal-YYYY-MM.*`).
+  The script has already appended to `<state_dir>/fp-dispositions.jsonl`.
+  `REFUSED …` means the re-check failed (tripwire now failing, out of scope,
+  already closed, shape mismatch): dismiss nothing, treat it like the line it
+  names. `ERROR … 403 …` means the App lacks **Code scanning alerts: Read and
+  write**: escalate once, and fall back to propose-only until it is granted.
+- `TRIPWIRE_FAILED <alert#> <policy> <check> <commit|main> … [pr=<n>]`: the structural
+  assumption behind the policy no longer holds (at that alert's commit only, or
+  on the default branch). **Escalate once** per policy and check on the ledger
+  (`mnt:escalated`, the check, where it failed, the alert link) and ping the
+  operator. Make **no dismissals under that policy** until the operator
+  resolves it: either the rule now has true positives and the policy must be
+  retired, or the check needs a reviewed fix. Never edit the policy yourself,
+  and do not re-escalate the same failure every tick (dedup on policy + check).
+  Alerts under that policy meanwhile fall back to propose-only.
+- `OUT_OF_SCOPE …`: the alert is outside the policy's `paths`; triage it as usual.
+- `ERROR …`: a config, `gh` or `git` problem. Log it, and dismiss nothing that
+  the error touches. Its scope is in its text:
+  - `ERROR alert <n>: …` (that alert's commit could not be fetched or read, for
+    example a PR closed or was force-pushed mid-run) and `ERROR pr <n>: …` (that
+    PR's alerts could not be listed) affect only that alert or PR; the other
+    lines of the same run are good and can be acted on.
+  - `ERROR policy <id>: …` (an invalid policy, a failed fetch of the default
+    branch, an unreadable default-branch alert list) fails the whole policy
+    closed: it yields no `CANDIDATE` lines by design, so dismiss nothing under
+    it that tick. An invalid policy needs the operator to fix it.
+  - `ERROR cannot list open PRs …`: no PR was scanned; the default branch was.
+
+**Weekly digest.** Once a week (the first tick at least seven days after the
+last one; record the date in `state.md`), comment on the ledger issue listing
+**every** line of `<state_dir>/fp-dispositions.jsonl` since the previous
+digest: alert link, policy, shape, evidence, commit. The operator audits
+policy dismissals from that list; a week with none still gets a one-line
+"no policy dismissals" so the silence is visible.
 
 ## Expert routing
 
@@ -172,7 +276,10 @@ does the analysis.
 - **No silent suppression.** A dismissed/ignored finding always leaves a
   tracked issue + rationale; you (or `nyx`) propose, only the **operator**
   applies `risk-accepted`. Never dismiss a Trivy/CodeQL finding or add a
-  `dependabot.yml` ignore without that label already on a linked issue.
+  `dependabot.yml` ignore without that label already on a linked issue, except
+  through an approved `fp_policies` entry and `mnt-fp-dismiss.sh`, which leaves
+  its own record (the alert's dismissal comment, `fp-dispositions.jsonl`, and
+  the weekly digest).
 - **Validate a fix against the _right_ gate, bound to the fix commit.** Trivy
   image-scan runs on push/dispatch, not PR — a green PR does not prove a CVE
   fix. When Phase 2 drives a fix, dispatch
@@ -265,7 +372,10 @@ final heartbeat with status "session end", stop the Monitor.
 ## Hard rules
 
 Never open a fix PR or apply a label outside Phase 1's read-only scope
-(classify + report + escalate only) · never merge anything — that's
+(classify + report + escalate only) · dismiss only through an approved
+`fp_policies` entry **and** `mnt-fp-dismiss.sh` — everything else stays
+propose-only behind `risk-accepted` — and never edit a policy yourself · never
+merge anything — that's
 the merge orchestrator's job · never run a migration or deploy · never apply
 `risk-accepted` yourself — operator-only · never let a duplicate finding
 re-trigger a fresh escalation or PR (dedup first) · never treat a GHAS
