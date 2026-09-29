@@ -397,6 +397,8 @@ export function globToRegExp(glob) {
 // ---------------------------------------------------------------------------------------------
 
 const ID_RE = /^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$/;
+// The example config ships `<who> <yyyy-mm-dd> <link ...>`: any <...> token, or an unclosed <who/<yyyy/<link, is a placeholder.
+const PLACEHOLDER_RE = /<[^<>]*>|<\s*(who|yyyy|link)/i;
 const TRIPWIRE_TYPES = ['absent_regex', 'absent_dependency', 'absent_path'];
 const DEP_SECTIONS = ['dependencies', 'devDependencies', 'optionalDependencies'];
 const isStr = (v) => typeof v === 'string' && v.trim() !== '';
@@ -444,6 +446,7 @@ export function validatePolicy(raw, index) {
   if (!isStr(raw.rule) || /\s/.test(raw.rule)) errors.push('rule must be an exact code-scanning rule id');
   if (raw.tool !== undefined && raw.tool !== null && !isStr(raw.tool)) errors.push('tool must be a string');
   if (!isStr(raw.approved_by)) errors.push('approved_by is required (who, date and a link to the reviewed change that added this policy)');
+  else if (PLACEHOLDER_RE.test(raw.approved_by)) errors.push('approved_by still contains a template placeholder (a <...> token such as <who>, <yyyy-mm-dd> or <link>); replace it with who signed off, the date and a bare link to the reviewed change');
   if (!Array.isArray(raw.known_fp_shapes) || raw.known_fp_shapes.length === 0) errors.push('known_fp_shapes must be a non-empty list');
   else if (!raw.known_fp_shapes.every(isStr)) errors.push('known_fp_shapes entries must be non-empty strings (quote a shape that contains ": ")');
   const paths = { include: [], exclude: [] };
@@ -511,6 +514,8 @@ function gitEnv() {
 }
 
 class ToolError extends Error {}
+/** A failure that affects every alert of a policy (the default branch is unavailable): fail the whole policy closed. */
+class MainError extends ToolError {}
 
 const oneLine = (s, max = 300) => {
   const t = String(s).replace(/\s+/g, ' ').trim();
@@ -542,6 +547,7 @@ function ghJson(args) {
   if (!r.ok) {
     const err = new ToolError(`gh api ${args[args.length - 1]} failed: ${oneLine(r.stderr || r.stdout)}`);
     err.http403 = /HTTP 403|Resource not accessible/i.test(r.stderr + r.stdout);
+    err.http404 = /HTTP 404|Not Found/i.test(r.stderr + r.stdout);
     throw err;
   }
   try {
@@ -551,18 +557,58 @@ function ghJson(args) {
   }
 }
 
-function listOpenAlerts(repo) {
-  const per = Number(process.env.MNT_FP_PER_PAGE) > 0 ? Number(process.env.MNT_FP_PER_PAGE) : 100;
+const perPage = () => (Number(process.env.MNT_FP_PER_PAGE) > 0 ? Number(process.env.MNT_FP_PER_PAGE) : 100);
+
+/** Open alerts of one ref (default branch when `ref` is null), all pages, walking to the first empty page. */
+function listOpenAlerts(repo, ref = null) {
+  const per = perPage();
   const all = [];
   for (let page = 1; ; page++) {
     if (page > MAX_PAGES) throw new ToolError(`code-scanning alert list exceeds ${MAX_PAGES} pages`);
-    const items = ghJson([`repos/${repo}/code-scanning/alerts?state=open&per_page=${per}&page=${page}`]);
+    const refq = ref ? `&ref=${ref}` : '';
+    const items = ghJson([`repos/${repo}/code-scanning/alerts?state=open&per_page=${per}&page=${page}${refq}`]);
     if (!Array.isArray(items)) throw new ToolError('code-scanning alerts response is not a list');
     if (items.length === 0) break;
     all.push(...items);
   }
-  return all.filter((a) => a && a.state === 'open').sort((x, y) => x.number - y.number);
+  return all.filter((a) => a && a.state === 'open');
 }
+
+/** Open PR numbers, ascending. `gh pr list` pages internally up to --limit; a full result means "maybe more", so widen. */
+function listOpenPrs(repo) {
+  let limit = Number(process.env.MNT_FP_PR_LIMIT) > 0 ? Number(process.env.MNT_FP_PR_LIMIT) : 1000;
+  for (;;) {
+    const r = gh(['pr', 'list', '-R', repo, '--state', 'open', '--json', 'number', '--limit', String(limit)]);
+    if (!r.ok) throw new ToolError(`gh pr list failed: ${oneLine(r.stderr || r.stdout)}`);
+    let list;
+    try { list = JSON.parse(r.stdout); } catch { throw new ToolError('gh pr list: response is not JSON'); }
+    if (!Array.isArray(list) || !list.every((x) => x && Number.isInteger(x.number))) throw new ToolError('gh pr list: unexpected response');
+    if (list.length < limit) return list.map((x) => x.number).sort((a, b) => a - b);
+    if (limit >= 100000) throw new ToolError(`more than ${limit} open PRs; the PR list may be truncated`);
+    limit *= 4;
+  }
+}
+
+/** Open alerts of a PR: its merge ref first (what the merge gate analyses), then /head when merge is 404 or empty. */
+function listPrAlerts(repo, pr) {
+  for (const kind of ['merge', 'head']) {
+    let items;
+    try {
+      items = listOpenAlerts(repo, `refs/pull/${pr}/${kind}`);
+    } catch (e) {
+      if (e.http404) continue; // no analysis for that ref
+      throw e;
+    }
+    if (items.length) return items;
+  }
+  return [];
+}
+
+const PR_REF_RE = /^refs\/pull\/(\d+)\/(merge|head)$/;
+const prFromRef = (ref) => {
+  const m = typeof ref === 'string' ? PR_REF_RE.exec(ref) : null;
+  return m ? Number(m[1]) : null;
+};
 
 // ---------------------------------------------------------------------------------------------
 // Evaluation
@@ -587,17 +633,27 @@ function ensureMain(ctx) {
       ctx.main = { ok: false, error: e.message };
     }
   }
-  if (!ctx.main.ok) throw new ToolError(`default branch not available (fail-closed): ${ctx.main.error}`);
+  if (!ctx.main.ok) throw new MainError(`default branch not available (fail-closed): ${ctx.main.error}`);
   return ctx.main.sha;
 }
 
-function ensureCommit(ctx, sha, ref) {
+/**
+ * Make `sha` available locally. Tries the sha itself, then, for a PR instance, the PR's merge and head refs fetched
+ * into scratch refs (refs/mnt-fp/pr-<n>-<kind>), then any other ref the instance names.
+ */
+function ensureCommit(ctx, sha, ref, pr) {
   if (ctx.commits.has(sha)) return;
   const have = () => git(ctx.repoDir, ['cat-file', '-e', `${sha}^{commit}`], { allowFail: true }).status === 0;
   if (!have()) {
     const first = git(ctx.repoDir, ['fetch', 'origin', sha], { allowFail: true });
-    if (!have() && typeof ref === 'string' && REF_RE.test(ref)) git(ctx.repoDir, ['fetch', 'origin', ref], { allowFail: true });
-    if (!have()) throw new ToolError(`alert commit ${sha.slice(0, 12)} is not available locally and could not be fetched${first.status === 0 ? '' : ` (${oneLine(first.stderr, 120)})`}`);
+    const n = pr ?? prFromRef(ref);
+    if (!have() && n !== null) {
+      for (const kind of ['merge', 'head']) {
+        if (have()) break;
+        git(ctx.repoDir, ['fetch', 'origin', `+refs/pull/${n}/${kind}:refs/mnt-fp/pr-${n}-${kind}`], { allowFail: true });
+      }
+    } else if (!have() && typeof ref === 'string' && REF_RE.test(ref)) git(ctx.repoDir, ['fetch', 'origin', ref], { allowFail: true });
+    if (!have()) throw new ToolError(`commit ${sha.slice(0, 12)} is not available locally and could not be fetched${n === null || n === undefined ? '' : ` (PR ${n})`}${first.status === 0 ? '' : ` (${oneLine(first.stderr, 120)})`}`);
   }
   ctx.commits.add(sha);
 }
@@ -680,8 +736,15 @@ function evalCheck(ctx, rev, check) {
     : { ok: true, files_scanned: targets.length, detail: `none of ${check.names.join(', ')} in ${targets.length} manifest(s) matching ${check.manifests}` };
 }
 
-function evalTripwire(ctx, rev, where, policy) {
-  return policy.tripwire.map((check, index) => ({ index, type: check.type, where, ...evalCheck(ctx, rev, check) }));
+function evalTripwire(ctx, rev, where, policy, pr = null) {
+  return policy.tripwire.map((check, index) => ({ index, type: check.type, where, sha: rev, pr, ...evalCheck(ctx, rev, check) }));
+}
+
+/** The instance(s) of an alert as evaluation inputs; `pr` says which PR's ref list the instance came from. */
+function instanceOf(alert, pr) {
+  const inst = alert.most_recent_instance || {};
+  const loc = inst.location || {};
+  return { pr: pr ?? prFromRef(inst.ref), ref: inst.ref || null, sha: inst.commit_sha, path: loc.path, line: loc.start_line ?? null };
 }
 
 const policyCovers = (policy, alert) =>
@@ -696,14 +759,16 @@ function scopeReason(policy, p) {
 }
 
 /**
- * Evaluate one alert against one policy. Returns a record; throws ToolError on any gh/git problem
- * (the caller turns that into ERROR and withholds candidates).
- * `mainChecks` (optional) reuses the default-branch tripwire result across alerts.
+ * Evaluate one alert against one policy. `item` is { alert, instances[] }: the alert JSON plus every instance
+ * found for it (default branch and PR refs, deduped by alert number). Returns a record; throws ToolError on a
+ * gh/git problem with this alert (the caller reports ERROR for it alone) and MainError when the default branch
+ * itself is unavailable (the caller fails the whole policy closed).
+ * The tripwire must hold at EVERY instance's commit and at the default branch.
+ * `mainCache` (optional) reuses the default-branch tripwire result across alerts.
  */
-function evaluateAlert(ctx, policy, alert, mainCache) {
-  const inst = alert.most_recent_instance || {};
-  const loc = inst.location || {};
-  const sha = inst.commit_sha;
+function evaluateAlert(ctx, policy, item, mainCache) {
+  const { alert, instances } = item;
+  const primary = instances[0];
   const rec = {
     status: null,
     alert: alert.number,
@@ -712,27 +777,39 @@ function evaluateAlert(ctx, policy, alert, mainCache) {
     tool: alert.tool ? alert.tool.name : null,
     severity: (alert.rule && (alert.rule.security_severity_level || alert.rule.severity)) || null,
     html_url: alert.html_url || null,
-    path: loc.path || null,
-    line: loc.start_line ?? null,
-    sha: sha || null,
+    pr: primary.pr,
+    path: primary.path || null,
+    line: primary.line,
+    sha: primary.sha || null,
+    instances,
     tripwire: [],
     reason: null,
   };
   if (!Number.isInteger(alert.number)) throw new ToolError('alert has no numeric id');
-  if (typeof loc.path !== 'string' || !loc.path) throw new ToolError(`alert ${alert.number} has no location path`);
-  if (typeof sha !== 'string' || !SHA_RE.test(sha)) throw new ToolError(`alert ${alert.number} has no valid most_recent_instance.commit_sha`);
-  const why = scopeReason(policy, loc.path);
-  if (why) { rec.status = 'OUT_OF_SCOPE'; rec.reason = why; return rec; }
+  for (const inst of instances) {
+    if (typeof inst.path !== 'string' || !inst.path) throw new ToolError('alert has no location path');
+    if (typeof inst.sha !== 'string' || !SHA_RE.test(inst.sha)) throw new ToolError('alert has no valid most_recent_instance.commit_sha');
+  }
+  for (const inst of instances) {
+    const why = scopeReason(policy, inst.path);
+    if (why) { Object.assign(rec, { status: 'OUT_OF_SCOPE', reason: why, pr: inst.pr, path: inst.path, line: inst.line, sha: inst.sha }); return rec; }
+  }
 
   const mainSha = ensureMain(ctx);
   rec.main_sha = mainSha;
-  ensureCommit(ctx, sha, inst.ref);
+  const seen = new Set();
+  const distinct = instances.filter((i) => !seen.has(i.sha) && seen.add(i.sha));
+  for (const inst of distinct) ensureCommit(ctx, inst.sha, inst.ref, inst.pr);
   let mainChecks = mainCache && mainCache.get(policy.id);
   if (!mainChecks) {
-    mainChecks = evalTripwire(ctx, mainSha, 'main', policy);
+    try {
+      mainChecks = evalTripwire(ctx, mainSha, 'main', policy);
+    } catch (e) {
+      throw new MainError(`default branch tripwire could not be evaluated (fail-closed): ${e.message}`);
+    }
     if (mainCache) mainCache.set(policy.id, mainChecks);
   }
-  rec.tripwire = [...evalTripwire(ctx, sha, 'commit', policy), ...mainChecks];
+  rec.tripwire = [...distinct.flatMap((inst) => evalTripwire(ctx, inst.sha, 'commit', policy, inst.pr)), ...mainChecks];
   rec.status = rec.tripwire.some((c) => !c.ok) ? 'TRIPWIRE_FAILED' : 'CANDIDATE';
   return rec;
 }
@@ -782,26 +859,36 @@ function checkCommon(o, needConfig = true) {
 
 function textLines(records) {
   const lines = [];
+  const prSuffix = (pr) => (pr ? ` pr=${pr}` : '');
   for (const r of records) {
-    if (r.status === 'CANDIDATE') lines.push(`CANDIDATE ${r.alert} ${r.policy} ${r.path}:${r.line} ${r.sha}`);
-    else if (r.status === 'OUT_OF_SCOPE') lines.push(`OUT_OF_SCOPE ${r.alert} ${r.policy} ${r.path} ${oneLine(r.reason)}`);
+    if (r.status === 'CANDIDATE') lines.push(`CANDIDATE ${r.alert} ${r.policy} ${r.path}:${r.line} ${r.sha}${prSuffix(r.pr)}`);
+    else if (r.status === 'OUT_OF_SCOPE') lines.push(`OUT_OF_SCOPE ${r.alert} ${r.policy} ${r.path} ${oneLine(r.reason)}${prSuffix(r.pr)}`);
     else if (r.status === 'TRIPWIRE_FAILED') {
-      for (const c of r.tripwire.filter((x) => !x.ok)) lines.push(`TRIPWIRE_FAILED ${r.alert} ${r.policy} ${c.type}#${c.index} ${c.where} ${oneLine(c.detail)}`);
+      for (const c of r.tripwire.filter((x) => !x.ok)) lines.push(`TRIPWIRE_FAILED ${r.alert} ${r.policy} ${c.type}#${c.index} ${c.where} ${oneLine(c.detail)}${prSuffix(c.pr)}`);
     } else lines.push(`ERROR ${oneLine(r.reason)}`);
   }
   return lines;
 }
 
-function errRec(policy, reason, alert = null) {
-  return { status: 'ERROR', alert, policy, reason: `${policy ? `policy ${policy}: ` : ''}${reason}` };
+/** A policy-level error (or, with policy null, a config-level one). */
+function errRec(policy, reason) {
+  return { status: 'ERROR', alert: null, pr: null, policy, reason: `${policy ? `policy ${policy}: ` : ''}${reason}` };
 }
+/** An error confined to one alert: the policy's other alerts still evaluate. */
+function alertErr(policy, alert, reason) {
+  return { status: 'ERROR', alert, pr: null, policy, reason: `alert ${alert}: ${reason}` };
+}
+
+const PRS_RE = /^(all|none|[1-9][0-9]*(,[1-9][0-9]*)*)$/;
 
 function cmdCandidates(argv) {
   const o = parseArgs(argv, {
     '--repo': { key: 'repo' }, '--config': { key: 'config' }, '--policy': { key: 'policy' }, '--json': { key: 'json', flag: true },
-    '--repo-dir': { key: 'repoDir' }, '--default-branch': { key: 'defaultBranch' },
+    '--repo-dir': { key: 'repoDir' }, '--default-branch': { key: 'defaultBranch' }, '--prs': { key: 'prs' },
   });
   checkCommon(o);
+  o.prs = o.prs ?? 'all';
+  if (!PRS_RE.test(o.prs)) throw new UsageError('--prs must be all, none, or a comma-separated list of PR numbers');
   const records = [];
   let cfg;
   try {
@@ -823,29 +910,60 @@ function cmdCandidates(argv) {
   if (valid.length === 0) return finish(records, o.json);
 
   const ctx = makeCtx({ repoDir: o.repoDir || '.', repo: o.repo, defaultBranch: o.defaultBranch || cfg.defaultBranch });
-  let alerts;
+
+  // Alerts by number: the default branch first, then each open PR's ref. An alert seen on several refs keeps
+  // every instance, and the tripwire is evaluated at each of them.
+  const items = new Map();
+  const add = (alert, pr) => {
+    if (!alert || !Number.isInteger(alert.number)) return;
+    const inst = instanceOf(alert, pr);
+    const cur = items.get(alert.number);
+    if (!cur) items.set(alert.number, { alert, instances: [inst] });
+    else if (!cur.instances.some((x) => x.sha === inst.sha && x.path === inst.path && x.line === inst.line)) cur.instances.push(inst);
+  };
   try {
-    alerts = listOpenAlerts(o.repo);
+    for (const a of listOpenAlerts(o.repo)) add(a, null);
   } catch (e) {
-    for (const p of valid) records.push(errRec(p.id, e.message));
+    // Affects every alert: fail every policy closed.
+    for (const p of valid) records.push(errRec(p.id, `cannot list the default branch's alerts: ${e.message}`));
     return finish(records, o.json);
   }
+  let prs = [];
+  if (o.prs === 'all') {
+    try {
+      prs = listOpenPrs(o.repo);
+    } catch (e) {
+      records.push(errRec(null, `cannot list open PRs, so no PR was scanned: ${e.message}`));
+    }
+  } else if (o.prs !== 'none') prs = o.prs.split(',').map(Number);
+  for (const pr of prs) {
+    try {
+      for (const a of listPrAlerts(o.repo, pr)) add(a, pr);
+    } catch (e) {
+      records.push({ status: 'ERROR', alert: null, pr, policy: null, reason: `pr ${pr}: could not list code-scanning alerts: ${e.message}` });
+    }
+  }
+
+  const ordered = [...items.values()].sort((x, y) => x.alert.number - y.alert.number);
   const mainCache = new Map();
   for (const policy of valid) {
-    const mine = alerts.filter((a) => policyCovers(policy, a));
+    const mine = ordered.filter((it) => policyCovers(policy, it.alert));
     const polRecs = [];
-    let errored = false;
-    for (const alert of mine) {
+    let wide = false;
+    for (const it of mine) {
       try {
-        polRecs.push(evaluateAlert(ctx, policy, alert, mainCache));
+        polRecs.push(evaluateAlert(ctx, policy, it, mainCache));
       } catch (e) {
-        polRecs.push(errRec(policy.id, `alert ${alert.number}: ${e.message}`, alert.number));
-        errored = true;
-        break;
+        if (e instanceof MainError) {
+          // Affects every alert of the policy: fail it closed.
+          polRecs.push(errRec(policy.id, e.message));
+          wide = true;
+          break;
+        }
+        polRecs.push(alertErr(policy.id, it.alert.number, e.message));
       }
     }
-    // Fail closed: any error for a policy withholds every CANDIDATE of that policy.
-    records.push(...(errored ? polRecs.filter((r) => r.status !== 'CANDIDATE') : polRecs));
+    records.push(...(wide ? polRecs.filter((r) => r.status !== 'CANDIDATE') : polRecs));
   }
   return finish(records, o.json);
 }
@@ -920,7 +1038,7 @@ function cmdDismiss(argv) {
   const ctx = makeCtx({ repoDir: o.repoDir || '.', repo: o.repo, defaultBranch: o.defaultBranch || cfg.defaultBranch });
   let rec;
   try {
-    rec = evaluateAlert(ctx, policy, alert, null);
+    rec = evaluateAlert(ctx, policy, { alert, instances: [instanceOf(alert, null)] }, null);
   } catch (e) {
     return refuse(`re-check failed (fail-closed): ${e.message}`);
   }
@@ -948,6 +1066,7 @@ function cmdDismiss(argv) {
     alert: alertNo,
     policy: policy.id,
     sha: rec.sha,
+    pr: rec.pr,
     path: rec.path,
     line: rec.line,
     shape: o.shape,
@@ -958,10 +1077,10 @@ function cmdDismiss(argv) {
   try {
     fs.appendFileSync(journal, JSON.stringify(line) + '\n');
   } catch (e) {
-    process.stdout.write(`DISMISSED ${alertNo} ${policy.id} ${rec.path}:${rec.line} ${rec.sha}\nERROR the alert WAS dismissed but the journal write failed (${e.code || e.message}); record it in the ledger by hand: ${JSON.stringify(line)}\n`);
+    process.stdout.write(`DISMISSED ${alertNo} ${policy.id} ${rec.path}:${rec.line} ${rec.sha}${rec.pr ? ` pr=${rec.pr}` : ''}\nERROR the alert WAS dismissed but the journal write failed (${e.code || e.message}); record it in the ledger by hand: ${JSON.stringify(line)}\n`);
     return 1;
   }
-  process.stdout.write(`DISMISSED ${alertNo} ${policy.id} ${rec.path}:${rec.line} ${rec.sha}\n`);
+  process.stdout.write(`DISMISSED ${alertNo} ${policy.id} ${rec.path}:${rec.line} ${rec.sha}${rec.pr ? ` pr=${rec.pr}` : ''}\n`);
   return 0;
 }
 

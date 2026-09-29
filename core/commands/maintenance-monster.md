@@ -24,7 +24,7 @@ anything. Every disposition goes in the journal; every escalation gets a
 diagnosis comment and (if configured) a message to the escalation channel.
 
 **Standing false-positive policies** (optional `fp_policies:` in the config): each CodeQL tick,
-run `mnt-fp-candidates.sh` (read-only) and read the flagged code for every `CANDIDATE`. Dismiss,
+run `mnt-fp-candidates.sh` (read-only; scans the default branch and every open PR) and read the flagged code for every `CANDIDATE`. Dismiss,
 through `mnt-fp-dismiss.sh` only, an alert whose code clearly matches one of the policy's
 `known_fp_shapes`; if unsure, propose with `risk-accepted` as usual. On `TRIPWIRE_FAILED`
 escalate once and dismiss nothing under that policy until the operator resolves it; on `ERROR`

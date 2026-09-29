@@ -78,7 +78,9 @@ suppression:
 # tripwire holds; you judge each alert's code against known_fp_shapes; scripts/mnt-fp-dismiss.sh
 # re-checks and is the only path that dismisses. See SKILL.md § Standing false-positive policies.
 # A policy is INVALID (an error, never a candidate) when it has: an id that is not a [a-z0-9-] slug,
-# no approved_by, an empty known_fp_shapes, no tripwire, an unknown tripwire type, or an unknown key.
+# no approved_by (or one still holding a <...> placeholder like the one below), an empty
+# known_fp_shapes, no tripwire, an unknown tripwire type, or an unknown key. Replace the placeholder
+# with the real sign-off before uncommenting.
 # Quote a shape that contains ": ". Globs match the full repo path (* stays in one directory,
 # **/ spans directories); absent_regex patterns are JavaScript regular expressions.
 # fp_policies:

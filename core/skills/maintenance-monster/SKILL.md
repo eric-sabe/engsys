@@ -181,9 +181,11 @@ alert the policy covers. Full schema: `config.example.yml`; rationale:
 Three pieces, each with one job:
 
 - **`scripts/mnt-fp-candidates.sh`** (read-only, auto-approved) finds open
-  code-scanning alerts a policy covers and proves the tripwire holds at the
-  alert's own commit **and** at the freshly fetched default branch. It never
-  dismisses. A tripwire is a grep-style check, so it can prove a structural
+  code-scanning alerts a policy covers, on the default branch **and on every
+  open pull request** (the alerts that block a merge live on PR refs:
+  `refs/pull/<n>/merge`, falling back to `/head`), and proves the tripwire holds
+  at the alert's own commit **and** at the freshly fetched default branch. It
+  never dismisses. A tripwire is a grep-style check, so it can prove a structural
   precondition still holds; it cannot prove a given alert is a false positive.
 - **You** make the per-alert judgment by reading the code.
 - **`scripts/mnt-fp-dismiss.sh`** (mutating, **not** auto-approved) re-runs the
@@ -196,10 +198,15 @@ tick), from the repo clone, as its own Bash call by literal path:
 <skill-dir>/scripts/mnt-fp-candidates.sh --repo <repo> --config <config-file>
 ```
 
+`--prs all|none|<n,n>` narrows which PRs are scanned (default `all`, every open
+PR; `<n,n>` a comma list of PR numbers). Do not narrow it on the routine tick:
+the PR alerts are the ones blocking merges.
+
 Act on each output line:
 
-- `CANDIDATE <alert#> <policy> <path>:<line> <sha>`: read the flagged code **at
-  the alert's commit**: `git show <sha>:<path>`, about 30 lines either side of
+- `CANDIDATE <alert#> <policy> <path>:<line> <sha> [pr=<n>]`: read the flagged code **at
+  the alert's commit** (a trailing `pr=<n>` means the alert is on that pull
+  request, and `<sha>` is fetched from its ref): `git show <sha>:<path>`, about 30 lines either side of
   `<line>`, plus whatever the surrounding function calls if the answer depends
   on it. Decide whether it **clearly** matches one of that policy's
   `known_fp_shapes`. If it does, dismiss with that shape copied **verbatim** and
@@ -222,7 +229,7 @@ Act on each output line:
   already closed, shape mismatch): dismiss nothing, treat it like the line it
   names. `ERROR … 403 …` means the App lacks **Code scanning alerts: Read and
   write**: escalate once, and fall back to propose-only until it is granted.
-- `TRIPWIRE_FAILED <alert#> <policy> <check> <commit|main> …`: the structural
+- `TRIPWIRE_FAILED <alert#> <policy> <check> <commit|main> … [pr=<n>]`: the structural
   assumption behind the policy no longer holds (at that alert's commit only, or
   on the default branch). **Escalate once** per policy and check on the ledger
   (`mnt:escalated`, the check, where it failed, the alert link) and ping the
@@ -232,11 +239,17 @@ Act on each output line:
   and do not re-escalate the same failure every tick (dedup on policy + check).
   Alerts under that policy meanwhile fall back to propose-only.
 - `OUT_OF_SCOPE …`: the alert is outside the policy's `paths`; triage it as usual.
-- `ERROR …`: a config, `gh` or `git` problem (an invalid policy, an unreadable
-  alert list, a failed fetch of the default branch, an alert commit that cannot
-  be fetched). **Dismiss nothing that tick** and log it. A policy with an
-  `ERROR` yields no `CANDIDATE` lines by design; an invalid policy needs the
-  operator to fix it.
+- `ERROR …`: a config, `gh` or `git` problem. Log it, and dismiss nothing that
+  the error touches. Its scope is in its text:
+  - `ERROR alert <n>: …` (that alert's commit could not be fetched or read, for
+    example a PR closed or was force-pushed mid-run) and `ERROR pr <n>: …` (that
+    PR's alerts could not be listed) affect only that alert or PR; the other
+    lines of the same run are good and can be acted on.
+  - `ERROR policy <id>: …` (an invalid policy, a failed fetch of the default
+    branch, an unreadable default-branch alert list) fails the whole policy
+    closed: it yields no `CANDIDATE` lines by design, so dismiss nothing under
+    it that tick. An invalid policy needs the operator to fix it.
+  - `ERROR cannot list open PRs …`: no PR was scanned; the default branch was.
 
 **Weekly digest.** Once a week (the first tick at least seven days after the
 last one; record the date in `state.md`), comment on the ledger issue listing

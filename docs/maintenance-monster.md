@@ -160,7 +160,8 @@ fp_policies:
 - **Invalid policies are errors, never candidates.** A policy is invalid, and
   `mnt-fp-candidates.sh` reports `ERROR` and produces no `CANDIDATE` for it, when
   the `id` is not a slug, `approved_by` is missing or blank, `known_fp_shapes` is
-  empty, `tripwire` is empty or has an unknown `type`, a check lacks a required
+  empty, `approved_by` still holds a template placeholder (any `<…>` token, such as
+  `<who>` or `<link …>`), `tripwire` is empty or has an unknown `type`, a check lacks a required
   key or a regex does not compile, a key is unknown (a typo such as `tripwires:`
   must not silently disable a check), or two policies share an `id`. The other
   policies in the file are unaffected.
@@ -171,6 +172,27 @@ fp_policies:
   scalars and comments; it rejects anchors, tags and block scalars, so a policy
   that uses them is invalid instead of misread. Quote a shape that contains
   `": "`.
+
+### Where alerts are read: the default branch and every open PR
+
+The toil this removes is on **pull requests**: the ruleset's code-scanning gate
+blocks a PR on a new high-severity alert in that PR's own analysis, so by the time
+an alert reaches the default branch, the PR was already blocked and someone
+already dismissed it by hand. `mnt-fp-candidates.sh` therefore reads the default
+branch's open alerts and, for each open PR (from `gh pr list --state open`, widened
+until the list is no longer full), that PR's alerts at `ref=refs/pull/<n>/merge`,
+falling back to `refs/pull/<n>/head` when the merge ref is 404 or empty. Results
+are deduped by alert number; an alert that shows up on several refs keeps each
+instance, and the tripwire must hold at **every** instance's commit. `--prs
+all|none|<n,n>` (default `all`) chooses which PRs to scan.
+
+An instance commit missing locally is fetched with `git fetch origin <sha>`, then,
+for a PR instance, from `refs/pull/<n>/merge` / `/head` into scratch refs under
+`refs/mnt-fp/`. `mnt-fp-dismiss.sh` re-fetches the same way when the alert's
+instance is on a PR ref. It re-checks the alert GitHub returns for that number
+(its `most_recent_instance`), whereas the candidate list checked every instance it
+found, so the list is the stricter of the two. Scanning N PRs costs one to two `gh`
+calls each.
 
 ### The two gates, and why both
 
@@ -185,7 +207,14 @@ The candidates script fetches the default branch explicitly
 if that fetch fails**: a stale `origin/main` is never read. It fetches an alert's
 commit if the clone lacks it, runs child `git` with the repo-location variables
 (`GIT_DIR` and friends) removed so a hook's environment cannot redirect it, and
-treats any `gh` or `git` error as `ERROR` with no `CANDIDATE` for that policy.
+treats any `gh` or `git` error as `ERROR`. The scope of an error matches what it
+can affect. A problem shared by every alert of a policy fails the **whole policy
+closed** (no `CANDIDATE` for it): an invalid policy, a failed fetch of the default
+branch, a default-branch tripwire that cannot be evaluated, or an unreadable
+default-branch alert list. A problem with **one alert** (`ERROR alert <n>: …`, e.g. a
+PR that was force-pushed so its commit is gone) or **one PR** (`ERROR pr <n>: …`, its
+alerts could not be listed) is reported for that alert or PR only, and the others
+still evaluate.
 
 ### Outputs
 
@@ -193,15 +222,20 @@ treats any `gh` or `git` error as `ERROR` with no `CANDIDATE` for that policy.
 one line per alert:
 
 ```
-CANDIDATE <alert#> <policy> <path>:<line> <sha>
-TRIPWIRE_FAILED <alert#> <policy> <check> <commit|main> <detail>
-OUT_OF_SCOPE <alert#> <policy> <path> <why>
+CANDIDATE <alert#> <policy> <path>:<line> <sha> [pr=<n>]
+TRIPWIRE_FAILED <alert#> <policy> <check> <commit|main> <detail> [pr=<n>]
+OUT_OF_SCOPE <alert#> <policy> <path> <why> [pr=<n>]
 ERROR <reason>
 ```
 
+`pr=<n>` is appended when the alert instance is on that pull request. Flags beyond
+those above: `--prs all|none|<n,n>` (default `all`), `--repo-dir DIR` (the local
+clone; default the current directory) and `--default-branch NAME`.
+
 `--json` prints one array instead, each element carrying `status`, `alert`,
-`policy`, `html_url`, `severity`, `path`, `line`, `sha` and the per-check
-`tripwire` results (`type`, `index`, `where`, `ok`, `detail`).
+`policy`, `html_url`, `severity`, `pr`, `path`, `line`, `sha`, every `instances[]`
+and the per-check `tripwire` results (`type`, `index`, `where`, `sha`, `pr`, `ok`,
+`detail`).
 
 `mnt-fp-dismiss.sh --repo R --config FILE --alert N --policy ID --shape "…"
 --evidence "…"` first re-runs that alert's evaluation (the tripwire may have
