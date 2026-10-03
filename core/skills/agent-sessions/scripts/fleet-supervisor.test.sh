@@ -28,6 +28,8 @@ esac
 SH
 cat >"$T/launch.sh" <<'SH'
 #!/usr/bin/env bash
+# $FAKE/launch-fail present = the launcher fails the way a missing binary does
+if [ -f "$FAKE/launch-fail" ]; then echo "attempt $1" >>"$FAKE/actions"; echo "error: claude not found on PATH" >&2; exit 1; fi
 echo "launch $1" >>"$FAKE/actions"; echo "2.1.300" >"$FAKE/pane-$1"; : >"$FAKE/capture-$1"
 SH
 chmod +x "$T/bin/gh" "$T/bin/tmux" "$T/launch.sh"
@@ -45,7 +47,7 @@ expect() { # expect <name> <grep-pattern | !pattern>
   if [ "${pat#!}" != "$pat" ]; then ! grep -q -- "${pat#!}" "$T/actions" && ok=1 || ok=0; else grep -q -- "$pat" "$T/actions" && ok=1 || ok=0; fi
   if [ "$ok" = 1 ]; then pass=$((pass + 1)); echo "  ok  $name"; else fail=$((fail + 1)); echo "  FAIL $name"; sed 's/^/       /' "$T/actions"; fi
 }
-reset() { rm -rf "$T/w/logs"; }
+reset() { rm -rf "$T/w/logs" "$T/launch-fail"; }
 
 # --- cases -------------------------------------------------------------------------------------
 reset; ledger 10 "rotation requested"; pane idle; run
@@ -79,6 +81,18 @@ expect "exited after session end → left stopped" "!^launch"
 
 reset; ledger 90 "ok — merging #12"; rm -f "$T/pane-acme-mm"; run   # no window at all (tmux server gone): tmux exits non-zero
 expect "no window + stale heartbeat → relaunch, the tick is not aborted" "^launch acme-mm"
+
+reset; ledger 90 "ok — merging #12"; pane exited; touch "$T/launch-fail"; run
+expect "launcher fails → escalated on the ledger" "comment 1: .*relaunch of .acme-mm. FAILED"
+expect "  …with the launcher's own error" "claude not found on PATH"
+run
+expect "still failing next tick → retried" "^attempt acme-mm"
+expect "  …but no second comment" "!comment 1"
+rm -f "$T/launch-fail"; run
+expect "launcher works again → relaunched" "^launch acme-mm"
+expect "  …and the recovery is reported once" "comment 1: .*relaunched after failed attempts since"
+ledger 90 "ok — merging #12"; pane exited; run
+expect "a later ordinary relaunch → plain relaunch comment, no stale latch" "comment 1: .*fleet-supervisor: relaunched .acme-mm."
 
 echo "$pass passed, $fail failed."
 [ "$fail" = 0 ]

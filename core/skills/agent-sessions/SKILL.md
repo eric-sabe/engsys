@@ -162,6 +162,7 @@ runs under launchd/cron every ~5 minutes with **no LLM in the restart path**
 | "session end" | exited | leave — deliberate stop |
 | ledger **closed** | any | never touch — kill switch wins |
 | stale | **alive** | never kill; escalate once on the ledger |
+| any relaunch **fails** | | escalate once on the ledger with the launcher's error, retry each tick without commenting, comment once on recovery |
 
 **A Claude session can't exit itself.** A monster that honors a rotation
 request posts its digest + final `rotation requested` heartbeat, stops its

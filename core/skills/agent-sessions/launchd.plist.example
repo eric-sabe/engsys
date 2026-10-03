@@ -19,8 +19,10 @@
   On Linux, an equivalent cron/systemd timer running the script from that
   directory every 5 minutes does the same job.
 
-  The PATH below must have node and gh where launchd can find them
-  (/opt/homebrew/bin first on Apple Silicon Homebrew; not nvm or fnm).
+  The PATH below must have node, gh, tmux, jq and claude where launchd can
+  find them: launchd does not read your shell profile. Replace YOU with your
+  user name (~/.local/bin is where Claude Code's native installer puts
+  claude); /opt/homebrew/bin covers Apple Silicon Homebrew. Not nvm or fnm.
   A durable machine identity that expires (cloud cert login, gh token) can get
   a sibling job on the same pattern: ProgramArguments = your login script,
   StartInterval = a few hours; the roster's PREFLIGHT= lines re-check it at
@@ -40,7 +42,7 @@
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <string>/Users/YOU/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
   </dict>
   <key>StartInterval</key>
   <integer>300</integer>
