@@ -6,7 +6,10 @@
 # __LABEL__ (com.<FLEET_ORG>.fleet.<basename>), __LOG_DIR__, __FLEET_REPO__, __HOME__ and any
 # fleet.conf key. Each rendered plist is `plutil -lint`ed, then the old copy is booted out and the
 # new one bootstrapped — never two copies running.
-#   fleet-supervisor  installed only when the instance has fleet/supervisor.conf.tmpl
+#   fleet-supervisor  installed only when the instance has fleet/supervisor.conf.tmpl and at least one of
+#                     its sessions runs on this host (lib/host-roles.sh: ROLES, ROSTER_EXCLUDE, the
+#                     registry). When none does, a previously installed copy is booted out and its plist
+#                     removed, so a host that must not supervise monsters never does, even after a sync.
 #   gh-app-login      installed only when GH_APP_ENV is set
 #
 # Usage: install-jobs.sh [--instance <dir>]                    # render + install + (re)load every job
@@ -59,6 +62,15 @@ if [ -n "$only" ]; then
   [ "$found" = 1 ] || fleet_die "no job template named '$only' (have: ${names[*]})"
 fi
 
+fleet_host_init
+host_skip_reason() { # host_skip_reason <job> → why this HOST must not run the job ('' = no host objection)
+  [ "$1" = fleet-supervisor ] && [ -f "$FLEET_REPO/fleet/supervisor.conf.tmpl" ] || return 0
+  local all
+  all="$(fleet_ledger_sessions)"
+  [ -n "$all" ] && [ -z "$(fleet_host_supervised)" ] || return 0
+  echo "no supervised session runs on this host; not on this host: $(printf '%s\n' "$all" | paste -sd' ' -)"
+}
+
 skip_reason() { # skip_reason <job> → why it does not apply to this instance ('' = installs)
   case "$1" in
     fleet-supervisor) [ -f "$FLEET_REPO/fleet/supervisor.conf.tmpl" ] || echo "no fleet/supervisor.conf.tmpl" ;;
@@ -68,7 +80,10 @@ skip_reason() { # skip_reason <job> → why it does not apply to this instance (
 
 needs_of() { # needs_of <job> → commands the job runs that must resolve on its own PATH ('' = unknown job)
   case "$1" in
-    fleet-supervisor) echo "tmux gh jq git claude${GH_APP_ENV:+ node}" ;;
+    fleet-supervisor) # node: the identity kit, and `fleet launch --check` reading the registry
+      local node=""
+      if [ -n "${GH_APP_ENV:-}" ] || { [ -n "$FLEET_ID" ] && [ -f "$FEDERATION_FILE" ]; }; then node=" node"; fi
+      echo "tmux gh jq git claude$node" ;;
     gh-app-login) echo "node gh git" ;;
   esac
 }
@@ -112,6 +127,14 @@ for i in "${!names[@]}"; do
   fi
   reason="$(skip_reason "$job")"
   if [ -n "$reason" ]; then echo "skipped: $LABEL ($reason)"; continue; fi
+  reason="$(host_skip_reason "$job")"
+  if [ -n "$reason" ]; then
+    echo "skipped: $LABEL ($reason)"
+    if [ "$dry" = 1 ]; then echo "would boot out $LABEL and remove $dest if present"; continue; fi
+    if launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null; then echo "booted out: $LABEL (it was loaded)"; else echo "not loaded: $LABEL"; fi
+    if [ -e "$dest" ]; then rm -f "$dest"; echo "removed: $dest (so launchd won't load it at the next login)"; fi
+    continue
+  fi
 
   rendered="$(fleet_render_text "$(cat "$tmpl")" "$tmpl")" || exit 1
   tmp="$(mktemp "${TMPDIR:-/tmp}/$LABEL.XXXXXX")"

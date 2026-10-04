@@ -10,7 +10,9 @@
 #   3. checks out ENGSYS_DIR at the engsys pin, then re-execs — the kit's own code lives there
 #   4. reinstalls the user-level plugins when a marketplace ref moved (remove -> add #ref -> install
 #      each enabled plugin), and installs any enabled plugin that's missing
-#   5. re-installs the launchd jobs if their templates changed
+#   5. re-installs the launchd jobs if their templates changed, or the files that decide which sessions
+#      run on this host (roster, supervisor conf, registry); and, whatever changed, unloads a supervisor
+#      job left installed on a host where no supervised session runs (lib/host-roles.sh)
 # Anything that changed is stamped in .fleet/last-change; `fleet restart` uses that stamp to tell which
 # running sessions are behind. Running sessions keep their loaded plugins (the old cache dirs stay on
 # disk) until restarted.
@@ -144,15 +146,23 @@ main() {
   fi
 
   # --- 5. launchd jobs, when their templates (or the config they render from) changed ------------
-  local jobs_changed=0
-  if [ -n "$prev_instance" ] && ! git -C "$FLEET_REPO" diff --quiet "$prev_instance" HEAD -- jobs/launchd fleet/fleet.conf 2>/dev/null; then jobs_changed=1; fi
-  if [ -n "$prev_engsys" ] && ! git -C "$ENGSYS_DIR" diff --quiet "$prev_engsys" HEAD -- core/fleet/jobs core/fleet/install-jobs.sh 2>/dev/null; then jobs_changed=1; fi
+  local jobs_changed=0 fed_rel=()
+  case "$FEDERATION_FILE" in "$FLEET_REPO"/*) fed_rel=("${FEDERATION_FILE#"$FLEET_REPO"/}") ;; esac
+  if [ -n "$prev_instance" ] && ! git -C "$FLEET_REPO" diff --quiet "$prev_instance" HEAD -- jobs/launchd fleet/fleet.conf fleet/roster.tmpl fleet/supervisor.conf.tmpl ${fed_rel[@]+"${fed_rel[@]}"} 2>/dev/null; then jobs_changed=1; fi
+  if [ -n "$prev_engsys" ] && ! git -C "$ENGSYS_DIR" diff --quiet "$prev_engsys" HEAD -- core/fleet/jobs core/fleet/install-jobs.sh core/fleet/lib/host-roles.sh 2>/dev/null; then jobs_changed=1; fi
   if [ "$jobs_changed" = 1 ]; then
     if command -v launchctl >/dev/null 2>&1; then
       say "launchd templates changed — reinstalling jobs"
       bash "$FLEET_KIT_DIR/install-jobs.sh" --instance "$FLEET_REPO"
     else
       say "launchd templates changed, but launchctl isn't available here — run: fleet install-jobs"
+    fi
+  elif [ -e "$HOME/Library/LaunchAgents/com.${FLEET_ORG}.fleet.fleet-supervisor.plist" ] && command -v launchctl >/dev/null 2>&1; then
+    # ROLES / ROSTER_EXCLUDE live in fleet.local.conf, outside any diff: check the supervisor every sync.
+    fleet_host_init
+    if [ -n "$(fleet_ledger_sessions)" ] && [ -z "$(fleet_host_supervised)" ]; then
+      say "the supervisor job is installed, but no supervised session runs on this host: unloading it"
+      bash "$FLEET_KIT_DIR/install-jobs.sh" --instance "$FLEET_REPO" --only fleet-supervisor
     fi
   fi
 

@@ -11,13 +11,43 @@
 # then runs the launcher from PIN_DIR (the sessions' default workdir). Identity preflights belong in
 # the roster (PREFLIGHT= lines); they warn, never block.
 #
-# Usage: launch.sh [--instance <dir>]            # every session in the roster
-#        launch.sh [--instance <dir>] <name>     # just one (the supervisor relaunches this way)
+# Sessions that are not on this host (ROLES / ROSTER_EXCLUDE in fleet.local.conf, or a singleton monster
+# whose registry home is another fleet: lib/host-roles.sh) are left out of a launch with no name, and
+# naming one is refused unless --force-excluded. The launcher gets .fleet/roster.host, the roster minus
+# those sessions; .fleet/roster stays the whole rendered roster.
+#
+# Usage: launch.sh [--instance <dir>]                              # every session that runs on this host
+#        launch.sh [--instance <dir>] <name> [--force-excluded]    # just one (the supervisor relaunches this way)
+#        launch.sh [--instance <dir>] --check <name>               # exit 0 if <name> runs on this host, else
+#                                                                  # 1 and the reason (the supervisor's HOST_CHECK_CMD)
 set -euo pipefail
 if [ "${1:-}" = --instance ]; then FLEET_INSTANCE="${2:?--instance needs a directory}"; export FLEET_INSTANCE; shift 2; fi
 case "${1:-}" in -h | --help) sed -n '2,/^set -/{/^set -/!p;}' "$0"; exit 0 ;; esac
+name="" check=0 force_excluded=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --check) check=1 ;;
+    --force-excluded) force_excluded=1 ;;
+    -*) echo "fleet: launch: unknown option: $1" >&2; exit 2 ;;
+    *) [ -z "$name" ] || { echo "fleet: launch takes one session name" >&2; exit 2; }; name="$1" ;;
+  esac
+  shift
+done
 # shellcheck source=lib/fleet-env.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib/fleet-env.sh"
+fleet_host_init
+
+if [ "$check" = 1 ]; then
+  [ -n "$name" ] || fleet_die "launch --check needs a session name"
+  fleet_roster_sessions | grep -Fxq "$name" || { echo "$name: not in the roster"; exit 1; }
+  if why="$(fleet_host_excluded "$name")"; then echo "$name: not on this host ($why)"; exit 1; fi
+  echo "$name: runs on this host"; exit 0
+fi
+[ "$force_excluded" = 0 ] || [ -n "$name" ] || fleet_die "--force-excluded needs a session name (it never applies to a whole-roster launch)"
+if [ -n "$name" ] && why="$(fleet_host_excluded "$name")"; then
+  [ "$force_excluded" = 1 ] || fleet_die "$name is not on this host ($why). To start it here anyway: fleet launch $name --force-excluded"
+  echo "fleet: WARNING launching $name although it is not on this host ($why), as --force-excluded asks" >&2
+fi
 
 fleet_check_engsys
 [ -d "$PIN_DIR" ] || fleet_die "PIN_DIR not found: $PIN_DIR (set it in fleet/fleet.conf or ~/.config/$FLEET_ORG/fleet.local.conf)"
@@ -63,8 +93,26 @@ if [ -f "$FEDERATION_FILE" ]; then
 fi
 
 cd "$PIN_DIR"
-if [ $# -gt 0 ]; then
-  grep -q "^$1|" "$FLEET_STATE/roster" || fleet_die "no session named '$1' in the roster"
-  exec bash "$LAUNCHER" --roster "$FLEET_STATE/roster" "$1"
+if [ -n "$name" ]; then
+  grep -q "^$name|" "$FLEET_STATE/roster" || fleet_die "no session named '$name' in the roster"
+  exec bash "$LAUNCHER" --roster "$FLEET_STATE/roster" "$name"
 fi
-exec bash "$LAUNCHER" --roster "$FLEET_STATE/roster"
+
+# The host roster: the rendered roster minus the sessions that are not on this host.
+host_roster="$FLEET_STATE/roster.host" kept=0
+: >"$host_roster"; chmod 600 "$host_roster"
+while IFS= read -r line; do
+  case "$line" in
+    [a-z0-9]*\|*)
+      n="${line%%|*}"
+      if why="$(fleet_host_excluded "$n")"; then
+        echo "skip: $n is not on this host ($why)"
+        printf '# not on this host: %s (%s)\n' "$n" "$why" >>"$host_roster"
+        continue
+      fi
+      kept=$((kept + 1)) ;;
+  esac
+  printf '%s\n' "$line" >>"$host_roster"
+done <"$FLEET_STATE/roster"
+if [ "$kept" = 0 ]; then echo "fleet: no roster session runs on this host; nothing to launch"; exit 0; fi
+exec bash "$LAUNCHER" --roster "$host_roster"

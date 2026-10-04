@@ -94,5 +94,17 @@ expect "  …and the recovery is reported once" "comment 1: .*relaunched after f
 ledger 90 "ok — merging #12"; pane exited; run
 expect "a later ordinary relaunch → plain relaunch comment, no stale latch" "comment 1: .*fleet-supervisor: relaunched .acme-mm."
 
+# HOST_CHECK_CMD: a session this host doesn't run is never touched, however stale (multi-fleet, #53)
+printf '#!/usr/bin/env bash\necho "check $1" >>"$FAKE/actions"; [ -f "$FAKE/host-ok" ]\n' >"$T/check.sh"
+printf 'TMUX_SESSION=acme\nLAUNCH_CMD=bash %s/launch.sh\nHOST_CHECK_CMD=bash %s/check.sh\nREPO=o/r\nacme-mm|1|60\n' "$T" "$T" >"$T/w/sup.conf"
+reset; rm -f "$T/host-ok"; ledger 90 "ok — merging #12"; pane exited; run
+expect "host check says no + stale + exited → never relaunched" "!^launch"
+expect "  …the check was asked" "^check acme-mm"
+expect "  …and nothing posted to a ledger another host owns" "!comment"
+reset; ledger 10 "rotation requested"; pane idle; run
+expect "host check says no + rotation → not relaunched either" "!^launch"
+reset; touch "$T/host-ok"; ledger 90 "ok — merging #12"; pane exited; run
+expect "host check says yes → the decision table runs as before" "^launch acme-mm"
+
 echo "$pass passed, $fail failed."
 [ "$fail" = 0 ]

@@ -2,8 +2,8 @@
 
 > **Status:** Design (proposed 2026-10), being built in phases (section 10). Implemented so far: the
 > registry, `FLEET_ID` and addresses (engsys#39, operator guide in
-> [`fleet-guide.md` § 6.10](fleet-guide.md#610-registry-multi-fleet)), `gate-check` (#41) and
-> `fleet notify` (#42). Nothing in this doc changes how a single fleet behaves today.
+> [`fleet-guide.md` § 6.10](fleet-guide.md#610-registry-multi-fleet)), `gate-check` (#41),
+> `fleet notify` (#42) and per-host roles (#53, [`fleet-guide.md` § 6.11](fleet-guide.md#611-host-roles-which-sessions-run-on-this-host)). Nothing in this doc changes how a single fleet behaves today.
 >
 > **Related:** [`agent-messaging.md`](agent-messaging.md) (same-fleet messaging and the "GitHub
 > channel" Phase 2 this builds on), [`fleet-guide.md`](fleet-guide.md) (running one fleet),
@@ -436,13 +436,19 @@ Do this before a second fleet stands anything up. Tracking: #39 (registry, `FLEE
 - Add per-fleet Slack (section 7): create the operators user group and the first fleet's Slack app, add
   `fleet notify`, and switch the monsters to it.
 - **Rule until P1 lands: the second fleet runs no monsters.** It runs only build, investigate and design,
-  plus its own broker. This is safe with today's code.
+  plus its own broker. From engsys v1.9.0 the kit enforces this (#53, operator guide in
+  [`fleet-guide.md` § 6.11](fleet-guide.md#611-host-roles-which-sessions-run-on-this-host)): with
+  `FLEET_ID` and the registry in place, a host never launches, cycles or supervises a merge or
+  maintenance monster whose home is another fleet, and `fleet sync` keeps the supervisor job unloaded on
+  a host that supervises nothing. The manual workaround (launching sessions by name, `install-jobs
+  --only`, checking after every sync that the supervisor is unloaded) is no longer needed.
 
 ### P1: Real batons
 
 - Spike the ref compare-and-swap, then build the `github` lease backend and the merge and maintenance
   monsters' claim and fence.
-- Add the startup holder check; the supervisor reads home and holder.
+- Add the startup holder check; the supervisor reads the holder from the lease (it already skips a
+  monster whose home is another fleet, from #53).
 
 ### P2: Cross-fleet messages
 

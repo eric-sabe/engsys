@@ -712,7 +712,9 @@ an invalid file or bad arguments.
 
 **`fleet status`** now starts with `fleet: <id>` and, with a registry, one line per repo role: its home
 (marked `(this fleet)` when it is yours), ledger, standbys and failover. `fleet launch` checks the
-registry and warns, without blocking, when it is invalid or does not list `FLEET_ID`.
+registry and warns when it is invalid or does not list `FLEET_ID`. With `FLEET_ID` set, the registry also
+decides which monsters this host may start (§ 6.11): a merge or maintain monster whose home is another
+fleet is not on this host, and an unreadable registry keeps every merge and maintain monster off it.
 
 **Addresses.** A session in a federation is addressed `<fleet>:<session>`, for example
 `alice:acme-build`. A bare name (`acme-build`) means "my fleet". The `mm-handoff` block's `session:`
@@ -729,6 +731,85 @@ The `FLEET_ID` in `fleet.conf` is the one `fleet notify` prefixes posts with. A 
 Slack env file is then unnecessary; if both are set and differ, `fleet notify` warns and uses
 `fleet.conf`'s.
 
+### 6.11 Host roles: which sessions run on this host
+
+Every host of an instance reads the same `fleet/roster.tmpl`. A host that must not run some of those
+sessions says so in its own `~/.config/<FLEET_ORG>/fleet.local.conf`, which is never committed. The
+usual case is a second fleet's host, which must not start or supervise the merge and maintenance
+monsters while another fleet holds those batons ([`multi-fleet.md`](multi-fleet.md) § 10, P0).
+
+A session is **not on this host** when the first of these that applies says so:
+
+1. **The registry.** With `FLEET_ID` set and a `federation.yml`, a session whose roster prompt runs the
+   merge or maintenance monster is excluded when the registry's `home` for that role is another fleet.
+   The monster's repo is its `fleet/supervisor.conf.tmpl` 4th field, else that file's `REPO=`, else
+   `PIN_REPO`. This needs no config, and nothing in `fleet.local.conf` overrides it: to run the monster
+   here, move `home` by PR. A registry that can't be read (invalid, `FLEET_ID` not declared under
+   `fleets`, or `node` missing) excludes every merge and maintain monster: a host that can't tell who
+   holds a baton starts neither.
+2. **`ROSTER_EXCLUDE=`**: a denylist. An entry that matches always wins.
+3. **`ROLES=`**: an allowlist. When set, a session that no entry matches is excluded. Prefer it on a
+   host with a narrow job: a session added to the roster later stays off that host until you list it.
+
+Entries are comma or space separated, and each matches a session by any of:
+
+| Entry | Matches |
+|---|---|
+| `acme-build` | the session of that name |
+| `build` | the session named `<NAMESPACE>-build` |
+| `merge`, `maintain`, `broker` | sessions whose roster prompt runs that monster (`merge-monster`, `maintenance-monster`, `resource-broker`) |
+| `monster` | all of those, plus every session listed in `fleet/supervisor.conf.tmpl` |
+| `interactive` | every other session |
+
+With neither key set and no registry in play, every session runs on every host, exactly as before.
+Values come only from `fleet.conf` and `fleet.local.conf`, never from the caller's environment.
+
+**What honors it:**
+
+| Command | On this host |
+|---|---|
+| `fleet launch` | starts only the sessions that run here (the launcher gets `.fleet/roster.host`) and prints `skip: <name> is not on this host (<reason>)` for the rest |
+| `fleet launch <name>` | refuses an excluded name with its reason. `--force-excluded` starts it anyway, for one deliberate launch; nothing else passes that flag |
+| `fleet launch --check <name>` | exit 0 when the session runs here, else 1 and the reason |
+| `fleet restart --all`, `--stale`, `<name>` | never cycles an excluded session |
+| `fleet status` | lists an excluded session as `not on this host (<reason>)`, not `missing`, and warns about what the filter can't decide (below) |
+| `fleet install-jobs`, `fleet sync` | install the supervisor job only when at least one supervised session runs here. Otherwise they boot out a loaded copy and delete its plist, so launchd won't load it at the next login. `fleet sync` checks this on every run, and reinstalls the jobs when the roster, the supervisor conf or the registry changes |
+| `fleet supervise` (the supervisor job) | drops excluded sessions from `.fleet/supervisor.conf`, does nothing when none are left, and adds `HOST_CHECK_CMD=… launch --check`. The supervisor asks that command before it reads any session's ledger, so even a stale conf never relaunches, or comments about, a session this host doesn't run. A check that fails for any reason skips the session |
+
+`fleet status` warns, without excluding anything, when a supervised session's prompt names no known
+monster (so the registry can't place it; list it in `ROSTER_EXCLUDE` if this host must not run it),
+when the registry declares no role for a monster's repo, and when a `ROLES` or `ROSTER_EXCLUDE` entry
+matches no session.
+
+**Example: a second fleet host.** The instance's roster has `acme-mm`, `acme-maintain`, `acme-broker`,
+`acme-build`, `acme-investigate` and `acme-design`, and `federation.yml` makes fleet `alice` home for
+merge and maintain of `acme/app`. Bob's host sets `FLEET_ID=bob` and, in
+`~/.config/acme/fleet.local.conf`:
+
+```bash
+# bob's host: the per-fleet roles and its own broker. merge + maintain stay off by the registry anyway.
+ROLES=build,investigate,design,broker
+```
+
+Then on bob's host:
+
+```text
+$ fleet launch
+skip: acme-mm is not on this host (merge home for acme/app is fleet alice)
+skip: acme-maintain is not on this host (maintain home for acme/app is fleet alice)
+launched: acme-broker  (…)
+launched: acme-build  (…)
+…
+$ fleet install-jobs
+installed + loaded: com.acme.fleet.fleet-supervisor  -> …
+```
+
+The supervisor is installed here only because `acme-broker` runs here and is supervised. With
+`ROLES=build,investigate,design` the host supervises nothing, so `fleet install-jobs` and every later
+`fleet sync` keep the supervisor job unloaded. Edit `fleet.local.conf`, then run `fleet install-jobs` to
+apply the change to the jobs. Starting sessions never needs a separate step: `fleet launch` reads the
+filter each time.
+
 ---
 
 ## 7. Day-2 operations
@@ -744,7 +825,8 @@ once (section 6.4).
 | **restart** | `fleet restart --stale` · `fleet restart acme-build` | cycle sessions onto what is installed, whenever you are ready | **yes** |
 
 `fleet status` prints the fleet id and registry homes (§ 6.10), runs `fleet sync --check` (exit 1 when the host is behind the pins), then the session
-table: name, kind (monster or interactive), state (`missing`, `exited`, `busy`, `idle`), start time and
+table: name, kind (monster or interactive), state (`missing`, `exited`, `busy`, `idle`, or `not on this
+host` with its reason, § 6.11), start time and
 `BEHIND` or `current`. **BEHIND** means the session's `claude` process started before the last change
 `fleet sync` made (`.fleet/last-change`).
 
@@ -759,7 +841,9 @@ The pins are in the pin repo's `.claude/settings.json` (section 3). `fleet sync`
 3. checks out `ENGSYS_DIR` at the engsys pin and re-executes, because the kit's own code lives there;
 4. reconciles each pinned marketplace's plugins (remove, add `#<ref>`, install each enabled plugin), and
    installs any enabled plugin that is missing;
-5. reinstalls the launchd jobs if their templates or `fleet.conf` changed;
+5. reinstalls the launchd jobs if their templates, `fleet.conf`, the roster, the supervisor conf or the
+   registry changed, and unloads a supervisor job left installed on a host that supervises nothing
+   (§ 6.11);
 6. stamps `.fleet/last-change` and appends to `.fleet/sync.log`.
 
 `fleet sync --check` reports drift only. Sync refuses to run over uncommitted changes to tracked files in
@@ -1043,6 +1127,8 @@ format) overrides it per machine. Environment values for `ENGSYS_REF` / `INSTANC
 | `NOTIFY_FALLBACK_ISSUE` | no | `owner/repo#N` for `fleet notify`'s fallback comment when Slack is unconfigured or unreachable. Empty means the message is only printed as a warning |
 | `FLEET_ID` | no | This fleet's id in a federation (§ 6.10): `^[a-z][a-z0-9-]{1,20}$`, rejected otherwise. Written into every session env. Never inherited from the caller's environment. Unset means single-fleet mode |
 | `FEDERATION_FILE` | no | The registry file, relative to the instance root unless absolute. Default `federation.yml`. Missing file means single-fleet mode |
+| `ROLES` | no | Set it in `fleet.local.conf`. An allowlist of the roster sessions this host runs: names, names without the namespace, or kinds (`merge`, `maintain`, `broker`, `monster`, `interactive`); § 6.11. Unset means every session. Never inherited from the caller's environment |
+| `ROSTER_EXCLUDE` | no | Set it in `fleet.local.conf`. A denylist with the same entries; it wins over `ROLES`. Never inherited from the caller's environment |
 | anything else | | Instance-defined template variables (model knobs, and so on) |
 
 `REVIEW_*`, `READY_LABEL`, `PREPUSH_SETUP_CMD` and `PIN_WAIT_MAX_MIN` are read by `fleet pin`.
@@ -1067,6 +1153,7 @@ plugins to install is `enabledPlugins` entries that are `true` and end in `@<mar
 |---|---|
 | `<instance>/.fleet/env/<lane>.env` | rendered env files, mode 0600, with the identity lines appended when `GH_APP_ENV` is set, and `FLEET_ID` (plus `FEDERATION_FILE` when it exists) when `FLEET_ID` is set |
 | `<instance>/.fleet/roster` | the rendered roster |
+| `<instance>/.fleet/roster.host` | the rendered roster minus the sessions that are not on this host (§ 6.11); what `fleet launch` with no name starts |
 | `<instance>/.fleet/supervisor.conf` | the rendered supervisor conf |
 | `<instance>/.fleet/last-change`, `sync.log` | what `fleet restart` uses to decide BEHIND, and the history |
 | `<instance>/logs/fleet-supervisor/` | supervisor state and log |

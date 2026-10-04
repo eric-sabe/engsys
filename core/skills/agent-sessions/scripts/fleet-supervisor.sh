@@ -38,6 +38,14 @@
 #   ROTATE_GRACE_MIN=<minutes> optional (default 3): how long a live session
 #                              must sit idle after its "rotation requested"
 #                              heartbeat before it is relaunched
+#   HOST_CHECK_CMD=<command>   optional: asked first, every tick, for every
+#                              session (supervisor appends the name); exit 0 =
+#                              this host runs it, anything else = skip the
+#                              session entirely (no ledger read, no comment, no
+#                              relaunch), so a stale conf can never start a
+#                              session another host owns. Fails closed: a check
+#                              that errors skips the session too. The engsys
+#                              fleet kit sets it to `fleet launch --check`.
 #   <session-name>|<ledger-issue>|<stale-minutes>[|<owner/name>]
 #                              one line per monster; the 4th field overrides
 #                              REPO= for that session (multi-repo fleets)
@@ -76,7 +84,7 @@ if ! mkdir "$LOCKDIR" 2>/dev/null; then
 fi
 trap 'rmdir "$LOCKDIR" 2>/dev/null || true' EXIT
 
-TMUX_SESSION="" LAUNCH_CMD="" DEFAULT_REPO="" ROTATE_GRACE_MIN=3
+TMUX_SESSION="" LAUNCH_CMD="" DEFAULT_REPO="" ROTATE_GRACE_MIN=3 HOST_CHECK_CMD=""
 SESSIONS=()
 while IFS= read -r line; do
   line="${line%%$'\r'}"
@@ -86,6 +94,7 @@ while IFS= read -r line; do
     LAUNCH_CMD=*) LAUNCH_CMD="${line#LAUNCH_CMD=}" ;;
     REPO=*) DEFAULT_REPO="${line#REPO=}" ;;
     ROTATE_GRACE_MIN=*) ROTATE_GRACE_MIN="${line#ROTATE_GRACE_MIN=}" ;;
+    HOST_CHECK_CMD=*) HOST_CHECK_CMD="${line#HOST_CHECK_CMD=}" ;;
     *\|*) SESSIONS+=("$line") ;;
     *) echo "fleet-supervisor: bad conf line: $line" >&2; exit 1 ;;
   esac
@@ -165,6 +174,14 @@ NOW=$(date +%s)
 for spec in "${SESSIONS[@]}"; do
   IFS='|' read -r name ledger stale_min repo <<<"$spec"
   [ -n "$name" ] && [ -n "$ledger" ] && [ -n "$stale_min" ] || { log "SKIP bad line: $spec"; continue; }
+  if [ -n "$HOST_CHECK_CMD" ]; then
+    # word-split on purpose, like LAUNCH_CMD
+    # shellcheck disable=SC2086
+    if ! WHY=$($HOST_CHECK_CMD "$name" 2>&1); then
+      log "$name: not on this host, never touched here ($(printf '%s' "${WHY:-host check failed}" | tail -n 1 | cut -c1-200))"
+      continue
+    fi
+  fi
   REPO_SLUG="${repo:-$DEFAULT_REPO}"
   [ -n "$REPO_SLUG" ] || REPO_SLUG=$(cwd_repo)
   [ -n "$REPO_SLUG" ] || { log "$name: cannot resolve repo (set REPO= or the 4th field; gh auth?) — skipping"; continue; }

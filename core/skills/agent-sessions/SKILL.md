@@ -161,6 +161,7 @@ runs under launchd/cron every ~5 minutes with **no LLM in the restart path**
 | stale, issue open | exited | relaunch (crash recovery) |
 | "session end" | exited | leave — deliberate stop |
 | ledger **closed** | any | never touch — kill switch wins |
+| any (`HOST_CHECK_CMD` says this host doesn't run the session) | any | never touch: no ledger read, no comment, no relaunch. Asked first, every tick; a check that errors skips the session too |
 | stale | **alive** | never kill; escalate once on the ledger |
 | any relaunch **fails** | | escalate once on the ledger with the launcher's error, retry each tick without commenting, comment once on recovery |
 
@@ -178,7 +179,8 @@ a judgment call for the operator or the maintenance watchdog, not a script.
 
 Setup, **fleet kit (plugin mode; recommended):** put the conf lines in your
 instance repo's `fleet/supervisor.conf.tmpl` and run `fleet install-jobs`; the
-kit renders the conf, sets `LAUNCH_CMD` and `TMUX_SESSION`, and loads the
+kit renders the conf, sets `LAUNCH_CMD`, `TMUX_SESSION` and `HOST_CHECK_CMD`
+(drops sessions that are not on this host: fleet-guide § 6.11), and loads the
 launchd job from the pinned engsys checkout (`fleet supervise` is one tick).
 Plugin mode has no `.claude/skills/agent-sessions/` in the project, so the two
 example files here are for reference, not for copying.
