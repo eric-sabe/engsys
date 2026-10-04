@@ -17,8 +17,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // Low-risk bookkeeping only: liveness registry + watchdog, GitHub watch/snapshot, ledger heartbeat,
-// merge preflight, session-sync, and the read-only false-positive candidate finder (mnt-fp-candidates.sh
-// never mutates; its sibling mnt-fp-dismiss.sh does, so it stays behind a prompt). Setup (creates labels/ledgers) and session launch/supervision are
+// merge preflight, session-sync, the read-only approval verifier (gate-check.sh only reads GitHub; its
+// sibling gate-request.sh posts a comment, so it stays behind a prompt), and the read-only false-positive
+// candidate finder (mnt-fp-candidates.sh never mutates; its sibling mnt-fp-dismiss.sh does, so it stays
+// behind a prompt). Setup (creates labels/ledgers) and session launch/supervision are
 // deliberately NOT here — those stay behind a human prompt.
 export const ALLOWED = new Set([
   'merge-monster/scripts/mm-agent-reg.sh',
@@ -28,6 +30,7 @@ export const ALLOWED = new Set([
   'merge-monster/scripts/mm-heartbeat.sh',
   'merge-monster/scripts/mm-preflight.sh',
   'merge-monster/scripts/mm-session-sync.sh',
+  'merge-monster/scripts/gate-check.sh',
   'maintenance-monster/scripts/mnt-watch.sh',
   'maintenance-monster/scripts/mnt-snapshot.sh',
   'maintenance-monster/scripts/mnt-heartbeat.sh',
