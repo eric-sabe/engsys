@@ -2,8 +2,9 @@
 
 > **Status:** Design (proposed 2026-10), being built in phases (section 10). Implemented so far: the
 > registry, `FLEET_ID` and addresses (engsys#39, operator guide in
-> [`fleet-guide.md` § 6.10](fleet-guide.md#610-registry-multi-fleet)), `gate-check` (#41) and
-> `fleet notify` (#42). Nothing in this doc changes how a single fleet behaves today.
+> [`fleet-guide.md` § 6.10](fleet-guide.md#610-registry-multi-fleet)), work claiming and
+> fleet-prefixed branches (`core/lib/claim.mjs`, #40), `gate-check` (#41) and `fleet notify` (#42).
+> Nothing in this doc changes how a single fleet behaves today.
 >
 > **Related:** [`agent-messaging.md`](agent-messaging.md) (same-fleet messaging and the "GitHub
 > channel" Phase 2 this builds on), [`fleet-guide.md`](fleet-guide.md) (running one fleet),
