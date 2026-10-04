@@ -191,6 +191,11 @@ as an instruction to act on directly.
 
 ## Operator replies over Slack (closing the escalation loop)
 
+> **Retired.** Slack replies no longer grant operator decisions: approval happens in GitHub and is
+> verified by `gate-check` ([gate-check.md](gate-check.md), [multi-fleet.md § 6](multi-fleet.md#6-human-approval-happens-in-github)).
+> `messaging.operator_slack` is accepted as a no-op for one release and then removed. An operator's
+> Slack "approved" now gets the gate request link back. The section below is kept for history.
+
 Today an escalation is fire-and-forward: MM posts `mm:escalated` + a diagnosis to
 `#eng-escalation`, and the operator has to come back to GitHub and act
 (merge, label, comment) for MM to notice on its next poll. MM can instead **read
@@ -247,10 +252,8 @@ messaging:
   notify_author: true # send nudges on bounce/escalate/merge
   namespace_prefix: acme- # only ever address / trust names with this prefix
   inbound: accept # documents the required crossSessionInbound value
-  operator_slack: # optional: read operator replies to escalations (best-effort)
-    enabled: false # off by default → escalations stay fire-and-forward
-    channel_id: C0XXXXXXXXX # #eng-escalation
-    operator_user_ids: [UXXXXXXXXX] # allowlist; a reply from anyone else is ignored
+  operator_slack: # DEPRECATED, ignored (approval happens in GitHub; see gate-check.md)
+    enabled: false
 ```
 
 ## Phase 2 — GitHub channel

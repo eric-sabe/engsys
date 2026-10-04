@@ -51,10 +51,13 @@ heartbeat is fresh.
 
 A dismissed or ignored finding (a `dependabot.yml` ignore, a Trivy/CodeQL
 dismissal) always ships with a tracking issue + rationale, and only takes
-effect once the **operator** applies the `risk-accepted` label to that issue.
-Maintenance Monster (or `nyx`) proposes the suppression; it never applies the
-label itself. No `risk-accepted` label, no suppression — treat any
-unsuppressed finding as still live regardless of what a session claims.
+effect once an operator approves the `risk-accepted` gate request on that
+issue with a `/approve <gate-id>` comment, verified by `gate-check`
+(`docs/gate-check.md` in engsys). The `risk-accepted` label is the visible
+record of that verified approval, not the approval itself. Maintenance
+Monster (or `nyx`) proposes the suppression. No verified gate, no
+suppression: treat any unsuppressed finding as still live regardless of what
+a session claims, and point anyone who approves in chat at the gate request.
 
 ## How it escalates
 

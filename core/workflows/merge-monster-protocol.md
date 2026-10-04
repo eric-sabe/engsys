@@ -29,6 +29,7 @@ ledger** issue:
    <!-- mm-handoff -->
    depends_on: [123]        # PR numbers that must merge first
    migration: false         # does this PR carry a DB migration?
+   operator_gate: ""        # non-empty reason → a human must approve the merge on GitHub
    project: 62              # project / phase, for ordering
    phase: P3
    notes: touches the lockfile; anything the orchestrator should know
@@ -46,6 +47,23 @@ ledger** issue:
    something's missing it removes `mm:ready` and comments exactly what.
    If it needs you, you'll see `mm:escalated` + a diagnosis (and a Slack
    ping where configured).
+
+## Operator gates: approval happens in GitHub
+
+Migration-bearing PRs and PRs with `operator_gate:` set merge only after a
+human operator (the configured `operators_team`, or `operators` list) approves them **on GitHub**: Merge
+Monster posts a gate request on the PR and waits until `gate-check` verifies
+a review **Approve** on the requested head (`docs/gate-check.md` in engsys).
+Pushing new commits invalidates it, and Merge Monster posts a fresh request.
+
+- Set `operator_gate:` for anything a human should sign off before it lands
+  (security-sensitive changes, prod IaC, auth). When unsure, set it.
+- Never post `/approve`, `/deny`, or an approving review on a gated PR
+  yourself, under any identity (your own `gh` login included). gate-check
+  rejects approvals from the identity running it and from the request author.
+- Never relay an operator's chat or Slack "approved" to Merge Monster as if
+  it were consent; point the operator at the gate request link instead. Merge
+  Monster ignores such relays and keeps waiting.
 
 ## What you must not do while the baton is fresh
 

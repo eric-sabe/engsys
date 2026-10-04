@@ -290,6 +290,12 @@ touching prod IaC, secrets, or migrations (agents are deny-ruled from prod
 migrations/deploys — that applies here too). Editing an `fp_policies` entry is
 also operator-only: the monster never changes a policy.
 
+An operator decision on any of these is a GitHub action verified by `gate-check`
+([gate-check.md](gate-check.md)): `/approve <gate-id>` on the tracking issue for
+a risk acceptance, a review approval for an expert-assisted fix PR. The
+`risk-accepted` label is the record of a verified approval; a label, chat
+message, or Slack reply alone approves nothing.
+
 ## Guardrails
 
 - **No silent suppression.** A dismissed/ignored finding always leaves a tracked

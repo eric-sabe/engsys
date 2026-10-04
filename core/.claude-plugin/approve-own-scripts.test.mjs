@@ -107,6 +107,15 @@ test('approves the read-only false-positive candidate finder, never the dismisse
   assert.equal(approvable(`${mnt}/mnt-fp-dismiss.sh ${args} --alert 1 --policy p --shape s --evidence e`, P.root), null);
 });
 
+test('approves the read-only gate verifier, never the gate-request poster', () => {
+  const mm = path.join(P.root, 'skills/merge-monster/scripts');
+  fs.mkdirSync(mm, { recursive: true });
+  for (const f of ['gate-check.sh', 'gate-request.sh']) fs.writeFileSync(path.join(mm, f), '#!/usr/bin/env bash\n', { mode: 0o755 });
+  const args = '--repo acme/app --pr 412 --gate merge-412 --operators-team acme/fleet-operators';
+  assert.equal(approvable(`${mm}/gate-check.sh ${args}`, P.root), 'merge-monster/scripts/gate-check.sh');
+  assert.equal(approvable(`${mm}/gate-request.sh --repo acme/app --pr 412 --kind merge --target t --what w`, P.root), null);
+});
+
 test('copy-mode settings template allows exactly the same scripts (lockstep)', async () => {
   const { ALLOWED } = await import('./approve-own-scripts.mjs');
   const tmpl = fs.readFileSync(path.join(path.dirname(HOOK), '..', 'templates', 'settings.json.tmpl'), 'utf8');

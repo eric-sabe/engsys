@@ -277,6 +277,10 @@ handing the fleet to someone else is a membership change rather than an account 
 - `gh` is a shim on `PATH` for fleet sessions only; it mints a short-lived installation token per call.
 - Nothing is written to `~/.gitconfig`, the Keychain or anyone's `gh auth login`. A person's own git and
   `gh` on the same account behave exactly as before, outside fleet processes.
+- **No operator's personal GitHub credential may exist on a fleet host or in a fleet session** (no
+  operator `gh auth login`, no operator PAT in any env file). Operator approvals happen on GitHub and
+  `gate-check` excludes only the identity it runs as, so a second credential within an agent's reach
+  could approve as that operator undetected ([gate-check.md](gate-check.md#configuration-and-permissions)).
 
 Set `GH_APP_ENV` in `fleet.conf` to the path of the machine-local App env file. Set = the identity kit is
 on: `fleet launch` appends the git identity lines to **every** rendered env file, the host scripts use the
