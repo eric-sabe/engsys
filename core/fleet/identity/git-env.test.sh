@@ -56,10 +56,12 @@ GH_APP_ID=1
 GH_APP_INSTALLATION_ID=2
 GH_APP_PEM=$T/none.pem
 GH_APP_CACHE=$T/cache.json
+GH_APP_INSTALLATIONS=pat-person=3
 GH_BOT_AUTHOR_NAME=acme-fleet[bot]
 GH_BOT_AUTHOR_EMAIL=123+acme-fleet[bot]@users.noreply.github.com
 APP_ENV
 printf '{"token":"ghs_cached","expires_at":"2099-01-01T00:00:00Z","permissions":{}}' > "$T/cache.json"
+printf '{"token":"ghs_pat","expires_at":"2099-01-01T00:00:00Z","permissions":{}}' > "$T/cache-3.json"
 
 cred_fill() { printf 'protocol=https\nhost=github.com\n\n' | GIT_TRACE=1 git credential fill 2>&1; }
 
@@ -76,7 +78,7 @@ rm -f "$T/keychain-called"
   fleet_git_env "$ENVF"
   check "bash: user.name is the bot" "acme-fleet[bot]" "$(git config user.name)"
   check "bash: user.email is the bot" "123+acme-fleet[bot]@users.noreply.github.com" "$(git config user.email)"
-  check "bash: GIT_CONFIG_COUNT is 4" "4" "$GIT_CONFIG_COUNT"
+  check "bash: GIT_CONFIG_COUNT is 5" "5" "$GIT_CONFIG_COUNT"
   check "bash: FLEET_GIT_ENV guard set" "1" "$FLEET_GIT_ENV"
   check "bash: GH_APP_ENV_FILE exported (absolute, resolved)" "$(cd "$(dirname "$ENVF")" && pwd -P)/gh-app.env" "$GH_APP_ENV_FILE"
   out="$(cred_fill)"
@@ -85,13 +87,18 @@ rm -f "$T/keychain-called"
   contains "bash: credential fill returns the App token" "password=ghs_cached" "$out"
   contains "bash: credential fill returns the App username" "username=x-access-token" "$out"
   lacks "bash: personal credential not offered" "personal-secret" "$out"
+  check "bash: useHttpPath set for github.com" "true" "$(git config credential.https://github.com.useHttpPath)"
+  out="$(printf 'protocol=https\nhost=github.com\npath=pat-person/tools.git\n\n' | git credential fill 2>&1)"
+  contains "bash: a listed owner's repo gets that installation's token" "password=ghs_pat" "$out"
+  out="$(printf 'protocol=https\nhost=github.com\npath=acme/app.git\n\n' | git credential fill 2>&1)"
+  contains "bash: any other owner gets the default installation's token" "password=ghs_cached" "$out"
   # a child process (as a session's tools would be) inherits the identity
   check "bash: child process inherits the bot identity" "acme-fleet[bot]" "$(sh -c 'git config user.name')"
 
   # idempotent: a second call (nested host scripts) must not grow the config
   fleet_git_env "$ENVF"
-  check "bash: second call leaves GIT_CONFIG_COUNT at 4" "4" "$GIT_CONFIG_COUNT"
-  check "bash: no fifth key appeared" "" "${GIT_CONFIG_KEY_4:-}"
+  check "bash: second call leaves GIT_CONFIG_COUNT at 5" "5" "$GIT_CONFIG_COUNT"
+  check "bash: no sixth key appeared" "" "${GIT_CONFIG_KEY_5:-}"
 )
 
 # 1b. an inherited GIT_CONFIG_COUNT is appended to, not clobbered
@@ -100,7 +107,7 @@ rm -f "$T/keychain-called"
   # shellcheck source=git-env.sh
   . "$GIT_ENV_SH"
   fleet_git_env "$ENVF"
-  check "bash: pre-existing env config kept, count is 5" "5" "$GIT_CONFIG_COUNT"
+  check "bash: pre-existing env config kept, count is 6" "6" "$GIT_CONFIG_COUNT"
   check "bash: pre-existing env config still applies" "cat" "$(git config core.pager)"
   check "bash: bot still wins" "acme-fleet[bot]" "$(git config user.name)"
 )
@@ -131,7 +138,7 @@ LINES_BASH="$T/lines.bash.env"
   . "$GIT_ENV_SH"
   fleet_git_env_lines "$ENVF" > "$LINES_BASH"
 )
-contains "lines: has the count" "GIT_CONFIG_COUNT=4" "$(cat "$LINES_BASH")"
+contains "lines: has the count" "GIT_CONFIG_COUNT=5" "$(cat "$LINES_BASH")"
 contains "lines: has the guard" "FLEET_GIT_ENV=1" "$(cat "$LINES_BASH")"
 contains "lines: carries the env file path" "GH_APP_ENV_FILE=" "$(cat "$LINES_BASH")"
 (
@@ -165,7 +172,7 @@ if command -v zsh >/dev/null 2>&1; then
     . "$1"; fleet_git_env "$2"; fleet_git_env "$2"
     echo "count=$GIT_CONFIG_COUNT name=$(git config user.name)"
   ' zsh "$GIT_ENV_SH" "$ENVF")"
-  check "zsh: fleet_git_env twice does not grow the count" "count=4 name=acme-fleet[bot]" "$out"
+  check "zsh: fleet_git_env twice does not grow the count" "count=5 name=acme-fleet[bot]" "$out"
 else
   echo "skip zsh cases (zsh not installed)"
 fi

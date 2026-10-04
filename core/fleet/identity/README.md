@@ -105,6 +105,7 @@ GH_BOT_AUTHOR_EMAIL=99999999+acme-fleet[bot]@users.noreply.github.com
 GH_APP_SLUG=acme-fleet
 FLEET_ORG=acme-fleet
 # GH_APP_REQUIRED_PERMS=contents:write,pull_requests:write,issues:write,actions:write,workflows:write,checks:read,statuses:read,metadata:read
+# GH_APP_INSTALLATIONS=pat-person=8765432
 # GH_APP_CACHE=/path/to/token-cache.json
 EOF
 chmod 600 ~/.config/acme-fleet/gh-app.env
@@ -119,7 +120,8 @@ chmod 600 ~/.config/acme-fleet/gh-app.env
 | `GH_APP_SLUG` | no | Informational |
 | `FLEET_ORG` | no | Names the cache directory: `~/.cache/<FLEET_ORG>/`. Default `engsys-fleet` |
 | `GH_APP_REQUIRED_PERMS` | no | What `--check` requires: a comma list of `perm:level`. Default: the repo-level set in section 1 (contents, pull_requests, issues, actions, workflows = write; checks, statuses, metadata = read). Setting it **replaces** the default, so include the defaults you still want |
-| `GH_APP_CACHE` | no | Full path of the token cache file. Overrides the default `~/.cache/<FLEET_ORG or engsys-fleet>/gh-app-token-<installation id>.json` |
+| `GH_APP_INSTALLATIONS` | no | More installations of the same App, as a comma list of `owner=installation-id`. Each owner's repos get a token from its own installation; every other owner gets `GH_APP_INSTALLATION_ID`. See section 7 |
+| `GH_APP_CACHE` | no | Full path of the token cache file. Overrides the default `~/.cache/<FLEET_ORG or engsys-fleet>/gh-app-token-<installation id>.json`. Installations from `GH_APP_INSTALLATIONS` get their id before the extension (`token-<id>.json`) |
 
 Values already in the process environment win over the file. The token cache is written `0600` in a
 `0700` directory (the directory mode is enforced only for the default location); a token is never
@@ -166,6 +168,8 @@ GH_APP_ENV_FILE=~/.config/acme-fleet/gh-app.env node core/fleet/identity/gh-app-
 
 `--check` always mints a **fresh** token (a cached one carries the permissions it was minted with),
 compares its permissions with `GH_APP_REQUIRED_PERMS` and lists the repos the installation covers.
+With `GH_APP_INSTALLATIONS` set it checks each installation in turn; those extra installations only need
+`contents:write`, `pull_requests:write` and `metadata:read` (section 7).
 
 | Exit | Meaning |
 |---|---|
@@ -197,3 +201,36 @@ Overlap the keys so there is no gap:
    longer want it in.
 
 Rotate on a handoff of fleet ownership and whenever a key may have been exposed.
+
+## 7. More than one installation (repos outside the org)
+
+The App's own installation covers the org's repos. To let the fleet push branches and open PRs on a repo
+owned by another account (for example a maintainer's personal repo the fleet depends on), install the
+same App there; no second key is needed.
+
+1. If the App was created for "only this account", open its settings, **Advanced**, **Make public**.
+   Public only means other accounts may install it; permissions stay under the App owner's control.
+   GitHub won't make it private again while another account has it installed.
+2. Signed in as that account: `https://github.com/apps/<slug>`, **Install**, pick the account,
+   **Only select repositories**, the repo(s). The page you land on,
+   `https://github.com/settings/installations/<id>`, holds the installation id.
+3. Add it to the env file: `GH_APP_INSTALLATIONS=<owner>=<id>` (comma-separate more).
+4. On the repo, add a branch ruleset on the default branch that requires a PR and an approval, with
+   **Repository admin** in the bypass list. The App has no Administration permission, so it can open
+   PRs but can't merge them, push to the branch, or change the ruleset; the admin bypass lets the
+   owner merge their own PRs.
+5. `--check` (section 5) should report an `OK (<owner>)` line.
+
+Permissions belong to the App, not the installation: the other account grants the repo everything the
+App holds, not just the PR minimum. Workflows + contents write lets a pushed branch run a workflow with
+that repo's Actions secrets. Keep anything that matters behind an Environment that needs approval. The
+other account can revoke all of it at any time by uninstalling the App (**Settings, Applications,
+Installed GitHub Apps**).
+
+How a call picks the installation: `git` sends the repo path to the credential helper (git-env.sh sets
+`credential.https://github.com.useHttpPath`), and the helper uses the path's owner. The `gh` shim takes
+the owner from `-R`/`--repo`, a `gh api repos/<owner>/...` path or a `https://github.com/<owner>/...`
+argument, and otherwise from the current repo's `origin`. `--owner <login>` or `GH_APP_OWNER` sets it
+explicitly. Commits are authored by the bot (`GH_BOT_AUTHOR_*`) in every repo, so its PRs can be
+approved by the repo owner.
+

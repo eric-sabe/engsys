@@ -9,13 +9,18 @@
 // Modes:
 //   gh-app-token.mjs                       print a valid token
 //   gh-app-token.mjs --refresh             force a re-mint, print it
-//   gh-app-token.mjs --check               mint fresh + verify permissions against the API; print status
-//                                          (exit 3 = token works but permissions are short)
+//   gh-app-token.mjs --check               mint fresh + verify permissions against the API, for every
+//                                          installation; print status (exit 3 = token works but
+//                                          permissions are short)
 //   gh-app-token.mjs git-credential <op>   git credential-helper protocol (op = get|store|erase)
+//   --owner <login>                        (any mode but --check) the account whose installation to use;
+//                                          GH_APP_OWNER in the process environment does the same
 //
 // Config: an env file named by GH_APP_ENV_FILE (required; there is no default location) providing
 // GH_APP_ID, GH_APP_INSTALLATION_ID, GH_APP_PEM. Optional keys: GH_APP_REQUIRED_PERMS (comma list of
-// perm:level for --check), GH_APP_CACHE (cache file path), FLEET_ORG (cache directory name).
+// perm:level for --check), GH_APP_INSTALLATIONS (more installations of the same App, as a comma list
+// of owner=id; GH_APP_INSTALLATION_ID serves every owner not listed), GH_APP_CACHE (cache file path),
+// FLEET_ORG (cache directory name).
 // Values already present in the process environment win over the file.
 // Cache: ~/.cache/<FLEET_ORG or "engsys-fleet">/gh-app-token-<installation id>.json (dir 700, file 600).
 // No token is ever written anywhere else. See README.md next to this file.
@@ -37,6 +42,9 @@ export const DEFAULT_REQUIRED_PERMS = {
   contents: 'write', pull_requests: 'write', issues: 'write', actions: 'write', workflows: 'write',
   checks: 'read', statuses: 'read', metadata: 'read',
 };
+// What --check requires of an installation listed in GH_APP_INSTALLATIONS: enough to push branches
+// and open PRs. Those are often personal accounts, where org-level permissions don't exist.
+export const EXTRA_REQUIRED_PERMS = { contents: 'write', pull_requests: 'write', metadata: 'read' };
 const RANK = { read: 1, write: 2, admin: 3 };
 
 function die(msg, code = 1) {
@@ -80,12 +88,46 @@ export function missingPermissions(have, required) {
     .map(([k, need]) => `${k}:${need} (has ${h[k] || 'none'})`);
 }
 
+/** "acme=11, Pat-Person=22" -> { acme: '11', 'pat-person': '22' } (owners lower-cased). Throws on a malformed entry. */
+export function parseInstallations(str) {
+  const out = {};
+  for (const part of String(str || '').split(',')) {
+    const p = part.trim();
+    if (!p) continue;
+    const m = p.match(/^([A-Za-z0-9][A-Za-z0-9-]*)=(\d+)$/);
+    if (!m) throw new Error(`invalid GH_APP_INSTALLATIONS entry "${p}" (want owner=installation-id)`);
+    out[m[1].toLowerCase()] = m[2];
+  }
+  return out;
+}
+
+/** The installation id serving `owner`: its GH_APP_INSTALLATIONS entry, else GH_APP_INSTALLATION_ID. */
+export function installationFor(cfg, owner) {
+  const map = parseInstallations(cfg.GH_APP_INSTALLATIONS);
+  return (owner && map[String(owner).toLowerCase()]) || cfg.GH_APP_INSTALLATION_ID;
+}
+
+/** The repo owner in a git credential `path` attribute ("acme/app.git" -> "acme"), or '' when absent. */
+export function ownerFromCredentialPath(p) {
+  const m = String(p || '').match(/^\/?([A-Za-z0-9][A-Za-z0-9-]*)\//);
+  return m ? m[1] : '';
+}
+
 /** Where the token cache lives. `cfg.GH_APP_CACHE` overrides; `custom` tells the caller not to chmod the directory. */
 export function cachePath(cfg, home = os.homedir()) {
   const expand = (p) => p.replace(/^~(?=\/|$)/, home);
-  if (cfg.GH_APP_CACHE) return { file: expand(cfg.GH_APP_CACHE), custom: true };
+  if (cfg.GH_APP_CACHE) {
+    const file = expand(cfg.GH_APP_CACHE);
+    // One file per installation: a non-default installation gets its id before the extension.
+    if (cfg.installationId && cfg.installationId !== cfg.GH_APP_INSTALLATION_ID) {
+      const ext = path.extname(file);
+      return { file: `${file.slice(0, file.length - ext.length)}-${cfg.installationId}${ext}`, custom: true };
+    }
+    return { file, custom: true };
+  }
   const org = cfg.FLEET_ORG || 'engsys-fleet';
-  return { file: path.join(home, '.cache', org, `gh-app-token-${cfg.GH_APP_INSTALLATION_ID}.json`), custom: false };
+  const id = cfg.installationId || cfg.GH_APP_INSTALLATION_ID;
+  return { file: path.join(home, '.cache', org, `gh-app-token-${id}.json`), custom: false };
 }
 
 export function apiBase(env = process.env) {
@@ -103,13 +145,14 @@ function loadConfig() {
   const file = envFile.replace(/^~(?=\/)/, home);
   if (!fs.existsSync(file)) die(`env file not found: ${file} (GH_APP_ENV_FILE)`);
   const cfg = parseEnvFile(fs.readFileSync(file, 'utf8'));
-  for (const k of ['GH_APP_ID', 'GH_APP_INSTALLATION_ID', 'GH_APP_PEM', 'GH_APP_REQUIRED_PERMS', 'GH_APP_CACHE', 'FLEET_ORG']) {
+  for (const k of ['GH_APP_ID', 'GH_APP_INSTALLATION_ID', 'GH_APP_PEM', 'GH_APP_REQUIRED_PERMS', 'GH_APP_INSTALLATIONS', 'GH_APP_CACHE', 'FLEET_ORG']) {
     if (process.env[k]) cfg[k] = process.env[k];
   }
   for (const k of ['GH_APP_ID', 'GH_APP_INSTALLATION_ID', 'GH_APP_PEM']) {
     if (!cfg[k]) die(`${k} not set (env file: ${file})`);
   }
   cfg.GH_APP_PEM = cfg.GH_APP_PEM.replace(/^~(?=\/)/, home);
+  try { parseInstallations(cfg.GH_APP_INSTALLATIONS); } catch (e) { die(e.message); }
   return cfg;
 }
 
@@ -168,7 +211,7 @@ function writeCache(cfg, entry) {
 async function mint(cfg) {
   if (!fs.existsSync(cfg.GH_APP_PEM)) die(`private key not found: ${cfg.GH_APP_PEM}`);
   const jwt = appJwt(cfg.GH_APP_ID, cfg.GH_APP_PEM);
-  const r = await gh(`/app/installations/${cfg.GH_APP_INSTALLATION_ID}/access_tokens`, {
+  const r = await gh(`/app/installations/${cfg.installationId || cfg.GH_APP_INSTALLATION_ID}/access_tokens`, {
     method: 'POST',
     bearer: jwt,
   });
@@ -185,8 +228,32 @@ async function token(cfg, { force = false } = {}) {
   return mint(cfg);
 }
 
+/** cfg bound to one installation (the token cache is keyed by it). */
+function forOwner(cfg, owner) {
+  return { ...cfg, installationId: installationFor(cfg, owner) };
+}
+
+async function checkInstallation(cfg, required, label) {
+  const { token: t, expires_at, permissions } = await token(cfg, { force: true }); // fresh: carries current permissions
+  const missing = missingPermissions(permissions, required);
+  const repos = await gh('/installation/repositories?per_page=100', { token: t });
+  const names = (repos.repositories || []).map((r) => r.full_name).sort();
+  process.stdout.write(
+    `gh-app-token: OK${label} — token valid until ${expires_at}; installation covers ${repos.total_count} repo(s): ${names.join(', ')}\n`,
+  );
+  return missing.length ? `${label ? `${label.trim()}: ` : ''}${missing.join(', ')}` : '';
+}
+
 async function main() {
-  const [mode, op] = process.argv.slice(2);
+  const args = process.argv.slice(2);
+  let owner = process.env.GH_APP_OWNER || '';
+  const oi = args.indexOf('--owner');
+  if (oi !== -1) {
+    owner = args[oi + 1] || '';
+    if (!owner) die('--owner needs an account login');
+    args.splice(oi, 2);
+  }
+  const [mode, op] = args;
   const cfg = loadConfig();
 
   if (mode === 'git-credential') {
@@ -196,7 +263,8 @@ async function main() {
       input.split('\n').filter(Boolean).map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]),
     );
     if (attrs.host !== 'github.com' || (attrs.protocol && attrs.protocol !== 'https')) return;
-    const { token: t } = await token(cfg);
+    // git sends `path` when credential.useHttpPath is set (git-env.sh sets it for github.com).
+    const { token: t } = await token(forOwner(cfg, owner || ownerFromCredentialPath(attrs.path)));
     process.stdout.write(`username=x-access-token\npassword=${t}\n`);
     return;
   }
@@ -206,20 +274,20 @@ async function main() {
     try {
       required = cfg.GH_APP_REQUIRED_PERMS ? parseRequiredPerms(cfg.GH_APP_REQUIRED_PERMS) : DEFAULT_REQUIRED_PERMS;
     } catch (e) { die(e.message); }
-    const { token: t, expires_at, permissions } = await token(cfg, { force: true }); // fresh: carries current permissions
-    const missing = missingPermissions(permissions, required);
-    const repos = await gh('/installation/repositories?per_page=100', { token: t });
-    const names = (repos.repositories || []).map((r) => r.full_name).sort();
-    process.stdout.write(
-      `gh-app-token: OK — token valid until ${expires_at}; installation covers ${repos.total_count} repo(s): ${names.join(', ')}\n`,
-    );
+    const extras = Object.entries(parseInstallations(cfg.GH_APP_INSTALLATIONS))
+      .filter(([, id]) => id !== cfg.GH_APP_INSTALLATION_ID);
+    const short = [await checkInstallation(forOwner(cfg, ''), required, extras.length ? ' (default)' : '')];
+    for (const [who, id] of extras) {
+      short.push(await checkInstallation({ ...cfg, installationId: id }, EXTRA_REQUIRED_PERMS, ` (${who})`));
+    }
+    const missing = short.filter(Boolean);
     if (missing.length) {
-      die(`installation token is MISSING permission(s): ${missing.join(', ')} — set them on the App and accept them on the installation (${DOCS}, "Changing permissions")`, 3); // 3 = token works, permissions short
+      die(`installation token is MISSING permission(s): ${missing.join('; ')} — set them on the App and accept them on the installation (${DOCS}, "Changing permissions")`, 3); // 3 = token works, permissions short
     }
     return;
   }
 
-  const { token: t } = await token(cfg, { force: mode === '--refresh' });
+  const { token: t } = await token(forOwner(cfg, owner), { force: mode === '--refresh' });
   process.stdout.write(`${t}\n`);
 }
 
