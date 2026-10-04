@@ -25,10 +25,11 @@ GH_APP_ID=1
 GH_APP_INSTALLATION_ID=2
 GH_APP_PEM=$T/none.pem
 GH_APP_CACHE=$T/cache.json
-GH_APP_INSTALLATIONS=pat-person=3
+GH_APP_INSTALLATIONS=pat-person=3,FeedFrwd=4
 APP_ENV
 printf '{"token":"tok_default","expires_at":"2099-01-01T00:00:00Z","permissions":{}}' >"$T/cache.json"
 printf '{"token":"tok_pat","expires_at":"2099-01-01T00:00:00Z","permissions":{}}' >"$T/cache-3.json"
+printf '{"token":"tok_feedfrwd","expires_at":"2099-01-01T00:00:00Z","permissions":{}}' >"$T/cache-4.json"
 
 git -C "$T/repo-pat" init -q && git -C "$T/repo-pat" remote add origin https://github.com/pat-person/tools.git
 git -C "$T/repo-acme" init -q && git -C "$T/repo-acme" remote add origin git@github.com:acme/app.git
@@ -49,6 +50,12 @@ check "origin (https) of the current repo" tok_pat     "$(run "$T/repo-pat" pr l
 check "origin (ssh) of the current repo"   tok_default "$(run "$T/repo-acme" pr list)"
 check "an explicit -R beats origin"        tok_default "$(run "$T/repo-pat" pr list -R acme/app)"
 check "GH_APP_OWNER beats everything"      tok_pat     "$(cd "$T/repo-acme" && env PATH="$HERE/bin:$T/realbin:$PATH" GH_APP_ENV_FILE="$T/gh-app.env" GH_APP_OWNER=pat-person "$SHIM" pr list -R acme/app)"
+check "--owner <x> names a listed owner"       tok_feedfrwd "$(run "$T/norepo" project item-list 11 --owner FeedFrwd)"
+check "--owner=<x> names a listed owner"       tok_feedfrwd "$(run "$T/norepo" project item-list 11 --owner=FeedFrwd)"
+check "--owner beats a URL argument (#55)"     tok_feedfrwd "$(run "$T/norepo" project item-add 89 --owner FeedFrwd --url https://github.com/pat-person/tools/issues/53)"
+check "--owner beats -R/--repo"                tok_feedfrwd "$(run "$T/norepo" pr list -R pat-person/tools --owner FeedFrwd)"
+check "--owner beats origin of current repo"   tok_feedfrwd "$(run "$T/repo-pat" project item-list 11 --owner FeedFrwd)"
+check "GH_APP_OWNER beats --owner"              tok_pat      "$(cd "$T/norepo" && env PATH="$HERE/bin:$T/realbin:$PATH" GH_APP_ENV_FILE="$T/gh-app.env" GH_APP_OWNER=pat-person "$SHIM" project item-list 11 --owner FeedFrwd)"
 
 if [ "$FAILS" -gt 0 ]; then echo "gh-shim.test.sh: $FAILS failure(s)" >&2; exit 1; fi
 echo "gh-shim.test.sh: all passed"

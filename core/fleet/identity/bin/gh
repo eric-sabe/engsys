@@ -26,27 +26,37 @@ for d in "${_dirs[@]}"; do
 done
 [ -n "$REAL_GH" ] || { echo "gh (fleet shim): real gh not found on PATH" >&2; exit 127; }
 
-# Which account's installation to use (GH_APP_INSTALLATIONS in the env file): the owner named by
-# -R/--repo, by a `gh api repos/<owner>/...` path or a github.com URL argument, else the current
-# repo's origin. The token helper falls back to GH_APP_INSTALLATION_ID for an owner it doesn't list.
+# Which account's installation to use (GH_APP_INSTALLATIONS in the env file). Precedence:
+# GH_APP_OWNER > --owner (names the account a command like `gh project`/`gh repo list`/
+# `gh search --owner` acts on) > -R/--repo > a `gh api repos/<owner>/...` path > a github.com
+# URL argument > the current repo's origin. The token helper falls back to
+# GH_APP_INSTALLATION_ID for an owner it doesn't list.
 owner_of() { # owner/repo, URL or api path -> owner, or nothing
   local s="${1#https://github.com/}"
   s="${s#/}"; s="${s#repos/}"
   case "$s" in */*) printf '%s' "${s%%/*}" ;; esac
 }
+OWNER_OPT="" REPO_OPT="" API_OWNER="" URL_OWNER=""
+prev=""
+for a in "$@"; do
+  case "$prev" in
+    --owner) [ -n "$OWNER_OPT" ] || OWNER_OPT="$a" ;;
+    -R|--repo) [ -n "$REPO_OPT" ] || REPO_OPT="$(owner_of "$a")" ;;
+  esac
+  case "$a" in
+    --owner=*) [ -n "$OWNER_OPT" ] || OWNER_OPT="${a#--owner=}" ;;
+    --repo=*) [ -n "$REPO_OPT" ] || REPO_OPT="$(owner_of "${a#--repo=}")" ;;
+    -R?*) [ -n "$REPO_OPT" ] || REPO_OPT="$(owner_of "${a#-R}")" ;;
+    repos/*/*|/repos/*/*) [ -n "$API_OWNER" ] || API_OWNER="$(owner_of "$a")" ;;
+    https://github.com/*/*) [ -n "$URL_OWNER" ] || URL_OWNER="$(owner_of "$a")" ;;
+  esac
+  prev="$a"
+done
 OWNER="${GH_APP_OWNER:-}"
-if [ -z "$OWNER" ]; then
-  prev=""
-  for a in "$@"; do
-    case "$prev" in -R|--repo) OWNER="$(owner_of "$a")"; break ;; esac
-    case "$a" in
-      --repo=*) OWNER="$(owner_of "${a#--repo=}")"; break ;;
-      -R?*) OWNER="$(owner_of "${a#-R}")"; break ;;
-      https://github.com/*/*|repos/*/*|/repos/*/*) OWNER="$(owner_of "$a")"; break ;;
-    esac
-    prev="$a"
-  done
-fi
+[ -n "$OWNER" ] || OWNER="$OWNER_OPT"
+[ -n "$OWNER" ] || OWNER="$REPO_OPT"
+[ -n "$OWNER" ] || OWNER="$API_OWNER"
+[ -n "$OWNER" ] || OWNER="$URL_OWNER"
 if [ -z "$OWNER" ] && url="$(git remote get-url origin 2>/dev/null)"; then
   case "$url" in
     https://github.com/*) OWNER="$(owner_of "$url")" ;;
