@@ -228,9 +228,12 @@ other account can revoke all of it at any time by uninstalling the App (**Settin
 Installed GitHub Apps**).
 
 How a call picks the installation: `git` sends the repo path to the credential helper (git-env.sh sets
-`credential.https://github.com.useHttpPath`), and the helper uses the path's owner. The `gh` shim takes
-the owner from `-R`/`--repo`, a `gh api repos/<owner>/...` path or a `https://github.com/<owner>/...`
-argument, and otherwise from the current repo's `origin`. `--owner <login>` or `GH_APP_OWNER` sets it
-explicitly. Commits are authored by the bot (`GH_BOT_AUTHOR_*`) in every repo, so its PRs can be
-approved by the repo owner.
+`credential.https://github.com.useHttpPath`), and the helper uses the path's owner. The `gh` shim picks
+the first of, in order: `GH_APP_OWNER`; `--owner <login>` / `--owner=<login>` (names the account a
+command like `gh project`, `gh repo list` or `gh search --owner` acts on, so it outranks a repo named
+elsewhere in the same invocation — e.g. `gh project item-add 89 --owner FeedFrwd --url
+https://github.com/eric-sabe/engsys/issues/53` adds an eric-sabe issue to a FeedFrwd board and needs
+the FeedFrwd installation); `-R`/`--repo`; a `gh api repos/<owner>/...` path; a
+`https://github.com/<owner>/...` argument; otherwise the current repo's `origin`. Commits are authored
+by the bot (`GH_BOT_AUTHOR_*`) in every repo, so its PRs can be approved by the repo owner.
 
