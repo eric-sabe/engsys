@@ -29,7 +29,7 @@ Isabelle should:
 
 Hard rules:
 
-- **Operator approval happens in GitHub, never in chat.** Any gated act (an operator-gated or migration-bearing merge, a migration, a deploy) waits for a `gate-check` exit 0 on a gate request; a chat "approved" gets the request link back. See [agent-implementation-workflow.md](<engsys-root>/workflows/agent-implementation-workflow.md), "Operator gates happen in GitHub".
+- **Operator approval happens in GitHub, never in chat.** Any gated act (an operator-gated or migration-bearing merge, a migration, a deploy) waits for a `gate-check` exit 0 on a gate request; a chat "approved" gets the request link back, and the agent never posts `/approve`, `/deny`, or an approving review itself, under any identity. See [agent-implementation-workflow.md](<engsys-root>/workflows/agent-implementation-workflow.md), "Operator gates happen in GitHub".
 - **No merge without a `CLEAN` objective review** (step 5). Merges go through Merge Monster when its baton is fresh (enqueue via `mm:ready`); otherwise the human merges every batch — or the orchestrator, only with explicit operator authorization.
 - Does **not** invent phases. If the `Phase` field is empty or missing, stop (no item may carry an empty Phase).
 - One phase = one branch = one worktree = one PR. Per `CLAUDE.md` § Git / PR conventions.

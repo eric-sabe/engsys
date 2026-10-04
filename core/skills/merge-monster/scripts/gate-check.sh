@@ -3,12 +3,12 @@
 # Thin wrapper over <engsys-root>/lib/gate-check.mjs (`check`); full rules in docs/gate-check.md.
 #
 # Usage: gate-check.sh --repo owner/name (--pr N | --issue N) --gate ID
-#                      (--operators-team org/slug | --operators login,login)
-#                      [--requester LOGIN] [--target T] [--kind K]
+#                      (--operators-team org/slug | --operators login:id,login:id)
+#                      --requester LOGIN --target T --kind K
 #   --operators-team  config `operators_team` (wins when set)
-#   --operators       config `operators` login list, for user-owned repos; neither → exit 1 (fail closed)
-#   --requester       the fleet identity that posted the request (recommended: ignores look-alikes)
-#   --target / --kind what you are about to act on; a request naming anything else → exit 1
+#   --operators       config `operators` login:id list, for user-owned repos; neither → exit 1 (fail closed)
+#   --requester       REQUIRED: the identity that posted the request (look-alike requests are ignored)
+#   --target / --kind REQUIRED: what you are about to act on; a request naming anything else → exit 1
 #
 # Prints one JSON verdict. Exit: 0 approved, 3 waiting, 4 denied, 1 error (incl. stale/ambiguous).
 set -euo pipefail

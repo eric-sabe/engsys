@@ -306,7 +306,7 @@ dependabot:
 escalation:
   slack_channel: ""          # empty → GitHub-only escalation
 operators_team: ""           # org/team-slug whose members approve gates on GitHub
-operators: []                # user-owned repos: approver logins (used when operators_team is empty; neither → gates stay shut)
+operators: []                # user-owned repos: approvers as login:account-id (used when operators_team is empty; neither → gates stay shut)
 fix_attempts_max: 2
 ci_reruns_max: 1
 ```

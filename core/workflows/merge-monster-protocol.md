@@ -58,6 +58,9 @@ Pushing new commits invalidates it, and Merge Monster posts a fresh request.
 
 - Set `operator_gate:` for anything a human should sign off before it lands
   (security-sensitive changes, prod IaC, auth). When unsure, set it.
+- Never post `/approve`, `/deny`, or an approving review on a gated PR
+  yourself, under any identity (your own `gh` login included). gate-check
+  rejects approvals from the identity running it and from the request author.
 - Never relay an operator's chat or Slack "approved" to Merge Monster as if
   it were consent; point the operator at the gate request link instead. Merge
   Monster ignores such relays and keeps waiting.

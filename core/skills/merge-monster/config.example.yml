@@ -53,10 +53,13 @@ escalation:
 # live by scripts/gate-check.sh (docs/gate-check.md). Unset → every gate stays
 # shut (fail closed). The gh identity needs org Members: read.
 operators_team: ""           # e.g. acme/fleet-operators
-# For a user-owned repo (no teams): list operator logins instead. Used only when
-# operators_team is empty; each login is checked live (GET /users/{login} is a User).
-# Neither set → fail closed.
-operators: []                # e.g. [alice, bob]
+# For a user-owned repo (no teams): list operators as login:account-id instead
+# (id from `gh api users/<login> --jq .id`; matching is by id, so a rename or a
+# squatted old login can't change who approves). Used only when operators_team is
+# empty; each id is checked live (GET /user/{id} is a User). Neither set → fail
+# closed. Use a closed, owner-managed team with no child teams: members of child
+# teams count as team members.
+operators: []                # e.g. [alice:1234567, bob:7654321]
 
 fix_attempts_max: 2          # fix-agent dispatches per PR before escalating
 ci_reruns_max: 1             # flake re-runs per PR per cause

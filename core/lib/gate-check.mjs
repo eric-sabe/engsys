@@ -5,7 +5,9 @@
 // Design: docs/multi-fleet.md § 6 "Human approval happens in GitHub" and docs/gate-check.md.
 //
 // Public API (pure; every network-touching function takes an `api` object, see `ghApiClient`):
-//   GATE_ID_RE, KIND_RE, TARGET_RE, OPERATORS_TEAM_RE   input formats
+//   GATE_ID_RE, KIND_RE, TARGET_RE, OPERATORS_TEAM_RE, LOGIN_RE, OPERATOR_ENTRY_RE   input formats
+//   operatorSource(opts)                    -> { type: team|list, ... } | null (team wins; null fails closed)
+//   parseIncluded(raw), nextLink(link)      -> gh api -i parsing; Link rel="next" as an API path
 //   EXIT                                    { APPROVED: 0, ERROR: 1, WAITING: 3, DENIED: 4 }
 //   parseGateRequest(body)                  -> { id, kind, target } | null (marker in leading position)
 //   parsePrTarget(target)                   -> { repo, number, sha } | null (`owner/repo#N@<40-hex>`)
@@ -19,10 +21,10 @@
 //
 // CLI:
 //   node gate-check.mjs check   --repo o/r (--pr N | --issue N) --gate ID
-//                               (--operators-team org/slug | --operators login,login)
-//                               [--requester LOGIN] [--target T] [--kind K]
+//                               (--operators-team org/slug | --operators login:id,login:id)
+//                               --requester LOGIN --target T --kind K
 //   node gate-check.mjs request --repo o/r (--pr N | --issue N) --kind K --target T --what TEXT
-//                               [--gate ID] [--operators-team org/slug | --operators login,login] [--dry-run]
+//                               [--gate ID] [--operators-team org/slug | --operators login:id,...] [--dry-run]
 // `check` prints one JSON verdict on stdout. Exit: 0 approved, 3 waiting, 4 denied, 1 error (bad
 // input, missing config, unreadable API, stale or ambiguous gate). Anything unexpected fails closed.
 //
@@ -30,9 +32,15 @@
 // two strict, anchored grammars (the request marker and `/approve|/deny <id>`) and otherwise never
 // interpreted, executed, or echoed, with one exception: a deny reason, which is reported defanged
 // and inside the untrusted-data envelope (see untrusted.mjs). Identity comes only from API fields
-// (`user.login`, `user.type`) plus a live read of the operator source, never from text. The operator
-// source is `operators_team` when set (live team membership, state active), else the `operators`
-// login allowlist (listed, and a live GET /users/{login} says type User). Neither set: fail closed.
+// (`user.login`, `user.id`, `user.type`) plus a live read of the operator source, never from text.
+// The operator source is `operators_team` when set (live team membership, state active), else the
+// `operators` allowlist of `login:id` pins (matched on the numeric account id, and a live
+// GET /user/{id} says type User). Neither set: fail closed.
+//
+// Self-approval. The identity running the check (GET /user) and the gate request's author can never
+// approve, deny, or clear an objection, even when they are operators: an agent whose `gh` runs as an
+// operator's own login must not be able to open its own gate. An App installation token has no user
+// (GET /user answers 403 "Resource not accessible by integration") and is recorded as `caller: app`.
 
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -54,11 +62,16 @@ export const OPERATORS_TEAM_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9
 const REPO_RE = /^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/;
 /** A GitHub user login (no `[bot]` suffix: bots are never operators). */
 export const LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
+/** An allowlist entry: `login:numeric-account-id` (the id survives renames; the login is a label). */
+export const OPERATOR_ENTRY_RE = /^([A-Za-z0-9](?:[A-Za-z0-9-]{0,38})):([1-9][0-9]{0,15})$/;
+/** Logins that are never an operator, whatever the API says (`ghost` is the deleted-user placeholder). */
+const DENIED_LOGINS = new Set(['ghost']);
+const NODE_ID_RE = /^[A-Za-z0-9_=-]{1,100}$/;
 
 /**
  * Which operator source applies: the team when `operatorsTeam` is set (it wins), else the
- * `operators` allowlist (an array or a comma-separated string of logins), else null (fail closed).
- * Throws on a malformed team or login so a typo never silently widens or empties the source.
+ * `operators` allowlist (an array or a comma-separated string of `login:id` entries), else null
+ * (fail closed). Throws on a malformed team or entry so a typo never silently widens or empties it.
  */
 export function operatorSource({ operatorsTeam, operators } = {}) {
   if (operatorsTeam) {
@@ -66,10 +79,15 @@ export function operatorSource({ operatorsTeam, operators } = {}) {
     return { type: 'team', team: operatorsTeam, label: `team ${operatorsTeam}` };
   }
   const list = Array.isArray(operators) ? operators : typeof operators === 'string' ? operators.split(',') : [];
-  const logins = list.map((l) => String(l).trim()).filter(Boolean);
-  if (logins.length === 0) return null;
-  for (const l of logins) if (!LOGIN_RE.test(l)) throw new TypeError(`operators entry is not a GitHub user login: ${JSON.stringify(l)}`);
-  return { type: 'list', logins: logins.map((l) => l.toLowerCase()), label: 'operators allowlist' };
+  const raw = list.map((l) => String(l).trim()).filter(Boolean);
+  if (raw.length === 0) return null;
+  const entries = raw.map((e) => {
+    const m = OPERATOR_ENTRY_RE.exec(e);
+    if (!m) throw new TypeError(`operators entry must be login:numeric-id (e.g. alice:1234567), got ${JSON.stringify(e)}`);
+    if (DENIED_LOGINS.has(m[1].toLowerCase())) throw new TypeError(`operators entry ${JSON.stringify(e)} names a login that can never be an operator`);
+    return { login: m[1].toLowerCase(), id: Number(m[2]) };
+  });
+  return { type: 'list', entries, ids: entries.map((e) => e.id), label: 'operators allowlist' };
 }
 
 /** Kinds approved by a PR review (anything that merges). Every other kind needs `/approve <id>`. */
@@ -83,6 +101,7 @@ const APPROVE_RE = /^\/approve[ \t]+(\S+)$/;
 // `/deny <id> [reason]`: verb + id on the first line, an optional reason after whitespace.
 const DENY_RE = /^\/deny[ \t]+([^\s]+)(?:\s+([\s\S]*))?$/;
 const MAX_PAGES = 50; // 5000 items per list; beyond that we fail closed rather than read partially
+const REQUESTER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(\[bot\])?$/;
 
 // ---------------------------------------------------------------------------------------------
 // parsing (pure)
@@ -150,7 +169,7 @@ export function renderGateRequest({ id, kind, target, what, operatorsTeam, opera
     throw new TypeError('gate-check: a gate on a pull request (and every merge gate) needs a target of the form owner/repo#N@<40-hex head sha>');
   }
   const src = operatorSource({ operatorsTeam, operators });
-  const who = src?.type === 'team' ? `a member of @${src.team}` : src?.type === 'list' ? `an operator (${src.logins.map((l) => `@${l}`).join(', ')})` : 'an operator';
+  const who = src?.type === 'team' ? `a member of @${src.team}` : src?.type === 'list' ? `an operator (${src.entries.map((e) => `@${e.login}`).join(', ')})` : 'an operator';
   const lines = [
     `<!-- gate-request id="${id}" kind="${kind}" target="${target}" -->`,
     `### Gate request \`${id}\` (${kind})`,
@@ -185,7 +204,9 @@ const ts = (s) => {
   return Number.isFinite(t) ? t : NaN;
 };
 const isHumanUser = (u) =>
-  !!u && u.type === 'User' && typeof u.login === 'string' && u.login.length > 0 && !/\[bot\]$/i.test(u.login);
+  !!u && u.type === 'User' && typeof u.login === 'string' && u.login.length > 0 && !/\[bot\]$/i.test(u.login) &&
+  !DENIED_LOGINS.has(u.login.toLowerCase());
+const sameLogin = (a, b) => typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase();
 const fail = (gate, message, extra = {}) => ({ status: 'error', exit: EXIT.ERROR, gate, message, ...extra });
 
 /** Defang + flatten + cap a deny reason, then wrap it as untrusted data. Never interpreted. */
@@ -203,10 +224,13 @@ function untrustedReason(reason) {
  *   pr: { state, head_sha, merged } | null,          // PR threads only
  *   reviews: [review objects, REST shape] | null,    // PR threads only
  *   reviewDecision: 'APPROVED'|'CHANGES_REQUESTED'|'REVIEW_REQUIRED'|null,  // PR threads only
+ *   dismissals: Map<reviewId, { actor, at, state }>, // review_dismissed timeline events, PR threads only
  *   pushFloor: { at: ISO, source } | null,           // latest push signal, PR threads only
+ *   edited: Map<commentId, boolean>,                 // GraphQL lastEditedAt != null, for the request + approvals
  *   members: Map<login, 'active'|'pending'|'none'>,  // live reads of the operator source
+ *   caller: { type: 'app' } | { type: 'user', login, id, user },  // the identity running the check
  * }
- * opts = { gate, operatorsTeam? | operators?, requester?, target?, kind? }
+ * opts = { gate, operatorsTeam? | operators?, requester, target, kind }  (all three pins required)
  */
 export function evaluateGate(facts, opts) {
   const gate = opts.gate;
@@ -214,13 +238,17 @@ export function evaluateGate(facts, opts) {
   try { source = operatorSource(opts); } catch (e) { return fail(gate, e.message); }
   if (!source) return fail(gate, 'neither operators_team nor operators is configured; refusing to open any gate (fail closed)');
   if (!GATE_ID_RE.test(gate ?? '')) return fail(gate, `invalid gate id ${JSON.stringify(gate)}`);
+  if (!opts.requester || !opts.target || !opts.kind) {
+    return fail(gate, '--requester, --target and --kind are required: pin the request author and the exact act you are about to perform');
+  }
+  if (!facts.caller || (facts.caller.type !== 'app' && facts.caller.type !== 'user')) return fail(gate, 'the checking identity was not read');
 
   // 1. Find the gate request: exactly one, unedited, from the requester when one is pinned.
   const requests = [];
   for (const c of facts.comments) {
     const req = parseGateRequest(c.body);
     if (!req || req.id !== gate) continue;
-    if (opts.requester && c.user?.login !== opts.requester) continue;
+    if (c.user?.login !== opts.requester) continue;
     requests.push({ comment: c, ...req });
   }
   if (requests.length === 0) return fail(gate, `no gate request with id "${gate}" on ${facts.repo}#${facts.number}`);
@@ -231,11 +259,15 @@ export function evaluateGate(facts, opts) {
   const rc = request.comment;
   const requestAt = ts(rc.created_at);
   if (!Number.isFinite(requestAt)) return fail(gate, 'gate request has no readable created_at');
-  if (rc.updated_at !== rc.created_at) return fail(gate, 'gate request was edited after posting; post a new request');
-  if (opts.target && opts.target !== request.target) {
+  if (rc.updated_at !== rc.created_at || facts.edited?.get(rc.id) !== false) {
+    return fail(gate, facts.edited?.has(rc.id) || rc.updated_at !== rc.created_at
+      ? 'gate request was edited after posting; post a new request'
+      : 'could not verify that the gate request is unedited');
+  }
+  if (opts.target !== request.target) {
     return fail(gate, `gate request target "${request.target}" does not match the expected target "${opts.target}"`);
   }
-  if (opts.kind && opts.kind !== request.kind) {
+  if (opts.kind !== request.kind) {
     return fail(gate, `gate request kind "${request.kind}" does not match the expected kind "${opts.kind}"`);
   }
 
@@ -278,16 +310,27 @@ export function evaluateGate(facts, opts) {
   }
   base.floor = { at: new Date(floor).toISOString(), source: floorSource };
   base.operator_source = source.label;
+  base.caller = facts.caller.type === 'app' ? 'app' : facts.caller.login;
 
-  const qualifies = (user) => {
+  /** Is `user` an operator per the configured source (identity only; no self/author exclusion)? */
+  const isOperator = (user) => {
     if (!isHumanUser(user)) return 'actor is not a human User account';
-    if (source.type === 'list' && !source.logins.includes(user.login.toLowerCase())) return 'not on the operators allowlist';
+    if (source.type === 'list' && !source.ids.includes(user.id)) return 'not on the operators allowlist (matched by account id)';
     const state = facts.members.get(user.login);
     if (state === undefined) return source.type === 'team' ? 'team membership was not read' : 'user account was not verified';
     if (state === 'active') return null;
     if (source.type === 'list') return 'allowlisted login is not a live User account';
     return state === 'pending' ? 'team membership is pending, not active' : `not a member of ${source.team}`;
   };
+  /** May `user` act on this gate: an operator who is neither the checking identity nor the requester. */
+  const qualifies = (user) => {
+    if (facts.caller.type === 'user' && user && (sameLogin(user.login, facts.caller.login) || (user.id !== undefined && user.id === facts.caller.id))) {
+      return 'actor is the identity running gate-check (self-approval is never accepted)';
+    }
+    if (user && sameLogin(user.login, rc.user?.login)) return 'actor is the author of the gate request';
+    return isOperator(user);
+  };
+  if (facts.caller.type === 'user' && isOperator(facts.caller.user) === null) base.self_is_operator = true;
   const ignored = [];
   const ignore = (actor, via, url, reason) => ignored.push({ actor: actor ?? null, via, url: url ?? null, reason });
 
@@ -319,7 +362,20 @@ export function evaluateGate(facts, opts) {
       if (!['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(r.state)) continue;
       if (r.user?.login) latest.set(r.user.login, r);
     }
-    const changesRequested = [...latest.values()].filter((r) => r.state === 'CHANGES_REQUESTED').map((r) => r.user.login);
+    // A dismissed change request still blocks unless a qualifying operator (not the checking identity,
+    // not the requester) dismissed it. A DISMISSED review whose dismissal event is missing blocks too:
+    // we cannot tell a dismissed objection from a dismissed approval.
+    const objecting = (r) => {
+      if (r.state === 'CHANGES_REQUESTED') return true;
+      if (r.state !== 'DISMISSED') return false;
+      const d = facts.dismissals?.get(r.id);
+      if (!d) { ignore(r.user?.login, 'review', r.html_url, 'dismissed review with no readable dismissal event: still blocking'); return true; }
+      if (String(d.state).toLowerCase() !== 'changes_requested') return false;
+      const why = qualifies(d.actor);
+      if (why) { ignore(d.actor?.login, 'dismissal', r.html_url, `change request dismissal does not count: ${why}`); return true; }
+      return false;
+    };
+    const changesRequested = [...latest.values()].filter(objecting).map((r) => r.user.login);
     let approval = null;
     for (const r of latest.values()) {
       if (r.state !== 'APPROVED') continue;
@@ -358,7 +414,8 @@ export function evaluateGate(facts, opts) {
     const cmd = parseCommand(c.body);
     if (!cmd || cmd.verb !== 'approve') continue;
     if (cmd.id !== gate) { ignore(c.user?.login, 'comment', c.html_url, 'names a different gate id'); continue; }
-    if (c.updated_at !== c.created_at) { ignore(c.user?.login, 'comment', c.html_url, 'comment was edited after posting'); continue; }
+    if (c.updated_at !== c.created_at || facts.edited?.get(c.id) === true) { ignore(c.user?.login, 'comment', c.html_url, 'comment was edited after posting'); continue; }
+    if (facts.edited?.get(c.id) !== false) { ignore(c.user?.login, 'comment', c.html_url, 'could not verify the comment is unedited'); continue; }
     const at = ts(c.created_at);
     if (!(at > floor)) { ignore(c.user?.login, 'comment', c.html_url, `approval is not newer than the ${floorSource}`); continue; }
     const why = qualifies(c.user);
@@ -432,7 +489,27 @@ export function parseIncluded(raw) {
   if (bodyText) {
     try { json = JSON.parse(bodyText); } catch { throw new Error(`gh api returned a non-JSON body (HTTP ${m[1]})`); }
   }
-  return { status: Number(m[1]), json };
+  const headers = {};
+  const head = sep === -1 ? text : text.slice(0, sep);
+  for (const line of head.split(/\r?\n/).slice(1)) {
+    const i = line.indexOf(':');
+    if (i > 0) headers[line.slice(0, i).trim().toLowerCase()] = line.slice(i + 1).trim();
+  }
+  return { status: Number(m[1]), json, headers };
+}
+
+/** The `rel="next"` URL of a Link header, as an API path (origin stripped), or null. */
+export function nextLink(link) {
+  if (typeof link !== 'string') return null;
+  for (const part of link.split(',')) {
+    const m = /^\s*<([^>]+)>\s*;\s*rel="next"\s*$/.exec(part);
+    if (!m) continue;
+    let u;
+    try { u = new URL(m[1]); } catch { throw new Error('unparseable Link header'); }
+    if (u.protocol !== 'https:') throw new Error('Link header next URL is not https');
+    return `${u.pathname}${u.search}`;
+  }
+  return null;
 }
 
 async function getOk(api, path, what) {
@@ -441,16 +518,19 @@ async function getOk(api, path, what) {
   return json;
 }
 
+/** Read a whole list by following `Link: rel="next"` (cursor-stable, unlike page offsets). */
 async function listAll(api, path, what) {
   const out = [];
-  const sep = path.includes('?') ? '&' : '?';
+  let next = `${path}${path.includes('?') ? '&' : '?'}per_page=100`;
   for (let page = 1; page <= MAX_PAGES; page++) {
-    const items = await getOk(api, `${path}${sep}per_page=100&page=${page}`, what);
-    if (!Array.isArray(items)) throw new Error(`expected a list while ${what}`);
-    out.push(...items);
-    if (items.length < 100) return out;
+    const { status, json, headers } = await api.request('GET', next);
+    if (status !== 200) throw new Error(`HTTP ${status} while ${what}${json?.message ? `: ${json.message}` : ''}`);
+    if (!Array.isArray(json)) throw new Error(`expected a list while ${what}`);
+    out.push(...json);
+    next = nextLink(headers?.link);
+    if (!next) return out;
   }
-  throw new Error(`more than ${MAX_PAGES * 100} items while ${what}; refusing to decide on a partial read`);
+  throw new Error(`more than ${MAX_PAGES} pages while ${what}; refusing to decide on a partial read`);
 }
 
 /**
@@ -459,8 +539,7 @@ async function listAll(api, path, what) {
  * SHA binding already catches; (a) catches a force-push back to an earlier SHA; (b) is a cheap
  * extra floor (it is pusher-controlled, so it can only ever raise the floor, never open a gate).
  */
-async function latestPush(api, repo, number, headSha) {
-  const timeline = await listAll(api, `/repos/${repo}/issues/${number}/timeline`, 'reading the PR timeline');
+async function latestPush(api, repo, timeline, headSha) {
   let best = null;
   for (const e of timeline) {
     if (e.event !== 'head_ref_force_pushed') continue;
@@ -475,12 +554,42 @@ async function latestPush(api, repo, number, headSha) {
   return best;
 }
 
-/** Allowlist entry is a live account of type User: 'active' | 'none'. 404 → none; other non-200 throws. */
-async function liveUser(api, login) {
-  const { status, json } = await api.request('GET', `/users/${encodeURIComponent(login)}`);
+/** Allowlisted account id is a live account of type User: 'active' | 'none'. 404 → none; other non-200 throws. */
+async function liveUserById(api, id) {
+  const { status, json } = await api.request('GET', `/user/${id}`);
   if (status === 404) return 'none';
-  if (status !== 200) throw new Error(`HTTP ${status} reading user ${login}${json?.message ? `: ${json.message}` : ''}`);
-  return json?.type === 'User' && typeof json.login === 'string' && json.login.toLowerCase() === login.toLowerCase() ? 'active' : 'none';
+  if (status !== 200) throw new Error(`HTTP ${status} reading user id ${id}${json?.message ? `: ${json.message}` : ''}`);
+  return json?.type === 'User' && json.id === id && !DENIED_LOGINS.has(String(json.login).toLowerCase()) ? 'active' : 'none';
+}
+
+/**
+ * Who is running the check. GET /user answers 200 for a user token (a laptop or personal `gh`) and
+ * 403/401 "Resource not accessible by integration" for a GitHub App installation token, which has
+ * no user and can never be an operator. Anything else throws (exit 1).
+ */
+async function readCaller(api) {
+  const { status, json } = await api.request('GET', '/user');
+  if (status === 200 && typeof json?.login === 'string') return { type: 'user', login: json.login, id: json.id, user: json };
+  if ((status === 403 || status === 401) && /resource not accessible by integration/i.test(json?.message ?? '')) return { type: 'app' };
+  throw new Error(`cannot identify the checking identity (GET /user: HTTP ${status}${json?.message ? `, ${json.message}` : ''})`);
+}
+
+/** lastEditedAt for issue comments by node id: Map<commentId, boolean>. A missing node throws. */
+async function readEdits(api, comments) {
+  const edited = new Map();
+  for (let i = 0; i < comments.length; i += 50) {
+    const chunk = comments.slice(i, i + 50);
+    for (const c of chunk) if (!NODE_ID_RE.test(c.node_id ?? '')) throw new Error(`comment ${c.id} has no usable node_id`);
+    // Node ids are validated above, so inlining them as string literals is injection-safe.
+    const query = `query{${chunk.map((c, k) => `c${k}:node(id:"${c.node_id}"){... on IssueComment{lastEditedAt}}`).join(' ')}}`;
+    const data = await api.graphql(query, {});
+    chunk.forEach((c, k) => {
+      const node = data?.[`c${k}`];
+      if (!node || !('lastEditedAt' in node)) throw new Error(`could not read the edit history of comment ${c.id}`);
+      edited.set(c.id, node.lastEditedAt !== null);
+    });
+  }
+  return edited;
 }
 
 /** Live membership: 'active' | 'pending' | 'none'. 404 means not a member; anything else non-200 throws. */
@@ -505,8 +614,12 @@ export async function collectFacts(api, { repo, number, thread, operatorsTeam, o
       );
     }
   }
+  const caller = await readCaller(api);
   const comments = await listAll(api, `/repos/${repo}/issues/${number}/comments`, 'reading comments');
-  const facts = { repo, number, thread, comments, pr: null, reviews: null, reviewDecision: null, pushFloor: null, members: new Map() };
+  const facts = {
+    repo, number, thread, comments, pr: null, reviews: null, reviewDecision: null, dismissals: new Map(), pushFloor: null,
+    edited: new Map(), members: new Map(), caller,
+  };
   if (thread === 'pr') {
     const pr = await getOk(api, `/repos/${repo}/pulls/${number}`, 'reading the PR');
     facts.pr = { state: pr.state, merged: !!pr.merged, head_sha: pr.head?.sha };
@@ -516,16 +629,32 @@ export async function collectFacts(api, { repo, number, thread, operatorsTeam, o
       'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewDecision}}}',
       { owner, name, number },
     );
-    facts.reviewDecision = data?.repository?.pullRequest?.reviewDecision ?? null;
-    facts.pushFloor = await latestPush(api, repo, number, facts.pr.head_sha);
+    const prNode = data?.repository?.pullRequest;
+    // Only a PRESENT pullRequest whose field is null means "no review required"; a missing object is
+    // a read failure, never a reason to skip GitHub's review requirement.
+    if (!prNode || typeof prNode !== 'object' || !('reviewDecision' in prNode)) throw new Error('GraphQL returned no pullRequest object; cannot read reviewDecision');
+    facts.reviewDecision = prNode.reviewDecision;
+    const timeline = await listAll(api, `/repos/${repo}/issues/${number}/timeline`, 'reading the PR timeline');
+    for (const e of timeline) {
+      if (e.event !== 'review_dismissed' || !e.dismissed_review) continue;
+      facts.dismissals.set(e.dismissed_review.review_id, { actor: e.actor ?? null, at: e.created_at, state: e.dismissed_review.state });
+    }
+    facts.pushFloor = await latestPush(api, repo, timeline, facts.pr.head_sha);
   }
-  // Membership is read only for human candidates: a command naming this gate, or an approving review.
-  const logins = new Set();
-  for (const c of comments) if (parseCommand(c.body)?.id === gate && isHumanUser(c.user)) logins.add(c.user.login);
-  for (const r of facts.reviews ?? []) if (r.state === 'APPROVED' && isHumanUser(r.user)) logins.add(r.user.login);
-  for (const login of logins) {
+  // Edit history (GraphQL lastEditedAt) for the gate request(s) and the approvals naming this gate.
+  const toCheck = comments.filter((c) => parseGateRequest(c.body)?.id === gate || (parseCommand(c.body)?.verb === 'approve' && parseCommand(c.body).id === gate));
+  facts.edited = await readEdits(api, toCheck);
+  // The operator source is read only for human candidates: a command naming this gate, an approving
+  // review, a change-request dismisser, and the checking identity (for `self_is_operator`).
+  const users = new Map();
+  const add = (u) => { if (isHumanUser(u) && !users.has(u.login)) users.set(u.login, u); };
+  for (const c of comments) if (parseCommand(c.body)?.id === gate) add(c.user);
+  for (const r of facts.reviews ?? []) if (r.state === 'APPROVED') add(r.user);
+  for (const d of facts.dismissals.values()) add(d.actor);
+  if (caller.type === 'user') add(caller.user);
+  for (const [login, u] of users) {
     if (source.type === 'team') facts.members.set(login, await membership(api, source.team, login));
-    else if (source.logins.includes(login.toLowerCase())) facts.members.set(login, await liveUser(api, login));
+    else if (source.ids.includes(u.id)) facts.members.set(login, await liveUserById(api, u.id));
     else facts.members.set(login, 'none'); // not listed: no API call needed
   }
   return facts;
@@ -547,8 +676,10 @@ function validateCommon({ repo, pr, issue, operatorsTeam, operators }, needSourc
 export async function checkGate(api, opts) {
   try {
     const { number, thread } = validateCommon(opts, true);
-    if (opts.requester !== undefined && !/^[A-Za-z0-9-]+(\[bot\])?$/.test(opts.requester)) throw new TypeError('--requester must be a GitHub login');
-    if (opts.target !== undefined && !TARGET_RE.test(opts.target)) throw new TypeError('--target has characters a gate target never contains');
+    if (!opts.requester || !opts.target || !opts.kind) throw new TypeError('--requester, --target and --kind are required for check');
+    if (!REQUESTER_RE.test(opts.requester)) throw new TypeError('--requester must be a GitHub login');
+    if (!TARGET_RE.test(opts.target)) throw new TypeError('--target has characters a gate target never contains');
+    if (!KIND_RE.test(opts.kind)) throw new TypeError('--kind must be a lowercase slug');
     const facts = await collectFacts(api, { repo: opts.repo, number, thread, operatorsTeam: opts.operatorsTeam, operators: opts.operators, gate: opts.gate });
     return evaluateGate(facts, opts);
   } catch (err) {
@@ -575,10 +706,10 @@ export async function postGateRequest(api, opts) {
 
 const USAGE = `usage:
   gate-check.mjs check   --repo o/r (--pr N | --issue N) --gate ID
-                         (--operators-team org/slug | --operators login,login)
-                         [--requester LOGIN] [--target T] [--kind K]
+                         (--operators-team org/slug | --operators login:id,login:id)
+                         --requester LOGIN --target T --kind K
   gate-check.mjs request --repo o/r (--pr N | --issue N) --kind K --target T --what TEXT
-                         [--gate ID] [--operators-team org/slug | --operators login,login] [--dry-run]
+                         [--gate ID] [--operators-team org/slug | --operators login:id,...] [--dry-run]
 exit (check): 0 approved, 3 waiting, 4 denied, 1 error`;
 
 export async function main(argv, { api = ghApiClient(), out = process.stdout, err = process.stderr } = {}) {

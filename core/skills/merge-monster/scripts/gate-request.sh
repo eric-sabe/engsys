@@ -3,7 +3,7 @@
 # Thin wrapper over <engsys-root>/lib/gate-check.mjs (`request`); see docs/gate-check.md.
 #
 # Usage: gate-request.sh --repo owner/name (--pr N | --issue N) --kind K --target T --what TEXT
-#                        [--gate ID] [--operators-team org/slug | --operators login,login] [--dry-run]
+#                        [--gate ID] [--operators-team org/slug | --operators login:id,...] [--dry-run]
 #   --kind    merge (approved by PR review) | migration | deploy | risk-accepted | dependency | ...
 #   --target  on a PR: owner/name#N@<full 40-hex head sha>; on an issue: e.g. alert:dependabot/42
 #   --gate    optional; default <kind>-<utc timestamp>-<4 hex>. Must be [a-z0-9-], unique on the thread.
