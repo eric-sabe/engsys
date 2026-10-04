@@ -28,7 +28,7 @@ _fleet_sq() { # shell-single-quote $1 (same result in bash and zsh)
   printf "'%s'" "${s//$q/$q$bs$q$q}"
 }
 
-_fleet_git_kv() { # → "key<TAB>value" lines: reset inherited github.com helpers, then the App helper + bot author
+_fleet_git_kv() { # → "key<TAB>value" lines: reset inherited github.com helpers, the App helper + bot author, and useHttpPath
   local envf="$1" node name email abs helper
   [ -f "$envf" ] || { echo "fleet-git-env: GitHub App env file not found: $envf" >&2; return 1; }
   abs="$(cd "$(dirname "$envf")" && pwd -P)/$(basename "$envf")"
@@ -44,7 +44,10 @@ _fleet_git_kv() { # → "key<TAB>value" lines: reset inherited github.com helper
     credential.https://github.com.helper "" \
     credential.https://github.com.helper "$helper" \
     user.name "$name" \
-    user.email "$email"
+    user.email "$email" \
+    credential.https://github.com.useHttpPath true
+  # useHttpPath: git then sends the repo path to the helper, which picks the installation for that
+  # owner (GH_APP_INSTALLATIONS in the env file).
 }
 
 fleet_git_env() {

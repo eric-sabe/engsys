@@ -10,7 +10,8 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import {
-  DEFAULT_REQUIRED_PERMS, apiBase, cachePath, missingPermissions, parseEnvFile, parseRequiredPerms,
+  DEFAULT_REQUIRED_PERMS, EXTRA_REQUIRED_PERMS, apiBase, cachePath, installationFor, missingPermissions,
+  ownerFromCredentialPath, parseEnvFile, parseInstallations, parseRequiredPerms,
 } from './gh-app-token.mjs';
 
 const SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), 'gh-app-token.mjs');
@@ -75,6 +76,44 @@ test('cachePath: FLEET_ORG namespacing, engsys-fleet fallback, GH_APP_CACHE over
     file: '/home/u/x/tok.json', custom: true,
   });
   assert.equal(cachePath({ GH_APP_CACHE: '/var/tok.json' }, home).file, '/var/tok.json');
+});
+
+test('parseInstallations: owner=id list, owners lower-cased, malformed entries throw', () => {
+  assert.deepEqual(parseInstallations('acme=11, Pat-Person=22,,'), { acme: '11', 'pat-person': '22' });
+  assert.deepEqual(parseInstallations(''), {});
+  assert.deepEqual(parseInstallations(undefined), {});
+  assert.throws(() => parseInstallations('acme'), /invalid GH_APP_INSTALLATIONS entry "acme"/);
+  assert.throws(() => parseInstallations('acme=abc'), /invalid/);
+});
+
+test('installationFor: a listed owner (any case) gets its id; anyone else gets the default', () => {
+  const cfg = { GH_APP_INSTALLATION_ID: '99', GH_APP_INSTALLATIONS: 'pat-person=22' };
+  assert.equal(installationFor(cfg, 'pat-person'), '22');
+  assert.equal(installationFor(cfg, 'Pat-Person'), '22');
+  assert.equal(installationFor(cfg, 'acme'), '99');
+  assert.equal(installationFor(cfg, ''), '99');
+  assert.equal(installationFor({ GH_APP_INSTALLATION_ID: '99' }, 'pat-person'), '99');
+});
+
+test('ownerFromCredentialPath: first path segment, or empty', () => {
+  assert.equal(ownerFromCredentialPath('acme/app.git'), 'acme');
+  assert.equal(ownerFromCredentialPath('/acme/app'), 'acme');
+  assert.equal(ownerFromCredentialPath('app.git'), '');
+  assert.equal(ownerFromCredentialPath(undefined), '');
+});
+
+test('cachePath: one file per installation, including under GH_APP_CACHE', () => {
+  const base = { GH_APP_INSTALLATION_ID: '99', FLEET_ORG: 'acme' };
+  assert.equal(cachePath({ ...base, installationId: '22' }, '/h').file, '/h/.cache/acme/gh-app-token-22.json');
+  assert.equal(cachePath({ ...base, installationId: '99' }, '/h').file, '/h/.cache/acme/gh-app-token-99.json');
+  const custom = { ...base, GH_APP_CACHE: '/c/token.json' };
+  assert.equal(cachePath(custom, '/h').file, '/c/token.json');
+  assert.equal(cachePath({ ...custom, installationId: '99' }, '/h').file, '/c/token.json');
+  assert.equal(cachePath({ ...custom, installationId: '22' }, '/h').file, '/c/token-22.json');
+});
+
+test('EXTRA_REQUIRED_PERMS is the push-and-open-PRs minimum', () => {
+  assert.deepEqual(EXTRA_REQUIRED_PERMS, { contents: 'write', pull_requests: 'write', metadata: 'read' });
 });
 
 test('apiBase: default, override, trailing slash trimmed', () => {
@@ -273,4 +312,62 @@ test('git-credential get: github.com over https yields the token; other hosts an
   assert.equal(http1.stdout, '');
   const store = await run(['git-credential', 'store'], { env, input: 'protocol=https\nhost=github.com\n\n' });
   assert.equal(store.stdout, '');
+});
+
+// --- more than one installation (GH_APP_INSTALLATIONS) ------------------------------------------
+
+const minted = () => requests.filter((r) => r.method === 'POST').map((r) => r.url.match(/installations\/(\d+)/)[1]);
+
+test('--owner and GH_APP_OWNER mint from that owner\'s installation; unlisted owners use the default', async () => {
+  granted = ALL;
+  const envf = envFile('multi.env', { FLEET_ORG: 'multi', GH_APP_INSTALLATIONS: 'pat-person=22' });
+  requests = [];
+  const a = await run(['--owner', 'pat-person'], { env: { GH_APP_ENV_FILE: envf } });
+  assert.equal(a.code, 0, a.stderr);
+  const b = await run([], { env: { GH_APP_ENV_FILE: envf, GH_APP_OWNER: 'acme' } });
+  assert.equal(b.code, 0, b.stderr);
+  assert.deepEqual(minted(), ['22', '99']);
+  assert.ok(fs.existsSync(path.join(HOME, '.cache', 'multi', 'gh-app-token-22.json')));
+  assert.ok(fs.existsSync(path.join(HOME, '.cache', 'multi', 'gh-app-token-99.json')));
+  const bad = await run(['--owner'], { env: { GH_APP_ENV_FILE: envf } });
+  assert.equal(bad.code, 1);
+  assert.match(bad.stderr, /--owner needs an account login/);
+});
+
+test('git-credential get: the path\'s owner picks the installation', async () => {
+  granted = ALL;
+  const envf = envFile('multi-cred.env', { FLEET_ORG: 'multicred', GH_APP_INSTALLATIONS: 'pat-person=22' });
+  requests = [];
+  const env = { GH_APP_ENV_FILE: envf };
+  await run(['git-credential', 'get'], { env, input: 'protocol=https\nhost=github.com\npath=pat-person/tools.git\n\n' });
+  await run(['git-credential', 'get'], { env, input: 'protocol=https\nhost=github.com\npath=acme/app.git\n\n' });
+  await run(['git-credential', 'get'], { env: { ...env, FLEET_ORG: 'multicred2' }, input: 'protocol=https\nhost=github.com\n\n' });
+  assert.deepEqual(minted(), ['22', '99', '99']);
+});
+
+test('a malformed GH_APP_INSTALLATIONS is a hard failure', async () => {
+  const envf = envFile('multi-bad.env', { GH_APP_INSTALLATIONS: 'pat-person' });
+  const r = await run([], { env: { GH_APP_ENV_FILE: envf } });
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /invalid GH_APP_INSTALLATIONS entry/);
+});
+
+test('--check: every installation is checked; extra ones only need the PR minimum', async () => {
+  const envf = envFile('multi-check.env', { FLEET_ORG: 'multicheck', GH_APP_INSTALLATIONS: 'pat-person=22' });
+  granted = ALL;
+  requests = [];
+  const ok = await run(['--check'], { env: { GH_APP_ENV_FILE: envf } });
+  assert.equal(ok.code, 0, ok.stderr);
+  assert.match(ok.stdout, /OK \(default\)/);
+  assert.match(ok.stdout, /OK \(pat-person\)/);
+  assert.deepEqual(minted(), ['99', '22']);
+  granted = EXTRA_REQUIRED_PERMS; // enough for the extra installation, short for the default
+  const short = await run(['--check'], { env: { GH_APP_ENV_FILE: envf } });
+  assert.equal(short.code, 3);
+  assert.match(short.stderr, /\(default\): .*issues:write/);
+  assert.doesNotMatch(short.stderr, /pat-person:/);
+  granted = { metadata: 'read' };
+  const both = await run(['--check'], { env: { GH_APP_ENV_FILE: envf } });
+  assert.equal(both.code, 3);
+  assert.match(both.stderr, /\(pat-person\): contents:write/);
 });
