@@ -50,11 +50,16 @@ fleet_load_conf "$FLEET_REPO/fleet/fleet.conf"
 : "${REVIEW_BLOCK_REGEX:=critical\\|warning}"
 : "${PIN_WAIT_MAX_MIN:=240}"
 : "${LOG_DIR:=$HOME/Library/Logs/${FLEET_ORG}-fleet}"
+# `fleet notify` config. SLACK_ENV: path to the bot's env file (SLACK_BOT_TOKEN, SLACK_CHANNEL_ID,
+# SLACK_OPERATORS_GROUP_ID, optional SLACK_OPERATOR_ID, FLEET_ID) — empty means Slack is
+# unconfigured, notify falls back straight to NOTIFY_FALLBACK_ISSUE (owner/repo#N, also empty-ok).
+: "${SLACK_ENV:=}"
+: "${NOTIFY_FALLBACK_ISSUE:=}"
 for _k in PIN_REPO PIN_DIR; do
   [ -n "${!_k:-}" ] || fleet_die "$_k is not set in $FLEET_REPO/fleet/fleet.conf (or ~/.config/$FLEET_ORG/fleet.local.conf)"
 done
 unset _k
-export FLEET_ORG PIN_REPO PIN_DIR ENGSYS_DIR ENGSYS_MARKETPLACE INSTANCE_MARKETPLACE READY_LABEL REVIEW_BLOCK_REGEX PIN_WAIT_MAX_MIN LOG_DIR
+export FLEET_ORG PIN_REPO PIN_DIR ENGSYS_DIR ENGSYS_MARKETPLACE INSTANCE_MARKETPLACE READY_LABEL REVIEW_BLOCK_REGEX PIN_WAIT_MAX_MIN LOG_DIR SLACK_ENV NOTIFY_FALLBACK_ISSUE
 
 command -v jq >/dev/null || fleet_die "jq is required"
 

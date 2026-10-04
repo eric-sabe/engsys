@@ -12,6 +12,8 @@
 #   supervise                     one supervisor tick (what the launchd job runs)
 #   install-jobs [--dry-run] [--only <job>] [--unload]
 #                                 render + (re)load the launchd jobs
+#   notify --level info|action|alert [--re <url>] [--incident <key>] [--resolve] "<text>"
+#                                 post to the fleet's own Slack voice (falls back to a GitHub comment)
 #   init ...                      scaffold a new fleet instance (engsys fleet init)
 #
 # The instance is --instance <dir>, else $FLEET_INSTANCE, else the git toplevel of the current
@@ -35,7 +37,7 @@ case "$cmd" in
   -h | --help | help) sed -n '2,/^set -/{/^set -/!p;}' "$0"; exit 0 ;;
   init) # the engsys CLI (this kit lives at <engsys>/core/fleet); no instance needed yet
     exec "$KIT/../../install" fleet init "$@" ;;
-  status | pin | sync | restart | launch | supervise | install-jobs) ;;
+  status | pin | sync | restart | launch | supervise | install-jobs | notify) ;;
   *) echo "fleet: unknown command '$cmd' (fleet help)" >&2; exit 2 ;;
 esac
 
@@ -54,4 +56,5 @@ case "$cmd" in
   launch) exec bash "$KIT/launch.sh" "$@" ;;
   supervise) exec bash "$KIT/supervise.sh" "$@" ;;
   install-jobs) exec bash "$KIT/install-jobs.sh" "$@" ;;
+  notify) exec bash "$KIT/notify.sh" "$@" ;;
 esac

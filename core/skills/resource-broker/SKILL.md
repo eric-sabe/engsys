@@ -267,13 +267,17 @@ session in the fleet's supervisor conf as `<ns>-broker|<ledger issue>|<stale min
 
 ## Escalation
 
-Add the `broker:escalated` label to the ledger issue, comment the diagnosis, and post to
-`escalation.slack_channel` (empty means GitHub-only) when: the pool is saturated for an extended period
-with a growing queue (a lessee may be leaking slots); a host-tier action is needed but you are not
-confident it is safe to run alone, or there is no `host.restart_cmd`; a host window aborted; or a directed
-env mutation references a slot or state that does not match live reality (re-verification failed: do not
-guess, ask). Escalations are never silent and never block routine grant, release and reap traffic, which
-keeps flowing regardless.
+Add the `broker:escalated` label to the ledger issue, comment the diagnosis, and
+`fleet notify --level alert --re <ledger-issue-url> --incident broker-<reason> "<diagnosis>"`
+(the fleet's own Slack voice, shared with the other monsters; falls back to the
+ledger comment on its own if Slack isn't configured or reachable) when: the pool is
+saturated for an extended period with a growing queue (a lessee may be leaking
+slots); a host-tier action is needed but you are not confident it is safe to run
+alone, or there is no `host.restart_cmd`; a host window aborted; or a directed env
+mutation references a slot or state that does not match live reality
+(re-verification failed: do not guess, ask). Escalations are never silent and never
+block routine grant, release and reap traffic, which keeps flowing regardless.
+Resolve the incident (`fleet notify ... --resolve`) once it clears.
 
 ## Shutdown (`STOP` event, user interrupt, or pause request)
 

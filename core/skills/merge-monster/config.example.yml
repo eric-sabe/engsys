@@ -45,8 +45,9 @@ dependabot:
   # under the watchdog — it will arrive back as a triaged mm:ready PR.
   auto_merge: [patch_dev, minor_dev, patch_ci, minor_ci, grouped_patch]
 
-escalation:
-  slack_channel: ""          # empty → escalate via GitHub only (label + comments)
+# Escalation posts via `fleet notify` (the fleet's own Slack voice, chmod-600 bot
+# token in SLACK_ENV — see fleet-guide.md § Slack); unconfigured/unreachable Slack
+# falls back to a ledger-issue comment on its own. Nothing to set here.
 
 # GitHub team (org/team-slug) whose members approve operator gates on GitHub:
 # a PR review Approve for merges, `/approve <gate-id>` for other acts. Checked

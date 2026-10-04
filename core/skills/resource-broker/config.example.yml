@@ -44,8 +44,9 @@ host:
 owns: [lease_actuation, per_slot_reset, active_reaping, host_window_actuation]
 does_not_own: [environment_health_decisions, flake_vs_regression, migration_history_reconciliation]
 
-escalation:
-  slack_channel: "" # shared with the other monsters; empty = GitHub-only (broker:escalated label + ledger comment)
+# Escalation posts via `fleet notify` (shared with the other monsters — one bot,
+# one channel per fleet). Unconfigured/unreachable Slack falls back to the
+# broker:escalated ledger comment on its own. Nothing to set here.
 
 # Cross-session messaging (docs/agent-messaging.md), reused as-is. Omit the block to run without it.
 messaging:
