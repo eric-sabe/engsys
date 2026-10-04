@@ -619,10 +619,15 @@ Install it to the workspace, invite the bot to the escalation channel, then put 
 ```sh
 SLACK_BOT_TOKEN=xoxb-...          # the app's Bot User OAuth Token
 SLACK_CHANNEL_ID=C0XXXXXXXXX      # the escalation channel the bot was invited to
-SLACK_OPERATORS_GROUP_ID=S0XXXXXXXXX  # a real Slack user group (e.g. @acme-operators)
+SLACK_OPERATORS_GROUP_ID=S0XXXXXXXXX  # optional: a real Slack user group (e.g. @acme-operators)
 SLACK_OPERATOR_ID=UXXXXXXXXX      # optional: this fleet's own operator, preferred for `action` posts
-FLEET_ID=acme                     # prefixes every post, e.g. "[acme] ..."
+FLEET_ID=acme                     # optional here: prefixes every post, e.g. "[acme] ..."; else taken from the fleet's env
 ```
+
+Only the token and channel are required. Mentions degrade gracefully: `action` mentions the operator,
+else the group; `alert` mentions the group, else the operator; with neither set, both fall back to
+`@here` in the channel. Creating a user group needs a Slack workspace admin, so a fleet can start with
+just the token, channel and its operator's member id, and add the group later.
 
 Point `fleet.conf`'s `SLACK_ENV` at that path (and optionally `NOTIFY_FALLBACK_ISSUE=owner/repo#N` for
 the GitHub-comment fallback). Never commit the file, and never reuse another bot's token: see

@@ -82,8 +82,16 @@ test('mentionFor: action prefers the named operator, else the group', () => {
   assert.equal(mentionFor('action', { SLACK_OPERATORS_GROUP_ID: 'S1' }), '<!subteam^S1>');
 });
 
-test('mentionFor: alert always mentions the group, ignoring SLACK_OPERATOR_ID', () => {
+test('mentionFor: alert prefers the group over the operator', () => {
   assert.equal(mentionFor('alert', { SLACK_OPERATOR_ID: 'U1', SLACK_OPERATORS_GROUP_ID: 'S1' }), '<!subteam^S1>');
+});
+
+test('mentionFor: no group yet degrades (alert: operator, then @here; action: group, then @here)', () => {
+  assert.equal(mentionFor('alert', { SLACK_OPERATOR_ID: 'U1' }), '<@U1>');
+  assert.equal(mentionFor('alert', {}), '<!here>');
+  assert.equal(mentionFor('action', {}), '<!here>');
+  assert.equal(mentionFor('info', {}), '');
+  assert.doesNotMatch(mentionFor('alert', { SLACK_OPERATORS_GROUP_ID: '' }), /subteam|undefined/);
 });
 
 test('composeText: fleet prefix + emoji, no mention', () => {
@@ -107,10 +115,8 @@ test('composeText: info/alert with --re get a plain GitHub line (no "approve")',
 });
 
 test('missingSlackConfig: reports what is absent', () => {
-  assert.deepEqual(missingSlackConfig({}), ['SLACK_BOT_TOKEN', 'SLACK_CHANNEL_ID', 'SLACK_OPERATORS_GROUP_ID', 'FLEET_ID']);
-  assert.deepEqual(missingSlackConfig({
-    SLACK_BOT_TOKEN: 'x', SLACK_CHANNEL_ID: 'C1', SLACK_OPERATORS_GROUP_ID: 'S1', FLEET_ID: 'alice',
-  }), []);
+  assert.deepEqual(missingSlackConfig({}), ['SLACK_BOT_TOKEN', 'SLACK_CHANNEL_ID']);
+  assert.deepEqual(missingSlackConfig({ SLACK_BOT_TOKEN: 'x', SLACK_CHANNEL_ID: 'C1' }), []);
 });
 
 test('apiBase: default, override, trailing slash trimmed', () => {
