@@ -7,7 +7,7 @@
 //
 // Config (read from the process environment, set by notify.sh after sourcing fleet-env.sh):
 //   SLACK_ENV               path to the bot's env file (SLACK_BOT_TOKEN, SLACK_CHANNEL_ID,
-//                           SLACK_OPERATORS_GROUP_ID, optional SLACK_OPERATOR_ID, FLEET_ID).
+//                           optional SLACK_OPERATORS_GROUP_ID, SLACK_OPERATOR_ID, FLEET_ID).
 //   FLEET_ID                the fleet's id from fleet.conf (the registry identity). It wins over a
 //                           FLEET_ID in SLACK_ENV, which is only needed when fleet.conf has none.
 //                           Empty/missing/incomplete = Slack is "unconfigured" → fallback.
@@ -80,23 +80,23 @@ export function incidentSlug(key) {
   return String(key).replace(/[^A-Za-z0-9_.-]/g, '_');
 }
 
-/** Build the Slack mention for a level. action prefers the named operator; alert always mentions
- * the group. info never mentions anyone. Returns '' when nothing should be mentioned. */
+/** Build the Slack mention for a level. info never mentions anyone. action prefers the fleet's
+ * named operator, then the operators group; alert prefers the group, then the operator. With
+ * neither configured (for example before a workspace admin has created the group) it degrades to
+ * `<!here>`, which notifies the channel's active members. One mention per incident either way. */
 export function mentionFor(level, cfg) {
   if (level === 'info') return '';
-  if (level === 'action') {
-    if (cfg.SLACK_OPERATOR_ID) return `<@${cfg.SLACK_OPERATOR_ID}>`;
-    return `<!subteam^${cfg.SLACK_OPERATORS_GROUP_ID}>`;
-  }
-  // alert
-  return `<!subteam^${cfg.SLACK_OPERATORS_GROUP_ID}>`;
+  const operator = cfg.SLACK_OPERATOR_ID ? `<@${cfg.SLACK_OPERATOR_ID}>` : '';
+  const group = cfg.SLACK_OPERATORS_GROUP_ID ? `<!subteam^${cfg.SLACK_OPERATORS_GROUP_ID}>` : '';
+  if (level === 'action') return operator || group || '<!here>';
+  return group || operator || '<!here>'; // alert
 }
 
 /** Compose the posted text: fleet prefix, emoji, optional mention (first post of an incident
  * only), the caller's text, and — for `action`, or any level that was given --re — a GitHub link
  * line that never asks for a Slack reply. */
 export function composeText({ level, text, re, fleetId, mention }) {
-  const head = `[${fleetId}] ${EMOJI[level]}${mention ? ` ${mention}` : ''}`;
+  const head = `${fleetId ? `[${fleetId}] ` : ''}${EMOJI[level]}${mention ? ` ${mention}` : ''}`;
   let body = text ? `${head} ${text}` : head;
   if (re) {
     const line = level === 'action' ? `Approve or act on GitHub: ${re}` : `GitHub: ${re}`;
@@ -118,7 +118,9 @@ export function resolveFleetId(cfg, env = process.env) {
 
 /** Which required Slack config keys are missing (config is "unconfigured" if any are). */
 export function missingSlackConfig(cfg) {
-  return ['SLACK_BOT_TOKEN', 'SLACK_CHANNEL_ID', 'SLACK_OPERATORS_GROUP_ID', 'FLEET_ID'].filter((k) => !cfg[k]);
+  // The group, the operator and FLEET_ID are optional: mentions degrade (see mentionFor) and the
+  // fleet id also comes from the environment.
+  return ['SLACK_BOT_TOKEN', 'SLACK_CHANNEL_ID'].filter((k) => !cfg[k]);
 }
 
 // --- incident state (one JSON file per incident key under $FLEET_STATE/notify/) ------------------
@@ -237,9 +239,12 @@ async function main() {
 
   const incident = args.incident ? readIncident(stateDir, args.incident) : null;
   const isFirstPost = !!args.incident && !incident;
-  const mention = args.resolve ? '' : (isFirstPost || !args.incident) ? mentionFor(args.level, cfg) : '';
+  // Slack mention syntax means nothing in a GitHub fallback comment, so mention only when posting to Slack.
+  const mention = (args.resolve || unconfiguredReason) ? '' : (isFirstPost || !args.incident) ? mentionFor(args.level, cfg) : '';
+  // cfg.FLEET_ID is already resolved above: fleet.conf's FLEET_ID wins, else the Slack env file's.
+  const fleetId = cfg.FLEET_ID || '';
   const text = args.resolve ? '✅ resolved' : composeText({
-    level: args.level, text: args.text, re: args.re, fleetId: cfg.FLEET_ID, mention,
+    level: args.level, text: args.text, re: args.re, fleetId, mention,
   });
 
   if (unconfiguredReason) {

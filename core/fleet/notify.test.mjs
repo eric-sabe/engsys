@@ -82,8 +82,16 @@ test('mentionFor: action prefers the named operator, else the group', () => {
   assert.equal(mentionFor('action', { SLACK_OPERATORS_GROUP_ID: 'S1' }), '<!subteam^S1>');
 });
 
-test('mentionFor: alert always mentions the group, ignoring SLACK_OPERATOR_ID', () => {
+test('mentionFor: alert prefers the group over the operator', () => {
   assert.equal(mentionFor('alert', { SLACK_OPERATOR_ID: 'U1', SLACK_OPERATORS_GROUP_ID: 'S1' }), '<!subteam^S1>');
+});
+
+test('mentionFor: no group yet degrades (alert: operator, then @here; action: group, then @here)', () => {
+  assert.equal(mentionFor('alert', { SLACK_OPERATOR_ID: 'U1' }), '<@U1>');
+  assert.equal(mentionFor('alert', {}), '<!here>');
+  assert.equal(mentionFor('action', {}), '<!here>');
+  assert.equal(mentionFor('info', {}), '');
+  assert.doesNotMatch(mentionFor('alert', { SLACK_OPERATORS_GROUP_ID: '' }), /subteam|undefined/);
 });
 
 test('composeText: fleet prefix + emoji, no mention', () => {
@@ -107,10 +115,8 @@ test('composeText: info/alert with --re get a plain GitHub line (no "approve")',
 });
 
 test('missingSlackConfig: reports what is absent', () => {
-  assert.deepEqual(missingSlackConfig({}), ['SLACK_BOT_TOKEN', 'SLACK_CHANNEL_ID', 'SLACK_OPERATORS_GROUP_ID', 'FLEET_ID']);
-  assert.deepEqual(missingSlackConfig({
-    SLACK_BOT_TOKEN: 'x', SLACK_CHANNEL_ID: 'C1', SLACK_OPERATORS_GROUP_ID: 'S1', FLEET_ID: 'alice',
-  }), []);
+  assert.deepEqual(missingSlackConfig({}), ['SLACK_BOT_TOKEN', 'SLACK_CHANNEL_ID']);
+  assert.deepEqual(missingSlackConfig({ SLACK_BOT_TOKEN: 'x', SLACK_CHANNEL_ID: 'C1' }), []);
 });
 
 test('resolveFleetId: fleet.conf FLEET_ID wins, SLACK_ENV fills in, a mismatch warns', () => {
@@ -307,6 +313,25 @@ test('unconfigured Slack (no SLACK_ENV): falls back to a gh issue comment, exits
   const ghCall = fs.readFileSync(log, 'utf8');
   assert.match(ghCall, /issue comment 5 -R acme\/app --body/);
   assert.match(ghCall, /no slack here/);
+});
+
+test('fallback comment: fleet id from the environment, no Slack mention syntax', async () => {
+  const fakeBin = path.join(TMP, 'fakebin-fallback-id');
+  fs.mkdirSync(fakeBin, { recursive: true });
+  const log = path.join(TMP, 'gh-fallback-id.log');
+  fs.writeFileSync(path.join(fakeBin, 'gh'), `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> '${log}'\ncat >/dev/null || true\n`, { mode: 0o755 });
+
+  const r = await run(['--level', 'alert', 'stuck'], { env: { NOTIFY_FALLBACK_ISSUE: 'acme/app#5', FLEET_ID: 'bob' }, fakeBin });
+  assert.equal(r.code, 0, r.stderr);
+  const ghCall = fs.readFileSync(log, 'utf8');
+  assert.match(ghCall, /\[bob\]/);
+  assert.doesNotMatch(ghCall, /undefined/);
+  assert.doesNotMatch(ghCall, /<!subteam|<@/);
+});
+
+test('composeText: no fleet id means no bracket prefix', () => {
+  const t = composeText({ level: 'info', text: 'hi', re: null, fleetId: '', mention: '' });
+  assert.doesNotMatch(t, /\[|undefined/);
 });
 
 test('unconfigured and no fallback issue: prints a warning, still exits 0', async () => {
