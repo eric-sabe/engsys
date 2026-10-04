@@ -442,5 +442,29 @@ Do this before a second fleet stands anything up. Tracking: #39 (registry, `FLEE
 1. **Spike:** confirm GitHub accepts compare-and-swap updates on a custom `refs/engsys/*` ref through an
    App installation token, including how rulesets and push protection treat that namespace. If it does
    not, use the `engsys/batons` branch excluded from rulesets.
+
+   **Spike result (2026-10): go.** Script: [`core/lib/lease/github-ref-spike.mjs`](../core/lib/lease/github-ref-spike.mjs)
+   (engsys#43). Ran against a test App installation on this repo, 20 trials per check.
+
+   - An App installation token can `POST`/`PATCH`/`DELETE` refs under `refs/engsys/spike/*` with no
+     interference: the repo's only ruleset targets the `main` branch, so a custom ref and an
+     off-pattern branch both sail through untouched. Creating a ref that already exists returns 422
+     ("Reference already exists"), which covers the first-claim check.
+   - `PATCH .../git/refs/<ref>` with `force: false` is a true compare-and-swap. Two commits parented on
+     the same tip, raced with two concurrent `PATCH`es, 20/20 trials: exactly one call returned 200 and
+     the other 422 ("Reference cannot be updated"). Zero double-wins, zero double-losses.
+   - A renew (create commit + update ref, the two calls the design assumes) ran p50 829 ms / p95
+     1388 ms over 20 iterations. At a 5-minute renewal cadence that is nowhere near a budget concern;
+     the whole run (claim, 20 renews, 20 race trials, release, on both ref styles) spent 88 of the
+     installation's 5000 calls/hour.
+   - Visibility is where the two options diverge. The custom ref never showed up in `git fetch`/`clone`
+     with the default refspec (only an explicit `git fetch origin refs/engsys/spike/...` pulls it), and,
+     more importantly, it generated **no** entry in the repo's events feed
+     (`GET /repos/{o}/{r}/events`) across the whole run, zero `PushEvent`s, so it is invisible to the
+     Activity tab, watchers and notifications. The branch fallback (`engsys-spike/baton-*`) is just as
+     invisible to a default clone, but every renew showed up as a `PushEvent` in the events feed, since
+     GitHub tracks branch pushes, which would be a steady trickle of noise at a 5-minute cadence.
+   - **Conclusion:** build the `github` lease backend on custom `refs/engsys/batons/<role>`, not the
+     branch fallback. Semantics are identical; the custom ref is silent where the branch is not.
 2. **Slack workspace administration:** creating apps and user groups needs a workspace admin. Each
    instance should name who that is before P0.
