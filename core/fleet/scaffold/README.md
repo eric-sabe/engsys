@@ -20,6 +20,9 @@ It holds config only. The machinery (host tooling, identity, gates, the monsters
 | `scripts/fleet` | The entry point: a shim that runs the engsys fleet kit against this repo |
 | `docs/TRANSITION.md` | Ownership register: everything that must transfer when the operator changes |
 | `.fleet/` | Machine-local rendered state (gitignored) |
+{{#if fleet}}
+| `federation.yml` | The multi-fleet registry: this fleet (`{{FLEET_ID}}`) and which fleet holds merge and maintain per repo. Change it by PR; check it with `scripts/fleet federation validate` |
+{{/if}}
 {{#if marketplace}}
 | `.claude-plugin/`, `plugin/` | The `{{INSTANCE_MARKETPLACE}}` plugin: per-repo context and monster configs (`plugin/repos/<owner>/<repo>/`), org context (`plugin/context/org.md`), and a SessionStart hook that injects them |
 {{/if}}

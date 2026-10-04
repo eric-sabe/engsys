@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   apiBase, composeText, incidentSlug, mentionFor, missingSlackConfig, parseArgs, parseEnvFile,
-  validateArgs,
+  resolveFleetId, validateArgs,
 } from './notify.mjs';
 
 const SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), 'notify.mjs');
@@ -111,6 +111,16 @@ test('missingSlackConfig: reports what is absent', () => {
   assert.deepEqual(missingSlackConfig({
     SLACK_BOT_TOKEN: 'x', SLACK_CHANNEL_ID: 'C1', SLACK_OPERATORS_GROUP_ID: 'S1', FLEET_ID: 'alice',
   }), []);
+});
+
+test('resolveFleetId: fleet.conf FLEET_ID wins, SLACK_ENV fills in, a mismatch warns', () => {
+  assert.deepEqual(resolveFleetId({ FLEET_ID: 'alice' }, {}), { fleetId: 'alice', warning: '' });
+  assert.deepEqual(resolveFleetId({}, { FLEET_ID: 'bob' }), { fleetId: 'bob', warning: '' });
+  assert.deepEqual(resolveFleetId({ FLEET_ID: 'bob' }, { FLEET_ID: 'bob' }), { fleetId: 'bob', warning: '' });
+  const r = resolveFleetId({ FLEET_ID: 'alice' }, { FLEET_ID: 'bob' });
+  assert.equal(r.fleetId, 'bob');
+  assert.match(r.warning, /SLACK_ENV \(alice\) differs from fleet\.conf \(bob\); using bob/);
+  assert.deepEqual(resolveFleetId({}, {}), { fleetId: '', warning: '' });
 });
 
 test('apiBase: default, override, trailing slash trimmed', () => {

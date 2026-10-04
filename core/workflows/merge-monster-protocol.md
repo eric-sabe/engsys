@@ -42,6 +42,14 @@ ledger** issue:
    durable record). Only names under the fleet's namespace prefix are
    addressed or trusted.
 
+   `session:` is an address: a bare session name (`<ns>-build`) means "my
+   fleet", and a fleet-qualified one (`<fleet>:<ns>-build`, for example
+   `bob:acme-build`) names a session in another fleet of the federation
+   (`docs/multi-fleet.md` in engsys). Write the qualified form whenever your
+   fleet has a `FLEET_ID`. Merge Monster nudges only addresses in its own
+   fleet (bare, or qualified with its own `FLEET_ID`); for another fleet's
+   address the PR comment is the whole message.
+
 4. You're done. Merge Monster will reply on the PR: `mm:queued` with a
    position + reasoning, then pilot it through ready → CI → merge. If
    something's missing it removes `mm:ready` and comments exactly what.

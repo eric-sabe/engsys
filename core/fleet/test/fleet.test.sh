@@ -113,6 +113,7 @@ E="$T/seed/engsys"
 seed_repo vendor/engsys "$E"
 mkdir -p "$E/core/skills" "$E/.claude-plugin"
 cp -R "$KIT_SRC" "$E/core/fleet"; rm -rf "$E/core/fleet/test"
+cp -R "$CORE_SRC/lib" "$E/core/lib"   # federation.mjs (fleet status) reads gate-check's operator-source rules
 cp -R "$CORE_SRC/skills/agent-sessions" "$E/core/skills/agent-sessions"
 mkdir -p "$E/core/fleet/identity/bin"
 cat >"$E/core/fleet/identity/git-env.sh" <<'SH'
@@ -313,6 +314,7 @@ run fleet sync --check
 rc_is "--check is clean" 0; has "…and says so" "$OUT" "host is in sync with the pins"
 run fleet status
 rc_is "status exits 0" 0; has "status shows the sync check" "$OUT" "in sync with the pins"; has "status shows the sessions" "$OUT" "SESSION"
+has "status opens with the registry block (single-fleet here)" "$OUT" "fleet: single-fleet mode"
 
 echo "== C. the pins move: pin checkout, instance re-exec, engsys re-exec, marketplace swap"
 write_settings v1.1.0 v0.2.0 true

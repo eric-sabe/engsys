@@ -47,7 +47,8 @@ fresh, nothing else merges. Full design: `docs/merge-monster.md` in engsys
 <ledger_issue> --status "session start"`. Comment a session-start digest
    on the ledger issue (queue depth, planned order). **If `messaging:` is
    configured, advertise your addressable name** in that digest — a line like
-   `session: <ns>-mm` (e.g. `acme-mm`) — so enqueuers read the nudge target from the ledger
+   `session: <ns>-mm` (e.g. `acme-mm`, or `alice:acme-mm` when the session env sets
+   `FLEET_ID=alice`), so enqueuers read the nudge target from the ledger
    rather than guessing (§ Cross-session messaging).
 4. Arm the event bus — a **persistent Monitor** running:
 
@@ -354,7 +355,13 @@ held/dropped nudge degrades to today's poll-based behavior.
 **bounced**, **escalated**, **merged**, **blocked-needs-you**:
 
 1. Read the target `session` from the PR's `<!-- mm-handoff -->` block (the
-   `session:` field). No field → no nudge (fall back to the comment).
+   `session:` field). No field → no nudge (fall back to the comment). The field
+   is an address: bare (`acme-build`) means this fleet; `<fleet>:<session>`
+   (`bob:acme-build`) names a fleet (rules: `parseAddress` in
+   `<engsys-root>/fleet/lib/federation.mjs`). Nudge only a bare address or one
+   whose fleet equals your `FLEET_ID` (from the session env), and match the
+   **session** part below; another fleet's address gets no nudge (the PR comment
+   is the message).
 2. `ListAgents`; filter to names starting with `messaging.namespace_prefix`
    (e.g. `acme-`) — the namespace fence. Match `session`; disambiguate by cwd if
    two rows collide.

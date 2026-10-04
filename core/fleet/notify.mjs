@@ -8,6 +8,8 @@
 // Config (read from the process environment, set by notify.sh after sourcing fleet-env.sh):
 //   SLACK_ENV               path to the bot's env file (SLACK_BOT_TOKEN, SLACK_CHANNEL_ID,
 //                           SLACK_OPERATORS_GROUP_ID, optional SLACK_OPERATOR_ID, FLEET_ID).
+//   FLEET_ID                the fleet's id from fleet.conf (the registry identity). It wins over a
+//                           FLEET_ID in SLACK_ENV, which is only needed when fleet.conf has none.
 //                           Empty/missing/incomplete = Slack is "unconfigured" → fallback.
 //   NOTIFY_FALLBACK_ISSUE   owner/repo#N to comment on when Slack can't be reached. Empty = skip
 //                           (print the message as a warning instead).
@@ -101,6 +103,17 @@ export function composeText({ level, text, re, fleetId, mention }) {
     body = `${body}\n\n${line}`;
   }
   return body;
+}
+
+/** The fleet id posts carry: fleet.conf's FLEET_ID (the registry identity) when set, else the one in
+ * SLACK_ENV. A disagreement is reported so the stale copy gets fixed. */
+export function resolveFleetId(cfg, env = process.env) {
+  const conf = env.FLEET_ID || '';
+  const slack = cfg.FLEET_ID || '';
+  const warning = conf && slack && conf !== slack
+    ? `FLEET_ID in SLACK_ENV (${slack}) differs from fleet.conf (${conf}); using ${conf}`
+    : '';
+  return { fleetId: conf || slack, warning };
 }
 
 /** Which required Slack config keys are missing (config is "unconfigured" if any are). */
@@ -212,10 +225,15 @@ async function main() {
     }
     if (raw !== undefined) {
       cfg = parseEnvFile(raw);
+      const { fleetId, warning } = resolveFleetId(cfg);
+      if (warning) process.stderr.write(`fleet notify: ${warning}\n`);
+      cfg.FLEET_ID = fleetId;
       const missing = missingSlackConfig(cfg);
       if (missing.length) unconfiguredReason = `SLACK_ENV is missing ${missing.join(', ')}`;
     }
   }
+  // Unconfigured Slack still prefixes the fallback comment with fleet.conf's id.
+  if (!cfg.FLEET_ID && process.env.FLEET_ID) cfg.FLEET_ID = process.env.FLEET_ID;
 
   const incident = args.incident ? readIncident(stateDir, args.incident) : null;
   const isFirstPost = !!args.incident && !incident;
