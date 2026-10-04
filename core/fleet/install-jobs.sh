@@ -66,6 +66,37 @@ skip_reason() { # skip_reason <job> → why it does not apply to this instance (
   esac
 }
 
+needs_of() { # needs_of <job> → commands the job runs that must resolve on its own PATH ('' = unknown job)
+  case "$1" in
+    fleet-supervisor) echo "tmux gh jq git claude${GH_APP_ENV:+ node}" ;;
+    gh-app-login) echo "node gh git" ;;
+  esac
+}
+
+# launchd gives a job only the PATH its plist sets, not the installing shell's. A tool that resolves in
+# your terminal but not there fails on every run, so warn at install time. Warn, don't fail: the
+# launcher has its own fallbacks for claude, and a fix can follow without unloading anything.
+check_job_path() { # check_job_path <job> <rendered plist>
+  local needs jpath t missing=""
+  needs="$(needs_of "$1")"
+  [ -n "$needs" ] && command -v plutil >/dev/null 2>&1 || return 0
+  jpath="$(plutil -extract EnvironmentVariables.PATH raw -o - "$2" 2>/dev/null)" || return 0
+  for t in $needs; do
+    PATH="$jpath" command -v "$t" >/dev/null 2>&1 || missing="$missing $t"
+  done
+  [ -z "$missing" ] && return 0
+  echo "install-jobs: WARNING $1: not found on the job's PATH ($jpath):$missing" >&2
+  local shell_path="" d # PATH minus the identity gh shim, which itself needs the real gh behind it
+  local IFS=:
+  for d in $PATH; do case "$d" in */core/fleet/identity/bin) ;; *) shell_path="${shell_path:+$shell_path:}$d" ;; esac; done
+  unset IFS
+  for t in $missing; do
+    local here
+    here="$(PATH="$shell_path" command -v "$t" 2>/dev/null || true)"
+    echo "               $t: ${here:-not installed}${here:+ (your shell finds it here; install it into a directory on the job's PATH, or override the template's PATH in <instance>/jobs/launchd/$1.plist.tmpl)}" >&2
+  done
+}
+
 [ "$dry" = 1 ] || [ "$unload" = 1 ] || mkdir -p "$AGENTS_DIR" "$LOG_DIR"
 
 for i in "${!names[@]}"; do
@@ -90,6 +121,8 @@ for i in "${!names[@]}"; do
   else
     echo "install-jobs: plutil not found — plist not linted" >&2
   fi
+
+  check_job_path "$job" "$tmp"
 
   if [ "$dry" = 1 ]; then
     echo "===== would write $dest  (from $tmpl) ====="

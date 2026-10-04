@@ -26,6 +26,10 @@
 #                                                  script's call — see
 #                                                  docs/subagent-liveness.md
 #                                                  in engsys)
+#   any relaunch that FAILS                      → escalate once on the ledger
+#                                                  (with the launcher's error),
+#                                                  retry each tick quietly,
+#                                                  comment again on recovery
 #
 # Config: .claude/fleet-supervisor.conf (or pass a path as $1)
 #   TMUX_SESSION=<tmux session the fleet runs in>
@@ -118,18 +122,41 @@ pane_busy() {
 }
 
 # Kill the window (if any) and launch the session fresh; report on the ledger.
+# A failed launch is escalated ONCE per incident (latch: <name>.launch-failed) with the launcher's own
+# error lines, then retried quietly every tick; the first successful launch after that clears the latch
+# and says so. Without the latch a persistent cause (e.g. claude not on the job's PATH) posts a comment
+# every tick and buries the alert.
 relaunch() { # relaunch <name> <ledger> <repo> <reason>
-  local name="$1" ledger="$2" repo="$3" reason="$4"
+  local name="$1" ledger="$2" repo="$3" reason="$4" out failed="$STATE_DIR/$1.launch-failed"
   log "$name: relaunching — $reason"
   tmux kill-window -t "${TMUX_SESSION}:$name" 2>/dev/null || true
+  out="$(mktemp "${TMPDIR:-/tmp}/fleet-supervisor.XXXXXX")"
   # LAUNCH_CMD is intentionally word-split (it is a command line, not a path)
   # shellcheck disable=SC2086
-  if $LAUNCH_CMD "$name" >>"$LOG" 2>&1; then
+  if $LAUNCH_CMD "$name" >"$out" 2>&1; then
+    cat "$out" >>"$LOG"; rm -f "$out"
     log "$name: relaunched"
-    gh issue comment "$ledger" -R "$repo" --body "🔁 fleet-supervisor: relaunched \`$name\` ($reason, $(date -u +%Y-%m-%dT%H:%M:%SZ)). Startup reconcile recovers state from this ledger + state.md." >/dev/null || true
+    if [ -f "$failed" ]; then
+      gh issue comment "$ledger" -R "$repo" --body "✅ fleet-supervisor: \`$name\` relaunched after failed attempts since $(cat "$failed") ($reason, $(date -u +%Y-%m-%dT%H:%M:%SZ)). Startup reconcile recovers state from this ledger + state.md." >/dev/null || true
+      rm -f "$failed"
+    else
+      gh issue comment "$ledger" -R "$repo" --body "🔁 fleet-supervisor: relaunched \`$name\` ($reason, $(date -u +%Y-%m-%dT%H:%M:%SZ)). Startup reconcile recovers state from this ledger + state.md." >/dev/null || true
+    fi
   else
-    log "$name: RELAUNCH FAILED — see $LOG"
-    gh issue comment "$ledger" -R "$repo" --body "🚨 fleet-supervisor: relaunch of \`$name\` FAILED ($reason). Operator needed — see logs/fleet-supervisor/supervisor.log on the host." >/dev/null || true
+    local tail_lines
+    tail_lines="$(tail -n 5 "$out" | cut -c1-200)"
+    cat "$out" >>"$LOG"; rm -f "$out"
+    if [ -f "$failed" ]; then
+      log "$name: RELAUNCH FAILED — already escalated (failing since $(cat "$failed")), retrying next tick"
+    else
+      log "$name: RELAUNCH FAILED — escalating on ledger $repo#$ledger"
+      gh issue comment "$ledger" -R "$repo" --body "🚨 fleet-supervisor: relaunch of \`$name\` FAILED ($reason). Operator needed. The supervisor retries every tick without commenting again, and comments once more when a relaunch succeeds. Launcher output:
+\`\`\`
+${tail_lines:-(no output)}
+\`\`\`
+Full log: logs/fleet-supervisor/supervisor.log on the host." >/dev/null \
+        && date -u +%Y-%m-%dT%H:%M:%SZ >"$failed"
+    fi
   fi
 }
 

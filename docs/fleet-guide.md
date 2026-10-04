@@ -386,7 +386,7 @@ brew install --cask claude-code
 
 | Tool | Why | Watch for |
 |---|---|---|
-| **node, in `/opt/homebrew/bin`** | identity scripts, hooks, the installer | launchd jobs search `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin` only. **Do not install node with nvm or fnm**; a launchd job will not find it. Use Homebrew `node` (or a versioned `node@NN` formula, linked). |
+| **node, in `/opt/homebrew/bin`** | identity scripts, hooks, the installer | launchd jobs search `~/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin` only, and `fleet install-jobs` warns when a tool a job needs doesn't resolve there. **Do not install node with nvm or fnm**; a launchd job will not find it. Use Homebrew `node` (or a versioned `node@NN` formula, linked). |
 | git >= 2.31 | env-based identity needs it | `git --version` |
 | gh, jq, tmux | fleet scripts, launcher, supervisor | |
 | **Claude Code on the Homebrew stable channel** | the sessions | Install with `brew install --cask claude-code` and **do not enable auto-update**. Unattended sessions should change version on purpose: `brew upgrade --cask claude-code`. The launcher needs a reasonably recent version (see its header); the plugin mechanics in section 9 were verified on 2.1.280. |
@@ -855,6 +855,7 @@ major Claude Code upgrade.
 | `marketplace add … failed — plugins are UNINSTALLED` | a network or auth hiccup mid-swap. Running sessions are unaffected; re-run `fleet sync` |
 | `still at … after switching` | a checkout did not land on the pinned ref. Check the tag exists on the remote (`git ls-remote --tags origin`) |
 | `engsys … has no fleet kit` | the pinned engsys release predates the kit; pin one that includes `core/fleet/` |
+| Supervisor log: `RELAUNCH FAILED` with `claude not found on PATH` | the supervisor's launchd PATH can't see `claude`. The default job PATH covers `~/.local/bin` (native installer) and Homebrew; for anywhere else, override the PATH in `<instance>/jobs/launchd/fleet-supervisor.plist.tmpl`. Then `fleet install-jobs` (it warns until every tool resolves) and `fleet launch` for anything missing. The supervisor escalates a failed relaunch once on the ledger and comments again when it recovers |
 | Launchd job runs but `node: command not found` | node is not in `/opt/homebrew/bin` (nvm/fnm install). Install Homebrew node; launchd does not read your shell profile |
 | The fleet stopped after a reboot | the fleet user is not logged in (FileVault disables auto-login). Log in over Screen Sharing (section 6.2) |
 | A session shows `missing` | no tmux window with that name. `fleet launch <name>`; a name outside the namespace is refused by the launcher |

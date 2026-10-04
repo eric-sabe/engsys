@@ -67,7 +67,14 @@ REPO="$(pwd)"
 ROSTER_DIR="$(cd "$(dirname "$ROSTER")" 2>/dev/null && pwd)" || ROSTER_DIR="$REPO"
 [ -f "$ROSTER" ] || { echo "error: roster not found: $ROSTER (see the agent-sessions skill's roster.example)" >&2; exit 1; }
 command -v tmux >/dev/null 2>&1 || { echo "error: tmux not found on PATH" >&2; exit 1; }
-command -v claude >/dev/null 2>&1 || { echo "error: claude not found on PATH" >&2; exit 1; }
+# launchd jobs (the fleet supervisor) run with a fixed PATH that may not include where Claude Code was
+# installed: the native installer uses ~/.local/bin. Look in the standard install locations before failing.
+if ! command -v claude >/dev/null 2>&1; then
+  for d in "$HOME/.local/bin" /opt/homebrew/bin /usr/local/bin; do
+    if [ -x "$d/claude" ]; then PATH="$d:$PATH"; export PATH; break; fi
+  done
+fi
+command -v claude >/dev/null 2>&1 || { echo "error: claude not found on PATH (also looked in ~/.local/bin, /opt/homebrew/bin, /usr/local/bin)" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
 # Parse roster
