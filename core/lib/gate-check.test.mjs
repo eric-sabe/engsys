@@ -560,6 +560,8 @@ const prRoutes = (comments, { reviews = [], timeline = [], committed = T(-30), m
     [`GET /repos/${REPO}/commits/${head}`]: { status: 200, json: { sha: head, commit: { committer: { date: committed } } } },
   };
   if (user) routes['GET /user'] = user;
+  const total = Array.isArray(comments) ? comments.length : comments.pages.flat().length;
+  routes[`GET /repos/${REPO}/issues/${PR}`] = { status: 200, json: { number: PR, comments: total } };
   for (const [login, r] of Object.entries(members)) routes[`GET /orgs/acme/teams/fleet-operators/memberships/${login}`] = r;
   return routes;
 };
@@ -658,6 +660,33 @@ describe('checkGate against a fake GitHub', () => {
     const v = await checkGate(api, CHECK('g-1', 'deploy'));
     assert.equal(v.status, 'denied', 'the deny on page 3 was read');
     assert.ok(api.calls.includes(`GET /repos/${REPO}/issues/${PR}/comments?per_page=100&page=3`), api.calls.join('\n'));
+  });
+
+  test('L8: a comment count mismatch re-lists once and then succeeds', async () => {
+    const r = requestComment('g-1', 'deploy');
+    const a = comment(ALICE, '/approve g-1', T(5));
+    const routes = prRoutes([r, a], { members: { alice: ACTIVE } });
+    let reads = 0;
+    routes[`GET /repos/${REPO}/issues/${PR}`] = () => ({ status: 200, json: { comments: ++reads === 1 ? 3 : 2 }, headers: {} });
+    const api = fakeApi(routes);
+    const v = await checkGate(api, CHECK('g-1', 'deploy'));
+    assert.equal(v.status, 'approved', v.message);
+    assert.equal(api.calls.filter((c) => c.startsWith(`GET /repos/${REPO}/issues/${PR}/comments`)).length, 2);
+  });
+
+  test('L8: a persistent comment count mismatch is an error', async () => {
+    const routes = prRoutes([requestComment('g-1', 'deploy'), comment(ALICE, '/approve g-1', T(5))], { members: { alice: ACTIVE } });
+    routes[`GET /repos/${REPO}/issues/${PR}`] = { status: 200, json: { comments: 3 } };
+    const v = await checkGate(fakeApi(routes), CHECK('g-1', 'deploy'));
+    assert.equal(v.status, 'error');
+    assert.match(v.message, /disagree/);
+  });
+
+  test('N2 end to end: an unparseable next link is an error, not a truncated list', async () => {
+    const routes = prRoutes([requestComment('g-1', 'deploy'), comment(ALICE, '/approve g-1', T(5))], { members: { alice: ACTIVE } });
+    routes[`GET /repos/${REPO}/pulls/${PR}/reviews`] = { status: 200, json: [], headers: { link: 'garbage; rel="next"' } };
+    const v = await checkGate(fakeApi(routes), CHECK('g-1', 'deploy'));
+    assert.equal(v.status, 'error');
   });
 
   test('bad input is an error before any API call', async () => {
@@ -788,6 +817,14 @@ describe('M3: dismissed change requests', () => {
     assert.equal(v.status, 'waiting');
   });
 
+  test('N1: only dismissed approved/commented are non-objecting; unknown states block', () => {
+    for (const [state, want] of [['approved', 'approved'], ['commented', 'approved'], ['APPROVED', 'approved'], ['pending', 'waiting'], ['', 'waiting'], [null, 'waiting'], ['dismissed', 'waiting']]) {
+      const d = review(MALLORY, 'DISMISSED', SHA, T(4));
+      const v = evaluateGate(prFacts([req()], { reviews: [d, review(ALICE, 'APPROVED', SHA, T(5))], dismissals: dismissal(d, BOB, state) }), OPTS(G, 'merge'));
+      assert.equal(v.status, want, String(state));
+    }
+  });
+
   test('a dismissed approval is not an objection; a dismissal with no event blocks', () => {
     const da = review(MALLORY, 'DISMISSED', SHA, T(4));
     assert.equal(evaluateGate(prFacts([req()], { reviews: [da, review(ALICE, 'APPROVED', SHA, T(5))], dismissals: dismissal(da, BOT, 'approved') }), OPTS(G, 'merge')).status, 'approved');
@@ -861,6 +898,13 @@ describe('parseIncluded and nextLink', () => {
     assert.equal(nextLink('<https://api.github.com/x?page=1>; rel="prev"'), null);
     assert.equal(nextLink(undefined), null);
     assert.throws(() => nextLink('<http://api.github.com/x>; rel="next"'), /https/);
+  });
+
+  test('N2: a rel="next" that does not parse throws instead of ending pagination', () => {
+    for (const bad of ['https://api.github.com/x?page=2; rel="next"', '<https://api.github.com/x?page=2> rel="next"', '<https://api.github.com/x>; rel=next', '<https://api.github.com/x>; rel="prev next"']) {
+      assert.throws(() => nextLink(bad), /rel="next"|https|unparseable/, bad);
+    }
+    assert.equal(nextLink('<https://api.github.com/x?page=1>; rel="prev", <https://api.github.com/x?page=1>; rel="first"'), null);
   });
 });
 

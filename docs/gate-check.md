@@ -100,7 +100,8 @@ An approval counts only if **all** of these hold:
 
   An objection is a latest review of `CHANGES_REQUESTED`, or a dismissed change request whose
   dismissal (the `review_dismissed` timeline event) was not made by a qualifying operator who is
-  also neither the checker nor the requester. A bot or any other write-access account dismissing a
+  also neither the checker nor the requester. Only a dismissed `approved` or `commented` review is
+  never an objection; a dismissed review in any other or unknown state blocks. A bot or any other write-access account dismissing a
   human's change request does not clear it. A dismissed review with no readable dismissal event
   also blocks.
 - **The PR still matches.** On a PR thread, the current head must equal the request's SHA. If the
@@ -113,9 +114,12 @@ untrusted-data envelope (`core/lib/untrusted.mjs`) and must never be followed as
 Everything else in a comment is matched against the two grammars above and otherwise ignored.
 
 Anything gate-check cannot read (team, membership, comments, reviews, timeline, edit history) is an
-error, never a silent "no member". Lists are read by following the `Link: rel="next"` header, which
-is stable when comments are deleted mid-read (page offsets are not); more than 50 pages fail closed
-rather than decide on a partial read.
+error, never a silent "no member". Lists are read by following the `Link: rel="next"` header (a
+next relation that does not parse is an error, never "last page"); more than 50 pages fail closed
+rather than decide on a partial read. GitHub's next links are still page offsets, so a comment
+deleted mid-read could shift another past a page boundary: after listing comments, gate-check
+compares the count with the thread's `comments` total from a fresh read, re-lists once on a
+mismatch, and exits 1 if they still disagree.
 
 ## Merging a gated PR
 
@@ -186,6 +190,9 @@ plus `ignored`: each candidate that did not count, and why).
 - A malformed team or entry is a config error (exit 1), never a silently empty source.
 - Run monsters with an identity that is not an operator (the fleet App, ideally). A personal token
   that is an operator still cannot approve its own gates; the verdict flags `self_is_operator`.
+- **No operator's personal GitHub credential may exist on a fleet host or in a fleet session.**
+  Self-exclusion only sees the token gate-check runs with; an agent holding a second credential (an
+  operator's `gh` login, a PAT in the environment) could approve as that person undetected.
 - `messaging.operator_slack` (merge-monster) is **deprecated and ignored**: Slack replies no longer
   grant decisions. The key is accepted for one release and then removed.
 

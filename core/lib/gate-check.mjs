@@ -370,7 +370,12 @@ export function evaluateGate(facts, opts) {
       if (r.state !== 'DISMISSED') return false;
       const d = facts.dismissals?.get(r.id);
       if (!d) { ignore(r.user?.login, 'review', r.html_url, 'dismissed review with no readable dismissal event: still blocking'); return true; }
-      if (String(d.state).toLowerCase() !== 'changes_requested') return false;
+      const state = String(d.state ?? '').toLowerCase();
+      if (state === 'approved' || state === 'commented') return false; // never an objection
+      if (state !== 'changes_requested') {
+        ignore(r.user?.login, 'review', r.html_url, `dismissed review in unknown state ${JSON.stringify(String(d.state ?? '')).slice(0, 40)}: still blocking`);
+        return true;
+      }
       const why = qualifies(d.actor);
       if (why) { ignore(d.actor?.login, 'dismissal', r.html_url, `change request dismissal does not count: ${why}`); return true; }
       return false;
@@ -503,7 +508,11 @@ export function nextLink(link) {
   if (typeof link !== 'string') return null;
   for (const part of link.split(',')) {
     const m = /^\s*<([^>]+)>\s*;\s*rel="next"\s*$/.exec(part);
-    if (!m) continue;
+    if (!m) {
+      // A next relation we cannot parse must never read as "last page": that would silently truncate.
+      if (/rel\s*=\s*"?[^",;]*\bnext\b/i.test(part)) throw new Error('unparseable rel="next" in Link header');
+      continue;
+    }
     let u;
     try { u = new URL(m[1]); } catch { throw new Error('unparseable Link header'); }
     if (u.protocol !== 'https:') throw new Error('Link header next URL is not https');
@@ -518,7 +527,11 @@ async function getOk(api, path, what) {
   return json;
 }
 
-/** Read a whole list by following `Link: rel="next"` (cursor-stable, unlike page offsets). */
+/**
+ * Read a whole list by following `Link: rel="next"`. GitHub's next links for these endpoints are
+ * still page offsets, so a deletion mid-read can shift an item past a page boundary; callers that
+ * need completeness cross-check the count (see `listComments`).
+ */
 async function listAll(api, path, what) {
   const out = [];
   let next = `${path}${path.includes('?') ? '&' : '?'}per_page=100`;
@@ -531,6 +544,20 @@ async function listAll(api, path, what) {
     if (!next) return out;
   }
   throw new Error(`more than ${MAX_PAGES} pages while ${what}; refusing to decide on a partial read`);
+}
+
+/**
+ * All issue comments, with a deletion-race check: the collected count must equal the issue's own
+ * `comments` total from a fresh read taken after the listing. On mismatch, re-list once; a second
+ * mismatch fails closed rather than decide on a list that may have skipped a comment.
+ */
+async function listComments(api, repo, number) {
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const comments = await listAll(api, `/repos/${repo}/issues/${number}/comments`, 'reading comments');
+    const issue = await getOk(api, `/repos/${repo}/issues/${number}`, 'reading the comment total');
+    if (Number.isInteger(issue?.comments) && issue.comments === comments.length) return comments;
+  }
+  throw new Error('the comment list and the comment total disagree twice (comments changed during the read); refusing to decide');
 }
 
 /**
@@ -615,7 +642,7 @@ export async function collectFacts(api, { repo, number, thread, operatorsTeam, o
     }
   }
   const caller = await readCaller(api);
-  const comments = await listAll(api, `/repos/${repo}/issues/${number}/comments`, 'reading comments');
+  const comments = await listComments(api, repo, number);
   const facts = {
     repo, number, thread, comments, pr: null, reviews: null, reviewDecision: null, dismissals: new Map(), pushFloor: null,
     edited: new Map(), members: new Map(), caller,
