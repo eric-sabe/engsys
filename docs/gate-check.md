@@ -58,9 +58,14 @@ An approval counts only if **all** of these hold:
   leading-position marker (from `--requester` when given, which is how look-alike requests from other
   accounts are ignored). It is unedited. With `--target` / `--kind`, it names exactly the act the
   agent is about to perform.
-- **The actor is a person on the operators team.** `user.type` is `User` (not `Bot`; a login ending in
-  `[bot]` is also refused), and `GET /orgs/{org}/teams/{slug}/memberships/{login}` returns
-  `state: active`, read live on every check. Pending membership does not count.
+- **The actor is a qualifying operator.** `user.type` is `User` (not `Bot`; a login ending in `[bot]`
+  is also refused), and the operator source confirms it live on every check:
+  - with `operators_team`: `GET /orgs/{org}/teams/{slug}/memberships/{login}` returns
+    `state: active` (pending membership does not count);
+  - with the `operators` allowlist instead: the login is on the list (case-insensitive) and
+    `GET /users/{login}` returns an account of `type: User`.
+
+  The verdict's `operator_source` (and `approval.source`) says which source was used.
 - **It is specific.** For `merge`: the reviewer's latest decisive review (approve, request changes,
   dismissed) is `APPROVED` on the request's head SHA. For every other kind: the trimmed comment body
   is exactly `/approve <gate-id>`, lowercase verb, nothing else on the line or after it.
@@ -68,10 +73,15 @@ An approval counts only if **all** of these hold:
   PR's latest push (next section).
 - **The comment is unedited** (`updated_at` equals `created_at`), so an edit cannot turn a different
   comment into an approval.
-- **For `merge`, GitHub agrees.** `reviewDecision` is `APPROVED` and no reviewer's latest review is
-  `CHANGES_REQUESTED`. An empty `reviewDecision` means the base branch requires no review; the gate
-  then waits, and the fix is the path-based required-review rule in
-  [multi-fleet.md § 6](multi-fleet.md#enforce-it-in-github-too).
+- **For `merge`, GitHub does not disagree.** No reviewer's latest review (anyone's, bots included)
+  is `CHANGES_REQUESTED`, and `reviewDecision` is:
+  - `APPROVED`: GitHub's required reviews are satisfied, so the operator approval opens the gate;
+  - empty or null: the base branch requires no review for this PR (for example a repo that requires
+    reviews only on gated paths), so the qualifying operator approval on the head is the whole
+    decision;
+  - `REVIEW_REQUIRED`, `CHANGES_REQUESTED`, or any other value: the gate waits.
+
+  The `approval.review_decision` field records which case applied.
 - **The PR still matches.** On a PR thread, the current head must equal the request's SHA. If the
   head moved, the verdict is `error` with `"stale": true`: post a new request.
 
@@ -104,9 +114,9 @@ The floor is the latest of the request time and signals 2 and 3; the verdict nam
 
 ```bash
 node core/lib/gate-check.mjs request --repo o/r (--pr N | --issue N) --kind K --target T --what TEXT \
-  [--gate ID] [--operators-team org/slug] [--dry-run]
-node core/lib/gate-check.mjs check --repo o/r (--pr N | --issue N) --gate ID --operators-team org/slug \
-  [--requester LOGIN] [--target T] [--kind K]
+  [--gate ID] [--operators-team org/slug | --operators login,login] [--dry-run]
+node core/lib/gate-check.mjs check --repo o/r (--pr N | --issue N) --gate ID \
+  (--operators-team org/slug | --operators login,login) [--requester LOGIN] [--target T] [--kind K]
 ```
 
 `request` prints `{id, url, comment_id, author}`; record `author` and pass it as `--requester` on
@@ -121,18 +131,21 @@ id that already has a request on the thread. Gate ids are `[a-z0-9-]`, at most 8
 | 0 | `approved` | proceed; record the `approval` block |
 | 3 | `waiting` | keep waiting; `reason` says what is missing |
 | 4 | `denied` | stop; the gate is closed, a new act needs a new request |
-| 1 | `error` | bad input, missing `operators_team`, unreadable API, ambiguous, edited or stale request |
+| 1 | `error` | bad input, no operator source configured, unreadable API, ambiguous, edited or stale request |
 
 ## Configuration and permissions
 
-- **`operators_team: org/team-slug`** in the merge-monster and maintenance-monster configs (or the
-  federation registry). The wrappers take it as `--operators-team`; if it is unset gate-check fails
-  closed (exit 1) and no gate ever opens.
-- The team must belong to an organization. A personal-account repo has no teams, so gate-check cannot
-  be used there.
-- The `gh` identity needs org **Members: read** (team and membership reads) on top of the usual repo
-  access. A GitHub App without it gets HTTP 403 or 404 and gate-check reports an error naming the
-  permission.
+- **Operator source**, in the merge-monster and maintenance-monster configs (or the federation
+  registry). Precedence: `operators_team` if set, else `operators`. Neither set (or an empty list)
+  fails closed: exit 1, and no gate ever opens.
+  - **`operators_team: org/team-slug`** (passed as `--operators-team`). Preferred for organizations:
+    membership is managed in GitHub, not in a config file. The `gh` identity needs org
+    **Members: read** on top of the usual repo access; without it the team read returns HTTP 403 or
+    404 and gate-check reports an error naming the permission.
+  - **`operators: [login, ...]`** (passed as `--operators login,login`). For user-owned repos, which
+    have no teams. Each entry must be a plain user login (a `[bot]` login is rejected as a config
+    error). Changing who may approve is then a reviewed config change.
+- A malformed team or login is a config error (exit 1), never a silently empty source.
 - `messaging.operator_slack` (merge-monster) is **deprecated and ignored**: Slack replies no longer
   grant decisions. The key is accepted for one release and then removed.
 

@@ -77,6 +77,10 @@ suppression:
 # merge-monster/scripts/gate-check.sh (docs/gate-check.md). Unset → every gate
 # stays shut (fail closed). The gh identity needs org Members: read.
 operators_team: "" # e.g. acme/fleet-operators
+# For a user-owned repo (no teams): list operator logins instead. Used only when
+# operators_team is empty; each login is checked live (GET /users/{login} is a User).
+# Neither set → fail closed.
+operators: [] # e.g. [alice, bob]
 
 # Standing false-positive policies (optional; omit to keep every dismissal behind `risk-accepted`).
 # The operator signs off ONCE, on a reviewed change that adds the policy, instead of per alert.

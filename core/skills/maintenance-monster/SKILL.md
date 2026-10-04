@@ -30,7 +30,7 @@ how confident a disposition looks.
 - The config exists — see **Config location** below (start from `config.example.yml`
   next to this file). **Read it first** — it defines the repo, ledger issue,
   watch-surface poll intervals, the `phase` gate, disposition class lists,
-  routing, the escalation channel, and `operators_team` (§ Operator gates).
+  routing, the escalation channel, and `operators_team` or `operators` (§ Operator gates).
 - **Config location**: `.claude/maintenance-monster.yml` in this repo if it exists;
   otherwise `maintenance-monster.yml` in the **fleet config dir** named in your session
   context — a line like `fleet config dir: /abs/path`, usually passed as this
@@ -316,7 +316,7 @@ Same mechanism as **§ Operator gates in
 [<engsys-root>/skills/merge-monster/SKILL.md](../merge-monster/SKILL.md)**
 (scripts `<engsys-root>/skills/merge-monster/scripts/gate-request.sh` and
 `gate-check.sh`, rules in `docs/gate-check.md`), with your config's
-`operators_team`. Gated here:
+`operators_team` (or `operators` list). Gated here:
 
 | Act | `--kind` | Thread | Human does |
 |---|---|---|---|

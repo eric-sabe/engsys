@@ -305,7 +305,8 @@ dependabot:
   auto_merge: [patch_dev, minor_dev, patch_ci, minor_ci, grouped_patch]
 escalation:
   slack_channel: ""          # empty → GitHub-only escalation
-operators_team: ""           # org/team-slug whose members approve gates on GitHub; unset → gates stay shut
+operators_team: ""           # org/team-slug whose members approve gates on GitHub
+operators: []                # user-owned repos: approver logins (used when operators_team is empty; neither → gates stay shut)
 fix_attempts_max: 2
 ci_reruns_max: 1
 ```

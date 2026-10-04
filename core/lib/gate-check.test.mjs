@@ -12,6 +12,7 @@ import {
   parseCommand,
   renderGateRequest,
   newGateId,
+  operatorSource,
   evaluateGate,
   checkGate,
   postGateRequest,
@@ -351,12 +352,47 @@ describe('merge gates (PR review)', () => {
     assert.match(reasons(v), /not a member/);
   });
 
-  test('reviewDecision not APPROVED keeps waiting (including empty: no required-review rule)', () => {
-    for (const rd of ['REVIEW_REQUIRED', 'CHANGES_REQUESTED', null]) {
+  test('reviewDecision REVIEW_REQUIRED or CHANGES_REQUESTED keeps waiting despite an operator approval', () => {
+    for (const rd of ['REVIEW_REQUIRED', 'CHANGES_REQUESTED']) {
       const v = evaluateGate(prFacts([req()], { reviews: [review(ALICE, 'APPROVED', SHA, T(5))], reviewDecision: rd }), OPTS(G));
-      assert.equal(v.status, 'waiting', String(rd));
+      assert.equal(v.status, 'waiting', rd);
       assert.match(v.reason, /reviewDecision/);
     }
+  });
+
+  test('reviewDecision APPROVED with a qualifying approval opens the gate and says so', () => {
+    const v = evaluateGate(prFacts([req()], { reviews: [review(ALICE, 'APPROVED', SHA, T(5))], reviewDecision: 'APPROVED' }), OPTS(G));
+    assert.equal(v.status, 'approved');
+    assert.equal(v.approval.review_decision, 'APPROVED');
+  });
+
+  test('empty reviewDecision (no review required): the qualifying operator approval decides', () => {
+    for (const rd of [null, '', undefined]) {
+      const v = evaluateGate(prFacts([req()], { reviews: [review(ALICE, 'APPROVED', SHA, T(5))], reviewDecision: rd }), OPTS(G));
+      assert.equal(v.status, 'approved', String(rd));
+      assert.equal(v.approval.review_decision, 'none (no review required)');
+    }
+  });
+
+  test('empty reviewDecision still needs a qualifying approval on the head, newer than the floor', () => {
+    const cases = [
+      [], // no review at all
+      [review(MALLORY, 'APPROVED', SHA, T(5))], // non-member
+      [review(BOT, 'APPROVED', SHA, T(5))], // bot
+      [review(ALICE, 'APPROVED', OLD_SHA, T(5))], // stale SHA
+      [review(ALICE, 'APPROVED', SHA, T(-1))], // before the request
+      [review(ALICE, 'APPROVED', SHA, T(5)), review(ALICE, 'CHANGES_REQUESTED', SHA, T(6))], // latest is changes
+      [review(ALICE, 'APPROVED', SHA, T(5)), review(MALLORY, 'CHANGES_REQUESTED', SHA, T(6))], // anyone's change request
+    ];
+    for (const reviews of cases) {
+      const v = evaluateGate(prFacts([req()], { reviews, reviewDecision: null }), OPTS(G));
+      assert.equal(v.status, 'waiting', JSON.stringify(reviews.map((r) => [r.user.login, r.state])));
+    }
+  });
+
+  test('an unknown reviewDecision value keeps waiting', () => {
+    const v = evaluateGate(prFacts([req()], { reviews: [review(ALICE, 'APPROVED', SHA, T(5))], reviewDecision: 'SOMETHING_NEW' }), OPTS(G));
+    assert.equal(v.status, 'waiting');
   });
 
   test('an outstanding change request from anyone keeps waiting', () => {
@@ -397,14 +433,21 @@ describe('missing operators team fails closed', () => {
     const v = evaluateGate(prFacts([requestComment('g', 'deploy'), comment(ALICE, '/approve g', T(5))]), { gate: 'g' });
     assert.equal(v.status, 'error');
     assert.equal(v.exit, EXIT.ERROR);
-    assert.match(v.message, /operators_team is not configured/);
+    assert.match(v.message, /neither operators_team.*nor operators/);
+  });
+
+  test('an empty allowlist is the same as none', () => {
+    for (const operators of [[], '', ' , ']) {
+      const v = evaluateGate(prFacts([requestComment('g', 'deploy'), comment(ALICE, '/approve g', T(5))]), { gate: 'g', operators });
+      assert.equal(v.status, 'error', JSON.stringify(operators));
+    }
   });
 
   test('checkGate never touches the API', async () => {
     const api = { request: () => assert.fail('API called'), graphql: () => assert.fail('API called') };
     const v = await checkGate(api, { repo: REPO, pr: String(PR), gate: 'g' });
     assert.equal(v.status, 'error');
-    assert.match(v.message, /operators_team is not configured/);
+    assert.match(v.message, /neither operators_team.*nor operators/);
   });
 
   test('CLI exits 1', async () => {
@@ -412,7 +455,7 @@ describe('missing operators team fails closed', () => {
     const err = sink();
     const code = await main(['check', '--repo', REPO, '--pr', String(PR), '--gate', 'g'], { api: {}, out, err });
     assert.equal(code, EXIT.ERROR);
-    assert.match(err.text, /operators_team is not configured/);
+    assert.match(err.text, /neither operators_team.*nor operators/);
   });
 });
 
@@ -580,5 +623,97 @@ describe('parseIncluded', () => {
     assert.deepEqual(parseIncluded('HTTP/2.0 200 OK\r\nContent-Type: application/json\r\n\r\n{"a":1}'), { status: 200, json: { a: 1 } });
     assert.deepEqual(parseIncluded('HTTP/2.0 404 Not Found\nX: y\n\n{"message":"Not Found"}'), { status: 404, json: { message: 'Not Found' } });
     assert.throws(() => parseIncluded('{"a":1}'), /status line/);
+  });
+});
+
+describe('operators allowlist (user-owned repos, no teams)', () => {
+  const G = 'deploy-1';
+  const LIST = (over = {}) => ({ gate: G, operators: ['Alice', 'bob'], requester: BOT.login, ...over });
+  const live = new Map([['alice', 'active'], ['bob', 'active']]);
+
+  test('operatorSource precedence: team wins, else list, else null; malformed entries throw', () => {
+    assert.equal(operatorSource({ operatorsTeam: TEAM, operators: ['alice'] }).type, 'team');
+    assert.deepEqual(operatorSource({ operators: 'Alice, bob' }).logins, ['alice', 'bob']);
+    assert.equal(operatorSource({}), null);
+    assert.equal(operatorSource({ operatorsTeam: '', operators: [] }), null);
+    assert.throws(() => operatorSource({ operators: ['evil[bot]'] }));
+    assert.throws(() => operatorSource({ operators: ['a b'] }));
+    assert.throws(() => operatorSource({ operatorsTeam: 'no-slash' }));
+  });
+
+  test('an allowlisted, live User approves (case-insensitive login) and the source is reported', () => {
+    const v = evaluateGate(prFacts([requestComment(G, 'deploy'), comment(ALICE, `/approve ${G}`, T(5))], { members: live }), LIST());
+    assert.equal(v.status, 'approved');
+    assert.equal(v.approval.source, 'operators allowlist');
+    assert.equal(v.operator_source, 'operators allowlist');
+  });
+
+  test('a team member who is not on the list does not qualify when only the list is set', () => {
+    const v = evaluateGate(prFacts([requestComment(G, 'deploy'), comment(MALLORY, `/approve ${G}`, T(5))], { members: new Map([['mallory', 'active']]) }), LIST());
+    assert.equal(v.status, 'waiting');
+    assert.match(reasons(v), /not on the operators allowlist/);
+  });
+
+  test('a listed login whose live account is not a User does not qualify', () => {
+    const v = evaluateGate(prFacts([requestComment(G, 'deploy'), comment(ALICE, `/approve ${G}`, T(5))], { members: new Map([['alice', 'none']]) }), LIST());
+    assert.equal(v.status, 'waiting');
+    assert.match(reasons(v), /not a live User/);
+  });
+
+  test('a bot is refused even if listed by its login', () => {
+    const v = evaluateGate(prFacts([requestComment(G, 'deploy'), comment({ login: 'alice', type: 'Bot' }, `/approve ${G}`, T(5))], { members: live }), LIST());
+    assert.equal(v.status, 'waiting');
+  });
+
+  test('merge gate with the list and empty reviewDecision', () => {
+    const v = evaluateGate(prFacts([requestComment('m', 'merge')], { members: live, reviews: [review(BOB, 'APPROVED', SHA, T(5))], reviewDecision: null }), LIST({ gate: 'm' }));
+    assert.equal(v.status, 'approved');
+    assert.equal(v.approval.source, 'operators allowlist');
+  });
+
+  test('checkGate verifies listed users live via GET /users and skips the team API', async () => {
+    const routes = prRoutes([requestComment(G, 'deploy'), comment(ALICE, `/approve ${G}`, T(5)), comment(MALLORY, `/approve ${G}`, T(6))]);
+    delete routes['GET /orgs/acme/teams/fleet-operators'];
+    routes['GET /users/alice'] = { status: 200, json: { login: 'alice', type: 'User' } };
+    const api = fakeApi(routes);
+    const v = await checkGate(api, { repo: REPO, pr: String(PR), gate: G, operators: 'alice,bob', requester: BOT.login });
+    assert.equal(v.status, 'approved', v.message);
+    assert.equal(v.approval.source, 'operators allowlist');
+    assert.ok(api.calls.includes('GET /users/alice'));
+    assert.ok(!api.calls.some((c) => c.startsWith('GET /orgs/')), 'no team API with the list');
+    assert.ok(!api.calls.includes('GET /users/mallory'), 'unlisted logins are not looked up');
+  });
+
+  test('a listed login that 404s or is an Organization does not qualify', async () => {
+    for (const user of [{ status: 404, json: { message: 'Not Found' } }, { status: 200, json: { login: 'alice', type: 'Organization' } }]) {
+      const routes = prRoutes([requestComment(G, 'deploy'), comment(ALICE, `/approve ${G}`, T(5))]);
+      routes['GET /users/alice'] = user;
+      const v = await checkGate(fakeApi(routes), { repo: REPO, pr: String(PR), gate: G, operators: 'alice', requester: BOT.login });
+      assert.equal(v.status, 'waiting', JSON.stringify(user));
+    }
+  });
+
+  test('a user lookup that errors is an error, not a silent no', async () => {
+    const routes = prRoutes([requestComment(G, 'deploy'), comment(ALICE, `/approve ${G}`, T(5))]);
+    routes['GET /users/alice'] = { status: 500, json: { message: 'boom' } };
+    const v = await checkGate(fakeApi(routes), { repo: REPO, pr: String(PR), gate: G, operators: 'alice', requester: BOT.login });
+    assert.equal(v.status, 'error');
+  });
+
+  test('team set and list set: the team decides (list ignored)', async () => {
+    const routes = prRoutes([requestComment(G, 'deploy'), comment(ALICE, `/approve ${G}`, T(5))]);
+    routes['GET /users/alice'] = { status: 200, json: { login: 'alice', type: 'User' } };
+    const v = await checkGate(fakeApi(routes), { repo: REPO, pr: String(PR), gate: G, operatorsTeam: TEAM, operators: 'alice', requester: BOT.login });
+    assert.equal(v.status, 'waiting', 'alice is on the list but not in the team');
+    assert.equal(v.operator_source, `team ${TEAM}`);
+  });
+
+  test('CLI --operators works and an empty --operators-team falls through to it', async () => {
+    const routes = prRoutes([requestComment(G, 'deploy'), comment(ALICE, `/approve ${G}`, T(5))]);
+    routes['GET /users/alice'] = { status: 200, json: { login: 'alice', type: 'User' } };
+    const out = sink();
+    const code = await main(['check', '--repo', REPO, '--pr', String(PR), '--gate', G, '--operators-team', '', '--operators', 'alice', '--requester', BOT.login], { api: fakeApi(routes), out, err: sink() });
+    assert.equal(code, EXIT.APPROVED);
+    assert.equal(JSON.parse(out.text).approval.source, 'operators allowlist');
   });
 });

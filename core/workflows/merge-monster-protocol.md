@@ -51,7 +51,7 @@ ledger** issue:
 ## Operator gates: approval happens in GitHub
 
 Migration-bearing PRs and PRs with `operator_gate:` set merge only after a
-human on the configured `operators_team` approves them **on GitHub**: Merge
+human operator (the configured `operators_team`, or `operators` list) approves them **on GitHub**: Merge
 Monster posts a gate request on the PR and waits until `gate-check` verifies
 a review **Approve** on the requested head (`docs/gate-check.md` in engsys).
 Pushing new commits invalidates it, and Merge Monster posts a fresh request.

@@ -18,10 +18,11 @@
 //   postGateRequest(api, opts)              -> { id, url, comment_id, author }
 //
 // CLI:
-//   node gate-check.mjs check   --repo o/r (--pr N | --issue N) --gate ID --operators-team org/slug
+//   node gate-check.mjs check   --repo o/r (--pr N | --issue N) --gate ID
+//                               (--operators-team org/slug | --operators login,login)
 //                               [--requester LOGIN] [--target T] [--kind K]
 //   node gate-check.mjs request --repo o/r (--pr N | --issue N) --kind K --target T --what TEXT
-//                               [--gate ID] [--operators-team org/slug] [--dry-run]
+//                               [--gate ID] [--operators-team org/slug | --operators login,login] [--dry-run]
 // `check` prints one JSON verdict on stdout. Exit: 0 approved, 3 waiting, 4 denied, 1 error (bad
 // input, missing config, unreadable API, stale or ambiguous gate). Anything unexpected fails closed.
 //
@@ -29,7 +30,9 @@
 // two strict, anchored grammars (the request marker and `/approve|/deny <id>`) and otherwise never
 // interpreted, executed, or echoed, with one exception: a deny reason, which is reported defanged
 // and inside the untrusted-data envelope (see untrusted.mjs). Identity comes only from API fields
-// (`user.login`, `user.type`) plus a live team-membership read, never from text.
+// (`user.login`, `user.type`) plus a live read of the operator source, never from text. The operator
+// source is `operators_team` when set (live team membership, state active), else the `operators`
+// login allowlist (listed, and a live GET /users/{login} says type User). Neither set: fail closed.
 
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -49,6 +52,25 @@ export const TARGET_RE = /^[A-Za-z0-9._/#@:+=-]{1,200}$/;
 /** `org/team-slug`. */
 export const OPERATORS_TEAM_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/;
 const REPO_RE = /^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/;
+/** A GitHub user login (no `[bot]` suffix: bots are never operators). */
+export const LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
+
+/**
+ * Which operator source applies: the team when `operatorsTeam` is set (it wins), else the
+ * `operators` allowlist (an array or a comma-separated string of logins), else null (fail closed).
+ * Throws on a malformed team or login so a typo never silently widens or empties the source.
+ */
+export function operatorSource({ operatorsTeam, operators } = {}) {
+  if (operatorsTeam) {
+    if (!OPERATORS_TEAM_RE.test(operatorsTeam)) throw new TypeError(`operators_team must be org/team-slug, got ${JSON.stringify(operatorsTeam)}`);
+    return { type: 'team', team: operatorsTeam, label: `team ${operatorsTeam}` };
+  }
+  const list = Array.isArray(operators) ? operators : typeof operators === 'string' ? operators.split(',') : [];
+  const logins = list.map((l) => String(l).trim()).filter(Boolean);
+  if (logins.length === 0) return null;
+  for (const l of logins) if (!LOGIN_RE.test(l)) throw new TypeError(`operators entry is not a GitHub user login: ${JSON.stringify(l)}`);
+  return { type: 'list', logins: logins.map((l) => l.toLowerCase()), label: 'operators allowlist' };
+}
 
 /** Kinds approved by a PR review (anything that merges). Every other kind needs `/approve <id>`. */
 export const REVIEW_KINDS = new Set(['merge']);
@@ -119,7 +141,7 @@ function oneLine(s, max) {
  * Render the request comment. The marker is always line 1 (check reads it only in leading
  * position). `what` is agent prose and is flattened to one line with comment markers removed.
  */
-export function renderGateRequest({ id, kind, target, what, operatorsTeam, thread = 'pr' }) {
+export function renderGateRequest({ id, kind, target, what, operatorsTeam, operators, thread = 'pr' }) {
   if (!GATE_ID_RE.test(id ?? '')) throw new TypeError(`gate-check: invalid gate id ${JSON.stringify(id)}`);
   if (!KIND_RE.test(kind ?? '')) throw new TypeError(`gate-check: invalid kind ${JSON.stringify(kind)}`);
   if (!TARGET_RE.test(target ?? '')) throw new TypeError(`gate-check: invalid target ${JSON.stringify(target)}`);
@@ -127,7 +149,8 @@ export function renderGateRequest({ id, kind, target, what, operatorsTeam, threa
   if ((REVIEW_KINDS.has(kind) || thread === 'pr') && !pr) {
     throw new TypeError('gate-check: a gate on a pull request (and every merge gate) needs a target of the form owner/repo#N@<40-hex head sha>');
   }
-  const who = operatorsTeam ? `a member of @${operatorsTeam}` : 'a member of the operators team';
+  const src = operatorSource({ operatorsTeam, operators });
+  const who = src?.type === 'team' ? `a member of @${src.team}` : src?.type === 'list' ? `an operator (${src.logins.map((l) => `@${l}`).join(', ')})` : 'an operator';
   const lines = [
     `<!-- gate-request id="${id}" kind="${kind}" target="${target}" -->`,
     `### Gate request \`${id}\` (${kind})`,
@@ -181,13 +204,15 @@ function untrustedReason(reason) {
  *   reviews: [review objects, REST shape] | null,    // PR threads only
  *   reviewDecision: 'APPROVED'|'CHANGES_REQUESTED'|'REVIEW_REQUIRED'|null,  // PR threads only
  *   pushFloor: { at: ISO, source } | null,           // latest push signal, PR threads only
- *   members: Map<login, 'active'|'pending'|'none'>,  // live team-membership reads
+ *   members: Map<login, 'active'|'pending'|'none'>,  // live reads of the operator source
  * }
- * opts = { gate, operatorsTeam, requester?, target?, kind? }
+ * opts = { gate, operatorsTeam? | operators?, requester?, target?, kind? }
  */
 export function evaluateGate(facts, opts) {
   const gate = opts.gate;
-  if (!opts.operatorsTeam) return fail(gate, 'operators_team is not configured; refusing to open any gate (fail closed)');
+  let source;
+  try { source = operatorSource(opts); } catch (e) { return fail(gate, e.message); }
+  if (!source) return fail(gate, 'neither operators_team nor operators is configured; refusing to open any gate (fail closed)');
   if (!GATE_ID_RE.test(gate ?? '')) return fail(gate, `invalid gate id ${JSON.stringify(gate)}`);
 
   // 1. Find the gate request: exactly one, unedited, from the requester when one is pinned.
@@ -252,13 +277,16 @@ export function evaluateGate(facts, opts) {
     if (facts.pr.state !== 'open') return fail(gate, `the PR is ${facts.pr.merged ? 'merged' : facts.pr.state}; a ${request.kind} gate needs an open PR`, base);
   }
   base.floor = { at: new Date(floor).toISOString(), source: floorSource };
+  base.operator_source = source.label;
 
   const qualifies = (user) => {
     if (!isHumanUser(user)) return 'actor is not a human User account';
+    if (source.type === 'list' && !source.logins.includes(user.login.toLowerCase())) return 'not on the operators allowlist';
     const state = facts.members.get(user.login);
-    if (state === undefined) return 'team membership was not read';
-    if (state !== 'active') return state === 'pending' ? 'team membership is pending, not active' : `not a member of ${opts.operatorsTeam}`;
-    return null;
+    if (state === undefined) return source.type === 'team' ? 'team membership was not read' : 'user account was not verified';
+    if (state === 'active') return null;
+    if (source.type === 'list') return 'allowlisted login is not a live User account';
+    return state === 'pending' ? 'team membership is pending, not active' : `not a member of ${source.team}`;
   };
   const ignored = [];
   const ignore = (actor, via, url, reason) => ignored.push({ actor: actor ?? null, via, url: url ?? null, reason });
@@ -277,7 +305,7 @@ export function evaluateGate(facts, opts) {
       ...base,
       status: 'denied',
       exit: EXIT.DENIED,
-      denial: { actor: c.user.login, at: c.created_at, url: c.html_url, reason: untrustedReason(cmd.reason) },
+      denial: { actor: c.user.login, at: c.created_at, url: c.html_url, source: source.label, reason: untrustedReason(cmd.reason) },
       ignored,
     };
   }
@@ -306,18 +334,19 @@ export function evaluateGate(facts, opts) {
     const waiting = (reason) => ({ ...base, status: 'waiting', exit: EXIT.WAITING, reason, ignored });
     if (!approval) return waiting(`no qualifying review approval on ${prTarget.sha.slice(0, 12)} newer than the ${floorSource}`);
     if (changesRequested.length) return waiting(`outstanding change requests from ${changesRequested.join(', ')}`);
-    if (facts.reviewDecision !== 'APPROVED') {
-      return waiting(
-        facts.reviewDecision
-          ? `GitHub reviewDecision is ${facts.reviewDecision}, not APPROVED`
-          : 'GitHub reviewDecision is empty (the base branch requires no review); add a required-review rule so GitHub agrees',
-      );
-    }
+    // APPROVED: GitHub agrees. Empty/null: the base branch requires no review for this PR, so the
+    // qualifying operator approval above (with no change requests) is the whole decision.
+    // REVIEW_REQUIRED / CHANGES_REQUESTED (or anything unknown): GitHub disagrees, keep waiting.
+    const rd = facts.reviewDecision ?? null;
+    if (rd !== 'APPROVED' && rd !== null && rd !== '') return waiting(`GitHub reviewDecision is ${rd}, not APPROVED`);
     return {
       ...base,
       status: 'approved',
       exit: EXIT.APPROVED,
-      approval: { actor: approval.user.login, at: approval.submitted_at, url: approval.html_url, via: 'review', commit: approval.commit_id },
+      approval: {
+        actor: approval.user.login, at: approval.submitted_at, url: approval.html_url, via: 'review', commit: approval.commit_id,
+        source: source.label, review_decision: rd || 'none (no review required)',
+      },
       ignored,
     };
   }
@@ -343,7 +372,7 @@ export function evaluateGate(facts, opts) {
     ...base,
     status: 'approved',
     exit: EXIT.APPROVED,
-    approval: { actor: approval.user.login, at: approval.created_at, url: approval.html_url, via: 'comment' },
+    approval: { actor: approval.user.login, at: approval.created_at, url: approval.html_url, via: 'comment', source: source.label },
     ignored,
   };
 }
@@ -446,6 +475,14 @@ async function latestPush(api, repo, number, headSha) {
   return best;
 }
 
+/** Allowlist entry is a live account of type User: 'active' | 'none'. 404 → none; other non-200 throws. */
+async function liveUser(api, login) {
+  const { status, json } = await api.request('GET', `/users/${encodeURIComponent(login)}`);
+  if (status === 404) return 'none';
+  if (status !== 200) throw new Error(`HTTP ${status} reading user ${login}${json?.message ? `: ${json.message}` : ''}`);
+  return json?.type === 'User' && typeof json.login === 'string' && json.login.toLowerCase() === login.toLowerCase() ? 'active' : 'none';
+}
+
 /** Live membership: 'active' | 'pending' | 'none'. 404 means not a member; anything else non-200 throws. */
 async function membership(api, operatorsTeam, login) {
   const [org, slug] = operatorsTeam.split('/');
@@ -456,13 +493,17 @@ async function membership(api, operatorsTeam, login) {
 }
 
 /** Read everything `evaluateGate` needs. Throws on any API problem (the CLI turns that into exit 1). */
-export async function collectFacts(api, { repo, number, thread, operatorsTeam, gate }) {
-  const [org, slug] = operatorsTeam.split('/');
-  const team = await api.request('GET', `/orgs/${org}/teams/${slug}`);
-  if (team.status !== 200) {
-    throw new Error(
-      `cannot read team ${operatorsTeam} (HTTP ${team.status}); check operators_team and that the token can read org members (Members: read)`,
-    );
+export async function collectFacts(api, { repo, number, thread, operatorsTeam, operators, gate }) {
+  const source = operatorSource({ operatorsTeam, operators });
+  if (!source) throw new Error('neither operators_team nor operators is configured; gate-check fails closed');
+  if (source.type === 'team') {
+    const [org, slug] = source.team.split('/');
+    const team = await api.request('GET', `/orgs/${org}/teams/${slug}`);
+    if (team.status !== 200) {
+      throw new Error(
+        `cannot read team ${source.team} (HTTP ${team.status}); check operators_team and that the token can read org members (Members: read)`,
+      );
+    }
   }
   const comments = await listAll(api, `/repos/${repo}/issues/${number}/comments`, 'reading comments');
   const facts = { repo, number, thread, comments, pr: null, reviews: null, reviewDecision: null, pushFloor: null, members: new Map() };
@@ -482,17 +523,23 @@ export async function collectFacts(api, { repo, number, thread, operatorsTeam, g
   const logins = new Set();
   for (const c of comments) if (parseCommand(c.body)?.id === gate && isHumanUser(c.user)) logins.add(c.user.login);
   for (const r of facts.reviews ?? []) if (r.state === 'APPROVED' && isHumanUser(r.user)) logins.add(r.user.login);
-  for (const login of logins) facts.members.set(login, await membership(api, operatorsTeam, login));
+  for (const login of logins) {
+    if (source.type === 'team') facts.members.set(login, await membership(api, source.team, login));
+    else if (source.logins.includes(login.toLowerCase())) facts.members.set(login, await liveUser(api, login));
+    else facts.members.set(login, 'none'); // not listed: no API call needed
+  }
   return facts;
 }
 
-function validateCommon({ repo, pr, issue, operatorsTeam }, needTeam) {
+function validateCommon({ repo, pr, issue, operatorsTeam, operators }, needSource) {
   if (!REPO_RE.test(repo ?? '')) throw new TypeError(`--repo must be owner/name, got ${JSON.stringify(repo)}`);
   if ((pr === undefined) === (issue === undefined)) throw new TypeError('pass exactly one of --pr N or --issue N');
   const n = Number(pr ?? issue);
   if (!Number.isInteger(n) || n < 1 || String(pr ?? issue) !== String(n)) throw new TypeError(`--pr/--issue must be a positive integer`);
-  if (needTeam && !operatorsTeam) throw new TypeError('operators_team is not configured (--operators-team org/slug); gate-check fails closed');
-  if (operatorsTeam && !OPERATORS_TEAM_RE.test(operatorsTeam)) throw new TypeError(`--operators-team must be org/team-slug, got ${JSON.stringify(operatorsTeam)}`);
+  const source = operatorSource({ operatorsTeam, operators }); // throws on a malformed team or login
+  if (needSource && !source) {
+    throw new TypeError('neither operators_team (--operators-team org/slug) nor operators (--operators login,login) is configured; gate-check fails closed');
+  }
   return { number: n, thread: pr !== undefined ? 'pr' : 'issue' };
 }
 
@@ -502,7 +549,7 @@ export async function checkGate(api, opts) {
     const { number, thread } = validateCommon(opts, true);
     if (opts.requester !== undefined && !/^[A-Za-z0-9-]+(\[bot\])?$/.test(opts.requester)) throw new TypeError('--requester must be a GitHub login');
     if (opts.target !== undefined && !TARGET_RE.test(opts.target)) throw new TypeError('--target has characters a gate target never contains');
-    const facts = await collectFacts(api, { repo: opts.repo, number, thread, operatorsTeam: opts.operatorsTeam, gate: opts.gate });
+    const facts = await collectFacts(api, { repo: opts.repo, number, thread, operatorsTeam: opts.operatorsTeam, operators: opts.operators, gate: opts.gate });
     return evaluateGate(facts, opts);
   } catch (err) {
     return fail(opts.gate ?? null, err?.message ?? String(err));
@@ -513,7 +560,7 @@ export async function checkGate(api, opts) {
 export async function postGateRequest(api, opts) {
   const { number, thread } = validateCommon(opts, false);
   const id = opts.gate ?? newGateId(opts.kind);
-  const body = renderGateRequest({ id, kind: opts.kind, target: opts.target, what: opts.what, operatorsTeam: opts.operatorsTeam, thread });
+  const body = renderGateRequest({ id, kind: opts.kind, target: opts.target, what: opts.what, operatorsTeam: opts.operatorsTeam, operators: opts.operators, thread });
   const comments = await listAll(api, `/repos/${opts.repo}/issues/${number}/comments`, 'reading comments');
   if (comments.some((c) => parseGateRequest(c.body)?.id === id)) throw new Error(`a gate request with id "${id}" already exists on ${opts.repo}#${number}`);
   if (opts.dryRun) return { id, dry_run: true, body };
@@ -527,10 +574,11 @@ export async function postGateRequest(api, opts) {
 // ---------------------------------------------------------------------------------------------
 
 const USAGE = `usage:
-  gate-check.mjs check   --repo o/r (--pr N | --issue N) --gate ID --operators-team org/slug
+  gate-check.mjs check   --repo o/r (--pr N | --issue N) --gate ID
+                         (--operators-team org/slug | --operators login,login)
                          [--requester LOGIN] [--target T] [--kind K]
   gate-check.mjs request --repo o/r (--pr N | --issue N) --kind K --target T --what TEXT
-                         [--gate ID] [--operators-team org/slug] [--dry-run]
+                         [--gate ID] [--operators-team org/slug | --operators login,login] [--dry-run]
 exit (check): 0 approved, 3 waiting, 4 denied, 1 error`;
 
 export async function main(argv, { api = ghApiClient(), out = process.stdout, err = process.stderr } = {}) {
@@ -542,7 +590,7 @@ export async function main(argv, { api = ghApiClient(), out = process.stdout, er
       strict: true,
       options: {
         repo: { type: 'string' }, pr: { type: 'string' }, issue: { type: 'string' }, gate: { type: 'string' },
-        'operators-team': { type: 'string' }, requester: { type: 'string' }, target: { type: 'string' },
+        'operators-team': { type: 'string' }, operators: { type: 'string' }, requester: { type: 'string' }, target: { type: 'string' },
         kind: { type: 'string' }, what: { type: 'string' }, 'dry-run': { type: 'boolean' },
       },
     }));
@@ -552,7 +600,7 @@ export async function main(argv, { api = ghApiClient(), out = process.stdout, er
   }
   const opts = {
     repo: values.repo, pr: values.pr, issue: values.issue, gate: values.gate,
-    operatorsTeam: values['operators-team'], requester: values.requester, target: values.target,
+    operatorsTeam: values['operators-team'], operators: values.operators, requester: values.requester, target: values.target,
     kind: values.kind, what: values.what, dryRun: !!values['dry-run'],
   };
   if (cmd === 'check') {

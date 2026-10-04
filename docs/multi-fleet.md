@@ -289,8 +289,11 @@ accepts an approval only if all of these hold:
 - It is **newer** than the gate request and than the PR's latest push.
 - The comment **has not been edited** since it was posted (`updated_at` equals `created_at`), so a later
   edit cannot turn a different comment into an approval.
-- For a merge, GitHub's own review state agrees: `reviewDecision` is `APPROVED`, with no outstanding
-  change requests.
+- For a merge, GitHub's own review state does not disagree: no outstanding change requests, and
+  `reviewDecision` is `APPROVED`, or empty because the branch requires no review for that PR (then the
+  operator's approval on the head decides). `REVIEW_REQUIRED` keeps the gate shut.
+- A user-owned repo has no teams, so an instance can list operators by login (`operators:`) instead
+  of `operators_team`; see [gate-check.md](gate-check.md#configuration-and-permissions).
 
 The agent records the verified approval (who, when, link) in its journal and as a one-line comment on
 the thread. `project-closeout` mines that record later. Implementation, exit codes and the latest-push
