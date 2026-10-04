@@ -3,7 +3,7 @@
 #
 #   fleet [--instance <dir>] <command> [args]
 #
-#   status                        pins vs host, and which sessions are behind
+#   status                        fleet id + registry homes, pins vs host, and which sessions are behind
 #   pin ...                       release the instance + open the pin PR (see `fleet pin --help`)
 #   sync [--check]                host checkouts + plugin reinstall to match the pins (no restarts)
 #   restart [--stale|--all|<name>...] [--force]
@@ -14,6 +14,8 @@
 #                                 render + (re)load the launchd jobs
 #   notify --level info|action|alert [--re <url>] [--incident <key>] [--resolve] "<text>"
 #                                 post to the fleet's own Slack voice (falls back to a GitHub comment)
+#   federation validate|get|home|address|status ...
+#                                 the multi-fleet registry (federation.yml; see `fleet federation --help`)
 #   init ...                      scaffold a new fleet instance (engsys fleet init)
 #
 # The instance is --instance <dir>, else $FLEET_INSTANCE, else the git toplevel of the current
@@ -37,7 +39,7 @@ case "$cmd" in
   -h | --help | help) sed -n '2,/^set -/{/^set -/!p;}' "$0"; exit 0 ;;
   init) # the engsys CLI (this kit lives at <engsys>/core/fleet); no instance needed yet
     exec "$KIT/../../install" fleet init "$@" ;;
-  status | pin | sync | restart | launch | supervise | install-jobs | notify) ;;
+  status | pin | sync | restart | launch | supervise | install-jobs | notify | federation) ;;
   *) echo "fleet: unknown command '$cmd' (fleet help)" >&2; exit 2 ;;
 esac
 
@@ -47,7 +49,7 @@ FLEET_INSTANCE="$(cd "$instance" 2>/dev/null && pwd -P)" || { echo "fleet: insta
 export FLEET_INSTANCE
 
 case "$cmd" in
-  status) bash "$KIT/sync.sh" --check || true; echo; exec bash "$KIT/restart.sh" --status ;;
+  status) bash "$KIT/federation.sh" status || true; echo; bash "$KIT/sync.sh" --check || true; echo; exec bash "$KIT/restart.sh" --status ;;
   pin)
     [ -f "$KIT/pin.sh" ] || { echo "fleet pin: not implemented yet" >&2; exit 1; }
     exec bash "$KIT/pin.sh" "$@" ;;
@@ -57,4 +59,5 @@ case "$cmd" in
   supervise) exec bash "$KIT/supervise.sh" "$@" ;;
   install-jobs) exec bash "$KIT/install-jobs.sh" "$@" ;;
   notify) exec bash "$KIT/notify.sh" "$@" ;;
+  federation) exec bash "$KIT/federation.sh" "$@" ;;
 esac

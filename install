@@ -35,6 +35,7 @@ function parseArgs(argv) {
     else if (a === '--resource-broker') args.resourceBroker = true;
     else if (a === '--engsys-dir') args.engsysDir = argv[++i];
     else if (a === '--worktrees-dir') args.worktreesDir = argv[++i];
+    else if (a === '--fleet') args.fleet = argv[++i];
     else if (a === '--help' || a === '-h') args.help = true;
     else args._.push(a);
   }
@@ -69,7 +70,7 @@ Commands:
       config, then runs update. Refuses if the config already has one.
   fleet init --into <dir> --org <slug> --namespace <ns> --pin-repo <owner/repo> --pin-dir <path>
              [--instance-marketplace <name>] [--identity github-app|none] [--cloud azure|none]
-             [--resource-broker]
+             [--resource-broker] [--fleet <id>]
              [--engsys-dir <path>] [--worktrees-dir <path>] [--dry-run] [--force]
       Scaffold a new fleet instance repo (config, roster, env and supervisor templates, the
       scripts/fleet shim, README, ownership register; optionally the instance plugin) that the
@@ -84,6 +85,8 @@ Commands:
         --cloud azure|none            azure adds the service-principal env source + login job (default none)
         --resource-broker             add the optional third monster: a <ns>-broker roster line and supervisor entry, plus
                                       resource-broker.yml and an example pool file in the config dir (the durable-lease pool)
+        --fleet <id>                  multi-fleet: set FLEET_ID=<id> in fleet.conf and write a one-fleet federation.yml
+                                      (this fleet home for merge and maintain of the pin repo); see docs/multi-fleet.md
         --engsys-dir <path>           pinned engsys checkout on the host (default ~/git/engsys)
         --worktrees-dir <path>        agent worktrees (default: <pin-dir's parent>/worktrees)
   uninstall --into <path> [--dry-run]
@@ -205,7 +208,7 @@ function main() {
         engsysRoot, into, force: args.force, dryRun: args.dryRun,
         org: args.org, namespace: args.namespace, pinRepo: args.pinRepo, pinDir: args.pinDir,
         instanceMarketplace: args.instanceMarketplace, identity: args.identity, cloud: args.cloud, resourceBroker: args.resourceBroker,
-        engsysDir: args.engsysDir, worktreesDir: args.worktreesDir,
+        fleet: args.fleet, engsysDir: args.engsysDir, worktreesDir: args.worktreesDir,
       });
     } catch (e) {
       console.error(`error: ${e.message}`);

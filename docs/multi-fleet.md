@@ -1,7 +1,9 @@
 # Multi-fleet: several fleets working one org's repos (design)
 
-> **Status:** Design, not yet implemented (proposed 2026-10). Nothing in this doc changes how a
-> single fleet behaves today.
+> **Status:** Design (proposed 2026-10), being built in phases (section 10). Implemented so far: the
+> registry, `FLEET_ID` and addresses (engsys#39, operator guide in
+> [`fleet-guide.md` § 6.10](fleet-guide.md#610-registry-multi-fleet)), `gate-check` (#41) and
+> `fleet notify` (#42). Nothing in this doc changes how a single fleet behaves today.
 >
 > **Related:** [`agent-messaging.md`](agent-messaging.md) (same-fleet messaging and the "GitHub
 > channel" Phase 2 this builds on), [`fleet-guide.md`](fleet-guide.md) (running one fleet),
@@ -124,6 +126,20 @@ repos:
   orgs that want it.
 - **`enabled: false`** is a per-fleet kill switch. It sits one level above closing a ledger, which stops
   that role for every fleet.
+- **`operators_team`** is the operator source `gate-check` reads (section 6). A user-owned repo has no
+  teams, so `operators: [login:account-id, ...]` is accepted instead, with the same rules as
+  [gate-check.md](gate-check.md#configuration-and-permissions).
+- **Optional fields.** Every fleet field except `enabled` (default `true`) is optional, and so is a
+  role's `ledger`, so a new instance's registry is valid before its ledger issues exist. `standby`
+  defaults to `[]` and `failover` to `escalate`.
+
+Each host's `fleet/fleet.conf` names its own fleet with `FLEET_ID` (`^[a-z][a-z0-9-]{1,20}$`), which every
+session env carries. No `federation.yml` means single-fleet mode. The loader,
+`core/fleet/lib/federation.mjs`, has no dependencies, so it reads a strict YAML subset (block maps, block
+lists of plain values, one-line flow maps and lists, plain or quoted scalars, integers, booleans,
+comments) and rejects anything else with the line number. The operator commands
+(`fleet federation validate|get|home|address|status`, and the registry block in `fleet status`) are
+in [`fleet-guide.md` § 6.10](fleet-guide.md#610-registry-multi-fleet).
 
 ## 2. Singleton batons: a real lease on GitHub
 
@@ -390,7 +406,7 @@ What to do: approve the PR on GitHub: <link>. Nothing else is blocked.
 
 | engsys core (generic) | Instance repo (for example `acme/acme-fleet`) |
 |---|---|
-| `federation.yml` schema and loader; `FLEET_ID` in `fleet.conf`; `<fleet>:<session>` addresses | The actual `federation.yml`: fleets, homes, standbys, operators team |
+| `federation.yml` schema and loader (`core/fleet/lib/federation.mjs`, `fleet federation`); `FLEET_ID` in `fleet.conf`; `<fleet>:<session>` addresses | The actual `federation.yml`: fleets, homes, standbys, operators team |
 | `github` backend for `core/lib/lease` (ref compare-and-swap, fencing, expiry) | Baton ref names per repo |
 | Merge and maintenance monsters: claim, renew and fence on the lease; handover on a `home` change; startup holder check | Ledger issue numbers |
 | Supervisor: relaunch only home roles; per-fleet status issue | One status issue per fleet |
@@ -430,7 +446,8 @@ Do this before a second fleet stands anything up. Tracking: #39 (registry, `FLEE
 
 ### P2: Cross-fleet messages
 
-- `fleet-msg` format, relay job, addresses in `mm-handoff`, `fleet status --federation`.
+- `fleet-msg` format, relay job, delivery to addresses in other fleets (the `mm-handoff` field already
+  accepts them, from P0), `fleet status --federation`.
 
 ### P3: Handover
 

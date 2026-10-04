@@ -621,7 +621,7 @@ SLACK_BOT_TOKEN=xoxb-...          # the app's Bot User OAuth Token
 SLACK_CHANNEL_ID=C0XXXXXXXXX      # the escalation channel the bot was invited to
 SLACK_OPERATORS_GROUP_ID=S0XXXXXXXXX  # optional: a real Slack user group (e.g. @acme-operators)
 SLACK_OPERATOR_ID=UXXXXXXXXX      # optional: this fleet's own operator, preferred for `action` posts
-FLEET_ID=acme                     # optional here: prefixes every post, e.g. "[acme] ..."; else taken from the fleet's env
+FLEET_ID=acme                     # optional: prefixes every post, e.g. "[acme] ..."; fleet.conf's FLEET_ID wins when set
 ```
 
 Only the token and channel are required. Mentions degrade gracefully: `action` mentions the operator,
@@ -642,6 +642,93 @@ Tests (offline, no real Slack or gh): `node --test core/fleet/notify.test.mjs` (
 the CLI against a stub Slack server) and `bash core/fleet/test/notify.test.sh` (the `bin/fleet` → `fleet.conf`
 → `notify.sh` wiring); both run under `npm test`.
 
+### 6.10 Registry (multi-fleet)
+
+Skip this while one fleet works your repos. When a second fleet (another operator, another host) joins,
+each fleet gets an id and the instance repo gets a registry saying who exists and which fleet holds each
+singleton role. Design and rationale: [`multi-fleet.md`](multi-fleet.md) § 1.
+
+**`FLEET_ID`** in `fleet/fleet.conf` (or `fleet.local.conf`) names this fleet: 2-21 characters, a
+lowercase letter, then lowercase letters, digits or hyphens (`alice`, `bob`, `acme-eu`). Every fleet
+command rejects any other value. `fleet launch` writes it into every session env, so monsters and
+scripts can read `$FLEET_ID`. Unset means single-fleet mode: nothing changes.
+
+**`federation.yml`** at the instance root (or the path in `FEDERATION_FILE`, relative to the instance
+root unless absolute) is the registry. Change it by PR, like any fleet config:
+
+```yaml
+version: 1
+operators_team: acme/fleet-operators   # or operators: [alice:1234567] for a user-owned repo
+fleets:
+  alice:
+    operator: alice                    # GitHub login of the fleet's human
+    host: alice-host
+    github_app: acme-fleet-alice       # App slug; the bot login is acme-fleet-alice[bot]
+    cloud_identity: fleet-alice
+    slack_operator: U0000000001        # Slack member id
+    status_issue: 11                   # this fleet's status issue in the instance repo
+    enabled: true                      # false = this fleet's kill switch
+  bob:
+    operator: bob
+    enabled: true
+repos:
+  acme/app:
+    merge:    { home: alice, ledger: 101, standby: [bob], failover: escalate }
+    maintain: { home: alice, ledger: 102, standby: [bob] }
+```
+
+The loader (`core/fleet/lib/federation.mjs`) rejects, with every problem listed:
+
+- `version` other than `1`, an unknown key at any level, or a fleet id that fails the `FLEET_ID` rule;
+- a malformed `operators_team` or `operators` entry (the same rules as
+  [gate-check](gate-check.md#configuration-and-permissions), which reads the same operator source);
+- a role other than `merge` or `maintain` (build, investigate and design are per fleet and never listed);
+- a `home` or `standby` that is not a declared fleet, a standby that repeats or equals `home`;
+- a `ledger` or `status_issue` that is not a positive integer, and a `failover` other than `escalate`
+  (the default) or `auto`.
+
+Every fleet field except `enabled` (default `true`) is optional, and so is `ledger`, because a new
+instance has no ledger issues yet. `standby` defaults to `[]`.
+
+The file is YAML, but the repo carries no YAML dependency, so the loader reads a strict subset: block
+maps, block lists of plain values, one-line flow maps and lists, quoted or plain strings, integers,
+`true`/`false`/`null` and comments. It rejects anything else with the line number instead of guessing:
+anchors and aliases, tags, block scalars (`|`, `>`), flow collections across lines, maps inside block
+lists, several documents, tabs in indentation, and plain values a YAML parser could read differently
+(`yes`, `no`, `on`, `off`, `1.5`, `010`, `0x1f`). Quote such a value to mean the string.
+
+**Commands** (through `scripts/fleet`, which resolves `FLEET_ID` and the file from `fleet.conf`):
+
+| Command | Output |
+|---|---|
+| `fleet federation validate [file]` | `ok: … (N fleets, M repo roles)`; exit 1 listing every problem. With `FLEET_ID` set, the id must be a declared fleet. No file: `single-fleet mode`, exit 0 |
+| `fleet federation get <path>` | one value, for example `get repos.acme/app.merge.home` prints `alice`; maps and lists print as JSON. Defaults are filled in (`failover` reads `escalate` when unset) |
+| `fleet federation home <owner/repo> <merge\|maintain>` | the home fleet id |
+| `fleet federation address <addr>` | `{"fleet":…,"session":…}` (below) |
+| `fleet federation status` | the block `fleet status` prints first |
+
+`get` and `home` exit 3 when the path or role is not declared, or when there is no file at all; 1 means
+an invalid file or bad arguments.
+
+**`fleet status`** now starts with `fleet: <id>` and, with a registry, one line per repo role: its home
+(marked `(this fleet)` when it is yours), ledger, standbys and failover. `fleet launch` checks the
+registry and warns, without blocking, when it is invalid or does not list `FLEET_ID`.
+
+**Addresses.** A session in a federation is addressed `<fleet>:<session>`, for example
+`alice:acme-build`. A bare name (`acme-build`) means "my fleet". The `mm-handoff` block's `session:`
+field takes either form, and Merge Monster nudges only addresses in its own fleet
+([merge-monster protocol](../core/workflows/merge-monster-protocol.md)).
+
+**Starting with a registry.** `engsys fleet init … --fleet alice` writes `FLEET_ID=alice` into
+`fleet/fleet.conf` and a one-fleet `federation.yml` with `alice` as home for merge and maintain of the
+pin repo. Its TODO comments mark what to fill in: the fleet's fields, `operators_team` (or
+`operators`), and each role's `ledger` once the setup scripts print the ledger numbers. On an existing
+instance, add `FLEET_ID` and the file by hand.
+
+The `FLEET_ID` in `fleet.conf` is the one `fleet notify` prefixes posts with. A `FLEET_ID` in the
+Slack env file is then unnecessary; if both are set and differ, `fleet notify` warns and uses
+`fleet.conf`'s.
+
 ---
 
 ## 7. Day-2 operations
@@ -651,12 +738,12 @@ once (section 6.4).
 
 | Step | Command | What it does | Touches running sessions? |
 |---|---|---|---|
-| **status** | `fleet status` | pins vs host (checkouts, marketplaces, plugins) and which sessions are behind | no |
+| **status** | `fleet status` | fleet id and registry homes (§ 6.10), pins vs host (checkouts, marketplaces, plugins) and which sessions are behind | no |
 | **pin** | `fleet pin --engsys vX.Y.Z` · `fleet pin --release next` · both | release your instance plugin, open the pin PR, get it reviewed and labeled, wait for the merge, then sync | no |
 | **sync** | `fleet sync` | make the host match the merged pins | no |
 | **restart** | `fleet restart --stale` · `fleet restart acme-build` | cycle sessions onto what is installed, whenever you are ready | **yes** |
 
-`fleet status` runs `fleet sync --check` (exit 1 when the host is behind the pins), then the session
+`fleet status` prints the fleet id and registry homes (§ 6.10), runs `fleet sync --check` (exit 1 when the host is behind the pins), then the session
 table: name, kind (monster or interactive), state (`missing`, `exited`, `busy`, `idle`), start time and
 `BEHIND` or `current`. **BEHIND** means the session's `claude` process started before the last change
 `fleet sync` made (`.fleet/last-change`).
@@ -954,6 +1041,8 @@ format) overrides it per machine. Environment values for `ENGSYS_REF` / `INSTANC
 | `PIN_WAIT_MAX_MIN` | no | Default 240 |
 | `SLACK_ENV` | no | Path to the `fleet notify` bot env file (§ 6.9). Empty means Slack is unconfigured: escalations fall back to a GitHub comment |
 | `NOTIFY_FALLBACK_ISSUE` | no | `owner/repo#N` for `fleet notify`'s fallback comment when Slack is unconfigured or unreachable. Empty means the message is only printed as a warning |
+| `FLEET_ID` | no | This fleet's id in a federation (§ 6.10): `^[a-z][a-z0-9-]{1,20}$`, rejected otherwise. Written into every session env. Never inherited from the caller's environment. Unset means single-fleet mode |
+| `FEDERATION_FILE` | no | The registry file, relative to the instance root unless absolute. Default `federation.yml`. Missing file means single-fleet mode |
 | anything else | | Instance-defined template variables (model knobs, and so on) |
 
 `REVIEW_*`, `READY_LABEL`, `PREPUSH_SETUP_CMD` and `PIN_WAIT_MAX_MIN` are read by `fleet pin`.
@@ -976,7 +1065,7 @@ plugins to install is `enabledPlugins` entries that are `true` and end in `@<mar
 
 | Path | Contents |
 |---|---|
-| `<instance>/.fleet/env/<lane>.env` | rendered env files, mode 0600, with the identity lines appended when `GH_APP_ENV` is set |
+| `<instance>/.fleet/env/<lane>.env` | rendered env files, mode 0600, with the identity lines appended when `GH_APP_ENV` is set, and `FLEET_ID` (plus `FEDERATION_FILE` when it exists) when `FLEET_ID` is set |
 | `<instance>/.fleet/roster` | the rendered roster |
 | `<instance>/.fleet/supervisor.conf` | the rendered supervisor conf |
 | `<instance>/.fleet/last-change`, `sync.log` | what `fleet restart` uses to decide BEHIND, and the history |

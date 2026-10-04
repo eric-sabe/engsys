@@ -7,6 +7,7 @@
 #                                                          on PATH, and GH_TOKEN/GITHUB_TOKEN unset)
 #   fleet/roster.tmpl          → .fleet/roster            (the launcher's roster; a session line's
 #                                                          optional 5th field names a per-session env)
+# Each env also gets FLEET_ID (and FEDERATION_FILE, when that file exists) when fleet.conf sets FLEET_ID.
 # then runs the launcher from PIN_DIR (the sessions' default workdir). Identity preflights belong in
 # the roster (PREFLIGHT= lines); they warn, never block.
 #
@@ -42,8 +43,24 @@ for tmpl in "$FLEET_REPO"/fleet/env/*.env.tmpl; do
     } >>"$dest"
   fi
   if [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ]; then printf 'CLAUDE_CONFIG_DIR=%q\n' "$FLEET_CLAUDE_CONFIG_DIR" >>"$dest"; fi
+  if [ -n "$FLEET_ID" ]; then
+    printf '# Multi-fleet identity (fleet/fleet.conf FLEET_ID; registry: FEDERATION_FILE when it exists).\nFLEET_ID=%q\n' "$FLEET_ID" >>"$dest"
+    if [ -f "$FEDERATION_FILE" ]; then printf 'FEDERATION_FILE=%q\n' "$FEDERATION_FILE" >>"$dest"; fi
+  fi
 done
 fleet_render "$FLEET_REPO/fleet/roster.tmpl" "$FLEET_STATE/roster"
+
+# A registry that doesn't parse, or doesn't list this fleet, is reported but never blocks a launch
+# (the supervisor relaunches through here).
+if [ -f "$FEDERATION_FILE" ]; then
+  if ! command -v node >/dev/null; then
+    echo "fleet: WARNING node not found, $FEDERATION_FILE not checked" >&2
+  elif ! node "$FLEET_KIT_DIR/lib/federation.mjs" validate "$FEDERATION_FILE" >/dev/null; then
+    echo "fleet: WARNING the federation registry above is invalid or does not list FLEET_ID '${FLEET_ID}' — fix it by PR (fleet federation validate)" >&2
+  elif [ -z "$FLEET_ID" ]; then
+    echo "fleet: WARNING $FEDERATION_FILE exists but FLEET_ID is not set in fleet/fleet.conf" >&2
+  fi
+fi
 
 cd "$PIN_DIR"
 if [ $# -gt 0 ]; then

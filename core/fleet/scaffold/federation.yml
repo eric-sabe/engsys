@@ -1,0 +1,27 @@
+# {{ORG}} federation registry: which fleets exist and which one holds each singleton role (merge,
+# maintain) per repo. Every fleet reads it at launch and in `fleet status`; change it by PR.
+# Schema: docs/multi-fleet.md § 1 in engsys. Check it with: scripts/fleet federation validate
+#
+# The loader reads a strict YAML subset: block maps, block lists of plain values, one-line flow maps
+# and lists ({ home: a, ledger: 1 }, [a, b]), quoted or plain strings, integers, true/false, comments.
+# Anything else (anchors, multi-line flows, `yes`/`no`, floats) is rejected with the line number.
+version: 1
+# TODO: the GitHub team whose human members may approve gates on GitHub (gate-check), for example:
+# operators_team: {{PIN_OWNER}}/fleet-operators
+# A user-owned repo has no teams: list operators as login:numeric-account-id instead.
+# operators: [alice:1234567]
+fleets:
+  {{FLEET_ID}}:
+    # TODO: fill these in (all optional; the loader checks each one that is set).
+    # operator: <github-login>          # the human responsible for this fleet
+    # host: <host-name>
+    # github_app: <app-slug>            # the bot login is <app-slug>[bot]
+    # cloud_identity: <name-or-id>
+    # slack_operator: U0000000000       # Slack member id to mention for this fleet
+    # status_issue: <issue-number>      # this fleet's heartbeat and digest issue in the instance repo
+    enabled: true
+repos:
+  {{PIN_REPO}}:
+    # TODO: add ledger: <issue-number> to each role once mm-setup.sh / mnt-setup.sh print them.
+    merge: { home: {{FLEET_ID}}, standby: [], failover: escalate }
+    maintain: { home: {{FLEET_ID}}, standby: [], failover: escalate }

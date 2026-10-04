@@ -260,6 +260,39 @@ file_hasnt "no flag: no broker in the roster" "$MIN/fleet/roster.tmpl" "broker"
 file_hasnt "no flag: none in the supervisor conf" "$MIN/fleet/supervisor.conf.tmpl" "broker"
 file_hasnt "no flag: no broker model keys" "$MIN/fleet/fleet.conf" "BROKER"
 
+echo "== B3. --fleet: FLEET_ID and a one-fleet federation.yml"
+FL="$T/fl"
+run init --into "$FL" "${INIT_COMMON[@]}" --pin-dir "$HOME/git/app" --fleet alice
+rc_is "init --fleet exits 0" 0
+has "…next steps: the ledgers go in federation.yml too" "$OUT" "put the ledger numbers in federation.yml too (repos.acme/app.merge / .maintain ledger:)"
+has "…and how to check it" "$OUT" "scripts/fleet federation validate"
+eq "file set: the minimal set plus federation.yml" "$(file_list "$FL")" "$(printf '%s\n' $MIN_FILES federation.yml | LC_ALL=C sort | paste -sd' ' -)"
+eq "no {{…}} token is left" "$(grep -rlF '{{' "$FL" | paste -sd' ' -)" ""
+file_has "fleet.conf: FLEET_ID set" "$FL/fleet/fleet.conf" "FLEET_ID=alice"
+file_has "fleet.conf: FEDERATION_FILE documented" "$FL/fleet/fleet.conf" "# FEDERATION_FILE=federation.yml"
+FED="$FL/federation.yml"
+file_has "federation.yml: version 1" "$FED" "version: 1"
+file_has "federation.yml: this fleet" "$FED" "  alice:"
+file_has "federation.yml: merge home is this fleet" "$FED" "merge: { home: alice, standby: [], failover: escalate }"
+file_has "federation.yml: maintain too" "$FED" "maintain: { home: alice, standby: [], failover: escalate }"
+file_has "federation.yml: operators_team TODO with the pin repo's owner" "$FED" "# operators_team: acme/fleet-operators"
+file_has "federation.yml: the ledger TODO" "$FED" "TODO: add ledger:"
+file_has "README: lists federation.yml" "$FL/README.md" "federation.yml"
+run env FLEET_ID=alice node "$KIT_SRC/lib/federation.mjs" validate "$FED"
+rc_is "the scaffolded federation.yml validates (with FLEET_ID=alice)" 0
+run node "$KIT_SRC/lib/federation.mjs" home acme/app maintain --file "$FED"
+eq "…and names alice as home" "$OUT" "alice"
+if grep -q '^FLEET_ID=' "$MIN/fleet/fleet.conf"; then bad "no --fleet: FLEET_ID is not set"; else ok "no --fleet: FLEET_ID is not set"; fi
+file_has "no --fleet: FLEET_ID is documented" "$MIN/fleet/fleet.conf" "# FLEET_ID="
+if [ ! -e "$MIN/federation.yml" ]; then ok "no --fleet: no federation.yml"; else bad "no --fleet: no federation.yml"; fi
+file_hasnt "no --fleet: README does not list federation.yml" "$MIN/README.md" "federation.yml"
+for badid in Alice a 1abc a_b abcdefghijklmnopqrstuv; do
+  run init --into "$T/badfleet" "${INIT_COMMON[@]}" --pin-dir "$HOME/git/app" --fleet "$badid"
+  rc_is "--fleet $badid is refused" 1
+done
+has "…naming the flag" "$OUT" "--fleet must be"
+if [ ! -e "$T/badfleet" ]; then ok "a refused --fleet writes nothing"; else bad "a refused --fleet writes nothing"; fi
+
 echo "== C. refusing to overwrite, --force, --dry-run, validation"
 sum_before="$(cat "$MIN"/fleet/fleet.conf "$MIN"/README.md | cksum)"
 run init --into "$MIN" "${INIT_COMMON[@]}" --pin-dir "$HOME/git/app"
@@ -338,6 +371,7 @@ echo "== E. the real kit runs the scaffold as-is"
 E="$HOME/git/engsys"
 mkdir -p "$E/core/skills" "$E/stacks/cloud/azure"
 cp -R "$KIT_SRC" "$E/core/fleet"; rm -rf "$E/core/fleet/test" "$E/core/fleet/scaffold"
+cp -R "$CORE_SRC/lib" "$E/core/lib"   # federation.mjs reads gate-check's operator-source rules
 cp -R "$CORE_SRC/skills/agent-sessions" "$E/core/skills/agent-sessions"
 cp -R "$ROOT_SRC/stacks/cloud/azure/fleet" "$E/stacks/cloud/azure/fleet"
 git -C "$E" init -q && git -C "$E" add -A && git -C "$E" commit -q -m "engsys" && git -C "$E" tag v1.2.0
@@ -488,6 +522,21 @@ has "supervisor.conf rendered with the broker" "$(cat "$STATE/supervisor.conf")"
   eq "kit: it is in the roster" "$(fleet_roster_sessions | paste -sd' ' -)" "acme-mm acme-maintain acme-broker acme-build acme-investigate acme-design"
 ) || bad "kit library checks aborted (resource broker)"
 if [ -f "$CORE_SRC/commands/resource-broker.md" ] && grep -Fq 'argument-hint: "[fleet config dir: /abs/path]"' "$CORE_SRC/commands/resource-broker.md"; then ok "the /engsys:resource-broker command exists and takes the fleet config dir"; else bad "the /engsys:resource-broker command exists and takes the fleet config dir"; fi
+
+echo "-- --fleet scaffold: launch carries FLEET_ID, status shows the registry"
+INST="$FL"; STATE="$INST/.fleet"
+rm -rf "$FAKE/tmux" "$HOME/git/worktrees"; : >"$FAKE/tmux.log"
+run "$INST/scripts/fleet" launch
+rc_is "scripts/fleet launch exits 0" 0
+hasnt "…the scaffolded registry raises no warning" "$OUT" "federation registry"
+eq "env files: every token rendered" "$(unrendered "$STATE"/env/*.env)" ""
+has "session env: FLEET_ID" "$(cat "$STATE/env/session.env")" "FLEET_ID=alice"
+has "session env: FEDERATION_FILE" "$(cat "$STATE/env/session.env")" "FEDERATION_FILE=$INST/federation.yml"
+has "security env: FLEET_ID too" "$(cat "$STATE/env/security.env")" "FLEET_ID=alice"
+run "$INST/scripts/fleet" federation status
+rc_is "scripts/fleet federation status exits 0" 0
+has "status: the fleet" "$OUT" "fleet: alice"
+has "status: merge is this fleet's" "$OUT" "home alice (this fleet)"
 
 # =============================================================================================
 pass="$(wc -l <"$T/pass.log" | tr -d ' ')"; fail="$(wc -l <"$T/fail.log" | tr -d ' ')"

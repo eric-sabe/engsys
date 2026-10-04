@@ -130,7 +130,8 @@ how confident a disposition looks.
      `mnt:fix-queued` / `mm:ready`.
    - **`phase: auto_drive` (Phase 2+):** **auto-fix** class → branch, apply,
      local CLI review + `pnpm precheck`, open the PR with the
-     `<!-- mm-handoff -->` block (with `session: <session_name>`) written into
+     `<!-- mm-handoff -->` block (with `session: <session_name>`, or
+     `<FLEET_ID>:<session_name>` when the session env sets `FLEET_ID`) written into
      the PR body, label `mm:ready`, label the finding `mnt:fix-queued`, nudge
      the merge orchestrator (§ Cross-session messaging).
      **Expert-assisted** class → same, but open as a plain draft, post a

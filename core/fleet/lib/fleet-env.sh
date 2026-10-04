@@ -39,6 +39,9 @@ export FLEET_INSTANCE="$FLEET_REPO" FLEET_REPO FLEET_STATE ENV_DIR FLEET_KIT_DIR
 # Derived values are always derived (never inherited from the caller's environment); a conf file
 # may still set them.
 unset TMUX_SESSION LOG_DIR
+# The fleet's identity comes only from its own config files, never from a caller's environment (a
+# session env carries FLEET_ID too).
+unset FLEET_ID FEDERATION_FILE
 fleet_load_conf "$FLEET_REPO/fleet/fleet.conf"
 [ -n "${FLEET_ORG:-}" ] || fleet_die "FLEET_ORG is not set in $FLEET_REPO/fleet/fleet.conf"
 [ -f "$HOME/.config/$FLEET_ORG/fleet.local.conf" ] && fleet_load_conf "$HOME/.config/$FLEET_ORG/fleet.local.conf"
@@ -51,15 +54,23 @@ fleet_load_conf "$FLEET_REPO/fleet/fleet.conf"
 : "${PIN_WAIT_MAX_MIN:=240}"
 : "${LOG_DIR:=$HOME/Library/Logs/${FLEET_ORG}-fleet}"
 # `fleet notify` config. SLACK_ENV: path to the bot's env file (SLACK_BOT_TOKEN, SLACK_CHANNEL_ID,
-# SLACK_OPERATORS_GROUP_ID, optional SLACK_OPERATOR_ID, FLEET_ID) — empty means Slack is
+# SLACK_OPERATORS_GROUP_ID, optional SLACK_OPERATOR_ID, FLEET_ID unless fleet.conf sets it) — empty means Slack is
 # unconfigured, notify falls back straight to NOTIFY_FALLBACK_ISSUE (owner/repo#N, also empty-ok).
 : "${SLACK_ENV:=}"
 : "${NOTIFY_FALLBACK_ISSUE:=}"
+# Multi-fleet registry (docs/multi-fleet.md § 1). FLEET_ID unset = single-fleet mode, unchanged.
+# FEDERATION_FILE is relative to the instance repo unless absolute; no file = single-fleet mode too.
+: "${FLEET_ID:=}"
+if [ -n "$FLEET_ID" ] && ! [[ "$FLEET_ID" =~ ^[a-z][a-z0-9-]{1,20}$ ]]; then
+  fleet_die "FLEET_ID '$FLEET_ID' must be 2-21 characters: a lowercase letter, then lowercase letters, digits or hyphens"
+fi
+: "${FEDERATION_FILE:=federation.yml}"
+case "$FEDERATION_FILE" in /*) ;; *) FEDERATION_FILE="$FLEET_REPO/$FEDERATION_FILE" ;; esac
 for _k in PIN_REPO PIN_DIR; do
   [ -n "${!_k:-}" ] || fleet_die "$_k is not set in $FLEET_REPO/fleet/fleet.conf (or ~/.config/$FLEET_ORG/fleet.local.conf)"
 done
 unset _k
-export FLEET_ORG PIN_REPO PIN_DIR ENGSYS_DIR ENGSYS_MARKETPLACE INSTANCE_MARKETPLACE READY_LABEL REVIEW_BLOCK_REGEX PIN_WAIT_MAX_MIN LOG_DIR SLACK_ENV NOTIFY_FALLBACK_ISSUE
+export FLEET_ORG PIN_REPO PIN_DIR ENGSYS_DIR ENGSYS_MARKETPLACE INSTANCE_MARKETPLACE READY_LABEL REVIEW_BLOCK_REGEX PIN_WAIT_MAX_MIN LOG_DIR SLACK_ENV NOTIFY_FALLBACK_ISSUE FLEET_ID FEDERATION_FILE
 
 command -v jq >/dev/null || fleet_die "jq is required"
 
