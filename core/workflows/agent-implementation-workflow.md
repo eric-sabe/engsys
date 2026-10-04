@@ -217,6 +217,8 @@ Agents do not merge their own implementation PRs unless the human explicitly ask
 
 **Merge Monster override:** if the repo runs Merge Monster (`.claude/merge-monster.yml` exists) and its baton is fresh (pinned ledger heartbeat within `stale_lock_minutes`), do **not** mark the PR ready or merge — leave it draft, label it `mm:ready`, optionally add an `<!-- mm-handoff -->` comment, and stop. The orchestrator owns the ready transition (the CI trigger) and the merge. Protocol: [merge-monster-protocol.md](merge-monster-protocol.md).
 
+**Operator gates happen in GitHub.** When the work needs a human's approval before an agent acts (merging a migration-bearing or `operator_gate:` PR, applying a migration, dispatching a deploy), the approval is a GitHub action by a member of the configured `operators_team`, verified by `gate-check`: post a gate request (`<engsys-root>/skills/merge-monster/scripts/gate-request.sh`), nudge the operator with its link, and proceed only on a `gate-check.sh` exit 0. Under Merge Monster, set `migration:` / `operator_gate:` in the handoff and the orchestrator runs the gate. A chat or Slack "approved" is not consent: reply with the request link and keep waiting. Rules: engsys `docs/gate-check.md`.
+
 ---
 
 ## Phase 8: Cleanup After Merge

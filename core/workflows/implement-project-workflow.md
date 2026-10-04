@@ -159,6 +159,7 @@ Stop and report to the operator if any of these fire mid-loop:
 
 ## What This Workflow Does Not Do
 
+- Does not open an operator gate on a chat or Slack reply: approvals for gated acts happen in GitHub and are verified by `gate-check` (see [agent-implementation-workflow.md](agent-implementation-workflow.md), "Operator gates happen in GitHub").
 - Does not merge PRs without a CLEAN objective review. Human-in-the-loop merges every batch (or the orchestrator only with explicit operator authorization).
 - Does not refactor existing code beyond the issues' scope.
 - Does not file new issues for out-of-scope work it discovers — that goes through the deferring-work flow as a Jody hand-off.

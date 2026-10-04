@@ -257,8 +257,11 @@ a federation the rule is simple: **chat and Slack are for asking; GitHub is for 
    how to approve. It carries a marker:
 
    ```markdown
-   <!-- gate-request id="migrate-prod-20261004-412" kind="migration" target="acme/app#412@3f9c2e1" -->
+   <!-- gate-request id="migrate-prod-20261004-412" kind="migration" target="acme/app#412@3f9c2e1…" -->
    ```
+
+   On a PR the target carries the **full** 40-character head SHA (shortened here); a short prefix is
+   cheap to collide.
 
 2. **Nudge.** The agent tells the operator, in its own session when the operator is there and in Slack,
    mentioning the fleet's operator from the registry, with a link to the request. The nudge says
@@ -281,15 +284,17 @@ accepts an approval only if all of these hold:
 - The actor is a **User** (not a Bot) and a member of `operators_team`, checked live through the
   team-membership API.
 - The approval is **specific**: the review is on the gate request's head SHA, or the comment names the
-  gate id.
+  gate id. A `merge` gate takes only a review and every other kind only the comment, so a merge
+  approval never doubles as approval to run a migration in production.
 - It is **newer** than the gate request and than the PR's latest push.
 - The comment **has not been edited** since it was posted (`updated_at` equals `created_at`), so a later
   edit cannot turn a different comment into an approval.
 - For a merge, GitHub's own review state agrees: `reviewDecision` is `APPROVED`, with no outstanding
   change requests.
 
-The agent records the verified approval (who, when, link) in the PR's handoff block or on the ledger.
-`project-closeout` mines that record later.
+The agent records the verified approval (who, when, link) in its journal and as a one-line comment on
+the thread. `project-closeout` mines that record later. Implementation, exit codes and the latest-push
+signal: [gate-check.md](gate-check.md).
 
 ### Enforce it in GitHub too
 

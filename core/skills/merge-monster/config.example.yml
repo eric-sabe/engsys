@@ -27,7 +27,8 @@ conflict_magnets: []
   # - pnpm-lock.yaml
   # - .github/workflows/ci.yml
 
-# Globs marking migration-bearing PRs: parked mm:blocked + operator ping.
+# Globs marking migration-bearing PRs: parked mm:blocked behind a `merge` gate
+# that a human approves with a PR review (SKILL.md § Operator gates).
 migration_globs: []
   # - services/database/migrations/**
 
@@ -47,6 +48,12 @@ dependabot:
 escalation:
   slack_channel: ""          # empty → escalate via GitHub only (label + comments)
 
+# GitHub team (org/team-slug) whose members approve operator gates on GitHub:
+# a PR review Approve for merges, `/approve <gate-id>` for other acts. Checked
+# live by scripts/gate-check.sh (docs/gate-check.md). Unset → every gate stays
+# shut (fail closed). The gh identity needs org Members: read.
+operators_team: ""           # e.g. acme/fleet-operators
+
 fix_attempts_max: 2          # fix-agent dispatches per PR before escalating
 ci_reruns_max: 1             # flake re-runs per PR per cause
 
@@ -58,10 +65,8 @@ ci_reruns_max: 1             # flake re-runs per PR per cause
 #   notify_author: true           # nudge the handoff `session:` on bounce/escalate/merge
 #   namespace_prefix: <ns>-       # only address / trust names with this prefix (the namespace fence)
 #   inbound: accept               # required crossSessionInbound value for an autonomous session
-#   operator_slack:               # optional: read operator replies to escalations (gated, best-effort)
-#     enabled: false
-#     channel_id: C0XXXXXXXXX     # the escalation Slack channel id
-#     operator_user_ids: [UXXXXXXXXX]  # allowlist — a reply from anyone else is ignored
+#   operator_slack:               # DEPRECATED, ignored: Slack replies no longer grant decisions
+#     enabled: false              # (approval happens in GitHub; see operators_team). Removed next release.
 
 # Optional subagent liveness (docs/subagent-liveness.md in engsys; scripts
 # mm-agent-reg.sh + mm-agent-watch.sh in this skill's scripts/). Registry row +

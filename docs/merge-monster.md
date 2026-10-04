@@ -166,9 +166,11 @@ wake — ordering is a *function of current state*, not a static list.
    actually conflicting or semantically overlaps files a just-merged PR
    changed (in which case it wants a fresh CI run anyway).
 5. **Migration-bearing PRs get an operator window, not priority.** Where
-   applying migrations is an operator-only action, such PRs are parked
-   `mm:blocked (migration)` and the operator is pinged; they merge when acked.
-   They never block the rest of the queue.
+   applying migrations is an operator-only action, such PRs (and PRs whose
+   handoff sets `operator_gate:`) are parked `mm:blocked (operator gate)`
+   behind a gate request; they merge when `gate-check` verifies a human's
+   review approval on GitHub ([gate-check.md](gate-check.md)). They never
+   block the rest of the queue.
 6. **Small-and-old beats big-and-fresh** (tiebreak). FIFO by ready-time, but a
    five-line fix doesn't rot behind a two-thousand-line phase PR that arrived
    an hour ago.
@@ -240,7 +242,8 @@ to save minutes. So MM never trusts the badge:
   and escalate or leave for triage.
 - **Never auto:** major bumps, runtime-dependency bumps, Docker base images,
   language/runtime engine bumps. When several accumulate, MM spawns one agent
-  to run the repo's Dependabot-triage playbook as a batch, or escalates.
+  to run the repo's Dependabot-triage playbook as a batch, or escalates. One
+  the operator wants merged anyway goes through a `merge` gate.
 
 ## 9. Help agents & escalation
 
@@ -257,7 +260,9 @@ MM itself is a thin decision loop; hands-on work is dispatched:
 **Escalation** = `mm:escalated` label + a diagnosis comment on the PR +
 a message on the configured channel (e.g. Slack). The message says what's
 blocked, what MM tried, and what decision or action is needed. Escalations
-never stall the queue.
+never stall the queue. When the decision is a human approval, the message
+links a gate request: Slack is for asking, GitHub is for approving
+([gate-check.md](gate-check.md)).
 
 ## 10. Ledger & inspectability
 
@@ -300,6 +305,7 @@ dependabot:
   auto_merge: [patch_dev, minor_dev, patch_ci, minor_ci, grouped_patch]
 escalation:
   slack_channel: ""          # empty → GitHub-only escalation
+operators_team: ""           # org/team-slug whose members approve gates on GitHub; unset → gates stay shut
 fix_attempts_max: 2
 ci_reruns_max: 1
 ```
@@ -310,6 +316,9 @@ ci_reruns_max: 1
   `--force`; never push to the default branch.
 - Never resolve substantive review threads to unblock a merge.
 - Never apply database migrations where that is operator-only — ping instead.
+- Never treat an operator decision as given until `gate-check` verifies it on
+  GitHub ([gate-check.md](gate-check.md)); a chat or Slack "approved" gets the
+  gate request link back.
 - Hard caps: fix attempts (2), CI re-runs (1 per cause), then escalate.
 - Everything MM cannot resolve becomes an **escalation with a diagnosis**,
   never a silent stall — and never a silent drop.

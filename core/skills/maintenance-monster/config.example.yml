@@ -70,7 +70,13 @@ max_concurrent_fix_prs: 3 # caps a vuln wave from becoming a PR storm (Phase 2+)
 fix_attempts_max: 2 # fix-agent dispatches per finding before escalating
 
 suppression:
-  signoff_label: risk-accepted # operator-only; the gate for any dismissal — no label, no suppression
+  signoff_label: risk-accepted # the visible record of a VERIFIED risk-accepted gate; a label alone approves nothing
+
+# GitHub team (org/team-slug) whose members approve operator gates on GitHub
+# (risk acceptance, expert-assisted and never-auto handoffs). Checked live by
+# merge-monster/scripts/gate-check.sh (docs/gate-check.md). Unset → every gate
+# stays shut (fail closed). The gh identity needs org Members: read.
+operators_team: "" # e.g. acme/fleet-operators
 
 # Standing false-positive policies (optional; omit to keep every dismissal behind `risk-accepted`).
 # The operator signs off ONCE, on a reviewed change that adds the policy, instead of per alert.

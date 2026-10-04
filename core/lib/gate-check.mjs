@@ -1,0 +1,587 @@
+#!/usr/bin/env node
+// gate-check.mjs — human approval happens in GitHub: post gate requests, verify approvals.
+//
+// Zero-dependency ESM, Node >= 20. The only external process is `gh` (injectable for tests).
+// Design: docs/multi-fleet.md § 6 "Human approval happens in GitHub" and docs/gate-check.md.
+//
+// Public API (pure; every network-touching function takes an `api` object, see `ghApiClient`):
+//   GATE_ID_RE, KIND_RE, TARGET_RE, OPERATORS_TEAM_RE   input formats
+//   EXIT                                    { APPROVED: 0, ERROR: 1, WAITING: 3, DENIED: 4 }
+//   parseGateRequest(body)                  -> { id, kind, target } | null (marker in leading position)
+//   parsePrTarget(target)                   -> { repo, number, sha } | null (`owner/repo#N@<40-hex>`)
+//   parseCommand(body)                      -> { verb: 'approve'|'deny', id, reason } | null
+//   renderGateRequest(opts)                 -> the request comment body
+//   newGateId(kind, now?)                   -> a fresh `<kind>-<yyyymmddhhmmss>-<4 hex>` id
+//   evaluateGate(facts, opts)               -> verdict; pure, the whole rule set lives here
+//   collectFacts(api, opts)                 -> facts; reads GitHub through `api`
+//   checkGate(api, opts)                    -> verdict (collectFacts + evaluateGate)
+//   postGateRequest(api, opts)              -> { id, url, comment_id, author }
+//
+// CLI:
+//   node gate-check.mjs check   --repo o/r (--pr N | --issue N) --gate ID --operators-team org/slug
+//                               [--requester LOGIN] [--target T] [--kind K]
+//   node gate-check.mjs request --repo o/r (--pr N | --issue N) --kind K --target T --what TEXT
+//                               [--gate ID] [--operators-team org/slug] [--dry-run]
+// `check` prints one JSON verdict on stdout. Exit: 0 approved, 3 waiting, 4 denied, 1 error (bad
+// input, missing config, unreadable API, stale or ambiguous gate). Anything unexpected fails closed.
+//
+// Trust model. Every comment and review body is attacker-influenceable text. It is matched against
+// two strict, anchored grammars (the request marker and `/approve|/deny <id>`) and otherwise never
+// interpreted, executed, or echoed, with one exception: a deny reason, which is reported defanged
+// and inside the untrusted-data envelope (see untrusted.mjs). Identity comes only from API fields
+// (`user.login`, `user.type`) plus a live team-membership read, never from text.
+
+import { execFile } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
+import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { parseArgs } from 'node:util';
+import { wrapUntrusted } from './untrusted.mjs';
+
+export const EXIT = Object.freeze({ APPROVED: 0, ERROR: 1, WAITING: 3, DENIED: 4 });
+
+/** Gate ids: lowercase slug, starts and ends alphanumeric, at most 80 characters. */
+export const GATE_ID_RE = /^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?$/;
+/** Gate kinds: lowercase slug (`merge`, `migration`, `risk-accepted`, `deploy`, `dependency`, ...). */
+export const KIND_RE = /^[a-z][a-z0-9-]{0,39}$/;
+/** Targets: a conservative charset with no quote, angle bracket, whitespace or comment terminator. */
+export const TARGET_RE = /^[A-Za-z0-9._/#@:+=-]{1,200}$/;
+/** `org/team-slug`. */
+export const OPERATORS_TEAM_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/;
+const REPO_RE = /^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/;
+
+/** Kinds approved by a PR review (anything that merges). Every other kind needs `/approve <id>`. */
+export const REVIEW_KINDS = new Set(['merge']);
+
+/** The request marker, anchored at the very start of the comment body. */
+const REQUEST_MARKER_RE = /^<!-- gate-request id="([^"\n]*)" kind="([^"\n]*)" target="([^"\n]*)" -->/;
+const PR_TARGET_RE = /^([A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100})#([1-9][0-9]{0,9})@([0-9a-f]{40})$/;
+// `/approve <id>`: the whole (trimmed) body, one line, exact verb, lowercase.
+const APPROVE_RE = /^\/approve[ \t]+(\S+)$/;
+// `/deny <id> [reason]`: verb + id on the first line, an optional reason after whitespace.
+const DENY_RE = /^\/deny[ \t]+([^\s]+)(?:\s+([\s\S]*))?$/;
+const MAX_PAGES = 50; // 5000 items per list; beyond that we fail closed rather than read partially
+
+// ---------------------------------------------------------------------------------------------
+// parsing (pure)
+// ---------------------------------------------------------------------------------------------
+
+/** Parse a gate-request marker at the START of `body`. Returns null unless every field is valid. */
+export function parseGateRequest(body) {
+  if (typeof body !== 'string') return null;
+  const m = REQUEST_MARKER_RE.exec(body);
+  if (!m) return null;
+  const [, id, kind, target] = m;
+  if (!GATE_ID_RE.test(id) || !KIND_RE.test(kind) || !TARGET_RE.test(target)) return null;
+  return { id, kind, target };
+}
+
+/** Parse a SHA-bound PR target `owner/repo#N@<full 40-hex sha>`; null for any other shape. */
+export function parsePrTarget(target) {
+  const m = typeof target === 'string' ? PR_TARGET_RE.exec(target) : null;
+  return m ? { repo: m[1], number: Number(m[2]), sha: m[3] } : null;
+}
+
+/**
+ * Parse a human command. The trimmed body must be exactly `/approve <id>` (nothing else, one line)
+ * or start `/deny <id>` followed by an optional reason. Quoted replies, extra prose, other casing
+ * and look-alike characters all fail the grammar. The id is returned raw; callers compare it to the
+ * gate id with strict equality.
+ */
+export function parseCommand(body) {
+  if (typeof body !== 'string') return null;
+  const text = body.trim();
+  let m = APPROVE_RE.exec(text);
+  if (m) return { verb: 'approve', id: m[1], reason: '' };
+  m = DENY_RE.exec(text);
+  if (m) return { verb: 'deny', id: m[1], reason: m[2] ?? '' };
+  return null;
+}
+
+/** A fresh, unique-enough gate id: `<kind>-<yyyymmddhhmmss>-<4 hex>` (UTC). */
+export function newGateId(kind, now = new Date()) {
+  if (!KIND_RE.test(kind)) throw new TypeError(`gate-check: invalid kind ${JSON.stringify(kind)}`);
+  const stamp = now.toISOString().replace(/[-:T]/g, '').slice(0, 14);
+  return `${kind}-${stamp}-${randomBytes(2).toString('hex')}`;
+}
+
+/** Collapse agent-supplied prose to one safe line: no comment markers, no control characters. */
+function oneLine(s, max) {
+  return String(s ?? '')
+    .replace(/<!--|-->/g, ' ')
+    .replace(/[\p{Cc}\p{Cf}]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, max);
+}
+
+/**
+ * Render the request comment. The marker is always line 1 (check reads it only in leading
+ * position). `what` is agent prose and is flattened to one line with comment markers removed.
+ */
+export function renderGateRequest({ id, kind, target, what, operatorsTeam, thread = 'pr' }) {
+  if (!GATE_ID_RE.test(id ?? '')) throw new TypeError(`gate-check: invalid gate id ${JSON.stringify(id)}`);
+  if (!KIND_RE.test(kind ?? '')) throw new TypeError(`gate-check: invalid kind ${JSON.stringify(kind)}`);
+  if (!TARGET_RE.test(target ?? '')) throw new TypeError(`gate-check: invalid target ${JSON.stringify(target)}`);
+  const pr = parsePrTarget(target);
+  if ((REVIEW_KINDS.has(kind) || thread === 'pr') && !pr) {
+    throw new TypeError('gate-check: a gate on a pull request (and every merge gate) needs a target of the form owner/repo#N@<40-hex head sha>');
+  }
+  const who = operatorsTeam ? `a member of @${operatorsTeam}` : 'a member of the operators team';
+  const lines = [
+    `<!-- gate-request id="${id}" kind="${kind}" target="${target}" -->`,
+    `### Gate request \`${id}\` (${kind})`,
+    '',
+    `**What:** ${oneLine(what, 300) || '(not stated)'}`,
+    `**Target:** \`${target}\``,
+    '',
+  ];
+  if (REVIEW_KINDS.has(kind)) {
+    lines.push(
+      `**To approve:** ${who} submits a PR review with **Approve** on commit \`${pr.sha.slice(0, 12)}\` ` +
+        '(Files changed, then Review changes, then Approve). Pushing new commits invalidates the approval; ' +
+        'a review submitted before this request does not count.',
+    );
+  } else {
+    lines.push(
+      `**To approve:** ${who} comments exactly \`/approve ${id}\` on this ${thread === 'pr' ? 'pull request' : 'issue'}.`,
+      `**To refuse:** comment \`/deny ${id} <reason>\`.`,
+      '',
+      'Edited comments do not count; post a new one. Chat or Slack replies do not open this gate.',
+    );
+  }
+  return lines.join('\n') + '\n';
+}
+
+// ---------------------------------------------------------------------------------------------
+// the rule set (pure)
+// ---------------------------------------------------------------------------------------------
+
+const ts = (s) => {
+  const t = typeof s === 'string' ? Date.parse(s) : NaN;
+  return Number.isFinite(t) ? t : NaN;
+};
+const isHumanUser = (u) =>
+  !!u && u.type === 'User' && typeof u.login === 'string' && u.login.length > 0 && !/\[bot\]$/i.test(u.login);
+const fail = (gate, message, extra = {}) => ({ status: 'error', exit: EXIT.ERROR, gate, message, ...extra });
+
+/** Defang + flatten + cap a deny reason, then wrap it as untrusted data. Never interpreted. */
+function untrustedReason(reason) {
+  const flat = String(reason ?? '').replace(/[\p{Cc}\p{Cf}]/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, 300);
+  return wrapUntrusted(flat || '(no reason given)', { header: 'deny reason (operator comment text)' });
+}
+
+/**
+ * Decide a gate from already-collected facts. Pure: no I/O, so every rule is unit-testable.
+ *
+ * facts = {
+ *   repo, number, thread: 'pr'|'issue',
+ *   comments: [issue comment objects, REST shape],
+ *   pr: { state, head_sha, merged } | null,          // PR threads only
+ *   reviews: [review objects, REST shape] | null,    // PR threads only
+ *   reviewDecision: 'APPROVED'|'CHANGES_REQUESTED'|'REVIEW_REQUIRED'|null,  // PR threads only
+ *   pushFloor: { at: ISO, source } | null,           // latest push signal, PR threads only
+ *   members: Map<login, 'active'|'pending'|'none'>,  // live team-membership reads
+ * }
+ * opts = { gate, operatorsTeam, requester?, target?, kind? }
+ */
+export function evaluateGate(facts, opts) {
+  const gate = opts.gate;
+  if (!opts.operatorsTeam) return fail(gate, 'operators_team is not configured; refusing to open any gate (fail closed)');
+  if (!GATE_ID_RE.test(gate ?? '')) return fail(gate, `invalid gate id ${JSON.stringify(gate)}`);
+
+  // 1. Find the gate request: exactly one, unedited, from the requester when one is pinned.
+  const requests = [];
+  for (const c of facts.comments) {
+    const req = parseGateRequest(c.body);
+    if (!req || req.id !== gate) continue;
+    if (opts.requester && c.user?.login !== opts.requester) continue;
+    requests.push({ comment: c, ...req });
+  }
+  if (requests.length === 0) return fail(gate, `no gate request with id "${gate}" on ${facts.repo}#${facts.number}`);
+  if (requests.length > 1) {
+    return fail(gate, `ambiguous: ${requests.length} gate requests carry id "${gate}"; post a new request with a fresh id (pin --requester)`);
+  }
+  const request = requests[0];
+  const rc = request.comment;
+  const requestAt = ts(rc.created_at);
+  if (!Number.isFinite(requestAt)) return fail(gate, 'gate request has no readable created_at');
+  if (rc.updated_at !== rc.created_at) return fail(gate, 'gate request was edited after posting; post a new request');
+  if (opts.target && opts.target !== request.target) {
+    return fail(gate, `gate request target "${request.target}" does not match the expected target "${opts.target}"`);
+  }
+  if (opts.kind && opts.kind !== request.kind) {
+    return fail(gate, `gate request kind "${request.kind}" does not match the expected kind "${opts.kind}"`);
+  }
+
+  const base = {
+    gate,
+    kind: request.kind,
+    target: request.target,
+    request: { url: rc.html_url, at: rc.created_at, author: rc.user?.login ?? null },
+  };
+  const reviewKind = REVIEW_KINDS.has(request.kind);
+  const prTarget = parsePrTarget(request.target);
+
+  // 2. SHA binding and the time floor ("newer than the request and the PR's latest push").
+  let floor = requestAt;
+  let floorSource = 'gate request';
+  if (facts.thread === 'pr') {
+    if (!facts.pr || !/^[0-9a-f]{40}$/.test(facts.pr.head_sha ?? '')) return fail(gate, 'could not read the PR head', base);
+    if (!prTarget) return fail(gate, 'a gate on a pull request must be SHA-bound (target owner/repo#N@<40-hex head sha)', base);
+    if (prTarget.repo.toLowerCase() !== facts.repo.toLowerCase() || prTarget.number !== facts.number) {
+      return fail(gate, `gate target ${request.target} names a different PR than ${facts.repo}#${facts.number}`, base);
+    }
+    if (prTarget.sha !== facts.pr.head_sha) {
+      return {
+        ...fail(gate, `stale: the PR head moved to ${facts.pr.head_sha.slice(0, 12)} since the request (target ${prTarget.sha.slice(0, 12)}); post a new gate request`, base),
+        stale: true,
+      };
+    }
+    const push = facts.pushFloor ? ts(facts.pushFloor.at) : NaN;
+    if (facts.pushFloor && !Number.isFinite(push)) return fail(gate, 'could not read the latest push time', base);
+    if (Number.isFinite(push) && push > floor) {
+      floor = push;
+      floorSource = facts.pushFloor.source;
+    }
+  } else if (prTarget) {
+    return fail(gate, 'a SHA-bound PR target must be checked with --pr, not --issue', base);
+  }
+  if (reviewKind) {
+    if (facts.thread !== 'pr' || !prTarget) return fail(gate, `a ${request.kind} gate must be SHA-bound to a PR (owner/repo#N@sha)`, base);
+    if (facts.pr.state !== 'open') return fail(gate, `the PR is ${facts.pr.merged ? 'merged' : facts.pr.state}; a ${request.kind} gate needs an open PR`, base);
+  }
+  base.floor = { at: new Date(floor).toISOString(), source: floorSource };
+
+  const qualifies = (user) => {
+    if (!isHumanUser(user)) return 'actor is not a human User account';
+    const state = facts.members.get(user.login);
+    if (state === undefined) return 'team membership was not read';
+    if (state !== 'active') return state === 'pending' ? 'team membership is pending, not active' : `not a member of ${opts.operatorsTeam}`;
+    return null;
+  };
+  const ignored = [];
+  const ignore = (actor, via, url, reason) => ignored.push({ actor: actor ?? null, via, url: url ?? null, reason });
+
+  // 3. Deny: a qualifying `/deny <gate>` newer than the request closes the gate, whatever else
+  //    happened. Deny is the safe direction, so an edited deny still counts.
+  for (const c of facts.comments) {
+    if (c === rc) continue;
+    const cmd = parseCommand(c.body);
+    if (!cmd || cmd.verb !== 'deny' || cmd.id !== gate) continue;
+    const at = ts(c.created_at);
+    if (!(at > requestAt)) { ignore(c.user?.login, 'comment', c.html_url, 'deny is not newer than the gate request'); continue; }
+    const why = qualifies(c.user);
+    if (why) { ignore(c.user?.login, 'comment', c.html_url, `deny ignored: ${why}`); continue; }
+    return {
+      ...base,
+      status: 'denied',
+      exit: EXIT.DENIED,
+      denial: { actor: c.user.login, at: c.created_at, url: c.html_url, reason: untrustedReason(cmd.reason) },
+      ignored,
+    };
+  }
+
+  // 4a. Review kinds: the qualifying reviewer's LATEST decisive review is APPROVED, on the target
+  //     SHA, newer than the floor; and GitHub's own state agrees.
+  if (reviewKind) {
+    const latest = new Map(); // login -> latest decisive review (APPROVED / CHANGES_REQUESTED / DISMISSED)
+    const ordered = [...(facts.reviews ?? [])].sort((a, b) => ts(a.submitted_at) - ts(b.submitted_at) || a.id - b.id);
+    for (const r of ordered) {
+      if (!['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(r.state)) continue;
+      if (r.user?.login) latest.set(r.user.login, r);
+    }
+    const changesRequested = [...latest.values()].filter((r) => r.state === 'CHANGES_REQUESTED').map((r) => r.user.login);
+    let approval = null;
+    for (const r of latest.values()) {
+      if (r.state !== 'APPROVED') continue;
+      const url = r.html_url;
+      if (r.commit_id !== prTarget.sha) { ignore(r.user.login, 'review', url, `approval is on ${String(r.commit_id).slice(0, 12)}, not the gate's head`); continue; }
+      const at = ts(r.submitted_at);
+      if (!(at > floor)) { ignore(r.user.login, 'review', url, `approval is not newer than the ${floorSource}`); continue; }
+      const why = qualifies(r.user);
+      if (why) { ignore(r.user.login, 'review', url, why); continue; }
+      if (!approval || at > ts(approval.submitted_at)) approval = r;
+    }
+    const waiting = (reason) => ({ ...base, status: 'waiting', exit: EXIT.WAITING, reason, ignored });
+    if (!approval) return waiting(`no qualifying review approval on ${prTarget.sha.slice(0, 12)} newer than the ${floorSource}`);
+    if (changesRequested.length) return waiting(`outstanding change requests from ${changesRequested.join(', ')}`);
+    if (facts.reviewDecision !== 'APPROVED') {
+      return waiting(
+        facts.reviewDecision
+          ? `GitHub reviewDecision is ${facts.reviewDecision}, not APPROVED`
+          : 'GitHub reviewDecision is empty (the base branch requires no review); add a required-review rule so GitHub agrees',
+      );
+    }
+    return {
+      ...base,
+      status: 'approved',
+      exit: EXIT.APPROVED,
+      approval: { actor: approval.user.login, at: approval.submitted_at, url: approval.html_url, via: 'review', commit: approval.commit_id },
+      ignored,
+    };
+  }
+
+  // 4b. Comment kinds: an unedited `/approve <gate>` from a qualifying human, newer than the floor.
+  let approval = null;
+  for (const c of facts.comments) {
+    if (c === rc) continue;
+    const cmd = parseCommand(c.body);
+    if (!cmd || cmd.verb !== 'approve') continue;
+    if (cmd.id !== gate) { ignore(c.user?.login, 'comment', c.html_url, 'names a different gate id'); continue; }
+    if (c.updated_at !== c.created_at) { ignore(c.user?.login, 'comment', c.html_url, 'comment was edited after posting'); continue; }
+    const at = ts(c.created_at);
+    if (!(at > floor)) { ignore(c.user?.login, 'comment', c.html_url, `approval is not newer than the ${floorSource}`); continue; }
+    const why = qualifies(c.user);
+    if (why) { ignore(c.user?.login, 'comment', c.html_url, why); continue; }
+    if (!approval) approval = c; // comments are oldest-first; the first qualifying one opens the gate
+  }
+  if (!approval) {
+    return { ...base, status: 'waiting', exit: EXIT.WAITING, reason: `no qualifying "/approve ${gate}" comment newer than the ${floorSource}`, ignored };
+  }
+  return {
+    ...base,
+    status: 'approved',
+    exit: EXIT.APPROVED,
+    approval: { actor: approval.user.login, at: approval.created_at, url: approval.html_url, via: 'comment' },
+    ignored,
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// GitHub access
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The thin API layer. `request(method, path, body?)` resolves `{ status, json }` and never throws
+ * on an HTTP status (only on a transport failure); `graphql(query, vars)` resolves the `data`
+ * object or throws. The default implementation shells out to `gh api -i`, which prints the status
+ * line even on 4xx, so a 404 is a value, not an exception.
+ */
+export function ghApiClient({ gh = defaultGh } = {}) {
+  return {
+    async request(method, path, body) {
+      const args = ['api', '-i', '-X', method, path];
+      let input;
+      if (body !== undefined) {
+        args.push('--input', '-');
+        input = JSON.stringify(body);
+      }
+      const raw = await gh(args, input);
+      return parseIncluded(raw);
+    },
+    async graphql(query, vars) {
+      const args = ['api', 'graphql', '-f', `query=${query}`];
+      for (const [k, v] of Object.entries(vars)) args.push(typeof v === 'number' ? '-F' : '-f', `${k}=${v}`);
+      const raw = await gh(args);
+      const parsed = JSON.parse(raw);
+      if (parsed.errors?.length) throw new Error(`graphql: ${parsed.errors.map((e) => e.message).join('; ')}`);
+      return parsed.data;
+    },
+  };
+}
+
+/** Run `gh`; resolve stdout even when gh exits non-zero (`-i` already printed the HTTP status). */
+export function defaultGh(args, input) {
+  return new Promise((resolve, reject) => {
+    const child = execFile('gh', args, { maxBuffer: 64 * 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err && !stdout) reject(new Error(`gh ${args.slice(0, 4).join(' ')} failed: ${String(stderr || err.message).trim()}`));
+      else resolve(stdout);
+    });
+    if (input !== undefined) child.stdin.end(input);
+  });
+}
+
+/** Parse `gh api -i` output: status line, headers, blank line, JSON body. */
+export function parseIncluded(raw) {
+  const text = String(raw ?? '');
+  const m = /^HTTP\/[0-9.]+ (\d{3})/.exec(text);
+  if (!m) throw new Error('gh api returned no HTTP status line');
+  const sep = text.search(/\r?\n\r?\n/);
+  const bodyText = sep === -1 ? '' : text.slice(sep).trim();
+  let json = null;
+  if (bodyText) {
+    try { json = JSON.parse(bodyText); } catch { throw new Error(`gh api returned a non-JSON body (HTTP ${m[1]})`); }
+  }
+  return { status: Number(m[1]), json };
+}
+
+async function getOk(api, path, what) {
+  const { status, json } = await api.request('GET', path);
+  if (status !== 200) throw new Error(`HTTP ${status} while ${what}${json?.message ? `: ${json.message}` : ''}`);
+  return json;
+}
+
+async function listAll(api, path, what) {
+  const out = [];
+  const sep = path.includes('?') ? '&' : '?';
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    const items = await getOk(api, `${path}${sep}per_page=100&page=${page}`, what);
+    if (!Array.isArray(items)) throw new Error(`expected a list while ${what}`);
+    out.push(...items);
+    if (items.length < 100) return out;
+  }
+  throw new Error(`more than ${MAX_PAGES * 100} items while ${what}; refusing to decide on a partial read`);
+}
+
+/**
+ * The PR's latest push signal: the later of (a) the newest `head_ref_force_pushed` timeline event
+ * and (b) the head commit's committer date. A regular push changes the head SHA, which the
+ * SHA binding already catches; (a) catches a force-push back to an earlier SHA; (b) is a cheap
+ * extra floor (it is pusher-controlled, so it can only ever raise the floor, never open a gate).
+ */
+async function latestPush(api, repo, number, headSha) {
+  const timeline = await listAll(api, `/repos/${repo}/issues/${number}/timeline`, 'reading the PR timeline');
+  let best = null;
+  for (const e of timeline) {
+    if (e.event !== 'head_ref_force_pushed') continue;
+    const t = ts(e.created_at);
+    if (Number.isFinite(t) && (!best || t > ts(best.at))) best = { at: e.created_at, source: 'latest force-push' };
+  }
+  const commit = await getOk(api, `/repos/${repo}/commits/${headSha}`, 'reading the head commit');
+  const committed = commit?.commit?.committer?.date;
+  if (typeof committed === 'string' && Number.isFinite(ts(committed)) && (!best || ts(committed) > ts(best.at))) {
+    best = { at: committed, source: 'head commit date' };
+  }
+  return best;
+}
+
+/** Live membership: 'active' | 'pending' | 'none'. 404 means not a member; anything else non-200 throws. */
+async function membership(api, operatorsTeam, login) {
+  const [org, slug] = operatorsTeam.split('/');
+  const { status, json } = await api.request('GET', `/orgs/${org}/teams/${slug}/memberships/${encodeURIComponent(login)}`);
+  if (status === 404) return 'none';
+  if (status !== 200) throw new Error(`HTTP ${status} reading ${operatorsTeam} membership for ${login}${json?.message ? `: ${json.message}` : ''}`);
+  return json?.state === 'active' ? 'active' : json?.state === 'pending' ? 'pending' : 'none';
+}
+
+/** Read everything `evaluateGate` needs. Throws on any API problem (the CLI turns that into exit 1). */
+export async function collectFacts(api, { repo, number, thread, operatorsTeam, gate }) {
+  const [org, slug] = operatorsTeam.split('/');
+  const team = await api.request('GET', `/orgs/${org}/teams/${slug}`);
+  if (team.status !== 200) {
+    throw new Error(
+      `cannot read team ${operatorsTeam} (HTTP ${team.status}); check operators_team and that the token can read org members (Members: read)`,
+    );
+  }
+  const comments = await listAll(api, `/repos/${repo}/issues/${number}/comments`, 'reading comments');
+  const facts = { repo, number, thread, comments, pr: null, reviews: null, reviewDecision: null, pushFloor: null, members: new Map() };
+  if (thread === 'pr') {
+    const pr = await getOk(api, `/repos/${repo}/pulls/${number}`, 'reading the PR');
+    facts.pr = { state: pr.state, merged: !!pr.merged, head_sha: pr.head?.sha };
+    facts.reviews = await listAll(api, `/repos/${repo}/pulls/${number}/reviews`, 'reading reviews');
+    const [owner, name] = repo.split('/');
+    const data = await api.graphql(
+      'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewDecision}}}',
+      { owner, name, number },
+    );
+    facts.reviewDecision = data?.repository?.pullRequest?.reviewDecision ?? null;
+    facts.pushFloor = await latestPush(api, repo, number, facts.pr.head_sha);
+  }
+  // Membership is read only for human candidates: a command naming this gate, or an approving review.
+  const logins = new Set();
+  for (const c of comments) if (parseCommand(c.body)?.id === gate && isHumanUser(c.user)) logins.add(c.user.login);
+  for (const r of facts.reviews ?? []) if (r.state === 'APPROVED' && isHumanUser(r.user)) logins.add(r.user.login);
+  for (const login of logins) facts.members.set(login, await membership(api, operatorsTeam, login));
+  return facts;
+}
+
+function validateCommon({ repo, pr, issue, operatorsTeam }, needTeam) {
+  if (!REPO_RE.test(repo ?? '')) throw new TypeError(`--repo must be owner/name, got ${JSON.stringify(repo)}`);
+  if ((pr === undefined) === (issue === undefined)) throw new TypeError('pass exactly one of --pr N or --issue N');
+  const n = Number(pr ?? issue);
+  if (!Number.isInteger(n) || n < 1 || String(pr ?? issue) !== String(n)) throw new TypeError(`--pr/--issue must be a positive integer`);
+  if (needTeam && !operatorsTeam) throw new TypeError('operators_team is not configured (--operators-team org/slug); gate-check fails closed');
+  if (operatorsTeam && !OPERATORS_TEAM_RE.test(operatorsTeam)) throw new TypeError(`--operators-team must be org/team-slug, got ${JSON.stringify(operatorsTeam)}`);
+  return { number: n, thread: pr !== undefined ? 'pr' : 'issue' };
+}
+
+/** Collect + evaluate. Never throws: problems come back as an `error` verdict (exit 1). */
+export async function checkGate(api, opts) {
+  try {
+    const { number, thread } = validateCommon(opts, true);
+    if (opts.requester !== undefined && !/^[A-Za-z0-9-]+(\[bot\])?$/.test(opts.requester)) throw new TypeError('--requester must be a GitHub login');
+    if (opts.target !== undefined && !TARGET_RE.test(opts.target)) throw new TypeError('--target has characters a gate target never contains');
+    const facts = await collectFacts(api, { repo: opts.repo, number, thread, operatorsTeam: opts.operatorsTeam, gate: opts.gate });
+    return evaluateGate(facts, opts);
+  } catch (err) {
+    return fail(opts.gate ?? null, err?.message ?? String(err));
+  }
+}
+
+/** Post a gate request. Refuses an id already used on the thread. */
+export async function postGateRequest(api, opts) {
+  const { number, thread } = validateCommon(opts, false);
+  const id = opts.gate ?? newGateId(opts.kind);
+  const body = renderGateRequest({ id, kind: opts.kind, target: opts.target, what: opts.what, operatorsTeam: opts.operatorsTeam, thread });
+  const comments = await listAll(api, `/repos/${opts.repo}/issues/${number}/comments`, 'reading comments');
+  if (comments.some((c) => parseGateRequest(c.body)?.id === id)) throw new Error(`a gate request with id "${id}" already exists on ${opts.repo}#${number}`);
+  if (opts.dryRun) return { id, dry_run: true, body };
+  const { status, json } = await api.request('POST', `/repos/${opts.repo}/issues/${number}/comments`, { body });
+  if (status !== 201) throw new Error(`HTTP ${status} posting the gate request${json?.message ? `: ${json.message}` : ''}`);
+  return { id, url: json.html_url, comment_id: json.id, author: json.user?.login ?? null };
+}
+
+// ---------------------------------------------------------------------------------------------
+// CLI
+// ---------------------------------------------------------------------------------------------
+
+const USAGE = `usage:
+  gate-check.mjs check   --repo o/r (--pr N | --issue N) --gate ID --operators-team org/slug
+                         [--requester LOGIN] [--target T] [--kind K]
+  gate-check.mjs request --repo o/r (--pr N | --issue N) --kind K --target T --what TEXT
+                         [--gate ID] [--operators-team org/slug] [--dry-run]
+exit (check): 0 approved, 3 waiting, 4 denied, 1 error`;
+
+export async function main(argv, { api = ghApiClient(), out = process.stdout, err = process.stderr } = {}) {
+  const [cmd, ...rest] = argv;
+  let values;
+  try {
+    ({ values } = parseArgs({
+      args: rest,
+      strict: true,
+      options: {
+        repo: { type: 'string' }, pr: { type: 'string' }, issue: { type: 'string' }, gate: { type: 'string' },
+        'operators-team': { type: 'string' }, requester: { type: 'string' }, target: { type: 'string' },
+        kind: { type: 'string' }, what: { type: 'string' }, 'dry-run': { type: 'boolean' },
+      },
+    }));
+  } catch (e) {
+    err.write(`gate-check: ${e.message}\n${USAGE}\n`);
+    return EXIT.ERROR;
+  }
+  const opts = {
+    repo: values.repo, pr: values.pr, issue: values.issue, gate: values.gate,
+    operatorsTeam: values['operators-team'], requester: values.requester, target: values.target,
+    kind: values.kind, what: values.what, dryRun: !!values['dry-run'],
+  };
+  if (cmd === 'check') {
+    const verdict = await checkGate(api, opts);
+    out.write(JSON.stringify(verdict, null, 2) + '\n');
+    if (verdict.status === 'error') err.write(`gate-check: ${verdict.message}\n`);
+    return verdict.exit;
+  }
+  if (cmd === 'request') {
+    try {
+      if (!opts.kind || !opts.target) throw new TypeError('request needs --kind and --target');
+      const res = await postGateRequest(api, opts);
+      out.write(JSON.stringify(res, null, 2) + '\n');
+      return 0;
+    } catch (e) {
+      err.write(`gate-check: ${e.message}\n`);
+      return EXIT.ERROR;
+    }
+  }
+  err.write(`${USAGE}\n`);
+  return EXIT.ERROR;
+}
+
+const isMain = () => {
+  try { return fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url)); } catch { return false; }
+};
+if (isMain()) {
+  main(process.argv.slice(2)).then(
+    (code) => { process.exitCode = code; },
+    (e) => { process.stderr.write(`gate-check: ${e?.stack ?? e}\n`); process.exitCode = EXIT.ERROR; },
+  );
+}
