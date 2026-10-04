@@ -12,7 +12,9 @@ A `create-worktree` helper takes an issue number and slug, then:
 ```bash
 # Usage: create-worktree <issue-number> <slug>
 ISSUE="$1"; SLUG="$2"
-BRANCH="agent/${ISSUE}-${SLUG}"
+# Multi-fleet (FLEET_ID set): claim the issue first — node <engsys-root>/lib/claim.mjs acquire
+# <owner/repo>#"$ISSUE". No-op in single-fleet mode; a foreign fleet's active claim refuses (exit 4).
+BRANCH="agent/${FLEET_ID:+$FLEET_ID/}${ISSUE}-${SLUG}"
 WORKTREE="../worktrees/issue-${ISSUE}-${SLUG}"
 
 cd <repo-root>
@@ -39,7 +41,12 @@ git worktree list
 # For each non-primary worktree: empty its dir, then `git worktree remove <path> --force`
 git worktree prune
 git branch --merged main | grep 'agent/' | xargs -r git branch -d
+# Multi-fleet: also release each issue's claim (node <engsys-root>/lib/claim.mjs release
+# <owner/repo>#<number>, no-op in single-fleet mode) — on merge here, or on abandonment earlier.
 ```
+
+The `grep 'agent/'` pattern matches both `agent/<slug>` (single-fleet) and `agent/<fleet>/<slug>`
+(multi-fleet) branches, since both contain the `agent/` substring — no change needed there.
 
 ## Single vs. Multi-Package Workflows
 

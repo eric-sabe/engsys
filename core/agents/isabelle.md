@@ -65,8 +65,13 @@ Isabelle is deliberately stack-agnostic. For language/framework/runtime detail, 
 When working on issue batches, use the worktree workflow described in `CLAUDE.md`:
 
 ```bash
+# Multi-fleet (FLEET_ID set): claim every issue in the batch before the worktree —
+#   node <engsys-root>/lib/claim.mjs acquire <owner/repo>#<number>
+# No-op in single-fleet mode. A foreign fleet's active claim refuses (exit 4); stop and report.
+
 # Create worktree AND branch together with -b flag (CRITICAL)
-git worktree add ../worktrees/<phase-or-project-slug> -b agent/<phase-or-project-slug>
+# Branch is fleet-prefixed when FLEET_ID is set (agent/<fleet>/<slug>), unchanged otherwise.
+git worktree add ../worktrees/<phase-or-project-slug> -b agent/${FLEET_ID:+$FLEET_ID/}<phase-or-project-slug>
 cd ../worktrees/<phase-or-project-slug>
 # install dependencies per the project's package manager
 ```

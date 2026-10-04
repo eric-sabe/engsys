@@ -76,8 +76,8 @@ Do not pause for operator approval — the slash command itself is the authoriza
 
 For the chosen phase, follow [agent-implementation-workflow.md](agent-implementation-workflow.md) end-to-end:
 
-1. Assign every issue in the phase to `@me` (skill `update-issue`).
-2. Create the worktree + branch: `agent/project-<num>-phase-<n>-<slug>` (e.g. `agent/project-21-phase-1-schema-dtos`), from `origin/main`.
+1. Assign every issue in the phase to `@me` (skill `update-issue`). **Multi-fleet** (`FLEET_ID` set): also claim every issue in the phase via `node <engsys-root>/lib/claim.mjs acquire <owner/repo>#<number>`, before the worktree. A foreign fleet's active claim on any issue in the phase refuses (exit 4) — stop the phase and report who holds it; a stale claim can be taken over with `--takeover`. No-op in single-fleet mode.
+2. Create the worktree + branch: `agent/${FLEET_ID:+$FLEET_ID/}project-<num>-phase-<n>-<slug>` (e.g. `agent/project-21-phase-1-schema-dtos`, or `agent/bob/project-21-phase-1-schema-dtos` with a fleet id), from `origin/main`.
 3. Set the board `Status` to `In Progress` on every item in this phase (skill `set-board-field`; on GitHub GraphQL `updateProjectV2ItemFieldValue`).
 4. Implement issues sequentially — **one commit per issue** with `(#<num>)` in the subject. Match the patterns of nearby code; do not refactor opportunistically.
 5. Run the project's pre-push gate / precheck (build, lint, unit tests, and path-gated checks for E2E, migrations, IaC, containers). See `/pre-push`.
@@ -135,7 +135,7 @@ Either way the reviewer must: re-run the full gate from scratch (confirm or refu
 
 After the PR is opened, the local review resolved, and the objective review returns CLEAN:
 
-1. Update the board `Status` to `Done` on every item in the completed phase (skill `set-board-field`) — **but only after the phase PR has merged** if the board has an "Auto-close issue" workflow enabled (otherwise `Status=Done` can prematurely close the linked issue while its PR is still a draft). If you need an interim state, use `Status: In Review`.
+1. Update the board `Status` to `Done` on every item in the completed phase (skill `set-board-field`) — **but only after the phase PR has merged** if the board has an "Auto-close issue" workflow enabled (otherwise `Status=Done` can prematurely close the linked issue while its PR is still a draft). If you need an interim state, use `Status: In Review`. **Multi-fleet**: release each issue's claim once the phase PR has merged (`node <engsys-root>/lib/claim.mjs release <owner/repo>#<number>`, no-op in single-fleet mode) — or immediately if the phase is abandoned before merging.
 2. Do **not** wait for the PR to merge before *starting* the next phase (each phase is a separate branch from `main`; rebasing across them after merges is normal) — unless the auto-close caveat above forces you to gate on merge.
 3. Loop to Phase 1 and pick the next unfinished phase.
 
