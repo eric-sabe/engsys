@@ -299,6 +299,25 @@ test('unconfigured Slack (no SLACK_ENV): falls back to a gh issue comment, exits
   assert.match(ghCall, /no slack here/);
 });
 
+test('fallback comment: fleet id from the environment, no Slack mention syntax', async () => {
+  const fakeBin = path.join(TMP, 'fakebin-fallback-id');
+  fs.mkdirSync(fakeBin, { recursive: true });
+  const log = path.join(TMP, 'gh-fallback-id.log');
+  fs.writeFileSync(path.join(fakeBin, 'gh'), `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> '${log}'\ncat >/dev/null || true\n`, { mode: 0o755 });
+
+  const r = await run(['--level', 'alert', 'stuck'], { env: { NOTIFY_FALLBACK_ISSUE: 'acme/app#5', FLEET_ID: 'bob' }, fakeBin });
+  assert.equal(r.code, 0, r.stderr);
+  const ghCall = fs.readFileSync(log, 'utf8');
+  assert.match(ghCall, /\[bob\]/);
+  assert.doesNotMatch(ghCall, /undefined/);
+  assert.doesNotMatch(ghCall, /<!subteam|<@/);
+});
+
+test('composeText: no fleet id means no bracket prefix', () => {
+  const t = composeText({ level: 'info', text: 'hi', re: null, fleetId: '', mention: '' });
+  assert.doesNotMatch(t, /\[|undefined/);
+});
+
 test('unconfigured and no fallback issue: prints a warning, still exits 0', async () => {
   const r = await run(['--level', 'info', 'heads up'], { env: {} });
   assert.equal(r.code, 0, r.stderr);

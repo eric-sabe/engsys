@@ -94,7 +94,7 @@ export function mentionFor(level, cfg) {
  * only), the caller's text, and — for `action`, or any level that was given --re — a GitHub link
  * line that never asks for a Slack reply. */
 export function composeText({ level, text, re, fleetId, mention }) {
-  const head = `[${fleetId}] ${EMOJI[level]}${mention ? ` ${mention}` : ''}`;
+  const head = `${fleetId ? `[${fleetId}] ` : ''}${EMOJI[level]}${mention ? ` ${mention}` : ''}`;
   let body = text ? `${head} ${text}` : head;
   if (re) {
     const line = level === 'action' ? `Approve or act on GitHub: ${re}` : `GitHub: ${re}`;
@@ -219,9 +219,12 @@ async function main() {
 
   const incident = args.incident ? readIncident(stateDir, args.incident) : null;
   const isFirstPost = !!args.incident && !incident;
-  const mention = args.resolve ? '' : (isFirstPost || !args.incident) ? mentionFor(args.level, cfg) : '';
+  // Slack mention syntax means nothing in a GitHub fallback comment, so mention only when posting to Slack.
+  const mention = (args.resolve || unconfiguredReason) ? '' : (isFirstPost || !args.incident) ? mentionFor(args.level, cfg) : '';
+  // FLEET_ID: the Slack env file when configured, else the fleet's own environment (fleet.conf / session env).
+  const fleetId = cfg.FLEET_ID || process.env.FLEET_ID || '';
   const text = args.resolve ? '✅ resolved' : composeText({
-    level: args.level, text: args.text, re: args.re, fleetId: cfg.FLEET_ID, mention,
+    level: args.level, text: args.text, re: args.re, fleetId, mention,
   });
 
   if (unconfiguredReason) {
