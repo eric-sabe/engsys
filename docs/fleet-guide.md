@@ -588,6 +588,51 @@ delete the old service-principal certificate by key id, revoke any review-CLI AP
 `~/.gh-app`, `~/.config/<org>` and `~/.cache/<org>` on the old machine. Add a line to
 `docs/TRANSITION.md`.
 
+### 6.9 Slack (optional)
+
+`fleet notify` is the fleet's own Slack voice: merge-monster, maintenance-monster and the resource
+broker post escalations through it instead of an operator's personal Slack connector (every post then
+appears as the fleet's own bot, not as whoever happens to be signed in). It's optional: without it,
+escalations fall back to a GitHub comment on their own, with no further configuration needed.
+
+**One Slack app per fleet**, created in the org's workspace (for example "Acme Fleet (acme)"), scope
+`chat:write` only, no read scopes, because approvals come from GitHub, never a Slack reply. Manifest:
+
+```yaml
+display_information:
+  name: Acme Fleet (acme)
+oauth_config:
+  scopes:
+    bot: [chat:write]
+settings:
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+```
+
+Install it to the workspace, invite the bot to the escalation channel, then put its bot token in a
+`chmod 600` env file under `~/.config/<org>/`, for example `~/.config/acme/slack.env`:
+
+```sh
+SLACK_BOT_TOKEN=xoxb-...          # the app's Bot User OAuth Token
+SLACK_CHANNEL_ID=C0XXXXXXXXX      # the escalation channel the bot was invited to
+SLACK_OPERATORS_GROUP_ID=S0XXXXXXXXX  # a real Slack user group (e.g. @acme-operators)
+SLACK_OPERATOR_ID=UXXXXXXXXX      # optional: this fleet's own operator, preferred for `action` posts
+FLEET_ID=acme                     # prefixes every post, e.g. "[acme] ..."
+```
+
+Point `fleet.conf`'s `SLACK_ENV` at that path (and optionally `NOTIFY_FALLBACK_ISSUE=owner/repo#N` for
+the GitHub-comment fallback). Never commit the file, and never reuse another bot's token: see
+`docs/multi-fleet.md` § 7 for why. Verify with a real post (never 🚨/🔴; see the message-format rules
+there too):
+
+```bash
+fleet --instance <dir> notify --level info "fleet notify is wired up"
+```
+
+Tests (offline, no real Slack or gh): `node --test core/fleet/notify.test.mjs` (the pure functions and
+the CLI against a stub Slack server) and `bash core/fleet/test/notify.test.sh` (the `bin/fleet` → `fleet.conf`
+→ `notify.sh` wiring); both run under `npm test`.
+
 ---
 
 ## 7. Day-2 operations
@@ -898,6 +943,8 @@ format) overrides it per machine. Environment values for `ENGSYS_REF` / `INSTANC
 | `READY_LABEL` | no | Default `mm:ready` |
 | `PREPUSH_SETUP_CMD` | no | Run in the pin worktree before commit and push (for example an install with a frozen lockfile) |
 | `PIN_WAIT_MAX_MIN` | no | Default 240 |
+| `SLACK_ENV` | no | Path to the `fleet notify` bot env file (§ 6.9). Empty means Slack is unconfigured: escalations fall back to a GitHub comment |
+| `NOTIFY_FALLBACK_ISSUE` | no | `owner/repo#N` for `fleet notify`'s fallback comment when Slack is unconfigured or unreachable. Empty means the message is only printed as a warning |
 | anything else | | Instance-defined template variables (model knobs, and so on) |
 
 `REVIEW_*`, `READY_LABEL`, `PREPUSH_SETUP_CMD` and `PIN_WAIT_MAX_MIN` are read by `fleet pin`.

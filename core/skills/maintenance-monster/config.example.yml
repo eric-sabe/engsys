@@ -101,9 +101,9 @@ suppression:
 #       - { type: absent_path, glob: "**/password*.ts" }
 
 
-escalation:
-  slack_channel: "" # shared with Merge Monster — one channel to watch; empty → GitHub-only
-  channel_id: C0XXXXXXXXX # the escalation Slack channel id
+# Escalation posts via `fleet notify` (shared with Merge Monster — one bot, one
+# channel per fleet; see fleet-guide.md § Slack). Unconfigured/unreachable Slack
+# falls back to a ledger-issue comment on its own. Nothing to set here.
 
 # Cross-session messaging (docs/agent-messaging.md) — reused as-is.
 # Omit the whole block to keep pure poll-based/GitHub-only behavior.

@@ -356,11 +356,15 @@ relaunches you within minutes; startup reconcile recovers from durable state.
 ## Escalation
 
 `mnt:escalated` label + diagnosis comment on the tracking issue (or PR, once
-Phase 2 opens one) + a message to `escalation.slack_channel`
-(shared with Merge Monster — one channel to watch; empty → GitHub-only
-escalation, label + comment): what the finding is, why it doesn't fit auto-fix/expert-assisted,
-what decision is needed. Escalations are never silent and never block the
-rest of the queue — move on to the next finding.
+Phase 2 opens one), then `fleet notify --level action --re <issue-or-PR-url>
+--incident mnt-<finding-id> "<what the finding is, why it doesn't fit
+auto-fix/expert-assisted, what decision is needed>"` (the fleet's own Slack
+voice, shared with Merge Monster (one bot and one channel per fleet); falls
+back to the ledger comment on its own if Slack isn't configured or
+reachable). Escalations are never silent and never block the rest of the
+queue; move on to the next finding. Resolve the incident
+(`fleet notify ... --resolve`) once the finding is fixed, dismissed, or
+handed off.
 
 ## Shutdown (`STOP` event, user interrupt, or pause request)
 
