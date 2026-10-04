@@ -7,7 +7,7 @@
 //
 // Config (read from the process environment, set by notify.sh after sourcing fleet-env.sh):
 //   SLACK_ENV               path to the bot's env file (SLACK_BOT_TOKEN, SLACK_CHANNEL_ID,
-//                           SLACK_OPERATORS_GROUP_ID, optional SLACK_OPERATOR_ID, FLEET_ID).
+//                           optional SLACK_OPERATORS_GROUP_ID, SLACK_OPERATOR_ID, FLEET_ID).
 //                           Empty/missing/incomplete = Slack is "unconfigured" → fallback.
 //   NOTIFY_FALLBACK_ISSUE   owner/repo#N to comment on when Slack can't be reached. Empty = skip
 //                           (print the message as a warning instead).
@@ -78,16 +78,16 @@ export function incidentSlug(key) {
   return String(key).replace(/[^A-Za-z0-9_.-]/g, '_');
 }
 
-/** Build the Slack mention for a level. action prefers the named operator; alert always mentions
- * the group. info never mentions anyone. Returns '' when nothing should be mentioned. */
+/** Build the Slack mention for a level. info never mentions anyone. action prefers the fleet's
+ * named operator, then the operators group; alert prefers the group, then the operator. With
+ * neither configured (for example before a workspace admin has created the group) it degrades to
+ * `<!here>`, which notifies the channel's active members. One mention per incident either way. */
 export function mentionFor(level, cfg) {
   if (level === 'info') return '';
-  if (level === 'action') {
-    if (cfg.SLACK_OPERATOR_ID) return `<@${cfg.SLACK_OPERATOR_ID}>`;
-    return `<!subteam^${cfg.SLACK_OPERATORS_GROUP_ID}>`;
-  }
-  // alert
-  return `<!subteam^${cfg.SLACK_OPERATORS_GROUP_ID}>`;
+  const operator = cfg.SLACK_OPERATOR_ID ? `<@${cfg.SLACK_OPERATOR_ID}>` : '';
+  const group = cfg.SLACK_OPERATORS_GROUP_ID ? `<!subteam^${cfg.SLACK_OPERATORS_GROUP_ID}>` : '';
+  if (level === 'action') return operator || group || '<!here>';
+  return group || operator || '<!here>'; // alert
 }
 
 /** Compose the posted text: fleet prefix, emoji, optional mention (first post of an incident
@@ -105,7 +105,9 @@ export function composeText({ level, text, re, fleetId, mention }) {
 
 /** Which required Slack config keys are missing (config is "unconfigured" if any are). */
 export function missingSlackConfig(cfg) {
-  return ['SLACK_BOT_TOKEN', 'SLACK_CHANNEL_ID', 'SLACK_OPERATORS_GROUP_ID', 'FLEET_ID'].filter((k) => !cfg[k]);
+  // The group, the operator and FLEET_ID are optional: mentions degrade (see mentionFor) and the
+  // fleet id also comes from the environment.
+  return ['SLACK_BOT_TOKEN', 'SLACK_CHANNEL_ID'].filter((k) => !cfg[k]);
 }
 
 // --- incident state (one JSON file per incident key under $FLEET_STATE/notify/) ------------------
