@@ -347,8 +347,9 @@ function defaultNotify({ env = process.env, err = process.stderr } = {}) {
  *   mergeApi  { request(method, path, body) } with a 30 s timeout (default: githubFetchClient)
  *   spawn     (cmd, args, {timeout}) => Promise<{code, stdout, stderr, timedOut}>
  *   prepare   async () => void: resolve the API token; called once an op is past its offline checks
+ *   remoteUrl async (dir) => origin's push URL in that checkout (for a guarded git push)
  */
-export function createBaton({ lease, repo, role, holder, run = null, store, home, now = Date.now, notify = async () => false, mergeApi, spawn, sleep, prepare = null, log = () => {} }) {
+export function createBaton({ lease, repo, role, holder, run = null, store, home, now = Date.now, notify = async () => false, mergeApi, spawn, sleep, prepare = null, remoteUrl = defaultRemoteUrl, log = () => {} }) {
   if (!ROLES.includes(role)) throw new LeaseUsageError(`role must be one of ${ROLES.join(", ")}, got ${JSON.stringify(role)}`);
   if (typeof repo !== "string" || !REPO_PATTERN.test(repo)) throw new LeaseUsageError(`invalid repo ${JSON.stringify(repo)}`);
   const sleepFn = sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
@@ -581,8 +582,62 @@ export function createBaton({ lease, repo, role, holder, run = null, store, home
 
   // -- guard -----------------------------------------------------------------------------------
 
-  async function guard(argv) {
+  /**
+   * Check a push against GitHub before the fence: the PR is open, its head is in this repo and its head
+   * branch is the one being pushed; that branch is not the repo's default branch (case-insensitive);
+   * `origin`'s push URL is this repo. -> { args } or a refusal.
+   */
+  async function preparePush(push, { pr, newBranch = false } = {}) {
+    const refuse = (reason) => ({ refusal: { exit: EXIT.REFUSED, result: { sent: false, code: "push_refused", role, holder, reason } } });
+    const fail = (reason) => ({ refusal: { exit: EXIT.ERROR, result: { sent: false, code: "error", role, holder, reason } } });
+    const hasPr = /^[1-9]\d{0,9}$/.test(String(pr ?? ""));
+    if (hasPr === Boolean(newBranch)) throw new LeaseUsageError("guard: a git push needs exactly one of --pr <n> (update that PR's head branch) or --new-branch (create a branch origin does not have yet)");
+    let repoRes;
+    let probe;
+    try {
+      repoRes = await mergeApi.request("GET", `/repos/${repo}`);
+      probe = hasPr
+        ? await mergeApi.request("GET", `/repos/${repo}/pulls/${pr}`)
+        : await mergeApi.request("GET", `/repos/${repo}/git/ref/heads/${push.branch.split("/").map(encodeURIComponent).join("/")}`);
+    } catch (e) {
+      return fail(`could not read the repo or the ${hasPr ? `PR #${pr}` : "branch"}: ${firstLine(e?.message ?? e)}`);
+    }
+    if (repoRes.status !== 200) return fail(`GitHub answered ${repoRes.status} for the repo`);
+    const defaultBranch = String(repoRes.json?.default_branch ?? "");
+    if (!defaultBranch || push.branch.toLowerCase() === defaultBranch.toLowerCase()) return refuse(`never the default branch (${defaultBranch || "unknown"})`);
+    if (hasPr) {
+      if (probe.status !== 200) return fail(`GitHub answered ${probe.status} for PR #${pr}`);
+      const head = probe.json?.head ?? {};
+      if (probe.json?.state !== "open") return refuse(`PR #${pr} is ${probe.json?.state}`);
+      if (String(head.repo?.full_name ?? "").toLowerCase() !== repo.toLowerCase()) return refuse(`PR #${pr}'s head lives in ${head.repo?.full_name ?? "an unknown repo"}, not ${repo}`);
+      if (head.ref !== push.branch) return refuse(`PR #${pr}'s head branch is ${head.ref}, not ${push.branch}`);
+    } else {
+      // Creating a branch can't clobber anything: it must not exist yet, and no force is allowed.
+      if (probe.status === 200) return refuse(`${push.branch} already exists on origin: update it with --pr <n>`);
+      if (probe.status !== 404) return fail(`GitHub answered ${probe.status} for the branch`);
+      if (push.flags.length) return refuse("--new-branch takes no --force-with-lease");
+    }
+    let url;
+    try { url = await remoteUrl(push.dir); } catch (e) { return refuse(`could not read origin's push URL: ${firstLine(e?.message ?? e)}`); }
+    const urlRepo = repoOfUrl(url);
+    if (!urlRepo || urlRepo.toLowerCase() !== repo.toLowerCase()) return refuse(`origin's push URL (${url}) is not ${repo}`);
+    // No hooks a dispatched agent could have planted in its worktree, no file:// or local transport.
+    return { args: ["-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=never", ...(push.dir ? ["-C", push.dir] : []), "push", ...push.flags, "origin", push.refspec] };
+  }
+
+  async function guard(argv, { pr, newBranch = false } = {}) {
     const cmd = guardCommand(argv);
+    if (cmd.push) {
+      if (/^[1-9]\d{0,9}$/.test(String(pr ?? "")) === Boolean(newBranch)) {
+        throw new LeaseUsageError("guard: a git push needs exactly one of --pr <n> (update that PR's head branch) or --new-branch (create a branch origin does not have yet)");
+      }
+      const pre = precheck();
+      if (!pre.state) return { exit: pre.exit, result: { ...pre.result, sent: false } };
+      if (mergeApi.prepare) await mergeApi.prepare();
+      const p = await preparePush(cmd.push, { pr, newBranch });
+      if (p.refusal) return p.refusal;
+      cmd.args = p.args;
+    }
     return fenced(async ({ elapsedMs }) => {
       const r = await spawn(cmd.exe, cmd.args, { timeout: ACTION_TIMEOUT_MS });
       return {
@@ -715,8 +770,8 @@ function defaultParentAlive() {
 
 /**
  * What `guard` may run: `gh …` (never a merge of any form, which goes through `merge` and its sha
- * pin, and never `--admin`), `git [-C dir] push` for a PR branch (`--force-with-lease`, never a
- * force, delete, the default branch or refs/engsys), or this engsys's own gate-request.sh. The guard is a
+ * pin, and never `--admin`), `git [-C dir] push [--force-with-lease] origin <PR head branch>` (an
+ * allowlist, checked against the PR by guard()), or this engsys's own gate-request.sh. The guard is a
  * fence, not a way around the permission system, so it runs nothing else.
  */
 export function guardCommand(argv) {
@@ -733,16 +788,32 @@ export function guardCommand(argv) {
     return { exe: "gh", args };
   }
   if (exe === "git") {
-    // A push for a PR branch, prepared by a dispatched agent and sent by the monster under the fence.
+    // An ALLOWLIST (#69 review N2): `git [-C <dir>] push [--force-with-lease[=…]] origin <ref>`, where
+    // <ref> is `<branch>` or `HEAD:refs/heads/<branch>`. Which branch is allowed (the PR's head, never
+    // the default branch) and where `origin` really points are checked against GitHub by guard().
     let i = 0;
-    const pre = [];
-    while (args[i] === "-C" && args[i + 1]) { pre.push("-C", args[i + 1]); i += 2; }
-    if (args[i] !== "push") throw new LeaseUsageError("guard runs `git [-C dir] push …` only");
-    const rest = args.slice(i + 1);
-    const bad = rest.find((a) => a === "--force" || a === "-f" || /^-[a-zA-Z]*f/.test(a) && !a.startsWith("--") || a === "--mirror" || a === "--all" || a === "--tags"
-      || a === "--delete" || a === "-d" || a.startsWith("+") || /refs\/engsys\//.test(a) || /(^|:)(refs\/heads\/)?(main|master)$/.test(a));
-    if (bad) throw new LeaseUsageError(`guard refuses git push ${bad}: --force-with-lease to a PR branch only, never a force, a delete, the default branch or refs/engsys`);
-    return { exe: "git", args: [...pre, "push", ...rest] };
+    let dir = null;
+    while (args[i] === "-C") {
+      if (dir !== null || !args[i + 1]) throw new LeaseUsageError("guard: git push takes one -C <dir>");
+      dir = args[i + 1];
+      i += 2;
+    }
+    if (args[i] !== "push") throw new LeaseUsageError("guard runs `git [-C <dir>] push …` only");
+    const flags = [];
+    const pos = [];
+    for (const a of args.slice(i + 1)) {
+      if (a === "--force-with-lease" || /^--force-with-lease=[A-Za-z0-9._/:-]+$/.test(a)) flags.push(a);
+      else if (a.startsWith("-")) throw new LeaseUsageError(`guard refuses git push ${a}: the only flag allowed is --force-with-lease[=…]`);
+      else pos.push(a);
+    }
+    if (pos.length !== 2) throw new LeaseUsageError("guard: git push needs exactly `origin <branch>` or `origin HEAD:refs/heads/<branch>`");
+    const [remote, refspec] = pos;
+    if (remote !== "origin") throw new LeaseUsageError(`guard: git push goes to origin only, not ${JSON.stringify(remote)}`);
+    const m = /^(?:HEAD:refs\/heads\/)?([A-Za-z0-9][A-Za-z0-9._\/-]{0,200})$/.exec(refspec);
+    if (!m || m[1].includes("..") || /^refs\//.test(m[1]) || m[1].endsWith(".lock")) {
+      throw new LeaseUsageError(`guard: refspec ${JSON.stringify(refspec)} must be <branch> or HEAD:refs/heads/<branch> (no delete, tag, force or other ref)`);
+    }
+    return { exe: "git", push: { dir, flags, refspec, branch: m[1] } };
   }
   if (basename(exe) === "gate-request.sh") {
     const own = resolve(HERE, "..", "..", "skills", "merge-monster", "scripts", "gate-request.sh");
@@ -754,6 +825,20 @@ export function guardCommand(argv) {
     return { exe: "bash", args: [real, ...args] };
   }
   throw new LeaseUsageError(`guard runs gh, git push or gate-request.sh only, not ${JSON.stringify(exe)}`);
+}
+
+/** owner/repo from a GitHub remote URL (https, ssh, scp-like), or null. */
+export function repoOfUrl(url) {
+  const m = /^(?:https:\/\/(?:[^@/]+@)?github\.com\/|ssh:\/\/git@github\.com(?::\d+)?\/|git@github\.com:)([A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}?)(?:\.git)?\/?$/.exec(String(url ?? "").trim());
+  return m ? m[1] : null;
+}
+
+function defaultRemoteUrl(dir) {
+  return new Promise((done, fail) => {
+    execFile("git", [...(dir ? ["-C", dir] : []), "remote", "get-url", "--push", "origin"], { timeout: 10_000 }, (err, stdout) => {
+      if (err) fail(err); else done(String(stdout).trim());
+    });
+  });
 }
 
 function defaultSpawn(cmd, args, { timeout }) {
@@ -778,6 +863,8 @@ function usage() {
     "  keepalive  [--pulse-max 20m]   renew loop for the watch bus (stops with its session)",
     "  fence                           exit 0 only while it is safe to mutate",
     "  guard -- gh <args…> | <engsys>/skills/merge-monster/scripts/gate-request.sh <args…>",
+    "  guard --pr N -- git [-C <dir>] push [--force-with-lease] origin HEAD:refs/heads/<PR head branch>",
+    "  guard --new-branch -- git [-C <dir>] push origin HEAD:refs/heads/<branch origin lacks>",
     "  merge      --pr N --sha <validated head> --method merge|squash|rebase",
     "  release    [--reason rotation|exit|handover]",
     "  status",
@@ -798,7 +885,7 @@ function parseArgs(argv) {
     if (arg === "--") { command = rest.slice(i + 1); break; }
     if (!arg.startsWith("--")) throw new LeaseUsageError(`unexpected argument ${JSON.stringify(arg)}`);
     const name = arg.slice(2);
-    if (name === "pretty") { flags.pretty = true; continue; }
+    if (name === "pretty" || name === "new-branch") { flags[name] = true; continue; }
     const value = rest[i + 1];
     if (value === undefined || value.startsWith("--")) throw new LeaseUsageError(`--${name} requires a value`);
     flags[name] = value;
@@ -880,7 +967,7 @@ export async function main(argv, deps = {}) {
       case "status": r = await baton.status(); break;
       case "supervise": r = await baton.supervise(); break;
       case "guard": {
-        r = await baton.guard(command);
+        r = await baton.guard(command, { pr: flags.pr, newBranch: flags["new-branch"] === true });
         if (r.stdout) out.write(r.stdout);
         if (r.stderr) err.write(r.stderr);
         err.write(`baton: ${JSON.stringify(r.result)}\n`);

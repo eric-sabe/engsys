@@ -51,7 +51,7 @@ function world() {
   };
 }
 
-function session(w, { holder = "alice:acme-mm", run = "run-1", home = HOME, role = "merge", dir, mergeReply } = {}) {
+function session(w, { holder = "alice:acme-mm", run = "run-1", home = HOME, role = "merge", dir, mergeReply, remoteUrl } = {}) {
   const stateDir = dir ?? mkdtempSync(join(tmpdir(), "baton-"));
   const lease = createGithubLease({ repo: REPO, api: w.api, sleep: noSleep, random: () => 0.5, now: () => w.local.t });
   const notes = [];
@@ -79,6 +79,7 @@ function session(w, { holder = "alice:acme-mm", run = "run-1", home = HOME, role
     mergeApi,
     spawn: async (cmd, args, opts) => { spawned.push({ cmd, args, opts, at: w.local.t }); return { code: 0, stdout: "ok\n", stderr: "", timedOut: false }; },
     sleep: async (ms) => w.advance(ms),
+    ...(remoteUrl ? { remoteUrl } : {}),
   });
   return { baton, store, stateDir, notes, merges, spawned, lease, holder, setHome: (h) => { homeInfo = h; } };
 }
@@ -689,21 +690,99 @@ test("L1: guard refuses every merge form, not just `gh pr merge` and numeric mer
   ]) assert.throws(() => guardCommand(argv), /merges go through/, argv.join(" "));
 });
 
-test("M2: guard sends a PR-branch push (force-with-lease) and refuses force, delete, default branch and refs/engsys", () => {
-  assert.deepEqual(guardCommand(["git", "-C", "../wt", "push", "--force-with-lease", "origin", "agent/1-x"]),
-    { exe: "git", args: ["-C", "../wt", "push", "--force-with-lease", "origin", "agent/1-x"] });
-  assert.deepEqual(guardCommand(["git", "push", "-u", "origin", "HEAD:agent/2-y"]).exe, "git");
+test("N2: guard's git push grammar is an allowlist (origin, one PR-branch refspec, --force-with-lease only)", () => {
+  assert.deepEqual(guardCommand(["git", "-C", "../wt", "push", "--force-with-lease", "origin", "HEAD:refs/heads/agent/1-x"]).push,
+    { dir: "../wt", flags: ["--force-with-lease"], refspec: "HEAD:refs/heads/agent/1-x", branch: "agent/1-x" });
+  assert.equal(guardCommand(["git", "push", "origin", "agent/1-x"]).push.branch, "agent/1-x");
   for (const argv of [
     ["git", "push", "--force", "origin", "x"],
     ["git", "push", "-f", "origin", "x"],
+    ["git", "push", "-u", "origin", "x"],
+    ["git", "push", "--no-verify", "origin", "x"],
+    ["git", "push", "--receive-pack=gh pr merge 5 #", "/tmp/r"],
+    ["git", "push", "--exec=gh pr merge 5", "origin", "x"],
+    ["git", "push", "-o", "ci.skip", "origin", "x"],
+    ["git", "push", "--push-option=x", "origin", "x"],
+    ["git", "push", "origin", ":release/1.0"],
     ["git", "push", "origin", "+x"],
-    ["git", "push", "--delete", "origin", "x"],
-    ["git", "push", "origin", "main"],
-    ["git", "push", "origin", "HEAD:refs/heads/master"],
+    ["git", "push", "origin", "refs/tags/v1.0"],
+    ["git", "push", "origin", "HEAD:refs/tags/v1.0"],
     ["git", "push", "origin", "x:refs/engsys/batons/merge"],
-    ["git", "push", "--mirror", "origin"],
+    ["git", "push", "https://github.com/other/repo", "HEAD:x"],
+    ["git", "push", "/tmp/r", "HEAD:x"],
+    ["git", "push", "origin"],
+    ["git", "push", "origin", "a", "b"],
+    ["git", "-C", "a", "-C", "b", "push", "origin", "x"],
+    ["git", "-c", "core.hooksPath=/tmp", "push", "origin", "x"],
     ["git", "commit", "-m", "x"],
   ]) assert.throws(() => guardCommand(argv), /guard/, argv.join(" "));
+});
+
+/** A merge API that answers the PR and repo reads a guarded push makes. */
+function pushApi({ headRef = "agent/1-x", headRepo = REPO, state = "open", defaultBranch = "main" } = {}) {
+  return (n, method, path) => {
+    if (path === `/repos/${REPO}/pulls/5`) return { status: 200, json: { state, head: { ref: headRef, repo: { full_name: headRepo } } }, headers: {} };
+    if (path === `/repos/${REPO}`) return { status: 200, json: { default_branch: defaultBranch }, headers: {} };
+    return { status: 404, json: {}, headers: {} };
+  };
+}
+
+test("N2: a guarded push is checked against the PR and origin, then sent with hooks off and file transport refused", async () => {
+  const run = async (argv, { opts = {}, url = `https://github.com/${REPO}.git`, pr = 5 } = {}) => {
+    const w = world();
+    const reply = pushApi(opts);
+    const calls = [];
+    const s = session(w, { remoteUrl: async () => url });
+    const b = createBaton({
+      lease: s.lease, repo: REPO, role: "merge", holder: s.holder, run: "run-1", store: s.store, home: async () => HOME, now: () => w.local.t,
+      mergeApi: { request: async (m, p) => reply(0, m, p) },
+      spawn: async (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "", timedOut: false }; },
+      remoteUrl: async () => url,
+    });
+    await s.baton.startup();
+    return { r: await b.guard(argv, { pr }), calls };
+  };
+  const ok = await run(["git", "-C", "../wt", "push", "--force-with-lease", "origin", "HEAD:refs/heads/agent/1-x"]);
+  assert.equal(ok.r.result.code, "ran");
+  assert.deepEqual(ok.calls[0], { cmd: "git", args: ["-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=never", "-C", "../wt", "push", "--force-with-lease", "origin", "HEAD:refs/heads/agent/1-x"] });
+  const refused = [
+    [["git", "push", "origin", "HEAD:refs/heads/other"], {}, "head branch is agent/1-x"],
+    [["git", "push", "origin", "HEAD:refs/heads/develop"], { opts: { headRef: "develop", defaultBranch: "develop" } }, "default branch"],
+    [["git", "push", "origin", "HEAD:refs/heads/Main"], { opts: { headRef: "Main", defaultBranch: "main" } }, "default branch"],
+    [["git", "push", "origin", "agent/1-x"], { opts: { headRepo: "fork/app" } }, "head lives in fork/app"],
+    [["git", "push", "origin", "agent/1-x"], { opts: { state: "closed" } }, "is closed"],
+    [["git", "push", "origin", "agent/1-x"], { url: "https://github.com/other/repo.git" }, "is not acme/app"],
+    [["git", "push", "origin", "agent/1-x"], { url: "/tmp/local-remote" }, "is not acme/app"],
+  ];
+  for (const [argv, o, why] of refused) {
+    const { r, calls } = await run(argv, o);
+    assert.equal(r.result.sent, false, argv.join(" "));
+    assert.match(r.result.reason, new RegExp(why), argv.join(" "));
+    assert.equal(calls.length, 0, "nothing ran");
+  }
+  await assert.rejects(() => run(["git", "push", "origin", "agent/1-x"], { pr: null }), /--pr/);
+});
+
+test("N2: --new-branch creates a branch origin lacks (no force, never the default branch) and nothing else", async () => {
+  const run = async (argv, { exists = false, defaultBranch = "main" } = {}) => {
+    const w = world();
+    const calls = [];
+    const s = session(w);
+    const b = createBaton({
+      lease: s.lease, repo: REPO, role: "maintain", holder: "alice:acme-maintain", run: "run-1", store: createStateStore({ stateDir: s.stateDir, role: "maintain" }), home: async () => HOME, now: () => w.local.t,
+      mergeApi: { request: async (m, p) => (p === `/repos/${REPO}` ? { status: 200, json: { default_branch: defaultBranch } } : p.startsWith(`/repos/${REPO}/git/ref/heads/`) ? { status: exists ? 200 : 404, json: {} } : { status: 404, json: {} }) },
+      spawn: async (cmd, args) => { calls.push(args); return { code: 0, stdout: "", stderr: "", timedOut: false }; },
+      remoteUrl: async () => `git@github.com:${REPO}.git`,
+    });
+    await b.startup();
+    return { r: await b.guard(argv, { newBranch: true }), calls };
+  };
+  const ok = await run(["git", "-C", "../wt", "push", "origin", "HEAD:refs/heads/mnt/fix-1"]);
+  assert.equal(ok.r.result.code, "ran");
+  assert.deepEqual(ok.calls[0].slice(-3), ["push", "origin", "HEAD:refs/heads/mnt/fix-1"]);
+  assert.match((await run(["git", "push", "origin", "mnt/fix-1"], { exists: true })).r.result.reason, /already exists/);
+  assert.match((await run(["git", "push", "--force-with-lease", "origin", "mnt/fix-1"])).r.result.reason, /no --force-with-lease/);
+  assert.match((await run(["git", "push", "origin", "trunk"], { defaultBranch: "trunk" })).r.result.reason, /default branch/);
 });
 
 test("M3: sessionProcess walks past shells to the session process; sameProcessAlive tells a reused pid apart", () => {

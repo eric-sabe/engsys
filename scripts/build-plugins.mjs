@@ -84,6 +84,8 @@ out.set('core/.claude-plugin/hooks.json', json({
       // deny GitHub writes that bypass the baton's fenced wrappers. Hooks run even under
       // --dangerously-skip-permissions; a deny here wins over the allow above.
       { matcher: 'Bash', hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/singleton-write-guard.mjs"' }] },
+      // …and its settings/plugin-file and GitHub-MCP checks (#69 review N1, L-c).
+      { matcher: 'Write|Edit|MultiEdit|NotebookEdit|mcp__.*', hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/singleton-write-guard.mjs"' }] },
     ],
     // Hand-back guard: a subagent can't hand back "still running, I'll continue once…" (nothing would
     // wake it), and a session can't end its turn on an unhandled INCOMPLETE hand-back.

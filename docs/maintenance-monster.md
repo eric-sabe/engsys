@@ -402,7 +402,7 @@ a background renew every 2.5 minutes in `mnt-watch.sh` plus one on every
 `mnt-heartbeat.sh --state-dir`, a fence before every write (`mnt-act.sh guard`
 for `gh` writes and gate requests; `mnt-fp-dismiss.sh` always fences itself
 before its PATCH, unless an operator outside any session passes `--no-baton`; `mnt-baton.sh fence` before
-dispatching a fix agent; pushes go through `mnt-act.sh guard -- git push`), stop-and-alert-once on loss
+dispatching a fix agent; pushes go through `mnt-act.sh guard --new-branch` / `--pr N -- git push`), stop-and-alert-once on loss
 (`baton-lost-maintain`), release on rotation, clean exit and handover, and the
 same handover when `maintain.home` moves.
 

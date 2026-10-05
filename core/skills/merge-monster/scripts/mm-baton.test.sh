@@ -62,6 +62,11 @@ run bash "$HERE/mm-act.sh" guard --repo acme/app --state-dir "$T/state" -- gh pr
 rc_is "gh pr merge is never run under guard" 2
 run bash "$HERE/mm-act.sh" guard --repo acme/app --state-dir "$T/state" -- rm -rf /
 rc_is "guard runs gh or gate-request.sh only" 2
+run bash "$HERE/mm-act.sh" guard --repo acme/app --state-dir "$T/state" -- git push origin agent/1-x
+rc_is "a guarded git push needs --pr or --new-branch" 2
+run bash "$HERE/mm-act.sh" guard --repo acme/app --state-dir "$T/state" --pr 5 -- git push --receive-pack=x origin agent/1-x
+rc_is "  …and refuses any flag but --force-with-lease" 2
+no_gh "  …nothing ran"
 run bash "$MNT/mnt-act.sh" guard --repo acme/app --state-dir "$T/state" -- gh issue comment 3 --body x
 rc_is "mnt-act.sh fences the maintain baton (none here) → exit 5" 5
 no_gh "  …nothing ran"

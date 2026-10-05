@@ -175,16 +175,19 @@ review):
   check started, then sends with a 30 s timeout. A merge is
   `PUT /pulls/{n}/merge` with `sha=<validated head>`, never retried. Agents MM
   dispatches never write to GitHub: a rebase or fix agent commits in its
-  worktree and hands back, and MM pushes with `mm-act.sh guard -- git push
-  --force-with-lease`.
+  worktree and hands back, and MM pushes with `mm-act.sh guard --pr N -- git
+  push --force-with-lease origin HEAD:refs/heads/<PR head branch>` (an
+  allowlist checked against the PR and `origin`'s URL, run with hooks off).
 - **Guard hook.** Fleet monsters run with `--dangerously-skip-permissions`, so
   no permission prompt stands in front of a raw `gh pr merge`. The engsys
   plugin's PreToolUse hook (`core/.claude-plugin/singleton-write-guard.mjs`)
   does: in a session the launcher marked `ENGSYS_SINGLETON_ROLE=merge` (or
-  `maintain`), it denies every Bash GitHub write (`gh` pr/issue/label/
-  workflow/run writes, `gh api` with a write method or fields, GraphQL
-  mutations, `git push`) unless the whole command is one plain invocation of
-  the fenced wrappers or the heartbeat. Subagents run in the session's process
+  `maintain`), it is an allowlist. Bash passes only as one plain invocation of
+  the fenced wrappers (the heartbeat with `--state-dir`), or when every `gh`,
+  `git` and HTTP client in it is a known read (aliases, extensions, `git push`,
+  config writes and HTTP clients towards GitHub are denied). Settings files
+  and the plugin cache are read-only to Bash and the edit tools, and GitHub
+  MCP write tools are denied. Subagents run in the session's process
   and get it too. It is a guard rail against drift, not a boundary: an
   obfuscated command can still get past a lexical check, and the lease and the
   sha-pinned merge are the control.
@@ -255,7 +258,7 @@ mm:ready ──► preflight ──► [rebase if conflicting] ──► mark re
   checks left over from a force-push; base branch correct.
 - **Rebase** (only when needed): dispatch a background agent into a worktree —
   `git rebase origin/<default>`, regenerate lockfiles per project convention,
-  `git push --force-with-lease`. Never plain `--force`; never rebase a branch
+  hand back; MM pushes `--force-with-lease` through `mm-act.sh guard --pr N`. Never plain `--force`; never rebase a branch
   whose head moved since the queue snapshot (re-verify first).
 - **Mark ready** is the CI trigger in draft-PR workflows; MM does it as late
   as possible, one PR at a time.

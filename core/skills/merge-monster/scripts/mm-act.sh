@@ -7,10 +7,13 @@
 # Usage: mm-act.sh merge --repo owner/name --state-dir DIR --pr N --sha <validated head> --method merge|squash|rebase
 #        mm-act.sh guard --repo owner/name --state-dir DIR -- gh <args…>
 #        mm-act.sh guard --repo owner/name --state-dir DIR -- <engsys-root>/skills/merge-monster/scripts/gate-request.sh <args…>
+#        mm-act.sh guard --repo owner/name --state-dir DIR --pr N -- git -C <wt> push --force-with-lease origin HEAD:refs/heads/<PR head branch>
+#        mm-act.sh guard --repo owner/name --state-dir DIR --new-branch -- git -C <wt> push origin HEAD:refs/heads/<new branch>
 #   [--role maintain]  Maintenance Monster's acts (mnt-act.sh passes it); default merge
 #   merge   PUT /pulls/{n}/merge with sha=<validated head>; never retried (exit 3 = unknown: re-snapshot)
 #   guard   gh mutations (pr ready, labels, comments, close, api) and gate requests; never `gh pr merge`
-#           or --admin. Its command's stdout passes through; a JSON status line goes to stderr.
+#           or --admin; a git push only in the two shapes above (checked against the PR / origin, run with
+#           hooks off). Its command's stdout passes through; a JSON status line goes to stderr.
 # Exit: merge 0 merged | 1 refused | 3 unknown/error; guard = the command's exit, or 1/3/5 when the
 # fence refused (nothing ran).
 set -euo pipefail

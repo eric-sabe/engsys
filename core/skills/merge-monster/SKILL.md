@@ -190,7 +190,7 @@ dispatching an agent that will push.
 | any other `gh` write | `<skill-dir>/scripts/mm-act.sh guard --repo <repo> --state-dir <state_dir> -- gh <args…>` |
 | gate request | `<skill-dir>/scripts/mm-act.sh guard --repo <repo> --state-dir <state_dir> -- <skill-dir>/scripts/gate-request.sh <args…>` |
 | CI re-run | `<skill-dir>/scripts/mm-act.sh guard --repo <repo> --state-dir <state_dir> -- gh run rerun <run-id> --failed` |
-| push a branch a rebase or fix agent prepared | `<skill-dir>/scripts/mm-act.sh guard --repo <repo> --state-dir <state_dir> -- git -C <worktree> push --force-with-lease origin <branch>` (the guard refuses a force, a delete, the default branch and `refs/engsys`) |
+| push a branch a rebase or fix agent prepared | `<skill-dir>/scripts/mm-act.sh guard --repo <repo> --state-dir <state_dir> --pr N -- git -C <worktree> push --force-with-lease origin HEAD:refs/heads/<PR head branch>`. An allowlist: remote `origin` whose push URL is this repo, one refspec naming PR N's head branch (checked against GitHub; never the default branch), `--force-with-lease` the only flag; git runs with hooks off |
 | dispatch a fix or rebase agent | `<skill-dir>/scripts/mm-baton.sh fence --repo <repo> --state-dir <state_dir>` immediately before the dispatch; dispatch only on exit 0 |
 
 `mm-act.sh` fences (the lease must have at least 60 s left by GitHub's clock,
@@ -205,11 +205,16 @@ and hand back; you push and label under the fence. Nothing they do later is
 covered by the fence you took before dispatching them.
 
 **The guard hook.** In this session (`ENGSYS_SINGLETON_ROLE=merge`, set by the
-launcher), the engsys plugin's PreToolUse hook denies any Bash command that
-writes to GitHub (`gh pr|issue|label|workflow|run` writes, `gh api` with a
-write method or fields, GraphQL mutations, `git push`) unless the whole
-command is one plain invocation of `mm-act.sh`, `mm-heartbeat.sh` or
-`mm-baton.sh`: no `;`, `&&`, `|`, redirects, `$( )` or backticks around it.
+launcher), the engsys plugin's PreToolUse hook is an allowlist. A Bash command
+passes if it is one plain invocation of `mm-act.sh`, `mm-baton.sh` or
+`mm-heartbeat.sh --state-dir …` (no `;`, `&&`, `|`, redirects, `$( )` or
+backticks around it), or if every `gh`, `git` and HTTP client in it is a known
+read: `gh pr|issue|run|workflow|repo|release view|list|status|diff|checks`,
+`gh search`, `gh api` GETs and non-mutation GraphQL queries, local `git` work
+(status, log, fetch, commit, rebase, worktree, …), never `git push`, git
+aliases, config writes or an HTTP client towards GitHub. Settings files and
+the plugin cache are read-only (Bash and the Write/Edit tools), and GitHub MCP
+tools that may write are denied.
 Agents you dispatch run in this session and get the same hook. It runs even
 under `--dangerously-skip-permissions`. It is a guard rail against drift (a
 compacted model reaching for `gh pr merge`), not a boundary: the lease and the
@@ -298,9 +303,9 @@ from `gh pr view` together with a `reviewThreads` GraphQL query into one object.
 Background agent in a worktree: `git fetch origin && git rebase
 origin/<default_branch>`; regenerate lockfiles per repo convention rather than
 hand-merging them; then it hands back (worktree path, branch, new head) without
-pushing. You push under the fence: `mm-act.sh guard … -- git -C <worktree>
-push --force-with-lease origin <branch>`. Never plain `--force` (the guard
-refuses it). If the branch head moved since your snapshot, re-verify before
+pushing. You push under the fence: `mm-act.sh guard … --pr N -- git -C
+<worktree> push --force-with-lease origin HEAD:refs/heads/<PR head branch>`.
+Never plain `--force` (the guard refuses it). If the branch head moved since your snapshot, re-verify before
 touching it.
 
 ## Subagent liveness (optional — `liveness:` config block)

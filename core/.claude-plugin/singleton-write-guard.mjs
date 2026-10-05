@@ -1,27 +1,40 @@
 #!/usr/bin/env node
-// singleton-write-guard.mjs — PreToolUse(Bash) hook for the engsys core PLUGIN (engsys#62, review H1).
+// singleton-write-guard.mjs — PreToolUse hook for the engsys core PLUGIN (engsys#62, #69 review H1/N1).
 //
 // A merge or maintenance monster holds its role through the github lease and must fence every write
-// to GitHub (core/lib/lease/baton.mjs). Fleet monsters run with --dangerously-skip-permissions, so a
-// permission prompt never stands between the model and a raw `gh pr merge`. Hooks still run in that
-// mode, so this one is the guard rail: in a singleton-monster session it DENIES every Bash command
-// that writes to GitHub unless the whole command is one invocation of a fenced wrapper:
+// to GitHub (core/lib/lease/baton.mjs). Fleet monsters run with --dangerously-skip-permissions, so no
+// permission prompt stands between the model and a raw `gh pr merge`. Hooks still run in that mode,
+// so this one is the guard rail. Active only when ENGSYS_SINGLETON_ROLE is `merge` or `maintain`
+// (launch-agent-sessions.sh exports it for a session whose roster prompt runs that monster; the hook
+// reads the claude process's environment, so a command cannot unset it). Subagents run inside the
+// session's process, so the agents a monster dispatches are covered too. Elsewhere it is silent.
 //
-//     [bash] <plugin>/skills/merge-monster/scripts/mm-act.sh … | mm-heartbeat.sh … | mm-baton.sh …
-//     [bash] <plugin>/skills/maintenance-monster/scripts/mnt-act.sh … | mnt-heartbeat.sh … | mnt-baton.sh …
+// In a singleton session it is an ALLOWLIST:
+//   Bash   a command that is exactly one plain invocation of a fenced wrapper passes (mm-act/mnt-act,
+//          mm-baton/mnt-baton, and mm-heartbeat/mnt-heartbeat with --state-dir), with no chaining,
+//          pipes, redirects or command substitution anywhere in it. Otherwise every gh, git and HTTP
+//          client invocation in it (nested quoted commands too) must be a known read:
+//            gh     pr|issue|run|workflow|repo|release|label|cache view|list|status|diff|checks|
+//                   download|watch, search, auth status, api with no method or GET, no --input,
+//                   and fields only under an explicit -X GET (query parameters),
+//                   api graphql with an inline query that is not a mutation. Anything else, including
+//                   aliases and extensions, is denied.
+//            git    a known local or read subcommand (status, log, diff, fetch, commit, rebase, …);
+//                   never push, config writes, remote changes, aliases or a -c outside a short list.
+//            curl, wget, http, xh …  never towards github.com; and no command may name
+//                   api.github.com or uploads.github.com at all.
+//          Nor may a command touch a settings file (.claude/settings*.json, managed-settings.json, the
+//          .claude dir itself) or the plugin cache except to read it.
+//   Write | Edit | MultiEdit | NotebookEdit   denied on those same settings and plugin paths.
+//   mcp__*github*   only tools whose name starts with get_/list_/search_/read_/fetch_/download_/view_.
 //
-// with no chaining, pipes, redirects or command substitution anywhere in it (quoted text is fine).
-//
-// Active only when ENGSYS_SINGLETON_ROLE is `merge` or `maintain` (launch-agent-sessions.sh exports
-// it for a session whose roster prompt runs that monster). Subagents run inside the session's process,
-// so the hook covers the agents a monster dispatches too. Everything else passes silently.
-//
-// It raises the bar; it is not a boundary. A determined obfuscation (a script file, an interpreter,
-// a variable holding the verb) gets past a lexical check. The controls are the lease itself and the
-// sha-pinned merge. When active and unsure (a command it cannot parse that mentions gh or git, or an
-// internal error), it denies.
+// It raises the bar; it is not a boundary. A determined obfuscation (a script file, an interpreter
+// assembling the verb, a variable holding it) gets past a lexical check. The controls are the lease
+// and the sha-pinned merge. When active and unsure (an unparseable command that mentions gh, git or
+// GitHub, or an internal error), it denies.
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -36,35 +49,29 @@ export const WRAPPERS = new Set([
   'maintenance-monster/scripts/mnt-heartbeat.sh',
   'maintenance-monster/scripts/mnt-baton.sh',
 ]);
+const HEARTBEATS = new Set(['merge-monster/scripts/mm-heartbeat.sh', 'maintenance-monster/scripts/mnt-heartbeat.sh']);
 
-/** gh <group> <verb> pairs that write. A group mapped to `true` writes for every verb but `list`/`view`. */
-const GH_WRITES = {
-  pr: new Set(['merge', 'ready', 'edit', 'close', 'reopen', 'comment', 'review', 'create', 'lock', 'unlock', 'update-branch']),
-  issue: new Set(['create', 'edit', 'close', 'reopen', 'comment', 'delete', 'transfer', 'lock', 'unlock', 'pin', 'unpin', 'develop']),
-  label: true,
-  workflow: new Set(['run', 'enable', 'disable']),
-  run: new Set(['rerun', 'cancel', 'delete']),
-  release: new Set(['create', 'edit', 'delete', 'delete-asset', 'upload']),
-  repo: new Set(['edit', 'delete', 'rename', 'archive', 'unarchive', 'sync']),
-  secret: new Set(['set', 'delete']),
-  variable: new Set(['set', 'delete']),
-  cache: new Set(['delete']),
-};
-const READ_VERBS = new Set(['list', 'view', 'status', 'diff', 'checks']);
+const GH_READ_GROUPS = new Set(['pr', 'issue', 'run', 'workflow', 'repo', 'release', 'label', 'cache']);
+const GH_READ_VERBS = new Set(['view', 'list', 'status', 'diff', 'checks', 'download', 'watch']);
 /** gh flags that take a separate value (so the value is not read as a group or verb). */
 const GH_VALUE_FLAGS = new Set(['-R', '--repo', '--hostname', '-X', '--method', '-H', '--header', '-f', '--raw-field', '-F', '--field',
-  '--input', '-q', '--jq', '-t', '--template', '-b', '--body', '--body-file', '-t', '--title', '-B', '--base', '--head', '-l', '--label',
-  '--add-label', '--remove-label', '-a', '--assignee', '-m', '--milestone', '-r', '--ref', '-c', '--color', '-d', '--description',
-  '--json', '-s', '--state', '-L', '--limit', '-A', '--author', '--search', '-S', '--subject', '--match-head-commit']);
-const GIT_VALUE_FLAGS = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace']);
-const SHELL_WORDS = new Set(['env', 'command', 'exec', 'nohup', 'time', 'xargs', 'sudo', 'timeout']);
+  '--input', '-q', '--jq', '-t', '--template', '-b', '--body', '--body-file', '--title', '-B', '--base', '--head', '-l', '--label',
+  '-a', '--assignee', '-m', '--milestone', '-r', '--ref', '--json', '-s', '--state', '-L', '--limit', '-A', '--author', '--search',
+  '-S', '--workflow', '-w', '--branch', '-u', '--user', '-e', '--event', '-c', '--commit', '-n', '--name', '-D', '--dir', '-p', '--pattern']);
 
-/**
- * A small quote-aware shell lexer. -> { words: [[w, …], …] (one array per simple command, split at
- * ; & | && || ( ) < > newline and backticks), subst: true when $( or a backtick appears anywhere
- * (even inside double quotes), ops: true when any operator appears outside quotes, ok: false on an
- * unbalanced quote }. Quoted strings come back as single words.
- */
+/** git subcommands that only read, or only change the local checkout. */
+const GIT_LOCAL = new Set(['add', 'am', 'apply', 'bisect', 'blame', 'branch', 'cat-file', 'check-ignore', 'checkout', 'cherry', 'cherry-pick',
+  'clean', 'clone', 'commit', 'config', 'describe', 'diff', 'diff-tree', 'fetch', 'for-each-ref', 'format-patch', 'fsck', 'gc', 'grep', 'help',
+  'log', 'ls-files', 'ls-remote', 'ls-tree', 'merge', 'merge-base', 'mv', 'name-rev', 'pull', 'range-diff', 'rebase', 'reflog', 'remote',
+  'reset', 'restore', 'rev-list', 'rev-parse', 'revert', 'rm', 'shortlog', 'show', 'show-ref', 'stash', 'status', 'switch', 'symbolic-ref',
+  'tag', 'update-index', 'var', 'version', 'worktree', 'whatchanged']);
+/** `git -c <key>=…` keys that cannot redirect a push, run a program or define an alias. */
+const GIT_SAFE_CONFIG = /^(user\.(name|email)|color\.[a-z.]+|core\.pager|advice\.[a-zA-Z.]+|commit\.gpgsign|init\.defaultBranch|pull\.rebase|rebase\.autoStash)=/;
+const HTTP_CLIENTS = new Set(['curl', 'wget', 'http', 'https', 'xh', 'httpie', 'aria2c', 'lwp-request']);
+/** Read-only tools that may name a protected settings path. */
+const READ_TOOLS = new Set(['cat', 'head', 'tail', 'less', 'more', 'grep', 'rg', 'jq', 'ls', 'stat', 'wc', 'file', 'diff', 'shasum',
+  'sha256sum', 'md5', 'od', 'xxd', 'realpath', 'readlink', 'test', '[']);
+
 export function lex(cmd) {
   const s = String(cmd ?? '');
   const commands = [[]];
@@ -119,50 +126,137 @@ function positionals(args, valueFlags) {
   return out;
 }
 
-function ghWrite(args) {
-  const pos = positionals(args, GH_VALUE_FLAGS);
-  const [group, verb] = pos;
-  if (group === 'api') {
-    let method = null;
-    let fields = false;
-    for (let i = 0; i < args.length; i += 1) {
-      const a = args[i];
-      if (a === '-X' || a === '--method') method = String(args[i + 1] ?? '').toUpperCase();
-      else if (a.startsWith('--method=')) method = a.slice(9).toUpperCase();
-      else if (/^-X[A-Za-z]+$/.test(a)) method = a.slice(2).toUpperCase();
-      if (['-f', '-F', '--field', '--raw-field', '--input'].includes(a) || /^--(raw-)?field=|^--input=/.test(a) || /^-[fF].+/.test(a)) fields = true;
-    }
-    if (verb === 'graphql') return args.some((a) => /\bmutation\b/.test(a)) ? 'gh api graphql mutation' : null;
-    if (method && method !== 'GET') return `gh api -X ${method}`;
-    if (!method && fields) return 'gh api with fields (POST)';
+/** gh api: GET only, no fields, no --input; graphql only an inline, non-mutation query. -> deny reason or null. */
+function ghApiVerdict(args, endpoint) {
+  let method = null;
+  let input = false;
+  const fields = [];
+  const headers = [];
+  for (let i = 0; i < args.length; i += 1) {
+    const a = args[i];
+    if (a === '-X' || a === '--method') { method = String(args[i + 1] ?? ''); i += 1; }
+    else if (a.startsWith('--method=')) method = a.slice(9);
+    else if (/^-X./.test(a)) method = a.slice(2).replace(/^=/, ''); // pflag: -XPUT, -X=PUT
+    else if (['-f', '-F', '--field', '--raw-field'].includes(a)) { fields.push(String(args[i + 1] ?? '')); i += 1; }
+    else if (/^--(raw-)?field=/.test(a)) fields.push(a.slice(a.indexOf('=') + 1));
+    else if (/^-[fF]./.test(a)) fields.push(a.slice(2).replace(/^=/, ''));
+    else if (a === '--input' || a.startsWith('--input=')) input = true;
+    else if (a === '-H' || a === '--header') { headers.push(String(args[i + 1] ?? '')); i += 1; }
+    else if (/^(--header=|-H.)/.test(a)) headers.push(a.replace(/^(--header=|-H=?)/, ''));
+  }
+  if (headers.some((h) => /method-override/i.test(h))) return 'gh api with a method-override header';
+  if (endpoint === 'graphql') {
+    if (input) return 'gh api graphql --input (the document is not visible)';
+    if (fields.some((v) => /^[^=]*=@/.test(v))) return 'gh api graphql with a field read from a file or stdin';
+    if (fields.some((v) => /\bmutation\b/i.test(v))) return 'gh api graphql mutation';
     return null;
   }
-  const writes = GH_WRITES[group];
-  if (!writes) return null;
-  if (writes === true) return verb && !READ_VERBS.has(verb) ? `gh ${group} ${verb}` : null;
-  return writes.has(verb) ? `gh ${group} ${verb}` : null;
+  if (method !== null && method.toUpperCase() !== 'GET') return `gh api -X ${method}`;
+  if (input) return 'gh api --input';
+  // Fields make gh POST, unless the method is an explicit GET (then they are query parameters).
+  if (fields.length && method === null) return 'gh api with fields (gh sends them as a POST)';
+  if (fields.some((v) => /^[^=]*=@/.test(v))) return 'gh api with a field read from a file';
+  return null;
 }
 
-function gitWrite(args) {
-  const pos = positionals(args, GIT_VALUE_FLAGS);
-  return pos[0] === 'push' ? 'git push' : null;
+/** -> deny reason, or null for a known read. */
+function ghVerdict(args) {
+  const pos = positionals(args, GH_VALUE_FLAGS);
+  const [group, verb] = pos;
+  if (group === undefined || group === 'help' || group === 'version') return null;
+  if (group === 'search') return null;
+  if (group === 'auth') return verb === 'status' ? null : `gh auth ${verb ?? ''}`.trim();
+  if (group === 'api') return ghApiVerdict(args, verb);
+  if (GH_READ_GROUPS.has(group) && GH_READ_VERBS.has(verb)) return null;
+  return `gh ${group}${verb ? ` ${verb}` : ''} (not a known read; aliases and extensions are denied too)`;
 }
 
-/** Every GitHub write found in `cmd` (nested quoted commands too, e.g. `bash -c "gh pr merge 1"`). */
-export function githubWrites(cmd, depth = 0) {
+/** -> deny reason, or null for a local or read-only git command. */
+function gitVerdict(args) {
+  let i = 0;
+  for (; i < args.length; i += 1) {
+    const a = args[i];
+    if (a === '-C' || a === '--git-dir' || a === '--work-tree') { i += 1; continue; }
+    if (a === '-c') {
+      if (!GIT_SAFE_CONFIG.test(String(args[i + 1] ?? ''))) return `git -c ${args[i + 1] ?? ''}`;
+      i += 1;
+      continue;
+    }
+    if (/^--(git-dir|work-tree)=/.test(a) || ['--no-pager', '-P', '--no-optional-locks', '--bare'].includes(a)) continue;
+    if (a.startsWith('-')) return `git ${a}`;
+    break;
+  }
+  const sub = args[i];
+  const rest = args.slice(i + 1);
+  if (sub === undefined) return null;
+  if (sub === 'push') return 'git push';
+  if (!GIT_LOCAL.has(sub)) return `git ${sub} (not a known local or read subcommand; aliases are denied)`;
+  if (sub === 'config') {
+    const reads = ['--get', '--get-all', '--get-regexp', '--list', '-l', 'get', 'list'];
+    return rest.some((a) => reads.includes(a)) && !rest.some((a) => /^--(add|unset|unset-all|replace-all|rename-section|remove-section|edit)$|^-e$|^set$|^unset$/.test(a))
+      ? null : 'git config (writes are denied)';
+  }
+  if (sub === 'remote') {
+    const pos = positionals(rest, new Set());
+    return pos.length === 0 || ['show', 'get-url'].includes(pos[0]) ? null : `git remote ${pos[0]}`;
+  }
+  return null;
+}
+
+function httpVerdict(args) {
+  return args.some((a) => /github\.com|githubusercontent\.com/i.test(a)) ? 'an HTTP client towards GitHub' : null;
+}
+
+/** Expand a leading ~ and $HOME so settings paths are recognized however they are spelled. */
+function expandHome(p, home) {
+  return String(p).replace(/^~(?=\/|$)/, home).replace(/^\$\{?HOME\}?(?=\/|$)/, home);
+}
+
+/** Is `p` a settings file, the .claude dir itself, or the plugin cache? */
+export function protectedPath(p, { env = process.env, cwd = process.cwd() } = {}) {
+  if (typeof p !== 'string' || !p) return false;
+  const home = env.HOME || os.homedir();
+  const abs = path.resolve(cwd, expandHome(p, home));
+  if (/(^|\/)\.claude\/?$/.test(abs)) return true;
+  if (/(^|\/)\.claude\/(settings[^/]*\.json|managed-settings\.json)$/.test(abs)) return true;
+  if (/managed-settings\.json$/.test(abs)) return true;
+  if (/(^|\/)\.claude\/plugins(\/|$)/.test(abs)) return true;
+  if (env.CLAUDE_CONFIG_DIR) {
+    const cfg = path.resolve(expandHome(env.CLAUDE_CONFIG_DIR, home));
+    if (abs === cfg || abs.startsWith(`${cfg}/plugins`) || (path.dirname(abs) === cfg && /^settings[^/]*\.json$/.test(path.basename(abs)))) return true;
+  }
+  if (env.CLAUDE_PLUGIN_ROOT) {
+    let root = env.CLAUDE_PLUGIN_ROOT;
+    try { root = fs.realpathSync(root); } catch { /* keep as given */ }
+    if (abs === root || abs.startsWith(`${root}/`)) return true;
+  }
+  return false;
+}
+
+/** Every reason to deny `cmd` in a singleton session (nested quoted commands too). */
+export function bashFindings(cmd, ctx = {}, depth = 0) {
   const found = [];
   const { words } = lex(cmd);
   for (const simple of words) {
+    const head = base(simple[0] ?? '');
     for (let i = 0; i < simple.length; i += 1) {
       const w = simple[i];
-      if (/\s/.test(w) && depth < 3) found.push(...githubWrites(w, depth + 1));
+      if (/\s/.test(w) && depth < 3) found.push(...bashFindings(w, ctx, depth + 1));
       const b = base(w);
-      if (b === 'gh') { const hit = ghWrite(simple.slice(i + 1)); if (hit) found.push(hit); }
-      if (b === 'git') { const hit = gitWrite(simple.slice(i + 1)); if (hit) found.push(hit); }
+      let hit = null;
+      if (b === 'gh') hit = ghVerdict(simple.slice(i + 1));
+      else if (b === 'git') hit = gitVerdict(simple.slice(i + 1));
+      else if (HTTP_CLIENTS.has(b)) hit = httpVerdict(simple.slice(i + 1));
+      if (hit) found.push(hit);
+      if (/(^|[/@.])(api|uploads)\.github\.com/i.test(w)) found.push('a command that names the GitHub API host');
+      if (protectedPath(w, ctx) && !READ_TOOLS.has(head)) found.push(`a write to a protected settings or plugin path (${w})`);
     }
   }
   return [...new Set(found)];
 }
+
+/** Back-compat name for the findings list. */
+export const githubWrites = (cmd) => bashFindings(cmd);
 
 /** The wrapper's rel path when `cmd` is exactly one invocation of a fenced wrapper, else null. */
 export function wrapperInvocation(cmd, pluginRoot) {
@@ -177,26 +271,43 @@ export function wrapperInvocation(cmd, pluginRoot) {
   let real;
   try { root = fs.realpathSync(pluginRoot); real = fs.realpathSync(exe); } catch { return null; }
   const rel = path.relative(path.join(root, 'skills'), real).split(path.sep).join('/');
-  return WRAPPERS.has(rel) ? rel : null;
+  if (!WRAPPERS.has(rel)) return null;
+  if (HEARTBEATS.has(rel) && !words.includes('--state-dir')) return null; // L-a: the heartbeat without a renew is no fence
+  return rel;
+}
+
+function denyMessage(role, found) {
+  const wrapper = role === 'merge' ? 'merge-monster/scripts/mm-act.sh' : 'maintenance-monster/scripts/mnt-act.sh';
+  return `engsys singleton-write guard: this ${role} monster session only reads GitHub directly (found: ${found.join('; ')}). `
+    + `Writes go through ONE plain command: <engsys-root>/skills/${wrapper} guard --repo <repo> --state-dir <state_dir> -- gh <args…>`
+    + `${role === 'merge' ? '; merges as mm-act.sh merge --pr N --sha <validated head> --method merge|squash' : ''}`
+    + '; a push as … guard --pr N -- git -C <worktree> push --force-with-lease origin HEAD:refs/heads/<PR head branch>. '
+    + 'No ;, &&, |, redirects, $( ) or backticks around it. If the fence refuses, do not act (SKILL.md § The baton). '
+    + 'Dispatched agents never write to GitHub themselves: they hand the act back to the monster. Settings and plugin files are read-only here.';
 }
 
 /** -> null (no opinion) or { deny: reason }. */
-export function decide({ command, env = process.env, pluginRoot = env.CLAUDE_PLUGIN_ROOT }) {
+export function decide({ tool_name: tool = 'Bash', tool_input: input = {}, command, env = process.env, pluginRoot = env.CLAUDE_PLUGIN_ROOT, cwd = process.cwd() }) {
   const role = env.ENGSYS_SINGLETON_ROLE;
   if (!ROLES.has(role)) return null;
-  const l = lex(command);
-  let writes = githubWrites(command);
-  if (!l.ok && /\b(gh|git)\b/.test(String(command))) writes = writes.length ? writes : ['an unparseable command that mentions gh or git'];
-  if (!writes.length) return null;
-  if (wrapperInvocation(command, pluginRoot)) return null;
-  const wrapper = role === 'merge' ? 'merge-monster/scripts/mm-act.sh' : 'maintenance-monster/scripts/mnt-act.sh';
-  return {
-    deny: `engsys singleton-write guard: this ${role} monster session writes to GitHub only through its fenced wrapper (found: ${writes.join(', ')}). `
-      + `Run it as ONE command: <engsys-root>/skills/${wrapper} guard --repo <repo> --state-dir <state_dir> -- <the gh or git push command>`
-      + `${role === 'merge' ? ', and merges as mm-act.sh merge --pr N --sha <validated head> --method merge|squash' : ''}. `
-      + 'No ;, &&, |, redirects, $( ) or backticks around it. If the fence refuses, do not act (SKILL.md § The baton). '
-      + 'Dispatched agents never write to GitHub themselves: they hand the push back to the monster.',
-  };
+  const ctx = { env, cwd };
+  if (tool === 'Bash') {
+    const cmd = command ?? input.command;
+    if (wrapperInvocation(cmd, pluginRoot)) return null;
+    let found = bashFindings(cmd, ctx);
+    if (!lex(cmd).ok && /\b(gh|git|curl|wget)\b|github\.com|\.claude/.test(String(cmd))) found = found.length ? found : ['an unparseable command that mentions gh, git, GitHub or .claude'];
+    return found.length ? { deny: denyMessage(role, found) } : null;
+  }
+  if (['Write', 'Edit', 'MultiEdit', 'NotebookEdit'].includes(tool)) {
+    const p = input.file_path ?? input.notebook_path ?? input.path;
+    return protectedPath(p, ctx) ? { deny: `engsys singleton-write guard: settings and plugin files are read-only in a ${role} monster session (${p}): changing them could switch off the hooks that fence its GitHub writes.` } : null;
+  }
+  if (/^mcp__/.test(tool) && /github/i.test(tool)) {
+    const name = tool.split('__').pop();
+    return /^(get|list|search|read|fetch|download|view)(_|$)/i.test(name) ? null
+      : { deny: `engsys singleton-write guard: GitHub MCP tool ${tool} may write; a ${role} monster session writes to GitHub only through its fenced wrapper.` };
+  }
+  return null;
 }
 
 async function main() {
@@ -204,10 +315,10 @@ async function main() {
   for await (const chunk of process.stdin) raw += chunk;
   let input;
   try { input = JSON.parse(raw); } catch { input = null; }
-  if (!input || input.tool_name !== 'Bash') return;
+  if (!input || typeof input.tool_name !== 'string') return;
   let d;
   try {
-    d = decide({ command: input.tool_input && input.tool_input.command });
+    d = decide({ tool_name: input.tool_name, tool_input: input.tool_input || {}, cwd: input.cwd || process.cwd() });
   } catch (e) {
     d = ROLES.has(process.env.ENGSYS_SINGLETON_ROLE) ? { deny: `engsys singleton-write guard failed (${String(e && e.message)}): denied, fail closed` } : null;
   }
