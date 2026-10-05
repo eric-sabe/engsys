@@ -12,9 +12,12 @@ import {
   parseRef,
   parseHeartbeat,
   isClaimActive,
+  parseClaimProject,
   acquireClaim,
   releaseClaim,
   claimStatus,
+  setBoardOwner,
+  clearBoardOwner,
   main,
 } from './claim.mjs';
 
@@ -60,6 +63,61 @@ function fakeApi({ labels = [], timeline = [], statusIssues = {} } = {}) {
 // Mark these labels as already existing in the repo (so ensureLabel's GET finds them).
 function withRepoLabel(api, ...names) {
   for (const n of names) api.state.repoLabels.add(n);
+  return api;
+}
+
+const PROJECT_ID = 'PVT_1';
+const ITEM_ID = 'PVTI_1';
+const ISSUE_NODE_ID = 'I_1';
+const FIELD_ID = 'PVTF_1';
+
+/**
+ * A fake ProjectV2 board, wired as `api.graphql` for `setBoardOwner`/`clearBoardOwner`'s three
+ * query/mutation shapes. `field` is `{ name, dataType, options? }`, or omitted for "field not
+ * found"; `ownerType` picks which of `org`/`usr` the target query resolves non-null.
+ */
+function fakeBoard({ owner, number, ownerType = 'org', field, alreadyOnBoard = false } = {}) {
+  const state = { added: alreadyOnBoard, value: null, cleared: false, calls: [] };
+  return {
+    state,
+    async graphql(query, vars) {
+      state.calls.push(query.includes('mutation') ? query.match(/mutation\(([^)]*)\)\s*\{\s*(\w+)/)?.[2] ?? 'mutation' : 'query');
+      if (query.includes('addProjectV2ItemById')) {
+        state.added = true;
+        return { addProjectV2ItemById: { item: { id: ITEM_ID } } };
+      }
+      if (query.includes('updateProjectV2ItemFieldValue')) {
+        state.value = vars.text ?? vars.optionId;
+        return { updateProjectV2ItemFieldValue: { projectV2Item: { id: ITEM_ID } } };
+      }
+      if (query.includes('clearProjectV2ItemFieldValue')) {
+        state.cleared = true;
+        state.value = null;
+        return { clearProjectV2ItemFieldValue: { projectV2Item: { id: ITEM_ID } } };
+      }
+      // The combined target query: resolve the issue + whichever owner (org/user) matches.
+      const miss = vars.projOwner !== owner || vars.projNumber !== number;
+      const projNode = {
+        id: PROJECT_ID,
+        fields: { nodes: field ? [{ id: FIELD_ID, name: field.name, dataType: field.dataType, ...(field.options ? { options: field.options } : {}) }] : [] },
+      };
+      return {
+        repository: {
+          issue: {
+            id: ISSUE_NODE_ID,
+            projectItems: { nodes: state.added ? [{ id: ITEM_ID, project: { id: PROJECT_ID, number } }] : [] },
+          },
+        },
+        org: !miss && ownerType === 'org' ? { projectV2: projNode } : null,
+        usr: !miss && ownerType === 'user' ? { projectV2: projNode } : null,
+      };
+    },
+  };
+}
+/** Attach a fake board's `graphql` to a REST fake api (they're independent concerns). */
+function withBoard(api, board) {
+  api.graphql = board.graphql.bind(board);
+  api.board = board.state;
   return api;
 }
 
@@ -231,6 +289,172 @@ describe('claimStatus', () => {
   });
 });
 
+describe('parseClaimProject', () => {
+  test('parses owner/number', () => {
+    assert.deepEqual(parseClaimProject('FeedFrwd/11'), { owner: 'FeedFrwd', number: 11 });
+  });
+  test('unset is null (unconfigured, skip silently)', () => {
+    assert.equal(parseClaimProject(undefined), null);
+    assert.equal(parseClaimProject(null), null);
+    assert.equal(parseClaimProject(''), null);
+  });
+  test('rejects a malformed value', () => {
+    for (const bad of ['FeedFrwd', 'FeedFrwd/0', '/11', 'bad owner/11']) {
+      assert.throws(() => parseClaimProject(bad), /CLAIM_PROJECT must be/);
+    }
+  });
+});
+
+describe('setBoardOwner / clearBoardOwner (board field sync)', () => {
+  const ENV = { CLAIM_PROJECT: 'FeedFrwd/11' };
+
+  test('unconfigured (no CLAIM_PROJECT): null, no graphql call', async () => {
+    const api = fakeApi();
+    api.graphql = () => assert.fail('graphql should not be called');
+    assert.equal(await setBoardOwner(api, { repo: REPO, number: NUM, fleetId: 'alice', env: {} }), null);
+    assert.equal(await clearBoardOwner(api, { repo: REPO, number: NUM, env: {} }), null);
+  });
+
+  test('a malformed CLAIM_PROJECT is a warning, not a throw', async () => {
+    const api = fakeApi();
+    const res = await setBoardOwner(api, { repo: REPO, number: NUM, fleetId: 'alice', env: { CLAIM_PROJECT: 'nope' } });
+    assert.equal(res.status, 'warning');
+    assert.match(res.message, /CLAIM_PROJECT must be/);
+  });
+
+  test('TEXT field, issue not yet on the board: adds the item and sets the text value', async () => {
+    const board = fakeBoard({ owner: 'FeedFrwd', number: 11, field: { name: 'Owner', dataType: 'TEXT' } });
+    const api = withBoard(fakeApi(), board);
+    const res = await setBoardOwner(api, { repo: REPO, number: NUM, fleetId: 'alice', env: ENV });
+    assert.deepEqual(res, { status: 'set', field: 'Owner', value: 'alice' });
+    assert.equal(board.state.added, true);
+    assert.equal(board.state.value, 'alice');
+  });
+
+  test('SINGLE_SELECT field: sets the matching option', async () => {
+    const board = fakeBoard({
+      owner: 'FeedFrwd', number: 11, alreadyOnBoard: true,
+      field: { name: 'Owner', dataType: 'SINGLE_SELECT', options: [{ id: 'OPT_alice', name: 'alice' }, { id: 'OPT_bob', name: 'bob' }] },
+    });
+    const api = withBoard(fakeApi(), board);
+    const res = await setBoardOwner(api, { repo: REPO, number: NUM, fleetId: 'alice', env: ENV });
+    assert.deepEqual(res, { status: 'set', field: 'Owner', value: 'alice' });
+    assert.equal(board.state.value, 'OPT_alice');
+  });
+
+  test('SINGLE_SELECT field with no matching option: warning, option never created', async () => {
+    const board = fakeBoard({
+      owner: 'FeedFrwd', number: 11, alreadyOnBoard: true,
+      field: { name: 'Owner', dataType: 'SINGLE_SELECT', options: [{ id: 'OPT_bob', name: 'bob' }] },
+    });
+    const api = withBoard(fakeApi(), board);
+    const res = await setBoardOwner(api, { repo: REPO, number: NUM, fleetId: 'alice', env: ENV });
+    assert.equal(res.status, 'warning');
+    assert.match(res.message, /no option named "alice"/);
+    assert.equal(board.state.value, null);
+    assert.equal(board.state.calls.includes('mutation'), false);
+  });
+
+  test('field not found on the project: warning', async () => {
+    const board = fakeBoard({ owner: 'FeedFrwd', number: 11 }); // no `field`
+    const api = withBoard(fakeApi(), board);
+    const res = await setBoardOwner(api, { repo: REPO, number: NUM, fleetId: 'alice', env: ENV });
+    assert.equal(res.status, 'warning');
+    assert.match(res.message, /board field "Owner" not found/);
+  });
+
+  test('project not accessible (wrong owner/number, or a user board queried as org): warning', async () => {
+    const board = fakeBoard({ owner: 'someone-else', number: 99, field: { name: 'Owner', dataType: 'TEXT' } });
+    const api = withBoard(fakeApi(), board);
+    const res = await setBoardOwner(api, { repo: REPO, number: NUM, fleetId: 'alice', env: ENV });
+    assert.equal(res.status, 'warning');
+    assert.match(res.message, /not found or not accessible/);
+  });
+
+  test('a user-owned project resolves through the `usr` alias', async () => {
+    const board = fakeBoard({ owner: 'FeedFrwd', number: 11, ownerType: 'user', field: { name: 'Owner', dataType: 'TEXT' } });
+    const api = withBoard(fakeApi(), board);
+    const res = await setBoardOwner(api, { repo: REPO, number: NUM, fleetId: 'alice', env: ENV });
+    assert.equal(res.status, 'set');
+  });
+
+  test('an unsupported field type (e.g. DATE) is a warning', async () => {
+    const board = fakeBoard({ owner: 'FeedFrwd', number: 11, field: { name: 'Owner', dataType: 'DATE' } });
+    const api = withBoard(fakeApi(), board);
+    const res = await setBoardOwner(api, { repo: REPO, number: NUM, fleetId: 'alice', env: ENV });
+    assert.equal(res.status, 'warning');
+    assert.match(res.message, /unsupported type DATE/);
+  });
+
+  test('a GraphQL error is a warning, never a throw', async () => {
+    const api = fakeApi();
+    api.graphql = async () => { throw new Error('boom'); };
+    const res = await setBoardOwner(api, { repo: REPO, number: NUM, fleetId: 'alice', env: ENV });
+    assert.equal(res.status, 'warning');
+    assert.match(res.message, /boom/);
+  });
+
+  test('clearBoardOwner clears a set value', async () => {
+    const board = fakeBoard({ owner: 'FeedFrwd', number: 11, alreadyOnBoard: true, field: { name: 'Owner', dataType: 'TEXT' } });
+    const api = withBoard(fakeApi(), board);
+    const res = await clearBoardOwner(api, { repo: REPO, number: NUM, env: ENV });
+    assert.deepEqual(res, { status: 'cleared', field: 'Owner' });
+    assert.equal(board.state.cleared, true);
+  });
+
+  test('clearBoardOwner is a no-op (null) when the issue was never added to the board', async () => {
+    const board = fakeBoard({ owner: 'FeedFrwd', number: 11, alreadyOnBoard: false, field: { name: 'Owner', dataType: 'TEXT' } });
+    const api = withBoard(fakeApi(), board);
+    assert.equal(await clearBoardOwner(api, { repo: REPO, number: NUM, env: ENV }), null);
+  });
+});
+
+describe('acquireClaim / releaseClaim: board sync is wired in and fails soft', () => {
+  const ENV = { CLAIM_PROJECT: 'FeedFrwd/11' };
+
+  test('acquireClaim carries a `board` result on success', async () => {
+    const board = fakeBoard({ owner: 'FeedFrwd', number: 11, field: { name: 'Owner', dataType: 'TEXT' } });
+    const api = withBoard(withRepoLabel(fakeApi(), 'fleet:alice'), board);
+    const res = await acquireClaim(api, { repo: REPO, number: NUM, fleetId: 'alice', now: NOW, env: ENV });
+    assert.equal(res.status, 'acquired');
+    assert.deepEqual(res.board, { status: 'set', field: 'Owner', value: 'alice' });
+  });
+
+  test('acquireClaim omits `board` entirely when unconfigured', async () => {
+    const api = withRepoLabel(fakeApi(), 'fleet:alice');
+    const res = await acquireClaim(api, { repo: REPO, number: NUM, fleetId: 'alice', now: NOW, env: {} });
+    assert.equal('board' in res, false);
+  });
+
+  test('a board warning never turns acquireClaim into a failure', async () => {
+    const board = fakeBoard({ owner: 'FeedFrwd', number: 11 }); // field missing -> warning
+    const api = withBoard(withRepoLabel(fakeApi(), 'fleet:alice'), board);
+    const res = await acquireClaim(api, { repo: REPO, number: NUM, fleetId: 'alice', now: NOW, env: ENV });
+    assert.equal(res.status, 'acquired');
+    assert.equal(res.board.status, 'warning');
+  });
+
+  test('already-own also syncs the board', async () => {
+    const board = fakeBoard({ owner: 'FeedFrwd', number: 11, field: { name: 'Owner', dataType: 'TEXT' } });
+    const api = withBoard(fakeApi({ labels: ['fleet:alice'] }), board);
+    const res = await acquireClaim(api, { repo: REPO, number: NUM, fleetId: 'alice', now: NOW, env: ENV });
+    assert.deepEqual(res, { status: 'already-own', fleet: 'alice', board: { status: 'set', field: 'Owner', value: 'alice' } });
+  });
+
+  test('releaseClaim carries a `board` result and clears the field', async () => {
+    const board = fakeBoard({ owner: 'FeedFrwd', number: 11, alreadyOnBoard: true, field: { name: 'Owner', dataType: 'TEXT' } });
+    const api = withBoard(fakeApi({ labels: ['fleet:alice'] }), board);
+    const res = await releaseClaim(api, { repo: REPO, number: NUM, fleetId: 'alice', env: ENV });
+    assert.deepEqual(res, { status: 'released', fleet: 'alice', held: true, board: { status: 'cleared', field: 'Owner' } });
+  });
+
+  test('releaseClaim omits `board` entirely when unconfigured', async () => {
+    const api = fakeApi({ labels: ['fleet:alice'] });
+    const res = await releaseClaim(api, { repo: REPO, number: NUM, fleetId: 'alice', env: {} });
+    assert.deepEqual(res, { status: 'released', fleet: 'alice', held: true });
+  });
+});
+
 describe('main (CLI)', () => {
   function run(args, { env = {}, api } = {}) {
     const out = { s: '' }; const err = { s: '' };
@@ -288,5 +512,14 @@ describe('main (CLI)', () => {
     const res = await run(['acquire', `${REPO}#${NUM}`], { env: { FLEET_ID: 'Bad_ID' }, api });
     assert.equal(res.code, EXIT.ERROR);
     assert.match(res.err, /FLEET_ID/);
+  });
+
+  test('a board warning prints to stderr but still exits OK', async () => {
+    const board = fakeBoard({ owner: 'FeedFrwd', number: 11 }); // field missing -> warning
+    const api = withBoard(withRepoLabel(fakeApi(), 'fleet:alice'), board);
+    const res = await run(['acquire', `${REPO}#${NUM}`], { env: { FLEET_ID: 'alice', CLAIM_PROJECT: 'FeedFrwd/11' }, api });
+    assert.equal(res.code, EXIT.OK);
+    assert.match(res.err, /board:.*not found/);
+    assert.match(res.out, /"status":"warning"/);
   });
 });

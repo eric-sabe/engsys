@@ -16,13 +16,30 @@
 //   parseRef(ref)                           -> { repo, number } from 'owner/repo#123'
 //   parseHeartbeat(body, now)               -> true/false/null (fresh/stale/no marker) — see below
 //   isClaimActive({ labeledAt, heartbeatFresh, now })   the refusal rule
+//   parseClaimProject(raw)                  -> { owner, number } from 'owner/N', or null if unset
 //   EXIT                                    { OK: 0, ERROR: 1, FOREIGN: 4 }
 //   acquireClaim(api, opts), releaseClaim(api, opts), claimStatus(api, opts)   the gh-backed verbs
+//   setBoardOwner(api, opts), clearBoardOwner(api, opts)   the board-field sync (see below)
 //   main(argv, { api, env, out, err })      the CLI
 //
 // Single-fleet mode: when FLEET_ID is unset (no `env.FLEET_ID` / `--fleet-id`), acquire and release
 // are no-ops that exit 0 (nothing to claim against; every caller behaves exactly as before this
 // module existed), and branchName returns the unprefixed name.
+//
+// Board field sync (docs/multi-fleet.md § 3: "set the project board's owner field to the fleet
+// id"). The `fleet:<id>` label stays the load-bearing claim signal — this is a visibility mirror
+// for operators who plan work from the board, not a second source of truth. Configured per
+// instance (fleet-guide.md § 11): `CLAIM_PROJECT=<owner>/<number>` (the ProjectV2 that carries the
+// issue's board, owner may be a user or an org and may differ from the issue's repo) and
+// `CLAIM_OWNER_FIELD` (default "Owner", a TEXT or SINGLE_SELECT field). Either unset means skip
+// silently — single-fleet instances and instances with no board need not configure this. A
+// SINGLE_SELECT field must already carry an option named exactly the fleet id; a missing option is
+// reported as a warning and never created (this module never mutates a board's field schema). Every
+// board-sync failure (missing field, inaccessible project, a GraphQL error, cross-owner auth) is a
+// warning, not a claim failure — `acquireClaim`/`releaseClaim` never throw over it, but surface it
+// as `.board` in their result so `main` can print it. A ProjectV2 belonging to a different owner than
+// the repo's installation needs the org-side token: set `GH_APP_OWNER` to the project's owner (the
+// `gh` shim resolves the installation from it; see fleet-guide.md's identity section and engsys#55).
 //
 // Heartbeat marker (status issue), same shape as mm-heartbeat.sh's ledger block:
 //   <!-- fleet-heartbeat -->
@@ -125,6 +142,23 @@ export function isClaimActive({ labeledAt, heartbeatFresh = null, now = Date.now
   return heartbeatFresh === true;
 }
 
+/** Default board field name when `CLAIM_OWNER_FIELD` is unset. */
+export const DEFAULT_CLAIM_OWNER_FIELD = 'Owner';
+const BOARD_OWNER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
+
+/**
+ * Parse `CLAIM_PROJECT` (`<owner>/<number>`, owner a GitHub user or org login) into
+ * `{ owner, number }`. Returns `null` for an unset/empty value (board sync is unconfigured — skip
+ * silently); throws on a non-empty value that doesn't parse (reported as a warning by callers, never
+ * a thrown error out of the acquire/release path).
+ */
+export function parseClaimProject(raw) {
+  if (raw === undefined || raw === null || raw === '') return null;
+  const m = /^([^/]+)\/([1-9][0-9]*)$/.exec(String(raw).trim());
+  if (!m || !BOARD_OWNER_RE.test(m[1])) throw new TypeError(`claim: CLAIM_PROJECT must be <owner>/<number>, got ${JSON.stringify(raw)}`);
+  return { owner: m[1], number: Number(m[2]) };
+}
+
 // --- gh-backed verbs ---------------------------------------------------------------------------
 
 async function getOk(api, path, what) {
@@ -205,6 +239,150 @@ async function foreignHeartbeatFresh(api, foreignFleet, { env = process.env, cwd
   }
 }
 
+// --- board field sync ----------------------------------------------------------------------------
+
+// `fields.nodes` is a union (ProjectV2FieldConfiguration); ProjectV2FieldCommon is the interface
+// every member implements (id, name, dataType), and the single-select fragment adds its options.
+const BOARD_TARGET_QUERY = `
+query($repoOwner:String!, $repoName:String!, $issueNumber:Int!, $projOwner:String!, $projNumber:Int!) {
+  repository(owner:$repoOwner, name:$repoName) {
+    issue(number:$issueNumber) {
+      id
+      projectItems(first: 50, includeArchived: true) {
+        nodes { id project { id number } }
+      }
+    }
+  }
+  org: organization(login:$projOwner) {
+    projectV2(number:$projNumber) {
+      id
+      fields(first: 50) {
+        nodes {
+          ... on ProjectV2FieldCommon { id name dataType }
+          ... on ProjectV2SingleSelectField { options { id name } }
+        }
+      }
+    }
+  }
+  usr: user(login:$projOwner) {
+    projectV2(number:$projNumber) {
+      id
+      fields(first: 50) {
+        nodes {
+          ... on ProjectV2FieldCommon { id name dataType }
+          ... on ProjectV2SingleSelectField { options { id name } }
+        }
+      }
+    }
+  }
+}`;
+
+const ADD_ITEM_MUTATION = `mutation($projectId:ID!, $contentId:ID!) {
+  addProjectV2ItemById(input: { projectId: $projectId, contentId: $contentId }) { item { id } }
+}`;
+
+const SET_TEXT_MUTATION = `mutation($projectId:ID!, $itemId:ID!, $fieldId:ID!, $text:String!) {
+  updateProjectV2ItemFieldValue(input: { projectId: $projectId, itemId: $itemId, fieldId: $fieldId, value: { text: $text } }) {
+    projectV2Item { id }
+  }
+}`;
+
+const SET_SINGLE_SELECT_MUTATION = `mutation($projectId:ID!, $itemId:ID!, $fieldId:ID!, $optionId:String!) {
+  updateProjectV2ItemFieldValue(input: { projectId: $projectId, itemId: $itemId, fieldId: $fieldId, value: { singleSelectOptionId: $optionId } }) {
+    projectV2Item { id }
+  }
+}`;
+
+const CLEAR_FIELD_MUTATION = `mutation($projectId:ID!, $itemId:ID!, $fieldId:ID!) {
+  clearProjectV2ItemFieldValue(input: { projectId: $projectId, itemId: $itemId, fieldId: $fieldId }) {
+    projectV2Item { id }
+  }
+}`;
+
+/**
+ * Resolve what `setBoardOwner`/`clearBoardOwner` need: the issue's node id, the project's node id,
+ * the named field (with its options if single-select), and the issue's existing item id in that
+ * project (`null` if it isn't on the board yet). Never throws: `{ skip: true }` (unconfigured, no
+ * warning) or `{ skip: true, warning }` (configured but unresolvable) short-circuits the callers.
+ */
+async function resolveBoardTarget(api, { repo, number, env } = {}) {
+  const e = env ?? process.env;
+  let project;
+  try {
+    project = parseClaimProject(e.CLAIM_PROJECT);
+  } catch (err) {
+    return { skip: true, warning: err.message };
+  }
+  if (!project) return { skip: true };
+  const fieldName = e.CLAIM_OWNER_FIELD || DEFAULT_CLAIM_OWNER_FIELD;
+  const [repoOwner, repoName] = repo.split('/');
+  let data;
+  try {
+    data = await api.graphql(BOARD_TARGET_QUERY, {
+      repoOwner, repoName, issueNumber: number, projOwner: project.owner, projNumber: project.number,
+    });
+  } catch (err) {
+    return { skip: true, warning: `board lookup for ${project.owner}/${project.number} failed: ${err.message ?? err}` };
+  }
+  const issue = data?.repository?.issue;
+  if (!issue?.id) return { skip: true, warning: `could not read ${repo}#${number} while resolving the board` };
+  const proj = data?.org?.projectV2 ?? data?.usr?.projectV2;
+  if (!proj?.id) return { skip: true, warning: `project ${project.owner}/${project.number} not found or not accessible (cross-owner board? set GH_APP_OWNER=${project.owner})` };
+  const field = (proj.fields?.nodes ?? []).find((f) => f && f.name === fieldName);
+  if (!field) return { skip: true, warning: `board field "${fieldName}" not found on project ${project.owner}/${project.number}` };
+  const existing = (issue.projectItems?.nodes ?? []).find((n) => n?.project?.id === proj.id);
+  return { skip: false, issueId: issue.id, projectId: proj.id, itemId: existing?.id ?? null, field };
+}
+
+/**
+ * Best-effort: set the board's owner field to `fleetId` for `repo#number` (adding the issue to the
+ * board first if it isn't on it yet). Returns `null` when board sync is unconfigured (silent skip),
+ * `{ status: 'set', field, value }` on success, or `{ status: 'warning', message }` on any failure —
+ * this never throws, so a board problem never fails the claim.
+ */
+export async function setBoardOwner(api, { repo, number, fleetId, env } = {}) {
+  const target = await resolveBoardTarget(api, { repo, number, env });
+  if (target.skip) return target.warning ? { status: 'warning', message: target.warning } : null;
+  try {
+    let itemId = target.itemId;
+    if (!itemId) {
+      const added = await api.graphql(ADD_ITEM_MUTATION, { projectId: target.projectId, contentId: target.issueId });
+      itemId = added?.addProjectV2ItemById?.item?.id;
+      if (!itemId) return { status: 'warning', message: 'could not add the issue to the project board' };
+    }
+    const { field } = target;
+    if (field.dataType === 'SINGLE_SELECT') {
+      const option = (field.options ?? []).find((o) => o?.name === fleetId);
+      if (!option) return { status: 'warning', message: `board field "${field.name}" has no option named "${fleetId}" (options are never created automatically)` };
+      await api.graphql(SET_SINGLE_SELECT_MUTATION, { projectId: target.projectId, itemId, fieldId: field.id, optionId: option.id });
+    } else if (field.dataType === 'TEXT') {
+      await api.graphql(SET_TEXT_MUTATION, { projectId: target.projectId, itemId, fieldId: field.id, text: fleetId });
+    } else {
+      return { status: 'warning', message: `board field "${field.name}" has unsupported type ${field.dataType}` };
+    }
+    return { status: 'set', field: field.name, value: fleetId };
+  } catch (err) {
+    return { status: 'warning', message: err.message ?? String(err) };
+  }
+}
+
+/**
+ * Best-effort: clear the board's owner field for `repo#number`. Returns `null` when unconfigured or
+ * when the issue was never added to the board (nothing to clear), `{ status: 'cleared', field }` on
+ * success, or `{ status: 'warning', message }` on failure — never throws.
+ */
+export async function clearBoardOwner(api, { repo, number, env } = {}) {
+  const target = await resolveBoardTarget(api, { repo, number, env });
+  if (target.skip) return target.warning ? { status: 'warning', message: target.warning } : null;
+  if (!target.itemId) return null;
+  try {
+    await api.graphql(CLEAR_FIELD_MUTATION, { projectId: target.projectId, itemId: target.itemId, fieldId: target.field.id });
+    return { status: 'cleared', field: target.field.name };
+  } catch (err) {
+    return { status: 'warning', message: err.message ?? String(err) };
+  }
+}
+
 /**
  * Acquire the claim on `repo#number` for `fleetId`. Resolves `{ status: 'acquired' | 'already-own' }`
  * or throws `ClaimError` (`.foreign`, `.exit`) when a foreign claim is active, or stale but
@@ -226,7 +404,10 @@ export async function acquireClaim(api, { repo, number, fleetId, takeover = fals
 
   const labels = await issueLabels(api, repo, number);
   const mine = claimLabel(fleetId);
-  if (labels.includes(mine)) return { status: 'already-own', fleet: fleetId };
+  if (labels.includes(mine)) {
+    const board = await setBoardOwner(api, { repo, number, fleetId, env });
+    return board ? { status: 'already-own', fleet: fleetId, board } : { status: 'already-own', fleet: fleetId };
+  }
 
   const foreignLabel = labels.find((l) => parseClaimLabel(l) && parseClaimLabel(l) !== fleetId);
   if (foreignLabel) {
@@ -255,18 +436,25 @@ export async function acquireClaim(api, { repo, number, fleetId, takeover = fals
   await ensureLabel(api, repo, fleetId);
   const added = await api.request('POST', `/repos/${repo}/issues/${number}/labels`, { labels: [mine] });
   if (added.status !== 200) throw new Error(`HTTP ${added.status} while adding label ${mine}${added.json?.message ? `: ${added.json.message}` : ''}`);
-  return { status: 'acquired', fleet: fleetId, took_over: !!foreignLabel || undefined };
+  const board = await setBoardOwner(api, { repo, number, fleetId, env });
+  return board
+    ? { status: 'acquired', fleet: fleetId, took_over: !!foreignLabel || undefined, board }
+    : { status: 'acquired', fleet: fleetId, took_over: !!foreignLabel || undefined };
 }
 
-/** Release the claim: remove our `fleet:<id>` label. A no-op (not an error) if it was already gone. */
-export async function releaseClaim(api, { repo, number, fleetId } = {}) {
+/** Release the claim: remove our `fleet:<id>` label, and clear the board's owner field (best-effort,
+ * see `clearBoardOwner`). The label removal is a no-op (not an error) if it was already gone. */
+export async function releaseClaim(api, { repo, number, fleetId, env } = {}) {
   if (!REPO_RE.test(repo ?? '')) throw new TypeError(`claim: repo must be owner/name, got ${JSON.stringify(repo)}`);
   if (!Number.isInteger(number) || number < 1) throw new TypeError(`claim: number must be a positive integer, got ${JSON.stringify(number)}`);
   if (!FLEET_ID_RE.test(fleetId ?? '')) throw new TypeError(`claim: invalid fleet id ${JSON.stringify(fleetId)}`);
   const name = claimLabel(fleetId);
   const { status, json } = await api.request('DELETE', `/repos/${repo}/issues/${number}/labels/${encodeURIComponent(name)}`);
   if (status !== 200 && status !== 404) throw new Error(`HTTP ${status} while removing label ${name}${json?.message ? `: ${json.message}` : ''}`);
-  return { status: 'released', fleet: fleetId, held: status === 200 };
+  const board = await clearBoardOwner(api, { repo, number, env });
+  return board
+    ? { status: 'released', fleet: fleetId, held: status === 200, board }
+    : { status: 'released', fleet: fleetId, held: status === 200 };
 }
 
 /** Who currently holds the claim (or null), for `claim status`. */
@@ -288,7 +476,9 @@ export async function claimStatus(api, { repo, number } = {}) {
 const USAGE = `usage: claim.mjs acquire <owner/repo#n> [--takeover] [--fleet-id ID]
        claim.mjs release <owner/repo#n> [--fleet-id ID]
        claim.mjs status  <owner/repo#n>
-No FLEET_ID (env or --fleet-id): acquire/release are no-ops, exit 0 (single-fleet mode).`;
+No FLEET_ID (env or --fleet-id): acquire/release are no-ops, exit 0 (single-fleet mode).
+CLAIM_PROJECT=<owner>/<number> + CLAIM_OWNER_FIELD (default "Owner"): also sync that board field
+on acquire/release. Unset means skip; a sync failure warns but never fails the claim.`;
 
 export async function main(argv, { api = ghApiClient(), env = process.env, cwd = process.cwd(), out = process.stdout, err = process.stderr } = {}) {
   const say = (s) => out.write(`${s}\n`);
@@ -326,12 +516,14 @@ export async function main(argv, { api = ghApiClient(), env = process.env, cwd =
       case 'acquire': {
         if (!fleetId) { say(`single-fleet mode: nothing to claim for ${repo}#${number}`); return EXIT.OK; }
         const res = await acquireClaim(api, { repo, number, fleetId, takeover, env, cwd });
+        if (res.board?.status === 'warning') warn(`board: ${res.board.message}`);
         say(JSON.stringify(res));
         return EXIT.OK;
       }
       case 'release': {
         if (!fleetId) { say(`single-fleet mode: nothing to release for ${repo}#${number}`); return EXIT.OK; }
-        const res = await releaseClaim(api, { repo, number, fleetId });
+        const res = await releaseClaim(api, { repo, number, fleetId, env });
+        if (res.board?.status === 'warning') warn(`board: ${res.board.message}`);
         say(JSON.stringify(res));
         return EXIT.OK;
       }
