@@ -8,7 +8,9 @@ import path from 'node:path';
 import {
   parseYaml, validateFederation, parseFederation, loadFederation, resolveFederationFile, checkFleetId,
   fleetIdProblems, getPath, roleHome, parseAddress, isOwnAddress, statusLines, main, FederationError, FLEET_ID_RE,
+  repoFromRemoteUrl, instanceRepo, statusIssueTarget,
 } from './federation.mjs';
+import { hermeticGit } from '../../lib/git-env.mjs';
 
 const DOC = `version: 1
 operators_team: acme/fleet-operators       # gates count only from human members of this team
@@ -425,4 +427,61 @@ test('cli address and status', () => {
   assert.equal(cli([]).code, 1);
   assert.equal(cli(['bogus']).code, 1);
   assert.equal(cli(['--help']).code, 0);
+});
+
+// --- the fleet's status issue (the broker's ledger in multi-fleet mode, #54) ---------------------
+
+test('repoFromRemoteUrl: GitHub https, ssh and scp-like remotes; anything else is null', () => {
+  assert.equal(repoFromRemoteUrl('https://github.com/acme/acme-fleet.git'), 'acme/acme-fleet');
+  assert.equal(repoFromRemoteUrl('https://x-access-token@github.com/acme/acme-fleet\n'), 'acme/acme-fleet');
+  assert.equal(repoFromRemoteUrl('git@github.com:acme/acme.fleet.git'), 'acme/acme.fleet');
+  assert.equal(repoFromRemoteUrl('ssh://git@github.com/acme/acme-fleet'), 'acme/acme-fleet');
+  assert.equal(repoFromRemoteUrl('https://gitlab.com/acme/acme-fleet.git'), null);
+  assert.equal(repoFromRemoteUrl('/srv/git/acme-fleet'), null);
+  assert.equal(repoFromRemoteUrl(''), null);
+});
+
+test('instanceRepo: FLEET_INSTANCE_REPO wins, else the origin of the checkout holding the file', () => {
+  const dir = tmp();
+  const f = write(dir, 'federation.yml', DOC);
+  assert.equal(instanceRepo(f, { FLEET_INSTANCE_REPO: 'acme/acme-fleet' }), 'acme/acme-fleet');
+  assert.throws(() => instanceRepo(f, { FLEET_INSTANCE_REPO: 'not a repo' }), /FLEET_INSTANCE_REPO "not a repo" must be owner\/name/);
+  assert.equal(instanceRepo(f, {}), null, 'not a git checkout: unknown');
+  hermeticGit(dir, ['init', '-q'], { isolateConfig: true });
+  hermeticGit(dir, ['remote', 'add', 'origin', 'git@github.com:acme/acme-fleet.git'], { isolateConfig: true });
+  assert.equal(instanceRepo(f, {}), 'acme/acme-fleet');
+});
+
+test('statusIssueTarget: null in single-fleet mode; the issue per fleet; fail closed otherwise', () => {
+  const reg = parseFederation(DOC);
+  const env = { FLEET_INSTANCE_REPO: 'acme/acme-fleet' };
+  assert.equal(statusIssueTarget(null, 'alice', { env }), null);
+  assert.equal(statusIssueTarget(reg, null, { env }), null);
+  assert.deepEqual(statusIssueTarget(reg, 'alice', { env }), { repo: 'acme/acme-fleet', issue: 11 });
+  assert.deepEqual(statusIssueTarget(reg, 'bob', { env }), { repo: 'acme/acme-fleet', issue: 12 }, 'two fleets, two issues');
+  assert.throws(() => statusIssueTarget(reg, 'carol', { env }), /FLEET_ID "carol" is not declared/);
+  const noIssue = parseFederation(minimal());
+  assert.throws(() => statusIssueTarget(noIssue, 'alice', { env, file: 'f.yml' }), /fleets\.alice\.status_issue is not declared in f\.yml/);
+  assert.throws(() => statusIssueTarget(reg, 'alice', { env: {}, file: path.join(tmp(), 'federation.yml') }), /set FLEET_INSTANCE_REPO=owner\/name/);
+});
+
+test('cli status-issue: owner/repo#N, exit 3 in single-fleet mode, exit 1 when unresolvable', () => {
+  const dir = tmp();
+  const f = write(dir, 'federation.yml', DOC);
+  const env = { FLEET_ID: 'bob', FLEET_INSTANCE_REPO: 'acme/acme-fleet' };
+  let r = cli(['status-issue', '--file', f], env);
+  assert.equal(r.code, 0);
+  assert.equal(r.out, 'acme/acme-fleet#12\n');
+  r = cli(['status-issue'], { ...env, FLEET_REPO: dir });
+  assert.equal(r.out, 'acme/acme-fleet#12\n', 'the default file is <instance>/federation.yml');
+  r = cli(['status-issue'], { ...env, FLEET_REPO: tmp() });
+  assert.equal(r.code, 3);
+  assert.match(r.err, /single-fleet mode/);
+  r = cli(['status-issue', '--file', f], { FLEET_INSTANCE_REPO: 'acme/acme-fleet' });
+  assert.equal(r.code, 3, 'no FLEET_ID: single-fleet');
+  r = cli(['status-issue', '--file', f], { ...env, FLEET_ID: 'carol' });
+  assert.equal(r.code, 1);
+  assert.match(r.err, /not declared/);
+  r = cli(['status-issue', 'extra', '--file', f], env);
+  assert.equal(r.code, 1);
 });

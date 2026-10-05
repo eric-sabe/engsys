@@ -34,7 +34,8 @@
 #                        [--owner OWNER] [--pool FILE] [--store DIR] [--owner-pattern REGEX]
 #                        [--config FILE | --config-dir DIR] [--once]
 # Every value defaults to resource-broker.yml (repo, state_dir, poll_interval, ledger_issue,
-# lease.owner, lease.pool_file, lease.store, lease.owner_pattern).
+# lease.owner, lease.pool_file, lease.store, lease.owner_pattern). In multi-fleet mode the ledger is the
+# fleet's status issue and the owner and fence are fleet-qualified (broker-config.sh).
 set -u
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -42,7 +43,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=broker-config.sh
 . "$here/broker-config.sh"
 
-REPO="" DIR="" INTERVAL="" LEDGER="" OWNER="" POOL_FILE="" STORE="" OWNER_PATTERN="" CONFIG="" CONFIG_DIR="" SESSION_NAME="" ONCE=0
+REPO="" DIR="" INTERVAL="" LEDGER="" OWNER="" POOL_FILE="" STORE="" OWNER_PATTERN="" CONFIG="" CONFIG_DIR="" ONCE=0
 usage() { echo "usage: broker-watch.sh [--repo owner/name] [--state-dir DIR] [--interval N] [--ledger N] [--owner OWNER] [--pool FILE] [--store DIR] [--config FILE | --config-dir DIR] [--once]" >&2; exit 2; }
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -61,18 +62,14 @@ while [ $# -gt 0 ]; do
   esac
 done
 broker_find_config "$CONFIG" "$CONFIG_DIR" || exit 1
-broker_fill_var REPO repo
-broker_fill_var LEDGER ledger_issue
+broker_fill_ledger REPO LEDGER || exit 2
 broker_fill_var DIR state_dir
 broker_fill_var INTERVAL poll_interval
-broker_fill_var OWNER lease.owner
-broker_fill_var SESSION_NAME session_name
-[ -n "$OWNER" ] || OWNER="${SESSION_NAME:-resource-broker}"
+broker_fill_owner OWNER OWNER_PATTERN || exit 2
 [ -n "$DIR" ] || DIR="logs/resource-broker"
 [ -n "$INTERVAL" ] || INTERVAL=30
 broker_fill_path POOL_FILE lease.pool_file
 broker_fill_path STORE lease.store
-broker_fill_var OWNER_PATTERN lease.owner_pattern
 
 { [ -n "$REPO" ] && [ -n "$LEDGER" ] && [ "$LEDGER" != 0 ]; } || {
   echo "broker-watch: need --repo and --ledger (or a resource-broker.yml with repo and a real ledger_issue)" >&2

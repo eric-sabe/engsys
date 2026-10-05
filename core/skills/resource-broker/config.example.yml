@@ -11,6 +11,9 @@ ledger_issue: 0 # the broker's ledger issue number; distinct from the Merge/Main
 # Set to an existing issue (any title): broker-setup.sh ADOPTS it, never creating another. It must be open; it
 # adds the <!-- broker-heartbeat --> marker pair the heartbeat script edits, only if the body lacks it, and is
 # safe to re-run.
+# Multi-fleet (FLEET_ID set and federation.yml present): repo and ledger_issue are not used for the ledger. The
+# broker heartbeats on its fleet's status_issue in the instance repo instead (SKILL.md "Multi-fleet"), so one
+# shared copy of this file serves every fleet.
 
 state_dir: logs/resource-broker # working memory: state.md, journal, .watch/ (keep gitignored) [script]
 poll_interval: 30 # seconds: the active-reap tick of broker-watch.sh [script]
@@ -28,6 +31,10 @@ lease:
   # Empty = <main checkout of the cwd's repo>/logs/leases (shared by its linked worktrees; set it when clients run from another clone)
   owner: <ns>-broker # the --owner for pump / reconcile / host windows [script]
   owner_pattern: '^<ns>-[a-z0-9][a-z0-9-]{0,62}$' # LEASE_OWNER_PATTERN: fences the store to this namespace. Empty = any safe token [script]
+  # Multi-fleet: owner and owner_pattern get the fleet id as a prefix at run time (<ns>-broker becomes
+  # <fleet>-<ns>-broker, ^<ns>- becomes ^<fleet>-<ns>-). false keeps them as written, for clients whose owners
+  # can't carry the fleet id yet; each host's store is local either way.
+  fleet_qualify: true # [script]
 
 # Optional host-tier actions (restart a container runtime, say). Absent = the broker refuses host
 # windows. A restart command must never destroy data: broker-host-window.sh refuses one that reads as

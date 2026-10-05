@@ -198,7 +198,19 @@ the failure where host B relaunches its own monster because of host A's heartbea
 
 **The resource broker and its pool** stay per host. Two hosts' pools have nothing to arbitrate between
 them, so the broker reports on its **fleet's status issue** instead of a per-repo ledger. Lease owner
-fences become `^<fleet>-acme-…` rather than `^acme-…`.
+fences become `^<fleet>-acme-…` rather than `^acme-…`. One shared `resource-broker.yml` serves every
+fleet: the broker scripts resolve the status issue from `federation.yml` at run time, prefix the owner and
+fence with `FLEET_ID` (`lease.fleet_qualify: false` opts out), and stop rather than fall back to the
+shared ledger when the status issue can't be resolved. The lease store is a local path, so each host's
+pool is its own.
+
+The status issue then carries two heartbeat blocks, each rewritten only by its writer: the supervisor's
+`<!-- fleet-heartbeat -->` (the fleet is alive; work claiming reads it) and the broker's
+`<!-- broker-heartbeat -->`. The supervisor conf names the block to read for a session
+(`<session>|<issue>|<stale>|<repo>|broker-heartbeat`), and `fleet supervise` writes that line for the
+broker. Both writers edit the same body with a read-modify-write, so one can drop the other's fresh line;
+the broker reads the body back after writing and retries, and any other writer of the issue should do the
+same.
 
 **Each fleet gets one status issue** in the instance repo. It carries heartbeats for all the fleet's
 sessions, supervisor events, and the "rotation requested" protocol. A per-repo ledger is then needed

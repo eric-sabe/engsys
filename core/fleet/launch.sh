@@ -7,7 +7,8 @@
 #                                                          on PATH, and GH_TOKEN/GITHUB_TOKEN unset)
 #   fleet/roster.tmpl          → .fleet/roster            (the launcher's roster; a session line's
 #                                                          optional 5th field names a per-session env)
-# Each env also gets FLEET_ID (and FEDERATION_FILE, when that file exists) when fleet.conf sets FLEET_ID.
+# Each env also gets FLEET_ID (and FEDERATION_FILE, when that file exists, and FLEET_INSTANCE_REPO, when
+# set) when fleet.conf sets FLEET_ID.
 # then runs the launcher from PIN_DIR (the sessions' default workdir). Identity preflights belong in
 # the roster (PREFLIGHT= lines); they warn, never block.
 #
@@ -84,6 +85,7 @@ for tmpl in "$FLEET_REPO"/fleet/env/*.env.tmpl; do
   if [ -n "$FLEET_ID" ]; then
     printf '# Multi-fleet identity (fleet/fleet.conf FLEET_ID; registry: FEDERATION_FILE when it exists).\nFLEET_ID=%q\n' "$FLEET_ID" >>"$dest"
     if [ -f "$FEDERATION_FILE" ]; then printf 'FEDERATION_FILE=%q\n' "$FEDERATION_FILE" >>"$dest"; fi
+    if [ -n "$FLEET_INSTANCE_REPO" ]; then printf 'FLEET_INSTANCE_REPO=%q\n' "$FLEET_INSTANCE_REPO" >>"$dest"; fi
   fi
 done
 fleet_render "$FLEET_REPO/fleet/roster.tmpl" "$FLEET_STATE/roster"
