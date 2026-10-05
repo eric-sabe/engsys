@@ -40,13 +40,22 @@
 # in single-fleet mode) AND nobody holds a live baton (free, released, expired, or malformed). A live
 # baton held by another fleet's session, or by this session itself, is a wait: a relaunched session
 # could not act on it. A lease or registry read that fails is a wait too, alerted ONCE via NOTIFY_CMD
-# (incident baton-read-<name>, resolved when it reads clean). Two triggers exist only for them:
+# (incident baton-read-<name>, resolved when it reads clean). Three triggers exist only for them:
 #   heartbeat "handover" + proc exited          → relaunch when the baton allows (the old home released
 #                                                  it; its heartbeat on the shared ledger is fresh)
 #   heartbeat stale + proc ALIVE, idle at its    → relaunch when the baton allows: a session whose
 #     prompt                                       lease ran out (lost, or wedged) never renews again,
 #                                                  so staleness + idle + a forfeited lease is three
 #                                                  signals, not one. Mid-turn stays never-killed.
+#   heartbeat >= FORFEIT_CHECK_MIN old (not yet  → relaunch when `supervise` reports the baton EXPIRED
+#     stale, not "session end" / "handover") +     with its tip still naming this session
+#     proc ALIVE, idle at its prompt               (`forfeited: true`, engsys#87): the session let its
+#                                                  lease run out and stopped on BATON_LOST, so it can
+#                                                  never act again; waiting for staleness only leaves
+#                                                  the role empty. The lease is read only once the
+#                                                  heartbeat is a TTL old, so a healthy session (which
+#                                                  heartbeats at most every 10 min) costs ~no reads.
+#                                                  Once per heartbeat (latch: <name>.forfeit).
 #
 # Ledger target moves (engsys#72): the supervisor records, per session, the ledger target it last
 # launched the session against (logs/fleet-supervisor/<name>.target: repo|issue|marker|launch-epoch).
@@ -267,6 +276,7 @@ notify() { # notify <args...> → 0 when NOTIFY_CMD ran and succeeded
 # Fails closed: anything but a clean "may relaunch" is a wait, and a read error alerts once per
 # incident (latch: <name>.baton-alerted), resolved on the first clean read after it.
 BATON_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/lease/baton.mjs"
+FORFEIT_CHECK_MIN=10 # the baton TTL (baton.mjs TTL_MINUTES): no younger heartbeat can sit on an expired lease
 baton_allows() { # baton_allows <name> <repo> <role> → 0 may relaunch
   local name="$1" repo="$2" role="$3" out rc=0 latch="$STATE_DIR/$1.baton-alerted"
   if [ -n "$BATON_CMD" ]; then
@@ -277,6 +287,7 @@ baton_allows() { # baton_allows <name> <repo> <role> → 0 may relaunch
   fi
   out="$(printf '%s' "$out" | tail -n 1 | cut -c1-300)"
   BATON_WHY="$(printf '%s' "$out" | jq -r '"\(.code): \(.reason)"' 2>/dev/null || printf '%s' "$out")"
+  BATON_FORFEITED="$(printf '%s' "$out" | jq -r 'if .forfeited == true then 1 else 0 end' 2>/dev/null || echo 0)"
   if [ "$rc" = 0 ] || [ "$rc" = 1 ]; then
     if [ -f "$latch" ]; then
       if notify --level info --incident "baton-read-$name" --resolve "Resolved: the $role baton for $repo reads clean again (since $(cat "$latch"))."; then rm -f "$latch"; fi
@@ -437,6 +448,17 @@ for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
       else
         log "$name: STALE+ALIVE — already escalated, holding"
       fi
+    elif [ -n "$role" ] && [ "$ENDED" = "0" ] && [ "$HANDOVER" = "0" ] && [ -n "$HB_EPOCH" ] \
+      && [ $(( (NOW - HB_EPOCH) / 60 )) -ge "$FORFEIT_CHECK_MIN" ] \
+      && [ "$(cat "$STATE_DIR/$name.forfeit" 2>/dev/null || true)" != "$HB_TS" ] && ! pane_busy "$name" \
+      && baton_allows "$name" "$REPO_SLUG" "$role" && [ "$BATON_FORFEITED" = "1" ]; then
+      # the session let its lease run out (header): relaunch now instead of after stale_min. Once per
+      # heartbeat: the relaunched session carries the same holder name, so until it heartbeats the
+      # lease still reads "expired, naming this session"; if it never does, the stale branch takes over.
+      DOWN=$((DOWN + 1))
+      rm -f "$LATCH"
+      relaunch "$name" "$ledger" "$REPO_SLUG" "the $role baton expired still naming this session (last heartbeat ${HB_TS}), session idle at its prompt ($BATON_WHY)"
+      printf '%s\n' "$HB_TS" >"$STATE_DIR/$name.forfeit"
     else
       UP=$((UP + 1))
       rm -f "$LATCH"

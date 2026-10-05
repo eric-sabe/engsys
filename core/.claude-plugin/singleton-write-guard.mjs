@@ -298,6 +298,23 @@ function gitVerdict(args) {
   return null;
 }
 
+/**
+ * `fleet msg send` posts a GitHub comment through a child gh this hook never sees (engsys#77), so in a
+ * singleton session it is a write like any other: allowed only as `mm-act.sh|mnt-act.sh guard -- fleet
+ * msg send …`. Caught as `fleet … msg … send`, and as msg.sh / msg.mjs (any path, any interpreter) followed
+ * by `send`. `inbox` and `read` stay allowed: they only read.
+ */
+export function fleetMsgSendVerdict(simple, i) {
+  const b = base(simple[i] ?? '');
+  const rest = simple.slice(i + 1);
+  if (b === 'fleet') {
+    const m = rest.indexOf('msg');
+    return m !== -1 && rest.slice(m + 1).includes('send') ? 'fleet msg send (a GitHub write)' : null;
+  }
+  if (b === 'msg.sh' || b === 'msg.mjs') return rest.includes('send') ? 'fleet msg send (a GitHub write)' : null;
+  return null;
+}
+
 function httpVerdict(args) {
   return args.some((a) => /github\.com|githubusercontent\.com/i.test(a)) ? 'an HTTP client towards GitHub' : null;
 }
@@ -631,6 +648,7 @@ export function bashFindings(cmd, ctx = {}, depth = 0, outerSubst = false, opts 
       } else if (b === 'hub') hit = 'hub (another GitHub client; reads and writes go through gh here)';
       else if (b === 'git') hit = gitVerdict(simple.slice(i + 1));
       else if (HTTP_CLIENTS.has(b)) hit = httpVerdict(simple.slice(i + 1));
+      else hit = fleetMsgSendVerdict(simple, i);
       if (hit) found.push(hit);
       // #85 F1: an interpreter only where it runs, never as a READ_TOOL's argument (grep -rn python3 …).
       if (!opts.skipInterpreters && !reading && at.includes(i) && INTERPRETER.test(b)) found.push(...interpreterFindings(simple, i, text, interpCode, ctx, depth, subst));

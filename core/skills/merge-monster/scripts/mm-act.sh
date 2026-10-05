@@ -7,6 +7,7 @@
 # Usage: mm-act.sh merge --repo owner/name --state-dir DIR --pr N --sha <validated head> --method merge|squash|rebase
 #        mm-act.sh guard --repo owner/name --state-dir DIR -- gh <args…>
 #        mm-act.sh guard --repo owner/name --state-dir DIR -- <engsys-root>/skills/merge-monster/scripts/gate-request.sh <args…>
+#        mm-act.sh guard --repo owner/name --state-dir DIR -- fleet msg send --to <fleet>:<session> [--re owner/repo#n] --body-file <f>
 #        mm-act.sh guard --repo owner/name --state-dir DIR --pr N -- git -C <wt> push --force-with-lease origin HEAD:refs/heads/<PR head branch>
 #        mm-act.sh guard --repo owner/name --state-dir DIR --new-branch -- git -C <wt> push origin HEAD:refs/heads/<agent/… new branch>
 #   [--role maintain]  Maintenance Monster's acts (mnt-act.sh passes it); default merge
