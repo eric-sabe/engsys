@@ -22,6 +22,11 @@
 #                                 supervisor's HEARTBEAT_CMD calls once per tick.
 #   federation validate|get|home|address|status ...
 #                                 the multi-fleet registry (federation.yml; see `fleet federation --help`)
+#   msg send --to <fleet>:<session> [--re owner/repo#n] --body-file <f> [--from <session>]
+#                                 post a cross-fleet message (a fleet-msg comment); exit 3 = same fleet,
+#                                 use SendMessage
+#   msg inbox <session> [--mark-read]
+#                                 the session's undelivered cross-fleet messages
 #   init ...                      scaffold a new fleet instance (engsys fleet init)
 #
 # The instance is --instance <dir>, else $FLEET_INSTANCE, else the git toplevel of the current
@@ -45,7 +50,7 @@ case "$cmd" in
   -h | --help | help) sed -n '2,/^set -/{/^set -/!p;}' "$0"; exit 0 ;;
   init) # the engsys CLI (this kit lives at <engsys>/core/fleet); no instance needed yet
     exec "$KIT/../../install" fleet init "$@" ;;
-  status | pin | sync | restart | launch | supervise | install-jobs | notify | heartbeat | federation) ;;
+  status | pin | sync | restart | launch | supervise | install-jobs | notify | heartbeat | federation | msg) ;;
   *) echo "fleet: unknown command '$cmd' (fleet help)" >&2; exit 2 ;;
 esac
 
@@ -67,4 +72,5 @@ case "$cmd" in
   notify) exec bash "$KIT/notify.sh" "$@" ;;
   heartbeat) exec bash "$KIT/heartbeat.sh" "$@" ;;
   federation) exec bash "$KIT/federation.sh" "$@" ;;
+  msg) exec bash "$KIT/msg.sh" "$@" ;;
 esac
