@@ -20,6 +20,7 @@ while [ $# -gt 0 ]; do
     --issue) ISSUE="$2"; shift 2 ;;
     --status) STATUS="$2"; shift 2 ;;
     --state-dir) STATE_DIR="$2"; shift 2 ;;
+    --state-dir=*) STATE_DIR="${1#--state-dir=}"; shift ;;
     --session) SESSION="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
