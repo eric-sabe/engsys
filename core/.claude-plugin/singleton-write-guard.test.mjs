@@ -260,6 +260,30 @@ test('N1: settings and plugin files are read-only — Bash writes and the Write/
   assert.equal(decide({ tool_name: 'Write', tool_input: { file_path: '/repo/.claude/settings.json' }, env: { HOME: '/Users/x' }, pluginRoot: ROOT }), null, 'inactive elsewhere');
 });
 
+test('running the plugin\'s own skill scripts is execution, not a write (v1.11 canary regression)', () => {
+  const env = { ...MERGE, HOME: '/Users/x', CLAUDE_PLUGIN_ROOT: ROOT };
+  const denied = (command) => decide({ command, env, pluginRoot: ROOT, cwd: '/repo' }) !== null;
+  const cache = '/Users/x/.claude/plugins/cache/engsys/engsys/1.11.0/skills/maintenance-monster/scripts';
+  for (const c of [
+    `bash ${cache}/mnt-snapshot.sh --config /c.yml`,
+    `bash ${path.join(ROOT, 'skills/maintenance-monster/scripts/mnt-watch.sh')} --state-dir logs/m`,
+    `${cache}/mnt-fp-candidates.sh --config /c.yml`,
+    `sh -e ${cache}/mm-agent-watch.sh --state-dir logs/m --stale-min 10`,
+    `node ${cache}/mnt-fp.mjs candidates --repo o/r`,
+    `bash ${cache}/mnt-snapshot.sh --config /c.yml | jq .alerts`,
+    `bash ${cache}/mnt-snapshot.sh > /tmp/snap.json`,
+  ]) assert.equal(denied(c), false, `should allow: ${c}`);
+  for (const c of [
+    `printf x > ${cache}/mnt-snapshot.sh`,
+    `cat /tmp/a.sh > ${cache}/mnt-snapshot.sh`,
+    `bash ${cache}/mnt-snapshot.sh > ${cache}/mnt-watch.sh`,
+    `cp /tmp/x.sh ${cache}/mnt-snapshot.sh`,
+    `node -e "require('fs').writeFileSync('x')" ${cache}/mnt-fp.mjs`,
+    `bash ${cache}/mnt-snapshot.sh /Users/x/.claude/settings.json`,
+    `bash /Users/x/.claude/settings.json`,
+  ]) assert.ok(denied(c), `should deny: ${c}`);
+});
+
 test('L-c: GitHub MCP tools that may write are denied; reads pass', () => {
   for (const t of ['mcp__github__merge_pull_request', 'mcp__plugin_engineering_github__create_issue', 'mcp__github__add_issue_comment', 'mcp__github__authenticate']) {
     assert.ok(decide({ tool_name: t, tool_input: {}, env: MERGE, pluginRoot: ROOT }), t);

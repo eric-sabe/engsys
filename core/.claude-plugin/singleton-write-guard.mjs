@@ -233,11 +233,39 @@ export function protectedPath(p, { env = process.env, cwd = process.cwd() } = {}
   return false;
 }
 
+/** Interpreters that run a script file given as their first non-option argument. */
+const SCRIPT_INTERPRETERS = new Set(['bash', 'sh', 'zsh', 'node']);
+const SCRIPT_FILE = /\.(sh|bash|mjs|cjs|js)$/;
+
+/**
+ * True when simple[i] is a plugin script being RUN, not written: either the command itself
+ * (`/…/plugins/…/x.sh args`) or the first non-option argument of bash/sh/zsh/node
+ * (`bash /…/plugins/…/x.sh args`; a bare path counts only as the first simple command, since a
+ * redirect target is lexed as a later simple command). Running the plugin's own skill scripts is how a monster works;
+ * changing them is still denied (cp/mv/tee/sed -i/redirects never reach this branch as the script
+ * position, and settings JSON files never match SCRIPT_FILE).
+ */
+export function scriptExecution(simple, i, simpleIndex = 0) {
+  const w = simple[i] ?? '';
+  if (!SCRIPT_FILE.test(w)) return false;
+  // A bare path at position 0 is a command only in the FIRST simple command: the lexer also emits a
+  // redirect target (`printf x > /…/x.sh`) as its own simple command, which always comes later.
+  if (i === 0) return simpleIndex === 0;
+  const head = base(simple[0] ?? '');
+  if (!SCRIPT_INTERPRETERS.has(head)) return false;
+  let j = 1;
+  while (j < simple.length && simple[j].startsWith('-')) {
+    if (head === 'node' && ['-e', '--eval', '-p', '--print'].includes(simple[j])) return false; // inline code, not a script file
+    j += 1;
+  }
+  return j === i;
+}
+
 /** Every reason to deny `cmd` in a singleton session (nested quoted commands too). */
 export function bashFindings(cmd, ctx = {}, depth = 0) {
   const found = [];
   const { words } = lex(cmd);
-  for (const simple of words) {
+  for (const [simpleIndex, simple] of words.entries()) {
     const head = base(simple[0] ?? '');
     for (let i = 0; i < simple.length; i += 1) {
       const w = simple[i];
@@ -249,7 +277,7 @@ export function bashFindings(cmd, ctx = {}, depth = 0) {
       else if (HTTP_CLIENTS.has(b)) hit = httpVerdict(simple.slice(i + 1));
       if (hit) found.push(hit);
       if (/(^|[/@.])(api|uploads)\.github\.com/i.test(w)) found.push('a command that names the GitHub API host');
-      if (protectedPath(w, ctx) && !READ_TOOLS.has(head)) found.push(`a write to a protected settings or plugin path (${w})`);
+      if (protectedPath(w, ctx) && !READ_TOOLS.has(head) && !scriptExecution(simple, i, simpleIndex)) found.push(`a write to a protected settings or plugin path (${w})`);
     }
   }
   return [...new Set(found)];
