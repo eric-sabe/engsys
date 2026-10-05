@@ -1050,10 +1050,22 @@ function defaultSpawn(cmd, args, { timeout, env = process.env }) {
     const out = [];
     const err = [];
     let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; child.kill("SIGTERM"); }, timeout);
+    let settled = false;
+    let killer = null;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+      killer = setTimeout(() => child.kill("SIGKILL"), 5_000); // a child that ignores SIGTERM
+    }, timeout);
     child.stdout.on("data", (c) => out.push(c));
     child.stderr.on("data", (c) => err.push(c));
-    const finish = (code) => { clearTimeout(timer); done({ code, stdout: Buffer.concat(out).toString(), stderr: Buffer.concat(err).toString(), timedOut }); };
+    const finish = (code) => {
+      if (settled) return; // error and close can both fire
+      settled = true;
+      clearTimeout(timer);
+      clearTimeout(killer);
+      done({ code, stdout: Buffer.concat(out).toString(), stderr: Buffer.concat(err).toString(), timedOut });
+    };
     child.on("error", (e) => { err.push(Buffer.from(String(e?.message ?? e))); finish(127); });
     child.on("close", (code) => finish(typeof code === "number" ? code : 1));
   });
