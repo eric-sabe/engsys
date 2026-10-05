@@ -14,6 +14,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
 import { execFile } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -1391,6 +1392,23 @@ test("N4/Q4: a confirmedByRead result reports the TIP's record (renewed expiry),
   // Confirming consumed the memory: a third acquire is heldBySelf, never a second re-issue.
   const third = await l.acquire({ role: "merge", holder: "alice:mm", ttlMinutes: 10 });
   assert.equal(third.heldBySelf, true);
+});
+
+test("N2: the settings template denies break-glass to agent sessions, whatever the path, flags or quoting", () => {
+  const tmpl = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "templates", "settings.json.tmpl"), "utf8"));
+  const rule = "Bash(*github-backend.mjs*break-glass*)";
+  assert.ok(tmpl.permissions.deny.includes(rule), `template deny list lacks ${rule}`);
+  // The rule's glob, applied the way the harness matches Bash rules (`*` spans anything).
+  const glob = new RegExp(`^${rule.slice("Bash(".length, -1).split("*").map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`);
+  for (const cmd of [
+    "node core/lib/lease/github-backend.mjs break-glass --repo o/r --role merge --reason x --expect-sha abc --i-know",
+    "node /Users/x/git/engsys/core/lib/lease/github-backend.mjs --repo o/r break-glass --role merge",
+    "node './core/lib/lease/github-backend.mjs' \"break-glass\" --role merge",
+    "cd core/lib/lease && node github-backend.mjs break-glass --role merge",
+  ]) assert.match(cmd, glob, cmd);
+  for (const cmd of ["node core/lib/lease/github-backend.mjs status --repo o/r --role merge", "node core/lib/lease/github-backend.mjs release --role merge --token t"]) {
+    assert.doesNotMatch(cmd, glob, cmd);
+  }
 });
 
 test("release of an expired-but-ours baton is allowed and reports wasExpired", async () => {

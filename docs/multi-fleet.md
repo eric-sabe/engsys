@@ -202,9 +202,9 @@ no longer that sha, nothing is written (`tip_moved`). When the old tip is a read
 is parented on it and written as a normal compare-and-swap, so a legitimate takeover that lands between
 the operator's read and write survives (`tip_moved` again); `force: true` is used only for a tip the API
 cannot serve as a commit. It is for a human at a shell, never an agent or a monster: the engsys
-settings template (`core/templates/settings.json.tmpl`) denies `Bash(*github-backend.mjs
-break-glass*)` in every rendered project, and a fleet instance repo should carry the same deny in its
-session settings.
+settings template (`core/templates/settings.json.tmpl`) denies `Bash(*github-backend.mjs*break-glass*)`
+in every rendered project (any path, any flags or quoting between the script and the subcommand), and
+a fleet instance repo should carry the same deny in its session settings.
 
 **Where batons live.** `refPrefix` must be under `refs/engsys/` (default `refs/engsys/batons`);
 `refs/heads`, `refs/tags` and anything else are rejected. A tip whose tree is not the empty tree is an
