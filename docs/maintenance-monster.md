@@ -391,6 +391,21 @@ Its own pinned ledger issue (the baton), `logs/maintenance-monster/`
 `Monitor` — the same shapes as `logs/merge-monster/`, so the closeout ceremony
 can mine its journal too.
 
+### The lease under the ledger (engsys#62)
+
+The ledger heartbeat is the human surface; the authority is the `maintain`
+lease on GitHub (`refs/engsys/batons/maintain`), held exactly as Merge Monster
+holds `merge` ([`merge-monster.md` § 5](merge-monster.md#the-lease-under-the-ledger-engsys62)):
+a startup holder check against `federation.yml` and the lease
+(`mnt-baton.sh startup`: not home → never acquire, held elsewhere → stand by),
+a background renew every 2.5 minutes in `mnt-watch.sh` plus one on every
+`mnt-heartbeat.sh --state-dir`, a fence before every write (`mnt-act.sh guard`
+for `gh` writes and gate requests; `mnt-fp-dismiss.sh` fences itself before
+its PATCH whenever its state dir carries the baton; `mnt-baton.sh fence` before
+dispatching a fix agent or pushing), stop-and-alert-once on loss
+(`baton-lost-maintain`), release on rotation, clean exit and handover, and the
+same handover when `maintain.home` moves.
+
 ## Rollout
 
 1. **Phase 0 + 1 — this PR.** The spec, the `/maintenance-monster` skill, the

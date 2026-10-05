@@ -585,6 +585,21 @@ has "HTTP 403: says what permission is missing" "$OUT" "Code scanning alerts: Re
 has "  names the API permission" "$OUT" "security_events: write"
 no_side_effects
 rm -f "$FAKE/patch.403"
+# The baton fence (engsys#62): a state dir that carries a Maintenance Monster baton dismisses only
+# under a passing fence. Both cases below are refused before any request (no token of this session /
+# a lost baton), so they run offline.
+export ENGSYS_SESSION=acme-maintain
+printf '{"v":1,"holder":"zed:acme-maintain","token":"00000000-0000-4000-8000-000000000000","deadlineMs":0}\n' >"$T/state/baton-maintain.json"
+run_d 1 "$SHAPE1" "hmac"
+has "a baton in the state dir that this session does not hold" "$OUT" "REFUSED 1 $POLICY baton: fence refused: not_started"
+no_side_effects
+rm -f "$T/state/baton-maintain.json"
+printf '{"at":"2026-10-04T12:00:00.000Z","code":"lost"}\n' >"$T/state/baton-maintain.lost"
+run_d 1 "$SHAPE1" "hmac"
+has "a lost baton" "$OUT" "REFUSED 1 $POLICY baton: fence refused: lost_earlier"
+no_side_effects
+rm -f "$T/state/baton-maintain.lost"
+unset ENGSYS_SESSION
 CFG_KEEP="$CFG"
 CFG="$T/bad.yml"
 write_cfg "$CFG" "$(printf '%s\n' "$GOOD_POLICY" | grep -v '^    approved_by:')"

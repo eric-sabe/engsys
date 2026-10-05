@@ -26,10 +26,27 @@
 #                                                  script's call — see
 #                                                  docs/subagent-liveness.md
 #                                                  in engsys)
+#   singleton monster (6th field merge|maintain) → every relaunch above also needs
+#                                                  the BATON to allow it (below)
 #   any relaunch that FAILS                      → escalate once on the ledger
 #                                                  (with the launcher's error),
 #                                                  retry each tick quietly,
 #                                                  comment again on recovery
+#
+# Singleton monsters (engsys#62): a session line whose 6th field is `merge` or `maintain` holds that
+# role through the github lease (core/lib/lease/baton.mjs), and the lease, not the shared ledger
+# heartbeat, says who holds it. Before ANY relaunch of such a session the supervisor asks the lease
+# (`baton.mjs supervise`): relaunch only when this fleet is the role's home (federation.yml; always,
+# in single-fleet mode) AND nobody holds a live baton (free, released, expired, or malformed). A live
+# baton held by another fleet's session, or by this session itself, is a wait: a relaunched session
+# could not act on it. A lease or registry read that fails is a wait too, alerted ONCE via NOTIFY_CMD
+# (incident baton-read-<name>, resolved when it reads clean). Two triggers exist only for them:
+#   heartbeat "handover" + proc exited          → relaunch when the baton allows (the old home released
+#                                                  it; its heartbeat on the shared ledger is fresh)
+#   heartbeat stale + proc ALIVE, idle at its    → relaunch when the baton allows: a session whose
+#     prompt                                       lease ran out (lost, or wedged) never renews again,
+#                                                  so staleness + idle + a forfeited lease is three
+#                                                  signals, not one. Mid-turn stays never-killed.
 #
 # Config: .claude/fleet-supervisor.conf (or pass a path as $1)
 #   TMUX_SESSION=<tmux session the fleet runs in>
@@ -72,7 +89,12 @@
 #                              Unset, or the command itself a no-op (single-
 #                              fleet mode, no status_issue) or failing = never
 #                              stops the tick.
-#   <session-name>|<ledger-issue>|<stale-minutes>[|<owner/name>[|<marker>]]
+#   BATON_CMD=<command>        optional: the lease check for singleton monsters, called as
+#                              `<cmd> --repo <r> --role <role> --session <name>`; prints one JSON
+#                              line; exit 0 = may relaunch, 1 = held / not home, anything else =
+#                              error (no relaunch, alert once). Default: node core/lib/lease/baton.mjs
+#                              supervise (reads FLEET_ID / FEDERATION_FILE from the environment).
+#   <session-name>|<ledger-issue>|<stale-minutes>[|<owner/name>[|<marker>[|<role>]]]
 #                              one line per monster; the 4th field overrides
 #                              REPO= for that session (multi-repo fleets).
 #                              The 5th names the block to read the heartbeat
@@ -83,6 +105,9 @@
 #                              broker-heartbeat block beside the supervisor's
 #                              own fleet-heartbeat). Without it, the first
 #                              `last:` line in the body counts, as before.
+#                              The 6th, `merge` or `maintain`, marks a singleton monster
+#                              (above). The fleet kit's `fleet supervise` fills it in from the
+#                              roster; leave the 4th and 5th empty to skip them (acme-mm|7|60|||merge).
 # Repo resolution per session: 4th field → REPO= → `gh repo view` in the cwd
 # (the last is the single-repo mode where the supervisor runs inside the
 # target repo; a separate fleet repo must set REPO= or the 4th field).
@@ -119,7 +144,7 @@ fi
 trap 'rmdir "$LOCKDIR" 2>/dev/null || true' EXIT
 
 TMUX_SESSION="" LAUNCH_CMD="" DEFAULT_REPO="" ROTATE_GRACE_MIN=3 HOST_CHECK_CMD=""
-HOST_HEALTH_CMD="" HOST_HEALTH_INCIDENT="host-health" NOTIFY_CMD="" HEARTBEAT_CMD=""
+HOST_HEALTH_CMD="" HOST_HEALTH_INCIDENT="host-health" NOTIFY_CMD="" HEARTBEAT_CMD="" BATON_CMD=""
 SESSIONS=()
 while IFS= read -r line; do
   line="${line%%$'\r'}"
@@ -134,6 +159,7 @@ while IFS= read -r line; do
     HOST_HEALTH_INCIDENT=*) HOST_HEALTH_INCIDENT="${line#HOST_HEALTH_INCIDENT=}" ;;
     NOTIFY_CMD=*) NOTIFY_CMD="${line#NOTIFY_CMD=}" ;;
     HEARTBEAT_CMD=*) HEARTBEAT_CMD="${line#HEARTBEAT_CMD=}" ;;
+    BATON_CMD=*) BATON_CMD="${line#BATON_CMD=}" ;;
     *\|*) SESSIONS+=("$line") ;;
     *) echo "fleet-supervisor: bad conf line: $line" >&2; exit 1 ;;
   esac
@@ -214,6 +240,36 @@ notify() { # notify <args...> → 0 when NOTIFY_CMD ran and succeeded
   # shellcheck disable=SC2086
   $NOTIFY_CMD "$@" >>"$LOG" 2>&1
 }
+# Singleton monsters: may this session be relaunched, as far as the lease is concerned? Sets BATON_WHY.
+# Fails closed: anything but a clean "may relaunch" is a wait, and a read error alerts once per
+# incident (latch: <name>.baton-alerted), resolved on the first clean read after it.
+BATON_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/lease/baton.mjs"
+baton_allows() { # baton_allows <name> <repo> <role> → 0 may relaunch
+  local name="$1" repo="$2" role="$3" out rc=0 latch="$STATE_DIR/$1.baton-alerted"
+  if [ -n "$BATON_CMD" ]; then
+    # shellcheck disable=SC2086 # a command line, like LAUNCH_CMD
+    out=$($BATON_CMD --repo "$repo" --role "$role" --session "$name" 2>&1) || rc=$?
+  else
+    out=$(node "$BATON_LIB" supervise --repo "$repo" --role "$role" --session "$name" 2>&1) || rc=$?
+  fi
+  out="$(printf '%s' "$out" | tail -n 1 | cut -c1-300)"
+  BATON_WHY="$(printf '%s' "$out" | jq -r '"\(.code): \(.reason)"' 2>/dev/null || printf '%s' "$out")"
+  if [ "$rc" = 0 ] || [ "$rc" = 1 ]; then
+    if [ -f "$latch" ]; then
+      if notify --level info --incident "baton-read-$name" --resolve "Resolved: the $role baton for $repo reads clean again (since $(cat "$latch"))."; then rm -f "$latch"; fi
+    fi
+    return "$rc"
+  fi
+  if [ -f "$latch" ]; then
+    log "$name: baton unreadable (exit $rc) — already alerted, not relaunching: $BATON_WHY"
+  elif notify --level alert --incident "baton-read-$name" "fleet-supervisor: can't read the $role baton for $repo (exit $rc: $BATON_WHY). Not relaunching \`$name\` until it reads clean: a relaunch with an unknown holder could start a second $role monster."; then
+    date -u +%Y-%m-%dT%H:%M:%SZ >"$latch"; log "$name: baton unreadable (exit $rc) — alerted, not relaunching: $BATON_WHY"
+  else
+    log "$name: baton unreadable (exit $rc), and the alert could not be posted (NOTIFY_CMD unset or failing); retrying next tick: $BATON_WHY"
+  fi
+  return 2
+}
+
 if [ -n "$HOST_HEALTH_CMD" ]; then
   HEALTH_LATCH="$STATE_DIR/host-health.alerted"
   # shellcheck disable=SC2086
@@ -245,9 +301,10 @@ NOW=$(date +%s)
 UP=0 ROTATING=0 DOWN=0
 
 for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
-  IFS='|' read -r name ledger stale_min repo marker <<<"$spec"
+  IFS='|' read -r name ledger stale_min repo marker role <<<"$spec"
   [ -n "$name" ] && [ -n "$ledger" ] && [ -n "$stale_min" ] || { log "SKIP bad line: $spec"; continue; }
   case "$marker" in *[!a-z0-9-]*) log "SKIP bad line (marker must be lowercase letters, digits, hyphens): $spec"; continue ;; esac
+  case "$role" in '' | merge | maintain) ;; *) log "SKIP bad line (6th field must be merge or maintain): $spec"; continue ;; esac
   if [ -n "$HOST_CHECK_CMD" ]; then
     # word-split on purpose, like LAUNCH_CMD
     # shellcheck disable=SC2086
@@ -300,6 +357,8 @@ for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
   fi
   ROTATION=0; case "$HB_STATUS" in *[Rr]otation\ requested*) ROTATION=1 ;; esac
   ENDED=0;    case "$HB_STATUS" in *[Ss]ession\ end*) ENDED=1 ;; esac
+  HANDOVER=0 # singleton monsters only: the old home released the role (engsys#62)
+  if [ -n "$role" ]; then case "$HB_STATUS" in *[Hh]andover*) HANDOVER=1 ;; esac; fi
 
   LATCH="$STATE_DIR/$name.escalated"
   ROTATED="$STATE_DIR/$name.rotated" # the rotation heartbeat we already relaunched for
@@ -317,14 +376,20 @@ for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
         log "$name: rotation requested ${AGE}m ago — letting it settle (grace ${ROTATE_GRACE_MIN}m)"
       elif pane_busy "$name"; then
         log "$name: rotation requested but the session is still mid-turn — waiting"
+      elif [ -n "$role" ] && ! baton_allows "$name" "$REPO_SLUG" "$role"; then
+        log "$name: rotation requested, but the $role baton does not allow a relaunch yet — waiting ($BATON_WHY)"
       else
         relaunch "$name" "$ledger" "$REPO_SLUG" "rotation requested; session idle at its prompt ${AGE}m after its final heartbeat"
         printf '%s\n' "$HB_TS" >"$ROTATED"
       fi
     elif [ "$STALE" = "1" ]; then
       DOWN=$((DOWN + 1))
-      # hung-or-thinking: never kill; escalate once per incident
-      if [ ! -f "$LATCH" ]; then
+      # hung-or-thinking: never kill; escalate once per incident. The one exception is a singleton
+      # monster idle at its prompt whose baton is forfeited (header).
+      if [ -n "$role" ] && ! pane_busy "$name" && baton_allows "$name" "$REPO_SLUG" "$role"; then
+        rm -f "$LATCH"
+        relaunch "$name" "$ledger" "$REPO_SLUG" "heartbeat stale (last: ${HB_TS:-never}), session idle at its prompt, $role baton forfeited ($BATON_WHY)"
+      elif [ ! -f "$LATCH" ]; then
         gh issue comment "$ledger" -R "$REPO_SLUG" --body "⚠️ fleet-supervisor: heartbeat stale (last: ${HB_TS:-never}) but the \`$name\` process is still alive. Not touching it — a live process is never killed on staleness alone (probe-then-classify is a judgment call, not a script's). Needs a probe: operator or maintenance watchdog." >/dev/null \
           && touch "$LATCH" && log "$name: STALE+ALIVE — escalated on ledger $REPO_SLUG#$ledger"
       else
@@ -340,9 +405,15 @@ for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
 
   # --- process exited ---------------------------------------------------------
   rm -f "$LATCH"
-  if [ "$ROTATION" = "1" ] || { [ "$STALE" = "1" ] && [ "$ENDED" = "0" ]; }; then
-    if [ "$ROTATION" = "1" ]; then ROTATING=$((ROTATING + 1)); else DOWN=$((DOWN + 1)); fi
-    REASON=$([ "$ROTATION" = "1" ] && echo "rotation requested" || echo "crash recovery (stale heartbeat, process gone)")
+  if [ "$ROTATION" = "1" ] || [ "$HANDOVER" = "1" ] || { [ "$STALE" = "1" ] && [ "$ENDED" = "0" ]; }; then
+    if [ "$ROTATION" = "1" ] || [ "$HANDOVER" = "1" ]; then ROTATING=$((ROTATING + 1)); else DOWN=$((DOWN + 1)); fi
+    if [ "$ROTATION" = "1" ]; then REASON="rotation requested"
+    elif [ "$HANDOVER" = "1" ]; then REASON="handover (${HB_STATUS})"
+    else REASON="crash recovery (stale heartbeat, process gone)"; fi
+    if [ -n "$role" ] && ! baton_allows "$name" "$REPO_SLUG" "$role"; then
+      log "$name: $REASON, but the $role baton does not allow a relaunch — waiting ($BATON_WHY)"
+      continue
+    fi
     # TOCTOU guard: re-read the pane immediately before killing the window —
     # a process may have appeared since classification (manual relaunch,
     # overlapping recovery). A now-live pane aborts this action entirely.

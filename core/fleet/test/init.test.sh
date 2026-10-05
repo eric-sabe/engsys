@@ -410,6 +410,7 @@ has "roster: investigate" "$R" "acme-investigate|$P||--add-dir $HOME/git/worktre
 has "roster: design" "$R" "acme-design|$P||--add-dir $HOME/git/worktrees --model claude-opus-5-5 --effort medium --remote-control --permission-mode auto"
 eq "five windows launched" "$(grep -c . "$FAKE/tmux/windows")" 5
 has "mm runs in the session env" "$(launched acme-mm)" "set -a && . $STATE/env/session.env && set +a && claude --name acme-mm"
+has "mm gets its session name and a launch id (the baton's holder, engsys#62)" "$(launched acme-mm)" "export ENGSYS_SESSION=acme-mm ENGSYS_SESSION_RUN="
 has "the prompt precedes the flags" "$(launched acme-mm)" "/engsys:merge-monster --model claude-opus-5-5"
 has "maintain: the 5th field replaces the session env" "$(launched acme-maintain)" "set -a && . $STATE/env/security.env && set +a && claude --name acme-maintain"
 S="$(cat "$STATE/env/session.env")"

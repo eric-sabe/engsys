@@ -157,11 +157,12 @@ that **claiming** becomes atomic, using a git ref as a compare-and-swap lock.
   compare-and-swap. Creating a ref fails if the ref already exists, which covers the first claim.
 - **Release:** a final commit with `holder: none`. **Takeover** after expiry follows the same
   compare-and-swap path, so two standbys cannot both win.
-- **Fencing:** every merge-monster action (marking a PR ready, merging) first checks that it still holds
-  the token. The current heartbeat has no equivalent. A monster that wakes from a long pause after
-  losing the baton stops instead of merging.
-- **Startup check:** a monster checks for a live holder before doing anything. Today it just writes a
-  heartbeat.
+- **Fencing:** every monster write (marking a PR ready, merging, labels, comments, gate requests,
+  dismissals, dispatching an agent that will push) first checks that it still holds the token. A
+  monster that wakes from a long pause after losing the baton stops instead of merging (#62: see
+  [P1](#p1-real-batons)).
+- **Startup check:** a monster checks the registry and the lease for a live holder before doing
+  anything, and acquires only where its fleet is home (#62).
 
 This is the cross-machine backend that `durable-lease.mjs` anticipates. The spike (see
 [Open items](#open-items)) confirmed that an App token can update a custom `refs/engsys/*` ref and that
@@ -296,9 +297,11 @@ This is how a singleton role moves from one fleet to another, for example from `
 
 1. A PR to `federation.yml` changes `merge.home` from `alice` to `bob`. An operator reviews it and it
    merges normally.
-2. The current holder sees the change on its next tick, finishes its current PR (never mid-merge),
-   posts a handover digest on the ledger, and releases the lease.
-3. The new home fleet's monster claims the lease and posts its startup digest. The ledger shows the
+2. The current holder sees the change within one renew (its watch bus emits `BATON_HANDOVER merge
+   bob`), starts nothing new, finishes or parks its current PR (never mid-merge), posts a handover
+   digest on the ledger, writes a final `handover to bob` heartbeat, and releases the lease.
+3. The new home fleet's monster claims the lease and posts its startup digest: a standing-by monster on
+   its next tick, or one bob's supervisor relaunches once the lease is free. The ledger shows the
    handover end to end.
 
 The supervisor changes to match. It relaunches a singleton monster only if **its own fleet** is that
@@ -583,9 +586,43 @@ Do this before a second fleet stands anything up. Tracking: #39 (registry, `FLEE
 ### P1: Real batons
 
 - Spike the ref compare-and-swap (#43, done), then build the `github` lease backend (#61, done:
-  section 2) and the merge and maintenance monsters' claim and fence.
-- Add the startup holder check; the supervisor reads the holder from the lease (it already skips a
-  monster whose home is another fleet, from #53).
+  section 2) and the merge and maintenance monsters' claim and fence (#62, done: below).
+- Add the startup holder check; the supervisor reads the holder from the lease (#62, done; it also
+  still skips a monster whose home is another fleet, from #53).
+
+**How the monsters hold their role (#62).** [`core/lib/lease/baton.mjs`](../core/lib/lease/baton.mjs)
+wraps the backend with the caller rule; the monsters call it through `mm-baton.sh` / `mnt-baton.sh`
+(startup, renew, fence, release, status: bookkeeping, auto-approved) and `mm-act.sh` / `mnt-act.sh`
+(the fenced writes: `merge`, and `guard -- gh …`; behind a prompt). Where each caller-rule item lives:
+
+| Rule | Where |
+|---|---|
+| TTL 10 min, renew at most every 3m20s | `TTL_MINUTES`, `RENEW_EVERY_MS`; `keepalive` (run by `mm-watch.sh` / `mnt-watch.sh`) renews every 2.5 min, and `mm-heartbeat.sh --state-dir` on every heartbeat |
+| on `lost: true` stop, alert once, exit | a sticky `baton-<role>.lost` marker created with `O_EXCL`; its creator sends the one `fleet notify --level alert --incident baton-lost-<role>`; every later call refuses with no request; the token is never used again |
+| local deadline | `Date.now()` at the start of the last good renew or `assertHeld`, plus its `expiresInMs`, minus 2 s; checked with `Date.now()` before every fence and again before every send |
+| fence before each merge | `assertHeld` with `minRemainingMs: 60000`, the local deadline, the post-takeover wait, then < 30 s since the fence started, then `PUT /pulls/{n}/merge` with `sha=<validated head>` and a 30 s timeout, never retried |
+| wait 60 s after a takeover | `notBeforeMs` (acquire return + 60 s); every fenced act refuses until then |
+| `heldBySelf` and errors are never held | startup answers `wait_self` / `error` with `act: false`; a fence holds only on `held: true` |
+| `wasExpired` release is an incident | `fleet notify --level alert --incident baton-overrun-<role>` |
+
+The token is written 0600 to the monster's state dir so later shell calls of the same session can use it,
+bound to the holder and to the launch (`ENGSYS_SESSION_RUN`, exported per launch by
+`launch-agent-sessions.sh` with `ENGSYS_SESSION`): a new launch archives its predecessor's file unread
+and waits out that baton (`wait_self`) rather than reuse its token. The background renewer stops when its
+watch bus is orphaned or the model has not touched the baton for 45 minutes, so a renewer can never keep a
+dead session's role alive. Holder: `<FLEET_ID>:<session>`, or `<hostname>:<session>` in single-fleet mode
+(no `FLEET_ID` or no federation file), where the lease still guards against an accidental second session.
+A role the registry declares no home for is decided by the lease alone (host-roles does not exclude
+such a session either); an unreadable registry, or a `FLEET_ID` it does not declare, fails closed.
+
+**Supervisor.** `fleet supervise` appends the role to the merge and maintain lines of the supervisor
+conf (6th field). Before any relaunch of such a session, the supervisor runs `baton.mjs supervise`:
+relaunch only when this fleet is home and nobody holds a live baton (free, released, expired, or a
+malformed tip the monster will take over loudly). A live baton held by another fleet, or by this
+session's own earlier launch, is a wait. A lease or registry read error is a wait plus one alert via
+`NOTIFY_CMD` (`baton-read-<name>`), resolved on the next clean read. Two triggers are new and apply to
+these sessions only: a `handover` heartbeat with the process gone, and a stale heartbeat with the
+session idle at its prompt and its baton forfeited.
 
 ### P2: Cross-fleet messages
 

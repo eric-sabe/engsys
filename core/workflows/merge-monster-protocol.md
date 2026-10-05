@@ -13,7 +13,16 @@ ledger** issue:
   `stale_lock_minutes` in `.claude/merge-monster.yml`, default 45 min) →
   **do not mark-ready, do not merge.** Label your PR `mm:ready` and walk away.
 - Heartbeat stale or issue closed → Merge Monster is not running; the normal
-  manual merge discipline applies.
+  manual merge discipline applies, unless the lease below says it holds the
+  role.
+
+Under the heartbeat sits the authority: Merge Monster holds the `merge` role
+through a lease on GitHub, the ref `refs/engsys/batons/merge`, and acts only
+while it holds it. To see the holder:
+`node <engsys-root>/lib/lease/github-backend.mjs status --repo <owner/name> --role merge`.
+`"state": "held"` means a Merge Monster session owns merging right now, whatever
+the heartbeat looks like: treat it as a fresh heartbeat. Never write to that
+ref yourself (`docs/multi-fleet.md` § 2 in engsys).
 
 ## How to enqueue
 

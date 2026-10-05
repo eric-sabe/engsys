@@ -28,6 +28,11 @@
 # fleet.conf, else the instance checkout's origin, names its repo). If it can't be resolved, the line
 # is commented out with a warning rather than left on the shared ledger another fleet's broker may use.
 #
+# Merge and maintain monsters (by their roster prompt, lib/host-roles.sh) get their role appended as
+# the 6th field (`acme-mm|7|60|||merge`): the supervisor then reads the role's holder from the github
+# lease before any relaunch and relaunches only where this fleet is home and no live baton is held
+# (fleet-supervisor.sh header; engsys#62).
+#
 # Usage: supervise.sh [--instance <dir>]
 set -euo pipefail
 if [ "${1:-}" = --instance ]; then FLEET_INSTANCE="${2:?--instance needs a directory}"; export FLEET_INSTANCE; shift 2; fi
@@ -59,6 +64,14 @@ while IFS= read -r line; do
         IFS='|' read -r _ _ stale _ <<<"$line"
         line="$n|${status_target##*#}|$stale|${status_target%%#*}|broker-heartbeat"
       fi
+      # Singleton monsters get their role as the 6th field, so the supervisor asks the lease before
+      # any relaunch (engsys#62). A role already written in the template wins.
+      kind="$(fleet_host_kind_of "$n")"
+      case "$kind" in
+        merge | maintain)
+          IFS='|' read -r _ l_ledger l_stale l_repo l_marker l_role <<<"$line"
+          [ -n "$l_role" ] || line="$n|$l_ledger|$l_stale|$l_repo|$l_marker|$kind" ;;
+      esac
       kept=$((kept + 1)) ;;
   esac
   printf '%s\n' "$line"

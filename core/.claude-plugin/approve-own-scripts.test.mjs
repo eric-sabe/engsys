@@ -116,6 +116,20 @@ test('approves the read-only gate verifier, never the gate-request poster', () =
   assert.equal(approvable(`${mm}/gate-request.sh --repo acme/app --pr 412 --kind merge --target t --what w`, P.root), null);
 });
 
+test('approves the monsters\' baton bookkeeping, never their fenced mutations', () => {
+  const mm = path.join(P.root, 'skills/merge-monster/scripts');
+  const mnt = path.join(P.root, 'skills/maintenance-monster/scripts');
+  fs.mkdirSync(mm, { recursive: true });
+  fs.mkdirSync(mnt, { recursive: true });
+  for (const f of ['mm-baton.sh', 'mm-act.sh']) fs.writeFileSync(path.join(mm, f), '#!/usr/bin/env bash\n', { mode: 0o755 });
+  for (const f of ['mnt-baton.sh', 'mnt-act.sh']) fs.writeFileSync(path.join(mnt, f), '#!/usr/bin/env bash\n', { mode: 0o755 });
+  const args = '--repo acme/app --state-dir logs/merge-monster';
+  assert.equal(approvable(`${mm}/mm-baton.sh startup ${args}`, P.root), 'merge-monster/scripts/mm-baton.sh');
+  assert.equal(approvable(`${mnt}/mnt-baton.sh renew ${args}`, P.root), 'maintenance-monster/scripts/mnt-baton.sh');
+  assert.equal(approvable(`${mm}/mm-act.sh merge ${args} --pr 1 --sha ${'a'.repeat(40)} --method squash`, P.root), null);
+  assert.equal(approvable(`${mnt}/mnt-act.sh guard ${args} -- gh pr ready 1`, P.root), null);
+});
+
 test('copy-mode settings template allows exactly the same scripts (lockstep)', async () => {
   const { ALLOWED } = await import('./approve-own-scripts.mjs');
   const tmpl = fs.readFileSync(path.join(path.dirname(HOOK), '..', 'templates', 'settings.json.tmpl'), 'utf8');

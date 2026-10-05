@@ -10,6 +10,12 @@
 #   CODEQL_ALERT <id> <rule> <sev>  new open code-scanning alert
 #   SECRET_ALERT <run>         latest Secret Scan workflow_run concluded failure
 #   TRIVY_RED <run>            latest push/dispatch services-ci run concluded failure
+#   BATON_LOST maintain <code>   this session lost the maintain baton: stop all mutations now (the
+#                          bus exits; the alert is already sent)
+#   BATON_HANDOVER maintain <fleet>  federation.yml moved the role's home: finish (never mid-merge),
+#                          post the handover digest, release
+#   BATON_RENEW_ERROR maintain <code>  renews failing (once per streak); fences refuse past the deadline
+#   BATON_IDLE maintain …        keepalive stopped: no model activity for --pulse-max
 #   STOP                       ledger issue closed (kill switch) — script exits
 #
 # GHAS surfaces (Dependabot alerts, CodeQL) may be disabled/forbidden for a
@@ -18,9 +24,16 @@
 #
 # Usage: mnt-watch.sh --repo owner/name --state-dir DIR [--interval 30]
 #                     [--default-branch main] [--ledger N]
+#                    [--session NAME] [--pulse-max 45m]
+#
+# Baton keepalive (engsys#62): while <state-dir>/baton-maintain.json carries this session's token, a
+# background `baton.mjs keepalive` renews the lease every 2.5 min (the caller rule: TTL 10 min, renew
+# <= 3m20s; the 30-minute heartbeat tick is far too slow). It stops renewing when this bus loses its
+# session (orphaned), when the model has not touched the baton for --pulse-max (default 45m, so a live
+# bus under a dead model never keeps the role), and on loss. --session defaults to ENGSYS_SESSION.
 set -u
 
-REPO="" DIR="" INTERVAL=30 DEFBRANCH=main LEDGER=""
+REPO="" DIR="" INTERVAL=30 DEFBRANCH=main LEDGER="" SESSION="${ENGSYS_SESSION:-}" PULSE_MAX=45m
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) REPO="$2"; shift 2 ;;
@@ -28,6 +41,8 @@ while [ $# -gt 0 ]; do
     --interval) INTERVAL="$2"; shift 2 ;;
     --default-branch) DEFBRANCH="$2"; shift 2 ;;
     --ledger) LEDGER="$2"; shift 2 ;;
+    --session) SESSION="$2"; shift 2 ;;
+    --pulse-max) PULSE_MAX="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -36,6 +51,28 @@ done
 W="$DIR/.watch"
 mkdir -p "$W"
 touch "$W/deps_pr.tsv" "$W/dep_alerts.tsv" "$W/codeql_alerts.tsv" "$W/secretrun.txt" "$W/trivyrun.txt"
+
+# --- baton keepalive (see the header) ----------------------------------------
+BATON_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/lease/baton.mjs"
+BATON_STATE="$DIR/baton-maintain.json"
+KEEP_PID=""
+INIT_PPID="$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')"
+OWNER_ARGS=() # the keepalive also stops once this bus's own parent (the session) is gone
+[ -z "$INIT_PPID" ] || [ "$INIT_PPID" = 1 ] || OWNER_ARGS=(--owner-pid "$INIT_PPID")
+trap '[ -z "$KEEP_PID" ] || kill "$KEEP_PID" 2>/dev/null || true' EXIT
+# baton_tick → 1 when the bus must stop (baton lost, or this bus outlived its session).
+baton_tick() {
+  # Orphaned (reparented to init since start): the session is gone. A bus started without a parent
+  # can't tell, and leans on the keepalive's --pulse-max instead.
+  if [ "$INIT_PPID" != 1 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" = 1 ]; then return 1; fi
+  [ ! -f "$DIR/baton-maintain.lost" ] || return 1
+  [ -f "$BATON_STATE" ] && grep -q '"token": "' "$BATON_STATE" || return 0
+  [ -n "$SESSION" ] || return 0
+  if [ -n "$KEEP_PID" ] && kill -0 "$KEEP_PID" 2>/dev/null; then return 0; fi
+  node "$BATON_LIB" keepalive --role maintain --repo "$REPO" --state-dir "$DIR" --session "$SESSION" \
+    ${OWNER_ARGS[@]+"${OWNER_ARGS[@]}"} --pulse-max "$PULSE_MAX" &
+  KEEP_PID=$!
+}
 
 # emit_diff <old-file> <new-file> <added-prefix> [removed-prefix]
 # Files are sorted "key<TAB>rest" lines. Diffs by KEY ONLY (column 1) so
@@ -63,6 +100,7 @@ emit_diff() {
 }
 
 while true; do
+  baton_tick || exit 0
   # --- kill switch: ledger issue closed → STOP and exit -------------------
   if [ -n "$LEDGER" ]; then
     STATE=$(gh issue view "$LEDGER" -R "$REPO" --json state --jq .state 2>/dev/null || echo "")

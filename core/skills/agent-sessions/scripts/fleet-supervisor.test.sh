@@ -189,5 +189,74 @@ printf 'TMUX_SESSION=acme\nLAUNCH_CMD=bash %s/launch.sh\nREPO=o/r\nacme-broker|3
 reset; status 1 90 "working"; bpane exited; run
 expect "marker: an invalid marker skips the line" "!^launch"
 
+# A 6th field (merge|maintain): a singleton monster; every relaunch also needs the lease to allow it
+# (engsys#62). The fake BATON_CMD answers from $FAKE/baton (free | expired | held_self | held_elsewhere |
+# not_home | error) and records each call.
+cat >"$T/baton.sh" <<'SH'
+#!/usr/bin/env bash
+echo "baton $*" >>"$FAKE/actions"
+code="$(cat "$FAKE/baton")"
+case "$code" in
+  free | expired | malformed) echo "{\"relaunch\":true,\"code\":\"$code\",\"reason\":\"ok\"}"; exit 0 ;;
+  held_self | held_elsewhere | not_home) echo "{\"relaunch\":false,\"code\":\"$code\",\"reason\":\"held by bob:acme-mm\"}"; exit 1 ;;
+  *) echo "{\"relaunch\":false,\"code\":\"error\",\"reason\":\"baton unreadable: 502\"}"; exit 3 ;;
+esac
+SH
+chmod +x "$T/baton.sh"
+printf 'TMUX_SESSION=acme\nLAUNCH_CMD=bash %s/launch.sh\nBATON_CMD=bash %s/baton.sh\nNOTIFY_CMD=bash %s/notify.sh\nREPO=o/r\nacme-mm|1|60|||merge\n' "$T" "$T" "$T" >"$T/w/sup.conf"
+baton() { echo "$1" >"$T/baton"; }
+
+reset; baton free; ledger 90 "ok — merging #12"; pane exited; run
+expect "baton: crash recovery asks the lease with repo, role and session" "^baton --repo o/r --role merge --session acme-mm"
+expect "  …free → relaunched" "^launch acme-mm"
+reset; baton expired; ledger 90 "ok — merging #12"; pane exited; run
+expect "baton: expired → relaunched" "^launch acme-mm"
+reset; baton held_elsewhere; ledger 90 "ok — merging #12"; pane exited; run
+expect "baton: another fleet holds a live baton → never relaunched" "!^launch"
+reset; baton held_self; ledger 90 "ok — merging #12"; pane exited; run
+expect "baton: this session's own unexpired baton → wait for it to expire" "!^launch"
+reset; baton not_home; ledger 90 "ok — merging #12"; pane exited; run
+expect "baton: not home → never relaunched" "!^launch"
+
+reset; rm -f "$T/notify-fail"; baton error; ledger 90 "ok — merging #12"; pane exited; run
+expect "baton: lease read error → no relaunch (fail closed)" "!^launch"
+expect "  …one alert" "^notify --level alert --incident baton-read-acme-mm"
+run
+expect "  …not repeated next tick" "!^notify"
+expect "  …still no relaunch" "!^launch"
+baton free; run
+expect "  …reads clean again → resolved" "^notify --level info --incident baton-read-acme-mm --resolve"
+expect "  …and relaunched" "^launch acme-mm"
+
+reset; baton free; ledger 2 "handover to bob — digest posted"; pane exited; run
+expect "baton: 'handover' heartbeat + exited + free → relaunched (fresh heartbeat is the old home's)" "^launch acme-mm"
+reset; baton held_elsewhere; ledger 2 "handover to bob"; pane exited; run
+expect "baton: handover but the old home still holds → wait" "!^launch"
+reset; baton free; ledger 2 "ok — merging #12"; pane exited; run
+expect "baton: fresh ordinary heartbeat + exited → grace, lease not even asked" "!^baton"
+reset; baton free; ledger 10 "session end"; pane exited; run
+expect "baton: session end stays a deliberate stop" "!^launch"
+
+reset; baton held_self; ledger 10 "rotation requested"; pane idle; run
+expect "baton: rotation + idle but the baton is still held → wait" "!^launch"
+baton free; run
+expect "  …released → relaunched" "^launch acme-mm"
+
+reset; baton expired; ledger 90 "ok — merging #12"; pane idle; run
+expect "baton: stale + alive + idle + forfeited baton → relaunched" "^launch acme-mm"
+reset; baton expired; ledger 90 "ok — merging #12"; pane busy; run
+expect "baton: stale + alive but mid-turn → never killed" "!^launch"
+expect "  …escalated instead" "comment 1: .*stale"
+reset; baton held_self; ledger 90 "ok — merging #12"; pane idle; run
+expect "baton: stale + idle but its baton is still live → escalate, not relaunch" "!^launch"
+
+printf 'TMUX_SESSION=acme\nLAUNCH_CMD=bash %s/launch.sh\nBATON_CMD=bash %s/baton.sh\nREPO=o/r\nacme-mm|1|60\n' "$T" "$T" >"$T/w/sup.conf"
+reset; baton held_elsewhere; ledger 90 "ok — merging #12"; pane exited; run
+expect "no 6th field → the lease is never consulted" "!^baton"
+expect "  …and the table runs as before" "^launch acme-mm"
+printf 'TMUX_SESSION=acme\nLAUNCH_CMD=bash %s/launch.sh\nBATON_CMD=bash %s/baton.sh\nREPO=o/r\nacme-mm|1|60|||deploy\n' "$T" "$T" >"$T/w/sup.conf"
+reset; baton free; ledger 90 "ok — merging #12"; pane exited; run
+expect "an unknown 6th field skips the line" "!^launch"
+
 echo "$pass passed, $fail failed."
 [ "$fail" = 0 ]

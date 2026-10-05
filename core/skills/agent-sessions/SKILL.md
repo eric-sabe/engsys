@@ -166,6 +166,25 @@ runs under launchd/cron every ~5 minutes with **no LLM in the restart path**
 | stale | **alive** | never kill; escalate once on the ledger |
 | any relaunch **fails** | | escalate once on the ledger with the launcher's error, retry each tick without commenting, comment once on recovery |
 
+**Singleton monsters (a 6th conf field `merge` or `maintain`; `fleet supervise`
+fills it in).** Their role is held through the github lease, and every relaunch
+in the table also needs the lease to allow it (`core/lib/lease/baton.mjs
+supervise`, or `BATON_CMD=`): this fleet is the role's home (always true in
+single-fleet mode) and nobody holds a live baton. A live baton, another
+fleet's or this session's own, is a wait; a lease read that fails is a wait
+plus one alert through `NOTIFY_CMD` (`baton-read-<name>`). Two rows apply to
+them only:
+
+| Ledger heartbeat | Process | Action |
+| --- | --- | --- |
+| "handover" (the old home released the role) | exited | relaunch, if the baton allows |
+| stale | **alive, idle at its prompt**, baton forfeited | relaunch: staleness + idle + a lease nobody holds is three signals, not one |
+
+The launcher exports `ENGSYS_SESSION` (the session name) and
+`ENGSYS_SESSION_RUN` (a per-launch id) into every session: the baton's holder
+is `<FLEET_ID or hostname>:<ENGSYS_SESSION>`, and a fencing token on disk is
+honored only by the launch that took it.
+
 **A Claude session can't exit itself.** A monster that honors a rotation
 request posts its digest + final `rotation requested` heartbeat, stops its
 loop, and then sits at the prompt with its process still alive — so the
@@ -175,7 +194,7 @@ relaunched session is never mistaken for the old one; if it never heartbeats,
 the stale-but-alive row below applies instead).
 
 The stale-but-alive row is deliberate: a live process is never killed on
-staleness alone — that's probe-then-classify territory (subagent-liveness),
+staleness alone (the singleton row above adds two more signals). That is probe-then-classify territory (subagent-liveness),
 a judgment call for the operator or the maintenance watchdog, not a script.
 
 Setup, **fleet kit (plugin mode; recommended):** put the conf lines in your

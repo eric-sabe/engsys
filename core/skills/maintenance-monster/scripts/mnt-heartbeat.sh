@@ -3,19 +3,40 @@
 # Maintenance Monster ledger issue body with the current UTC time and a short
 # status.
 #
-# Usage: mnt-heartbeat.sh --repo owner/name --issue N [--status "text"]
+# Usage: mnt-heartbeat.sh --repo owner/name --issue N [--status "text"] [--state-dir DIR [--session NAME]]
+#   --state-dir  the monster's state_dir: renew this session's maintain baton first (engsys#62). The
+#                heartbeat is the HOLDER's human surface, so without a held baton it is not written:
+#                exit 1 + BATON_LOST (lost: stop all mutations now) or exit 5 (no baton in this
+#                session). A renew error only warns. Prints BATON_HANDOVER <fleet> when federation.yml
+#                moved the role's home away from this fleet.
 set -euo pipefail
 
-REPO="" ISSUE="" STATUS="running"
+REPO="" ISSUE="" STATUS="running" STATE_DIR="" SESSION=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) REPO="$2"; shift 2 ;;
     --issue) ISSUE="$2"; shift 2 ;;
     --status) STATUS="$2"; shift 2 ;;
+    --state-dir) STATE_DIR="$2"; shift 2 ;;
+    --session) SESSION="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
-[ -n "$REPO" ] && [ -n "$ISSUE" ] || { echo "usage: mnt-heartbeat.sh --repo owner/name --issue N [--status text]" >&2; exit 2; }
+[ -n "$REPO" ] && [ -n "$ISSUE" ] || { echo "usage: mnt-heartbeat.sh --repo owner/name --issue N [--status text] [--state-dir DIR [--session NAME]]" >&2; exit 2; }
+
+if [ -n "$STATE_DIR" ]; then
+  BATON_RC=0
+  BATON_OUT=$(node "$(dirname "${BASH_SOURCE[0]}")/../../../lib/lease/baton.mjs" renew --role maintain --repo "$REPO" \
+    --state-dir "$STATE_DIR" ${SESSION:+--session "$SESSION"}) || BATON_RC=$?
+  case "$BATON_RC" in
+    0) if printf '%s' "$BATON_OUT" | jq -e '.handover' >/dev/null 2>&1; then
+         echo "BATON_HANDOVER $(printf '%s' "$BATON_OUT" | jq -r '.handover.home // "none"')"
+       fi ;;
+    1) echo "BATON_LOST maintain: heartbeat not written; stop all mutations now: $BATON_OUT"; exit 1 ;;
+    5) echo "baton: this session holds no maintain baton; heartbeat not written: $BATON_OUT"; exit 5 ;;
+    *) echo "WARNING baton renew failed (exit $BATON_RC), writing the heartbeat anyway; fences refuse once the local deadline passes: $BATON_OUT" >&2 ;;
+  esac
+fi
 
 NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 TMP=$(mktemp)

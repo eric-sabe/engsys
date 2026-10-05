@@ -13,7 +13,8 @@
 // `candidates` is read-only: it finds open alerts a policy covers and proves the tripwires hold at
 // the alert's own commit AND at the default branch. It never dismisses. The per-alert code judgment
 // belongs to the calling model. `dismiss` is the only mutating path: it re-runs the same evaluation
-// for one alert (the tripwire may have tripped since the candidate list was made), then PATCHes.
+// for one alert (the tripwire may have tripped since the candidate list was made), then PATCHes,
+// fenced by the Maintenance Monster baton when its state dir carries one (batonFence, engsys#62).
 //
 // Fail-closed throughout: any gh or git error means ERROR and no CANDIDATE for that policy; an
 // invalid policy is reported and never evaluated.
@@ -530,8 +531,8 @@ function git(dir, args, opts = {}) {
   return { status: r.status, stdout: r.stdout, stderr };
 }
 
-function gh(args) {
-  const r = spawnSync('gh', args, { encoding: 'utf8', maxBuffer: 1 << 29 });
+function gh(args, { timeout } = {}) {
+  const r = spawnSync('gh', args, { encoding: 'utf8', maxBuffer: 1 << 29, ...(timeout ? { timeout } : {}) });
   if (r.error) return { ok: false, stdout: '', stderr: `gh: ${r.error.message}`, status: null };
   return { ok: r.status === 0, stdout: r.stdout || '', stderr: r.stderr || '', status: r.status };
 }
@@ -985,6 +986,34 @@ function fitComment(s) {
   return out.join('') + '…';
 }
 
+const BATON = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'lib', 'lease', 'baton.mjs');
+const BATON_SEND_WINDOW_MS = 30_000;
+const BATON_ACTION_TIMEOUT_MS = 30_000;
+
+/**
+ * A dismissal is a mutating act: when the state dir carries a Maintenance Monster baton (engsys#62),
+ * dismiss only under a passing fence, sent within 30 s of the fence's start and bounded by a 30 s
+ * timeout. No baton file there means no monster runs from this state dir (an operator by hand).
+ */
+function batonFence(repo, stateDir) {
+  const has = (f) => fs.existsSync(path.join(stateDir, f));
+  if (!has('baton-maintain.json') && !has('baton-maintain.lost')) return { ok: true, skipped: true };
+  const started = Date.now();
+  const r = spawnSync(process.execPath, [BATON, 'fence', '--role', 'maintain', '--repo', repo, '--state-dir', stateDir], { encoding: 'utf8', timeout: 20_000 });
+  if (r.status !== 0) {
+    let why = `fence refused (exit ${r.status ?? 'timeout'})`;
+    try {
+      const j = JSON.parse(String(r.stdout).trim().split('\n').pop());
+      why = `fence refused: ${j.code}${j.reason ? ` (${j.reason})` : ''}`;
+    } catch {
+      if (r.stderr) why += `: ${oneLine(r.stderr, 200)}`;
+    }
+    return { ok: false, why };
+  }
+  if (Date.now() - started >= BATON_SEND_WINDOW_MS) return { ok: false, why: 'fence passed but 30 s went by before the send; nothing sent' };
+  return { ok: true };
+}
+
 function cmdDismiss(argv) {
   const o = parseArgs(argv, {
     '--repo': { key: 'repo' }, '--config': { key: 'config' }, '--alert': { key: 'alert' }, '--policy': { key: 'policy' },
@@ -1049,10 +1078,12 @@ function cmdDismiss(argv) {
   }
 
   const comment = fitComment(`fp-policy ${policy.id}: ${o.shape} — ${evidence}`);
+  const fence = batonFence(o.repo, stateDir);
+  if (!fence.ok) return refuse(`baton: ${fence.why}`);
   const res = gh([
     'api', '-X', 'PATCH', `repos/${o.repo}/code-scanning/alerts/${alertNo}`,
     '-f', 'state=dismissed', '-f', 'dismissed_reason=false positive', '-f', `dismissed_comment=${comment}`,
-  ]);
+  ], fence.skipped ? {} : { timeout: BATON_ACTION_TIMEOUT_MS });
   if (!res.ok) {
     if (/HTTP 403|Resource not accessible/i.test(res.stderr + res.stdout)) {
       process.stdout.write(`ERROR alert ${alertNo} not dismissed: HTTP 403. Dismissing code-scanning alerts needs the GitHub App permission "Code scanning alerts: Read and write" (security_events: write); add it to the App, accept it on the installation, and list it in GH_APP_REQUIRED_PERMS (core/fleet/identity/README.md).\n`);

@@ -166,8 +166,12 @@ launch_one() {
     session_env="$env_file"
   fi
 
-  local cmd
-  cmd="cd $(printf %q "$workdir") && "
+  local cmd run
+  # The session's own name and a per-launch id, for the monsters' baton (engsys#62): the holder is
+  # <fleet>:<ENGSYS_SESSION>, and a fencing token on disk is honored only by the launch that took it.
+  run="$(date -u +%Y%m%dT%H%M%SZ)-$$-${RANDOM}"
+  cmd="export ENGSYS_SESSION=$(printf %q "$name") ENGSYS_SESSION_RUN=$(printf %q "$run") && "
+  cmd+="cd $(printf %q "$workdir") && "
   if [ -n "$session_env" ]; then
     cmd+="set -a && . $(printf %q "$session_env") && set +a && "
   fi

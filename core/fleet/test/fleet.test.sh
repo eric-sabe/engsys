@@ -173,7 +173,10 @@ EOF
 printf 'MODEL_ALIAS="__MERGE_MODEL__"\nLANE=session\n' >"$I/fleet/env/session.env.tmpl"
 printf '. "__ENV_DIR__/session.env"\nMODEL_ALIAS="__SEC_MODEL__"\nLANE=security\n' >"$I/fleet/env/security.env.tmpl"
 printf 'LANE=rel\n' >"$I/fleet/env/rel.env.tmpl"
-printf 'REPO=acme/app\n# <session>|<ledger>|<stale minutes>\nacme-mm|11|60\nacme-security|12|60\n' >"$I/fleet/supervisor.conf.tmpl"
+# BATON_CMD: the lease check for the singleton monsters (engsys#62), faked as "free" so the
+# relaunch path below runs offline.
+printf '#!/usr/bin/env bash\necho "baton $*" >>"$FAKE/baton.log"; echo "{\\"relaunch\\":true,\\"code\\":\\"free\\",\\"reason\\":\\"no baton\\"}"\n' >"$T/baton-free.sh"
+printf 'REPO=acme/app\nBATON_CMD=bash %s/baton-free.sh\n# <session>|<ledger>|<stale minutes>\nacme-mm|11|60\nacme-security|12|60\n' "$T" >"$I/fleet/supervisor.conf.tmpl"
 cat >"$I/jobs/launchd/fleet-supervisor.plist.tmpl" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -438,6 +441,8 @@ SUP="$(cat "$STATE/supervisor.conf")"
 has "conf: LAUNCH_CMD points back at the dispatcher" "$SUP" "LAUNCH_CMD=bash $ENGSYS_HOST/core/fleet/bin/fleet --instance $INST launch"
 has "conf: TMUX_SESSION defaulted" "$SUP" "TMUX_SESSION=acme"
 has "conf: sessions from the template" "$SUP" "acme-mm|11|60"
+has "conf: the merge monster carries its role, so the supervisor asks the lease (engsys#62)" "$SUP" "acme-mm|11|60|||merge"
+has "conf: …and the maintenance monster too" "$SUP" "acme-security|12|60|||maintain"
 has "conf: HEARTBEAT_CMD defaulted to the dispatcher" "$SUP" "HEARTBEAT_CMD=bash $ENGSYS_HOST/core/fleet/bin/fleet --instance $INST heartbeat"
 has "stale monster with no window is relaunched through the kit" "$(grep -F '[new-session]' "$FAKE/tmux.log" | grep -F '[acme-mm]' || true)" "[acme-mm]"
 hasnt "closed ledger (kill switch) is left alone" "$(cat "$FAKE/tmux.log")" "[acme-security]"
