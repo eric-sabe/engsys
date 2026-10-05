@@ -166,6 +166,20 @@ runs under launchd/cron every ~5 minutes with **no LLM in the restart path**
 | stale | **alive** | never kill; escalate once on the ledger |
 | any relaunch **fails** | | escalate once on the ledger with the launcher's error, retry each tick without commenting, comment once on recovery |
 
+**Moved ledger targets.** The supervisor records, per session, the ledger target it
+last launched it against (`logs/fleet-supervisor/<name>.target`). When the
+configured target differs (for example the resource broker moving from a
+per-repo ledger issue to the status issue's `<!-- broker-heartbeat -->` block), it
+also reads the recorded old target, and honours a `rotation requested` there that
+is newer than the launch. A session still on the old version posts it on the old
+target, which would otherwise never be read. Relaunching records the new target
+and ends the double read. A session with no record (the first tick after
+upgrading to a supervisor that keeps one) is assumed to be on the current target,
+so for that one transition, if an old-version session sits idle after a
+`fleet restart`, exit it and `fleet launch` it by hand. The general rule: when a
+session's ledger target changes, the rotation handshake has to be readable on
+both sides during the transition.
+
 **Singleton monsters (a 6th conf field `merge` or `maintain`; `fleet supervise`
 fills it in).** Their role is held through the github lease, and every relaunch
 in the table also needs the lease to allow it (`core/lib/lease/baton.mjs

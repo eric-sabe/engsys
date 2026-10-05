@@ -48,6 +48,17 @@
 #                                                  so staleness + idle + a forfeited lease is three
 #                                                  signals, not one. Mid-turn stays never-killed.
 #
+# Ledger target moves (engsys#72): the supervisor records, per session, the ledger target it last
+# launched the session against (logs/fleet-supervisor/<name>.target: repo|issue|marker|launch-epoch).
+# When the configured target later differs (a monster moved from a per-repo ledger issue to the fleet
+# status issue's block), a session still running the old version posts `rotation requested` on the
+# OLD target, which the supervisor no longer reads. So while the recorded target differs, the old
+# target is also read; a `rotation requested` on it, newer than the launch, is honoured exactly like
+# one on the new target. Relaunching records the new target, which ends the double read. A session
+# with no record is assumed to have been launched against the current target (nothing to compare).
+# Rule: when a session's ledger target changes, the rotation handshake must be readable on both
+# sides during the transition.
+#
 # Config: .claude/fleet-supervisor.conf (or pass a path as $1)
 #   TMUX_SESSION=<tmux session the fleet runs in>
 #   LAUNCH_CMD=<command that launches ONE session; supervisor appends name>
@@ -184,6 +195,17 @@ iso_to_epoch() {
     || echo ""
 }
 
+# Heartbeat of a ledger body: prints `<ts>|<status>` for the first `last:` line, or only the one
+# inside `<!-- marker -->` … `<!-- /marker -->` when a marker is given.
+hb_of() { # hb_of <body> <marker>
+  if [ -n "$2" ]; then
+    printf '%s\n' "$1" | awk -v m="$2" '{ sub(/\r$/, "") } $0 == "<!-- " m " -->" { on = 1; next } $0 == "<!-- /" m " -->" { on = 0 } on' \
+      | sed -n 's/^last: \([0-9TZ:-]*\) — status: \(.*\)$/\1|\2/p' | head -1
+  else
+    printf '%s\n' "$1" | sed -n 's/^last: \([0-9TZ:-]*\) — status: \(.*\)$/\1|\2/p' | head -1
+  fi
+}
+
 # Foreground command of the session's tmux pane; empty if window gone.
 pane_cmd() {
   # tmux exits non-zero for a missing window/session; that must read as "gone", not abort the tick
@@ -210,6 +232,7 @@ relaunch() { # relaunch <name> <ledger> <repo> <reason>
   if $LAUNCH_CMD "$name" >"$out" 2>&1; then
     cat "$out" >>"$LOG"; rm -f "$out"
     log "$name: relaunched"
+    printf '%s|%s\n' "${CUR_TARGET:-$repo|$ledger|}" "$(date +%s)" >"$STATE_DIR/$name.target"
     if [ -f "$failed" ]; then
       gh issue comment "$ledger" -R "$repo" --body "✅ fleet-supervisor: \`$name\` relaunched after failed attempts since $(cat "$failed") ($reason, $(date -u +%Y-%m-%dT%H:%M:%SZ)). Startup reconcile recovers state from this ledger + state.md." >/dev/null || true
       rm -f "$failed"
@@ -327,15 +350,34 @@ for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
     log "$name: ledger $REPO_SLUG#$ledger CLOSED (kill switch) — not touching"
     continue
   fi
-  if [ -n "$marker" ]; then # only the line inside this session's own block (a shared status issue)
-    HB=$(jq -r .body <<<"$ISSUE" | awk -v m="$marker" '{ sub(/\r$/, "") } $0 == "<!-- " m " -->" { on = 1; next } $0 == "<!-- /" m " -->" { on = 0 } on' \
-      | sed -n 's/^last: \([0-9TZ:-]*\) — status: \(.*\)$/\1|\2/p' | head -1)
-  else
-    HB=$(jq -r .body <<<"$ISSUE" | sed -n 's/^last: \([0-9TZ:-]*\) — status: \(.*\)$/\1|\2/p' | head -1)
-  fi
+  # only the line inside this session's own block when a marker is given (a shared status issue)
+  HB=$(hb_of "$(jq -r .body <<<"$ISSUE")" "$marker")
   HB_TS="${HB%%|*}"
   HB_STATUS="${HB#*|}"
   HB_EPOCH=$(iso_to_epoch "$HB_TS")
+
+  # --- moved ledger target: honour a rotation request left on the old one (engsys#72) -----------
+  CUR_TARGET="$REPO_SLUG|$ledger|$marker"
+  TARGET_FILE="$STATE_DIR/$name.target"
+  if [ -f "$TARGET_FILE" ]; then
+    IFS='|' read -r OLD_REPO OLD_LEDGER OLD_MARKER OLD_LAUNCH <"$TARGET_FILE" || true
+    if [ "$OLD_REPO|$OLD_LEDGER|$OLD_MARKER" != "$CUR_TARGET" ]; then
+      if OLD_ISSUE=$(gh issue view "$OLD_LEDGER" -R "$OLD_REPO" --json state,body 2>/dev/null) \
+        && [ "$(jq -r .state <<<"$OLD_ISSUE")" != "CLOSED" ]; then
+        OLD_HB=$(hb_of "$(jq -r .body <<<"$OLD_ISSUE")" "$OLD_MARKER")
+        OLD_EPOCH=$(iso_to_epoch "${OLD_HB%%|*}")
+        case "${OLD_HB#*|}" in
+          *[Rr]otation\ requested*)
+            if [ -n "$OLD_EPOCH" ] && [ "$OLD_EPOCH" -gt "${OLD_LAUNCH:-0}" ]; then
+              log "$name: ledger target moved ($OLD_REPO#$OLD_LEDGER → $REPO_SLUG#$ledger); honouring the rotation request on the old target (${OLD_HB%%|*})"
+              HB="$OLD_HB" HB_TS="${OLD_HB%%|*}" HB_STATUS="${OLD_HB#*|}" HB_EPOCH="$OLD_EPOCH"
+            fi ;;
+        esac
+      fi
+    fi
+  else
+    printf '%s|%s\n' "$CUR_TARGET" "$NOW" >"$TARGET_FILE" # first sight: assume launched against the current target
+  fi
 
   # --- process state ----------------------------------------------------------
   # Do NOT match the claude binary by name — it renames its process to its
