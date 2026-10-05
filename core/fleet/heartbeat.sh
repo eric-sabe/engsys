@@ -20,6 +20,12 @@
 # Unlike mm-heartbeat.sh (which refuses to edit a ledger missing the marker), this APPENDS the
 # block when the status issue body doesn't have one yet — the status issue is this fleet's own,
 # scaffolded once and never hand-authored with the marker pre-written.
+#
+# The status issue is shared (#54's resource-broker writes its own `<!-- broker-heartbeat -->`
+# block on the same issue in multi-fleet mode), so this rewrites only the fleet-heartbeat block —
+# never anything outside it — then reads the body back and retries (3 attempts) when a concurrent
+# edit of the same body dropped the line, the same way broker-heartbeat.sh does. A failure to land
+# after 3 attempts is still soft (exit 0): the next tick tries again.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck source=lib/fleet-env.sh
@@ -38,24 +44,46 @@ case "$ISSUE" in '' | *[!0-9]*) exit 0 ;; esac # not declared, or not a bare int
 REPO="$(cd "$FLEET_REPO" && gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)" || exit 0
 [ -n "$REPO" ] || exit 0
 
-BODY="$(gh issue view "$ISSUE" -R "$REPO" --json body --jq .body 2>/dev/null)" || exit 0
-
 NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+# The line travels through the environment, not `awk -v`, so a backslash in the status text is
+# never interpreted (awk -v runs command-line-assignment escape processing on its value; ENVIRON
+# does not).
+LINE="last: $NOW — status: $STATUS_TEXT"
 TMP="$(mktemp)"
 trap 'rm -f "$TMP"' EXIT
 
-printf '%s\n' "$BODY" | awk -v now="$NOW" -v status="$STATUS_TEXT" '
-  /<!-- fleet-heartbeat -->/   { print; print "last: " now " — status: " status; found=1; skip=1; next }
-  /<!-- \/fleet-heartbeat -->/ { skip=0 }
-  skip != 1                    { print }
-  END {
-    if (!found) {
-      print ""
-      print "<!-- fleet-heartbeat -->"
-      print "last: " now " — status: " status
-      print "<!-- /fleet-heartbeat -->"
-    }
-  }
-' >"$TMP"
+attempt=0
+while :; do
+  attempt=$((attempt + 1))
+  BODY="$(gh issue view "$ISSUE" -R "$REPO" --json body --jq .body 2>/dev/null)" || exit 0
 
-gh issue edit "$ISSUE" -R "$REPO" --body-file "$TMP" >/dev/null 2>&1 || exit 0
+  printf '%s\n' "$BODY" | FLEET_LINE="$LINE" awk '
+    /<!-- fleet-heartbeat -->/   { print; print ENVIRON["FLEET_LINE"]; found=1; skip=1; next }
+    /<!-- \/fleet-heartbeat -->/ { skip=0 }
+    skip != 1                    { print }
+    END {
+      if (!found) {
+        print ""
+        print "<!-- fleet-heartbeat -->"
+        print ENVIRON["FLEET_LINE"]
+        print "<!-- /fleet-heartbeat -->"
+      }
+    }
+  ' >"$TMP"
+
+  # Refuse to wipe the body unless exactly one open/close marker pair survived the rewrite: zero
+  # (before the append above) never happens, but more than one means the body is already malformed
+  # (someone hand-duplicated the block) — editing it further would only make that worse.
+  OPEN_COUNT=$(grep -c "<!-- fleet-heartbeat -->" "$TMP" || true)
+  CLOSE_COUNT=$(grep -c "<!-- /fleet-heartbeat -->" "$TMP" || true)
+  [ "$OPEN_COUNT" = 1 ] && [ "$CLOSE_COUNT" = 1 ] || exit 0
+
+  gh issue edit "$ISSUE" -R "$REPO" --body-file "$TMP" >/dev/null 2>&1 || exit 0
+  # Read back: the broker's own read-modify-write of the same issue can land after ours and drop
+  # our line (or vice versa for its block, which this script never touches either way).
+  if gh issue view "$ISSUE" -R "$REPO" --json body --jq .body 2>/dev/null | tr -d '\r' | grep -Fxq -- "$LINE"; then
+    exit 0
+  fi
+  [ "$attempt" -lt 3 ] || exit 0 # soft: give up quietly, the next tick tries again
+  sleep "${FLEET_HEARTBEAT_RETRY_SECS:-2}"
+done
