@@ -1332,6 +1332,67 @@ test("N2/Q3: a takeover that lands between break-glass's read and its write surv
   assert.equal(parseBatonMessage(api.state.commits.get(api.state.refs.get(`${PREFIX}/merge`)).message).record.holder, "bob:mm");
 });
 
+test("M-1/R4: a transient commit-read failure never reaches the forced path — error, nothing written, a racing takeover survives", async () => {
+  const api = fakeGitApi();
+  const l = lease(api);
+  const wedged = plantTip(api, "merge", "garbage\n\nholder: x\nholder: y");
+  const inner = api.request.bind(api);
+  let operatorReading = true; // the OPERATOR's commit reads fail (503 every attempt); bob's reads succeed
+  let armed = true;
+  api.request = async (m, p, b) => {
+    if (operatorReading && m === "GET" && p.includes("/commits/")) {
+      if (armed) { // while the operator's commit read is failing, bob takes over legitimately
+        armed = false;
+        operatorReading = false;
+        const bob = await lease(api).acquire({ role: "merge", holder: "bob:mm", ttlMinutes: 10 });
+        assert.equal(bob.tookOverMalformed, true);
+        operatorReading = true;
+      }
+      api.state.log.push({ method: m, path: p });
+      return { status: 503, json: { message: "Server Error" }, headers: { date: new Date(api.state.now).toUTCString() } };
+    }
+    return inner(m, p, b);
+  };
+  const g = await l.breakGlass({ role: "merge", reason: "clear garbage", expectSha: wedged });
+  assert.equal(g.ok, false, JSON.stringify(g));
+  assert.equal(g.code, "error");
+  assert.match(g.reason, /nothing written/);
+  assert.equal(api.state.log.filter((e) => e.method === "PATCH").length, 1, "only bob's takeover PATCH; the operator's call wrote nothing");
+  operatorReading = false;
+  assert.equal((await lease(api).status({ role: "merge" })).holder, "bob:mm");
+  // The same for a permission / rate-limit answer: 403 and 429 are not "no such commit".
+  for (const status of [401, 403, 429]) {
+    const api2 = fakeGitApi();
+    const l2 = lease(api2);
+    const sha = plantTip(api2, "merge", "garbage\n\nholder: x\nholder: y");
+    api2.fault({ when: (m, p) => m === "GET" && p.includes("/commits/"), status, times: 1 });
+    const r = await l2.breakGlass({ role: "merge", reason: "x", expectSha: sha });
+    assert.equal(r.code, "error", `status ${status}`);
+    assert.equal(api2.state.refs.get(`${PREFIX}/merge`), sha, `status ${status}: ref untouched`);
+  }
+});
+
+test("M-1: the forced path re-checks the tip against expectSha right before writing", async () => {
+  const api = fakeGitApi();
+  const l = lease(api);
+  const sha = plantTip(api, "merge", "x");
+  const inner = api.request.bind(api);
+  let refReads = 0;
+  api.request = async (m, p, b) => {
+    if (m === "GET" && p.includes("/ref/")) {
+      refReads += 1;
+      if (refReads === 2) plantTip(api, "merge", "someone else moved it"); // moved between the inspection read and the pre-write re-check
+    }
+    const r = await inner(m, p, b);
+    if (m === "GET" && p.includes("/ref/") && r.status === 200) r.json.object.type = "tag"; // a non-commit tip: the only route to force:true
+    return r;
+  };
+  const g = await l.breakGlass({ role: "merge", reason: "tag on the ref", expectSha: sha });
+  assert.equal(g.ok, false, JSON.stringify(g));
+  assert.equal(g.code, "tip_moved");
+  assert.equal(api.state.log.filter((e) => e.method === "PATCH").length, 0);
+});
+
 test("N2: force:true is used only for a tip the API cannot serve as a commit", async () => {
   const api = fakeGitApi();
   const l = lease(api);

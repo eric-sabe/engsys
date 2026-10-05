@@ -200,11 +200,16 @@ the one operator action: it resets the ref to `holder: none` whatever the tip ho
 run without both flags. `--expect-sha` is the tip the operator inspected with `status`: if the tip is
 no longer that sha, nothing is written (`tip_moved`). When the old tip is a readable commit the reset
 is parented on it and written as a normal compare-and-swap, so a legitimate takeover that lands between
-the operator's read and write survives (`tip_moved` again); `force: true` is used only for a tip the API
-cannot serve as a commit. It is for a human at a shell, never an agent or a monster: the engsys
-settings template (`core/templates/settings.json.tmpl`) denies `Bash(*github-backend.mjs*break-glass*)`
-in every rendered project (any path, any flags or quoting between the script and the subcommand), and
-a fleet instance repo should carry the same deny in its session settings.
+the operator's read and write survives (`tip_moved` again); `force: true` is used only for a tip that
+definitively is not a commit the API can serve (a non-commit object, or a commit GET answering
+404/422), after one more check that the tip still equals `--expect-sha`; a transient failure to read
+the commit (5xx, timeout, 401/403/429) writes nothing. It is meant for a human at a shell, not an
+agent or a monster. The engsys settings template (`core/templates/settings.json.tmpl`) denies
+`Bash(*github-backend.mjs*break-glass*)` in every rendered project, and a fleet instance repo should
+carry the same deny in its session settings, but treat that as a guard rail, not a boundary: a glob on
+the command string is bypassed by `node -e`, an op passed through a variable, a copied script, or a raw
+`gh api` PATCH by anyone with `contents: write`. The control that actually fences the write is
+`--expect-sha`: whoever runs it must have inspected that specific tip.
 
 **Where batons live.** `refPrefix` must be under `refs/engsys/` (default `refs/engsys/batons`);
 `refs/heads`, `refs/tags` and anything else are rejected. A tip whose tree is not the empty tree is an

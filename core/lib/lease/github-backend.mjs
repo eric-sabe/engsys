@@ -35,9 +35,13 @@
 // Every success path in this file is a CAS win (or, for the first claim, a successful create).
 // There is no code path that reports "acquired" / "renewed" / "released" without the server having
 // accepted exactly the commit this caller built on exactly the tip it read. The operator break-glass
-// is a CAS too whenever the old tip is a readable commit; it falls back to `force: true` only for a
-// tip the API cannot serve as a commit. It requires the inspected tip sha, and the fleet settings
-// template denies the command to agent sessions (policy enforced by the harness, not by this file).
+// is a CAS too whenever the old tip is a commit the API can serve; it falls back to `force: true`
+// only for a tip that definitively is not one (a non-commit object, or a commit GET answering
+// 404/422), and never on a transient read failure. Its real control is `expectSha`: whoever runs it
+// must have inspected the specific tip. The settings template also denies the command to agent
+// sessions, but that is a guard rail, not a boundary — a glob on the command string is bypassed by
+// `node -e`, a variable, a copied script, or a raw `gh api` PATCH by anyone with contents:write,
+// which is the repo's own trust boundary (see Fencing).
 //
 // Only refs under `refs/engsys/` are accepted, and a tip whose tree is not the empty tree is an
 // error for every operation (never a takeover): an empty-tree child commit on a real branch would
@@ -505,7 +509,10 @@ export function createGithubLease({
     if (res.status === 200 && typeof res.json?.message === "string") {
       return { message: res.json.message, tree: res.json?.tree?.sha ?? null, serverNow: serverTimeOf(res), at: res.at };
     }
-    return { failure: res.failure ?? { status: res.status, message: res.json?.message ?? null } };
+    // `missing` is definitive: the API says there is no such commit (404/422). Anything else (5xx,
+    // timeout, 401/403/429) is a transient or permission failure about a commit that may well exist.
+    const missing = res.status === 404 || res.status === 422;
+    return { failure: res.failure ?? { status: res.status, message: res.json?.message ?? null }, missing };
   }
 
   /**
@@ -642,7 +649,7 @@ export function createGithubLease({
       ok: true,
       code,
       role,
-      record: { ...record, role, ttlMinutes, sha },
+      record: { ...record, role, ...(ttlMinutes === undefined ? {} : { ttlMinutes }), sha },
       expiresAt: record.expires,
       expiresInMs: remainingMs(expiresMs, clock),
       ...extra,
@@ -901,8 +908,9 @@ export function createGithubLease({
    *   and the write wins, and the reset reports `tip_moved` instead of wiping a live baton. Only a
    *   tip the API cannot serve as a commit (a non-commit object, an unreadable sha) is reset with a
    *   parentless commit and `force: true`.
-   * It is for a human, by hand, from the CLI (`break-glass --expect-sha … --i-know`), and the fleet
-   * settings template denies that command to agent sessions. Returns what it overwrote.
+   * It is for a human, by hand, from the CLI (`break-glass --expect-sha … --i-know`). The fleet
+   * settings template denies that command to agent sessions as a guard rail; `expectSha` is the
+   * control that actually fences the write. Returns what it overwrote.
    */
   async function breakGlass({ role, reason, expectSha } = {}) {
     validateRole(role);
@@ -919,8 +927,15 @@ export function createGithubLease({
     if (r.sha !== expectSha) {
       return { ok: false, code: "tip_moved", role, expected: expectSha, current: r.sha, reason: "the tip is not the one you inspected; re-read with `status` and decide again" };
     }
-    const readable = r.type === undefined || r.type === "commit";
-    const prior = readable ? await readCommit(r.sha) : { failure: { message: `ref points at a ${r.type}, not a commit` } };
+    const isCommit = r.type === undefined || r.type === "commit";
+    const prior = isCommit ? await readCommit(r.sha) : { failure: { message: `ref points at a ${r.type}, not a commit` }, missing: true };
+    // The forced (non-CAS) path exists only for a tip that definitively is not a commit the API can
+    // serve: a non-commit object, or a commit GET that says 404/422. Any other failure to read the
+    // commit (5xx, timeout, 401/403/429) means the tip may be a perfectly good baton that a takeover
+    // could land on while we write — so write nothing and let the operator retry.
+    if (prior.failure && !prior.missing) {
+      return errorResult(role, "could not read the tip commit; nothing written — retry", { failure: prior.failure, sha: r.sha });
+    }
     const previous = { sha: r.sha, ...(prior.failure ? { unreadable: prior.failure } : { tree: prior.tree, message: prior.message.slice(0, MAX_MESSAGE_BYTES), parsed: parseBatonMessage(prior.message) }) };
     const record = { holder: RELEASED_HOLDER, token: randomUUID(), expires: new Date(r.serverNow).toISOString(), protocol: PROTOCOL, fleet: fleetOpt ?? RELEASED_HOLDER };
     const message = `${formatBatonMessage(record, role).replace(/\n/, ` (break-glass: ${why})\n`)}`;
@@ -935,6 +950,13 @@ export function createGithubLease({
       // the current tip; nothing of ours was written.
       const nowTip = await readTip(ref);
       return { ok: false, code: "tip_moved", role, expected: expectSha, current: nowTip.kind === "error" ? null : (nowTip.sha ?? null), now: describe(role, nowTip), reason: "the tip moved after you inspected it; nothing was written" };
+    }
+    // Forced path (non-commit tip). No CAS is possible, so narrow the window: re-read the ref
+    // immediately before the write and refuse if the tip is no longer the one inspected.
+    const again = await readRef(ref);
+    if (again.failure) return errorResult(role, "could not re-read the tip before the forced reset; nothing written", { failure: again.failure });
+    if (again.sha !== expectSha) {
+      return { ok: false, code: "tip_moved", role, expected: expectSha, current: again.sha, reason: "the tip moved after you inspected it; nothing was written" };
     }
     const res = await call("PATCH", `${base}/refs/${shortRef(ref)}`, { sha: commit.sha, force: true });
     if (res.status !== 200) return errorResult(role, "the forced reset failed", { failure: res.failure ?? { status: res.status, message: res.json?.message ?? null }, previous });
