@@ -141,6 +141,10 @@ sed -i.bak 's/Every 5 minutes\./Every 5 minutes (kit 1.1.0)./' "$E/core/fleet/jo
 commit_all "$E" "engsys 1.1.0"; git -C "$E" tag v1.1.0
 git -C "$E" commit -q --allow-empty -m "engsys 1.2.0"; git -C "$E" tag v1.2.0
 push_all "$E"
+# `fleet verify` (which gates the merge and maintain monsters) checks the plugin against these tags.
+# shellcheck source=fake-release.sh
+. "$HERE/fake-release.sh"
+fake_release "$T/remotes/vendor/engsys.git"
 
 # the instance repo: v0.1.0 (plus a later untagged commit on main), v0.2.0 comes in phase C
 I="$T/seed/acme-fleet"
@@ -445,7 +449,7 @@ has "conf: the merge monster carries its role, so the supervisor asks the lease 
 has "conf: …and the maintenance monster too" "$SUP" "acme-security|12|60|||maintain"
 has "conf: HEARTBEAT_CMD defaulted to the dispatcher" "$SUP" "HEARTBEAT_CMD=bash $ENGSYS_HOST/core/fleet/bin/fleet --instance $INST heartbeat"
 has "conf: INTEGRITY_CMD defaulted to fleet verify, throttled to 15 min (engsys#70)" "$SUP" "INTEGRITY_CMD=bash $ENGSYS_HOST/core/fleet/bin/fleet --instance $INST verify --alert --max-age 15"
-has "the integrity check couldn't run here (no plugin install path): warned, the tick went on" "$(cat "$INST/logs/fleet-supervisor/supervisor.log")" "integrity: WARNING the check could not run (exit 3)"
+has "the integrity check ran in the tick and passed" "$(cat "$INST/logs/fleet-supervisor/supervisor.log")" "integrity: ok"
 has "stale monster with no window is relaunched through the kit" "$(grep -F '[new-session]' "$FAKE/tmux.log" | grep -F '[acme-mm]' || true)" "[acme-mm]"
 hasnt "closed ledger (kill switch) is left alone" "$(cat "$FAKE/tmux.log")" "[acme-security]"
 has "supervisor log kept in the instance" "$(cat "$INST/logs/fleet-supervisor/supervisor.log")" "acme-security: ledger acme/app#12 CLOSED"
@@ -572,7 +576,7 @@ hasnt "no instance marketplace calls" "$seg" "acme"
 eq "only the engsys marketplace" "$(json_names marketplaces '.[] | .name + "#" + .ref')" "engsys#v1.2.0"
 eq "only its plugins" "$(json_names plugins '.[].id')" "core@engsys"
 eq "instance checkout untouched" "$(git -C "$INST" describe --tags --exact-match)" v0.2.0
-eq "without GH_APP_ENV no shim is put on PATH" "$(since "$b" | grep -v -e "PATH0=$T/bin" -e '^MARK' || true)" ""
+eq "without GH_APP_ENV no shim is put on PATH" "$(since "$b" | grep -v -e "PATH0=$T/bin" -e "PATH0=$T/fake-release" -e '^MARK' || true)" ""
 reset_tmux
 run fleet launch
 rc_is "launch works without an identity" 0

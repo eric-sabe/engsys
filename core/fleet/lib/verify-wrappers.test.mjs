@@ -1,6 +1,7 @@
-// verify-wrappers.test.mjs: the plugin integrity check (engsys#70): git blob hashing, the protected
-// set and its coverage of what the wrappers run, the comparison, the throttle cache and the CLI's exit
-// codes. GitHub is never called: the tree is built from this checkout and injected.
+// verify-wrappers.test.mjs: the plugin integrity check (engsys#70, review fixes from #86): git blob
+// hashing, the protected closure (hooks, wrappers, lease code, all from the release's own copy), the
+// comparison, which installs count, the release's place on the default branch, the throttle cache and
+// the CLI's exit codes. GitHub is never called: the release is built from a cache copy and injected.
 // Run: node --test core/fleet/lib/verify-wrappers.test.mjs (part of `npm test`).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -8,35 +9,49 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PROTECTED, PLUGIN_SUBDIR, blobSha, cachePath, localState, parseTree, compare, run, Unverified } from './verify-wrappers.mjs';
+import {
+  SEEDS, PLUGIN_SUBDIR, blobSha, cachePath, walk, localState, parseTree, parseWrappers, compare, selectInstalls, run, Unverified,
+} from './verify-wrappers.mjs';
 import { WRAPPERS } from '../../.claude-plugin/singleton-write-guard.mjs';
 import { hermeticGit } from '../../lib/git-env.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
-const ARGS = ['--repo', 'eric-sabe/engsys', '--ref', 'v9.9.9'];
+const CORE = path.join(REPO, PLUGIN_SUBDIR);
+const CLOSURE = Object.keys(walk(CORE));
+const tmp = (p) => fs.mkdtempSync(path.join(os.tmpdir(), p));
 
-/** A plugin cache built from this checkout: the protected files copied to <tmp>/<path under core/>. */
+/** A plugin cache built from this checkout: the protected closure copied to <tmp>/<path under core/>. */
 function makeCache() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'verify-cache-'));
-  for (const p of PROTECTED) {
+  const root = tmp('verify-cache-');
+  for (const p of CLOSURE) {
     const dest = cachePath(root, p);
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.copyFileSync(path.join(REPO, p), dest);
   }
   return root;
 }
-/** The tree GitHub would return for this checkout. */
-function treeOf(extra = []) {
-  const tree = PROTECTED.map((p) => ({ path: p, type: 'blob', mode: '100644', sha: blobSha(fs.readFileSync(path.join(REPO, p))) }));
-  return { sha: 'x', truncated: false, tree: [...tree, { path: 'core', type: 'tree', sha: 'y' }, ...extra] };
+/** The release GitHub would return for the files under root, as they are now. */
+function releaseOf(root, { status = 'ahead' } = {}) {
+  const tree = Object.entries(walk(root)).filter(([, sha]) => sha && sha !== 'not-a-file').map(([p, sha]) => ({ path: p, type: 'blob', sha }));
+  return { commit: 'c'.repeat(40), defaultBranch: 'main', status, tree: parseTree({ tree: [...tree, { path: 'core', type: 'tree', sha: 'y' }] }) };
 }
+const release = releaseOf(CORE);
+const PROJECT = tmp('verify-pin-dir-');
+function pluginList(entries) {
+  const f = path.join(tmp('verify-list-'), 'plugins.json');
+  fs.writeFileSync(f, JSON.stringify(entries));
+  return f;
+}
+const userEntry = (root, extra = {}) => ({ id: 'engsys@engsys', version: '9.9.9', scope: 'user', enabled: true, installPath: root, ...extra });
+const args = (plugins, extra = []) => ['--repo', 'eric-sabe/engsys', '--tag', 'v9.9.9', '--plugin-id', 'engsys@engsys', '--project-dir', PROJECT, '--plugins', plugins, ...extra];
 function capture() {
   const lines = [];
   return { out: (s) => lines.push(s), text: () => lines.join('\n') };
 }
+const kinds = (diffs) => diffs.map((d) => `${d.kind} ${d.path}`).sort();
 
 test('blobSha is git hash-object', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'verify-blob-'));
+  const dir = tmp('verify-blob-');
   for (const [name, body] of [['empty', ''], ['hello', 'hello\n'], ['bin', Buffer.from([0, 1, 2, 255])]]) {
     fs.writeFileSync(path.join(dir, name), body);
     assert.equal(blobSha(fs.readFileSync(path.join(dir, name))), hermeticGit(dir, ['hash-object', name]).trim(), name);
@@ -44,67 +59,67 @@ test('blobSha is git hash-object', () => {
   assert.equal(blobSha(''), 'e69de29bb2d1d6434b8b29ae775ad8c2e48c5391');
 });
 
-test('the protected set: wrappers, hook, its registration, the lease code', () => {
-  for (const w of WRAPPERS) assert.ok(PROTECTED.includes(`core/skills/${w}`), w);
-  for (const p of ['core/.claude-plugin/singleton-write-guard.mjs', 'core/.claude-plugin/hooks.json', 'core/.claude-plugin/plugin.json',
-    'core/lib/lease/baton.mjs', 'core/lib/lease/github-backend.mjs']) assert.ok(PROTECTED.includes(p), p);
-  assert.equal(new Set(PROTECTED).size, PROTECTED.length, 'no duplicates');
-  for (const p of PROTECTED) assert.ok(fs.statSync(path.join(REPO, p)).isFile(), `${p} exists`);
+test('the closure: every registered hook script, every wrapper, the lease code and what it loads', () => {
+  for (const w of WRAPPERS) assert.ok(CLOSURE.includes(`core/skills/${w}`), w);
+  assert.deepEqual(parseWrappers(fs.readFileSync(path.join(CORE, '.claude-plugin/singleton-write-guard.mjs'), 'utf8')).sort(), [...WRAPPERS].sort());
+  // Every file hooks.json registers is protected (engsys#86 review M2), read independently of the walk.
+  const hooks = JSON.parse(fs.readFileSync(path.join(CORE, '.claude-plugin/hooks.json'), 'utf8'));
+  const registered = new Set();
+  for (const groups of Object.values(hooks.hooks)) for (const g of groups) for (const h of g.hooks) {
+    for (const m of h.command.matchAll(/\$\{CLAUDE_PLUGIN_ROOT\}\/(\S+?)"?(?:\s|$)/g)) registered.add(`core/${m[1].replace(/"$/, '')}`);
+  }
+  assert.ok(registered.size >= 6, `hooks.json registers ${[...registered]}`);
+  for (const r of registered) assert.ok(CLOSURE.includes(r), `${r} is registered in hooks.json but not protected`);
+  for (const p of ['core/.claude-plugin/approve-own-scripts.mjs', 'core/.claude-plugin/engsys-context.mjs', 'core/.claude-plugin/handback-guard.mjs',
+    'core/templates/post-compact-reground.sh.tmpl', 'core/templates/post-clear-reground.sh.tmpl', 'core/.claude-plugin/plugin.json',
+    'core/lib/lease/baton.mjs', 'core/lib/lease/github-backend.mjs', 'core/fleet/identity/gh-app-token.mjs', 'core/fleet/lib/federation.mjs',
+    'core/lib/gate-check.mjs', 'core/lib/git-env.mjs', 'core/lib/untrusted.mjs', 'core/templates/CLAUDE.md.tmpl']) {
+    assert.ok(CLOSURE.includes(p), `${p} protected`);
+  }
+  for (const s of SEEDS) assert.ok(fs.statSync(path.join(REPO, s)).isFile(), `seed ${s} exists`);
+  for (const p of CLOSURE) assert.ok(fs.statSync(path.join(REPO, p)).isFile(), `${p} exists`);
 });
 
 test('the plugin is built from core/ (the cache path mapping holds)', () => {
   const mk = JSON.parse(fs.readFileSync(path.join(REPO, '.claude-plugin/marketplace.json'), 'utf8'));
   assert.equal(mk.plugins.find((p) => p.name === 'engsys').source, `./${PLUGIN_SUBDIR}`);
-  const hooks = fs.readFileSync(path.join(REPO, 'core/.claude-plugin/hooks.json'), 'utf8');
-  assert.match(hooks, /\$\{CLAUDE_PLUGIN_ROOT\}\/\.claude-plugin\/singleton-write-guard\.mjs/);
   assert.equal(cachePath('/c/engsys/1.0.0', 'core/lib/lease/baton.mjs'), '/c/engsys/1.0.0/lib/lease/baton.mjs');
 });
 
-test('everything a wrapper runs is protected (imports, sibling scripts, the token helper)', () => {
-  // Walk from the wrappers: a .sh names the scripts/libs it execs by relative path; a .mjs reaches
-  // relative modules through static and dynamic imports and execs helpers by path.join(HERE, ...).
-  const seen = new Set();
-  const queue = [...WRAPPERS].map((w) => `core/skills/${w}`);
-  while (queue.length) {
-    const p = queue.shift();
-    if (seen.has(p)) continue;
-    seen.add(p);
-    const src = fs.readFileSync(path.join(REPO, p), 'utf8');
-    const dir = path.posix.dirname(p);
-    const refs = [];
-    if (p.endsWith('.sh')) {
-      for (const m of src.matchAll(/(?:\$here|\$\(dirname "\$\{BASH_SOURCE\[0\]\}"\))\/([A-Za-z0-9_./-]+\.(?:sh|mjs))/g)) refs.push(m[1]);
-    } else {
-      for (const m of src.matchAll(/(?:from\s+|import\()\s*['"](\.{1,2}\/[^'"]+)['"]/g)) refs.push(m[1]);
-      for (const m of src.matchAll(/join\(HERE,\s*((?:['"][^'"]+['"],?\s*)+)\)/g)) {
-        refs.push([...m[1].matchAll(/['"]([^'"]+)['"]/g)].map((x) => x[1]).join('/'));
-      }
-    }
-    for (const r of refs) {
-      const target = path.posix.normalize(path.posix.join(dir, r));
-      if (fs.existsSync(path.join(REPO, target))) queue.push(target);
-    }
-  }
-  assert.ok(seen.has('core/lib/lease/baton.mjs') && seen.has('core/fleet/identity/gh-app-token.mjs'), `walk reached the lease code: ${[...seen]}`);
-  for (const p of seen) assert.ok(PROTECTED.includes(p), `${p} runs inside a fenced wrapper but is not in PROTECTED`);
-  const hookFiles = new Set(['core/.claude-plugin/singleton-write-guard.mjs', 'core/.claude-plugin/hooks.json', 'core/.claude-plugin/plugin.json']);
-  assert.deepEqual(PROTECTED.filter((p) => !seen.has(p) && !hookFiles.has(p)), [], 'PROTECTED lists only what the wrappers run, plus the hook and its registration');
+test('the wrapper and hook lists come from the release copy, not this checkout (review L4, M2)', () => {
+  // A release whose guard names one more wrapper and whose hooks.json registers one more hook.
+  const root = makeCache();
+  const guard = cachePath(root, 'core/.claude-plugin/singleton-write-guard.mjs');
+  fs.writeFileSync(guard, fs.readFileSync(guard, 'utf8').replace("export const WRAPPERS = new Set([", "export const WRAPPERS = new Set([\n  'merge-monster/scripts/mm-extra.sh',"));
+  fs.writeFileSync(cachePath(root, 'core/skills/merge-monster/scripts/mm-extra.sh'), '#!/usr/bin/env bash\n');
+  const hooksFile = cachePath(root, 'core/.claude-plugin/hooks.json');
+  const hooks = JSON.parse(fs.readFileSync(hooksFile, 'utf8'));
+  hooks.hooks.PreToolUse.push({ matcher: 'Bash', hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/extra-hook.mjs"' }] });
+  fs.writeFileSync(hooksFile, JSON.stringify(hooks));
+  fs.writeFileSync(cachePath(root, 'core/.claude-plugin/extra-hook.mjs'), '// extra\n');
+  const rel = releaseOf(root);
+  assert.deepEqual(compare(rel.tree, localState([root])), []);
+  fs.appendFileSync(cachePath(root, 'core/skills/merge-monster/scripts/mm-extra.sh'), 'gh pr merge 1\n');
+  fs.appendFileSync(cachePath(root, 'core/.claude-plugin/extra-hook.mjs'), 'process.stdout.write("{}")\n');
+  assert.deepEqual(kinds(compare(rel.tree, localState([root]))), [
+    'modified core/.claude-plugin/extra-hook.mjs',
+    'modified core/skills/merge-monster/scripts/mm-extra.sh',
+  ]);
 });
 
 test('compare: untouched passes; modified, missing, unexpected and symlinked files are caught', () => {
   const root = makeCache();
-  const tree = parseTree(treeOf());
-  assert.deepEqual(compare(tree, localState([root])), []);
+  assert.deepEqual(compare(release.tree, localState([root])), []);
 
   fs.appendFileSync(cachePath(root, 'core/skills/merge-monster/scripts/mm-act.sh'), '\ngh pr merge 1\n');
-  fs.rmSync(cachePath(root, 'core/.claude-plugin/hooks.json'));
+  fs.appendFileSync(cachePath(root, 'core/.claude-plugin/approve-own-scripts.mjs'), '\n// allow + updatedInput\n');
+  fs.rmSync(cachePath(root, 'core/.claude-plugin/handback-guard.mjs'));
   const link = cachePath(root, 'core/lib/lease/baton.mjs');
-  const real = `${link}.real`;
-  fs.renameSync(link, real);
-  fs.symlinkSync(real, link);
-  const diffs = compare(tree, localState([root]));
-  assert.deepEqual(diffs.map((d) => `${d.kind} ${d.path}`).sort(), [
-    'missing core/.claude-plugin/hooks.json',
+  fs.renameSync(link, `${link}.real`);
+  fs.symlinkSync(`${link}.real`, link);
+  assert.deepEqual(kinds(compare(release.tree, localState([root]))), [
+    'missing core/.claude-plugin/handback-guard.mjs',
+    'modified core/.claude-plugin/approve-own-scripts.mjs',
     'modified core/skills/merge-monster/scripts/mm-act.sh',
     'not-a-file core/lib/lease/baton.mjs',
   ]);
@@ -114,61 +129,121 @@ test('compare: untouched passes; modified, missing, unexpected and symlinked fil
   const scripts = cachePath(viaDir, 'core/skills/merge-monster/scripts');
   fs.renameSync(scripts, `${scripts}.real`);
   fs.symlinkSync(`${scripts}.real`, scripts);
-  assert.deepEqual(compare(tree, localState([viaDir])).map((d) => `${d.kind} ${d.path}`).sort(), [
+  assert.deepEqual(kinds(compare(release.tree, localState([viaDir]))), [
     'not-a-file core/skills/merge-monster/scripts/mm-act.sh',
     'not-a-file core/skills/merge-monster/scripts/mm-baton.sh',
     'not-a-file core/skills/merge-monster/scripts/mm-heartbeat.sh',
   ]);
 
-  // A file the release doesn't have: fine when absent locally too (an older release), caught when present.
-  const older = parseTree({ tree: treeOf().tree.filter((e) => e.path !== 'core/lib/untrusted.mjs') });
+  // A file the release doesn't have: fine when absent locally too, caught when present.
+  const older = parseTree({ tree: [...release.tree].filter(([p]) => p !== 'core/lib/untrusted.mjs').map(([p, sha]) => ({ path: p, type: 'blob', sha })) });
   const fresh = makeCache();
-  assert.deepEqual(compare(older, localState([fresh])).map((d) => `${d.kind} ${d.path}`), ['unexpected core/lib/untrusted.mjs']);
+  assert.deepEqual(kinds(compare(older, localState([fresh]))), ['unexpected core/lib/untrusted.mjs']);
   fs.rmSync(cachePath(fresh, 'core/lib/untrusted.mjs'));
   assert.deepEqual(compare(older, localState([fresh])), []);
 });
 
+test('selectInstalls: every applicable install counts (review H2)', () => {
+  const good = makeCache();
+  const bad = makeCache();
+  const sel = (list) => selectInstalls(list, { pluginId: 'engsys@engsys', projectDir: PROJECT, version: '9.9.9' });
+  assert.deepEqual(sel([userEntry(good), { id: 'other@engsys', version: '1', installPath: '/x' }]).problems, []);
+  // The normal two-scope layout: user and project entries on one path.
+  assert.deepEqual(sel([userEntry(good), userEntry(good, { scope: 'project', projectPath: PROJECT })]).problems, []);
+  // A project entry for another directory doesn't apply here.
+  assert.deepEqual(sel([userEntry(good), userEntry(bad, { scope: 'project', projectPath: '/elsewhere', version: '1.0.0' })]).problems, []);
+  // PoC A: the version label edited on the only entry.
+  assert.match(sel([userEntry(bad, { version: '9.9.9-local' })]).problems.join('\n'), /^version .*9\.9\.9-local, not the pin 9\.9\.9/m);
+  // PoC B: a pristine user entry at the pin plus a project entry for PIN_DIR at another version.
+  assert.match(sel([userEntry(good), userEntry(bad, { scope: 'project', projectPath: PROJECT, version: '9.9.10' })]).problems.join('\n'), /^version .*project scope/m);
+  // Two install paths at the pin.
+  assert.match(sel([userEntry(good), userEntry(bad, { scope: 'local', projectPath: PROJECT })]).problems.join('\n'), /^two-paths/m);
+  // Disabled, in any way.
+  assert.match(sel([userEntry(good, { enabled: false })]).problems.join('\n'), /^disabled/m);
+  assert.match(sel([userEntry(good, { projectEnabled: false })]).problems.join('\n'), /^disabled/m);
+  assert.match(sel([userEntry(good, { enabled: undefined })]).problems.join('\n'), /^disabled/m);
+  // Nothing at all: not verified, not a pass.
+  assert.equal(sel([{ id: 'other@engsys', version: '9.9.9', installPath: good }]).notInstalled, true);
+});
+
 test('parseTree: a truncated or malformed tree is "not verified", never a pass', () => {
-  assert.throws(() => parseTree({ ...treeOf(), truncated: true }), Unverified);
+  assert.throws(() => parseTree({ tree: [], truncated: true }), Unverified);
   assert.throws(() => parseTree('<html>'), Unverified);
   assert.throws(() => parseTree({ message: 'Not Found' }), /Not Found/);
 });
 
-test('CLI: exit 0 on an untouched cache, 1 on a tampered wrapper, 3 when GitHub fails', async () => {
+test('CLI: 0 untouched, 1 tampered (with a fingerprint per mismatch), 3 when GitHub fails or nothing is installed', async () => {
   const root = makeCache();
-  const fetch = async ({ repo, ref }) => { assert.equal(repo, 'eric-sabe/engsys'); assert.equal(ref, 'v9.9.9'); return parseTree(treeOf()); };
+  const fetch = async ({ repo, tag }) => { assert.equal(repo, 'eric-sabe/engsys'); assert.equal(tag, 'v9.9.9'); return release; };
+  const plugins = pluginList([userEntry(root)]);
   let c = capture();
-  assert.equal(await run([...ARGS, '--root', root], { fetch, out: c.out }), 0);
-  assert.match(c.text(), /^verify: ok, \d+ protected files/);
+  assert.equal(await run(args(plugins), { fetch, out: c.out }), 0);
+  assert.match(c.text(), /^verify: ok, 22 protected files/);
 
   fs.appendFileSync(cachePath(root, 'core/skills/maintenance-monster/scripts/mnt-act.sh'), '# x\n');
   c = capture();
-  assert.equal(await run([...ARGS, '--root', root], { fetch, out: c.out }), 1);
-  assert.match(c.text(), /MISMATCH, 1 of \d+ protected files differ from eric-sabe\/engsys@v9\.9\.9/);
-  assert.match(c.text(), /modified\s+\S+mnt-act\.sh/);
+  assert.equal(await run(args(plugins), { fetch, out: c.out }), 1);
+  assert.match(c.text(), /MISMATCH against eric-sabe\/engsys@v9\.9\.9, 1 problem/);
+  assert.match(c.text(), /modified\s+\S+mnt-act\.sh [0-9a-f]{40}/);
+  const fp1 = c.text().match(/^fingerprint: ([0-9a-f]{40})$/m)[1];
+  fs.appendFileSync(cachePath(root, 'core/skills/maintenance-monster/scripts/mnt-act.sh'), '# y\n');
+  c = capture();
+  await run(args(plugins), { fetch, out: c.out });
+  assert.notEqual(c.text().match(/^fingerprint: ([0-9a-f]{40})$/m)[1], fp1, 'a different mismatch has a different fingerprint');
 
   c = capture();
-  assert.equal(await run([...ARGS, '--root', root], { fetch: async () => { throw new Unverified('gh api failed: connect ETIMEDOUT'); }, out: c.out }), 3);
+  assert.equal(await run(args(plugins), { fetch: async () => { throw new Unverified('gh api failed: connect ETIMEDOUT'); }, out: c.out }), 3);
   assert.match(c.text(), /not verified against eric-sabe\/engsys@v9\.9\.9: gh api failed: connect ETIMEDOUT/);
+
+  c = capture();
+  assert.equal(await run(args(pluginList([])), { fetch, out: c.out }), 3);
+  assert.match(c.text(), /not installed/);
 });
 
-test('CLI: every root is checked', async () => {
+test('CLI: an install problem is a mismatch before GitHub is asked (PoC A, PoC B)', async () => {
   const good = makeCache();
   const bad = makeCache();
-  fs.writeFileSync(cachePath(bad, 'core/.claude-plugin/singleton-write-guard.mjs'), 'process.exit(0)\n');
+  fs.appendFileSync(cachePath(bad, 'core/.claude-plugin/hooks.json'), '// tampered\n');
+  let calls = 0;
+  const fetch = async () => { calls++; return release; };
+  for (const list of [
+    [userEntry(bad, { version: '9.9.9-local' })],
+    [userEntry(good), userEntry(bad, { scope: 'project', projectPath: PROJECT, version: '9.9.10' })],
+    [userEntry(good, { enabled: false })],
+  ]) {
+    const c = capture();
+    assert.equal(await run(args(pluginList(list)), { fetch, out: c.out }), 1, JSON.stringify(list));
+    assert.match(c.text(), /^verify: MISMATCH/);
+  }
+  assert.equal(calls, 0);
+});
+
+test('CLI: a tag whose commit is not on the default branch is a mismatch (review M1)', async () => {
+  const root = makeCache();
+  for (const [status, code] of [['ahead', 0], ['identical', 0], ['behind', 1], ['diverged', 1]]) {
+    const c = capture();
+    assert.equal(await run(args(pluginList([userEntry(root)])), { fetch: async () => ({ ...release, status }), out: c.out }), code, status);
+    if (code) assert.match(c.text(), new RegExp(`release\\s+v9\\.9\\.9 is commit c{40}, which is not on main \\(compare: ${status}\\)`));
+  }
+});
+
+test('CLI: every applicable install path is walked', async () => {
+  const root = makeCache();
+  fs.writeFileSync(cachePath(root, 'core/.claude-plugin/singleton-write-guard.mjs'), 'process.exit(0)\n');
   const c = capture();
-  assert.equal(await run([...ARGS, '--root', good, '--root', bad], { fetch: async () => parseTree(treeOf()), out: c.out }), 1);
-  assert.match(c.text(), new RegExp(`modified\\s+${fs.realpathSync(bad).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  assert.equal(await run(args(pluginList([userEntry(root)])), { fetch: async () => release, out: c.out }), 1);
+  assert.match(c.text(), /modified\s+\S+singleton-write-guard\.mjs/);
 });
 
 test('CLI: the throttle reuses a pass only while the files are unchanged and the cache is young', async () => {
   const root = makeCache();
-  const cache = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'verify-state-')), 'verify-wrappers.json');
+  const plugins = pluginList([userEntry(root)]);
+  const cache = path.join(tmp('verify-state-'), 'verify-wrappers.json');
   let calls = 0;
-  const fetch = async () => { calls++; return parseTree(treeOf()); };
+  const fetch = async () => { calls++; return release; };
   let t = 1_000_000;
   const now = () => t;
-  const go = (extra = []) => run([...ARGS, '--root', root, '--cache', cache, '--max-age-min', '15', ...extra], { fetch, now, out: () => {} });
+  const go = (tag = 'v9.9.9') => run(args(plugins, ['--cache', cache, '--max-age-min', '15']).map((x) => (x === 'v9.9.9' ? tag : x)), { fetch, now, out: () => {} });
 
   assert.equal(await go(), 0); assert.equal(calls, 1, 'first run asks GitHub');
   t += 14 * 60_000;
@@ -183,19 +258,16 @@ test('CLI: the throttle reuses a pass only while the files are unchanged and the
 
   fs.copyFileSync(path.join(REPO, 'core/lib/lease/github-backend.mjs'), cachePath(root, 'core/lib/lease/github-backend.mjs'));
   assert.equal(await go(), 0); assert.equal(calls, 5);
-  assert.equal(await run([...ARGS.slice(0, 2), '--ref', 'v9.9.10', '--root', root, '--cache', cache, '--max-age-min', '15'], { fetch, now, out: () => {} }), 0);
-  assert.equal(calls, 6, 'another ref is not served from the cache');
-
-  // GitHub down after a cached pass expired: not verified (3), not a pass.
   t += 60 * 60_000;
-  assert.equal(await run([...ARGS, '--root', root, '--cache', cache, '--max-age-min', '15'], { fetch: async () => { throw new Unverified('down'); }, now, out: () => {} }), 3);
+  assert.equal(await run(args(plugins, ['--cache', cache, '--max-age-min', '15']), { fetch: async () => { throw new Unverified('down'); }, now, out: () => {} }), 3,
+    'GitHub down after the cached pass expired: not verified, not a pass');
 });
 
-test('CLI: usage errors exit 2', async () => {
+test('CLI: usage errors exit 2, including a ref that is not a release tag (review M1)', async () => {
   const c = capture();
-  assert.equal(await run(['--repo', 'nope', '--ref', 'v1', '--root', '/x'], { out: c.out }), 2);
-  assert.equal(await run(['--repo', 'a/b', '--ref', '../x', '--root', '/x'], { out: c.out }), 2);
-  assert.equal(await run(['--repo', 'a/b', '--ref', 'feature/x', '--root', '/x'], { out: c.out }), 2);
-  assert.equal(await run(['--repo', 'a/b', '--ref', 'v1'], { out: c.out }), 2);
-  assert.equal(await run(['--repo', 'a/b', '--ref', 'v1', '--root', '/x', '--cache', '/c'], { out: c.out }), 2);
+  const plugins = pluginList([]);
+  const base = ['--repo', 'a/b', '--plugin-id', 'engsys@engsys', '--project-dir', PROJECT, '--plugins', plugins];
+  for (const tag of ['main', 'v1.2', 'feature/x', 'v1.2.3-rc1', '../v1.2.3']) assert.equal(await run([...base, '--tag', tag], { out: c.out }), 2, tag);
+  assert.equal(await run(['--repo', 'nope', '--tag', 'v1.0.0', '--plugin-id', 'engsys@engsys', '--project-dir', PROJECT, '--plugins', plugins], { out: c.out }), 2);
+  assert.equal(await run([...base, '--tag', 'v1.0.0', '--cache', '/c'], { out: c.out }), 2);
 });

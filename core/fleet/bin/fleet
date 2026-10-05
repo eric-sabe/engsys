@@ -10,10 +10,12 @@
 #   sync [--check]                host checkouts + plugin reinstall to match the pins (no restarts)
 #   restart [--stale|--all|<name>...] [--force]
 #                                 cycle sessions when you're ready (no args = status)
-#   launch [<name> [--force-excluded]] | --check <name>
+#   launch [<name> [--force-excluded] [--skip-verify]] | --check <name>
 #                                 start missing sessions that run on this host (all, or one);
 #                                 --check: does <name> run on this host (ROLES / ROSTER_EXCLUDE / registry)
 #                                 --host-health: is an unreadable registry keeping monsters off this host
+#                                 --skip-verify: start a merge/maintain session without `fleet verify`
+#                                 (typed at a terminal only; warns and alerts)
 #   supervise                     one supervisor tick (what the launchd job runs)
 #   verify [--alert] [--max-age <min>]
 #                                 do the plugin files guarding merge/maintain match the pinned engsys

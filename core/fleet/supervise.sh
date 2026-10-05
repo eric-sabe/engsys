@@ -31,9 +31,9 @@
 # It also gets INTEGRITY_CMD (`fleet verify --alert --max-age $VERIFY_MAX_AGE_MIN`, default 15): once
 # per tick the supervisor checks that the plugin files guarding the merge and maintain monsters match
 # the pinned engsys release on GitHub (engsys#70). GitHub is asked at most once per VERIFY_MAX_AGE_MIN
-# minutes while the local files are unchanged. A mismatch alerts once per incident and holds every
-# relaunch of those sessions; running ones are left alone. A check that can't run is logged and the
-# tick goes on.
+# minutes while the local files are unchanged. Anything but a pass (a mismatch, or a check that can't
+# run) alerts once per incident and holds every relaunch of those sessions (engsys#86 review H1);
+# running ones are left alone.
 #
 # Merge and maintain monsters (by their roster prompt, lib/host-roles.sh) get their role appended as
 # the 6th field (`acme-mm|7|60|||merge`): the supervisor then reads the role's holder from the github
