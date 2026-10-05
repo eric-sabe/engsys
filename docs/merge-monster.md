@@ -182,7 +182,7 @@ review):
   no permission prompt stands in front of a raw `gh pr merge`. The engsys
   plugin's PreToolUse hook (`core/.claude-plugin/singleton-write-guard.mjs`)
   does: in a session the launcher marked `ENGSYS_SINGLETON_ROLE=merge` (or
-  `maintain`), it is an allowlist. Bash passes only as one plain invocation of
+  `maintain`), it is an allowlist for Bash and Monitor commands. A command passes only as one plain invocation of
   the fenced wrappers (the heartbeat with `--state-dir`), or when every `gh`,
   `git` and HTTP client in it is a known read (aliases, extensions, `git push`,
   config writes, `hub` and HTTP clients towards GitHub are denied; a GraphQL

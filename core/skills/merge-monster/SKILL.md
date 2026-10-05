@@ -205,10 +205,11 @@ and hand back; you push and label under the fence. Nothing they do later is
 covered by the fence you took before dispatching them.
 
 **The guard hook.** In this session (`ENGSYS_SINGLETON_ROLE=merge`, set by the
-launcher), the engsys plugin's PreToolUse hook is an allowlist. A Bash command
-passes if it is one plain invocation of `mm-act.sh`, `mm-baton.sh` or
-`mm-heartbeat.sh --state-dir …` (no `;`, `&&`, `|`, redirects, `$( )` or
-backticks around it), or if every `gh`, `git` and HTTP client in it is a known
+launcher), the engsys plugin's PreToolUse hook is an allowlist for Bash and
+Monitor commands. A command passes if it is one plain invocation of `mm-act.sh`,
+`mm-baton.sh` or `mm-heartbeat.sh --state-dir …` (no `;`, `&&`, redirects,
+`$( )` or backticks around it; `2>&1`, `| jq …`, `| cat`, `; echo $?` and a
+heredoc body for `--body-file -` may follow), or if every `gh`, `git` and HTTP client in it is a known
 read: `gh pr|issue|run|workflow|repo|release view|list|status|diff|checks`,
 `gh search`, `gh api` GETs and non-mutation GraphQL queries written out in
 the command (no `$VAR`, `$( )` or backticks in it, never `mergePullRequest`),

@@ -34,4 +34,4 @@ while [ $# -gt 0 ]; do
     *) args+=("$1"); shift ;;
   esac
 done
-exec node "$lib" "$op" --role "$role" ${args[@]+"${args[@]}"} "$@"
+exec env -u NODE_OPTIONS node "$lib" "$op" --role "$role" ${args[@]+"${args[@]}"} "$@"

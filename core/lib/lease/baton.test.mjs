@@ -35,6 +35,10 @@ import {
   sessionProcess,
   supervisorDecision,
   unsafeLocalConfig,
+  unsafePushConfig,
+  localizeIncludes,
+  pushEnv,
+  PUSH_PATH,
 } from "./baton.mjs";
 
 const MIN = 60_000;
@@ -745,7 +749,7 @@ const FLEET_CONFIG = [
   { scope: "command", key: "user.name", value: "fleet[bot]" },
 ];
 const PUSH_C = [
-  "-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=never", "-c", "core.fsmonitor=false", "-c", "core.sshCommand=ssh", "-c", "core.askPass=",
+  "-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=never", "-c", "core.fsmonitor=false", "-c", "http.sslVerify=true", "-c", "core.sshCommand=ssh", "-c", "core.askPass=",
   "-c", "credential.helper=", "-c", "credential.helper=osxkeychain", "-c", "credential.https://github.com.helper=",
   "-c", "credential.https://github.com.helper=!node /fleet/gh-app-token.mjs git-credential", "-c", "push.gpgSign=false", "-c", "push.recurseSubmodules=no",
 ];
@@ -886,7 +890,10 @@ test("#71 L3: a guarded push refuses a checkout whose own config sets credential
     ["local", "branch.agent/1-x.merge", "refs/heads/agent/1-x"],
     ["global", "http.proxy", "http://corp-proxy"],
     ["global", "url.git@github.com:.insteadof", "https://github.com/"],
-    ["command", "credential.https://github.com.helper", "!fleet"],
+    ["command", "credential.https://github.com.helper", "!GH_APP_ENV_FILE='/x/gh-app.env' '/opt/homebrew/bin/node' '/x/gh-app-token.mjs' git-credential"],
+    ["command", "credential.https://github.com.helper", ""],
+    ["command", "credential.https://github.com.usehttppath", "true"],
+    ["command", "user.name", "fleet[bot]"],
   ];
   assert.deepEqual(unsafeLocalConfig(fine.map(([scope, key, value]) => ({ scope, key, value }))), []);
 
@@ -1016,4 +1023,97 @@ test("default notify failure is soft and names the resolved command", async () =
   const notify = defaultNotify({ env: { PATH: "/nonexistent", FLEET_BIN: "/no/such/fleet" }, err: { write: (x) => err.push(x) } });
   assert.equal(await notify({ level: "alert", text: "x" }), false);
   assert.match(err.join(""), /notify failed via `\/no\/such\/fleet notify`/);
+});
+
+// ------------------------------------------------------------------------- #85 Nyx follow-ups --
+
+test("#85 L3: env-scoped config (scope command) is checked too: only the fleet's helper, useHttpPath and user keys pass", () => {
+  const bad = [
+    ["credential.helper", "!evil"],
+    ["credential.https://github.com.helper", "!/tmp/evil.sh"],
+    ["url.https://evil.example/.pushinsteadof", "https://github.com/"],
+    ["http.proxy", "http://attacker"],
+    ["core.sshcommand", "/tmp/evil-ssh"],
+    ["core.askpass", "/tmp/evil"],
+    ["include.path", "/tmp/x"],
+  ];
+  for (const [key, value] of bad) assert.deepEqual(unsafePushConfig([{ scope: "command", key, value }]), [key], key);
+  assert.deepEqual(unsafePushConfig(FLEET_CONFIG), []);
+  assert.deepEqual(unsafePushConfig([{ scope: "global", key: "core.sshcommand", value: "ssh -i ~/.ssh/fleet" }]), [], "the operator's own config");
+  assert.equal(unsafeLocalConfig, unsafePushConfig, "back-compat name");
+});
+
+test("#85 L3: an includeIf in global config that points into the checkout counts as the checkout's config", () => {
+  const dir = mkdtempSync(join(tmpdir(), "baton-inc-"));
+  const entries = [
+    { scope: "global", origin: `file:${join(dir, ".git", "evil.inc")}`, key: "http.proxy", value: "http://attacker" },
+    { scope: "global", origin: `file:${join(dir, "x.inc")}`, key: "credential.helper", value: "!evil" },
+    { scope: "global", origin: "file:/Users/x/.gitconfig", key: "core.editor", value: "nano" },
+    { scope: "command", origin: "command line:", key: "user.name", value: "bot" },
+  ];
+  const out = localizeIncludes(entries, [dir, join(dir, ".git")]);
+  assert.deepEqual(out.map((e) => e.scope), ["local", "local", "global", "command"]);
+  assert.deepEqual(unsafePushConfig(out), ["http.proxy", "credential.helper"]);
+});
+
+test("#85 L3: the push environment drops GIT_* (but the fleet's env-scoped config), askpass, proxies, NODE_OPTIONS and preloads, and pins PATH", () => {
+  const env = pushEnv({
+    HOME: "/Users/x", GH_APP_ENV_FILE: "/x/gh-app.env", PATH: "/tmp/evil-bin:/usr/bin",
+    GIT_CONFIG_COUNT: "2", GIT_CONFIG_KEY_0: "credential.https://github.com.helper", GIT_CONFIG_VALUE_0: "", GIT_CONFIG_KEY_1: "user.name", GIT_CONFIG_VALUE_1: "bot",
+    GIT_SSH_COMMAND: "/tmp/evil", GIT_SSH: "/tmp/evil", GIT_ASKPASS: "/tmp/evil", GIT_PROXY_COMMAND: "/tmp/evil", GIT_EXEC_PATH: "/tmp/evil", GIT_DIR: "/tmp/x",
+    GIT_CONFIG_PARAMETERS: "'credential.helper=!evil'", GIT_CONFIG_GLOBAL: "/tmp/g", GIT_SSL_NO_VERIFY: "1", SSH_ASKPASS: "/tmp/evil", NODE_OPTIONS: "--require /tmp/evil.js",
+    https_proxy: "http://attacker", ALL_PROXY: "http://attacker", SSL_CERT_FILE: "/tmp/ca.pem", DYLD_INSERT_LIBRARIES: "/tmp/evil.dylib", LD_PRELOAD: "/tmp/evil.so",
+  });
+  assert.deepEqual(Object.keys(env).sort(), ["GH_APP_ENV_FILE", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_VALUE_1", "GIT_TERMINAL_PROMPT", "HOME", "PATH"]);
+  assert.equal(env.PATH, PUSH_PATH);
+  assert.equal(env.GIT_TERMINAL_PROMPT, "0");
+});
+
+test("#85 L4: the config is scanned again inside the fence, right before the push; the push gets the cleaned env", async () => {
+  const w = world();
+  const s = session(w);
+  await s.baton.startup();
+  const run = async (second) => {
+    const calls = [];
+    let scans = 0;
+    const b = createBaton({
+      lease: s.lease, repo: REPO, role: "merge", holder: s.holder, run: "run-1", store: s.store, home: async () => HOME, now: () => w.local.t,
+      mergeApi: { request: async (m, p) => pushApi()(0, m, p) },
+      spawn: async (cmd, args, opts) => { calls.push({ args, opts }); return { code: 0, stdout: "", stderr: "", timedOut: false }; },
+      remoteUrl: async () => `https://github.com/${REPO}.git`,
+      pushConfig: async () => { scans += 1; return scans === 1 ? FLEET_CONFIG : second; },
+    });
+    return { r: await b.guard(["git", "-C", "../wt", "push", "origin", "agent/1-x"], { pr: 5 }), calls, scans: () => scans };
+  };
+  const planted = await run([...FLEET_CONFIG, { scope: "local", key: "url.https://evil.example/.pushinsteadof", value: "https://github.com/" }]);
+  assert.equal(planted.r.result.code, "push_refused");
+  assert.equal(planted.r.result.sent, false);
+  assert.match(planted.r.result.reason, /pushinsteadof/);
+  assert.equal(planted.calls.length, 0, "nothing ran");
+  assert.equal(planted.scans(), 2);
+  const clean = await run(FLEET_CONFIG);
+  assert.equal(clean.r.result.code, "ran");
+  assert.equal(clean.calls[0].opts.env.PATH, PUSH_PATH, "the push runs with pushEnv()");
+  assert.ok(!("NODE_OPTIONS" in clean.calls[0].opts.env));
+});
+
+test("#85 L5: guard refuses gh api graphql whose document is not inline", () => {
+  for (const argv of [
+    ["gh", "api", "graphql", "-F", "query=@/tmp/m.graphql"],
+    ["gh", "api", "graphql", "-f", "query=@-"],
+    ["gh", "api", "graphql", "--field=query=@m.graphql"],
+    ["gh", "api", "graphql", "-Fquery=@m.graphql"],
+    ["gh", "api", "graphql", "--input", "m.json"],
+    ["gh", "api", "graphql", "--input=m.json"],
+    ["gh", "api", "/graphql", "-F", "query=@m.graphql"],
+  ]) assert.throws(() => guardCommand(argv), /document inline/, argv.join(" "));
+  assert.equal(guardCommand(["gh", "api", "graphql", "-f", "query=query { viewer { login } }"]).exe, "gh");
+  assert.equal(guardCommand(["gh", "api", "repos/o/r/issues/1/labels", "--input", "labels.json"]).exe, "gh", "REST --input stays allowed");
+});
+
+test("#85 L3: parseConfigList reads the --show-origin form", () => {
+  assert.deepEqual(parseConfigList("global\0file:/Users/x/.gitconfig\0core.editor\nnano\0command\0command line:\0user.name\nbot\0", { origin: true }), [
+    { scope: "global", origin: "file:/Users/x/.gitconfig", key: "core.editor", value: "nano" },
+    { scope: "command", origin: "command line:", key: "user.name", value: "bot" },
+  ]);
 });

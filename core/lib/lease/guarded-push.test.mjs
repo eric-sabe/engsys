@@ -8,13 +8,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn, execFile } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { scrubbedGitEnv, hermeticGit } from "../git-env.mjs";
-import { parseConfigList, pushConfigArgs } from "./baton.mjs";
+import { parseConfigList, pushConfigArgs, pushEnv, readPushConfig, unsafePushConfig } from "./baton.mjs";
 
 const TOKEN = "fleet-token-123";
 const ROOT = mkdtempSync(join(tmpdir(), "guarded-push-"));
@@ -89,12 +89,13 @@ test.after(() => { server.close(); rmSync(ROOT, { recursive: true, force: true }
 hermeticGit(ROOT, ["init", "-q", "--bare", join(SRV, "r.git")], { isolateConfig: true });
 
 /** A checkout an agent prepared: one commit, origin = the server, and a planted helper, askpass, ssh command and hooks dir. */
-function checkout(name) {
+function checkout(name, { plant = true } = {}) {
   const wt = join(ROOT, name);
   const g = (args) => hermeticGit(ROOT, ["-C", wt, ...args], { isolateConfig: true });
   hermeticGit(ROOT, ["init", "-q", "-b", "main", wt], { isolateConfig: true });
   g(["-c", "user.name=Test", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "seed"]);
   g(["remote", "add", "origin", ORIGIN]);
+  if (!plant) return wt;
   g(["config", "credential.helper", EVIL_HELPER]);
   g(["config", "core.askPass", EVIL_ASKPASS]);
   g(["config", "core.sshCommand", EVIL_SSH]);
@@ -103,7 +104,12 @@ function checkout(name) {
 }
 
 /** A session environment: scrubbed, no prompts, no inherited askpass; `fleet` adds the env-scoped helper the way git-env.sh does. */
-function sessionEnv({ fleet = true, globalConfig = "/dev/null" } = {}) {
+/** The fleet helper the way git-env.sh writes it (…/gh-app-token.mjs git-credential), so the env-scoped scan accepts it. */
+const APP_TOKEN = join(ROOT, "gh-app-token.mjs");
+writeFileSync(APP_TOKEN, `echo "$@" >> '${join(MARK, "fleet-helper")}'\n[ "$2" = get ] && printf 'username=x-access-token\\npassword=${TOKEN}\\n'\nexit 0\n`);
+const APP_HELPER = `!sh '${APP_TOKEN}' git-credential`;
+
+function sessionEnv({ fleet = true, globalConfig = "/dev/null", helper = FLEET_HELPER } = {}) {
   const env = scrubbedGitEnv(process.env, { isolateConfig: true });
   delete env.GIT_ASKPASS;
   delete env.SSH_ASKPASS;
@@ -111,7 +117,7 @@ function sessionEnv({ fleet = true, globalConfig = "/dev/null" } = {}) {
   env.GIT_CONFIG_GLOBAL = globalConfig;
   if (fleet) {
     const key = `credential.${ORIGIN.replace(/\/r\.git$/, "")}.helper`;
-    Object.assign(env, { GIT_CONFIG_COUNT: "2", GIT_CONFIG_KEY_0: key, GIT_CONFIG_VALUE_0: "", GIT_CONFIG_KEY_1: key, GIT_CONFIG_VALUE_1: FLEET_HELPER });
+    Object.assign(env, { GIT_CONFIG_COUNT: "2", GIT_CONFIG_KEY_0: key, GIT_CONFIG_VALUE_0: "", GIT_CONFIG_KEY_1: key, GIT_CONFIG_VALUE_1: helper });
   }
   return env;
 }
@@ -173,4 +179,30 @@ test("#71 L3: an operator's global helper (no env-scoped config) is kept under t
   assert.ok(ran("fleet-helper"));
   assert.equal(ran("evil-helper"), false);
   assert.equal(readFileSync(global, "utf8").includes("evil"), false, "the global file is untouched");
+});
+
+test("#85 L3: the push's cleaned environment still authenticates through the fleet helper, and drops planted GIT_ASKPASS / NODE_OPTIONS / GIT_SSH_COMMAND", async () => {
+  resetMarks();
+  const wt = checkout("wt-env", { plant: false });
+  const home = mkdtempSync(join(ROOT, "home-"));
+  const env = pushEnv({ ...sessionEnv({ helper: APP_HELPER }), HOME: home, GIT_ASKPASS: EVIL_ASKPASS, SSH_ASKPASS: EVIL_ASKPASS, GIT_SSH_COMMAND: EVIL_SSH, NODE_OPTIONS: "--require /nonexistent.js", GIT_CONFIG_PARAMETERS: `'credential.helper=${EVIL_HELPER}'` });
+  const entries = await readPushConfig(wt, { ...sessionEnv({ helper: APP_HELPER }), HOME: home });
+  assert.deepEqual(unsafePushConfig(entries), [], "the fleet's env-scoped helper passes the scan");
+  assert.deepEqual(unsafePushConfig(await readPushConfig(wt, { ...sessionEnv(), HOME: home })), [`credential.${ORIGIN.replace(/\/r\.git$/, "")}.helper`], "any other env-scoped helper is refused");
+  const r = await git(wt, [...pushConfigArgs(entries), "push", "origin", "HEAD:refs/heads/agent/5-x"], env);
+  assert.equal(r.code, 0, r.stderr);
+  assert.ok(remoteHas("agent/5-x"));
+  assert.ok(ran("fleet-helper"));
+  for (const m of ["evil-helper", "evil-askpass", "evil-ssh", "evil-hook"]) assert.equal(ran(m), false, `${m} must not run`);
+});
+
+test("#85 L3: an includeIf in the operator's global config that points into the checkout is read as the checkout's config and refused", async () => {
+  const wt = realpathSync(checkout("wt-include"));
+  const home = mkdtempSync(join(ROOT, "home-"));
+  writeFileSync(join(wt, ".git", "evil.inc"), "[http]\n\tproxy = http://127.0.0.1:9\n");
+  writeFileSync(join(home, ".gitconfig"), `[includeIf "gitdir:${wt}/"]\n\tpath = ${join(wt, ".git", "evil.inc")}\n`);
+  const entries = await readPushConfig(wt, { ...sessionEnv(), HOME: home });
+  const proxy = entries.find((e) => e.key === "http.proxy");
+  assert.equal(proxy?.scope, "local", "relabeled from global");
+  assert.ok(unsafePushConfig(entries).includes("http.proxy"));
 });
