@@ -15,6 +15,10 @@
 # when an unreadable registry keeps merge/maintain monsters off this host, the supervisor posts one
 # `fleet notify --level alert --incident fleet-registry-unreadable` and resolves it once the registry
 # reads clean again.
+# It also gets HEARTBEAT_CMD (`fleet heartbeat`): once per tick the supervisor writes this fleet's
+# own status-issue heartbeat (federation.yml fleets.<FLEET_ID>.status_issue), which cross-fleet work
+# claiming (core/lib/claim.mjs) reads for freshness. No-op in single-fleet mode or with no
+# status_issue declared.
 #
 # Usage: supervise.sh [--instance <dir>]
 set -euo pipefail
@@ -46,6 +50,7 @@ grep -q '^HOST_CHECK_CMD=' "$conf" || printf 'HOST_CHECK_CMD=bash %s/bin/fleet -
 grep -q '^HOST_HEALTH_CMD=' "$conf" || printf 'HOST_HEALTH_CMD=bash %s/bin/fleet --instance %s launch --host-health\n' "$FLEET_KIT_DIR" "$FLEET_REPO" >>"$conf"
 grep -q '^HOST_HEALTH_INCIDENT=' "$conf" || printf 'HOST_HEALTH_INCIDENT=fleet-registry-unreadable\n' >>"$conf"
 grep -q '^NOTIFY_CMD=' "$conf" || printf 'NOTIFY_CMD=bash %s/bin/fleet --instance %s notify\n' "$FLEET_KIT_DIR" "$FLEET_REPO" >>"$conf"
+grep -q '^HEARTBEAT_CMD=' "$conf" || printf 'HEARTBEAT_CMD=bash %s/bin/fleet --instance %s heartbeat\n' "$FLEET_KIT_DIR" "$FLEET_REPO" >>"$conf"
 # Nothing to supervise, but an unreadable registry is what paused the monsters (or an open alert needs
 # resolving): run the tick anyway, for the alert.
 if [ "$kept" = 0 ] && { fleet_host_registry_alert >/dev/null || [ -f "$FLEET_REPO/logs/fleet-supervisor/host-health.alerted" ]; }; then

@@ -60,6 +60,18 @@
 #                              kit: `fleet notify`). Unset or failing = logged
 #                              only; a failed alert is retried next tick and
 #                              never stops the tick.
+#   HEARTBEAT_CMD=<command>    optional: called once per tick as `<cmd> "<one-
+#                              line summary>"` (the fleet kit: `fleet
+#                              heartbeat`), after every session is classified,
+#                              so the fleet's own status issue carries a fresh
+#                              `<!-- fleet-heartbeat -->` marker for cross-
+#                              fleet work claiming (core/lib/claim.mjs) to read.
+#                              Skipped when the UTC minute hasn't changed since
+#                              the last call (state: heartbeat.last-minute) or
+#                              there were no sessions to classify this tick.
+#                              Unset, or the command itself a no-op (single-
+#                              fleet mode, no status_issue) or failing = never
+#                              stops the tick.
 #   <session-name>|<ledger-issue>|<stale-minutes>[|<owner/name>]
 #                              one line per monster; the 4th field overrides
 #                              REPO= for that session (multi-repo fleets)
@@ -99,7 +111,7 @@ fi
 trap 'rmdir "$LOCKDIR" 2>/dev/null || true' EXIT
 
 TMUX_SESSION="" LAUNCH_CMD="" DEFAULT_REPO="" ROTATE_GRACE_MIN=3 HOST_CHECK_CMD=""
-HOST_HEALTH_CMD="" HOST_HEALTH_INCIDENT="host-health" NOTIFY_CMD=""
+HOST_HEALTH_CMD="" HOST_HEALTH_INCIDENT="host-health" NOTIFY_CMD="" HEARTBEAT_CMD=""
 SESSIONS=()
 while IFS= read -r line; do
   line="${line%%$'\r'}"
@@ -113,6 +125,7 @@ while IFS= read -r line; do
     HOST_HEALTH_CMD=*) HOST_HEALTH_CMD="${line#HOST_HEALTH_CMD=}" ;;
     HOST_HEALTH_INCIDENT=*) HOST_HEALTH_INCIDENT="${line#HOST_HEALTH_INCIDENT=}" ;;
     NOTIFY_CMD=*) NOTIFY_CMD="${line#NOTIFY_CMD=}" ;;
+    HEARTBEAT_CMD=*) HEARTBEAT_CMD="${line#HEARTBEAT_CMD=}" ;;
     *\|*) SESSIONS+=("$line") ;;
     *) echo "fleet-supervisor: bad conf line: $line" >&2; exit 1 ;;
   esac
@@ -218,6 +231,11 @@ fi
 
 NOW=$(date +%s)
 
+# Tallied as each session is classified below, for the once-per-tick heartbeat summary. A session
+# skipped before classification (bad conf line, not on this host, closed/unreadable ledger) is left
+# out of the tally entirely — it was never actually weighed.
+UP=0 ROTATING=0 DOWN=0
+
 for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
   IFS='|' read -r name ledger stale_min repo <<<"$spec"
   [ -n "$name" ] && [ -n "$ledger" ] && [ -n "$stale_min" ] || { log "SKIP bad line: $spec"; continue; }
@@ -276,6 +294,7 @@ for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
   if [ "$ALIVE" = "1" ]; then
     # (relaunched for this rotation but the new session never heartbeated → falls to the stale branch)
     if [ "$ROTATION" = "1" ] && ! { [ "$MARKED" = "1" ] && [ "$STALE" = "1" ]; }; then
+      ROTATING=$((ROTATING + 1))
       rm -f "$LATCH"
       AGE=$(( (NOW - ${HB_EPOCH:-$NOW}) / 60 ))
       if [ "$MARKED" = "1" ]; then
@@ -289,6 +308,7 @@ for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
         printf '%s\n' "$HB_TS" >"$ROTATED"
       fi
     elif [ "$STALE" = "1" ]; then
+      DOWN=$((DOWN + 1))
       # hung-or-thinking: never kill; escalate once per incident
       if [ ! -f "$LATCH" ]; then
         gh issue comment "$ledger" -R "$REPO_SLUG" --body "⚠️ fleet-supervisor: heartbeat stale (last: ${HB_TS:-never}) but the \`$name\` process is still alive. Not touching it — a live process is never killed on staleness alone (probe-then-classify is a judgment call, not a script's). Needs a probe: operator or maintenance watchdog." >/dev/null \
@@ -297,6 +317,7 @@ for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
         log "$name: STALE+ALIVE — already escalated, holding"
       fi
     else
+      UP=$((UP + 1))
       rm -f "$LATCH"
       log "$name: alive, heartbeat ok — nothing to do"
     fi
@@ -306,6 +327,7 @@ for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
   # --- process exited ---------------------------------------------------------
   rm -f "$LATCH"
   if [ "$ROTATION" = "1" ] || { [ "$STALE" = "1" ] && [ "$ENDED" = "0" ]; }; then
+    if [ "$ROTATION" = "1" ]; then ROTATING=$((ROTATING + 1)); else DOWN=$((DOWN + 1)); fi
     REASON=$([ "$ROTATION" = "1" ] && echo "rotation requested" || echo "crash recovery (stale heartbeat, process gone)")
     # TOCTOU guard: re-read the pane immediately before killing the window —
     # a process may have appeared since classification (manual relaunch,
@@ -318,8 +340,30 @@ for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
     relaunch "$name" "$ledger" "$REPO_SLUG" "$REASON"
     if [ "$ROTATION" = "1" ]; then printf '%s\n' "$HB_TS" >"$ROTATED"; fi
   elif [ "$ENDED" = "1" ]; then
+    DOWN=$((DOWN + 1))
     log "$name: process exited after 'session end' — deliberate stop, leaving it"
   else
+    DOWN=$((DOWN + 1))
     log "$name: process exited, heartbeat fresh (${HB_TS:-?}) — within grace, waiting"
   fi
 done
+
+# Status-issue heartbeat: once per tick (deduped to once per UTC minute, in case a tick is ever
+# re-entered at the same minute), after every session above has been classified. Fail soft and
+# cheap — this never blocks or repeats within the same tick.
+if [ -n "$HEARTBEAT_CMD" ] && [ $((UP + ROTATING + DOWN)) -gt 0 ]; then
+  MINUTE_NOW=$(date -u +%Y-%m-%dT%H:%M)
+  MINUTE_LATCH="$STATE_DIR/heartbeat.last-minute"
+  if [ ! -f "$MINUTE_LATCH" ] || [ "$(cat "$MINUTE_LATCH")" != "$MINUTE_NOW" ]; then
+    SUMMARY="sessions: $UP up, $ROTATING rotating, $DOWN down"
+    # shellcheck disable=SC2086
+    if $HEARTBEAT_CMD "$SUMMARY" >>"$LOG" 2>&1; then
+      printf '%s\n' "$MINUTE_NOW" >"$MINUTE_LATCH"
+      log "heartbeat: $SUMMARY"
+    else
+      log "heartbeat: HEARTBEAT_CMD failed (soft) — $SUMMARY"
+    fi
+  else
+    log "heartbeat: already written this minute ($MINUTE_NOW) — skipping"
+  fi
+fi

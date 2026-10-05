@@ -22,6 +22,12 @@ REPO=owner/name
 # Minutes a live session must sit idle after its "rotation requested" heartbeat
 # before it is relaunched (it can't exit itself). Default 3.
 # ROTATE_GRACE_MIN=3
+# Multi-fleet only: once per tick, writes this fleet's own status-issue heartbeat
+# (federation.yml fleets.<FLEET_ID>.status_issue) for cross-fleet work claiming
+# to read. Under the fleet kit this defaults to `fleet heartbeat`; omit it in
+# copy mode or single-fleet setups (a no-op either way with no FLEET_ID / no
+# status_issue declared).
+# HEARTBEAT_CMD=bash <path-to-engsys>/core/fleet/heartbeat.sh
 # <session>|<ledger issue>|<stale minutes>[|<owner/name>]
 #   stale = heartbeat older than this; mirror the monster's stale_lock_minutes
 #   + grace. The optional 4th field overrides REPO= (multi-repo fleets).
