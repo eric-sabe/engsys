@@ -8,7 +8,7 @@
 #        mm-act.sh guard --repo owner/name --state-dir DIR -- gh <args…>
 #        mm-act.sh guard --repo owner/name --state-dir DIR -- <engsys-root>/skills/merge-monster/scripts/gate-request.sh <args…>
 #        mm-act.sh guard --repo owner/name --state-dir DIR --pr N -- git -C <wt> push --force-with-lease origin HEAD:refs/heads/<PR head branch>
-#        mm-act.sh guard --repo owner/name --state-dir DIR --new-branch -- git -C <wt> push origin HEAD:refs/heads/<new branch>
+#        mm-act.sh guard --repo owner/name --state-dir DIR --new-branch -- git -C <wt> push origin HEAD:refs/heads/<agent/… new branch>
 #   [--role maintain]  Maintenance Monster's acts (mnt-act.sh passes it); default merge
 #   merge   PUT /pulls/{n}/merge with sha=<validated head>; never retried (exit 3 = unknown: re-snapshot)
 #   guard   gh mutations (pr ready, labels, comments, close, api) and gate requests; never `gh pr merge`
@@ -34,4 +34,4 @@ while [ $# -gt 0 ]; do
     *) args+=("$1"); shift ;;
   esac
 done
-exec node "$lib" "$op" --role "$role" ${args[@]+"${args[@]}"} "$@"
+exec env -u NODE_OPTIONS node "$lib" "$op" --role "$role" ${args[@]+"${args[@]}"} "$@"
