@@ -252,6 +252,54 @@ has "…saying why" "$OUT" "registry unreadable; no singleton monster starts her
 run fleet restart --status
 has "…and status warns" "$OUT" "WARNING registry unreadable"
 
+echo "== B3. enabled: false in the registry (the per-fleet kill switch)"
+conf FLEET_ID=bob; registry bob bob
+sed -i.bak '/^  bob:/,/^    enabled/s/enabled: true/enabled: false/' "$I/federation.yml"; rm -f "$I/federation.yml.bak"
+eq "every monster off, interactive roles untouched" "$(checks)" "acme-mm:1 acme-maintain:1 acme-broker:1 acme-odd:1 acme-build:0 acme-design:0"
+run fleet launch --check acme-broker
+has "…reason" "$OUT" "acme-broker: not on this host (fleet bob disabled in registry)"
+run fleet restart --status
+matches "status shows it" "$OUT" '^acme-maintain +monster +not on this host \(fleet bob disabled in registry\)$'
+has "…and warns once" "$OUT" "WARNING fleet bob is disabled in the registry (enabled: false)"
+run fleet launch --host-health
+rc_is "a disabled fleet is deliberate: no registry alert" 0
+conf FLEET_ID=alice
+eq "another fleet's enabled: false changes nothing here (alice is home of nothing)" "$(checks | cut -d' ' -f1-3)" "acme-mm:1 acme-maintain:1 acme-broker:0"
+
+echo "== B4. an unreadable registry raises one alert from the supervisor, resolved on recovery"
+conf FLEET_ID=bob NOTIFY_FALLBACK_ISSUE=acme/app#99; local_conf; registry bob bob
+run fleet launch --host-health
+rc_is "a readable registry: --host-health exits 0" 0
+printf 'version: 1\nfleets: [unterminated\n' >"$I/federation.yml"
+run fleet launch --host-health
+rc_is "an unreadable registry: --host-health exits 1" 1
+has "…naming the validator's first error" "$OUT" "cannot be read on this host: federation:"
+has "…what is paused" "$OUT" "Paused: merge/maintain (acme-mm acme-maintain) will not be relaunched on this host"
+has "…and what to do" "$OUT" "correct federation.yml by PR"
+has "…including the emergency override" "$OUT" "fleet launch <name> --force-excluded"
+reset_tmux; stale_ledgers; : >"$FAKE/gh.log"; rm -rf "$I/logs" "$STATE/notify"
+run fleet supervise
+rc_is "supervise exits 0" 0
+has "conf: HOST_HEALTH_CMD points at fleet launch --host-health" "$(cat "$STATE/supervisor.conf")" "HOST_HEALTH_CMD=bash $EH/core/fleet/bin/fleet --instance $I launch --host-health"
+has "conf: the incident key" "$(cat "$STATE/supervisor.conf")" "HOST_HEALTH_INCIDENT=fleet-registry-unreadable"
+eq "the alert went out once (here through fleet notify's GitHub fallback)" "$(grep -c 'issue comment 99 -R acme/app' "$FAKE/gh.log")" 1
+has "…carrying the text" "$(grep 'issue comment 99' "$FAKE/gh.log")" "will not be relaunched on this host"
+run fleet supervise
+eq "next tick: no repeat" "$(grep -c 'issue comment 99 -R acme/app' "$FAKE/gh.log")" 1
+registry bob bob
+run fleet supervise
+[ ! -e "$I/logs/fleet-supervisor/host-health.alerted" ] && ok "registry fixed: the alert latch is cleared" || bad "registry fixed: the alert latch is cleared"
+has "…and the resolve logged" "$(cat "$I/logs/fleet-supervisor/supervisor.log")" "alert fleet-registry-unreadable resolved"
+printf 'version: 1\nfleets: [unterminated\n' >"$I/federation.yml"; local_conf ROLES=merge,maintain; : >"$FAKE/gh.log"
+run fleet supervise
+eq "nothing else to supervise: the alert still goes out" "$(grep -c 'issue comment 99 -R acme/app' "$FAKE/gh.log")" 1
+registry alice alice
+run fleet supervise
+[ ! -e "$I/logs/fleet-supervisor/host-health.alerted" ] && ok "…and is resolved even when the fix leaves nothing to supervise" || bad "…and is resolved even when the fix leaves nothing to supervise"
+run fleet supervise
+has "with nothing to supervise and no open alert, the tick is a no-op again" "$OUT" "nothing to do"
+local_conf; registry bob bob; conf FLEET_ID=bob
+
 echo "== C. ROLES and ROSTER_EXCLUDE in fleet.local.conf (single-fleet)"
 conf; no_registry
 local_conf ROLES=build,design

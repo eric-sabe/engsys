@@ -746,7 +746,9 @@ A session is **not on this host** when the first of these that applies says so:
    `PIN_REPO`. This needs no config, and nothing in `fleet.local.conf` overrides it: to run the monster
    here, move `home` by PR. A registry that can't be read (invalid, `FLEET_ID` not declared under
    `fleets`, or `node` missing) excludes every merge and maintain monster: a host that can't tell who
-   holds a baton starts neither.
+   holds a baton starts neither, and the supervisor raises one alert about it (below). And when the
+   registry sets `enabled: false` for this fleet (the per-fleet kill switch), every monster is off:
+   merge, maintain, broker and any other supervised session. Interactive roles still run.
 2. **`ROSTER_EXCLUDE=`**: a denylist. An entry that matches always wins.
 3. **`ROLES=`**: an allowlist. When set, a session that no entry matches is excluded. Prefer it on a
    host with a narrow job: a session added to the roster later stays off that host until you list it.
@@ -775,6 +777,14 @@ Values come only from `fleet.conf` and `fleet.local.conf`, never from the caller
 | `fleet status` | lists an excluded session as `not on this host (<reason>)`, not `missing`, and warns about what the filter can't decide (below) |
 | `fleet install-jobs`, `fleet sync` | install the supervisor job only when at least one supervised session runs here. Otherwise they boot out a loaded copy and delete its plist, so launchd won't load it at the next login. `fleet sync` checks this on every run, and reinstalls the jobs when the roster, the supervisor conf or the registry changes |
 | `fleet supervise` (the supervisor job) | drops excluded sessions from `.fleet/supervisor.conf`, does nothing when none are left, and adds `HOST_CHECK_CMD=… launch --check`. The supervisor asks that command before it reads any session's ledger, so even a stale conf never relaunches, or comments about, a session this host doesn't run. A check that fails for any reason skips the session |
+
+**When an unreadable registry pauses the monsters**, the supervisor posts one
+`fleet notify --level alert --incident fleet-registry-unreadable` (§ 6.9) with the validator's first
+error, which sessions are paused, and what to do: fix `federation.yml` by PR, or, in an emergency,
+`fleet launch <name> --force-excluded`. It posts once per incident, even on a host with nothing else to
+supervise, and resolves the incident on the first tick after the registry reads clean again. A failed
+post is logged and retried next tick and never stops the tick. `enabled: false` raises no alert: it is
+deliberate. `fleet launch --host-health` prints the same alert (exit 1) or exits 0.
 
 `fleet status` warns, without excluding anything, when a supervised session's prompt names no known
 monster (so the registry can't place it; list it in `ROSTER_EXCLUDE` if this host must not run it),

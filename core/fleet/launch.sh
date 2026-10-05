@@ -20,14 +20,18 @@
 #        launch.sh [--instance <dir>] <name> [--force-excluded]    # just one (the supervisor relaunches this way)
 #        launch.sh [--instance <dir>] --check <name>               # exit 0 if <name> runs on this host, else
 #                                                                  # 1 and the reason (the supervisor's HOST_CHECK_CMD)
+#        launch.sh [--instance <dir>] --host-health                 # exit 0, or 1 and an alert when an unreadable
+#                                                                  # registry keeps merge/maintain off this host
+#                                                                  # (the supervisor's HOST_HEALTH_CMD)
 set -euo pipefail
 if [ "${1:-}" = --instance ]; then FLEET_INSTANCE="${2:?--instance needs a directory}"; export FLEET_INSTANCE; shift 2; fi
 case "${1:-}" in -h | --help) sed -n '2,/^set -/{/^set -/!p;}' "$0"; exit 0 ;; esac
-name="" check=0 force_excluded=0
+name="" check=0 force_excluded=0 health=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --check) check=1 ;;
     --force-excluded) force_excluded=1 ;;
+    --host-health) health=1 ;;
     -*) echo "fleet: launch: unknown option: $1" >&2; exit 2 ;;
     *) [ -z "$name" ] || { echo "fleet: launch takes one session name" >&2; exit 2; }; name="$1" ;;
   esac
@@ -37,6 +41,10 @@ done
 . "$(dirname "${BASH_SOURCE[0]}")/lib/fleet-env.sh"
 fleet_host_init
 
+if [ "$health" = 1 ]; then
+  if fleet_host_registry_alert; then exit 1; fi
+  echo "host roles: ok"; exit 0
+fi
 if [ "$check" = 1 ]; then
   [ -n "$name" ] || fleet_die "launch --check needs a session name"
   fleet_roster_sessions | grep -Fxq "$name" || { echo "$name: not in the roster"; exit 1; }

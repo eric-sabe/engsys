@@ -6,7 +6,9 @@
 #      (merge or maintain) whose home for its repo is another fleet. Nothing in fleet.local.conf
 #      overrides this; move `home` by PR instead. A registry that can't be read (invalid, FLEET_ID not
 #      declared, node missing) excludes every merge and maintain session: when this host can't tell
-#      who holds a baton, it starts no singleton.
+#      who holds a baton, it starts no singleton (fleet_host_registry_alert describes that for the
+#      supervisor's alert). `fleets.<FLEET_ID>.enabled: false` (the per-fleet kill switch) excludes every
+#      monster: merge, maintain, broker and any other supervised session. Interactive roles still run.
 #   2. ROSTER_EXCLUDE (fleet.local.conf) matches the session.
 #   3. ROLES (fleet.local.conf) is set and matches nothing about the session.
 # ROLES / ROSTER_EXCLUDE entries (comma or space separated) match a session by its name (acme-build),
@@ -17,6 +19,7 @@
 # Call fleet_host_init once per process, then the readers below.
 
 FLEET_HOST_READY="" FLEET_HOST_TABLE="" FLEET_HOST_WARNINGS=""
+FLEET_HOST_REGISTRY=off FLEET_HOST_REGISTRY_WHY="" # off | ok | broken | disabled, and why it is broken
 
 fleet_host_warn() { FLEET_HOST_WARNINGS="${FLEET_HOST_WARNINGS}$*"$'\n'; }
 
@@ -59,8 +62,11 @@ fleet_host_init() {
       reg=broken reg_why="$(printf '%s' "$out" | head -1)"
     else
       reg=ok
+      [ "$(node "$FLEET_KIT_DIR/lib/federation.mjs" get "fleets.$FLEET_ID.enabled" --file "$FEDERATION_FILE" 2>/dev/null || true)" != false ] || reg=disabled
     fi
-    [ "$reg" = ok ] || fleet_host_warn "registry unreadable ($reg_why): every merge and maintain session is excluded on this host until it is fixed (fleet federation validate)"
+    FLEET_HOST_REGISTRY="$reg" FLEET_HOST_REGISTRY_WHY="$reg_why"
+    [ "$reg" = disabled ] && fleet_host_warn "fleet $FLEET_ID is disabled in the registry (enabled: false): no monster runs on this host"
+    [ "$reg" = ok ] || [ "$reg" = disabled ] || fleet_host_warn "registry unreadable ($reg_why): every merge and maintain session is excluded on this host until it is fixed (fleet federation validate)"
   fi
 
   while IFS='|' read -r name _ prompt _; do
@@ -69,7 +75,9 @@ fleet_host_init() {
     kind="$(fleet_host_kind "$prompt" "$in_ledger")"
     reason=""
     # 1. the registry
-    if [ "$reg" != off ]; then
+    if [ "$reg" = disabled ]; then
+      case "$kind" in merge | maintain | broker | monster) reason="fleet $FLEET_ID disabled in registry" ;; esac
+    elif [ "$reg" != off ]; then
       case "$kind" in
         merge | maintain)
           if [ "$reg" = broken ]; then
@@ -133,5 +141,13 @@ fleet_host_supervised() { # supervised (ledger-bearing) sessions that run on thi
     [ -n "$n" ] || continue
     fleet_host_excluded "$n" >/dev/null || echo "$n"
   done < <(fleet_ledger_sessions)
+}
+fleet_host_registry_alert() { # → the alert text, exit 0, when an unreadable registry is keeping monsters off this host
+  local names
+  [ "$FLEET_HOST_REGISTRY" = broken ] || return 1
+  names="$(printf '%s' "$FLEET_HOST_TABLE" | awk -F'|' '($2 == "merge" || $2 == "maintain") && $3 ~ /^registry unreadable/ { print $1 }' | paste -sd' ' -)"
+  [ -n "$names" ] || return 1
+  printf 'fleet %s: the federation registry (%s) cannot be read on this host: %s. Paused: merge/maintain (%s) will not be relaunched on this host. To fix: correct federation.yml by PR (check it with: fleet federation validate). In an emergency, start one by hand: fleet launch <name> --force-excluded\n' \
+    "$FLEET_ID" "$FEDERATION_FILE" "$FLEET_HOST_REGISTRY_WHY" "$names"
 }
 fleet_host_warnings() { printf '%s' "$FLEET_HOST_WARNINGS" | sed '/^$/d; s/^/WARNING /'; }

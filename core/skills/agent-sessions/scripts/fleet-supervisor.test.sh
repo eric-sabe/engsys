@@ -106,5 +106,26 @@ expect "host check says no + rotation → not relaunched either" "!^launch"
 reset; touch "$T/host-ok"; ledger 90 "ok — merging #12"; pane exited; run
 expect "host check says yes → the decision table runs as before" "^launch acme-mm"
 
+# HOST_HEALTH_CMD + NOTIFY_CMD: one alert per incident, no repeat, resolved on recovery (#53)
+printf '#!/usr/bin/env bash\n[ -f "$FAKE/healthy" ] && exit 0; echo "registry unreadable: line 3: bad"; exit 1\n' >"$T/health.sh"
+printf '#!/usr/bin/env bash\n[ -f "$FAKE/notify-fail" ] && exit 1; echo "notify $*" >>"$FAKE/actions"\n' >"$T/notify.sh"
+printf 'TMUX_SESSION=acme\nLAUNCH_CMD=bash %s/launch.sh\nHOST_HEALTH_CMD=bash %s/health.sh\nHOST_HEALTH_INCIDENT=fleet-registry-unreadable\nNOTIFY_CMD=bash %s/notify.sh\nREPO=o/r\nacme-mm|1|60\n' "$T" "$T" "$T" >"$T/w/sup.conf"
+reset; rm -f "$T/healthy" "$T/notify-fail"; ledger 2 "ok — merging #12"; pane idle; run
+expect "unhealthy host → one alert" "^notify --level alert --incident fleet-registry-unreadable registry unreadable: line 3: bad"
+run
+expect "still unhealthy next tick → no repeat" "!^notify"
+touch "$T/healthy"; run
+expect "healthy again → resolved" "^notify --level info --incident fleet-registry-unreadable --resolve"
+run
+expect "  …once" "!^notify"
+reset; rm -f "$T/healthy"; touch "$T/notify-fail"; ledger 90 "ok — merging #12"; pane exited; run
+expect "notify fails → nothing posted, the tick goes on (soft)" "!^notify"
+expect "  …and the sessions are still handled" "^launch acme-mm"
+rm -f "$T/notify-fail"; run
+expect "  …the alert is retried next tick" "^notify --level alert"
+printf 'TMUX_SESSION=acme\nLAUNCH_CMD=bash %s/launch.sh\nHOST_HEALTH_CMD=bash %s/health.sh\nNOTIFY_CMD=bash %s/notify.sh\nREPO=o/r\n' "$T" "$T" "$T" >"$T/w/sup.conf"
+reset; run
+expect "no sessions at all: the alert still goes out" "^notify --level alert --incident host-health"
+
 echo "$pass passed, $fail failed."
 [ "$fail" = 0 ]

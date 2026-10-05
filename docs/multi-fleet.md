@@ -125,7 +125,9 @@ repos:
   handover costs little. `auto` (a standby claims the expired lease itself) stays in the schema for
   orgs that want it.
 - **`enabled: false`** is a per-fleet kill switch. It sits one level above closing a ledger, which stops
-  that role for every fleet.
+  that role for every fleet. From engsys v1.9.0 the kit enforces it on that fleet's hosts: no monster
+  (merge, maintain, broker, any supervised session) launches or is supervised; interactive roles run
+  ([`fleet-guide.md` § 6.11](fleet-guide.md#611-host-roles-which-sessions-run-on-this-host)).
 - **`operators_team`** is the operator source `gate-check` reads (section 6). A user-owned repo has no
   teams, so `operators: [login:account-id, ...]` is accepted instead, with the same rules as
   [gate-check.md](gate-check.md#configuration-and-permissions).

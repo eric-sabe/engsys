@@ -162,6 +162,7 @@ runs under launchd/cron every ~5 minutes with **no LLM in the restart path**
 | "session end" | exited | leave — deliberate stop |
 | ledger **closed** | any | never touch — kill switch wins |
 | any (`HOST_CHECK_CMD` says this host doesn't run the session) | any | never touch: no ledger read, no comment, no relaunch. Asked first, every tick; a check that errors skips the session too |
+| (per tick, not per session) `HOST_HEALTH_CMD` fails | | one alert through `NOTIFY_CMD` per incident, resolved once the check passes again; a failed post is retried next tick |
 | stale | **alive** | never kill; escalate once on the ledger |
 | any relaunch **fails** | | escalate once on the ledger with the launcher's error, retry each tick without commenting, comment once on recovery |
 
