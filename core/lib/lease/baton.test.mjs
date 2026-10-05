@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, statSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { chmodSync } from "node:fs";
 
 import { createGithubLease } from "./github-backend.mjs";
 import { fakeGitApi, REPO } from "./fixtures/fake-github.mjs";
@@ -24,6 +25,8 @@ import {
   holderFor,
   homeCheck,
   hostSlug,
+  defaultNotify,
+  resolveNotifyCommand,
   main,
   sameProcessAlive,
   sessionProcess,
@@ -853,4 +856,32 @@ test("L3: a failed release clears its in-progress mark, so a real loss later sti
   assert.equal((await s.baton.release({ reason: "exit" })).exit, EXIT.ERROR);
   assert.equal(s.store.load().releasing, undefined);
   assert.ok(s.store.load().token);
+});
+
+// ---------------------------------------------------------------- default notify (#75) --
+
+test("default notify resolves an absolute command, never a bare `fleet`", () => {
+  const [cmd, script] = resolveNotifyCommand({});
+  assert.equal(cmd, "bash");
+  assert.ok(script.startsWith("/") && script.endsWith("core/fleet/bin/fleet"), script);
+  assert.ok(existsSync(script), `${script} must exist in the kit`);
+});
+
+test("default notify runs with a PATH that lacks `fleet` (FLEET_BIN stub is invoked)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "baton-notify-"));
+  const stub = join(dir, "stub-fleet");
+  writeFileSync(stub, `#!/bin/sh\nprintf '%s\\n' "$@" > "${dir}/argv"\n`);
+  chmodSync(stub, 0o755);
+  const err = [];
+  const notify = defaultNotify({ env: { PATH: "/nonexistent", FLEET_BIN: stub }, err: { write: (x) => err.push(x) } });
+  assert.equal(await notify({ level: "alert", incident: "baton-lost-merge", text: "lost it" }), true);
+  assert.deepEqual(readFileSync(join(dir, "argv"), "utf8").trim().split("\n"), ["notify", "--level", "alert", "--incident", "baton-lost-merge", "lost it"]);
+  assert.deepEqual(err, []);
+});
+
+test("default notify failure is soft and names the resolved command", async () => {
+  const err = [];
+  const notify = defaultNotify({ env: { PATH: "/nonexistent", FLEET_BIN: "/no/such/fleet" }, err: { write: (x) => err.push(x) } });
+  assert.equal(await notify({ level: "alert", text: "x" }), false);
+  assert.match(err.join(""), /notify failed via `\/no\/such\/fleet notify`/);
 });

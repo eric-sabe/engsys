@@ -323,13 +323,24 @@ function usable(state, holder, run) {
 
 // ------------------------------------------------------------------------------------ notify --
 
-function defaultNotify({ env = process.env, err = process.stderr } = {}) {
-  const custom = env.BATON_NOTIFY_CMD;
+/**
+ * The command the default notifier runs, as [cmd, ...preArgs]. Never a bare `fleet`: the monster
+ * scripts run without the operator's PATH, so a bare name fails with ENOENT and a baton loss never
+ * pages (#75). Order: BATON_NOTIFY_CMD (full command, whitespace-split), FLEET_BIN (the fleet CLI,
+ * run as `<FLEET_BIN> notify`), else this kit's own `core/fleet/bin/fleet`, resolved from this file.
+ */
+export function resolveNotifyCommand(env = process.env) {
+  if (env.BATON_NOTIFY_CMD) return env.BATON_NOTIFY_CMD.split(/\s+/).filter(Boolean);
+  if (env.FLEET_BIN) return [env.FLEET_BIN, "notify"];
+  return ["bash", join(dirname(fileURLToPath(import.meta.url)), "..", "..", "fleet", "bin", "fleet"), "notify"];
+}
+
+export function defaultNotify({ env = process.env, err = process.stderr } = {}) {
   return ({ level, incident, text }) => new Promise((resolveNotify) => {
     const args = ["--level", level, ...(incident ? ["--incident", incident] : []), text];
-    const [cmd, ...pre] = custom ? custom.split(/\s+/).filter(Boolean) : ["fleet", "notify"];
+    const [cmd, ...pre] = resolveNotifyCommand(env);
     execFile(cmd, [...pre, ...args], { env, timeout: 30_000 }, (e) => {
-      if (e) err.write(`baton: notify failed (${firstLine(e.message)}): [${level}${incident ? ` ${incident}` : ""}] ${text}\n`);
+      if (e) err.write(`baton: notify failed via \`${[cmd, ...pre].join(" ")}\` (${firstLine(e.message)}): [${level}${incident ? ` ${incident}` : ""}] ${text}\n`);
       resolveNotify(!e);
     });
   });
@@ -870,7 +881,7 @@ function usage() {
     "  status",
     "  supervise                       relaunch decision for the fleet supervisor (no --state-dir)",
     "env: ENGSYS_SESSION (session name), ENGSYS_SESSION_RUN (per launch), FLEET_ID, FEDERATION_FILE,",
-    "     GH_TOKEN | GH_APP_ENV_FILE | gh auth token, BATON_NOTIFY_CMD (default: fleet notify)",
+    "     GH_TOKEN | GH_APP_ENV_FILE | gh auth token, BATON_NOTIFY_CMD | FLEET_BIN (default: this kit's core/fleet/bin/fleet notify)",
     "exit: 0 ok | 1 refused | 2 usage | 3 error | 4 newer protocol | 5 not started in this session",
   ].join("\n");
 }

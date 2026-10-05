@@ -39,6 +39,7 @@ const SUITES = [
   ["bash core/fleet/test/notify.test.sh"],
   ["bash core/fleet/test/heartbeat.test.sh"],
   ["bash core/fleet/test/federation.test.sh"],
+  ["bash core/fleet/test/federation-status.test.sh"],
   ["bash core/fleet/test/host-roles.test.sh"],
   ["bash core/fleet/test/pin.test.sh"],
   ["bash core/fleet/test/init.test.sh"],
