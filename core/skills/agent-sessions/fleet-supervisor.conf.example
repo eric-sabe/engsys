@@ -28,9 +28,12 @@ REPO=owner/name
 # copy mode or single-fleet setups (a no-op either way with no FLEET_ID / no
 # status_issue declared).
 # HEARTBEAT_CMD=bash <path-to-engsys>/core/fleet/heartbeat.sh
-# <session>|<ledger issue>|<stale minutes>[|<owner/name>]
+# <session>|<ledger issue>|<stale minutes>[|<owner/name>[|<marker>]]
 #   stale = heartbeat older than this; mirror the monster's stale_lock_minutes
-#   + grace. The optional 4th field overrides REPO= (multi-repo fleets).
+#   + grace. The optional 4th field overrides REPO= (multi-repo fleets). The
+#   optional 5th reads the heartbeat only from the <!-- <marker> --> block, for
+#   an issue that carries several (a fleet status issue). Under the fleet kit,
+#   `fleet supervise` writes it for the broker in multi-fleet mode.
 acme-mm|0|60
 acme-maintain|0|60
 # acme-<role>|0|60

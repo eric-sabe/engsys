@@ -15,6 +15,12 @@
 #   - a body with no such line gets a pair appended, status "adopted by resource broker".
 # The labels are created and the issue pinned only if it is not pinned already. Running it again
 # changes nothing. With no ledger configured it finds (or creates) the ledger issue by its title.
+#
+# Multi-fleet mode (broker-config.sh): the ledger is the fleet's status issue in the instance repo, so
+# setup adopts that issue (never creates one), creates the labels in the instance repo, and does not
+# pin (the status issue is the fleet's, not the broker's). The status issue also carries the
+# supervisor's `<!-- fleet-heartbeat -->` block, so adopting it always appends a broker block and never
+# wraps an existing `last:` line.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,9 +41,14 @@ while [ $# -gt 0 ]; do
   esac
 done
 broker_find_config "$CONFIG" "$CONFIG_DIR" || exit 1
-broker_fill_var REPO repo
-broker_fill_var LEDGER ledger_issue
+broker_fill_ledger REPO LEDGER || exit 1
 [ -n "$REPO" ] || usage
+APPEND_ONLY=0
+if [ -n "$BROKER_FLEET" ]; then
+  [ -n "$LEDGER" ] && [ "$LEDGER" != 0 ] || { echo "broker-setup: multi-fleet mode but no status issue resolved" >&2; exit 1; }
+  echo "multi-fleet mode: fleet $BROKER_FLEET heartbeats on its status issue $REPO#$LEDGER (ledger_issue in resource-broker.yml is not used)"
+  APPEND_ONLY=1 PIN=0
+fi
 LEDGER="${LEDGER#\#}"
 case "$LEDGER" in
   '' | 0) LEDGER="" ;;
@@ -104,14 +115,14 @@ Protocol: the `resource-broker` skill in engsys; pool primitives: the `durable-l
 # description of what it did goes to the file $1. The caller has already checked that the body has no
 # broker markers. NOW is the fresh heartbeat time.
 adopt_body() {
-  BROKER_NOW="$NOW" BROKER_NOTE="$1" awk '
+  BROKER_NOW="$NOW" BROKER_NOTE="$1" BROKER_APPEND="$APPEND_ONLY" awk '
     { line[NR] = $0 }
     END {
       hb = 0
       for (i = 1; i <= NR; i++) {
         l = line[i]; sub(/\r$/, "", l)
         # the same line the fleet supervisor parses (first match wins there too)
-        if (l ~ /^last: [0-9TZ:-]+ — status: /) { hb = i; break }
+        if (ENVIRON["BROKER_APPEND"] != "1" && l ~ /^last: [0-9TZ:-]+ — status: /) { hb = i; break }
       }
       if (hb == 0) {
         for (i = 1; i <= NR; i++) print line[i]
@@ -119,7 +130,8 @@ adopt_body() {
         print "<!-- broker-heartbeat -->"
         print "last: " ENVIRON["BROKER_NOW"] " — status: adopted by resource broker"
         print "<!-- /broker-heartbeat -->"
-        print "no heartbeat line in the body: appended a broker heartbeat block (status: adopted by resource broker)" > ENVIRON["BROKER_NOTE"]
+        if (ENVIRON["BROKER_APPEND"] == "1") print "appended a broker heartbeat block to the status issue (status: adopted by resource broker)" > ENVIRON["BROKER_NOTE"]
+        else print "no heartbeat line in the body: appended a broker heartbeat block (status: adopted by resource broker)" > ENVIRON["BROKER_NOTE"]
         exit
       }
       a = hb; b = hb
@@ -194,6 +206,16 @@ if [ "$PIN" = 1 ]; then
   else
     echo "WARN: could not pin issue #$NUM (missing permission, or three issues are already pinned) — pinning is cosmetic, continuing"
   fi
+fi
+
+if [ -n "$BROKER_FLEET" ]; then
+  cat <<EOF
+
+== multi-fleet: nothing to paste ==
+The broker of fleet $BROKER_FLEET heartbeats on $REPO#$NUM between <!-- broker-heartbeat --> markers.
+\`fleet supervise\` points this fleet's broker line in fleet/supervisor.conf.tmpl at that issue itself.
+EOF
+  exit 0
 fi
 
 cat <<EOF

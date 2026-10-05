@@ -69,7 +69,8 @@ its holder resets it with `reset`. No pool-file change is needed.
   read by the scripts too, and each has a flag that wins):
   `repo`, `session_name`, `ledger_issue` [script] · `state_dir` [script], `poll_interval` [script],
   `heartbeat_minutes`, `stale_lock_minutes` · `lease.pool_file` [script], `lease.store` [script] (the
-  `LEASE_STORE`), `lease.owner` [script], `lease.owner_pattern` [script] (the owner fence) ·
+  `LEASE_STORE`), `lease.owner` [script], `lease.owner_pattern` [script] (the owner fence),
+  `lease.fleet_qualify` [script] (multi-fleet only; see **Multi-fleet**) ·
   `host.health_cmd`, `host.restart_cmd`, `host.window_minutes` [script] (optional) · `escalation`,
   `messaging`, `liveness` (read by you).
 - **Paths in the config:** `lease.pool_file` and `lease.store` are read the same way: a leading `~` expands
@@ -87,7 +88,8 @@ its holder resets it with `reset`. No pool-file change is needed.
   creates another, and adds the `<!-- broker-heartbeat -->` marker pair only if the body lacks it (see
   **The ledger and the heartbeat**), so running it is always safe. With `ledger_issue` empty or 0 it finds
   or creates the ledger by its title and prints the number to put in the config. `<skill-dir>` is this
-  skill's directory (`<engsys-root>/skills/resource-broker` when installed).
+  skill's directory (`<engsys-root>/skills/resource-broker` when installed). In multi-fleet mode the
+  ledger is your fleet's status issue instead, and setup adopts it (see **Multi-fleet**).
 - `gh` authed with `repo` scope; `jq` and `node` (>= 20) on PATH.
 - The scripts find `pool-cli.mjs` relative to this skill (`core/lib/lease/`, next to `core/skills/`);
   set `POOL_CLI` (and `LEASE_CLI`) if the library lives elsewhere.
@@ -99,6 +101,10 @@ its holder resets it with `reset`. No pool-file change is needed.
 > (the scripts create their state dirs).
 
 1. Read the config; load prior `state.md` / journal from `state_dir` if present (you may be resuming).
+   Then run `bash <skill-dir>/scripts/broker-config.sh --config <config>`: its `effective ledger`,
+   `effective owner` and `effective owner_pattern` lines are what the scripts use. "The ledger issue"
+   below means that effective ledger, which in multi-fleet mode is not the config's `ledger_issue`.
+   Record all three in `state.md`.
 2. **Reconcile against durable truth. Never trust an in-memory or pre-compaction picture of the pool.**
 
    ```bash
@@ -263,7 +269,43 @@ supervisor parses exactly that line. Statuses it reads: **"rotation requested"**
 end"** (a deliberate stop; leave me). Anything else is a working status. Closing the ledger issue is the
 **kill switch**: the watcher emits `STOP` and the supervisor never touches a closed ledger. Register the
 session in the fleet's supervisor conf as `<ns>-broker|<ledger issue>|<stale minutes>` (stale minutes are
-`stale_lock_minutes` plus grace). The script refuses to edit a body without exactly one marker pair.
+`stale_lock_minutes` plus grace). The script refuses to edit a body without exactly one marker pair,
+except on a fleet status issue with no broker block yet, where it appends one (see **Multi-fleet**).
+
+## Multi-fleet: one broker per host, on its fleet's status issue
+
+The broker and its pool are a host role (engsys `docs/multi-fleet.md` § 3): each fleet's
+host runs its own broker over its own pool, and two hosts' brokers have nothing to arbitrate between them.
+Multi-fleet mode is on when `FLEET_ID` is set and the federation file exists (`fleet launch` writes
+`FLEET_ID` and `FEDERATION_FILE` into the session env). One shared `resource-broker.yml` then serves every
+fleet; the scripts derive the fleet-specific parts from the registry at run time:
+
+- **The ledger is your fleet's status issue** (`fleets.<FLEET_ID>.status_issue` in `federation.yml`, in the
+  instance repo), not `repo` + `ledger_issue`. Your heartbeat, digests, `broker:*` labels, escalation
+  comments and the kill switch all live there, so two fleets' brokers never write the same issue. The
+  instance repo is `FLEET_INSTANCE_REPO` when set (fleet.conf; `fleet launch` passes it on), else the
+  origin remote of the checkout that holds `federation.yml`.
+- **The status issue is shared.** It also carries the supervisor's `<!-- fleet-heartbeat -->` block.
+  Your heartbeat rewrites only the `<!-- broker-heartbeat -->` block, appends one on its first run if the
+  issue has none, and reads the body back, retrying when a concurrent edit dropped its line. Setup
+  appends a block and never wraps the fleet-heartbeat line. Closing the status issue stops your watcher
+  (`STOP`) and the supervisor's relaunches of you; prefer `enabled: false` in the registry to stop the
+  whole fleet.
+- **Owners are fleet-qualified:** `lease.owner` and `lease.owner_pattern` get the fleet id as a prefix
+  (`acme-broker` becomes `bob-acme-broker`, `^acme-…` becomes `^bob-acme-…`), so leases from two fleets
+  can never be confused, including in a store several hosts can see. Clients that take slots must then
+  use owners inside the qualified fence. Set `lease.fleet_qualify: false` while they can't (an owner
+  hard-coded in a repo's own lease client): the lease store is a local path, so each host's store is its
+  own either way. `session_name` and the `messaging` names stay as configured; a peer in another fleet
+  is addressed `<fleet>:<session>`.
+- **Fail closed.** If the status issue can't be resolved (the registry is unreadable, `FLEET_ID` is not
+  declared, the fleet has no `status_issue`, or the instance repo is unknown) every script stops with the
+  reason. None falls back to the shared `ledger_issue`, where another fleet's broker may heartbeat.
+- **The supervisor** follows on its own: `fleet supervise` rewrites this session's line in
+  `fleet/supervisor.conf.tmpl` to `<name>|<status issue>|<stale>|<instance repo>|broker-heartbeat`, so
+  it reads only your block. Nothing in the template changes.
+
+A flag (`--repo`, `--issue`/`--ledger`, `--owner`, `--owner-pattern`) is used as given in either mode.
 
 ## Escalation
 
