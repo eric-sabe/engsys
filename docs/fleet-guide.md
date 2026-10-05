@@ -1092,8 +1092,10 @@ emergency rollback path) and differs from the pin, `fleet verify` says so on eve
 
 The supervisor asks GitHub at most once every `VERIFY_MAX_AGE_MIN` minutes (default 15; set it in
 `fleet.conf` or `fleet.local.conf`). Between calls it hashes the local files each tick and reuses the last
-pass only while they are unchanged. A launch always asks GitHub. `fleet verify` exits 0 on a match, 1 on a
-mismatch and 3 when it could not check.
+pass only while they are unchanged. That cache (`.fleet/verify-wrappers.json`) is host state a session can
+rewrite, so it only bounds how quickly the supervisor notices; it is not a guarantee (engsys#96). A launch
+never uses it and always asks GitHub. `fleet verify` exits 0 on a match, 1 on a mismatch and 3 when it
+could not check.
 
 On an alert: look at the running merge and maintain sessions and stop any you don't trust. Then
 reinstall the plugin: `claude plugin uninstall engsys@<marketplace>`, delete its cache directory, and run
