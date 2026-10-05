@@ -33,6 +33,9 @@
 # model has not touched the baton for --pulse-max (default 20m, so a live bus under a wedged or dead
 # model never keeps the role), and on loss. --session defaults to ENGSYS_SESSION.
 set -u
+# shellcheck source=../../../lib/fleet-gh.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/fleet-gh.sh"
+fleet_gh_resolve
 
 REPO="" DIR="" INTERVAL=30 DEFBRANCH=main LEDGER="" SESSION="${ENGSYS_SESSION:-}" PULSE_MAX=20m
 while [ $# -gt 0 ]; do
@@ -100,6 +103,9 @@ emit_diff() {
 
 while true; do
   baton_tick || exit 0
+  # Once, after the baton check (a lost baton exits quietly first): an unauthenticated gh must
+  # surface as an event, never as a bus that sees nothing (engsys#90).
+  if [ -z "${GH_AUTH_CHECKED:-}" ]; then assert_gh_auth mnt-watch event || exit 1; GH_AUTH_CHECKED=1; fi
   # --- kill switch: ledger issue closed → STOP and exit -------------------
   if [ -n "$LEDGER" ]; then
     STATE=$(gh issue view "$LEDGER" -R "$REPO" --json state --jq .state 2>/dev/null || echo "")
@@ -107,7 +113,7 @@ while true; do
   fi
 
   # --- new open Dependabot PRs ----------------------------------------------
-  if OUT=$(gh pr list -R "$REPO" --author "app/dependabot" --state open --limit 200 --json number,title \
+  if OUT=$("$FLEET_GH" pr list -R "$REPO" --author "app/dependabot" --state open --limit 200 --json number,title \
       --jq '.[] | "#\(.number)\t\(.title)"' 2>/dev/null); then
     printf '%s\n' "$OUT" | sed '/^$/d' | sort > "$W/deps_pr.new"
     emit_diff "$W/deps_pr.tsv" "$W/deps_pr.new" "DEPENDABOT_PR"
@@ -115,7 +121,7 @@ while true; do
 
   # --- new open Dependabot (dependency vulnerability) alerts ---------------
   # Tolerates 404/403 — GHAS Dependabot alerts may be disabled for the repo.
-  if OUT=$(gh api --paginate "repos/$REPO/dependabot/alerts?state=open&per_page=100" \
+  if OUT=$("$FLEET_GH" api --paginate "repos/$REPO/dependabot/alerts?state=open&per_page=100" \
       --jq '.[] | "\(.number)\t\(.dependency.package.name)\t\(.security_advisory.severity)"' 2>/dev/null); then
     printf '%s\n' "$OUT" | sed '/^$/d' | sort > "$W/dep_alerts.new"
     emit_diff "$W/dep_alerts.tsv" "$W/dep_alerts.new" "DEP_ALERT"
@@ -123,7 +129,7 @@ while true; do
 
   # --- new open CodeQL / code-scanning alerts -------------------------------
   # Tolerates 404/403 — GHAS code scanning may be disabled for the repo.
-  if OUT=$(gh api --paginate "repos/$REPO/code-scanning/alerts?state=open&per_page=100" \
+  if OUT=$("$FLEET_GH" api --paginate "repos/$REPO/code-scanning/alerts?state=open&per_page=100" \
       --jq '.[] | "\(.number)\t\(.rule.id)\t\(.rule.security_severity_level // "unknown")"' 2>/dev/null); then
     printf '%s\n' "$OUT" | sed '/^$/d' | sort > "$W/codeql_alerts.new"
     emit_diff "$W/codeql_alerts.tsv" "$W/codeql_alerts.new" "CODEQL_ALERT"
@@ -132,7 +138,7 @@ while true; do
   # --- latest Secret Scan workflow_run went red -----------------------------
   # Only record runs with a terminal conclusion — recording an in-progress
   # run id would suppress its SECRET_ALERT when it later concludes failure.
-  if OUT=$(gh run list -R "$REPO" --branch "$DEFBRANCH" --workflow "Secret Scan" --limit 1 \
+  if OUT=$("$FLEET_GH" run list -R "$REPO" --branch "$DEFBRANCH" --workflow "Secret Scan" --limit 1 \
       --json databaseId,conclusion \
       --jq '.[0] | "\(.databaseId)\t\(.conclusion)"' 2>/dev/null); then
     RUNID=$(echo "$OUT" | cut -f1)
@@ -156,7 +162,7 @@ while true; do
   # Deliberately push-scoped, not widened to workflow_dispatch: this loop is
   # a red-main DETECTOR, not the Phase-2 fix-validator, and watching dispatch
   # runs would double-handle the guardrail's own `force_all` runs.
-  if OUT=$(gh run list -R "$REPO" --branch "$DEFBRANCH" --workflow "services-ci.yml" \
+  if OUT=$("$FLEET_GH" run list -R "$REPO" --branch "$DEFBRANCH" --workflow "services-ci.yml" \
       --event push --limit 1 --json databaseId,conclusion \
       --jq '.[0] | "\(.databaseId)\t\(.conclusion)"' 2>/dev/null); then
     RUNID=$(echo "$OUT" | cut -f1)

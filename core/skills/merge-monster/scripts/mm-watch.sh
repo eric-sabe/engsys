@@ -34,6 +34,9 @@
 # model has not touched the baton for --pulse-max (default 20m, so a live bus under a wedged or dead
 # model never keeps the role), and on loss. --session defaults to ENGSYS_SESSION.
 set -u
+# shellcheck source=../../../lib/fleet-gh.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/fleet-gh.sh"
+fleet_gh_resolve
 
 REPO="" DIR="" INTERVAL=30 DEFBRANCH=main LEDGER="" SESSION="${ENGSYS_SESSION:-}" PULSE_MAX=20m
 while [ $# -gt 0 ]; do
@@ -95,6 +98,9 @@ emit_diff() {
 
 while true; do
   baton_tick || exit 0
+  # Once, after the baton check (a lost baton exits quietly first): an unauthenticated gh must
+  # surface as an event, never as a bus that sees nothing (engsys#90).
+  if [ -z "${GH_AUTH_CHECKED:-}" ]; then assert_gh_auth mm-watch event || exit 1; GH_AUTH_CHECKED=1; fi
   # --- kill switch: ledger issue closed → STOP and exit -------------------
   if [ -n "$LEDGER" ]; then
     STATE=$(gh issue view "$LEDGER" -R "$REPO" --json state --jq .state 2>/dev/null || echo "")
@@ -102,21 +108,21 @@ while true; do
   fi
 
   # --- new / withdrawn mm:ready PRs ---------------------------------------
-  if OUT=$(gh pr list -R "$REPO" --label mm:ready --json number,title \
+  if OUT=$("$FLEET_GH" pr list -R "$REPO" --label mm:ready --json number,title \
       --jq '.[] | "#\(.number)\t\(.title)"' 2>/dev/null); then
     printf '%s\n' "$OUT" | sed '/^$/d' | sort > "$W/ready.new"
     emit_diff "$W/ready.tsv" "$W/ready.new" "READY" "UNREADY"
   fi
 
   # --- new Dependabot PRs ---------------------------------------------------
-  if OUT=$(gh pr list -R "$REPO" --author "app/dependabot" --json number,title \
+  if OUT=$("$FLEET_GH" pr list -R "$REPO" --author "app/dependabot" --json number,title \
       --jq '.[] | "#\(.number)\t\(.title)"' 2>/dev/null); then
     printf '%s\n' "$OUT" | sed '/^$/d' | sort > "$W/deps.new"
     emit_diff "$W/deps.tsv" "$W/deps.new" "DEPENDABOT"
   fi
 
   # --- queued/ready PRs turning DIRTY (conflict) ----------------------------
-  if OUT=$(gh pr list -R "$REPO" --json number,labels,mergeStateStatus \
+  if OUT=$("$FLEET_GH" pr list -R "$REPO" --json number,labels,mergeStateStatus \
       --jq '.[] | select((.labels | map(.name) | any(. == "mm:ready" or . == "mm:queued" or . == "mm:active"))
                   and .mergeStateStatus == "DIRTY") | "#\(.number)"' 2>/dev/null); then
     printf '%s\n' "$OUT" | sed '/^$/d' | sort > "$W/dirty.new"
@@ -135,7 +141,7 @@ while true; do
     printf '%s' "$ACTIVE" > "$W/checks.pr"
   fi
   if [ -n "$ACTIVE" ]; then
-    if OUT=$(gh pr view "$ACTIVE" -R "$REPO" --json statusCheckRollup --jq '
+    if OUT=$("$FLEET_GH" pr view "$ACTIVE" -R "$REPO" --json statusCheckRollup --jq '
         .statusCheckRollup[]?
         | if .__typename == "CheckRun"
           then select(.status == "COMPLETED") | "\(.name)\t\(.conclusion)"
@@ -160,7 +166,7 @@ while true; do
   #      even if it keeps resurfacing as "newest".
   # In-progress runs are never recorded, so one still emits once it concludes
   # failure.
-  if OUT=$(gh run list -R "$REPO" --branch "$DEFBRANCH" --limit 20 \
+  if OUT=$("$FLEET_GH" run list -R "$REPO" --branch "$DEFBRANCH" --limit 20 \
       --json databaseId,conclusion,workflowName,event \
       --jq 'map(select(.event != "schedule")) | .[0] | select(.)
             | "\(.databaseId)\t\(.conclusion)\t\(.workflowName)"' 2>/dev/null); then

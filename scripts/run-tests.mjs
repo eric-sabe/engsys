@@ -28,6 +28,8 @@ const SUITES = [
   ["node --test core/lib/git-env.test.mjs"],
   ["node --test core/lib/gate-check.test.mjs"],
   ["node --test core/lib/claim.test.mjs"],
+  ["bash core/lib/fleet-gh.test.sh"],
+  ["node --test core/.claude-plugin/fleet-gh-path.test.mjs"],
   ["node --test core/lib/lease/durable-lease.test.mjs"],
   ["node --test core/lib/lease/github-backend.test.mjs"],
   ["node --test core/lib/lease/baton.test.mjs"],

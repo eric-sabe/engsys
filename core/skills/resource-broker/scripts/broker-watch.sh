@@ -37,6 +37,9 @@
 # lease.owner, lease.pool_file, lease.store, lease.owner_pattern). In multi-fleet mode the ledger is the
 # fleet's status issue and the owner and fence are fleet-qualified (broker-config.sh).
 set -u
+# shellcheck source=../../../lib/fleet-gh.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/fleet-gh.sh"
+fleet_gh_resolve
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source-path=SCRIPTDIR
@@ -85,6 +88,7 @@ if [ "$INTERVAL" -le 0 ]; then
   echo "broker-watch: --interval must be a positive integer (got '$INTERVAL'): a zero interval would busy-loop the pool CLI" >&2
   exit 2
 fi
+assert_gh_auth broker-watch event || exit 1
 broker_setup_pool || exit 2
 
 W="$DIR/.watch"

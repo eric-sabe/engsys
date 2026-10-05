@@ -532,7 +532,7 @@ function git(dir, args, opts = {}) {
 }
 
 function gh(args, { timeout } = {}) {
-  const r = spawnSync('gh', args, { encoding: 'utf8', maxBuffer: 1 << 29, ...(timeout ? { timeout } : {}) });
+  const r = spawnSync(process.env.FLEET_GH || 'gh', args, { encoding: 'utf8', maxBuffer: 1 << 29, ...(timeout ? { timeout } : {}) });
   if (r.error) return { ok: false, stdout: '', stderr: `gh: ${r.error.message}`, status: null };
   return { ok: r.status === 0, stdout: r.stdout || '', stderr: r.stderr || '', status: r.status };
 }

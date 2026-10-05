@@ -10,6 +10,9 @@
 #                (else exit 3). Prints BATON_HANDOVER <fleet> when federation.yml
 #                moved the role's home away from this fleet.
 set -euo pipefail
+# shellcheck source=../../../lib/fleet-gh.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/fleet-gh.sh"
+fleet_gh_resolve
 
 REPO="" ISSUE="" STATUS="running" STATE_DIR="" SESSION=""
 while [ $# -gt 0 ]; do
@@ -49,7 +52,7 @@ NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 TMP=$(mktemp)
 trap 'rm -f "$TMP"' EXIT
 
-gh issue view "$ISSUE" -R "$REPO" --json body --jq .body | awk -v now="$NOW" -v status="$STATUS" '
+"$FLEET_GH" issue view "$ISSUE" -R "$REPO" --json body --jq .body | awk -v now="$NOW" -v status="$STATUS" '
   /<!-- mm-heartbeat -->/  { print; print "last: " now " — status: " status; skip=1; next }
   /<!-- \/mm-heartbeat -->/ { skip=0 }
   skip != 1 { print }
@@ -61,5 +64,5 @@ if ! grep -q "mm-heartbeat" "$TMP"; then
   exit 1
 fi
 
-gh issue edit "$ISSUE" -R "$REPO" --body-file "$TMP" >/dev/null
+"$FLEET_GH" issue edit "$ISSUE" -R "$REPO" --body-file "$TMP" >/dev/null
 echo "heartbeat: $NOW ($STATUS)"

@@ -97,6 +97,8 @@ out.set('core/.claude-plugin/hooks.json', json({
     ],
     SessionStart: [
       { hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/engsys-context.mjs"' }] },
+      // Fleet gh shim first on PATH for every Bash call, past a login shell that re-prepends Homebrew (#90).
+      { hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/fleet-gh-path.mjs"' }] },
       { matcher: 'compact', hooks: [{ type: 'command', command: 'bash "${CLAUDE_PLUGIN_ROOT}/templates/post-compact-reground.sh.tmpl"' }] },
       { matcher: 'clear|resume', hooks: [{ type: 'command', command: 'bash "${CLAUDE_PLUGIN_ROOT}/templates/post-clear-reground.sh.tmpl"' }] },
     ],
