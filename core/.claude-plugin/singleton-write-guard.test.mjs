@@ -305,3 +305,26 @@ test('the guard is registered for Bash, the edit tools and MCP tools', () => {
     assert.ok(matchers.some((m) => m.test(t)), t);
   }
 });
+
+test('engsys#77 M2: an unwrapped `fleet msg send` is denied in a singleton session; reads and the fenced form pass', () => {
+  for (const cmd of [
+    'fleet msg send --to bob:acme-build --body-file /tmp/b.txt',
+    'bash /opt/engsys/core/fleet/bin/fleet --instance /x msg send --to bob:acme-build --body-file b',
+    '/opt/engsys/core/fleet/bin/fleet msg send --to bob:x --body-file b',
+    'node /opt/engsys/core/fleet/msg.mjs send --to bob:x --body-file b',
+    'bash /opt/engsys/core/fleet/msg.sh send --to bob:x --body-file b',
+    'cd /tmp && fleet msg send --to bob:x --body-file b',
+    'echo hi; node ./msg.mjs send --to bob:x --body-file b',
+  ]) {
+    assert.equal(denied(cmd), true, cmd);
+    assert.equal(denied(cmd, { ENGSYS_SINGLETON_ROLE: 'maintain' }), true, cmd);
+    assert.equal(denied(cmd, {}), false, `inactive outside a singleton session: ${cmd}`);
+  }
+  for (const cmd of [
+    'fleet msg inbox --mark-read',
+    'node /opt/engsys/core/fleet/msg.mjs inbox',
+    'node /opt/engsys/core/fleet/msg.mjs read https://github.com/acme/app/issues/1#issuecomment-2',
+  ]) assert.equal(denied(cmd), false, cmd);
+  assert.equal(denied(`${ACT} guard --repo acme/app --state-dir /tmp/s -- fleet msg send --to bob:x --body-file b`), false);
+  assert.equal(denied(`bash ${MNT_ACT} guard --repo acme/app --state-dir /tmp/s -- fleet msg send --to bob:x --body-file b`, { ENGSYS_SINGLETON_ROLE: 'maintain' }), false);
+});

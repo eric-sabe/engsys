@@ -4,6 +4,7 @@
 // recorders. Two clocks move independently: `api.state.now` (the server's Date header) and `local.t`
 // (Date.now on this host), so a sleeping laptop and a lagging server can each be simulated.
 
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, statSync, writeFileSync, existsSync, readdirSync } from "node:fs";
@@ -520,12 +521,29 @@ test("guard: fences, then runs the command; refuses everything but gh and this e
   assert.equal(r.stdout, "ok\n");
   assert.deepEqual(s.spawned[0].args, ["pr", "edit", "12", "--add-label", "mm:active"]);
   assert.equal(s.spawned[0].opts.timeout, 30_000);
-  assert.throws(() => guardCommand(["rm", "-rf", "/"]), /gh, git push or gate-request/);
+  assert.throws(() => guardCommand(["rm", "-rf", "/"]), /gh, git push, gate-request\.sh or fleet msg send only/);
   assert.throws(() => guardCommand(["gh", "pr", "merge", "12"]), /merges go through/);
   assert.throws(() => guardCommand(["gh", "-R", "o/r", "pr", "merge", "12"]), /merges go through/);
   assert.throws(() => guardCommand(["gh", "api", "-X", "PUT", "repos/o/r/pulls/12/merge"]), /merges go through/);
   assert.throws(() => guardCommand(["gh", "pr", "ready", "12", "--admin"]), /--admin/);
   assert.throws(() => guardCommand(["/tmp/gate-request.sh", "--repo", "o/r"]), /only this engsys/);
+});
+
+test("guard: `fleet msg send` (engsys#77) runs this engsys's msg.mjs; other subcommands and other msg.mjs files are refused", () => {
+  const own = fileURLToPath(new URL("../../fleet/msg.mjs", import.meta.url));
+  for (const argv of [
+    ["fleet", "msg", "send", "--to", "bob:acme-build", "--body-file", "b.txt"],
+    [own, "send", "--to", "bob:acme-build", "--body-file", "b.txt"],
+    ["node", own, "send", "--to", "bob:acme-build", "--body-file", "b.txt"],
+  ]) {
+    const c = guardCommand(argv);
+    assert.equal(c.exe, process.execPath, argv.join(" "));
+    assert.deepEqual(c.args, [own, "send", "--to", "bob:acme-build", "--body-file", "b.txt"]);
+  }
+  assert.throws(() => guardCommand(["fleet", "msg", "inbox"]), /fleet msg send/);
+  assert.throws(() => guardCommand(["fleet", "status"]), /gh, git push, gate-request\.sh or fleet msg send only/);
+  assert.throws(() => guardCommand(["/tmp/msg.mjs", "send"]), /only this engsys's msg\.mjs/);
+  assert.throws(() => guardCommand(["node", "/tmp/msg.mjs", "send"]), /only this engsys's msg\.mjs/);
 });
 
 test("guard on a session that holds nothing runs nothing", async () => {
