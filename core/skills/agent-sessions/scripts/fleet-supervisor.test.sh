@@ -189,6 +189,38 @@ printf 'TMUX_SESSION=acme\nLAUNCH_CMD=bash %s/launch.sh\nREPO=o/r\nacme-broker|3
 reset; status 1 90 "working"; bpane exited; run
 expect "marker: an invalid marker skips the line" "!^launch"
 
+# A moved ledger target (engsys#72): launched against issue 1, the conf now says the status-issue block
+# (30). A session still on the old version posts `rotation requested` on 1, which is no longer read.
+printf 'TMUX_SESSION=acme\nLAUNCH_CMD=bash %s/launch.sh\nREPO=o/r\nacme-broker|30|60|o/fleet|broker-heartbeat\n' "$T" >"$T/w/sup.conf"
+oldledger() { # oldledger <minutes-ago> <status> — the per-repo ledger the session was launched against
+  jq -n --arg b "last: $(iso "$1") — status: $2" '{state:"OPEN", body:$b}' >"$T/ledger-1.json"
+}
+moved() { # moved <launch minutes-ago> — a recorded launch against the old target
+  mkdir -p "$T/w/logs/fleet-supervisor"
+  printf 'o/r|1||%s\n' "$(( $(date +%s) - $1 * 60 ))" >"$T/w/logs/fleet-supervisor/acme-broker.target"
+}
+reset; status 1 2 "adopted by resource broker"; oldledger 10 "rotation requested"; moved 60; bpane idle; run
+expect "moved target: rotation request on the OLD target, newer than launch → relaunch" "^launch acme-broker"
+expect "  …and the relaunch is announced on the NEW target" "comment 30: .*relaunched"
+oldledger 10 "rotation requested"; run
+expect "  …the new launch is recorded, so the old target is no longer read" "!^launch"
+
+reset; status 1 2 "adopted by resource broker"; oldledger 90 "rotation requested"; moved 60; bpane idle; run
+expect "moved target: rotation request on the old target older than the launch → ignored" "!^launch"
+
+reset; status 1 2 "adopted by resource broker"; oldledger 10 "ok — working"; moved 60; bpane idle; run
+expect "moved target: no rotation request on the old target → nothing" "!^launch"
+
+reset; status 1 2 "adopted by resource broker"; oldledger 10 "rotation requested"; bpane idle; run
+expect "no recorded target (first sight) → the old target is not guessed at" "!^launch"
+expect "  …but it is recorded, so a later move is seen" "!^kill"
+grep -q '^o/fleet|30|broker-heartbeat|' "$T/w/logs/fleet-supervisor/acme-broker.target" && echo x >>"$T/actions"
+expect "  …(record holds the current target)" "^x"
+
+reset; status 1 2 "adopted by resource broker"; oldledger 10 "rotation requested"; mkdir -p "$T/w/logs/fleet-supervisor"
+printf 'o/fleet|30|broker-heartbeat|%s\n' "$(( $(date +%s) - 3600 ))" >"$T/w/logs/fleet-supervisor/acme-broker.target"; bpane idle; run
+expect "unchanged target: rotation request on an unrelated ledger is never read" "!^launch"
+
 # A 6th field (merge|maintain): a singleton monster; every relaunch also needs the lease to allow it
 # (engsys#62). The fake BATON_CMD answers from $FAKE/baton (free | expired | held_self | held_elsewhere |
 # not_home | error) and records each call.
