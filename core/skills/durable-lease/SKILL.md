@@ -32,7 +32,9 @@ Both CLIs print exactly one JSON object on stdout and never prompt, so hooks and
   after the holder died, `unknown`.
 - **Not for** cross-machine coordination. Freshness compares this host's clock against heartbeats
   written on this host, and the atomic-`mkdir`/rename guard assumes one POSIX filesystem. A lease
-  between machines needs a different backend (a pinned issue, a database row) behind the same idea.
+  between machines (a singleton role across fleets) is `github-backend.mjs` in the same directory: a
+  compare-and-swap baton on a custom git ref, decided on the API server's clock. See
+  `docs/multi-fleet.md` section 2.
 
 ## Semantics to rely on
 

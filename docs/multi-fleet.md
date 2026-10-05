@@ -163,11 +163,74 @@ that **claiming** becomes atomic, using a git ref as a compare-and-swap lock.
 - **Startup check:** a monster checks for a live holder before doing anything. Today it just writes a
   heartbeat.
 
-This is the cross-machine backend that `durable-lease.mjs` anticipates, implemented as a `github`
-backend for `core/lib/lease` behind the existing `acquire/release/heartbeat/status/reap/reconcile/list`
-API. It needs a spike first (see [Open items](#open-items)): confirm GitHub accepts updates to a custom
-`refs/engsys/*` namespace through an App token. The fallback is a dedicated branch (`engsys/batons`)
-excluded from rulesets, which has the same compare-and-swap semantics.
+This is the cross-machine backend that `durable-lease.mjs` anticipates. The spike (see
+[Open items](#open-items)) confirmed that an App token can update a custom `refs/engsys/*` ref and that
+`force: false` is a true compare-and-swap, so the backend uses the custom ref, not the branch fallback.
+
+### The `github` backend (implemented, engsys#61)
+
+[`core/lib/lease/github-backend.mjs`](../core/lib/lease/github-backend.mjs), zero dependencies, global
+`fetch`. Token: `GH_TOKEN`, else the fleet's App token helper when `GH_APP_ENV_FILE` is set, else
+`gh auth token`. Tests: `github-backend.test.mjs` next to it (offline, against an in-process fake of the
+git data API that implements the two CAS rules; a live test runs with `LEASE_GITHUB_LIVE=1
+LEASE_GITHUB_REPO=owner/repo` on a scratch ref it deletes afterwards).
+
+**API.** `createGithubLease({ repo, refPrefix?, fleet?, api? })` gives:
+
+| Call | What it does | Result |
+|---|---|---|
+| `acquire({ role, holder, ttlMinutes })` | create the ref, or CAS over an expired, released or malformed tip | `acquired` (with `tookOverExpired` / `tookOverMalformed` + `previous` on a takeover), `held` (holder, expiry), `protocol_unsupported`, `error` |
+| `renew({ role, token, ttlMinutes })` (alias `heartbeat`) | CAS a commit with the same token and a new expiry | `renewed`; or **`lost: true`** with `lost` (token not on the tip, or the CAS lost and the re-read shows another holder), `expired` (our token, past expiry: no revival), `not_held`, `protocol_unsupported` |
+| `assertHeld({ role, token, minRemainingMs? })` | one read, the fence | `held: true` only if the tip carries our token and is unexpired with at least `minRemainingMs` left; every other outcome, including an error, is `held: false` |
+| `release({ role, token })` | CAS to `holder: none`, our token kept on the release commit | `released`, `already_released` / `not_held` (idempotent), `lost` (another holder's token is on the tip) |
+| `status({ role })`, `list()` | lock-free reads | `state` is `free` (no ref, or released), `held`, `unknown` (expired or malformed) or `error` |
+
+Not carried over from the file backend: `reap` (the takeover inside `acquire` is the reap; a separate
+delete step would only widen the window) and `reconcile` (nothing local to sweep).
+
+CLI, one JSON object on stdout:
+`node core/lib/lease/github-backend.mjs status|acquire|renew|fence|release|list --repo o/r --role merge --holder fleet:session [--token T] [--ttl 10m]`.
+Exit codes: 0 ok, 1 refused (held, lost, expired, not held), 2 usage, 3 error, 4 the tip's protocol is
+newer than this code.
+
+**Commit format.** Each baton commit points at the empty tree, has the previous tip as its parent, and
+carries the record in its message:
+
+```text
+baton merge: alice:acme-mm until 2026-10-04T12:10:00.000Z
+
+holder: alice:acme-mm
+token: 7c2e9a3e-4b7f-4d1c-9a2e-5f6b7c8d9e0f
+expires: 2026-10-04T12:10:00.000Z
+protocol: 1
+fleet: alice
+```
+
+The first line is for humans. The rest is parsed as untrusted data: a strict line grammar (bounded
+size, each known key exactly once, anchored values, unknown keys ignored), never evaluated. A tip that
+fails the grammar is `malformed`: readers report it, a renewer treats it as lost, an acquirer may take
+it over (it is indistinguishable from a dead holder). The `protocol:` line is the one that outlives
+versions: a tip whose protocol is higher than the code's is refused for takeover and renew, so a fleet
+on older code stays out of a role a newer fleet holds (section 8).
+
+**Clock rule.** Expiry math uses the `Date` header of the API response that observed the tip, never the
+local clock; a response without one is an error, not a local-clock decision. A new baton's `expires` is
+that server time plus the TTL. Assumptions: GitHub's front ends share one clock (NTP, well under a
+second apart) at 1-second resolution, and the observed time lags true server time by up to one
+round-trip, so a reader sees a lease as live slightly longer than it is (conservative for takeover) and
+a holder sees slightly more remaining time than it has. Callers compensate with cadence: renew at or
+under TTL/3, and pass the action's expected duration as `minRemainingMs` to the fence.
+
+**Failure semantics.** Every success is a CAS win (or, for the first claim, a successful create). A 422
+is a decision, never resent: the caller re-reads the tip and decides again (bounded rounds). 5xx and
+transport errors retry with jittered backoff, bounded; before resending a write the backend re-reads
+the tip: if it already is the commit the caller built, the write landed and is reported as the success
+it was; if it moved elsewhere, the caller lost; only an unchanged tip resends. So a retry never
+double-applies. Any other status or an exhausted retry is `error`, and an error is never `held`.
+
+The token is not a secret (anyone who can read the ref can read it): it fences stale holders, not
+hostile ones. Anyone with `contents: write` can force-push the ref, which is the repo's own trust
+boundary, not this primitive's.
 
 ### Handover
 
@@ -449,8 +512,8 @@ Do this before a second fleet stands anything up. Tracking: #39 (registry, `FLEE
 
 ### P1: Real batons
 
-- Spike the ref compare-and-swap, then build the `github` lease backend and the merge and maintenance
-  monsters' claim and fence.
+- Spike the ref compare-and-swap (#43, done), then build the `github` lease backend (#61, done:
+  section 2) and the merge and maintenance monsters' claim and fence.
 - Add the startup holder check; the supervisor reads the holder from the lease (it already skips a
   monster whose home is another fleet, from #53).
 
