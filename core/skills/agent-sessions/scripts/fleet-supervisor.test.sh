@@ -314,5 +314,61 @@ printf 'TMUX_SESSION=acme\nLAUNCH_CMD=bash %s/launch.sh\nBATON_CMD=bash %s/baton
 reset; baton free; ledger 90 "ok — merging #12"; pane exited; run
 expect "an unknown 6th field skips the line" "!^launch"
 
+# INTEGRITY_CMD (engsys#70, #86 review H1/L1): once per tick when a singleton monster is supervised.
+# Anything but 0 (1 = the plugin files guarding merge/maintain differ from their release, 3 = it couldn't
+# check) holds every relaunch of a 6th-field session, fail closed, said once on its ledger; a running one
+# is never killed for it. The fake answers from $FAKE/integrity (0 | 1 | 3) and records each call.
+printf '#!/usr/bin/env bash\necho "integrity $*" >>"$FAKE/actions"; exit "$(cat "$FAKE/integrity")"\n' >"$T/integrity.sh"
+printf 'TMUX_SESSION=acme\nLAUNCH_CMD=bash %s/launch.sh\nBATON_CMD=bash %s/baton.sh\nINTEGRITY_CMD=bash %s/integrity.sh --alert\nREPO=o/r\nacme-mm|1|60|||merge\nacme-rel|2|60\n' "$T" "$T" "$T" >"$T/w/sup.conf"
+integrity() { echo "$1" >"$T/integrity"; }
+ledger2() { jq -n --arg b "last: $(iso "$1") — status: $2" '{state:"OPEN", body:$b}' >"$T/ledger-2.json"; }
+rpane() { echo zsh >"$T/pane-acme-rel"; : >"$T/capture-acme-rel"; }
+
+reset; baton free; integrity 0; ledger 90 "ok — merging #12"; ledger2 2 "ok"; pane exited; rpane; run
+expect "integrity: asked once per tick" "^integrity --alert"
+expect "  …passes → crash recovery relaunches as before" "^launch acme-mm"
+reset; baton free; integrity 1; ledger 90 "ok — merging #12"; ledger2 90 "ok"; pane exited; rpane; run
+expect "integrity: mismatch → the singleton monster is not relaunched" "!^launch acme-mm"
+expect "  …the lease is not even asked" "!^baton"
+expect "  …a session without a role is still relaunched" "^launch acme-rel"
+expect "  …the held relaunch is said on the monster's ledger" "comment 1: .*held: the engsys plugin on this host does not match its release"
+run
+expect "  …once" "!comment 1: .*held"
+integrity 0; run
+expect "  …passes again → relaunched" "^launch acme-mm"
+integrity 1; ledger 90 "ok — merging #12"; pane exited; run
+expect "  …a new hold after a pass is said again" "comment 1: .*held"
+grep -q "integrity: MISMATCH" "$T/w/logs/fleet-supervisor/supervisor.log" && { pass=$((pass + 1)); echo "  ok    …logged"; } || { fail=$((fail + 1)); echo "  FAIL  …logged"; }
+reset; baton free; integrity 1; ledger 10 "rotation requested"; ledger2 2 "ok"; pane idle; rpane; run
+expect "integrity: mismatch + rotation requested + idle → not relaunched, not killed" "!^kill acme-mm"
+reset; baton expired; integrity 1; ledger 90 "ok — merging #12"; ledger2 2 "ok"; pane idle; rpane; run
+expect "integrity: mismatch + stale + idle → never killed" "!^kill acme-mm"
+expect "  …escalated on the ledger instead" "comment 1: .*stale"
+reset; baton free; integrity 3; ledger 90 "ok — merging #12"; ledger2 90 "ok"; pane exited; rpane; run
+expect "integrity: couldn't check (GitHub down) → fail closed, not relaunched" "!^launch acme-mm"
+expect "  …said on the ledger" "comment 1: .*held: the engsys plugin check could not run (exit 3)"
+expect "  …a session without a role is still relaunched" "^launch acme-rel"
+grep -q "integrity: the check could not run (exit 3), so no merge/maintain session is relaunched" "$T/w/logs/fleet-supervisor/supervisor.log" && { pass=$((pass + 1)); echo "  ok    …logged"; } || { fail=$((fail + 1)); echo "  FAIL  …logged"; }
+printf 'TMUX_SESSION=acme\nLAUNCH_CMD=bash %s/launch.sh\nINTEGRITY_CMD=bash %s/integrity.sh\nREPO=o/r\nacme-rel|2|60\n' "$T" "$T" >"$T/w/sup.conf"
+reset; integrity 1; ledger2 90 "ok"; rpane; run
+expect "integrity: no singleton monster supervised → never asked" "!^integrity"
+expect "  …and the table runs as before" "^launch acme-rel"
+
+# --- operator time format (#89): comments read in the operator's zone, the log stays ISO UTC ----
+printf 'TMUX_SESSION=acme\nLAUNCH_CMD=bash %s/launch.sh\nREPO=o/r\nacme-mm|1|60\n' "$T" >"$T/w/sup.conf"
+LASTISO="$(iso 90)"
+reset; ledger 90 "ok — merging #12"; pane busy; run
+expect "no time format: the escalation comment keeps the ISO heartbeat" "comment 1: .*last: $LASTISO"
+reset; ledger 90 "ok — merging #12"; pane busy
+: >"$T/actions"; (cd "$T/w" && OPERATOR_TIMEZONE=America/New_York OPERATOR_CLOCK=12h bash "$SUP" sup.conf >/dev/null 2>&1)
+expect "12h ET: the escalation comment shows the heartbeat as a clock time" "comment 1: .*last: [A-Z][a-z][a-z] [0-9]*, [0-9]*:[0-9][0-9] [AP]M E[SD]T)"
+expect "  …and no raw ISO timestamp remains in it" "!comment 1: .*last: [0-9]\{4\}-"
+if grep -q "$LASTISO" "$T/w/logs/fleet-supervisor/supervisor.log" 2>/dev/null || grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z ' "$T/w/logs/fleet-supervisor/supervisor.log"; then
+  pass=$((pass + 1)); echo "  ok  the supervisor log keeps ISO 8601 UTC"
+else fail=$((fail + 1)); echo "  FAIL the supervisor log lost its ISO timestamps"; fi
+reset; ledger 90 "ok — merging #12"; pane exited
+: >"$T/actions"; (cd "$T/w" && OPERATOR_TIMEZONE=Europe/Berlin OPERATOR_CLOCK=24h bash "$SUP" sup.conf >/dev/null 2>&1)
+expect "24h Berlin: the relaunch comment shows the time as 24h CET/CEST" "comment 1: .*relaunched .acme-mm.*[0-9]:[0-9][0-9] CES\?T)"
+
 echo "$pass passed, $fail failed."
 [ "$fail" = 0 ]

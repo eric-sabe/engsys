@@ -6,6 +6,9 @@
 #
 # Usage: mm-preflight.sh --repo owner/name --pr N
 set -euo pipefail
+# shellcheck source=../../../lib/fleet-gh.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/fleet-gh.sh"
+fleet_gh_resolve
 
 REPO="" PR=""
 while [ $# -gt 0 ]; do
@@ -20,10 +23,10 @@ done
 OWNER="${REPO%%/*}"
 NAME="${REPO##*/}"
 
-VIEW=$(gh pr view "$PR" -R "$REPO" \
+VIEW=$("$FLEET_GH" pr view "$PR" -R "$REPO" \
   --json isDraft,mergeable,mergeStateStatus,baseRefName,body,comments,files,commits)
 
-THREADS=$(gh api graphql -f owner="$OWNER" -f name="$NAME" -F number="$PR" -f query='
+THREADS=$("$FLEET_GH" api graphql -f owner="$OWNER" -f name="$NAME" -F number="$PR" -f query='
   query($owner: String!, $name: String!, $number: Int!) {
     repository(owner: $owner, name: $name) {
       pullRequest(number: $number) {

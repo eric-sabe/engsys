@@ -87,6 +87,7 @@ runs them for you from an **instance repo** (section 4):
 | `fleet restart` | cycle sessions onto what is installed, when you choose |
 | `fleet launch [<name>]` | render templates and start missing sessions |
 | `fleet supervise` | one supervisor tick (what the launchd job runs) |
+| `fleet verify` | check that the plugin files guarding the merge and maintain monsters match the pinned engsys release (section 7) |
 | `fleet install-jobs` | render and (re)load the launchd jobs |
 | `fleet msg send\|inbox` | send a cross-fleet message; print a session's undelivered ones (multi-fleet, § 6.10) |
 | `fleet relay` | one poll of the cross-fleet relay (what the `fleet-relay` job runs) |
@@ -689,6 +690,8 @@ fleets:
     cloud_identity: fleet-alice
     slack_operator: U0000000001        # Slack member id
     status_issue: 11                   # this fleet's status issue in the instance repo
+    timezone: America/New_York         # IANA zone for times shown to people (default UTC)
+    clock: 12h                         # 12h or 24h (default 24h)
     enabled: true                      # false = this fleet's kill switch
   bob:
     operator: bob
@@ -779,6 +782,20 @@ one line per accepted or rejected message, rotated to `.1` past 1 MB.
 The `FLEET_ID` in `fleet.conf` is the one `fleet notify` prefixes posts with. A `FLEET_ID` in the
 Slack env file is then unnecessary; if both are set and differ, `fleet notify` warns and uses
 `fleet.conf`'s.
+
+#### Operator time format
+
+Each fleet sets how dates and times read to its operator: a time zone and a 12-hour or 24-hour clock.
+Set `timezone: America/New_York` and `clock: 12h` under the fleet in `federation.yml` (or, in single-fleet
+mode, `OPERATOR_TIMEZONE` and `OPERATOR_CLOCK` in `fleet.conf`). Default is UTC and 24h. `fleet federation
+validate` rejects an unknown zone; at run time a bad zone falls back to UTC with a warning.
+
+It changes only text a person reads: the session-start and re-ground context line, `fleet notify` (Slack
+shows each reader their own zone through a date token; the fallback text and the GitHub comment use the
+fleet's format), supervisor ledger comments, `fleet status --federation`, and the gate-request comment.
+Everything a script parses stays ISO 8601 UTC: heartbeat `last:` lines, baton commits, ledger markers,
+logs and `--json`. `fleet time <iso|epoch|now> [--date|--time|--relative]` renders one time the same way,
+for example `Oct 5, 3:44 PM EDT` or `5 Oct 15:44 CEST`.
 
 ### 6.11 Host roles: which sessions run on this host
 
@@ -1017,6 +1034,90 @@ you have not yet restarted onto costs nothing but a pin PR. For an emergency wit
 `ENGSYS_REF` and/or `INSTANCE_REF` in `~/.config/<org>/fleet.local.conf`. `fleet sync` will follow that
 override; remove it once the rollback PR has merged, or the two sources of truth will disagree.
 
+### Plugin integrity: `fleet verify`
+
+The merge and maintain monsters run with bypassed permissions. The engsys singleton-write guard hook
+lets one plain call of a fenced wrapper (`mm-act.sh`, `mm-baton.sh`, `mm-heartbeat.sh` and the `mnt-*`
+versions) through, recognising each wrapper by its path in the plugin cache
+(`~/.claude/plugins/cache/<marketplace>/engsys/<version>/`). The sessions run as the same macOS user that
+owns that cache. A session that rewrote a wrapper, the hook, another hook registered beside it, or the
+lease code the wrappers run could get a raw GitHub write past the guard. `fleet verify` detects that. It
+does not isolate the sessions from the cache: everything on the host runs as one user, so the check makes
+tampering harder and visible, and no more.
+
+**The root of trust is GitHub.** `fleet verify` reads the pinned engsys tag through the tag namespace
+(`git/ref/tags/<tag>`, so a branch with the same name can't stand in), checks that its commit is on the
+repo's default branch (a tag pushed on an unmerged commit is a mismatch), and reads that commit's tree.
+It hashes each protected file in the installed plugin the way `git hash-object` does and compares it with
+the blob in that tree. Owner, repo and tag come from the engsys pin in the pin repo's
+`.claude/settings.json`, the same source `fleet sync` uses, and the pin must be a release tag (`vX.Y.Z`).
+No hash list is kept on the host or in the instance repo, because the sessions can write both.
+
+**What is protected: the whole install root.** Every regular file under the install directory must be a
+`core/` file of the verified commit, with the same content. An extra file anywhere is a mismatch, and so is
+a release file that is missing or a symlink. That matters because Claude Code loads files from fixed
+places that nothing references: a planted `hooks/hooks.json` (merged with the plugin's hooks), `.mcp.json`,
+`bin/` (put on the Bash tool's PATH), `monitors/monitors.json`, `settings.json` or `skills/<x>/SKILL.md`
+would each get past the guard while every referenced file still matched. The only thing skipped is Claude
+Code's own `.in_use/` directory of PID markers at the top of the install root. On a healthy host the
+install holds exactly the release's `core/` files (231 at v1.11.1), so `fleet verify` reports that count.
+
+**Which install.** It runs `claude plugin list --json` in `PIN_DIR`, where the sessions start, and looks at
+every `engsys@<marketplace>` entry that applies there (user scope, or a project entry for `PIN_DIR`),
+enabled or not. An applicable entry at another version, two different install paths, or a plugin that is
+disabled there is a mismatch.
+
+Where it runs:
+
+| When | What happens on a mismatch, or when the check can't run |
+|---|---|
+| `fleet launch` of a merge or maintain session (a named one, or the whole roster) | a named one is refused; a whole-roster launch leaves them out and starts the rest. Other sessions are never checked. One alert per incident |
+| every supervisor tick, when a merge or maintain monster is supervised | no relaunch of those monsters until the check passes, said once on the monster's ledger. A running session is never killed for it: check it yourself. One alert per incident |
+
+Merge and maintain sessions start only on a pass. A check that can't run (GitHub unreachable, no pin, the
+plugin not installed) holds them just like a mismatch, under its own alert
+(`wrapper-integrity-unverified`, next to `wrapper-integrity` for a mismatch), so you can tell an outage
+from a tampered file. A monster can't merge without GitHub anyway, and the supervisor tries again every
+tick. The mismatch alert repeats when the set of differing files changes.
+
+**The escape hatch** is typed by a person: `fleet launch <name> --skip-verify`, from an interactive
+terminal only. It prints a warning and posts an alert (`wrapper-integrity-skipped`); if the alert can't
+be delivered (to Slack or the fallback issue), the launch is refused. No config file or environment
+variable turns it on, and the supervisor never uses it. Alert text is escaped for Slack, so a file name
+in an alert can't turn into a link or a mention.
+
+**A forced engsys ref.** When `ENGSYS_REF` is overridden (in `fleet.local.conf` or the environment, the
+emergency rollback path) and differs from the pin, `fleet verify` says so on every run and alerts once
+(`engsys-ref-forced`). An older tag can carry a weaker guard, so the alert asks whoever set it to confirm.
+
+The supervisor asks GitHub at most once every `VERIFY_MAX_AGE_MIN` minutes (default 15; set it in
+`fleet.conf` or `fleet.local.conf`). Between calls it hashes the local files each tick and reuses the last
+pass only while they are unchanged. That cache (`.fleet/verify-wrappers.json`) is host state a session can
+rewrite, so it only bounds how quickly the supervisor notices; it is not a guarantee (engsys#96). A launch
+never uses it and always asks GitHub. `fleet verify` exits 0 on a match, 1 on a mismatch and 3 when it
+could not check.
+
+On an alert: look at the running merge and maintain sessions and stop any you don't trust. Then
+reinstall the plugin: `claude plugin uninstall engsys@<marketplace>`, delete its cache directory, and run
+`fleet sync`. `fleet verify` should then exit 0, and the next check resolves the alert.
+
+Two settings make the check stronger:
+
+- **A tag ruleset on the engsys repo.** The fleet's GitHub App can push to engsys. If it can create, move
+  or delete a `v*` tag, someone can publish a release that matches a tampered cache and point an override
+  at it. Add a tag ruleset (Settings, Rules, Rulesets, target: tags, pattern `v*`) that restricts
+  **creations, updates and deletions**, with Repository admin as the only bypass (not the App).
+- **Optional: lock the cache files.**
+  `find ~/.claude/plugins/cache/<marketplace>/engsys/<version> -type f -exec chflags uchg {} +` makes the
+  files immutable until someone clears the flag (`chflags nouchg`). Flag the files, not the directories:
+  Claude Code writes a marker file into the version directory. The owner can still clear the flag, so this
+  only stops casual writes. Clear it before `fleet sync` removes that version.
+
+What it does not cover yet: the verifier, the supervisor and the gh shim run from the host engsys checkout
+(`ENGSYS_DIR`), which the hook does not protect (engsys#88). Settings files, shell rc files and the `node`
+and `claude` binaries are outside the check too, and a running monster keeps its loaded files until it is
+stopped. Treat a change in the host checkout (`git -C ~/git/engsys status`) as seriously as a mismatch.
+
 ### Humans' machines
 
 Laptops do not follow the pins automatically: the marketplaces are pinned by tag and never auto-update.
@@ -1161,9 +1262,12 @@ major Claude Code upgrade.
 | Supervisor log: `RELAUNCH FAILED` with `claude not found on PATH` | the supervisor's launchd PATH can't see `claude`. The default job PATH covers `~/.local/bin` (native installer) and Homebrew; for anywhere else, override the PATH in `<instance>/jobs/launchd/fleet-supervisor.plist.tmpl`. Then `fleet install-jobs` (it warns until every tool resolves) and `fleet launch` for anything missing. The supervisor escalates a failed relaunch once on the ledger and comments again when it recovers |
 | Launchd job runs but `node: command not found` | node is not in `/opt/homebrew/bin` (nvm/fnm install). Install Homebrew node; launchd does not read your shell profile |
 | The fleet stopped after a reboot | the fleet user is not logged in (FileVault disables auto-login). Log in over Screen Sharing (section 6.2) |
+| `not launching acme-mm: its engsys plugin does not match vX.Y.Z` | `fleet verify` found protected plugin files, or an install, that don't match the pinned release. See "Plugin integrity" in section 7 |
+| `not launching acme-mm: the engsys plugin check could not run` | GitHub was unreachable, the pin is not a release tag, or the plugin is not installed (`fleet sync`). Merge and maintain stay held until `fleet verify` passes; the supervisor retries every tick |
 | A session shows `missing` | no tmux window with that name. `fleet launch <name>`; a name outside the namespace is refused by the launcher |
 | Session name got a `-2` suffix | a duplicate name existed somewhere under the same OS user, which silently breaks addressing. Stop the old session first, then relaunch |
 | Monster asked to rotate but never came back | is the supervisor job loaded (`launchctl list \| grep fleet-supervisor`)? Is its ledger issue open? Look at `~/Library/Logs/<org>-fleet/fleet-supervisor.log` and `logs/fleet-supervisor/supervisor.log` in the instance checkout. A live session is never killed on staleness alone; a closed ledger is never touched |
+| Monster scripts print `GH_AUTH_ERROR <script>: …` and exit non-zero, or bare `gh` says "not logged in" in a fleet session | bare `gh` resolved to an unauthenticated binary: a login profile (`eval "$(brew shellenv)"` in `~/.zprofile`) put Homebrew ahead of the identity shim. The engsys SessionStart hook `fleet-gh-path.mjs` re-prepends the shim through `$CLAUDE_ENV_FILE` on every start, resume, clear and compact, and kit scripts call the shim by absolute path (`FLEET_GH`, `core/lib/fleet-gh.sh`), so no `~/.zshrc` edit is needed. If it persists, check the plugin is enabled and `GH_APP_ENV_FILE` is in the session env (`fleet status`), then `fleet restart <name>` |
 | `gh-app-token.mjs --check` exits 3 | the token works but permissions are short; the message lists each. Fix the App's permissions, **accept** them on the installation, re-check |
 | `gh project list` prints "No projects found" for the bot | the wrong "Projects" row was set. Use the **Organization permissions** one (section 5) |
 | The pin PR was not labeled | the review stopped it (a blocking match, a non-zero exit, or `REVIEW_CMD` missing). Read the review output, then add the label yourself and run `fleet sync` after it merges |
@@ -1208,6 +1312,7 @@ format) overrides it per machine. Environment values for `ENGSYS_REF` / `INSTANC
 | `CLAIM_PROJECT` | no | `<owner>/<number>` of the ProjectV2 board `claim.mjs acquire`/`release` mirror the `fleet:<id>` label onto (§ 3). Owner may be a user or org and may differ from the issue's repo; a cross-owner board needs `GH_APP_OWNER` set to it (engsys#55). Unset means no board sync, only the label |
 | `CLAIM_OWNER_FIELD` | no | The board field name `claim.mjs` writes the fleet id to: a TEXT or SINGLE_SELECT field (a SINGLE_SELECT field must already carry an option named exactly each fleet id, never created automatically). Default `Owner`. Ignored when `CLAIM_PROJECT` is unset |
 | `FLEET_INSTANCE_REPO` | no | `owner/name` of the instance repo, which holds each fleet's status issue (§ 6.11). Default: the origin remote of the instance checkout. Written into every session env when set. Never inherited from the caller's environment |
+| `OPERATOR_TIMEZONE` / `OPERATOR_CLOCK` | no | Single-fleet mode only: how times read to a person (§ 6.10, "Operator time format"). An IANA zone and `12h` or `24h`. Default UTC, 24h. With a registry, the fleet's `timezone` / `clock` in `federation.yml` win. Written into every session env when set |
 | `ROLES` | no | Set it in `fleet.local.conf`. An allowlist of the roster sessions this host runs: names, names without the namespace, or kinds (`merge`, `maintain`, `broker`, `monster`, `interactive`); § 6.11. Unset means every session. Never inherited from the caller's environment |
 | `ROSTER_EXCLUDE` | no | Set it in `fleet.local.conf`. A denylist with the same entries; it wins over `ROLES`. Never inherited from the caller's environment |
 | anything else | | Instance-defined template variables (model knobs, and so on) |

@@ -8,7 +8,8 @@
 #   fleet/roster.tmpl          → .fleet/roster            (the launcher's roster; a session line's
 #                                                          optional 5th field names a per-session env)
 # Each env also gets FLEET_ID (and FEDERATION_FILE, when that file exists, FLEET_INSTANCE_REPO, when
-# set, and FLEET_INBOX_DIR, the relay's per-session inbox) when fleet.conf sets FLEET_ID.
+# set, and FLEET_INBOX_DIR, the relay's per-session inbox) when fleet.conf sets FLEET_ID, and
+# OPERATOR_TIMEZONE / OPERATOR_CLOCK when the fleet sets a time format.
 # then runs the launcher from PIN_DIR (the sessions' default workdir). Identity preflights belong in
 # the roster (PREFLIGHT= lines); they warn, never block.
 #
@@ -17,8 +18,18 @@
 # naming one is refused unless --force-excluded. The launcher gets .fleet/roster.host, the roster minus
 # those sessions; .fleet/roster stays the whole rendered roster.
 #
+# Merge and maintain sessions start only when `fleet verify --alert` passes (engsys#70): the plugin they
+# load matches the pinned engsys release on GitHub. Anything else, a mismatch or a check that could not
+# run, refuses a named one and leaves them out of a whole-roster launch, with one alert per incident
+# (engsys#86 review H1). Other sessions are never checked. The one way past it is typed by a person:
+# `fleet launch <name> --skip-verify`, from an interactive terminal only, which warns loudly and alerts
+# (and refuses when the alert can't be delivered).
+# No config file or environment variable turns it on, and the supervisor never passes it.
+#
 # Usage: launch.sh [--instance <dir>]                              # every session that runs on this host
 #        launch.sh [--instance <dir>] <name> [--force-excluded]    # just one (the supervisor relaunches this way)
+#        launch.sh [--instance <dir>] <name> --skip-verify         # a merge/maintain session without the plugin
+#                                                                  # check: an operator at a terminal only
 #        launch.sh [--instance <dir>] --check <name>               # exit 0 if <name> runs on this host, else
 #                                                                  # 1 and the reason (the supervisor's HOST_CHECK_CMD)
 #        launch.sh [--instance <dir>] --host-health                 # exit 0, or 1 and an alert when an unreadable
@@ -27,12 +38,13 @@
 set -euo pipefail
 if [ "${1:-}" = --instance ]; then FLEET_INSTANCE="${2:?--instance needs a directory}"; export FLEET_INSTANCE; shift 2; fi
 case "${1:-}" in -h | --help) sed -n '2,/^set -/{/^set -/!p;}' "$0"; exit 0 ;; esac
-name="" check=0 force_excluded=0 health=0
+name="" check=0 force_excluded=0 health=0 skip_verify=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --check) check=1 ;;
     --force-excluded) force_excluded=1 ;;
     --host-health) health=1 ;;
+    --skip-verify) skip_verify=1 ;;
     -*) echo "fleet: launch: unknown option: $1" >&2; exit 2 ;;
     *) [ -z "$name" ] || { echo "fleet: launch takes one session name" >&2; exit 2; }; name="$1" ;;
   esac
@@ -53,6 +65,9 @@ if [ "$check" = 1 ]; then
   echo "$name: runs on this host"; exit 0
 fi
 [ "$force_excluded" = 0 ] || [ -n "$name" ] || fleet_die "--force-excluded needs a session name (it never applies to a whole-roster launch)"
+[ "$skip_verify" = 0 ] || [ -n "$name" ] || fleet_die "--skip-verify needs a session name (it never applies to a whole-roster launch)"
+# Typed by a person, never by a script or a session: both stdin and stdout must be a terminal.
+[ "$skip_verify" = 0 ] || { [ -t 0 ] && [ -t 1 ]; } || fleet_die "--skip-verify only works from an interactive terminal"
 if [ -n "$name" ] && why="$(fleet_host_excluded "$name")"; then
   [ "$force_excluded" = 1 ] || fleet_die "$name is not on this host ($why). To start it here anyway: fleet launch $name --force-excluded"
   echo "fleet: WARNING launching $name although it is not on this host ($why), as --force-excluded asks" >&2
@@ -89,6 +104,12 @@ for tmpl in "$FLEET_REPO"/fleet/env/*.env.tmpl; do
     # Where the relay keeps each session's cross-fleet inbox; the plugin's session-start hook reads it.
     printf 'FLEET_INBOX_DIR=%q\n' "$FLEET_STATE/inbox" >>"$dest"
   fi
+  # The operator's time zone and clock (fleet-env.sh resolves them); the session-start context reads these.
+  if [ -n "$OPERATOR_TIMEZONE$OPERATOR_CLOCK" ]; then
+    printf '# Operator time format (fleet.conf, or federation.yml fleets.<FLEET_ID>.timezone / .clock).\n' >>"$dest"
+    if [ -n "$OPERATOR_TIMEZONE" ]; then printf 'OPERATOR_TIMEZONE=%q\n' "$OPERATOR_TIMEZONE" >>"$dest"; fi
+    if [ -n "$OPERATOR_CLOCK" ]; then printf 'OPERATOR_CLOCK=%q\n' "$OPERATOR_CLOCK" >>"$dest"; fi
+  fi
 done
 fleet_render "$FLEET_REPO/fleet/roster.tmpl" "$FLEET_STATE/roster"
 
@@ -104,9 +125,39 @@ if [ -f "$FEDERATION_FILE" ]; then
   fi
 fi
 
+# Plugin integrity (engsys#70), asked once per launch and only when a merge or maintain session is in it.
+# Fails closed: only a pass lets them start (engsys#86 review H1).
+integrity="" why_held="" # integrity: '' = not asked yet | ok | held
+singleton_integrity_ok() { # → 0 when merge/maintain sessions may start
+  if [ -z "$integrity" ]; then
+    local rc=0
+    bash "$FLEET_KIT_DIR/verify.sh" --instance "$FLEET_REPO" --alert </dev/null >&2 || rc=$?
+    case "$rc" in
+      0) integrity=ok ;;
+      1) integrity=held why_held="its engsys plugin does not match $ENGSYS_REF" ;;
+      *) integrity=held why_held="the engsys plugin check could not run (exit $rc), so the plugin is unverified" ;;
+    esac
+  fi
+  [ "$integrity" = ok ]
+}
+is_singleton() { case "$(fleet_host_kind_of "$1")" in merge | maintain) return 0 ;; esac; return 1; }
+
 cd "$PIN_DIR"
 if [ -n "$name" ]; then
   grep -q "^$name|" "$FLEET_STATE/roster" || fleet_die "no session named '$name' in the roster"
+  if is_singleton "$name" && [ "$skip_verify" = 1 ]; then
+    {
+      echo "fleet: ################################################################################"
+      echo "fleet: WARNING launching $name WITHOUT the plugin integrity check (--skip-verify)."
+      echo "fleet: Its guard hook and fenced wrappers are not confirmed to match $ENGSYS_REF. The team is alerted."
+      echo "fleet: ################################################################################"
+    } >&2
+    # The alert is the control here, so the launch waits on it: no alert delivered, no launch.
+    node "$FLEET_KIT_DIR/notify.mjs" --level alert --require-delivery --incident wrapper-integrity-skipped "Plugin check skipped on $(hostname -s 2>/dev/null || echo this host): someone launched $name with --skip-verify, so its engsys plugin was not checked against $ENGSYS_REF. If that wasn't planned, please stop the session and run fleet verify." >&2 \
+      || fleet_die "not launching $name: the --skip-verify alert could not be posted (Slack and NOTIFY_FALLBACK_ISSUE both failed, above). Fix the alert path first."
+  elif is_singleton "$name" && ! singleton_integrity_ok; then
+    fleet_die "not launching $name: $why_held (above). Check the running sessions, fix or reinstall the plugin, then: fleet verify"
+  fi
   exec bash "$LAUNCHER" --roster "$FLEET_STATE/roster" "$name"
 fi
 
@@ -120,6 +171,11 @@ while IFS= read -r line; do
       if why="$(fleet_host_excluded "$n")"; then
         echo "skip: $n is not on this host ($why)"
         printf '# not on this host: %s (%s)\n' "$n" "$why" >>"$host_roster"
+        continue
+      fi
+      if is_singleton "$n" && ! singleton_integrity_ok; then
+        echo "skip: $n, $why_held (fleet verify)"
+        printf '# plugin integrity held: %s (%s)\n' "$n" "$why_held" >>"$host_roster"
         continue
       fi
       kept=$((kept + 1)) ;;

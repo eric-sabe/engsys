@@ -90,6 +90,10 @@ commit_all "$E" "engsys 1.0.0"; git -C "$E" tag v1.0.0
 sed -i.bak 's/Every 5 minutes\./Every 5 minutes (kit 1.1.0)./' "$E/core/fleet/jobs/launchd/fleet-supervisor.plist.tmpl"; rm -f "$E/core/fleet/jobs/launchd/"*.bak
 commit_all "$E" "engsys 1.1.0"; git -C "$E" tag v1.1.0
 push_all "$E"
+# `fleet verify` (which gates the merge and maintain monsters) checks the plugin against these tags.
+# shellcheck source=fake-release.sh
+. "$HERE/fake-release.sh"
+fake_release "$T/remotes/vendor/engsys.git"
 git clone -q https://github.com/vendor/engsys.git "$HOME/git/engsys"
 git -C "$HOME/git/engsys" checkout -q v1.1.0
 EH="$HOME/git/engsys"

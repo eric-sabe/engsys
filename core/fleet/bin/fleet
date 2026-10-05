@@ -10,11 +10,16 @@
 #   sync [--check]                host checkouts + plugin reinstall to match the pins (no restarts)
 #   restart [--stale|--all|<name>...] [--force]
 #                                 cycle sessions when you're ready (no args = status)
-#   launch [<name> [--force-excluded]] | --check <name>
+#   launch [<name> [--force-excluded] [--skip-verify]] | --check <name>
 #                                 start missing sessions that run on this host (all, or one);
 #                                 --check: does <name> run on this host (ROLES / ROSTER_EXCLUDE / registry)
 #                                 --host-health: is an unreadable registry keeping monsters off this host
+#                                 --skip-verify: start a merge/maintain session without `fleet verify`
+#                                 (typed at a terminal only; warns and alerts)
 #   supervise                     one supervisor tick (what the launchd job runs)
+#   verify [--alert] [--max-age <min>]
+#                                 do the plugin files guarding merge/maintain match the pinned engsys
+#                                 release on GitHub? exit 0 match, 1 mismatch, 3 not verified
 #   install-jobs [--dry-run] [--only <job>] [--unload]
 #                                 render + (re)load the launchd jobs
 #   notify --level info|action|alert [--re <url>] [--incident <key>] [--resolve] "<text>"
@@ -22,6 +27,9 @@
 #   heartbeat "<summary>"         write this fleet's heartbeat onto its own status issue (federation.yml
 #                                 fleets.<FLEET_ID>.status_issue); no-op in single-fleet mode. What the
 #                                 supervisor's HEARTBEAT_CMD calls once per tick.
+#   time <iso|epoch|now> [--date|--time|--relative]
+#                                 render a time the way this fleet's operator reads it (time zone +
+#                                 12h/24h, from federation.yml or fleet.conf); machine fields stay UTC
 #   federation validate|get|home|address|status ...
 #                                 the multi-fleet registry (federation.yml; see `fleet federation --help`)
 #   msg send --to <fleet>:<session> [--re owner/repo#n] --body-file <f> [--from <session>]
@@ -54,7 +62,7 @@ case "$cmd" in
   -h | --help | help) sed -n '2,/^set -/{/^set -/!p;}' "$0"; exit 0 ;;
   init) # the engsys CLI (this kit lives at <engsys>/core/fleet); no instance needed yet
     exec "$KIT/../../install" fleet init "$@" ;;
-  status | pin | sync | restart | launch | supervise | install-jobs | notify | heartbeat | federation | msg | relay) ;;
+  status | pin | sync | restart | launch | supervise | verify | install-jobs | notify | heartbeat | time | federation | msg | relay) ;;
   *) echo "fleet: unknown command '$cmd' (fleet help)" >&2; exit 2 ;;
 esac
 
@@ -79,9 +87,11 @@ case "$cmd" in
   restart) exec bash "$KIT/restart.sh" "$@" ;;
   launch) exec bash "$KIT/launch.sh" "$@" ;;
   supervise) exec bash "$KIT/supervise.sh" "$@" ;;
+  verify) exec bash "$KIT/verify.sh" "$@" ;;
   install-jobs) exec bash "$KIT/install-jobs.sh" "$@" ;;
   notify) exec bash "$KIT/notify.sh" "$@" ;;
   heartbeat) exec bash "$KIT/heartbeat.sh" "$@" ;;
+  time) exec bash "$KIT/time.sh" "$@" ;;
   federation) exec bash "$KIT/federation.sh" "$@" ;;
   msg) exec bash "$KIT/msg.sh" "$@" ;;
   relay) exec bash "$KIT/relay.sh" "$@" ;;

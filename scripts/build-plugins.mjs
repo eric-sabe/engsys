@@ -105,6 +105,8 @@ out.set('core/.claude-plugin/hooks.json', json({
     ],
     SessionStart: [
       { hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/engsys-context.mjs"' }] },
+      // Fleet gh shim first on PATH for every Bash call, past a login shell that re-prepends Homebrew (#90).
+      { hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/fleet-gh-path.mjs"' }] },
       // Cross-fleet inbox (engsys#77): a fleet session sees the messages the relay recorded for it. The
       // grep keeps it free outside a multi-fleet session (needs FLEET_INBOX_DIR and ENGSYS_SESSION).
       { hooks: [{ type: 'command', command: INBOX_HOOK('session-start') }] },

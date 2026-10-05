@@ -500,3 +500,50 @@ test('cli status-issue: owner/repo#N, exit 3 in single-fleet mode, exit 1 when u
   r = cli(['status-issue', 'extra', '--file', f], env);
   assert.equal(r.code, 1);
 });
+
+// --- operator time format (#89) -------------------------------------------------------------------
+
+test('a fleet may set timezone and clock; both are kept', () => {
+  const reg = parseFederation(`version: 1
+fleets:
+  eric:
+    timezone: America/New_York
+    clock: 12h
+  bob:
+    timezone: Europe/Berlin
+    clock: 24h
+`);
+  assert.equal(reg.fleets.eric.timezone, 'America/New_York');
+  assert.equal(reg.fleets.eric.clock, '12h');
+  assert.equal(reg.fleets.bob.clock, '24h');
+});
+
+test('timezone and clock are optional', () => {
+  const reg = parseFederation('version: 1\nfleets:\n  eric:\n    enabled: true\n');
+  assert.equal(reg.fleets.eric.timezone, undefined);
+  assert.equal(reg.fleets.eric.clock, undefined);
+});
+
+test('an invalid zone fails validation, naming the fleet and key', () => {
+  assert.throws(
+    () => parseFederation('version: 1\nfleets:\n  eric:\n    timezone: Mars/Olympus\n'),
+    (e) => e instanceof FederationError && /fleets\.eric\.timezone: must be an IANA time zone name/.test(e.message),
+  );
+});
+
+test('an invalid clock fails validation', () => {
+  assert.throws(
+    () => parseFederation('version: 1\nfleets:\n  eric:\n    clock: 13h\n'),
+    (e) => e instanceof FederationError && /fleets\.eric\.clock: must be 12h or 24h/.test(e.message),
+  );
+});
+
+test('get reads the new keys for the shell', () => {
+  const d = tmp();
+  const f = path.join(d, 'federation.yml');
+  fs.writeFileSync(f, 'version: 1\nfleets:\n  eric:\n    timezone: America/New_York\n    clock: 12h\n');
+  let out = '';
+  const code = main(['get', 'fleets.eric.clock', '--file', f], { out: { write: (s) => { out += s; } }, err: { write() {} } });
+  assert.equal(code, 0);
+  assert.equal(out.trim(), '12h');
+});

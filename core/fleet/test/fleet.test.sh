@@ -141,6 +141,10 @@ sed -i.bak 's/Every 5 minutes\./Every 5 minutes (kit 1.1.0)./' "$E/core/fleet/jo
 commit_all "$E" "engsys 1.1.0"; git -C "$E" tag v1.1.0
 git -C "$E" commit -q --allow-empty -m "engsys 1.2.0"; git -C "$E" tag v1.2.0
 push_all "$E"
+# `fleet verify` (which gates the merge and maintain monsters) checks the plugin against these tags.
+# shellcheck source=fake-release.sh
+. "$HERE/fake-release.sh"
+fake_release "$T/remotes/vendor/engsys.git"
 
 # the instance repo: v0.1.0 (plus a later untagged commit on main), v0.2.0 comes in phase C
 I="$T/seed/acme-fleet"
@@ -444,6 +448,8 @@ has "conf: sessions from the template" "$SUP" "acme-mm|11|60"
 has "conf: the merge monster carries its role, so the supervisor asks the lease (engsys#62)" "$SUP" "acme-mm|11|60|||merge"
 has "conf: …and the maintenance monster too" "$SUP" "acme-security|12|60|||maintain"
 has "conf: HEARTBEAT_CMD defaulted to the dispatcher" "$SUP" "HEARTBEAT_CMD=bash $ENGSYS_HOST/core/fleet/bin/fleet --instance $INST heartbeat"
+has "conf: INTEGRITY_CMD defaulted to fleet verify, throttled to 15 min (engsys#70)" "$SUP" "INTEGRITY_CMD=bash $ENGSYS_HOST/core/fleet/bin/fleet --instance $INST verify --alert --max-age 15"
+has "the integrity check ran in the tick and passed" "$(cat "$INST/logs/fleet-supervisor/supervisor.log")" "integrity: ok"
 has "stale monster with no window is relaunched through the kit" "$(grep -F '[new-session]' "$FAKE/tmux.log" | grep -F '[acme-mm]' || true)" "[acme-mm]"
 hasnt "closed ledger (kill switch) is left alone" "$(cat "$FAKE/tmux.log")" "[acme-security]"
 has "supervisor log kept in the instance" "$(cat "$INST/logs/fleet-supervisor/supervisor.log")" "acme-security: ledger acme/app#12 CLOSED"
@@ -571,7 +577,7 @@ hasnt "no instance marketplace calls" "$seg" "acme"
 eq "only the engsys marketplace" "$(json_names marketplaces '.[] | .name + "#" + .ref')" "engsys#v1.2.0"
 eq "only its plugins" "$(json_names plugins '.[].id')" "core@engsys"
 eq "instance checkout untouched" "$(git -C "$INST" describe --tags --exact-match)" v0.2.0
-eq "without GH_APP_ENV no shim is put on PATH" "$(since "$b" | grep -v -e "PATH0=$T/bin" -e '^MARK' || true)" ""
+eq "without GH_APP_ENV no shim is put on PATH" "$(since "$b" | grep -v -e "PATH0=$T/bin" -e "PATH0=$T/fake-release" -e '^MARK' || true)" ""
 reset_tmux
 run fleet launch
 rc_is "launch works without an identity" 0
@@ -579,6 +585,31 @@ hasnt "env files carry no identity lines" "$(cat "$STATE/env/session.env")" "GIT
 hasnt "env files carry no gh shim without identity" "$(cat "$STATE/env/session.env")" "core/fleet/identity/bin"
 run fleet install-jobs --dry-run
 has "gh-app-login job is not installed without GH_APP_ENV" "$OUT" "skipped: com.acme.fleet.gh-app-login (GH_APP_ENV is not set)"
+rm -f "$HOME/.config/acme/fleet.local.conf"
+
+# --- fleet time: the operator time format (#89) ---------------------------------------------------
+YR="$(date -u +%Y)"
+run fleet time "$YR-10-05T19:44:00Z"
+rc_is "fleet time with no setting" 0
+eq "defaults to UTC, 24h" "$OUT" "5 Oct 19:44 UTC"
+printf 'OPERATOR_TIMEZONE=America/New_York\nOPERATOR_CLOCK=12h\n' >"$HOME/.config/acme/fleet.local.conf"
+run fleet time "$YR-10-05T19:44:00Z"
+eq "single-fleet mode reads OPERATOR_TIMEZONE / OPERATOR_CLOCK from the conf" "$OUT" "Oct 5, 3:44 PM EDT"
+run fleet time "$YR-10-05T19:44:00Z" --time
+eq "--time" "$OUT" "3:44 PM EDT"
+printf 'OPERATOR_TIMEZONE=Nope/Zone\n' >"$HOME/.config/acme/fleet.local.conf"
+run fleet time "$YR-10-05T19:44:00Z"
+rc_is "an invalid zone still renders" 0
+has "  …falling back to UTC" "$OUT" "5 Oct 19:44 UTC"
+has "  …with a warning" "$OUT" "not an IANA time zone"
+printf 'version: 1\nfleets:\n  eric:\n    timezone: Europe/Berlin\n    clock: 24h\n' >"$T/operator-time-fed.yml"
+printf 'FLEET_ID=eric\nFEDERATION_FILE=%s\nOPERATOR_TIMEZONE=America/New_York\nOPERATOR_CLOCK=12h\n' "$T/operator-time-fed.yml" >"$HOME/.config/acme/fleet.local.conf"
+run fleet time "$YR-10-05T19:44:00Z"
+eq "multi-fleet mode: the registry's timezone and clock win over the conf" "$OUT" "5 Oct 21:44 CEST"
+run fleet launch
+S_ENV="$(cat "$STATE/env/session.env")"
+has "session env carries the zone" "$S_ENV" "OPERATOR_TIMEZONE=Europe/Berlin"
+has "session env carries the clock" "$S_ENV" "OPERATOR_CLOCK=24h"
 rm -f "$HOME/.config/acme/fleet.local.conf"
 
 # =============================================================================================

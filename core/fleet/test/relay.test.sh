@@ -65,6 +65,7 @@ mkdir -p "$FAKE/gh"
 : >"$FAKE/gh.log"
 cat >"$T/bin/gh" <<'SH'
 #!/usr/bin/env bash
+[ "${1:-} ${2:-}" != "api rate_limit" ] || { echo 5000; exit 0; }   # the watch buses' startup auth check (#90), unlogged
 { printf 'gh'; for a in "$@"; do printf ' [%s]' "$a"; done; printf '\n'; } >>"$FAKE/gh.log"
 G="$FAKE/gh"
 if [ "${1:-}" = issue ]; then cat >/dev/null 2>&1 || true; exit 0; fi   # notify's fallback comment

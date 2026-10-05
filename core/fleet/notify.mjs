@@ -3,7 +3,12 @@
 // default (info/action/alert, no sirens), one post per incident (thread + resolve), and a
 // GitHub-issue-comment fallback when Slack is unreachable or unconfigured. Never fails the caller.
 //
-//   fleet notify --level info|action|alert [--re <github-url>] [--incident <key>] [--resolve] "<text>"
+//   fleet notify --level info|action|alert [--re <github-url>] [--incident <key>] [--resolve] [--require-delivery] "<text>"
+//
+// --require-delivery: exit 1 when the message reached neither Slack nor the fallback issue (for a caller
+// whose next step depends on the alert going out, e.g. `fleet launch --skip-verify`). Without it, notify
+// never fails the caller. The caller's text is escaped for Slack (&, <, >), so text that carries file
+// names or other outside data can't turn into a link or a mention.
 //
 // Config (read from the process environment, set by notify.sh after sourcing fleet-env.sh):
 //   SLACK_ENV               path to the bot's env file (SLACK_BOT_TOKEN, SLACK_CHANNEL_ID,
@@ -13,6 +18,11 @@
 //                           Empty/missing/incomplete = Slack is "unconfigured" → fallback.
 //   NOTIFY_FALLBACK_ISSUE   owner/repo#N to comment on when Slack can't be reached. Empty = skip
 //                           (print the message as a warning instead).
+//   OPERATOR_TIMEZONE / OPERATOR_CLOCK
+//                           the fleet's operator time format (fleet-env.sh derives them). When either is
+//                           set, an ISO 8601 UTC timestamp in the text becomes Slack's date token
+//                           (each reader sees their own zone and clock; the fallback text is this
+//                           fleet's format) and a plain rendering in the GitHub fallback comment.
 //   FLEET_STATE             the instance's state directory; incident latches live under
 //                           $FLEET_STATE/notify/.
 //
@@ -24,6 +34,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { humanizeText, resolveSettings } from '../lib/operator-time.mjs';
 
 const LEVELS = ['info', 'action', 'alert'];
 const EMOJI = { info: 'ℹ️', action: '👋', alert: '⚠️' };
@@ -50,7 +61,7 @@ export function parseEnvFile(text) {
 
 /** Parse argv (excluding node + script path) into {level, re, incident, resolve, text}. */
 export function parseArgs(argv) {
-  const out = { level: null, re: null, incident: null, resolve: false, textParts: [] };
+  const out = { level: null, re: null, incident: null, resolve: false, requireDelivery: false, textParts: [] };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     switch (a) {
@@ -58,6 +69,7 @@ export function parseArgs(argv) {
       case '--re': out.re = argv[++i]; break;
       case '--incident': out.incident = argv[++i]; break;
       case '--resolve': out.resolve = true; break;
+      case '--require-delivery': out.requireDelivery = true; break;
       default: out.textParts.push(a);
     }
   }
@@ -95,9 +107,14 @@ export function mentionFor(level, cfg) {
 /** Compose the posted text: fleet prefix, emoji, optional mention (first post of an incident
  * only), the caller's text, and — for `action`, or any level that was given --re — a GitHub link
  * line that never asks for a Slack reply. */
+/** Slack's control characters in plain text: & < > (https://api.slack.com/reference/surfaces/formatting#escaping). */
+export function escapeSlack(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
 export function composeText({ level, text, re, fleetId, mention }) {
   const head = `${fleetId ? `[${fleetId}] ` : ''}${EMOJI[level]}${mention ? ` ${mention}` : ''}`;
-  let body = text ? `${head} ${text}` : head;
+  let body = text ? `${head} ${escapeSlack(text)}` : head;
   if (re) {
     const line = level === 'action' ? `Approve or act on GitHub: ${re}` : `GitHub: ${re}`;
     body = `${body}\n\n${line}`;
@@ -169,22 +186,24 @@ async function postSlack({ token, channel, text, threadTs }) {
 
 // --- fallback --------------------------------------------------------------------------------
 
-function fallback(message, fallbackIssue) {
+function fallback(message, fallbackIssue) { // → true when the comment was posted
   if (!fallbackIssue) {
     process.stderr.write(`fleet notify: Slack unavailable, no NOTIFY_FALLBACK_ISSUE configured — message was:\n${message}\n`);
-    return;
+    return false;
   }
   const m = fallbackIssue.match(/^([^/]+\/[^#]+)#(\d+)$/);
   if (!m) {
     process.stderr.write(`fleet notify: NOTIFY_FALLBACK_ISSUE is malformed ('${fallbackIssue}', want owner/repo#N) — message was:\n${message}\n`);
-    return;
+    return false;
   }
   const [, repo, number] = m;
   try {
     execFileSync('gh', ['issue', 'comment', number, '-R', repo, '--body', message], { stdio: ['ignore', 'ignore', 'pipe'] });
     process.stderr.write(`fleet notify: Slack unavailable — fell back to a comment on ${fallbackIssue}\n`);
+    return true;
   } catch (e) {
     process.stderr.write(`fleet notify: Slack unavailable AND the fallback comment on ${fallbackIssue} failed (${e.message}) — message was:\n${message}\n`);
+    return false;
   }
 }
 
@@ -247,17 +266,21 @@ async function main() {
     level: args.level, text: args.text, re: args.re, fleetId, mention,
   });
 
+  for (const w of resolveSettings(process.env).warnings) process.stderr.write(`fleet notify: ${w}\n`);
+  const slackText = humanizeText(text, process.env, { slack: true });
+  const plainText = humanizeText(text, process.env);
+
   if (unconfiguredReason) {
     process.stderr.write(`fleet notify: ${unconfiguredReason} — Slack not posted\n`);
-    fallback(text, fallbackIssue);
-    process.exit(0);
+    const delivered = fallback(plainText, fallbackIssue);
+    process.exit(args.requireDelivery && !delivered ? 1 : 0);
   }
 
   try {
     const result = await postSlack({
       token: cfg.SLACK_BOT_TOKEN,
       channel: cfg.SLACK_CHANNEL_ID,
-      text,
+      text: slackText,
       threadTs: incident ? incident.ts : undefined,
     });
     if (args.resolve) {
@@ -271,8 +294,8 @@ async function main() {
     }
   } catch (e) {
     process.stderr.write(`fleet notify: Slack API call failed (${e.message}) — Slack not posted\n`);
-    fallback(text, fallbackIssue);
-    process.exit(0);
+    const delivered = fallback(plainText, fallbackIssue);
+    process.exit(args.requireDelivery && !delivered ? 1 : 0);
   }
 }
 

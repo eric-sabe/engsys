@@ -15,6 +15,9 @@
 # and retries (3 attempts) when a concurrent edit of the same body dropped its line. On a status issue
 # with no broker block yet, the first heartbeat appends one.
 set -euo pipefail
+# shellcheck source=../../../lib/fleet-gh.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/fleet-gh.sh"
+fleet_gh_resolve
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source-path=SCRIPTDIR
@@ -48,7 +51,7 @@ attempt=0
 while :; do
   attempt=$((attempt + 1))
   # The status travels through the environment, not `awk -v`, so a backslash in it is never interpreted.
-  gh issue view "$ISSUE" -R "$REPO" --json body --jq .body | BROKER_LINE="$LINE" awk '
+  "$FLEET_GH" issue view "$ISSUE" -R "$REPO" --json body --jq .body | BROKER_LINE="$LINE" awk '
     /<!-- broker-heartbeat -->/  { print; print ENVIRON["BROKER_LINE"]; skip=1; next }
     /<!-- \/broker-heartbeat -->/ { skip=0 }
     skip != 1 { print }
@@ -70,9 +73,9 @@ while :; do
     exit 1
   fi
 
-  gh issue edit "$ISSUE" -R "$REPO" --body-file "$TMP" >/dev/null
+  "$FLEET_GH" issue edit "$ISSUE" -R "$REPO" --body-file "$TMP" >/dev/null
   # Read back: another writer's read-modify-write of the same body can land after ours and drop the line.
-  if gh issue view "$ISSUE" -R "$REPO" --json body --jq .body | tr -d '\r' | grep -Fxq -- "$LINE"; then break; fi
+  if "$FLEET_GH" issue view "$ISSUE" -R "$REPO" --json body --jq .body | tr -d '\r' | grep -Fxq -- "$LINE"; then break; fi
   [ "$attempt" -lt 3 ] || { echo "ERROR: heartbeat did not stick on $REPO#$ISSUE after $attempt attempts (a concurrent edit kept overwriting it)" >&2; exit 1; }
   echo "heartbeat: lost to a concurrent edit of $REPO#$ISSUE, retrying" >&2
   sleep "${BROKER_HEARTBEAT_RETRY_SECS:-2}"

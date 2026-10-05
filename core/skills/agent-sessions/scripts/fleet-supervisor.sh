@@ -27,7 +27,8 @@
 #                                                  docs/subagent-liveness.md
 #                                                  in engsys)
 #   singleton monster (6th field merge|maintain) → every relaunch above also needs
-#                                                  the BATON to allow it (below)
+#                                                  the BATON to allow it (below),
+#                                                  and INTEGRITY_CMD to pass
 #   any relaunch that FAILS                      → escalate once on the ledger
 #                                                  (with the launcher's error),
 #                                                  retry each tick quietly,
@@ -114,6 +115,15 @@
 #                              line; exit 0 = may relaunch, 1 = held / not home, anything else =
 #                              error (no relaunch, alert once). Default: node core/lib/lease/baton.mjs
 #                              supervise (reads FLEET_ID / FEDERATION_FILE from the environment).
+#   INTEGRITY_CMD=<command>    optional: run once per tick, before the sessions, when any session
+#                              line has a 6th field. Exit 0 = the plugin files that guard the
+#                              singleton monsters are intact. Anything else (1 = they don't match
+#                              their release, 3 = it couldn't check) holds every relaunch of a
+#                              session with a 6th field this tick, fail closed; running ones are
+#                              never killed for it. The command alerts on its own, once per
+#                              incident (the fleet kit: `fleet verify --alert --max-age N`,
+#                              engsys#70); a held relaunch is also said once on that session's
+#                              ledger.
 #   <session-name>|<ledger-issue>|<stale-minutes>[|<owner/name>[|<marker>[|<role>]]]
 #                              one line per monster; the 4th field overrides
 #                              REPO= for that session (multi-repo fleets).
@@ -145,6 +155,20 @@ mkdir -p "$STATE_DIR"
 LOG="$STATE_DIR/supervisor.log"
 log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | tee -a "$LOG"; }
 
+# Text for people (ledger comments) shows times in the operator's zone and clock when the fleet sets
+# OPERATOR_TIMEZONE / OPERATOR_CLOCK (fleet-env.sh exports them); the log, latches and every machine
+# field stay ISO 8601 UTC. Unset, or any failure, passes the text through unchanged.
+OPERATOR_TIME_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../lib" 2>/dev/null && pwd)/operator-time.mjs"
+human_text() { # human_text <text> → text with ISO UTC timestamps in the operator's format
+  local out
+  if [ -n "${OPERATOR_TIMEZONE:-}${OPERATOR_CLOCK:-}" ] && [ -f "$OPERATOR_TIME_LIB" ] && command -v node >/dev/null 2>&1 \
+    && out="$(printf '%s' "$1" | node "$OPERATOR_TIME_LIB" humanize 2>/dev/null)"; then
+    printf '%s' "$out"
+  else
+    printf '%s' "$1"
+  fi
+}
+
 # One supervisor run at a time: launchd tick + a manual invocation overlapping
 # could both classify-then-act. mkdir lock; a lock older than 10 min is a
 # crashed run — steal via atomic mv (never rmdir a path another waiter may
@@ -164,7 +188,7 @@ fi
 trap 'rmdir "$LOCKDIR" 2>/dev/null || true' EXIT
 
 TMUX_SESSION="" LAUNCH_CMD="" DEFAULT_REPO="" ROTATE_GRACE_MIN=3 HOST_CHECK_CMD=""
-HOST_HEALTH_CMD="" HOST_HEALTH_INCIDENT="host-health" NOTIFY_CMD="" HEARTBEAT_CMD="" BATON_CMD=""
+HOST_HEALTH_CMD="" HOST_HEALTH_INCIDENT="host-health" NOTIFY_CMD="" HEARTBEAT_CMD="" BATON_CMD="" INTEGRITY_CMD=""
 SESSIONS=()
 while IFS= read -r line; do
   line="${line%%$'\r'}"
@@ -180,6 +204,7 @@ while IFS= read -r line; do
     NOTIFY_CMD=*) NOTIFY_CMD="${line#NOTIFY_CMD=}" ;;
     HEARTBEAT_CMD=*) HEARTBEAT_CMD="${line#HEARTBEAT_CMD=}" ;;
     BATON_CMD=*) BATON_CMD="${line#BATON_CMD=}" ;;
+    INTEGRITY_CMD=*) INTEGRITY_CMD="${line#INTEGRITY_CMD=}" ;;
     *\|*) SESSIONS+=("$line") ;;
     *) echo "fleet-supervisor: bad conf line: $line" >&2; exit 1 ;;
   esac
@@ -233,6 +258,7 @@ pane_busy() {
 # every tick and buries the alert.
 relaunch() { # relaunch <name> <ledger> <repo> <reason>
   local name="$1" ledger="$2" repo="$3" reason="$4" out failed="$STATE_DIR/$1.launch-failed"
+  local reason_h; reason_h="$(human_text "$reason")" # the comments read to a person; the log keeps $reason as is
   log "$name: relaunching — $reason"
   tmux kill-window -t "${TMUX_SESSION}:$name" 2>/dev/null || true
   out="$(mktemp "${TMPDIR:-/tmp}/fleet-supervisor.XXXXXX")"
@@ -243,10 +269,10 @@ relaunch() { # relaunch <name> <ledger> <repo> <reason>
     log "$name: relaunched"
     printf '%s|%s\n' "${CUR_TARGET:-$repo|$ledger|}" "$(date +%s)" >"$STATE_DIR/$name.target"
     if [ -f "$failed" ]; then
-      gh issue comment "$ledger" -R "$repo" --body "✅ fleet-supervisor: \`$name\` relaunched after failed attempts since $(cat "$failed") ($reason, $(date -u +%Y-%m-%dT%H:%M:%SZ)). Startup reconcile recovers state from this ledger + state.md." >/dev/null || true
+      gh issue comment "$ledger" -R "$repo" --body "✅ fleet-supervisor: \`$name\` relaunched after failed attempts since $(human_text "$(cat "$failed")") ($reason_h, $(human_text "$(date -u +%Y-%m-%dT%H:%M:%SZ)")). Startup reconcile recovers state from this ledger + state.md." >/dev/null || true
       rm -f "$failed"
     else
-      gh issue comment "$ledger" -R "$repo" --body "🔁 fleet-supervisor: relaunched \`$name\` ($reason, $(date -u +%Y-%m-%dT%H:%M:%SZ)). Startup reconcile recovers state from this ledger + state.md." >/dev/null || true
+      gh issue comment "$ledger" -R "$repo" --body "🔁 fleet-supervisor: relaunched \`$name\` ($reason_h, $(human_text "$(date -u +%Y-%m-%dT%H:%M:%SZ)")). Startup reconcile recovers state from this ledger + state.md." >/dev/null || true
     fi
   else
     local tail_lines
@@ -256,7 +282,7 @@ relaunch() { # relaunch <name> <ledger> <repo> <reason>
       log "$name: RELAUNCH FAILED — already escalated (failing since $(cat "$failed")), retrying next tick"
     else
       log "$name: RELAUNCH FAILED — escalating on ledger $repo#$ledger"
-      gh issue comment "$ledger" -R "$repo" --body "🚨 fleet-supervisor: relaunch of \`$name\` FAILED ($reason). Operator needed. The supervisor retries every tick without commenting again, and comments once more when a relaunch succeeds. Launcher output:
+      gh issue comment "$ledger" -R "$repo" --body "🚨 fleet-supervisor: relaunch of \`$name\` FAILED ($reason_h). Operator needed. The supervisor retries every tick without commenting again, and comments once more when a relaunch succeeds. Launcher output:
 \`\`\`
 ${tail_lines:-(no output)}
 \`\`\`
@@ -303,6 +329,41 @@ baton_allows() { # baton_allows <name> <repo> <role> → 0 may relaunch
   fi
   return 2
 }
+
+# Singleton monsters: the integrity check (INTEGRITY_CMD, once per tick) and then the lease. Sets BATON_WHY.
+# A relaunch held by the integrity check is said once on the session's ledger (latch:
+# <name>.integrity-held), cleared by the first passing check (engsys#86 review L1).
+INTEGRITY_BLOCKED=0 INTEGRITY_WHY=""
+singleton_allows() { # singleton_allows <name> <repo> <role> <ledger> → 0 may relaunch
+  local held="$STATE_DIR/$1.integrity-held"
+  if [ "$INTEGRITY_BLOCKED" = 1 ]; then
+    BATON_WHY="plugin integrity: $INTEGRITY_WHY (fleet verify)"
+    if [ ! -f "$held" ]; then
+      gh issue comment "$4" -R "$2" --body "⏸️ fleet-supervisor: \`$1\` needs a relaunch, but it is held: $INTEGRITY_WHY. The supervisor relaunches it on its own once \`fleet verify\` passes on the host; the details went to the fleet's alert channel." >/dev/null \
+        && date -u +%Y-%m-%dT%H:%M:%SZ >"$held"
+    fi
+    return 2
+  fi
+  rm -f "$held"
+  baton_allows "$1" "$2" "$3"
+}
+if [ -n "$INTEGRITY_CMD" ]; then
+  for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
+    IFS='|' read -r _ _ _ _ _ s_role <<<"$spec"
+    [ -n "$s_role" ] || continue
+    # shellcheck disable=SC2086 # a command line, like LAUNCH_CMD
+    INTEGRITY_RC=0; INTEGRITY_OUT=$($INTEGRITY_CMD 2>&1 </dev/null) || INTEGRITY_RC=$?
+    printf '%s\n' "$INTEGRITY_OUT" >>"$LOG"
+    case "$INTEGRITY_RC" in
+      0) log "integrity: ok"; rm -f "$STATE_DIR"/*.integrity-held ;;
+      1) INTEGRITY_BLOCKED=1 INTEGRITY_WHY="the engsys plugin on this host does not match its release"
+         log "integrity: MISMATCH, no merge/maintain session is relaunched this tick; running ones are left alone (alert: INTEGRITY_CMD)" ;;
+      *) INTEGRITY_BLOCKED=1 INTEGRITY_WHY="the engsys plugin check could not run (exit $INTEGRITY_RC)"
+         log "integrity: the check could not run (exit $INTEGRITY_RC), so no merge/maintain session is relaunched this tick (fail closed): $(printf '%s' "$INTEGRITY_OUT" | tail -n 1 | cut -c1-200)" ;;
+    esac
+    break
+  done
+fi
 
 if [ -n "$HOST_HEALTH_CMD" ]; then
   HEALTH_LATCH="$STATE_DIR/host-health.alerted"
@@ -429,8 +490,8 @@ for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
         log "$name: rotation requested ${AGE}m ago — letting it settle (grace ${ROTATE_GRACE_MIN}m)"
       elif pane_busy "$name"; then
         log "$name: rotation requested but the session is still mid-turn — waiting"
-      elif [ -n "$role" ] && ! baton_allows "$name" "$REPO_SLUG" "$role"; then
-        log "$name: rotation requested, but the $role baton does not allow a relaunch yet — waiting ($BATON_WHY)"
+      elif [ -n "$role" ] && ! singleton_allows "$name" "$REPO_SLUG" "$role" "$ledger"; then
+        log "$name: rotation requested, but a relaunch is held (baton or integrity) — waiting ($BATON_WHY)"
       else
         relaunch "$name" "$ledger" "$REPO_SLUG" "rotation requested; session idle at its prompt ${AGE}m after its final heartbeat"
         printf '%s\n' "$HB_TS" >"$ROTATED"
@@ -439,11 +500,11 @@ for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
       DOWN=$((DOWN + 1))
       # hung-or-thinking: never kill; escalate once per incident. The one exception is a singleton
       # monster idle at its prompt whose baton is forfeited (header).
-      if [ -n "$role" ] && ! pane_busy "$name" && baton_allows "$name" "$REPO_SLUG" "$role"; then
+      if [ -n "$role" ] && ! pane_busy "$name" && singleton_allows "$name" "$REPO_SLUG" "$role" "$ledger"; then
         rm -f "$LATCH"
         relaunch "$name" "$ledger" "$REPO_SLUG" "heartbeat stale (last: ${HB_TS:-never}), session idle at its prompt, $role baton forfeited ($BATON_WHY)"
       elif [ ! -f "$LATCH" ]; then
-        gh issue comment "$ledger" -R "$REPO_SLUG" --body "⚠️ fleet-supervisor: heartbeat stale (last: ${HB_TS:-never}) but the \`$name\` process is still alive. Not touching it — a live process is never killed on staleness alone (probe-then-classify is a judgment call, not a script's). Needs a probe: operator or maintenance watchdog." >/dev/null \
+        gh issue comment "$ledger" -R "$REPO_SLUG" --body "⚠️ fleet-supervisor: heartbeat stale (last: $(human_text "${HB_TS:-never}")) but the \`$name\` process is still alive. Not touching it — a live process is never killed on staleness alone (probe-then-classify is a judgment call, not a script's). Needs a probe: operator or maintenance watchdog." >/dev/null \
           && touch "$LATCH" && log "$name: STALE+ALIVE — escalated on ledger $REPO_SLUG#$ledger"
       else
         log "$name: STALE+ALIVE — already escalated, holding"
@@ -474,8 +535,8 @@ for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
     if [ "$ROTATION" = "1" ]; then REASON="rotation requested"
     elif [ "$HANDOVER" = "1" ]; then REASON="handover (${HB_STATUS})"
     else REASON="crash recovery (stale heartbeat, process gone)"; fi
-    if [ -n "$role" ] && ! baton_allows "$name" "$REPO_SLUG" "$role"; then
-      log "$name: $REASON, but the $role baton does not allow a relaunch — waiting ($BATON_WHY)"
+    if [ -n "$role" ] && ! singleton_allows "$name" "$REPO_SLUG" "$role" "$ledger"; then
+      log "$name: $REASON, but a relaunch is held (baton or integrity) — waiting ($BATON_WHY)"
       continue
     fi
     # TOCTOU guard: re-read the pane immediately before killing the window —
