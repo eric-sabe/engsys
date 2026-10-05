@@ -39,6 +39,10 @@ import {
   localizeIncludes,
   pushEnv,
   PUSH_PATH,
+  PUSH_PATH_CANDIDATES,
+  NO_TRUSTED_GIT,
+  pushGit,
+  trustedPushDirs,
 } from "./baton.mjs";
 
 const MIN = 60_000;
@@ -766,13 +770,14 @@ test("N2: a guarded push is checked against the PR and origin, then sent with ho
       spawn: async (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "", timedOut: false }; },
       remoteUrl: async () => url,
       pushConfig: async () => FLEET_CONFIG,
+      gitPath: () => "/usr/bin/git",
     });
     await s.baton.startup();
     return { r: await b.guard(argv, { pr }), calls };
   };
   const ok = await run(["git", "-C", "../wt", "push", "--force-with-lease", "origin", "HEAD:refs/heads/agent/1-x"]);
   assert.equal(ok.r.result.code, "ran");
-  assert.deepEqual(ok.calls[0], { cmd: "git", args: [...PUSH_C, "-C", "../wt", "push", "--force-with-lease", "origin", "HEAD:refs/heads/agent/1-x"] });
+  assert.deepEqual(ok.calls[0], { cmd: "/usr/bin/git", args: [...PUSH_C, "-C", "../wt", "push", "--force-with-lease", "origin", "HEAD:refs/heads/agent/1-x"] });
   const refused = [
     [["git", "push", "origin", "HEAD:refs/heads/other"], {}, "head branch is agent/1-x"],
     [["git", "push", "origin", "HEAD:refs/heads/develop"], { opts: { headRef: "develop", defaultBranch: "develop" } }, "default branch"],
@@ -1063,6 +1068,7 @@ test("#85 L3: the push environment drops GIT_* (but the fleet's env-scoped confi
     GIT_SSH_COMMAND: "/tmp/evil", GIT_SSH: "/tmp/evil", GIT_ASKPASS: "/tmp/evil", GIT_PROXY_COMMAND: "/tmp/evil", GIT_EXEC_PATH: "/tmp/evil", GIT_DIR: "/tmp/x",
     GIT_CONFIG_PARAMETERS: "'credential.helper=!evil'", GIT_CONFIG_GLOBAL: "/tmp/g", GIT_SSL_NO_VERIFY: "1", SSH_ASKPASS: "/tmp/evil", NODE_OPTIONS: "--require /tmp/evil.js",
     https_proxy: "http://attacker", ALL_PROXY: "http://attacker", SSL_CERT_FILE: "/tmp/ca.pem", DYLD_INSERT_LIBRARIES: "/tmp/evil.dylib", LD_PRELOAD: "/tmp/evil.so",
+    DEVELOPER_DIR: "/tmp/fake-xcode", TOOLCHAINS: "evil",
   });
   assert.deepEqual(Object.keys(env).sort(), ["GH_APP_ENV_FILE", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_VALUE_1", "GIT_TERMINAL_PROMPT", "HOME", "PATH"]);
   assert.equal(env.PATH, PUSH_PATH);
@@ -1116,4 +1122,58 @@ test("#85 L3: parseConfigList reads the --show-origin form", () => {
     { scope: "global", origin: "file:/Users/x/.gitconfig", key: "core.editor", value: "nano" },
     { scope: "command", origin: "command line:", key: "user.name", value: "bot" },
   ]);
+});
+
+// ------------------------------------------------------------------- #92 NF2: a trusted git --
+
+test("#92 NF2: the push PATH keeps only root-owned directories nobody else can write", () => {
+  const st = (uid, mode, dir = true) => ({ uid, mode, isDirectory: () => dir, isFile: () => !dir });
+  const table = { "/usr/bin": st(0, 0o40755), "/opt/homebrew/bin": st(501, 0o40775), "/usr/local/bin": st(0, 0o40775), "/bin": st(0, 0o40755) };
+  const stat = (p) => { if (table[p]) return table[p]; throw new Error("ENOENT"); };
+  assert.deepEqual(trustedPushDirs(["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/nope"], { stat }), ["/usr/bin", "/bin"]);
+  // On this host: every PUSH_PATH entry really is root-owned and not group/other-writable.
+  for (const d of PUSH_PATH.split(":").filter(Boolean)) {
+    const s = statSync(d);
+    assert.ok(s.uid === 0 && (s.mode & 0o022) === 0, d);
+  }
+  assert.ok(PUSH_PATH_CANDIDATES.includes("/opt/homebrew/bin"), "Homebrew is a candidate, kept only when root-owned");
+});
+
+test("#92 NF2: the push runs git by absolute path from a trusted directory, never a planted one ahead of it", () => {
+  const planted = mkdtempSync(join(tmpdir(), "planted-"));
+  writeFileSync(join(planted, "git"), "#!/bin/sh\necho planted\n", { mode: 0o755 });
+  const git = pushGit({ dirs: [planted, ...PUSH_PATH_CANDIDATES] });
+  assert.notEqual(git, join(planted, "git"), "a user-owned directory is never used");
+  if (git) {
+    assert.ok(git.startsWith("/") && git.endsWith("/git"));
+    assert.equal(statSync(git).uid, 0);
+  }
+  assert.equal(pushGit({ dirs: [planted] }), null, "only a user-writable git: none");
+  // A root-owned git that doesn't run (the macOS shim without the Command Line Tools) is skipped.
+  const st = (dir) => ({ uid: 0, mode: dir ? 0o40755 : 0o100755, isDirectory: () => dir, isFile: () => !dir });
+  const stat = (p) => st(!p.endsWith("/git"));
+  const tried = [];
+  const run = (p) => { tried.push(p); if (p === "/a/git") throw new Error("xcrun: error: invalid active developer path"); return "git version 2"; };
+  assert.equal(pushGit({ dirs: ["/a", "/b"], stat, run }), "/b/git");
+  assert.deepEqual(tried, ["/a/git", "/b/git"]);
+});
+
+test("#92 NF2: with no trusted git the guarded push is refused before anything is sent", async () => {
+  const w = world();
+  const s = session(w);
+  await s.baton.startup();
+  const calls = [];
+  const b = createBaton({
+    lease: s.lease, repo: REPO, role: "merge", holder: s.holder, run: "run-1", store: s.store, home: async () => HOME, now: () => w.local.t,
+    mergeApi: { request: async (m, p) => pushApi()(0, m, p) },
+    spawn: async (cmd, args) => { calls.push(args); return { code: 0, stdout: "", stderr: "", timedOut: false }; },
+    remoteUrl: async () => `https://github.com/${REPO}.git`,
+    pushConfig: async () => FLEET_CONFIG,
+    gitPath: () => null,
+  });
+  const r = await b.guard(["git", "push", "origin", "agent/1-x"], { pr: 5 });
+  assert.equal(r.result.code, "push_refused");
+  assert.equal(r.result.reason, NO_TRUSTED_GIT);
+  assert.match(NO_TRUSTED_GIT, /Command Line Tools/);
+  assert.equal(calls.length, 0);
 });

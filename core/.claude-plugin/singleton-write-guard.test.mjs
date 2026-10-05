@@ -658,3 +658,48 @@ test('#85 (keystone-maintain): a plugin-cache path handed to a kit script is a r
     `node -e "1" ${cfg}`,
   ]) assert.ok(nyxDenied(c), `should deny: ${c}`);
 });
+
+// ------------------------------------------------------- #92 NF1: unquoted heredocs expand --
+
+test('#92 NF1: an unquoted heredoc runs its substitutions whatever reads it; a quoted one is data', () => {
+  const env = { ...MERGE, HOME: '/Users/x', CLAUDE_PLUGIN_ROOT: ROOT };
+  const deniedIn = (command) => decide({ command, env, pluginRoot: ROOT, cwd: '/repo' }) !== null;
+  for (const c of [
+    'cat <<EOF\n$(gh pr merge 5)\nEOF',
+    'cat <<EOF\n`gh pr merge 5`\nEOF',
+    'tee /tmp/f <<EOF\nnote: $(gh pr merge 5) done\nEOF',
+    'cat <<-EOF\n\t$(git push origin HEAD)\n\tEOF',
+    'cat <<EOF\n$(echo $(gh pr merge 5))\nEOF',
+    `${ACT} guard --repo o/r --state-dir d -- gh issue comment 5 --body-file - <<EOF\n$(gh pr merge 5)\nEOF`,
+    'python3 <<EOF\n$(gh pr merge 5)\nEOF',
+    'gh api graphql -F query=x <<EOF\n$QUERY\nEOF',
+  ]) assert.ok(deniedIn(c), `should deny: ${JSON.stringify(c)}`);
+  for (const c of [
+    "cat <<'EOF'\n$(gh pr merge 5)\nEOF",
+    'cat <<"EOF"\n`gh pr merge 5`\nEOF',
+    'cat <<\\EOF\n$(gh pr merge 5)\nEOF',
+    'cat <<EOF\nescaped \\$(gh pr merge 5) and \\`gh pr merge 5\\`\nEOF',
+    'cat > /tmp/b.md <<EOF\nPR $N: node 22 failed; next the guarded git push. Built $(date).\nEOF',
+    `${ACT} guard --repo o/r --state-dir d -- gh issue comment 5 --body-file - <<EOF\nPR $N failed on node 22\nEOF`,
+  ]) assert.equal(deniedIn(c), false, `should allow: ${JSON.stringify(c)}`);
+});
+
+test('#92 NF1: a heredoc feeding eval, a read loop that evals, or xargs … sh -c is code', () => {
+  const env = { ...MERGE, HOME: '/Users/x', CLAUDE_PLUGIN_ROOT: ROOT };
+  const deniedIn = (command) => decide({ command, env, pluginRoot: ROOT, cwd: '/repo' }) !== null;
+  for (const c of [
+    "while read l; do eval \"$l\"; done <<'EOF'\ngh pr merge 5\nEOF",
+    "while read l\ndo\n  eval \"$l\"\ndone <<'EOF'\ngh pr merge 5\nEOF",
+    "while read -r l; do bash -c \"$l\"; done <<'EOF'\ngit push origin HEAD\nEOF",
+    "for f in a; do $f; done <<'EOF'\ngh pr merge 5\nEOF",
+    "xargs -I{} sh -c {} <<'EOF'\ngh pr merge 5\nEOF",
+    "xargs -n1 bash -c <<'EOF'\ngh pr merge 5\nEOF",
+    "parallel sh -c {} <<'EOF'\ngh pr merge 5\nEOF",
+    "eval \"$(cat)\" <<'EOF'\ngh pr merge 5\nEOF",
+  ]) assert.ok(deniedIn(c), `should deny: ${JSON.stringify(c)}`);
+  for (const c of [
+    "while read l; do echo \"$l\"; done <<'EOF'\ngh pr merge 5\nEOF",
+    "{ cat; } <<'EOF'\ngh pr merge 5\nEOF",
+    "echo start; cat <<'EOF'\ngh pr merge 5\nEOF",
+  ]) assert.equal(deniedIn(c), false, `should allow: ${JSON.stringify(c)}`);
+});

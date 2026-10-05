@@ -365,7 +365,7 @@ export function defaultNotify({ env = process.env, err = process.stderr } = {}) 
  *   pushConfig async (dir) => that checkout's git config as [{scope, key, value}] (pushConfigEntries)
  *   newBranchPrefixes  the prefixes a --new-branch push may create (default DEFAULT_NEW_BRANCH_PREFIXES)
  */
-export function createBaton({ lease, repo, role, holder, run = null, store, home, now = Date.now, notify = async () => false, mergeApi, spawn, sleep, prepare = null, remoteUrl = defaultRemoteUrl, pushConfig = defaultPushConfig, newBranchPrefixes = DEFAULT_NEW_BRANCH_PREFIXES, log = () => {} }) {
+export function createBaton({ lease, repo, role, holder, run = null, store, home, now = Date.now, notify = async () => false, mergeApi, spawn, sleep, prepare = null, remoteUrl = defaultRemoteUrl, pushConfig = defaultPushConfig, gitPath = pushGit, newBranchPrefixes = DEFAULT_NEW_BRANCH_PREFIXES, log = () => {} }) {
   if (!ROLES.includes(role)) throw new LeaseUsageError(`role must be one of ${ROLES.join(", ")}, got ${JSON.stringify(role)}`);
   if (typeof repo !== "string" || !REPO_PATTERN.test(repo)) throw new LeaseUsageError(`invalid repo ${JSON.stringify(repo)}`);
   const sleepFn = sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
@@ -615,6 +615,8 @@ export function createBaton({ lease, repo, role, holder, run = null, store, home
         ? `--new-branch creates only branches under ${newBranchPrefixes.join(", ")} (ENGSYS_NEW_BRANCH_PREFIX), not ${push.branch}`
         : "--new-branch is refused: ENGSYS_NEW_BRANCH_PREFIX holds no valid prefix");
     }
+    const git = gitPath(); // #92 NF2: an absolute, root-owned git, or no push
+    if (!git) return refuse(NO_TRUSTED_GIT);
     let repoRes;
     let probe;
     try {
@@ -645,7 +647,7 @@ export function createBaton({ lease, repo, role, holder, run = null, store, home
     const urlRepo = repoOfUrl(url);
     if (!urlRepo || urlRepo.toLowerCase() !== repo.toLowerCase()) return refuse(`origin's push URL (${url}) is not ${repo}`);
     const scanned = await pushArgs(push);
-    return scanned.reason ? refuse(scanned.reason) : scanned;
+    return scanned.reason ? refuse(scanned.reason) : { ...scanned, exe: git };
   }
 
   /**
@@ -674,6 +676,7 @@ export function createBaton({ lease, repo, role, holder, run = null, store, home
       const p = await preparePush(cmd.push, { pr, newBranch });
       if (p.refusal) return p.refusal;
       cmd.args = p.args;
+      cmd.exe = p.exe;
     }
     return fenced(async ({ elapsedMs }) => {
       if (cmd.push) {
@@ -886,7 +889,9 @@ export function repoOfUrl(url) {
 
 function defaultRemoteUrl(dir) {
   return new Promise((done, fail) => {
-    execFile("git", [...(dir ? ["-C", dir] : []), "remote", "get-url", "--push", "origin"], { timeout: 10_000, env: pushEnv() }, (err, stdout) => {
+    const git = pushGit();
+    if (!git) { fail(new Error(NO_TRUSTED_GIT)); return; }
+    execFile(git, [...(dir ? ["-C", dir] : []), "remote", "get-url", "--push", "origin"], { timeout: 10_000, env: pushEnv() }, (err, stdout) => {
       if (err) fail(err); else done(String(stdout).trim());
     });
   });
@@ -933,7 +938,9 @@ export function localizeIncludes(entries, roots) {
 
 function gitOut(args, env) {
   return new Promise((done, fail) => {
-    execFile("git", args, { timeout: 10_000, maxBuffer: 4 * 1024 * 1024, env: pushEnv(env) }, (err, stdout) => (err ? fail(err) : done(String(stdout))));
+    const git = pushGit();
+    if (!git) { fail(new Error(NO_TRUSTED_GIT)); return; }
+    execFile(git, args, { timeout: 10_000, maxBuffer: 4 * 1024 * 1024, env: pushEnv(env) }, (err, stdout) => (err ? fail(err) : done(String(stdout))));
   });
 }
 
@@ -948,20 +955,64 @@ export async function readPushConfig(dir, env = process.env) {
 }
 const defaultPushConfig = (dir) => readPushConfig(dir);
 
-/** A PATH the guarded push trusts, whatever the session's PATH has become (#85 L3). */
-export const PUSH_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+/** Where the guarded push may take programs from, if the directory is trustworthy (#85 L3, #92 NF2). */
+export const PUSH_PATH_CANDIDATES = Object.freeze(["/usr/bin", "/bin", "/usr/sbin", "/sbin", "/usr/local/bin", "/opt/homebrew/bin"]);
+
+/** Owned by root and writable by nobody else: a worker session (same user as the monster) can't plant a program there. */
+function rootOwned(p, stat) {
+  try { const st = stat(p); return st.uid === 0 && (st.mode & 0o022) === 0 ? st : null; } catch { return null; }
+}
+
+/**
+ * The candidate directories that are root-owned and not group/other-writable (#92 NF2). Homebrew's
+ * /opt/homebrew/bin (and /usr/local/bin on an Intel Mac with Homebrew) belongs to the user, so a
+ * planted `git`, `ssh` or `git-credential-*` there would run inside the fenced push: it is dropped.
+ */
+export function trustedPushDirs(dirs = PUSH_PATH_CANDIDATES, { stat = statSync } = {}) {
+  return dirs.filter((d) => rootOwned(d, stat)?.isDirectory());
+}
+
+/** The PATH the guarded push, its config scan and its URL read run with. */
+export const PUSH_PATH = trustedPushDirs().join(":");
+
+export const NO_TRUSTED_GIT = "no working git in a root-owned directory (/usr/bin, /bin, /usr/local/bin …): the guarded push never runs a git a session could replace (Homebrew's is user-writable). On macOS install the Command Line Tools (xcode-select --install); elsewhere install git from the system package manager";
+
+/**
+ * The git the guarded push runs, by absolute path (#92 NF2): the first root-owned, not group/other-
+ * writable `git` in a trusted directory that answers `git --version` (on macOS /usr/bin/git is the
+ * Command Line Tools shim, which fails until they are installed). null when there is none: the push
+ * is refused rather than fall back to a user-writable git. Memoized for the default lookup.
+ */
+let defaultGit;
+export function pushGit({ dirs, stat = statSync, run = execFileSync } = {}) {
+  const memo = dirs === undefined && stat === statSync && run === execFileSync;
+  if (memo && defaultGit !== undefined) return defaultGit;
+  let found = null;
+  for (const d of trustedPushDirs(dirs ?? PUSH_PATH_CANDIDATES, { stat })) {
+    const p = join(d, "git");
+    if (!rootOwned(p, stat)?.isFile()) continue;
+    try {
+      run(p, ["--version"], { env: pushEnv(), timeout: 15_000, stdio: ["ignore", "pipe", "pipe"] });
+      found = p;
+      break;
+    } catch { /* not a working git: try the next directory */ }
+  }
+  if (memo) defaultGit = found;
+  return found;
+}
 
 /**
  * The environment the guarded push (and its config scan and URL read) runs with (#85 L3): no GIT_*
  * except the fleet's env-scoped config (GIT_CONFIG_COUNT/KEY_n/VALUE_n, which the scan checks), so no
  * GIT_SSH_COMMAND, GIT_ASKPASS, GIT_PROXY_COMMAND, GIT_EXEC_PATH, GIT_CONFIG_PARAMETERS or repo-location
- * vars; no SSH_ASKPASS, NODE_OPTIONS, proxies, CA overrides or preload libraries; a fixed PATH.
+ * vars; no SSH_ASKPASS, NODE_OPTIONS, proxies, CA overrides or preload libraries; no DEVELOPER_DIR or
+ * TOOLCHAINS (the macOS /usr/bin/git shim would follow them to another git); PATH = PUSH_PATH.
  */
 export function pushEnv(env = process.env) {
   const out = {};
   for (const [k, v] of Object.entries(env)) {
     if (k.startsWith("GIT_") && !(k === "GIT_CONFIG_COUNT" || /^GIT_CONFIG_(KEY|VALUE)_\d+$/.test(k))) continue;
-    if (/^(SSH_ASKPASS|NODE_OPTIONS|NODE_PATH|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_.*|SSL_CERT_FILE|SSL_CERT_DIR|CURL_CA_BUNDLE|all_proxy|ALL_PROXY|https?_proxy|HTTPS?_PROXY|ftp_proxy|FTP_PROXY)$/.test(k)) continue;
+    if (/^(SSH_ASKPASS|NODE_OPTIONS|NODE_PATH|DEVELOPER_DIR|TOOLCHAINS|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_.*|SSL_CERT_FILE|SSL_CERT_DIR|CURL_CA_BUNDLE|all_proxy|ALL_PROXY|https?_proxy|HTTPS?_PROXY|ftp_proxy|FTP_PROXY)$/.test(k)) continue;
     out[k] = v;
   }
   for (const k of GIT_LOCATION_VARS) delete out[k];

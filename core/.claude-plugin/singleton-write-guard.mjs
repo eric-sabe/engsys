@@ -36,7 +36,9 @@
 //                   words, so subprocess.run(['gh','pr','merge']) counts) runs a gh/git write (#71 L2,
 //                   #85 L1); running the kit's own scripts is fine.
 //          NAME=value may prefix a kit script, never gh or git. A heredoc fed to cat, tee or gh is data
-//          and is not read as commands (#85 F1). The fenced wrappers and gate-request.sh run only as
+//          and is not read as commands (#85 F1), except that an UNQUOTED delimiter makes the shell run
+//          the body's $( ) and backticks, so those are commands (#92 NF1); a heredoc fed to eval, a
+//          read loop that evals, or xargs … sh -c is code. The fenced wrappers and gate-request.sh run only as
 //          the one plain invocation above. Nor may a command touch a settings file
 //          (.claude/settings*.json, managed-settings.json, the .claude dir itself, the shell snapshots
 //          and session-env files sourced before each Bash call), git config (.git/config,
@@ -343,7 +345,7 @@ const SCRIPT_INTERPRETERS = new Set(['bash', 'sh', 'zsh', 'node']);
 const SCRIPT_FILE = /\.(sh|bash|mjs|cjs|js)$/;
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 /** Commands that run the command after them, and their flags that take a value. */
-const PREFIX_COMMANDS = new Map([['env', ['-u', '-C', '-S']], ['command', []], ['exec', ['-a']], ['xargs', ['-n', '-I', '-P', '-L', '-s', '-d', '-E']],
+const PREFIX_COMMANDS = new Map([['env', ['-u', '-C', '-S']], ['command', []], ['exec', ['-a']], ['xargs', ['-n', '-I', '-P', '-L', '-s', '-d', '-E']], ['parallel', ['-j', '-I']],
   ['timeout', ['-s', '-k']], ['nohup', []], ['sudo', ['-u', '-g']], ['nice', ['-n']], ['time', []], ['stdbuf', []]]);
 
 /**
@@ -426,29 +428,76 @@ const SETTINGS_TEXT = /\.claude(?!\/[\w.-]+\.(?:ya?ml|md)\b)|managed-settings|\.
  * command word the shell expands), 'interp' (an interpreter) or 'data' (cat, tee, gh --body-file -, …).
  */
 function heredocSink(s, lineStart, at, after) {
-  const before = s.slice(lineStart, at);
-  const tail = s.slice(after, (s.indexOf('\n', after) + 1 || s.length + 1) - 1);
-  const segment = `${before.split(/;|&&|\|\||[({]/).pop()} ${tail.split(/;|&&|\|\|/)[0]}`
-    .replace(/<<-?\s*(['"]?)[^\s'"]+\1/g, ' ').replace(/\d*[<>]+&?\s*\S+/g, ' ');
+  const line = s.slice(lineStart, at);
+  const tail = s.slice(after, (s.indexOf('\n', after) + 1 || s.length + 1) - 1).split(/;|&&|\|\|/)[0];
+  // Command boundaries, including shell keywords and a lone ( or { (not the {} in xargs -I{}).
+  const SEP = /;|&&|\|\||\n|(?:^|\s)[({](?=\s|$)|\b(?:while|until|for|do|done|if|then|else|elif|fi)\b/;
+  // A loop redirected from the heredoc (`while read l; do eval "$l"; done <<EOF`) feeds every command
+  // in it, so read the whole command up to the heredoc, not just this line (#92 NF1).
+  const parts = /\bdone\s*$/.test(line) ? s.slice(0, at).split(SEP) : [line.split(SEP).pop()];
+  parts[parts.length - 1] = `${parts.at(-1)} ${tail}`;
   let sink = 'data';
-  for (const part of segment.split('|')) {
-    const words = lex(part).words.flat();
-    const c = commandIndices(words).map((k) => words[k]);
-    if (c.some((w) => SHELLS.has(cmdName(w)) || /^[$`]/.test(w))) return 'shell';
-    if (c.some((w) => INTERPRETER.test(cmdName(w)))) sink = 'interp';
+  for (const segment of parts) {
+    for (const part of segment.replace(/<<-?\s*(['"]?)[^\s'"]+\1/g, ' ').replace(/\d*[<>]+&?\s*\S+/g, ' ').split('|')) {
+      const words = lex(part).words.flat();
+      const c = commandIndices(words).map((k) => words[k]);
+      if (c.some((w) => SHELLS.has(cmdName(w)) || /^[$`]/.test(w))) return 'shell';
+      if (c.some((w) => INTERPRETER.test(cmdName(w)))) sink = 'interp';
+    }
   }
   return sink;
+}
+
+/**
+ * What an UNQUOTED heredoc body makes the shell run or expand (#92 NF1): the text of every live
+ * `$( … )` and backtick substitution (an escaped \\$ or \\` is literal), and whether a $VAR or ${…}
+ * is expanded. -> { code: [command text…], expands }.
+ */
+function bodyExpansions(body) {
+  const code = [];
+  let expands = false;
+  for (let i = 0; i < body.length; i += 1) {
+    const ch = body[i];
+    if (ch === '\\') { i += 1; continue; }
+    if (ch === '$' && body[i + 1] === '(') {
+      let depth = 0;
+      let j = i + 1;
+      for (; j < body.length; j += 1) {
+        if (body[j] === '\\') { j += 1; continue; }
+        if (body[j] === '(') depth += 1;
+        else if (body[j] === ')' && --depth === 0) break;
+      }
+      code.push(body.slice(i + 2, j)); // unbalanced: the rest of the body, fail closed
+      expands = true;
+      i = j;
+      continue;
+    }
+    if (ch === '`') {
+      let j = i + 1;
+      while (j < body.length && body[j] !== '`') j += body[j] === '\\' ? 2 : 1;
+      code.push(body.slice(i + 1, j));
+      expands = true;
+      i = j;
+      continue;
+    }
+    if (ch === '$' && /[A-Za-z0-9_{@*#?$!-]/.test(body[i + 1] ?? '')) expands = true;
+  }
+  return { code, expands };
 }
 
 /**
  * Take heredoc bodies out of `cmd` (#85 F1). A body fed to cat, tee or gh is data and is never
  * lexed (an escalation comment may mention node, git push or .claude/settings.json). A body fed to
  * a shell is commands and stays in; one fed to an interpreter is code for interpreterFindings.
- * Quote-aware, so `echo "<<X"` opens nothing. -> { text, shellCode, interpCode }.
+ * Quote-aware, so `echo "<<X"` opens nothing. An UNQUOTED delimiter makes the shell expand the
+ * body whatever reads it, so its substitutions are commands (shellCode) and any expansion sets
+ * `subst` (#92 NF1); a quoted delimiter (<<'EOF', <<"EOF", <<\EOF) keeps the body inert.
+ * -> { text, shellCode, interpCode, subst }.
  */
 export function splitHeredocs(cmd) {
   const s = String(cmd ?? '');
-  if (!s.includes('<<')) return { text: s, shellCode: '', interpCode: '' };
+  if (!s.includes('<<')) return { text: s, shellCode: '', interpCode: '', subst: false };
+  let subst = false;
   let out = '';
   const shell = [];
   const interp = [];
@@ -469,7 +518,8 @@ export function splitHeredocs(cmd) {
     if (ch === '<' && s[i + 1] === '<' && s[i + 2] !== '<' && s[i - 1] !== '<') {
       const m = /^<<(-?)[ \t]*(?:'([^'\n]+)'|"([^"\n]+)"|\\?([A-Za-z_][\w-]*))/.exec(s.slice(i));
       if (m) {
-        pending.push({ delim: m[2] ?? m[3] ?? m[4], strip: m[1] === '-', sink: heredocSink(s, lineStart, i, i + m[0].length) });
+        const quoted = m[4] === undefined || m[0].includes('\\');
+        pending.push({ delim: m[2] ?? m[3] ?? m[4], strip: m[1] === '-', quoted, sink: heredocSink(s, lineStart, i, i + m[0].length) });
         out += m[0];
         i += m[0].length - 1;
         continue;
@@ -488,7 +538,14 @@ export function splitHeredocs(cmd) {
           body.push(line);
         }
         if (p.sink === 'shell') shell.push(body.join('\n'));
-        else if (p.sink === 'interp') interp.push(body.join('\n'));
+        else {
+          if (p.sink === 'interp') interp.push(body.join('\n'));
+          if (!p.quoted) {
+            const x = bodyExpansions(body.join('\n'));
+            shell.push(...x.code);
+            subst ||= x.expands;
+          }
+        }
       }
       if (pending.length) { pending.length = 0; i = j - 1; }
       lineStart = i + 1;
@@ -496,7 +553,7 @@ export function splitHeredocs(cmd) {
     }
     out += ch;
   }
-  return { text: out, shellCode: shell.join('\n'), interpCode: interp.join('\n') };
+  return { text: out, shellCode: shell.join('\n'), interpCode: interp.join('\n'), subst };
 }
 
 /** A script inside the installed plugin (cache or CLAUDE_PLUGIN_ROOT): the kit's own code, not the agent's. */
@@ -540,9 +597,9 @@ function interpreterFindings(simple, i, text, interpCode, ctx, depth, subst) {
 export function bashFindings(cmd, ctx = {}, depth = 0, outerSubst = false, opts = {}) {
   const found = [];
   // Interpreter code re-scanned as words (opts.skipInterpreters) is already flat: no heredocs to split.
-  const { text, shellCode, interpCode } = opts.skipInterpreters ? { text: String(cmd ?? ''), shellCode: '', interpCode: '' } : splitHeredocs(cmd);
+  const { text, shellCode, interpCode, subst: hereSubst } = opts.skipInterpreters ? { text: String(cmd ?? ''), shellCode: '', interpCode: '', subst: false } : splitHeredocs(cmd);
   const l = lex(shellCode ? `${text}\n${shellCode}` : text);
-  const subst = outerSubst || l.subst;
+  const subst = outerSubst || l.subst || hereSubst;
   for (const [simpleIndex, simple] of l.words.entries()) {
     const at = commandIndices(simple);
     const head = cmdName(simple[at[0] ?? 0] ?? '');
