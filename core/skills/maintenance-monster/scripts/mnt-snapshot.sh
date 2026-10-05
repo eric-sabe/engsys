@@ -6,6 +6,9 @@
 #
 # Usage: mnt-snapshot.sh --repo owner/name [--default-branch main]
 set -euo pipefail
+# shellcheck source=../../../lib/fleet-gh.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/fleet-gh.sh"
+fleet_gh_resolve
 
 REPO="" DEFBRANCH="main"
 while [ $# -gt 0 ]; do
@@ -16,9 +19,10 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "$REPO" ] || { echo "usage: mnt-snapshot.sh --repo owner/name [--default-branch main]" >&2; exit 2; }
+assert_gh_auth mnt-snapshot || exit 1
 
 # --- open Dependabot PRs ----------------------------------------------------
-DEPENDABOT_PRS=$(gh pr list -R "$REPO" --author "app/dependabot" --state open --limit 200 \
+DEPENDABOT_PRS=$("$FLEET_GH" pr list -R "$REPO" --author "app/dependabot" --state open --limit 200 \
   --json number,title,labels,mergeStateStatus,createdAt \
   --jq '[ .[] | {
       number, title, createdAt,
@@ -32,7 +36,7 @@ DEPENDABOT_PRS=$(gh pr list -R "$REPO" --author "app/dependabot" --state open --
 # collapse to an empty array, or the snapshot reads as clean when the
 # surface is actually unavailable. --jq emits one object per alert (not an
 # array) so --paginate's per-page output concatenates cleanly; slurp after.
-if DEP_ALERTS_RAW=$(gh api --paginate "repos/$REPO/dependabot/alerts?state=open&per_page=100" \
+if DEP_ALERTS_RAW=$("$FLEET_GH" api --paginate "repos/$REPO/dependabot/alerts?state=open&per_page=100" \
     --jq '.[] | {
       number, severity: .security_advisory.severity,
       package: .dependency.package.name,
@@ -49,7 +53,7 @@ fi
 
 # --- open CodeQL / code-scanning alerts (GHAS may be off — tolerate) -------
 # Same available-vs-zero distinction as Dependabot alerts above.
-if CODEQL_ALERTS_RAW=$(gh api --paginate "repos/$REPO/code-scanning/alerts?state=open&per_page=100" \
+if CODEQL_ALERTS_RAW=$("$FLEET_GH" api --paginate "repos/$REPO/code-scanning/alerts?state=open&per_page=100" \
     --jq '.[] | {
       number, rule: .rule.id, severity: .rule.security_severity_level
     }' 2>/dev/null); then
@@ -63,14 +67,14 @@ else
 fi
 
 # --- latest Secret Scan workflow_run on the default branch -----------------
-SECRET_SCAN=$(gh run list -R "$REPO" --branch "$DEFBRANCH" --workflow "Secret Scan" --limit 1 \
+SECRET_SCAN=$("$FLEET_GH" run list -R "$REPO" --branch "$DEFBRANCH" --workflow "Secret Scan" --limit 1 \
   --json databaseId,conclusion,status \
   --jq '.[0] // {}' 2>/dev/null || echo "{}")
 
 # --- latest push/dispatch services-ci run on the default branch (Trivy) ----
 # Trivy image-scan runs push/dispatch only, not pull_request — see
 # docs/agent-lessons/ (Trivy image-scan gate is push-only).
-SERVICES_CI=$(gh run list -R "$REPO" --branch "$DEFBRANCH" --workflow "services-ci.yml" \
+SERVICES_CI=$("$FLEET_GH" run list -R "$REPO" --branch "$DEFBRANCH" --workflow "services-ci.yml" \
   --event push --limit 1 \
   --json databaseId,conclusion,status,headSha \
   --jq '.[0] // {}' 2>/dev/null || echo "{}")

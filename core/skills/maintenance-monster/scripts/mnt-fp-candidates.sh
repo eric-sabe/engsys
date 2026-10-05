@@ -29,4 +29,8 @@
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 command -v node >/dev/null || { echo "ERROR node not found"; exit 1; }
+# shellcheck source=../../../lib/fleet-gh.sh
+. "$here/../../../lib/fleet-gh.sh"
+fleet_gh_resolve
+assert_gh_auth mnt-fp-candidates || exit 1
 exec node "$here/mnt-fp.mjs" candidates "$@"

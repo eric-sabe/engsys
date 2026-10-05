@@ -4,6 +4,9 @@
 #
 # Usage: mm-snapshot.sh --repo owner/name
 set -euo pipefail
+# shellcheck source=../../../lib/fleet-gh.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/fleet-gh.sh"
+fleet_gh_resolve
 
 REPO=""
 while [ $# -gt 0 ]; do
@@ -13,8 +16,9 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "$REPO" ] || { echo "usage: mm-snapshot.sh --repo owner/name" >&2; exit 2; }
+assert_gh_auth mm-snapshot || exit 1
 
-gh pr list -R "$REPO" --state open --limit 100 \
+"$FLEET_GH" pr list -R "$REPO" --state open --limit 100 \
   --json number,title,author,isDraft,labels,mergeStateStatus,mergeable,baseRefName,headRefName,createdAt,additions,deletions \
   --jq '[ .[] | {
       number, title, isDraft, mergeStateStatus, mergeable,

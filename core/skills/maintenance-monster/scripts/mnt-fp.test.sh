@@ -42,6 +42,8 @@ SHAPE3="hashing a high-entropy generated secret such as an API key or bearer tok
 # A stub gh: serves alert pages (?page=N) and single alerts, records PATCH calls with their -f fields.
 cat >"$T/bin/gh" <<'SH'
 #!/usr/bin/env bash
+# the wrapper's startup auth probe (engsys#90): answered, and not logged
+[ "${1:-} ${2:-}" != "api rate_limit" ] || { echo 5000; exit 0; }
 echo "gh $*" >>"$FAKE/gh.log"
 [ "${1:-}" = api ] || [ "${1:-}" = pr ] || { echo "stub gh: unsupported: $*" >&2; exit 2; }
 if [ "${2:-}" = list ] && [ "$1" = pr ]; then # gh pr list ... --limit L

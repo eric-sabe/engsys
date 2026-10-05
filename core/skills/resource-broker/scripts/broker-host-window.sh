@@ -36,6 +36,9 @@
 # `broker:host-window` label for the duration, best effort. In multi-fleet mode that issue is the
 # fleet's status issue and the owner and fence are fleet-qualified (broker-config.sh).
 set -euo pipefail
+# shellcheck source=../../../lib/fleet-gh.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/fleet-gh.sh"
+fleet_gh_resolve
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source-path=SCRIPTDIR
