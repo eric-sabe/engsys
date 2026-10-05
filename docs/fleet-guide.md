@@ -591,7 +591,8 @@ Three jobs, all rendered from `core/fleet/jobs/launchd/*.plist.tmpl` with the la
 `com.<org>.fleet.<job>`: **`fleet-supervisor`** (every 5 minutes; installed only when
 `fleet/supervisor.conf.tmpl` exists), **`gh-app-login`** (every 30 minutes; installed only when
 `GH_APP_ENV` is set) and **`fleet-relay`** (every 60 seconds; installed only in multi-fleet mode, with
-`FLEET_ID` set and a federation file, § 6.10; otherwise a loaded copy is booted out). Each is `plutil -lint`ed, then booted out and bootstrapped, so there are never two
+`FLEET_ID` set and a federation file, § 6.10, on a host that runs at least one roster session;
+otherwise a loaded copy is booted out). Each is `plutil -lint`ed, then booted out and bootstrapped, so there are never two
 copies. A same-named file in the instance's `jobs/launchd/` overrides the default, and you can add jobs
 (for example an `az-sp-login` refresh). `--only <job>` acts on one; `--unload` boots everything out.
 Logs are in `~/Library/Logs/<org>-fleet/`.
@@ -684,6 +685,7 @@ fleets:
     operator: alice                    # GitHub login of the fleet's human
     host: alice-host
     github_app: acme-fleet-alice       # App slug; the bot login is acme-fleet-alice[bot]
+    github_app_id: 1000001             # the App's numeric id (its settings page); required with 2+ enabled fleets
     cloud_identity: fleet-alice
     slack_operator: U0000000001        # Slack member id
     status_issue: 11                   # this fleet's status issue in the instance repo
@@ -755,18 +757,24 @@ another fleet is a GitHub comment carrying a `fleet-msg` header, which the other
 ```bash
 fleet msg send --to bob:acme-build --re acme/app#412 --body-file tmp/bounce.md
 fleet msg inbox acme-build              # undelivered messages for a session; --mark-read marks them
+fleet msg read <comment-url>            # fetch one, re-check it, print the body as untrusted data
 fleet relay                              # one poll by hand (the fleet-relay job runs it every minute)
 ```
 
 `send` posts on the `--re` PR or issue, or on the target fleet's `status_issue` when there is no
 `--re`, as this host's GitHub identity. The receiving relay accepts it only when that identity is the
-sending fleet's App (`github_app` in the registry), so post with the fleet's App, not a personal login.
-`--to` naming your own fleet exits 3 with `same fleet: use SendMessage to <session>`. The relay records
-each accepted message in `<instance>/.fleet/inbox/<session>.jsonl` and types one line into that
-session's tmux window: who sent it, which PR or issue, and the comment URL, never the message text. A
-session that was not running sees its waiting messages at startup through the engsys plugin's
-session-start hook. `fleet status` prints the relay's last poll and any undelivered messages; its log
-is `~/Library/Logs/<org>-fleet/fleet-relay.log`, one line per accepted, rejected or delivered message.
+sending fleet's App (`github_app`, and `github_app_id` once two fleets are enabled), so post with the
+fleet's App, not a personal login. `--to` naming your own fleet exits 3 with
+`same fleet: use SendMessage to <session>`. A merge or maintain monster sends through its fence
+(`mm-act.sh guard … -- fleet msg send …`); its write guard denies the bare command.
+
+The relay records each accepted message in `<instance>/.fleet/inbox/<session>.jsonl`, as a pointer (who
+sent it, which PR or issue, the comment URL), never the text. It sends no keystrokes. The engsys
+plugin's inbox hook shows a session its waiting pointers when it starts and on each prompt, and a
+monster also gets a `FLEET_MSG` line on its watch bus. Inside a session, `fleet msg` runs as
+`node <engsys>/core/fleet/msg.mjs inbox|read` (the hook prints the path). `fleet status` prints the
+relay's last poll and any undelivered messages. The log is `~/Library/Logs/<org>-fleet/fleet-relay.log`,
+one line per accepted or rejected message, rotated to `.1` past 1 MB.
 
 The `FLEET_ID` in `fleet.conf` is the one `fleet notify` prefixes posts with. A `FLEET_ID` in the
 Slack env file is then unnecessary; if both are set and differ, `fleet notify` warns and uses

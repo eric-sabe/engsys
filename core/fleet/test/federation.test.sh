@@ -43,9 +43,13 @@ operators_team: acme/fleet-operators
 fleets:
   alice:
     operator: alice
+    github_app: acme-fleet-alice
+    github_app_id: 1000001
     enabled: true
   bob:
     operator: bob
+    github_app: acme-fleet-bob
+    github_app_id: 1000002
     enabled: true
 repos:
   acme/app:

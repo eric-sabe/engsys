@@ -18,6 +18,8 @@
 #                          post the handover digest, release
 #   BATON_RENEW_ERROR merge <code>  renews failing (once per streak); fences refuse past the deadline
 #   BATON_IDLE merge …        keepalive stopped: no model activity for --pulse-max
+#   FLEET_MSG              a cross-fleet message is waiting in this session's inbox (engsys#77; multi-fleet only):
+#                          run the command the line names (msg.mjs inbox --mark-read), then msg.mjs read <url>
 #   STOP                   ledger issue closed (kill switch) — script exits
 #
 # The active PR number is read each cycle from <state-dir>/active, so one
@@ -91,6 +93,22 @@ emit_diff() {
   fi
   rm -f "$old.k" "$new.k"
   mv "$new" "$old"
+}
+
+# --- cross-fleet inbox (engsys#77) ---------------------------------------------
+# The relay records messages for this session in $FLEET_INBOX_DIR/<session>.jsonl (fleet launch sets
+# FLEET_INBOX_DIR in multi-fleet mode). One fixed FLEET_MSG line per new undelivered entry, read with
+# grep (no node per tick); the line carries no message content, only the command to run.
+INBOX_FILE="" MSG_CLI="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../fleet" 2>/dev/null && pwd)/msg.mjs"
+case "$SESSION" in '' | *[!a-z0-9-]*) ;; *) [ -z "${FLEET_INBOX_DIR:-}" ] || INBOX_FILE="$FLEET_INBOX_DIR/$SESSION.jsonl" ;; esac
+touch "$W/inbox.seen"
+inbox_event() {
+  [ -n "$INBOX_FILE" ] && [ -f "$INBOX_FILE" ] || return 0
+  grep -F '"delivered_at":null' "$INBOX_FILE" 2>/dev/null | grep -oE '^\{"id":[0-9]+' | sort -u >"$W/inbox.new" || true
+  if [ -n "$(comm -13 "$W/inbox.seen" "$W/inbox.new")" ]; then
+    echo "FLEET_MSG cross-fleet message waiting: run node $MSG_CLI inbox --mark-read"
+  fi
+  mv "$W/inbox.new" "$W/inbox.seen"
 }
 
 while true; do
@@ -174,5 +192,6 @@ while true; do
     fi
   fi
 
+  inbox_event
   sleep "$INTERVAL"
 done

@@ -67,6 +67,8 @@ export const REASONS = Object.freeze({
   'author-not-bot': 'the comment author is not a GitHub App bot',
   'author-unregistered': 'the comment author is not the App of any fleet in the registry',
   'author-shared-app': 'several fleets share the author App, so the sender cannot be told apart',
+  'author-app-mismatch': 'the comment was not made through the App id the registry pins for that fleet',
+  'author-app-unpinned': 'the registry has two or more enabled fleets but no github_app_id for the sender',
   'sender-mismatch': 'the from fleet is not the fleet whose App wrote the comment',
   'sender-disabled': 'the sending fleet is disabled in the registry',
   'self-sender': 'a message from this fleet to itself (same-fleet messages use SendMessage)',
@@ -156,7 +158,8 @@ export function parse(commentBody) {
 /**
  * Decide whether a parsed message is accepted. Pure: everything it needs is passed in.
  *   msg        parse(...).msg
- *   comment    the REST issue comment ({ user: { login, type }, created_at, updated_at })
+ *   comment    the REST issue comment ({ user: { login, type }, performed_via_github_app: { id },
+ *              created_at, updated_at })
  *   registry   loadFederation(...) output (validated, defaults filled in)
  *   opts.selfFleet     FLEET_ID of the receiving fleet
  *   opts.instanceRepo  owner/name of the instance repo (holds the status issues), or null
@@ -179,6 +182,15 @@ export function verify(msg, comment, registry, { selfFleet = null, instanceRepo 
   const author = authors[0];
   if (author !== msg.from.fleet) return reject('sender-mismatch', `written by ${author}'s App, claims ${msg.from.fleet}`);
   if (!registry.fleets[author].enabled) return reject('sender-disabled', author);
+  // The login slug alone can be re-registered once an App is renamed or deleted; the numeric App id
+  // (performed_via_github_app.id, which the issue-comments API returns for every App-made comment)
+  // cannot. Required once messages can flow, i.e. with two or more enabled fleets.
+  const appId = registry.fleets[author].github_app_id;
+  if (appId) {
+    if (comment.performed_via_github_app?.id !== appId) return reject('author-app-mismatch', `${author} pins App id ${appId}`);
+  } else if (Object.values(registry.fleets).filter((f) => f.enabled).length >= 2) {
+    return reject('author-app-unpinned', `set fleets.${author}.github_app_id`);
+  }
   if (author === selfFleet) return reject('self-sender');
 
   if (comment.updated_at !== comment.created_at) return reject('edited');
