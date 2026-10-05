@@ -35,6 +35,23 @@
 // left, unread. A new session therefore never acts on its predecessor's token: if that predecessor's
 // baton is still live it sees `wait_self` and waits out the TTL.
 //
+// ## The keepalive outlives its bus (engsys#87)
+//
+// The watch bus runs under a Monitor, and a Monitor ends (expiry, crash, re-arm gap). A renewer tied
+// to the bus therefore stopped with it, and one renew error plus a gap of a few minutes let the
+// 10-minute lease run out. So the bus calls `keepalive --detach`, which starts the renewer in its
+// own process session (it survives the bus and the bus's process group) and records it in
+// `<state-dir>/baton-<role>.keepalive.pid` (pid, process start time, owner, launch). The next bus
+// adopts that process instead of starting a second one. The start time tells a live renewer from a
+// recycled pid; a mkdir lock serialises two buses starting at once; a renewer that finds the pidfile
+// naming another live renewer stops. The renewer is bounded by its owner, the claude process
+// (sessionProcess() of the bus, accepted only when `ps` shows the claude CLI): it stops when the
+// owner is gone, when the token is gone or lost, or after --pulse-max without a model renew. The
+// owner never comes from the command line: the starter writes it to a one-time nonce file
+// (`baton-<role>.keepalive.nonce-<hex>`) and passes the nonce in the child's environment; the child
+// reads and deletes the file, and refuses to run without it. It writes its BATON_* lines to
+// `baton-<role>.events` (the bus relays them to its Monitor) and its log to `baton-<role>.keepalive.log`.
+//
 // ## Holder
 //
 // `<FLEET_ID>:<session>`, or `<hostname>:<session>` in single-fleet mode (no FLEET_ID), so even one
@@ -45,9 +62,11 @@
 //
 //   startup    home check, then acquire when free/expired and home        exit 0 act | 1 don't | 3 | 4
 //   renew      [--if-due 150s] renew with the session's token             exit 0 | 1 lost | 3 | 5
-//   keepalive  [--pulse-max 20m] renew loop for the watch bus; prints BATON_* events
+//   keepalive  [--pulse-max 20m] renew loop; prints BATON_* events (attached to its caller)
+//   keepalive --detach [--pulse-max 20m]   the watch bus's call: adopt this session's running
+//              renewer, or start one detached (see "The keepalive outlives its bus")  exit 0 | 1 | 3 | 5
 //   fence      the check before a mutating act                            exit 0 held | 1 | 3 | 5
-//   guard -- <gh …|gate-request.sh …>   fence, then run the command (30 s timeout)
+//   guard -- <gh …|gate-request.sh …|fleet msg send …>   fence, then run the command (30 s timeout)
 //   merge      --pr N --sha S --method merge|squash|rebase                exit 0 merged | 1 | 3
 //   release    [--reason rotation|exit|handover]                          exit 0 | 1 lost | 3
 //   status     lease + local view (never the token)
@@ -57,12 +76,14 @@
 // github-backend's: 0 ok, 1 refused, 2 usage, 3 error, 4 newer protocol, 5 not started (no token in
 // this session).
 
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmdirSync, statSync, writeFileSync, writeSync } from "node:fs";
-import { execFile, execFileSync } from "node:child_process";
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { execFile, execFileSync, spawn as spawnProcess, spawn as spawnChild } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { hostname as osHostname } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { GIT_LOCATION_VARS } from "../git-env.mjs";
 import { EXIT as LEASE_EXIT, HOLDER_PATTERN, LeaseUsageError, PROTOCOL, createGithubLease, githubFetchClient, resolveToken } from "./github-backend.mjs";
 
 export const ROLES = Object.freeze(["merge", "maintain"]);
@@ -73,6 +94,16 @@ export const RENEW_EVERY_MS = 200_000;
 export const KEEPALIVE_EVERY_MS = 150_000;
 /** keepalive's retry after a renew error (the local deadline still bounds every act). */
 export const KEEPALIVE_RETRY_MS = 30_000;
+/**
+ * The model's renew (heartbeat, `renew`) retries a transient error (transport, 5xx, 429, a secondary
+ * rate limit) after these waits, while the local deadline holds (engsys#87).
+ */
+export const RENEW_RETRY_BACKOFF_MS = Object.freeze([2_000, 6_000]);
+/**
+ * A long-lived process (the keepalive) resolves its API token again after this long: an App
+ * installation token lives an hour and the token helper hands out one with >= 10 minutes left.
+ */
+export const TOKEN_REUSE_MS = 5 * 60_000;
 /**
  * keepalive stops renewing when the model has not touched the baton for this long (the SKILLs tick at
  * most every 10 minutes while holding, and every tick renews), so a wedged session forfeits its role
@@ -95,6 +126,8 @@ export const EXIT = Object.freeze({ ...LEASE_EXIT, NOT_STARTED: 5 });
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
 const REPO_PATTERN = /^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/;
 const HERE = dirname(fileURLToPath(import.meta.url));
+/** Branch prefixes a `--new-branch` push may create, unless ENGSYS_NEW_BRANCH_PREFIX names others (#71). */
+export const DEFAULT_NEW_BRANCH_PREFIXES = Object.freeze(["agent/"]);
 
 // ------------------------------------------------------------------------------ pure helpers --
 
@@ -150,6 +183,15 @@ export function sessionProcess({ startPid = process.ppid, ps = defaultPs } = {})
   return null;
 }
 
+/**
+ * Is this `ps` comm the claude CLI? `claude` (as a path or a bare name), or the version string the
+ * CLI renames its process to (e.g. `2.1.233`; fleet-supervisor.sh reads the same thing from tmux).
+ */
+export function isClaudeCommand(comm) {
+  const name = basename(String(comm ?? "").trim()).replace(/^-/, "");
+  return name === "claude" || /^\d+\.\d+\.\d+$/.test(name);
+}
+
 /** True while the process `{pid, start}` is the same live process. */
 export function sameProcessAlive(proc, ps = defaultPs) {
   const info = ps(proc.pid);
@@ -201,8 +243,9 @@ export async function homeCheck({ env = process.env, repo, role, cwd = process.c
  * a protocol this code can take over. A live baton held by anyone, this fleet's own session included,
  * is a wait: a relaunched session could not act on it (its token died with the old session). Any read
  * problem fails closed (no relaunch; the supervisor alerts once).
- *   -> { relaunch: boolean, code, reason, holder? }   code: free | expired | malformed | held_self |
- *      held_elsewhere | not_home | error
+ *   -> { relaunch: boolean, code, reason, holder?, forfeited? }   code: free | expired | malformed |
+ *      held_self | held_elsewhere | not_home | error. `forfeited: true` marks an expired baton whose tip
+ *      still names `ownHolder`: this session let it run out, so it can never act again (engsys#87).
  */
 export function supervisorDecision({ home, status, ownHolder }) {
   if (!home?.ok) return { relaunch: false, code: "error", reason: `registry: ${home?.reason ?? "unknown"}` };
@@ -218,7 +261,7 @@ export function supervisorDecision({ home, status, ownHolder }) {
   if (typeof protocol === "number" && protocol > PROTOCOL) {
     return { relaunch: false, code: "error", reason: `baton protocol ${protocol} is newer than ${PROTOCOL}: sync engsys on this host first` };
   }
-  if (status.expired) return { relaunch: true, code: "expired", holder: status.holder, reason: `baton of ${status.holder} expired ${status.expiresAt}` };
+  if (status.expired) return { relaunch: true, code: "expired", holder: status.holder, ...(status.holder === ownHolder ? { forfeited: true } : {}), reason: `baton of ${status.holder} expired ${status.expiresAt}` };
   if (status.malformed) return { relaunch: true, code: "malformed", reason: `baton tip is malformed (${status.reason}); the monster takes it over loudly` };
   return { relaunch: false, code: "error", reason: `baton state ${JSON.stringify(status.state)} not understood` };
 }
@@ -230,6 +273,9 @@ export function supervisorDecision({ home, status, ownHolder }) {
  *   baton-<role>.json    { holder, run, token, deadlineMs, notBeforeMs, ... }   (0600, atomic rename)
  *   baton-<role>.lost    sticky: created once with O_EXCL, never cleared by this session
  *   baton-<role>.notice  the last info notice sent (so a standby tick does not repeat it)
+ *   baton-<role>.keepalive.pid   the detached renewer: `pid|start|ownerPid|ownerStart|run`
+ *   baton-<role>.events          its BATON_* lines (append-only; the watch bus relays them)
+ *   baton-<role>.keepalive.log   its stderr
  */
 export function createStateStore({ stateDir, role }) {
   if (!stateDir) throw new LeaseUsageError("--state-dir is required");
@@ -238,24 +284,26 @@ export function createStateStore({ stateDir, role }) {
   const noticeFile = join(stateDir, `baton-${role}.notice`);
   const ensureDir = () => mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   const lockDir = join(stateDir, `baton-${role}.lock`);
+  const keepalivePidFile = join(stateDir, `baton-${role}.keepalive.pid`);
   /** mkdir lock: up to ~3 s of waiting; a lock older than 10 s is a crashed writer and is broken. */
-  const withLock = (fn) => {
+  const lockAt = (dir) => (fn) => {
     ensureDir();
     for (let i = 0; ; i += 1) {
       try {
-        mkdirSync(lockDir);
+        mkdirSync(dir);
         break;
       } catch (e) {
         if (e.code !== "EEXIST") throw e;
         let age = 0;
-        try { age = Date.now() - statSync(lockDir).mtimeMs; } catch { continue; }
-        if (age > 10_000) { try { rmdirSync(lockDir); } catch { /* raced */ } continue; }
-        if (i >= 300) throw new Error(`baton state lock ${lockDir} is held`);
+        try { age = Date.now() - statSync(dir).mtimeMs; } catch { continue; }
+        if (age > 10_000) { try { rmdirSync(dir); } catch { /* raced */ } continue; }
+        if (i >= 300) throw new Error(`baton state lock ${dir} is held`);
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
       }
     }
-    try { return fn(); } finally { try { rmdirSync(lockDir); } catch { /* gone */ } }
+    try { return fn(); } finally { try { rmdirSync(dir); } catch { /* gone */ } }
   };
+  const withLock = lockAt(lockDir);
   const readJson = (f) => {
     try {
       return JSON.parse(readFileSync(f, "utf8"));
@@ -310,6 +358,44 @@ export function createStateStore({ stateDir, role }) {
     },
     notice: () => readJson(noticeFile),
     setNotice: (value) => writeJson(noticeFile, value),
+    keepaliveFiles: { pid: keepalivePidFile, events: join(stateDir, `baton-${role}.events`), log: join(stateDir, `baton-${role}.keepalive.log`) },
+    /** The recorded detached renewer -> { pid, start, ownerPid, ownerStart, run } or null. */
+    keepalivePid() {
+      let text;
+      try { text = readFileSync(keepalivePidFile, "utf8"); } catch { return null; }
+      const [pid, start, ownerPid, ownerStart, ...run] = text.replace(/\n$/, "").split("|");
+      if (!/^[1-9]\d*$/.test(pid ?? "") || !start) return null;
+      return { pid: Number(pid), start, ownerPid: Number(ownerPid), ownerStart: ownerStart ?? "", run: run.join("|") };
+    },
+    setKeepalivePid({ pid, start, ownerPid, ownerStart, run }) {
+      ensureDir();
+      const tmp = `${keepalivePidFile}.${process.pid}.tmp`;
+      writeFileSync(tmp, `${[pid, start, ownerPid, ownerStart, run ?? ""].join("|")}\n`, { mode: 0o600 });
+      renameSync(tmp, keepalivePidFile);
+    },
+    /** A one-time nonce naming the renewer's owner (0600, created exclusively) -> the nonce. */
+    writeKeepaliveNonce({ pid, start }) {
+      ensureDir();
+      const nonce = randomBytes(16).toString("hex");
+      const fd = openSync(join(stateDir, `baton-${role}.keepalive.nonce-${nonce}`), "wx", 0o600);
+      try { writeSync(fd, `${pid}|${start}\n`); } finally { closeSync(fd); }
+      return nonce;
+    },
+    /** Consume a nonce: -> the owner it names ({pid, start}), deleting it; null if absent. Usable once. */
+    takeKeepaliveNonce(nonce) {
+      if (!/^[0-9a-f]{32}$/.test(String(nonce ?? ""))) return null;
+      const f = join(stateDir, `baton-${role}.keepalive.nonce-${nonce}`);
+      const taken = `${f}.${process.pid}.taken`;
+      try { renameSync(f, taken); } catch { return null; } // atomic: only one taker wins
+      let text = "";
+      try { text = readFileSync(taken, "utf8"); } catch { /* unreadable */ }
+      try { rmSync(taken); } catch { /* gone */ }
+      const [pid, ...start] = text.replace(/\n$/, "").split("|");
+      if (!/^[1-9]\d*$/.test(pid ?? "") || !start.join("|")) return null;
+      return { pid: Number(pid), start: start.join("|") };
+    },
+    /** One bus at a time decides whether to adopt or start the renewer. */
+    withKeepaliveLock: lockAt(join(stateDir, `baton-${role}.keepalive.lock`)),
   };
 }
 
@@ -359,8 +445,10 @@ export function defaultNotify({ env = process.env, err = process.stderr } = {}) 
  *   spawn     (cmd, args, {timeout}) => Promise<{code, stdout, stderr, timedOut}>
  *   prepare   async () => void: resolve the API token; called once an op is past its offline checks
  *   remoteUrl async (dir) => origin's push URL in that checkout (for a guarded git push)
+ *   pushConfig async (dir) => that checkout's git config as [{scope, key, value}] (pushConfigEntries)
+ *   newBranchPrefixes  the prefixes a --new-branch push may create (default DEFAULT_NEW_BRANCH_PREFIXES)
  */
-export function createBaton({ lease, repo, role, holder, run = null, store, home, now = Date.now, notify = async () => false, mergeApi, spawn, sleep, prepare = null, remoteUrl = defaultRemoteUrl, log = () => {} }) {
+export function createBaton({ lease, repo, role, holder, run = null, store, home, now = Date.now, notify = async () => false, mergeApi, spawn, sleep, prepare = null, remoteUrl = defaultRemoteUrl, pushConfig = defaultPushConfig, newBranchPrefixes = DEFAULT_NEW_BRANCH_PREFIXES, log = () => {} }) {
   if (!ROLES.includes(role)) throw new LeaseUsageError(`role must be one of ${ROLES.join(", ")}, got ${JSON.stringify(role)}`);
   if (typeof repo !== "string" || !REPO_PATTERN.test(repo)) throw new LeaseUsageError(`invalid repo ${JSON.stringify(repo)}`);
   const sleepFn = sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
@@ -501,7 +589,12 @@ export function createBaton({ lease, repo, role, holder, run = null, store, home
 
   // -- renew -----------------------------------------------------------------------------------
 
-  async function renew({ source = "model", ifDueMs = 0 } = {}) {
+  /**
+   * `retries` (the model's renew: heartbeat, `renew`): retry a transient error after each wait in
+   * RENEW_RETRY_BACKOFF_MS, up to this many times, while the local deadline holds. The keepalive
+   * passes 0: it retries on its own 30 s cadence.
+   */
+  async function renew({ source = "model", ifDueMs = 0, retries = 0 } = {}) {
     const lost = store.lost();
     if (lost) return { exit: EXIT.REFUSED, result: { ok: false, lost: true, code: "lost_earlier", role, holder, lostAt: lost.at } };
     const state = store.load();
@@ -513,8 +606,17 @@ export function createBaton({ lease, repo, role, holder, run = null, store, home
       return { exit: EXIT.OK, result: { ok: true, code: "not_due", role, holder, ...localView(state) } };
     }
     await prepare?.();
-    const startMs = now();
-    const r = await lease.renew({ role, token: state.token, ttlMinutes: TTL_MINUTES, holder });
+    let startMs = now();
+    let r = await lease.renew({ role, token: state.token, ttlMinutes: TTL_MINUTES, holder });
+    for (const wait of RENEW_RETRY_BACKOFF_MS.slice(0, retries)) {
+      if (!transientRenewError(r) || !(now() + wait < (state.deadlineMs ?? 0))) break;
+      log(`renew (${source}): ${r.reason ?? r.code} (${failureText(r.failure)}); retrying in ${wait / 1000}s`);
+      await sleepFn(wait);
+      const lostMeanwhile = store.lost();
+      if (lostMeanwhile) return { exit: EXIT.REFUSED, result: { ok: false, lost: true, code: "lost_earlier", role, holder, lostAt: lostMeanwhile.at } };
+      startMs = now();
+      r = await lease.renew({ role, token: state.token, ttlMinutes: TTL_MINUTES, holder });
+    }
     if (r.ok) {
       recordGood(state.token, startMs, r.expiresInMs, { lastRenewOkMs: now(), expiresAt: r.expiresAt, ...pulse });
       const h = await home();
@@ -603,6 +705,13 @@ export function createBaton({ lease, repo, role, holder, run = null, store, home
     const fail = (reason) => ({ refusal: { exit: EXIT.ERROR, result: { sent: false, code: "error", role, holder, reason } } });
     const hasPr = /^[1-9]\d{0,9}$/.test(String(pr ?? ""));
     if (hasPr === Boolean(newBranch)) throw new LeaseUsageError("guard: a git push needs exactly one of --pr <n> (update that PR's head branch) or --new-branch (create a branch origin does not have yet)");
+    // A new branch only under a configured prefix, so a fenced push can't create a branch a
+    // branch-filtered workflow trigger (push: branches: …) watches (#71).
+    if (newBranch && !newBranchPrefixes.some((p) => push.branch.startsWith(p))) {
+      return refuse(newBranchPrefixes.length
+        ? `--new-branch creates only branches under ${newBranchPrefixes.join(", ")} (ENGSYS_NEW_BRANCH_PREFIX), not ${push.branch}`
+        : "--new-branch is refused: ENGSYS_NEW_BRANCH_PREFIX holds no valid prefix");
+    }
     let repoRes;
     let probe;
     try {
@@ -632,8 +741,22 @@ export function createBaton({ lease, repo, role, holder, run = null, store, home
     try { url = await remoteUrl(push.dir); } catch (e) { return refuse(`could not read origin's push URL: ${firstLine(e?.message ?? e)}`); }
     const urlRepo = repoOfUrl(url);
     if (!urlRepo || urlRepo.toLowerCase() !== repo.toLowerCase()) return refuse(`origin's push URL (${url}) is not ${repo}`);
-    // No hooks a dispatched agent could have planted in its worktree, no file:// or local transport.
-    return { args: ["-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=never", ...(push.dir ? ["-C", push.dir] : []), "push", ...push.flags, "origin", push.refspec] };
+    const scanned = await pushArgs(push);
+    return scanned.reason ? refuse(scanned.reason) : scanned;
+  }
+
+  /**
+   * #71 L3: the checkout was prepared by a dispatched agent, so its config may carry a planted program
+   * or a proxy. Scan it; refuse what `-c` can't mask, mask the rest. -> { args } or { reason }.
+   */
+  async function pushArgs(push) {
+    let entries;
+    try { entries = await pushConfig(push.dir); } catch (e) { return { reason: `could not read the checkout's git config: ${firstLine(e?.message ?? e)}` }; }
+    const unsafe = unsafePushConfig(entries);
+    if (unsafe.length) {
+      return { reason: `git config for this push sets ${unsafe.slice(0, 5).join(", ")}${unsafe.length > 5 ? ", …" : ""}: a guarded push never runs with credential, proxy, TLS, URL-rewrite, include or transport settings from the checkout or the environment (remove them)` };
+    }
+    return { args: [...pushConfigArgs(entries), ...(push.dir ? ["-C", push.dir] : []), "push", ...push.flags, "origin", push.refspec] };
   }
 
   async function guard(argv, { pr, newBranch = false } = {}) {
@@ -650,7 +773,14 @@ export function createBaton({ lease, repo, role, holder, run = null, store, home
       cmd.args = p.args;
     }
     return fenced(async ({ elapsedMs }) => {
-      const r = await spawn(cmd.exe, cmd.args, { timeout: ACTION_TIMEOUT_MS });
+      if (cmd.push) {
+        // #85 L4: scan again right before the push, so a key planted while the fence ran is caught.
+        const again = await pushArgs(cmd.push);
+        if (again.reason) return { exit: EXIT.REFUSED, result: { sent: false, code: "push_refused", role, holder, reason: again.reason } };
+        cmd.args = again.args;
+      }
+      // #85 L3: the push runs with a cleaned environment (no GIT_SSH_COMMAND, askpass, proxies, NODE_OPTIONS; a fixed PATH).
+      const r = await spawn(cmd.exe, cmd.args, { timeout: ACTION_TIMEOUT_MS, ...(cmd.push ? { env: pushEnv() } : {}) });
       return {
         exit: r.timedOut ? EXIT.ERROR : r.code,
         result: { sent: true, code: r.timedOut ? "timeout" : "ran", exitCode: r.code, sentAfterFenceMs: elapsedMs, ...(r.timedOut ? { reason: "killed after 30 s: its effect is unknown; re-snapshot before acting again" } : {}) },
@@ -720,23 +850,35 @@ export function createBaton({ lease, repo, role, holder, run = null, store, home
    * never keep a dead session's baton alive, and an intermediate shell can outlive claude); or the
    * model has not touched the baton for `pulseMaxMs` (a live bus under a dead model, same reason).
    */
-  async function keepalive({ out, owner = null, ownerAlive = owner ? () => sameProcessAlive(owner) : () => true, pulseMaxMs = DEFAULT_PULSE_MAX_MS, parentAlive = defaultParentAlive(), maxCycles = Infinity } = {}) {
+  /** No model pulse for `pulseMaxMs`: say BATON_IDLE once per pulse (the bus asks again every poll). */
+  function idleStop(state, pulseMaxMs, out) {
+    if (!pulseMaxMs || !(now() - (state.pulseMs ?? 0) > pulseMaxMs)) return false;
+    if (state.idleNotedFor !== (state.pulseMs ?? 0)) {
+      store.update((s) => (s && s.token === state.token ? { ...s, idleNotedFor: state.pulseMs ?? 0 } : null));
+      out(`BATON_IDLE ${role} no model activity for ${Math.round((now() - (state.pulseMs ?? 0)) / 60_000)}m: keepalive stopped renewing (the next model renew restarts it, or the lease runs out)`);
+    }
+    return true;
+  }
+
+  async function keepalive({ out, owner = null, ownerAlive = owner ? () => sameProcessAlive(owner) : () => true, pulseMaxMs = DEFAULT_PULSE_MAX_MS, parentAlive = defaultParentAlive(), stillMine = () => true, maxCycles = Infinity } = {}) {
     let announcedHandover = false;
     let erroring = false;
     for (let cycle = 0; cycle < maxCycles; cycle += 1) {
       if (!parentAlive() || !ownerAlive()) { log("keepalive: its session is gone, stopping"); return EXIT.OK; }
+      // From the second cycle on (the starter records the pidfile after spawning this process).
+      if (cycle > 0 && !stillMine()) { log("keepalive: another keepalive owns this state dir, stopping"); return EXIT.OK; }
       if (store.lost()) return EXIT.REFUSED;
       const state = store.load();
       if (!usable(state, holder, run).ok) return EXIT.OK;
-      if (pulseMaxMs && now() - (state.pulseMs ?? 0) > pulseMaxMs) {
-        // Said once per pulse: the bus restarts a stopped keepalive every poll.
-        if (state.idleNotedFor !== (state.pulseMs ?? 0)) {
-          store.update((s) => (s && s.token === state.token ? { ...s, idleNotedFor: state.pulseMs ?? 0 } : null));
-          out(`BATON_IDLE ${role} no model activity for ${Math.round((now() - (state.pulseMs ?? 0)) / 60_000)}m: keepalive stopped renewing (the next model renew restarts it, or the lease runs out)`);
-        }
-        return EXIT.OK;
+      if (idleStop(state, pulseMaxMs, out)) return EXIT.OK;
+      let r;
+      try {
+        r = await renew({ source: "keepalive" });
+      } catch (e) {
+        // A token that could not be resolved (the App token helper failed) is a renew error like
+        // any other: retry on the next cycle, never die (engsys#87).
+        r = { exit: EXIT.ERROR, result: { ok: false, code: "error", reason: firstLine(e?.message ?? e) } };
       }
-      const r = await renew({ source: "keepalive" });
       if (r.result.lost) { out(`BATON_LOST ${role} ${r.result.code}`); return EXIT.REFUSED; }
       if (r.exit === EXIT.NOT_STARTED) return EXIT.OK;
       if (r.result.ok) {
@@ -756,7 +898,65 @@ export function createBaton({ lease, repo, role, holder, run = null, store, home
     return EXIT.OK;
   }
 
-  return { startup, renew, fence, merge, guard, release, status, supervise, keepalive };
+  /**
+   * The watch bus's call (`keepalive --detach`): make sure exactly one renewer runs for this session.
+   * Adopts the recorded one when it is the same live process (pid AND start time) for the same owner
+   * and launch; otherwise stops a recorded one that is alive (another launch's), starts a new one
+   * with `spawnChild(nonce)` -> pid (the nonce file names the owner), and records it. Never starts one
+   * without an owner to bound it, and the owner must be the claude CLI (`no_owner` otherwise: the bus
+   * then runs the renewer attached, bounded by the bus as before).
+   *   isAlive ({pid, start}) => boolean      kill (pid) => void      startOf (pid) => start | null
+   *   ownerIsClaude ({pid, start}) => boolean
+   */
+  function ensureKeepalive({ owner, spawnChild, out, pulseMaxMs = DEFAULT_PULSE_MAX_MS, isAlive = (p) => sameProcessAlive(p), kill = (pid) => process.kill(pid, "SIGTERM"), startOf = (pid) => defaultPs(pid)?.start ?? null, ownerIsClaude = (o) => isClaudeCommand(defaultPs(o.pid)?.comm) }) {
+    const lost = store.lost();
+    if (lost) return { exit: EXIT.REFUSED, result: { ok: false, lost: true, code: "lost_earlier", role, holder, lostAt: lost.at } };
+    const state = store.load();
+    const u = usable(state, holder, run);
+    if (!u.ok) return { exit: EXIT.NOT_STARTED, result: { ok: false, code: u.code, role, holder, reason: u.reason } };
+    if (!owner) return { exit: EXIT.ERROR, result: { ok: false, code: "no_owner", role, holder, reason: "no session process found above this call: a detached renewer would have nothing to bound it" } };
+    if (!ownerIsClaude(owner)) return { exit: EXIT.ERROR, result: { ok: false, code: "no_owner", role, holder, reason: `the session process above this call (pid ${owner.pid}) is not the claude CLI: a detached renewer bound to it might outlive the session` } };
+    if (idleStop(state, pulseMaxMs, out)) return { exit: EXIT.OK, result: { ok: true, code: "idle", role, holder } };
+    return store.withKeepaliveLock(() => {
+      const rec = store.keepalivePid();
+      if (rec && isAlive({ pid: rec.pid, start: rec.start })) {
+        if (rec.ownerPid === owner.pid && rec.ownerStart === owner.start && rec.run === (run ?? "")) {
+          return { exit: EXIT.OK, result: { ok: true, code: "adopted", role, holder, pid: rec.pid } };
+        }
+        try { kill(rec.pid); } catch { /* already gone */ }
+        log(`keepalive: stopped the renewer of another launch or session process (pid ${rec.pid})`);
+      }
+      const nonce = store.writeKeepaliveNonce(owner);
+      let pid = null;
+      try { pid = spawnChild(nonce); } catch (e) { log(`keepalive: could not start the renewer: ${firstLine(e?.message ?? e)}`); }
+      const start = pid ? startOf(pid) : null;
+      if (!start) {
+        store.takeKeepaliveNonce(nonce);
+        if (pid) { try { kill(pid); } catch { /* gone */ } }
+        return { exit: EXIT.ERROR, result: { ok: false, code: "spawn_failed", role, holder, reason: pid ? `could not read the start time of pid ${pid}` : "the renewer did not start" } };
+      }
+      store.setKeepalivePid({ pid, start, ownerPid: owner.pid, ownerStart: owner.start, run });
+      return { exit: EXIT.OK, result: { ok: true, code: "started", role, holder, pid } };
+    });
+  }
+
+  return { startup, renew, fence, merge, guard, release, status, supervise, keepalive, ensureKeepalive };
+}
+
+/** A renew error worth retrying soon: transport, timeout, 5xx, 429 or a secondary rate limit. */
+export function transientRenewError(r) {
+  if (!r || r.ok || r.lost || r.code !== "error") return false;
+  const f = r.failure ?? {};
+  if (f.code) return false;
+  const st = f.status;
+  if (st === undefined || st === null || st === 0) return true;
+  if (st >= 500 || st === 429) return true;
+  return st === 403 && /rate limit/i.test(String(f.message ?? ""));
+}
+
+function failureText(f) {
+  if (!f) return "no detail";
+  return [f.status ? `HTTP ${f.status}` : null, f.message ?? null].filter(Boolean).join(" ") || "no detail";
 }
 
 function pick(obj, keys) {
@@ -782,7 +982,8 @@ function defaultParentAlive() {
 /**
  * What `guard` may run: `gh …` (never a merge of any form, which goes through `merge` and its sha
  * pin, and never `--admin`), `git [-C dir] push [--force-with-lease] origin <PR head branch>` (an
- * allowlist, checked against the PR by guard()), or this engsys's own gate-request.sh. The guard is a
+ * allowlist, checked against the PR by guard()), this engsys's own gate-request.sh, or `fleet msg send …`
+ * (this engsys's core/fleet/msg.mjs, the cross-fleet message post). The guard is a
  * fence, not a way around the permission system, so it runs nothing else.
  */
 export function guardCommand(argv) {
@@ -795,6 +996,13 @@ export function guardCommand(argv) {
     // path to a merge endpoint is refused.
     if ((args.includes("pr") && args.includes("merge")) || args.some((a) => /\/merges?\b|mergePullRequest|enablePullRequestAutoMerge|mergeBranch/.test(a))) {
       throw new LeaseUsageError("merges go through `merge --pr N --sha <validated head> --method …`, never gh under guard (no merge endpoint, placeholder path or GraphQL merge mutation)");
+    }
+    // #85 L5: a GraphQL document must be visible to the merge check above, never read from a file.
+    if (args.includes("api") && args.some((a) => /^\/?graphql$/i.test(a))) {
+      const fromFile = args.some((a, k) => a === "--input" || a.startsWith("--input=")
+        || (["-f", "-F", "--field", "--raw-field"].includes(a) && /^[^=]*=@/.test(String(args[k + 1] ?? "")))
+        || /^--(raw-)?field=[^=]*=@/.test(a) || /^-[fF]=?[^=]*=@/.test(a));
+      if (fromFile) throw new LeaseUsageError("guard runs gh api graphql only with the document inline (no --input, no field=@file): the merge check must see it");
     }
     return { exe: "gh", args };
   }
@@ -826,6 +1034,23 @@ export function guardCommand(argv) {
     }
     return { exe: "git", push: { dir, flags, refspec, branch: m[1] } };
   }
+  // `fleet msg send …` (a cross-fleet message, engsys#77) runs this engsys's own msg.mjs. Named as
+  // `fleet msg send`, or as this engsys's msg.mjs (directly or through node); never another subcommand.
+  if (exe === "node" && args.length) [exe, ...args] = args;
+  const ownMsg = resolve(HERE, "..", "..", "fleet", "msg.mjs");
+  const isFleetMsg = exe === "fleet" && args[0] === "msg";
+  if (isFleetMsg || basename(exe) === "msg.mjs") {
+    const sub = isFleetMsg ? args.slice(1) : args;
+    if (!isFleetMsg) {
+      let real;
+      try { real = realpathSync(exe); } catch { real = null; }
+      let ownReal;
+      try { ownReal = realpathSync(ownMsg); } catch { ownReal = ownMsg; }
+      if (real !== ownReal) throw new LeaseUsageError(`guard runs only this engsys's msg.mjs (${ownMsg})`);
+    }
+    if (sub[0] !== "send") throw new LeaseUsageError("guard runs `fleet msg send …` only (inbox and read need no fence)");
+    return { exe: process.execPath, args: [ownMsg, ...sub] };
+  }
   if (basename(exe) === "gate-request.sh") {
     const own = resolve(HERE, "..", "..", "skills", "merge-monster", "scripts", "gate-request.sh");
     let real;
@@ -835,7 +1060,7 @@ export function guardCommand(argv) {
     if (real !== ownReal) throw new LeaseUsageError(`guard runs only this engsys's gate-request.sh (${own})`);
     return { exe: "bash", args: [real, ...args] };
   }
-  throw new LeaseUsageError(`guard runs gh, git push or gate-request.sh only, not ${JSON.stringify(exe)}`);
+  throw new LeaseUsageError(`guard runs gh, git push, gate-request.sh or fleet msg send only, not ${JSON.stringify(exe)}`);
 }
 
 /** owner/repo from a GitHub remote URL (https, ssh, scp-like), or null. */
@@ -846,19 +1071,188 @@ export function repoOfUrl(url) {
 
 function defaultRemoteUrl(dir) {
   return new Promise((done, fail) => {
-    execFile("git", [...(dir ? ["-C", dir] : []), "remote", "get-url", "--push", "origin"], { timeout: 10_000 }, (err, stdout) => {
+    execFile("git", [...(dir ? ["-C", dir] : []), "remote", "get-url", "--push", "origin"], { timeout: 10_000, env: pushEnv() }, (err, stdout) => {
       if (err) fail(err); else done(String(stdout).trim());
     });
   });
 }
 
-function defaultSpawn(cmd, args, { timeout }) {
+/**
+ * `git config --list --show-scope [--show-origin] -z` output -> [{scope, origin?, key, value}]
+ * (value null for a bare key). With `origin`, each entry is scope, origin, key\nvalue.
+ */
+export function parseConfigList(out, { origin = false } = {}) {
+  const parts = String(out ?? "").split("\0");
+  const entries = [];
+  const step = origin ? 3 : 2;
+  for (let i = 0; i + step - 1 < parts.length; i += step) {
+    const kv = parts[i + step - 1];
+    const nl = kv.indexOf("\n");
+    entries.push({ scope: parts[i], ...(origin ? { origin: parts[i + 1] } : {}), key: nl < 0 ? kv : kv.slice(0, nl), value: nl < 0 ? null : kv.slice(nl + 1) });
+  }
+  return entries;
+}
+
+/** realpath of `p`, or of its deepest existing ancestor with the rest appended (a missing file still compares right). */
+function realOr(p) {
+  const abs = resolve(p);
+  try { return realpathSync(abs); } catch { /* resolve the parent */ }
+  const parent = dirname(abs);
+  return parent === abs ? abs : join(realOr(parent), basename(abs));
+}
+
+/**
+ * #85 L3: an entry git labels system or global but read from a file inside the checkout (an
+ * includeIf in ~/.gitconfig pointing there) is the checkout's config: relabel it local.
+ */
+export function localizeIncludes(entries, roots) {
+  const inside = roots.filter(Boolean).map(realOr);
+  return entries.map((e) => {
+    if (e.scope !== "system" && e.scope !== "global") return e;
+    const m = /^file:(.+)$/.exec(String(e.origin ?? ""));
+    if (!m) return e;
+    const file = realOr(m[1]);
+    return inside.some((r) => file === r || file.startsWith(`${r}/`)) ? { ...e, scope: "local" } : e;
+  });
+}
+
+function gitOut(args, env) {
+  return new Promise((done, fail) => {
+    execFile("git", args, { timeout: 10_000, maxBuffer: 4 * 1024 * 1024, env: pushEnv(env) }, (err, stdout) => (err ? fail(err) : done(String(stdout))));
+  });
+}
+
+/**
+ * The git config a guarded push from `dir` will see, read with the push's own environment
+ * (pushEnv), each entry labeled with its scope and origin; includes into the checkout count as local.
+ */
+export async function readPushConfig(dir, env = process.env) {
+  const C = dir ? ["-C", dir] : [];
+  const roots = (await gitOut([...C, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir", "--absolute-git-dir"], env)).split("\n");
+  return localizeIncludes(parseConfigList(await gitOut([...C, "config", "--list", "--show-scope", "--show-origin", "-z"], env), { origin: true }), roots);
+}
+const defaultPushConfig = (dir) => readPushConfig(dir);
+
+/** A PATH the guarded push trusts, whatever the session's PATH has become (#85 L3). */
+export const PUSH_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+
+/**
+ * The environment the guarded push (and its config scan and URL read) runs with (#85 L3): no GIT_*
+ * except the fleet's env-scoped config (GIT_CONFIG_COUNT/KEY_n/VALUE_n, which the scan checks), so no
+ * GIT_SSH_COMMAND, GIT_ASKPASS, GIT_PROXY_COMMAND, GIT_EXEC_PATH, GIT_CONFIG_PARAMETERS or repo-location
+ * vars; no SSH_ASKPASS, NODE_OPTIONS, proxies, CA overrides or preload libraries; a fixed PATH.
+ */
+export function pushEnv(env = process.env) {
+  const out = {};
+  for (const [k, v] of Object.entries(env)) {
+    if (k.startsWith("GIT_") && !(k === "GIT_CONFIG_COUNT" || /^GIT_CONFIG_(KEY|VALUE)_\d+$/.test(k))) continue;
+    if (/^(SSH_ASKPASS|NODE_OPTIONS|NODE_PATH|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_.*|SSL_CERT_FILE|SSL_CERT_DIR|CURL_CA_BUNDLE|all_proxy|ALL_PROXY|https?_proxy|HTTPS?_PROXY|ftp_proxy|FTP_PROXY)$/.test(k)) continue;
+    out[k] = v;
+  }
+  for (const k of GIT_LOCATION_VARS) delete out[k];
+  out.PATH = PUSH_PATH;
+  out.GIT_TERMINAL_PROMPT = "0";
+  return out;
+}
+
+/** Config scopes a dispatched agent prepares: the checkout's own .git/config (and includes) and config.worktree. */
+const LOCAL_SCOPES = new Set(["local", "worktree"]);
+/** `http.*` variables that change no destination, credential or TLS check (a large push may need postBuffer). */
+const HTTP_SAFE_VARS = new Set(["postbuffer", "lowspeedlimit", "lowspeedtime", "maxrequests", "minsessions", "version"]);
+
+/** The fleet's env-scoped credential helper (core/fleet/identity/git-env.sh), or a reset of the list. */
+const FLEET_HELPER = /(^$)|gh-app-token\.mjs['"]?\s+git-credential\s*$/;
+
+/**
+ * Keys a guarded push refuses, in the checkout's own config (local, worktree) and in env-scoped
+ * config (scope command, #85 L3): they can't be masked with `-c` (a URL-scoped `http.<url>.proxy`
+ * outranks an unscoped one) or they redirect where the push and its credential go. In scope command
+ * the fleet's own helper and useHttpPath are expected. -> the offending keys.
+ */
+export function unsafePushConfig(entries) {
+  const bad = new Set();
+  for (const { scope, key, value } of entries ?? []) {
+    if (!LOCAL_SCOPES.has(scope) && scope !== "command") continue;
+    const k = key.toLowerCase();
+    const last = k.slice(k.lastIndexOf(".") + 1);
+    if (scope === "command" && /^credential\./.test(k) && ((last === "helper" && FLEET_HELPER.test(String(value ?? ""))) || last === "usehttppath")) continue;
+    if (/^(credential|url|include|includeif|protocol)\./.test(k)
+      || (k.startsWith("http.") && !HTTP_SAFE_VARS.has(last))
+      || /^remote\..+\.(proxy|proxyauthmethod|vcs|receivepack|uploadpack)$/.test(k)
+      || k === "core.gitproxy"
+      || (scope === "command" && /^core\.(sshcommand|askpass|fsmonitor|hookspath)$/.test(k))) bad.add(key);
+  }
+  return [...bad];
+}
+
+/** Back-compat name (#71). */
+export const unsafeLocalConfig = unsafePushConfig;
+
+/**
+ * The `-c` options a guarded push runs with (#69 N2, #71 L3): no hooks, no file transport, and the
+ * programs git may run during a push (credential helpers, ssh, askpass, fsmonitor, gpg) taken only
+ * from config outside the checkout. `credential.helper=` empties the helper list, and git reads
+ * environment-scoped config (the fleet's GIT_CONFIG_COUNT helper) BEFORE `-c`, so the reset would
+ * drop the fleet's helper too: every helper from a non-local scope is added back after it, in order.
+ */
+export function pushConfigArgs(entries) {
+  const outside = (entries ?? []).filter((e) => !LOCAL_SCOPES.has(e.scope));
+  const lastValue = (name) => {
+    let v;
+    for (const e of outside) if (e.key.toLowerCase() === name) v = e.value ?? "";
+    return v;
+  };
+  const helpers = outside.filter((e) => /^credential\.(.+\.)?helper$/i.test(e.key));
+  const c = (kv) => ["-c", kv];
+  return [
+    ...c("core.hooksPath=/dev/null"),
+    ...c("protocol.file.allow=never"),
+    ...c("core.fsmonitor=false"),
+    ...c("http.sslVerify=true"),
+    ...c(`core.sshCommand=${lastValue("core.sshcommand") ?? "ssh"}`),
+    ...c(`core.askPass=${lastValue("core.askpass") ?? ""}`),
+    ...c("credential.helper="),
+    ...helpers.flatMap((e) => c(`${e.key}=${e.value ?? ""}`)),
+    ...c("push.gpgSign=false"),
+    ...c("push.recurseSubmodules=no"),
+  ];
+}
+
+/**
+ * ENGSYS_NEW_BRANCH_PREFIX (comma or space separated) -> prefixes; the default when unset. An invalid
+ * value yields [] so every --new-branch push is refused (fail closed) while other ops keep working.
+ */
+export function newBranchPrefixesFrom(env = process.env) {
+  const list = String(env.ENGSYS_NEW_BRANCH_PREFIX ?? "").split(/[\s,]+/).filter(Boolean);
+  if (!list.length) return [...DEFAULT_NEW_BRANCH_PREFIXES];
+  return list.every((p) => /^[A-Za-z0-9][A-Za-z0-9._\/-]{0,100}$/.test(p) && !p.includes("..")) ? list : [];
+}
+
+function defaultSpawn(cmd, args, { timeout, env = process.env }) {
+  // stdin passes through, so `guard -- gh issue comment N --body-file - <<'EOF'` sends its body.
   return new Promise((done) => {
-    execFile(cmd, args, { timeout, killSignal: "SIGTERM", maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
-      const timedOut = Boolean(err && err.killed);
-      const code = err ? (typeof err.code === "number" ? err.code : 1) : 0;
-      done({ code, stdout: String(stdout ?? ""), stderr: String(stderr ?? ""), timedOut });
-    });
+    const child = spawnChild(cmd, args, { env, stdio: ["inherit", "pipe", "pipe"] });
+    const out = [];
+    const err = [];
+    let timedOut = false;
+    let settled = false;
+    let killer = null;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+      killer = setTimeout(() => child.kill("SIGKILL"), 5_000); // a child that ignores SIGTERM
+    }, timeout);
+    child.stdout.on("data", (c) => out.push(c));
+    child.stderr.on("data", (c) => err.push(c));
+    const finish = (code) => {
+      if (settled) return; // error and close can both fire
+      settled = true;
+      clearTimeout(timer);
+      clearTimeout(killer);
+      done({ code, stdout: Buffer.concat(out).toString(), stderr: Buffer.concat(err).toString(), timedOut });
+    };
+    child.on("error", (e) => { err.push(Buffer.from(String(e?.message ?? e))); finish(127); });
+    child.on("close", (code) => finish(typeof code === "number" ? code : 1));
   });
 }
 
@@ -871,17 +1265,18 @@ function usage() {
     "usage: baton.mjs <op> --repo o/r --role merge|maintain --state-dir DIR [--session NAME] [flags]",
     "  startup                         home check + acquire; exit 0 = act, 1 = do not act",
     "  renew      [--if-due 150s]      renew this session's baton",
-    "  keepalive  [--pulse-max 20m]   renew loop for the watch bus (stops with its session)",
+    "  keepalive  [--detach] [--pulse-max 20m]   renew loop; --detach adopts or starts this session's detached one",
     "  fence                           exit 0 only while it is safe to mutate",
-    "  guard -- gh <args…> | <engsys>/skills/merge-monster/scripts/gate-request.sh <args…>",
+    "  guard -- gh <args…> | <engsys>/skills/merge-monster/scripts/gate-request.sh <args…> | fleet msg send <args…>",
     "  guard --pr N -- git [-C <dir>] push [--force-with-lease] origin HEAD:refs/heads/<PR head branch>",
-    "  guard --new-branch -- git [-C <dir>] push origin HEAD:refs/heads/<branch origin lacks>",
+    "  guard --new-branch -- git [-C <dir>] push origin HEAD:refs/heads/<agent/… branch origin lacks>",
     "  merge      --pr N --sha <validated head> --method merge|squash|rebase",
     "  release    [--reason rotation|exit|handover]",
     "  status",
     "  supervise                       relaunch decision for the fleet supervisor (no --state-dir)",
     "env: ENGSYS_SESSION (session name), ENGSYS_SESSION_RUN (per launch), FLEET_ID, FEDERATION_FILE,",
-    "     GH_TOKEN | GH_APP_ENV_FILE | gh auth token, BATON_NOTIFY_CMD | FLEET_BIN (default: this kit's core/fleet/bin/fleet notify)",
+    "     GH_TOKEN | GH_APP_ENV_FILE | gh auth token, BATON_NOTIFY_CMD | FLEET_BIN (default: this kit's core/fleet/bin/fleet notify),",
+    "     ENGSYS_NEW_BRANCH_PREFIX (prefixes --new-branch may create; default agent/)",
     "exit: 0 ok | 1 refused | 2 usage | 3 error | 4 newer protocol | 5 not started in this session",
   ].join("\n");
 }
@@ -896,7 +1291,7 @@ function parseArgs(argv) {
     if (arg === "--") { command = rest.slice(i + 1); break; }
     if (!arg.startsWith("--")) throw new LeaseUsageError(`unexpected argument ${JSON.stringify(arg)}`);
     const name = arg.slice(2);
-    if (name === "pretty" || name === "new-branch") { flags[name] = true; continue; }
+    if (name === "pretty" || name === "new-branch" || name === "detach" || name === "detached-child") { flags[name] = true; continue; }
     const value = rest[i + 1];
     if (value === undefined || value.startsWith("--")) throw new LeaseUsageError(`--${name} requires a value`);
     flags[name] = value;
@@ -938,16 +1333,35 @@ export async function main(argv, deps = {}) {
     // offline checks, so a lost or tokenless session spends no request): minting one can take
     // seconds, and that time must never count against a fence read (5 s cap) or sit between a fence
     // and its send.
+    // A failed resolve is forgotten, and a long-lived process (the keepalive) resolves again after
+    // TOKEN_REUSE_MS, so an expired App token or one failed mint never stops renewing (engsys#87).
     let tokenP = null;
-    const token = () => (tokenP ??= resolveToken({ env, owner: flags.repo.split("/")[0] }).then((t) => {
-      if (!t) throw new Error("no GitHub token could be resolved (GH_TOKEN, GH_APP_ENV_FILE or gh auth token)");
-      return t;
-    }));
-    let clientP = null;
-    const client = () => (clientP ??= token().then((t) => githubFetchClient({ token: t })));
+    let tokenAt = 0;
+    const token = () => {
+      if (!tokenP || Date.now() - tokenAt > TOKEN_REUSE_MS) {
+        tokenAt = Date.now();
+        const p = resolveToken({ env, owner: flags.repo.split("/")[0] }).then((t) => {
+          if (!t) throw new Error("no GitHub token could be resolved (GH_TOKEN, GH_APP_ENV_FILE or gh auth token)");
+          return t;
+        });
+        p.catch(() => { if (tokenP === p) tokenP = null; });
+        tokenP = p;
+      }
+      return tokenP;
+    };
+    /** A client cache that follows the token: a new token makes a new client. */
+    const clientFor = (make) => {
+      let forToken = null;
+      let clientP = null;
+      return () => {
+        const t = token();
+        if (t !== forToken) { forToken = t; clientP = t.then(make); }
+        return clientP;
+      };
+    };
+    const client = clientFor((t) => githubFetchClient({ token: t }));
     const lease = deps.lease ?? createGithubLease({ repo: flags.repo, api: deps.api ?? { request: async (m, p, b) => (await client()).request(m, p, b) }, env });
-    let mergeClientP = null;
-    const mergeClient = () => (mergeClientP ??= token().then((t) => githubFetchClient({ token: t, timeoutMs: ACTION_TIMEOUT_MS, userAgent: "engsys-baton" })));
+    const mergeClient = clientFor((t) => githubFetchClient({ token: t, timeoutMs: ACTION_TIMEOUT_MS, userAgent: "engsys-baton" }));
     const mergeApi = deps.mergeApi ?? {
       prepare: async () => { await mergeClient(); },
       async request(method, path, body) { return (await mergeClient()).request(method, path, body); },
@@ -964,6 +1378,8 @@ export async function main(argv, deps = {}) {
       notify: deps.notify ?? defaultNotify({ env, err }),
       mergeApi,
       spawn: deps.spawn ?? defaultSpawn,
+      ...(deps.pushConfig ? { pushConfig: deps.pushConfig } : {}),
+      newBranchPrefixes: newBranchPrefixesFrom(env),
       sleep: deps.sleep,
       prepare: deps.api || deps.lease ? null : async () => { await client(); },
       log: (s) => err.write(`baton: ${s}\n`),
@@ -971,7 +1387,7 @@ export async function main(argv, deps = {}) {
     let r;
     switch (op) {
       case "startup": r = await baton.startup(); break;
-      case "renew": r = await baton.renew({ source: "model", ifDueMs: flags["if-due"] ? durationMs(flags["if-due"], "if-due") : 0 }); break;
+      case "renew": r = await baton.renew({ source: "model", ifDueMs: flags["if-due"] ? durationMs(flags["if-due"], "if-due") : 0, retries: RENEW_RETRY_BACKOFF_MS.length }); break;
       case "fence": r = await baton.fence(); break;
       case "merge": r = await baton.merge({ pr: flags.pr, sha: flags.sha, method: flags.method }); break;
       case "release": r = await baton.release({ reason: flags.reason ?? "exit" }); break;
@@ -984,14 +1400,64 @@ export async function main(argv, deps = {}) {
         err.write(`baton: ${JSON.stringify(r.result)}\n`);
         return r.exit;
       }
-      case "keepalive":
+      case "keepalive": {
+        const pulseMaxMs = flags["pulse-max"] ? durationMs(flags["pulse-max"], "pulse-max") : DEFAULT_PULSE_MAX_MS;
+        const files = createStateStore({ stateDir, role: flags.role });
+        if (flags.detach) {
+          // The watch bus's call: adopt or start the detached renewer, owned by the claude process.
+          const owner = deps.owner !== undefined ? deps.owner : sessionProcess({ startPid: env.BATON_WALK_FROM || process.ppid });
+          const run = env.ENGSYS_SESSION_RUN || (deps.run !== undefined ? deps.run : fallbackRun(env));
+          const childArgs = ["keepalive", "--repo", flags.repo, "--role", flags.role, "--state-dir", stateDir, "--session", holderFor({ env, session: flags.session, hostname: deps.hostname ?? osHostname() }).session,
+            "--pulse-max", `${pulseMaxMs}ms`];
+          // The owner travels in a one-time nonce file, never on argv (#95 review L1).
+          const spawnChild = (nonce) => (deps.spawnKeepalive ?? defaultSpawnKeepalive)({
+            args: [...childArgs, "--detached-child"],
+            env: { ...env, BATON_KEEPALIVE_NONCE: nonce, ...(run ? { ENGSYS_SESSION_RUN: run } : {}) },
+            files: files.keepaliveFiles,
+          });
+          r = baton.ensureKeepalive({
+            owner,
+            spawnChild,
+            pulseMaxMs,
+            out: (line) => appendFileSync(files.keepaliveFiles.events, `${line}\n`, { mode: 0o600 }),
+            ...(deps.isAlive ? { isAlive: deps.isAlive } : {}),
+            ...(deps.kill ? { kill: deps.kill } : {}),
+            ...(deps.startOf ? { startOf: deps.startOf } : {}),
+            ...(deps.ownerIsClaude ? { ownerIsClaude: deps.ownerIsClaude } : {}),
+          });
+          break;
+        }
+        if (flags["detached-child"]) {
+          // The detached renewer itself: bounded by the owner its starter recorded in the one-time
+          // nonce file (consumed here), not by its parent (the starter exits at once); stdout is the
+          // events file. No valid nonce, no renewer.
+          const owner = files.takeKeepaliveNonce(env.BATON_KEEPALIVE_NONCE);
+          if (!owner) {
+            err.write("baton: keepalive --detached-child runs only when started by `keepalive --detach` (no valid one-time nonce)\n");
+            return EXIT.REFUSED;
+          }
+          const selfStart = (deps.startOf ?? ((pid) => defaultPs(pid)?.start ?? null))(process.pid);
+          return await baton.keepalive({
+            out: (line) => out.write(`${line}\n`),
+            owner,
+            ...(deps.ownerAlive ? { ownerAlive: deps.ownerAlive } : {}),
+            parentAlive: () => true,
+            stillMine: () => {
+              const rec = files.keepalivePid();
+              return !rec || (rec.pid === process.pid && rec.start === selfStart) || !(deps.isAlive ?? sameProcessAlive)({ pid: rec.pid, start: rec.start });
+            },
+            pulseMaxMs,
+            ...(deps.maxCycles ? { maxCycles: deps.maxCycles } : {}),
+          });
+        }
         return await baton.keepalive({
           out: (line) => out.write(`${line}\n`),
           owner: deps.owner !== undefined ? deps.owner : sessionProcess({ startPid: env.BATON_WALK_FROM || process.ppid }),
-          pulseMaxMs: flags["pulse-max"] ? durationMs(flags["pulse-max"], "pulse-max") : DEFAULT_PULSE_MAX_MS,
+          pulseMaxMs,
           ...(deps.parentAlive ? { parentAlive: deps.parentAlive } : {}),
           ...(deps.maxCycles ? { maxCycles: deps.maxCycles } : {}),
         });
+      }
       default: throw new LeaseUsageError(`unknown op ${op}`);
     }
     emit(r.result);
@@ -1015,6 +1481,23 @@ export async function main(argv, deps = {}) {
 function fallbackRun(env) {
   const p = sessionProcess({ startPid: env.BATON_WALK_FROM || process.ppid });
   return p ? `pid:${p.pid}@${p.start}` : null;
+}
+
+/**
+ * Start the detached renewer: its own process session (`detached`), so it outlives the watch bus and
+ * the bus's process group; stdout appends to the events file, stderr to the log. -> its pid.
+ */
+function defaultSpawnKeepalive({ args, env, files }) {
+  const outFd = openSync(files.events, "a", 0o600);
+  const errFd = openSync(files.log, "a", 0o600);
+  try {
+    const child = spawnProcess(process.execPath, [fileURLToPath(import.meta.url), ...args], { detached: true, stdio: ["ignore", outFd, errFd], env });
+    child.unref();
+    return child.pid;
+  } finally {
+    closeSync(outFd);
+    closeSync(errFd);
+  }
 }
 
 /** `supervise` reads no local state. */

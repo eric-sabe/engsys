@@ -40,13 +40,22 @@
 # in single-fleet mode) AND nobody holds a live baton (free, released, expired, or malformed). A live
 # baton held by another fleet's session, or by this session itself, is a wait: a relaunched session
 # could not act on it. A lease or registry read that fails is a wait too, alerted ONCE via NOTIFY_CMD
-# (incident baton-read-<name>, resolved when it reads clean). Two triggers exist only for them:
+# (incident baton-read-<name>, resolved when it reads clean). Three triggers exist only for them:
 #   heartbeat "handover" + proc exited          → relaunch when the baton allows (the old home released
 #                                                  it; its heartbeat on the shared ledger is fresh)
 #   heartbeat stale + proc ALIVE, idle at its    → relaunch when the baton allows: a session whose
 #     prompt                                       lease ran out (lost, or wedged) never renews again,
 #                                                  so staleness + idle + a forfeited lease is three
 #                                                  signals, not one. Mid-turn stays never-killed.
+#   heartbeat >= FORFEIT_CHECK_MIN old (not yet  → relaunch when `supervise` reports the baton EXPIRED
+#     stale, not "session end" / "handover") +     with its tip still naming this session
+#     proc ALIVE, idle at its prompt               (`forfeited: true`, engsys#87): the session let its
+#                                                  lease run out and stopped on BATON_LOST, so it can
+#                                                  never act again; waiting for staleness only leaves
+#                                                  the role empty. The lease is read only once the
+#                                                  heartbeat is a TTL old, so a healthy session (which
+#                                                  heartbeats at most every 10 min) costs ~no reads.
+#                                                  Once per heartbeat (latch: <name>.forfeit).
 #
 # Ledger target moves (engsys#72): the supervisor records, per session, the ledger target it last
 # launched the session against (logs/fleet-supervisor/<name>.target: repo|issue|marker|launch-epoch).
@@ -136,6 +145,20 @@ mkdir -p "$STATE_DIR"
 LOG="$STATE_DIR/supervisor.log"
 log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | tee -a "$LOG"; }
 
+# Text for people (ledger comments) shows times in the operator's zone and clock when the fleet sets
+# OPERATOR_TIMEZONE / OPERATOR_CLOCK (fleet-env.sh exports them); the log, latches and every machine
+# field stay ISO 8601 UTC. Unset, or any failure, passes the text through unchanged.
+OPERATOR_TIME_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../lib" 2>/dev/null && pwd)/operator-time.mjs"
+human_text() { # human_text <text> → text with ISO UTC timestamps in the operator's format
+  local out
+  if [ -n "${OPERATOR_TIMEZONE:-}${OPERATOR_CLOCK:-}" ] && [ -f "$OPERATOR_TIME_LIB" ] && command -v node >/dev/null 2>&1 \
+    && out="$(printf '%s' "$1" | node "$OPERATOR_TIME_LIB" humanize 2>/dev/null)"; then
+    printf '%s' "$out"
+  else
+    printf '%s' "$1"
+  fi
+}
+
 # One supervisor run at a time: launchd tick + a manual invocation overlapping
 # could both classify-then-act. mkdir lock; a lock older than 10 min is a
 # crashed run — steal via atomic mv (never rmdir a path another waiter may
@@ -224,6 +247,7 @@ pane_busy() {
 # every tick and buries the alert.
 relaunch() { # relaunch <name> <ledger> <repo> <reason>
   local name="$1" ledger="$2" repo="$3" reason="$4" out failed="$STATE_DIR/$1.launch-failed"
+  local reason_h; reason_h="$(human_text "$reason")" # the comments read to a person; the log keeps $reason as is
   log "$name: relaunching — $reason"
   tmux kill-window -t "${TMUX_SESSION}:$name" 2>/dev/null || true
   out="$(mktemp "${TMPDIR:-/tmp}/fleet-supervisor.XXXXXX")"
@@ -234,10 +258,10 @@ relaunch() { # relaunch <name> <ledger> <repo> <reason>
     log "$name: relaunched"
     printf '%s|%s\n' "${CUR_TARGET:-$repo|$ledger|}" "$(date +%s)" >"$STATE_DIR/$name.target"
     if [ -f "$failed" ]; then
-      gh issue comment "$ledger" -R "$repo" --body "✅ fleet-supervisor: \`$name\` relaunched after failed attempts since $(cat "$failed") ($reason, $(date -u +%Y-%m-%dT%H:%M:%SZ)). Startup reconcile recovers state from this ledger + state.md." >/dev/null || true
+      gh issue comment "$ledger" -R "$repo" --body "✅ fleet-supervisor: \`$name\` relaunched after failed attempts since $(human_text "$(cat "$failed")") ($reason_h, $(human_text "$(date -u +%Y-%m-%dT%H:%M:%SZ)")). Startup reconcile recovers state from this ledger + state.md." >/dev/null || true
       rm -f "$failed"
     else
-      gh issue comment "$ledger" -R "$repo" --body "🔁 fleet-supervisor: relaunched \`$name\` ($reason, $(date -u +%Y-%m-%dT%H:%M:%SZ)). Startup reconcile recovers state from this ledger + state.md." >/dev/null || true
+      gh issue comment "$ledger" -R "$repo" --body "🔁 fleet-supervisor: relaunched \`$name\` ($reason_h, $(human_text "$(date -u +%Y-%m-%dT%H:%M:%SZ)")). Startup reconcile recovers state from this ledger + state.md." >/dev/null || true
     fi
   else
     local tail_lines
@@ -247,7 +271,7 @@ relaunch() { # relaunch <name> <ledger> <repo> <reason>
       log "$name: RELAUNCH FAILED — already escalated (failing since $(cat "$failed")), retrying next tick"
     else
       log "$name: RELAUNCH FAILED — escalating on ledger $repo#$ledger"
-      gh issue comment "$ledger" -R "$repo" --body "🚨 fleet-supervisor: relaunch of \`$name\` FAILED ($reason). Operator needed. The supervisor retries every tick without commenting again, and comments once more when a relaunch succeeds. Launcher output:
+      gh issue comment "$ledger" -R "$repo" --body "🚨 fleet-supervisor: relaunch of \`$name\` FAILED ($reason_h). Operator needed. The supervisor retries every tick without commenting again, and comments once more when a relaunch succeeds. Launcher output:
 \`\`\`
 ${tail_lines:-(no output)}
 \`\`\`
@@ -267,6 +291,7 @@ notify() { # notify <args...> → 0 when NOTIFY_CMD ran and succeeded
 # Fails closed: anything but a clean "may relaunch" is a wait, and a read error alerts once per
 # incident (latch: <name>.baton-alerted), resolved on the first clean read after it.
 BATON_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/lease/baton.mjs"
+FORFEIT_CHECK_MIN=10 # the baton TTL (baton.mjs TTL_MINUTES): no younger heartbeat can sit on an expired lease
 baton_allows() { # baton_allows <name> <repo> <role> → 0 may relaunch
   local name="$1" repo="$2" role="$3" out rc=0 latch="$STATE_DIR/$1.baton-alerted"
   if [ -n "$BATON_CMD" ]; then
@@ -277,6 +302,7 @@ baton_allows() { # baton_allows <name> <repo> <role> → 0 may relaunch
   fi
   out="$(printf '%s' "$out" | tail -n 1 | cut -c1-300)"
   BATON_WHY="$(printf '%s' "$out" | jq -r '"\(.code): \(.reason)"' 2>/dev/null || printf '%s' "$out")"
+  BATON_FORFEITED="$(printf '%s' "$out" | jq -r 'if .forfeited == true then 1 else 0 end' 2>/dev/null || echo 0)"
   if [ "$rc" = 0 ] || [ "$rc" = 1 ]; then
     if [ -f "$latch" ]; then
       if notify --level info --incident "baton-read-$name" --resolve "Resolved: the $role baton for $repo reads clean again (since $(cat "$latch"))."; then rm -f "$latch"; fi
@@ -432,11 +458,22 @@ for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
         rm -f "$LATCH"
         relaunch "$name" "$ledger" "$REPO_SLUG" "heartbeat stale (last: ${HB_TS:-never}), session idle at its prompt, $role baton forfeited ($BATON_WHY)"
       elif [ ! -f "$LATCH" ]; then
-        gh issue comment "$ledger" -R "$REPO_SLUG" --body "⚠️ fleet-supervisor: heartbeat stale (last: ${HB_TS:-never}) but the \`$name\` process is still alive. Not touching it — a live process is never killed on staleness alone (probe-then-classify is a judgment call, not a script's). Needs a probe: operator or maintenance watchdog." >/dev/null \
+        gh issue comment "$ledger" -R "$REPO_SLUG" --body "⚠️ fleet-supervisor: heartbeat stale (last: $(human_text "${HB_TS:-never}")) but the \`$name\` process is still alive. Not touching it — a live process is never killed on staleness alone (probe-then-classify is a judgment call, not a script's). Needs a probe: operator or maintenance watchdog." >/dev/null \
           && touch "$LATCH" && log "$name: STALE+ALIVE — escalated on ledger $REPO_SLUG#$ledger"
       else
         log "$name: STALE+ALIVE — already escalated, holding"
       fi
+    elif [ -n "$role" ] && [ "$ENDED" = "0" ] && [ "$HANDOVER" = "0" ] && [ -n "$HB_EPOCH" ] \
+      && [ $(( (NOW - HB_EPOCH) / 60 )) -ge "$FORFEIT_CHECK_MIN" ] \
+      && [ "$(cat "$STATE_DIR/$name.forfeit" 2>/dev/null || true)" != "$HB_TS" ] && ! pane_busy "$name" \
+      && baton_allows "$name" "$REPO_SLUG" "$role" && [ "$BATON_FORFEITED" = "1" ]; then
+      # the session let its lease run out (header): relaunch now instead of after stale_min. Once per
+      # heartbeat: the relaunched session carries the same holder name, so until it heartbeats the
+      # lease still reads "expired, naming this session"; if it never does, the stale branch takes over.
+      DOWN=$((DOWN + 1))
+      rm -f "$LATCH"
+      relaunch "$name" "$ledger" "$REPO_SLUG" "the $role baton expired still naming this session (last heartbeat ${HB_TS}), session idle at its prompt ($BATON_WHY)"
+      printf '%s\n' "$HB_TS" >"$STATE_DIR/$name.forfeit"
     else
       UP=$((UP + 1))
       rm -f "$LATCH"

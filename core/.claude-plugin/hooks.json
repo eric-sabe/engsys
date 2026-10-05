@@ -11,7 +11,7 @@
         ]
       },
       {
-        "matcher": "Bash",
+        "matcher": "Bash|Monitor",
         "hooks": [
           {
             "type": "command",
@@ -35,6 +35,16 @@
           {
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/handback-guard.mjs\" subagent"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "grep -qs '\"delivered_at\":null' \"${FLEET_INBOX_DIR:-/nonexistent}/${ENGSYS_SESSION:-none}.jsonl\" && node \"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/fleet-inbox.mjs\" prompt; exit 0"
           }
         ]
       }
@@ -63,6 +73,14 @@
           {
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/fleet-gh-path.mjs\""
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "grep -qs '\"delivered_at\":null' \"${FLEET_INBOX_DIR:-/nonexistent}/${ENGSYS_SESSION:-none}.jsonl\" && node \"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/fleet-inbox.mjs\" session-start; exit 0"
           }
         ]
       },

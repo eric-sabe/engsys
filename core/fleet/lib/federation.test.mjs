@@ -8,7 +8,7 @@ import path from 'node:path';
 import {
   parseYaml, validateFederation, parseFederation, loadFederation, resolveFederationFile, checkFleetId,
   fleetIdProblems, getPath, roleHome, parseAddress, isOwnAddress, statusLines, main, FederationError, FLEET_ID_RE,
-  repoFromRemoteUrl, instanceRepo, statusIssueTarget,
+  repoFromRemoteUrl, instanceRepo, statusIssueTarget, registryWarnings,
 } from './federation.mjs';
 import { hermeticGit } from '../../lib/git-env.mjs';
 
@@ -19,6 +19,7 @@ fleets:
     operator: alice                         # GitHub login
     host: alice-host
     github_app: acme-fleet-alice            # bot login: acme-fleet-alice[bot]
+    github_app_id: 1000001                  # the App's numeric id (required with 2+ enabled fleets)
     cloud_identity: fleet-alice
     slack_operator: U0000000001
     status_issue: 11
@@ -27,6 +28,7 @@ fleets:
     operator: bob
     host: bob-host
     github_app: acme-fleet-bob
+    github_app_id: 1000002
     cloud_identity: fleet-bob
     slack_operator: U0000000002
     status_issue: 12
@@ -66,7 +68,7 @@ test('the docs/multi-fleet.md example parses and normalizes', () => {
   assert.equal(reg.operators_team, 'acme/fleet-operators');
   assert.deepEqual(Object.keys(reg.fleets), ['alice', 'bob']);
   assert.deepEqual(reg.fleets.alice, {
-    enabled: true, operator: 'alice', host: 'alice-host', github_app: 'acme-fleet-alice',
+    enabled: true, operator: 'alice', host: 'alice-host', github_app: 'acme-fleet-alice', github_app_id: 1000001,
     cloud_identity: 'fleet-alice', slack_operator: 'U0000000001', status_issue: 11,
   });
   assert.deepEqual(reg.repos['acme/app'].merge, { home: 'alice', ledger: 101, standby: ['bob'], failover: 'escalate' });
@@ -136,6 +138,19 @@ test('rejects: bad fleet field values', () => {
   assert.match(f('status_issue: 0'), /status_issue: must be a positive issue number, got 0/);
   assert.match(f('status_issue: "11"'), /status_issue: must be a positive issue number, got "11"/);
   assert.match(f('enabled: "true"'), /enabled: must be true or false/);
+  assert.match(f('github_app_id: 0'), /github_app_id: must be the App's numeric id/);
+  assert.match(f('github_app_id: "5013025"'), /github_app_id: must be the App's numeric id/);
+  assert.match(f('github_app_id: 5013025'), /github_app_id: set github_app/);
+});
+
+test('registryWarnings: github_app_id is required once two or more fleets are enabled (engsys#77 L3)', () => {
+  const reg = parseFederation(DOC);
+  assert.deepEqual(registryWarnings(reg), []);
+  const unpinned = parseFederation(DOC.replace('    github_app_id: 1000002\n', ''));
+  assert.deepEqual(registryWarnings(unpinned), ['fleets.bob.github_app_id is not set: with 2 enabled fleets it is required (cross-fleet messages from bob are rejected until it is)']);
+  assert.match(statusLines(unpinned, { fleetId: 'alice', file: 'f.yml' }).join('\n'), /WARNING fleets\.bob\.github_app_id is not set/);
+  const oneEnabled = parseFederation(DOC.replace('    github_app_id: 1000002\n', '').replace(/(status_issue: 12\n    enabled: )true/, '$1false'));
+  assert.deepEqual(registryWarnings(oneEnabled), []);
 });
 
 test('rejects: malformed operators_team and operators entries', () => {
@@ -484,4 +499,51 @@ test('cli status-issue: owner/repo#N, exit 3 in single-fleet mode, exit 1 when u
   assert.match(r.err, /not declared/);
   r = cli(['status-issue', 'extra', '--file', f], env);
   assert.equal(r.code, 1);
+});
+
+// --- operator time format (#89) -------------------------------------------------------------------
+
+test('a fleet may set timezone and clock; both are kept', () => {
+  const reg = parseFederation(`version: 1
+fleets:
+  eric:
+    timezone: America/New_York
+    clock: 12h
+  bob:
+    timezone: Europe/Berlin
+    clock: 24h
+`);
+  assert.equal(reg.fleets.eric.timezone, 'America/New_York');
+  assert.equal(reg.fleets.eric.clock, '12h');
+  assert.equal(reg.fleets.bob.clock, '24h');
+});
+
+test('timezone and clock are optional', () => {
+  const reg = parseFederation('version: 1\nfleets:\n  eric:\n    enabled: true\n');
+  assert.equal(reg.fleets.eric.timezone, undefined);
+  assert.equal(reg.fleets.eric.clock, undefined);
+});
+
+test('an invalid zone fails validation, naming the fleet and key', () => {
+  assert.throws(
+    () => parseFederation('version: 1\nfleets:\n  eric:\n    timezone: Mars/Olympus\n'),
+    (e) => e instanceof FederationError && /fleets\.eric\.timezone: must be an IANA time zone name/.test(e.message),
+  );
+});
+
+test('an invalid clock fails validation', () => {
+  assert.throws(
+    () => parseFederation('version: 1\nfleets:\n  eric:\n    clock: 13h\n'),
+    (e) => e instanceof FederationError && /fleets\.eric\.clock: must be 12h or 24h/.test(e.message),
+  );
+});
+
+test('get reads the new keys for the shell', () => {
+  const d = tmp();
+  const f = path.join(d, 'federation.yml');
+  fs.writeFileSync(f, 'version: 1\nfleets:\n  eric:\n    timezone: America/New_York\n    clock: 12h\n');
+  let out = '';
+  const code = main(['get', 'fleets.eric.clock', '--file', f], { out: { write: (s) => { out += s; } }, err: { write() {} } });
+  assert.equal(code, 0);
+  assert.equal(out.trim(), '12h');
 });

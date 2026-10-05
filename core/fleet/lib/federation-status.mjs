@@ -17,6 +17,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ghApiClient } from '../../lib/gate-check.mjs';
+import { formatFromEnv, isConfigured } from '../../lib/operator-time.mjs';
 import { createGithubLease, fleetOf, RELEASED_HOLDER } from '../../lib/lease/github-backend.mjs';
 import {
   ROLES, FederationError, checkFleetId, instanceRepo, loadFederation, resolveFederationFile,
@@ -133,9 +134,15 @@ function table(headers, rows) {
   return [line(headers), ...rows.map(line)];
 }
 
-/** The plain-text rendering of a `collect` result. */
-export function render(data) {
+/**
+ * The plain-text rendering of a `collect` result. With an operator time format in `env`
+ * (OPERATOR_TIMEZONE / OPERATOR_CLOCK) it adds an "as of" line and the baton expiry as a clock time;
+ * without one the table is unchanged. The JSON view never changes: it stays ISO 8601 UTC.
+ */
+export function render(data, env = {}) {
   const out = [];
+  const human = isConfigured(env);
+  if (human) out.push(`as of ${formatFromEnv(data.generatedAt, env)}`, '');
   const fleetRows = data.fleets.map((f) => [
     f.id, f.operator ?? '-', f.enabled ? 'yes' : 'no',
     f.statusIssue ? `${f.statusIssue.repo ?? '?'}#${f.statusIssue.number}` : '-',
@@ -149,6 +156,7 @@ export function render(data) {
     let expires = '-';
     if (b.state === 'error' || b.state === 'unknown') expires = '?';
     else if (b.expiresInSec !== null) expires = b.expiresInSec > 0 ? humanSeconds(b.expiresInSec) : `expired ${humanSeconds(b.expiresInSec)} ago`;
+    if (human && b.expiresAt && expires !== '-' && expires !== '?') expires += ` (${formatFromEnv(b.expiresAt, env)})`;
     const holder = b.holder ?? (b.state === 'free' ? '-' : '?');
     return [b.repo, b.role, b.home, b.standby.length ? b.standby.join(',') : '-', holder, expires, b.flag ? '!' : ''];
   });
@@ -190,7 +198,7 @@ export async function main(argv, { env = process.env, out = process.stdout, err 
     const data = await collect(reg, { file: target, env, ...(api ? { api } : {}), ...(now ? { now } : {}), ...(leaseFor ? { leaseFor } : {}) });
     data.federation = true;
     if (json) say(JSON.stringify(data, null, 2));
-    else for (const l of render(data)) say(l);
+    else for (const l of render(data, env)) say(l);
     return 0;
   } catch (e) {
     if (e instanceof FederationError) { err.write(`federation-status: ${e.message}\n`); return 1; }
