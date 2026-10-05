@@ -43,9 +43,13 @@ operators_team: acme/fleet-operators
 fleets:
   alice:
     operator: alice
+    github_app: acme-fleet-alice
+    github_app_id: 1000001
     enabled: true
   bob:
     operator: bob
+    github_app: acme-fleet-bob
+    github_app_id: 1000002
     enabled: true
 repos:
   acme/app:
@@ -149,6 +153,7 @@ conf
 run fleet launch
 rc_is "single-fleet launch exits 0" 0
 hasnt "single-fleet: no FLEET_ID in the env" "$(cat "$I/.fleet/env/session.env")" "FLEET_ID"
+hasnt "single-fleet: no inbox dir either" "$(cat "$I/.fleet/env/session.env")" "FLEET_INBOX_DIR"
 hasnt "…and no registry warning" "$OUT" "federation"
 conf FLEET_ID=alice
 run fleet launch
@@ -156,6 +161,7 @@ rc_is "launch with FLEET_ID exits 0" 0
 S="$(cat "$I/.fleet/env/session.env")"
 has "the env keeps its template content" "$S" "MARKER=1"
 has "the env carries FLEET_ID" "$S" "FLEET_ID=alice"
+has "…and the relay inbox dir for the session-start hook" "$S" "FLEET_INBOX_DIR=$I/.fleet/inbox"
 hasnt "no FEDERATION_FILE line while the file does not exist" "$S" "FEDERATION_FILE="
 got="$(env -i PATH=/usr/bin:/bin sh -c "set -a; . '$I/.fleet/env/session.env'; set +a; echo \"\$FLEET_ID\"")"
 eq "sourcing the env in sh exports FLEET_ID" "$got" "alice"

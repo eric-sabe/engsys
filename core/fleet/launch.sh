@@ -7,8 +7,9 @@
 #                                                          on PATH, and GH_TOKEN/GITHUB_TOKEN unset)
 #   fleet/roster.tmpl          → .fleet/roster            (the launcher's roster; a session line's
 #                                                          optional 5th field names a per-session env)
-# Each env also gets FLEET_ID (and FEDERATION_FILE, when that file exists, and FLEET_INSTANCE_REPO, when
-# set) when fleet.conf sets FLEET_ID, and OPERATOR_TIMEZONE / OPERATOR_CLOCK when the fleet sets a time format.
+# Each env also gets FLEET_ID (and FEDERATION_FILE, when that file exists, FLEET_INSTANCE_REPO, when
+# set, and FLEET_INBOX_DIR, the relay's per-session inbox) when fleet.conf sets FLEET_ID, and
+# OPERATOR_TIMEZONE / OPERATOR_CLOCK when the fleet sets a time format.
 # then runs the launcher from PIN_DIR (the sessions' default workdir). Identity preflights belong in
 # the roster (PREFLIGHT= lines); they warn, never block.
 #
@@ -86,6 +87,8 @@ for tmpl in "$FLEET_REPO"/fleet/env/*.env.tmpl; do
     printf '# Multi-fleet identity (fleet/fleet.conf FLEET_ID; registry: FEDERATION_FILE when it exists).\nFLEET_ID=%q\n' "$FLEET_ID" >>"$dest"
     if [ -f "$FEDERATION_FILE" ]; then printf 'FEDERATION_FILE=%q\n' "$FEDERATION_FILE" >>"$dest"; fi
     if [ -n "$FLEET_INSTANCE_REPO" ]; then printf 'FLEET_INSTANCE_REPO=%q\n' "$FLEET_INSTANCE_REPO" >>"$dest"; fi
+    # Where the relay keeps each session's cross-fleet inbox; the plugin's session-start hook reads it.
+    printf 'FLEET_INBOX_DIR=%q\n' "$FLEET_STATE/inbox" >>"$dest"
   fi
   # The operator's time zone and clock (fleet-env.sh resolves them); the session-start context reads these.
   if [ -n "$OPERATOR_TIMEZONE$OPERATOR_CLOCK" ]; then

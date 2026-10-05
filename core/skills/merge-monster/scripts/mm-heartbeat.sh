@@ -6,8 +6,9 @@
 #   --state-dir  the monster's state_dir: renew this session's merge baton first (engsys#62). The
 #                heartbeat is the HOLDER's human surface, so without a held baton it is not written:
 #                exit 1 + BATON_LOST (lost: stop all mutations now) or exit 5 (no baton in this
-#                session). A renew error writes the heartbeat only while the local deadline holds
-#                (else exit 3). Prints BATON_HANDOVER <fleet> when federation.yml
+#                session). The renew retries a transient error (transport, 5xx, 429, secondary
+#                rate limit) after 2 s and 6 s while the local deadline holds (engsys#87); an error
+#                that remains writes the heartbeat only while the local deadline holds (else exit 3). Prints BATON_HANDOVER <fleet> when federation.yml
 #                moved the role's home away from this fleet.
 set -euo pipefail
 
@@ -18,6 +19,7 @@ while [ $# -gt 0 ]; do
     --issue) ISSUE="$2"; shift 2 ;;
     --status) STATUS="$2"; shift 2 ;;
     --state-dir) STATE_DIR="$2"; shift 2 ;;
+    --state-dir=*) STATE_DIR="${1#--state-dir=}"; shift ;;
     --session) SESSION="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac

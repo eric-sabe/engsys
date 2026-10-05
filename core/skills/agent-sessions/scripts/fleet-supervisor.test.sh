@@ -222,13 +222,15 @@ printf 'o/fleet|30|broker-heartbeat|%s\n' "$(( $(date +%s) - 3600 ))" >"$T/w/log
 expect "unchanged target: rotation request on an unrelated ledger is never read" "!^launch"
 
 # A 6th field (merge|maintain): a singleton monster; every relaunch also needs the lease to allow it
-# (engsys#62). The fake BATON_CMD answers from $FAKE/baton (free | expired | held_self | held_elsewhere |
-# not_home | error) and records each call.
+# (engsys#62). The fake BATON_CMD answers from $FAKE/baton (free | expired | expired_self | held_self |
+# held_elsewhere | not_home | error) and records each call. expired_self is an expired baton whose tip
+# still names this session (`forfeited: true`, engsys#87).
 cat >"$T/baton.sh" <<'SH'
 #!/usr/bin/env bash
 echo "baton $*" >>"$FAKE/actions"
 code="$(cat "$FAKE/baton")"
 case "$code" in
+  expired_self) echo '{"relaunch":true,"code":"expired","forfeited":true,"holder":"alice:acme-mm","reason":"baton of alice:acme-mm expired"}'; exit 0 ;;
   free | expired | malformed) echo "{\"relaunch\":true,\"code\":\"$code\",\"reason\":\"ok\"}"; exit 0 ;;
   held_self | held_elsewhere | not_home) echo "{\"relaunch\":false,\"code\":\"$code\",\"reason\":\"held by bob:acme-mm\"}"; exit 1 ;;
   *) echo "{\"relaunch\":false,\"code\":\"error\",\"reason\":\"baton unreadable: 502\"}"; exit 3 ;;
@@ -282,7 +284,29 @@ expect "  …escalated instead" "comment 1: .*stale"
 reset; baton held_self; ledger 90 "ok — merging #12"; pane idle; run
 expect "baton: stale + idle but its baton is still live → escalate, not relaunch" "!^launch"
 
+# The session let its baton run out and stopped on BATON_LOST (engsys#87): relaunch on the next tick,
+# not 60 minutes later when the heartbeat goes stale.
+reset; baton expired_self; ledger 12 "ok — merging #12"; pane idle; run
+expect "baton: expired still naming this session + idle, heartbeat a TTL old → relaunched now" "^launch acme-mm"
+expect "  …the reason names the forfeit" "comment 1: .*expired still naming this session"
+run   # the relaunched session idles without a heartbeat (its startup failed): same holder name, same lease
+expect "  …relaunched once per heartbeat, not every tick" "!^launch"
+reset; baton expired; ledger 12 "ok — merging #12"; pane idle; run
+expect "baton: expired but naming another holder (not this session's forfeit) → left alone" "!^launch"
+expect "  …the lease was asked" "^baton --repo o/r --role merge"
+expect "  …and nothing escalated (heartbeat not stale)" "!comment"
+reset; baton expired_self; ledger 5 "ok — merging #12"; pane idle; run
+expect "baton: heartbeat younger than the TTL → lease not even asked" "!^baton"
+reset; baton expired_self; ledger 12 "ok — merging #12"; pane busy; run
+expect "baton: forfeited but mid-turn → never killed" "!^launch"
+reset; baton expired_self; ledger 12 "session end"; pane idle; run
+expect "baton: forfeited after 'session end' → a deliberate stop stays stopped" "!^launch"
+reset; baton held_self; ledger 12 "ok — merging #12"; pane idle; run
+expect "baton: idle with its baton still live → nothing" "!^launch"
+
 printf 'TMUX_SESSION=acme\nLAUNCH_CMD=bash %s/launch.sh\nBATON_CMD=bash %s/baton.sh\nREPO=o/r\nacme-mm|1|60\n' "$T" "$T" >"$T/w/sup.conf"
+reset; baton expired_self; ledger 12 "ok — merging #12"; pane idle; run
+expect "no 6th field → no forfeit trigger" "!^launch"
 reset; baton held_elsewhere; ledger 90 "ok — merging #12"; pane exited; run
 expect "no 6th field → the lease is never consulted" "!^baton"
 expect "  …and the table runs as before" "^launch acme-mm"

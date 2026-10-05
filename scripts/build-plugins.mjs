@@ -63,6 +63,9 @@ node -e 'process.stdout.write(JSON.stringify({hookSpecificOutput:{hookEventName:
 exit 0
 `;
 
+// The cross-fleet inbox hook (engsys#77): node starts only when the session's inbox has an undelivered line.
+const INBOX_HOOK = (event) => `grep -qs '"delivered_at":null' "\${FLEET_INBOX_DIR:-/nonexistent}/\${ENGSYS_SESSION:-none}.jsonl" && node "\${CLAUDE_PLUGIN_ROOT}/.claude-plugin/fleet-inbox.mjs" ${event}; exit 0`;
+
 // ---- core plugin -------------------------------------------------------------
 out.set('core/.claude-plugin/plugin.json', json({
   $schema: SCHEMA,
@@ -83,7 +86,8 @@ out.set('core/.claude-plugin/hooks.json', json({
       // Singleton-write guard (engsys#62): in a merge/maintain monster session (ENGSYS_SINGLETON_ROLE),
       // deny GitHub writes that bypass the baton's fenced wrappers. Hooks run even under
       // --dangerously-skip-permissions; a deny here wins over the allow above.
-      { matcher: 'Bash', hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/singleton-write-guard.mjs"' }] },
+      // Monitor runs a shell command too (#85 M1).
+      { matcher: 'Bash|Monitor', hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/singleton-write-guard.mjs"' }] },
       // …and its settings/plugin-file and GitHub-MCP checks (#69 review N1, L-c).
       { matcher: 'Write|Edit|MultiEdit|NotebookEdit|mcp__.*', hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/singleton-write-guard.mjs"' }] },
     ],
@@ -92,11 +96,18 @@ out.set('core/.claude-plugin/hooks.json', json({
     SubagentStop: [
       { hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/handback-guard.mjs" subagent' }] },
     ],
+    // …and again on every prompt, so a running session hears about a message without keystrokes.
+    UserPromptSubmit: [
+      { hooks: [{ type: 'command', command: INBOX_HOOK('prompt') }] },
+    ],
     Stop: [
       { hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/handback-guard.mjs" stop' }] },
     ],
     SessionStart: [
       { hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/engsys-context.mjs"' }] },
+      // Cross-fleet inbox (engsys#77): a fleet session sees the messages the relay recorded for it. The
+      // grep keeps it free outside a multi-fleet session (needs FLEET_INBOX_DIR and ENGSYS_SESSION).
+      { hooks: [{ type: 'command', command: INBOX_HOOK('session-start') }] },
       { matcher: 'compact', hooks: [{ type: 'command', command: 'bash "${CLAUDE_PLUGIN_ROOT}/templates/post-compact-reground.sh.tmpl"' }] },
       { matcher: 'clear|resume', hooks: [{ type: 'command', command: 'bash "${CLAUDE_PLUGIN_ROOT}/templates/post-clear-reground.sh.tmpl"' }] },
     ],

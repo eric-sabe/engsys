@@ -13,7 +13,9 @@ changes land together in one PR, held unmerged until the next Claude Code
 under the `acme-<role>` names below — see [Rollout](#rollout)). Nothing here
 changes a _running_ session's behavior: a live session has already loaded its
 skill, and messaging is off unless the `messaging:` config block is present.
-Phase 2 (the GitHub channel) stays future. See the
+Phase 2 (the GitHub channel) stays future within one fleet. Between fleets, a
+polling relay built on the same untrusted-ingress rules now carries `fleet-msg`
+comments ([`multi-fleet.md` § 4](multi-fleet.md#4-talking-between-fleets)). See the
 [enqueue protocol](../core/workflows/merge-monster-protocol.md) for how sessions
 coordinate today.
 
