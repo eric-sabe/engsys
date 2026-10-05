@@ -18,6 +18,11 @@
 //                           Empty/missing/incomplete = Slack is "unconfigured" → fallback.
 //   NOTIFY_FALLBACK_ISSUE   owner/repo#N to comment on when Slack can't be reached. Empty = skip
 //                           (print the message as a warning instead).
+//   OPERATOR_TIMEZONE / OPERATOR_CLOCK
+//                           the fleet's operator time format (fleet-env.sh derives them). When either is
+//                           set, an ISO 8601 UTC timestamp in the text becomes Slack's date token
+//                           (each reader sees their own zone and clock; the fallback text is this
+//                           fleet's format) and a plain rendering in the GitHub fallback comment.
 //   FLEET_STATE             the instance's state directory; incident latches live under
 //                           $FLEET_STATE/notify/.
 //
@@ -29,6 +34,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { humanizeText, resolveSettings } from '../lib/operator-time.mjs';
 
 const LEVELS = ['info', 'action', 'alert'];
 const EMOJI = { info: 'ℹ️', action: '👋', alert: '⚠️' };
@@ -260,9 +266,13 @@ async function main() {
     level: args.level, text: args.text, re: args.re, fleetId, mention,
   });
 
+  for (const w of resolveSettings(process.env).warnings) process.stderr.write(`fleet notify: ${w}\n`);
+  const slackText = humanizeText(text, process.env, { slack: true });
+  const plainText = humanizeText(text, process.env);
+
   if (unconfiguredReason) {
     process.stderr.write(`fleet notify: ${unconfiguredReason} — Slack not posted\n`);
-    const delivered = fallback(text, fallbackIssue);
+    const delivered = fallback(plainText, fallbackIssue);
     process.exit(args.requireDelivery && !delivered ? 1 : 0);
   }
 
@@ -270,7 +280,7 @@ async function main() {
     const result = await postSlack({
       token: cfg.SLACK_BOT_TOKEN,
       channel: cfg.SLACK_CHANNEL_ID,
-      text,
+      text: slackText,
       threadTs: incident ? incident.ts : undefined,
     });
     if (args.resolve) {
@@ -284,7 +294,7 @@ async function main() {
     }
   } catch (e) {
     process.stderr.write(`fleet notify: Slack API call failed (${e.message}) — Slack not posted\n`);
-    const delivered = fallback(text, fallbackIssue);
+    const delivered = fallback(plainText, fallbackIssue);
     process.exit(args.requireDelivery && !delivered ? 1 : 0);
   }
 }

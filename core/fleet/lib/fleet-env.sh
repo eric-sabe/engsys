@@ -41,7 +41,7 @@ export FLEET_INSTANCE="$FLEET_REPO" FLEET_REPO FLEET_STATE ENV_DIR FLEET_KIT_DIR
 unset TMUX_SESSION LOG_DIR
 # The fleet's identity comes only from its own config files, never from a caller's environment (a
 # session env carries FLEET_ID too). The same goes for the per-host role filter (lib/host-roles.sh).
-unset FLEET_ID FEDERATION_FILE FLEET_INSTANCE_REPO ROLES ROSTER_EXCLUDE
+unset FLEET_ID FEDERATION_FILE FLEET_INSTANCE_REPO ROLES ROSTER_EXCLUDE OPERATOR_TIMEZONE OPERATOR_CLOCK
 fleet_load_conf "$FLEET_REPO/fleet/fleet.conf"
 [ -n "${FLEET_ORG:-}" ] || fleet_die "FLEET_ORG is not set in $FLEET_REPO/fleet/fleet.conf"
 [ -f "$HOME/.config/$FLEET_ORG/fleet.local.conf" ] && fleet_load_conf "$HOME/.config/$FLEET_ORG/fleet.local.conf"
@@ -72,11 +72,21 @@ fi
 : "${FEDERATION_FILE:=federation.yml}"
 case "$FEDERATION_FILE" in /*) ;; *) FEDERATION_FILE="$FLEET_REPO/$FEDERATION_FILE" ;; esac
 : "${FLEET_INSTANCE_REPO:=}"
+# Operator time format (core/lib/operator-time.mjs): how times read to a person. Multi-fleet mode takes
+# fleets.<FLEET_ID>.timezone / .clock from the registry; single-fleet mode reads OPERATOR_TIMEZONE /
+# OPERATOR_CLOCK from fleet.conf. Unset = UTC, 24h. Machine-read timestamps are always ISO 8601 UTC.
+: "${OPERATOR_TIMEZONE:=}"
+: "${OPERATOR_CLOCK:=}"
+if [ -n "$FLEET_ID" ] && [ -f "$FEDERATION_FILE" ] && command -v node >/dev/null 2>&1; then
+  _v="$(node "$FLEET_KIT_DIR/lib/federation.mjs" get "fleets.$FLEET_ID.timezone" --file "$FEDERATION_FILE" 2>/dev/null)" && [ -n "$_v" ] && OPERATOR_TIMEZONE="$_v"
+  _v="$(node "$FLEET_KIT_DIR/lib/federation.mjs" get "fleets.$FLEET_ID.clock" --file "$FEDERATION_FILE" 2>/dev/null)" && [ -n "$_v" ] && OPERATOR_CLOCK="$_v"
+  unset _v
+fi
 for _k in PIN_REPO PIN_DIR; do
   [ -n "${!_k:-}" ] || fleet_die "$_k is not set in $FLEET_REPO/fleet/fleet.conf (or ~/.config/$FLEET_ORG/fleet.local.conf)"
 done
 unset _k
-export FLEET_ORG PIN_REPO PIN_DIR ENGSYS_DIR ENGSYS_MARKETPLACE INSTANCE_MARKETPLACE READY_LABEL REVIEW_BLOCK_REGEX PIN_WAIT_MAX_MIN VERIFY_MAX_AGE_MIN LOG_DIR SLACK_ENV NOTIFY_FALLBACK_ISSUE FLEET_ID FEDERATION_FILE FLEET_INSTANCE_REPO
+export FLEET_ORG PIN_REPO PIN_DIR ENGSYS_DIR ENGSYS_MARKETPLACE INSTANCE_MARKETPLACE READY_LABEL REVIEW_BLOCK_REGEX PIN_WAIT_MAX_MIN VERIFY_MAX_AGE_MIN LOG_DIR SLACK_ENV NOTIFY_FALLBACK_ISSUE FLEET_ID FEDERATION_FILE FLEET_INSTANCE_REPO OPERATOR_TIMEZONE OPERATOR_CLOCK
 
 command -v jq >/dev/null || fleet_die "jq is required"
 

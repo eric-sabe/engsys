@@ -48,6 +48,7 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { wrapUntrusted } from './untrusted.mjs';
+import { formatFromEnv, isConfigured } from './operator-time.mjs';
 
 export const EXIT = Object.freeze({ APPROVED: 0, ERROR: 1, WAITING: 3, DENIED: 4 });
 
@@ -160,7 +161,7 @@ function oneLine(s, max) {
  * Render the request comment. The marker is always line 1 (check reads it only in leading
  * position). `what` is agent prose and is flattened to one line with comment markers removed.
  */
-export function renderGateRequest({ id, kind, target, what, operatorsTeam, operators, thread = 'pr' }) {
+export function renderGateRequest({ id, kind, target, what, operatorsTeam, operators, thread = 'pr', requestedAt = null }) {
   if (!GATE_ID_RE.test(id ?? '')) throw new TypeError(`gate-check: invalid gate id ${JSON.stringify(id)}`);
   if (!KIND_RE.test(kind ?? '')) throw new TypeError(`gate-check: invalid kind ${JSON.stringify(kind)}`);
   if (!TARGET_RE.test(target ?? '')) throw new TypeError(`gate-check: invalid target ${JSON.stringify(target)}`);
@@ -176,6 +177,7 @@ export function renderGateRequest({ id, kind, target, what, operatorsTeam, opera
     '',
     `**What:** ${oneLine(what, 300) || '(not stated)'}`,
     `**Target:** \`${target}\``,
+    ...(requestedAt ? [`**Requested:** ${oneLine(requestedAt, 60)}`] : []),
     '',
   ];
   if (REVIEW_KINDS.has(kind)) {
@@ -714,11 +716,16 @@ export async function checkGate(api, opts) {
   }
 }
 
+/** The request time in the operator's zone and clock, or null when the fleet sets no time format. */
+function operatorRequestedAt(env, now = new Date()) {
+  return isConfigured(env) ? formatFromEnv(now, env, { now }) : null;
+}
+
 /** Post a gate request. Refuses an id already used on the thread. */
 export async function postGateRequest(api, opts) {
   const { number, thread } = validateCommon(opts, false);
   const id = opts.gate ?? newGateId(opts.kind);
-  const body = renderGateRequest({ id, kind: opts.kind, target: opts.target, what: opts.what, operatorsTeam: opts.operatorsTeam, operators: opts.operators, thread });
+  const body = renderGateRequest({ id, kind: opts.kind, target: opts.target, what: opts.what, operatorsTeam: opts.operatorsTeam, operators: opts.operators, thread, requestedAt: operatorRequestedAt(opts.env ?? process.env) });
   const comments = await listAll(api, `/repos/${opts.repo}/issues/${number}/comments`, 'reading comments');
   if (comments.some((c) => parseGateRequest(c.body)?.id === id)) throw new Error(`a gate request with id "${id}" already exists on ${opts.repo}#${number}`);
   if (opts.dryRun) return { id, dry_run: true, body };

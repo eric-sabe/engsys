@@ -587,5 +587,30 @@ run fleet install-jobs --dry-run
 has "gh-app-login job is not installed without GH_APP_ENV" "$OUT" "skipped: com.acme.fleet.gh-app-login (GH_APP_ENV is not set)"
 rm -f "$HOME/.config/acme/fleet.local.conf"
 
+# --- fleet time: the operator time format (#89) ---------------------------------------------------
+YR="$(date -u +%Y)"
+run fleet time "$YR-10-05T19:44:00Z"
+rc_is "fleet time with no setting" 0
+eq "defaults to UTC, 24h" "$OUT" "5 Oct 19:44 UTC"
+printf 'OPERATOR_TIMEZONE=America/New_York\nOPERATOR_CLOCK=12h\n' >"$HOME/.config/acme/fleet.local.conf"
+run fleet time "$YR-10-05T19:44:00Z"
+eq "single-fleet mode reads OPERATOR_TIMEZONE / OPERATOR_CLOCK from the conf" "$OUT" "Oct 5, 3:44 PM EDT"
+run fleet time "$YR-10-05T19:44:00Z" --time
+eq "--time" "$OUT" "3:44 PM EDT"
+printf 'OPERATOR_TIMEZONE=Nope/Zone\n' >"$HOME/.config/acme/fleet.local.conf"
+run fleet time "$YR-10-05T19:44:00Z"
+rc_is "an invalid zone still renders" 0
+has "  …falling back to UTC" "$OUT" "5 Oct 19:44 UTC"
+has "  …with a warning" "$OUT" "not an IANA time zone"
+printf 'version: 1\nfleets:\n  eric:\n    timezone: Europe/Berlin\n    clock: 24h\n' >"$T/operator-time-fed.yml"
+printf 'FLEET_ID=eric\nFEDERATION_FILE=%s\nOPERATOR_TIMEZONE=America/New_York\nOPERATOR_CLOCK=12h\n' "$T/operator-time-fed.yml" >"$HOME/.config/acme/fleet.local.conf"
+run fleet time "$YR-10-05T19:44:00Z"
+eq "multi-fleet mode: the registry's timezone and clock win over the conf" "$OUT" "5 Oct 21:44 CEST"
+run fleet launch
+S_ENV="$(cat "$STATE/env/session.env")"
+has "session env carries the zone" "$S_ENV" "OPERATOR_TIMEZONE=Europe/Berlin"
+has "session env carries the clock" "$S_ENV" "OPERATOR_CLOCK=24h"
+rm -f "$HOME/.config/acme/fleet.local.conf"
+
 # =============================================================================================
 finish fleet.test

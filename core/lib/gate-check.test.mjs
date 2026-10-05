@@ -1001,3 +1001,13 @@ describe('L7: operators allowlist pinned by account id (user-owned repos, no tea
     assert.equal(JSON.parse(out.text).approval.source, 'operators allowlist');
   });
 });
+
+describe('renderGateRequest: requested time', () => {
+  test('a requestedAt line appears only when given, and the request still parses', () => {
+    const args = { id: 'deploy-prod-2', kind: 'deploy', target: 'acme/app:prod@v1.2.3', what: 'dispatch', operatorsTeam: TEAM, thread: 'issue' };
+    assert.doesNotMatch(renderGateRequest(args), /Requested/);
+    const body = renderGateRequest({ ...args, requestedAt: 'Oct 5, 3:44 PM EDT' });
+    assert.match(body, /\*\*Requested:\*\* Oct 5, 3:44 PM EDT/);
+    assert.deepEqual(parseGateRequest(body), { id: 'deploy-prod-2', kind: 'deploy', target: 'acme/app:prod@v1.2.3' });
+  });
+});

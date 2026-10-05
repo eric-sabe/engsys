@@ -354,5 +354,21 @@ reset; integrity 1; ledger2 90 "ok"; rpane; run
 expect "integrity: no singleton monster supervised → never asked" "!^integrity"
 expect "  …and the table runs as before" "^launch acme-rel"
 
+# --- operator time format (#89): comments read in the operator's zone, the log stays ISO UTC ----
+printf 'TMUX_SESSION=acme\nLAUNCH_CMD=bash %s/launch.sh\nREPO=o/r\nacme-mm|1|60\n' "$T" >"$T/w/sup.conf"
+LASTISO="$(iso 90)"
+reset; ledger 90 "ok — merging #12"; pane busy; run
+expect "no time format: the escalation comment keeps the ISO heartbeat" "comment 1: .*last: $LASTISO"
+reset; ledger 90 "ok — merging #12"; pane busy
+: >"$T/actions"; (cd "$T/w" && OPERATOR_TIMEZONE=America/New_York OPERATOR_CLOCK=12h bash "$SUP" sup.conf >/dev/null 2>&1)
+expect "12h ET: the escalation comment shows the heartbeat as a clock time" "comment 1: .*last: [A-Z][a-z][a-z] [0-9]*, [0-9]*:[0-9][0-9] [AP]M E[SD]T)"
+expect "  …and no raw ISO timestamp remains in it" "!comment 1: .*last: [0-9]\{4\}-"
+if grep -q "$LASTISO" "$T/w/logs/fleet-supervisor/supervisor.log" 2>/dev/null || grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z ' "$T/w/logs/fleet-supervisor/supervisor.log"; then
+  pass=$((pass + 1)); echo "  ok  the supervisor log keeps ISO 8601 UTC"
+else fail=$((fail + 1)); echo "  FAIL the supervisor log lost its ISO timestamps"; fi
+reset; ledger 90 "ok — merging #12"; pane exited
+: >"$T/actions"; (cd "$T/w" && OPERATOR_TIMEZONE=Europe/Berlin OPERATOR_CLOCK=24h bash "$SUP" sup.conf >/dev/null 2>&1)
+expect "24h Berlin: the relaunch comment shows the time as 24h CET/CEST" "comment 1: .*relaunched .acme-mm.*[0-9]:[0-9][0-9] CES\?T)"
+
 echo "$pass passed, $fail failed."
 [ "$fail" = 0 ]
