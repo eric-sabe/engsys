@@ -31,6 +31,7 @@ const SUITES = [
   ["node --test core/lib/lease/durable-lease.test.mjs"],
   ["node --test core/lib/lease/github-backend.test.mjs"],
   ["node --test core/lib/lease/baton.test.mjs"],
+  ["node --test core/lib/lease/guarded-push.test.mjs"],
   ["node --test core/lib/lease/pool.test.mjs"],
   ["node --test core/scripts/review-bakeoff.test.mjs"],
   ["bash core/fleet/identity/git-env.test.sh"],
