@@ -170,28 +170,39 @@ This is the cross-machine backend that `durable-lease.mjs` anticipates. The spik
 ### The `github` backend (implemented, engsys#61)
 
 [`core/lib/lease/github-backend.mjs`](../core/lib/lease/github-backend.mjs), zero dependencies, global
-`fetch`. Token: `GH_TOKEN`, else the fleet's App token helper when `GH_APP_ENV_FILE` is set, else
-`gh auth token`. Tests: `github-backend.test.mjs` next to it (offline, against an in-process fake of the
-git data API that implements the two CAS rules; a live test runs with `LEASE_GITHUB_LIVE=1
+`fetch` with a 10 s timeout on every request. Token: `GH_TOKEN`, else the fleet's App token helper when
+`GH_APP_ENV_FILE` is set, else `gh auth token`. Tests: `github-backend.test.mjs` next to it (offline,
+against an in-process fake of the git data API that implements the two CAS rules, moves its clock
+during requests and can serve lagging reads; a live test runs with `LEASE_GITHUB_LIVE=1
 LEASE_GITHUB_REPO=owner/repo` on a scratch ref it deletes afterwards).
 
 **API.** `createGithubLease({ repo, refPrefix?, fleet?, api? })` gives:
 
 | Call | What it does | Result |
 |---|---|---|
-| `acquire({ role, holder, ttlMinutes })` | create the ref, or CAS over an expired, released or malformed tip | `acquired` (with `tookOverExpired` / `tookOverMalformed` + `previous` on a takeover), `held` (holder, expiry), `protocol_unsupported`, `error` |
+| `acquire({ role, holder, ttlMinutes })` | create the ref, or CAS over an expired, released or malformed tip | `acquired` (with `tookOverExpired` / `tookOverMalformed` + `previous` on a takeover; `confirmedByRead` when an earlier unconfirmed write of ours turned out to have landed), `held` (holder, expiry; `heldBySelf` when the tip carries our NAME with a token we do not have: never "held"), `protocol_unsupported`, `error` |
 | `renew({ role, token, ttlMinutes })` (alias `heartbeat`) | CAS a commit with the same token and a new expiry | `renewed`; or **`lost: true`** with `lost` (token not on the tip, or the CAS lost and the re-read shows another holder), `expired` (our token, past expiry: no revival), `not_held`, `protocol_unsupported` |
-| `assertHeld({ role, token, minRemainingMs? })` | one read, the fence | `held: true` only if the tip carries our token and is unexpired with at least `minRemainingMs` left; every other outcome, including an error, is `held: false` |
-| `release({ role, token })` | CAS to `holder: none`, our token kept on the release commit | `released`, `already_released` / `not_held` (idempotent), `lost` (another holder's token is on the tip) |
-| `status({ role })`, `list()` | lock-free reads | `state` is `free` (no ref, or released), `held`, `unknown` (expired or malformed) or `error` |
+| `assertHeld({ role, token, minRemainingMs? })` | one read, the fence | `held: true` only if the tip carries our token, is unexpired and has at least `minRemainingMs` left as of return; a read slower than 5 s is refused (`error`, `slow_read`); every other outcome, including an error, is `held: false` |
+| `release({ role, token })` | CAS to `holder: none`, our token kept on the release commit | `released` (`wasExpired: true` if we overran the TTL: log it), `already_released` / `not_held` (idempotent), `lost` (another holder's token is on the tip), `protocol_unsupported` |
+| `status({ role })`, `list()` | lock-free reads | `state` is `free` (no ref, or released), `held`, `unknown` (expired or malformed) or `error` (unreadable, or not a baton) |
+| `breakGlass({ role, reason })` | **operator only**: force-reset the ref to `holder: none` | `broke_glass` with `previous` (what it overwrote), `not_held`, `error` |
 
-Not carried over from the file backend: `reap` (the takeover inside `acquire` is the reap; a separate
-delete step would only widen the window) and `reconcile` (nothing local to sweep).
+TTL is capped at 24 hours. Not carried over from the file backend: `reap` (the takeover inside `acquire`
+is the reap; a separate delete step would only widen the window) and `reconcile` (nothing local to
+sweep).
 
 CLI, one JSON object on stdout:
 `node core/lib/lease/github-backend.mjs status|acquire|renew|fence|release|list --repo o/r --role merge --holder fleet:session [--token T] [--ttl 10m]`.
 Exit codes: 0 ok, 1 refused (held, lost, expired, not held), 2 usage, 3 error, 4 the tip's protocol is
-newer than this code.
+newer than this code. `break-glass --repo o/r --role R --reason '<why>' --i-know` is the one operator
+action: it force-resets the ref whatever the tip holds (a hostile `protocol: 9999`, an expiry years
+out, a non-baton commit), prints what it overwrote, and refuses to run without `--i-know`. Agents and
+monsters never call it; it is for a human at a shell, and the reason goes in the commit.
+
+**Where batons live.** `refPrefix` must be under `refs/engsys/` (default `refs/engsys/batons`);
+`refs/heads`, `refs/tags` and anything else are rejected. A tip whose tree is not the empty tree is an
+`error` for every operation and never a takeover: a takeover writes an empty-tree child commit, and on
+a real branch that would read as "delete everything", which the ancestry check would allow.
 
 **Commit format.** Each baton commit points at the empty tree, has the previous tip as its parent, and
 carries the record in its message:
@@ -210,27 +221,57 @@ The first line is for humans. The rest is parsed as untrusted data: a strict lin
 size, each known key exactly once, anchored values, unknown keys ignored), never evaluated. A tip that
 fails the grammar is `malformed`: readers report it, a renewer treats it as lost, an acquirer may take
 it over (it is indistinguishable from a dead holder). The `protocol:` line is the one that outlives
-versions: a tip whose protocol is higher than the code's is refused for takeover and renew, so a fleet
-on older code stays out of a role a newer fleet holds (section 8).
+versions, and it is read first, before the size and character checks, so an old client sees "newer
+protocol" even in a message it otherwise cannot read: a tip whose protocol is higher than the code's is
+refused for takeover, renew, fence and release, so a fleet on older code stays out of a role a newer
+fleet holds (section 8). Rule for every future version: keep `protocol: N` on its own line within the
+first 4 KiB.
 
-**Clock rule.** Expiry math uses the `Date` header of the API response that observed the tip, never the
-local clock; a response without one is an error, not a local-clock decision. A new baton's `expires` is
-that server time plus the TTL. Assumptions: GitHub's front ends share one clock (NTP, well under a
-second apart) at 1-second resolution, and the observed time lags true server time by up to one
-round-trip, so a reader sees a lease as live slightly longer than it is (conservative for takeover) and
-a holder sees slightly more remaining time than it has. Callers compensate with cadence: renew at or
-under TTL/3, and pass the action's expected duration as `minRemainingMs` to the fence.
+**CAS rule.** `PATCH force:false` succeeds only if the ref's current tip is an ancestor of the new
+commit. Every writer here only fast-forwards, so that equals "the tip is still the one I read" unless
+someone force-pushed the ref back to an ancestor meanwhile, and a force-pusher is inside the repo's own
+trust boundary. "No revival" is decided on the read: a renew whose read saw the baton live may land
+after the expiry instant. That is safe, because a taker that read after expiry built on the same tip
+and the CAS lets exactly one of them through.
+
+**Clock rule.** Expiry math never uses the local clock as an instant; a response without a `Date`
+header is an error, not a local-clock decision. Decisions about someone else's baton (expired? may I
+take over?) use the `Date` of the GET that observed the ref: it lags true server time by up to one
+round-trip, which makes a lease look live slightly longer, the conservative direction. A new baton's
+`expires` is that server time plus the TTL. Numbers handed to a holder (remaining time from
+`assertHeld`, `acquire`, `renew`) never overstate: they use the latest `Date` seen during the call (the
+last GET, or the CAS response) minus the local wall-clock time elapsed since it arrived, and a fence read
+that took longer than 5 s is refused rather than answered late. Assumptions: GitHub's front ends share
+one clock (NTP, well under a second apart) at 1-second resolution. Callers still compensate with
+cadence: renew at or under TTL/3, pass the action's expected duration as `minRemainingMs`, and keep a
+local wall-clock deadline (`Date.now()`, not a monotonic clock, which stops while a laptop sleeps) past
+which no mutating action runs.
 
 **Failure semantics.** Every success is a CAS win (or, for the first claim, a successful create). A 422
 is a decision, never resent: the caller re-reads the tip and decides again (bounded rounds). 5xx and
-transport errors retry with jittered backoff, bounded; before resending a write the backend re-reads
-the tip: if it already is the commit the caller built, the write landed and is reported as the success
-it was; if it moved elsewhere, the caller lost; only an unchanged tip resends. So a retry never
-double-applies. Any other status or an exhausted retry is `error`, and an error is never `held`.
+transport errors (including the request timeout) retry with jittered backoff, bounded; before resending
+a write, and once more after the last failure, the backend re-reads the tip: if it already is the commit
+the caller built, the write landed and is reported as the success it was; if it moved elsewhere, the
+caller lost; only an unchanged tip resends. So a retry never double-applies. `acquire` also remembers
+every token the instance minted: a later read showing one of them on the tip (same holder, unexpired)
+is a confirmed win, so an unconfirmed write never strands a baton for a TTL while the process lives.
+A lagging replica can only ever cost a round (a false "lost"), never produce a false win. 429 and
+secondary rate limits are errors like any other unexpected status (no `Retry-After` handling; the
+heartbeat loop retries on its own cadence until its local deadline). Any other status or an exhausted
+retry is `error`, and an error is never `held`.
 
 The token is not a secret (anyone who can read the ref can read it): it fences stale holders, not
 hostile ones. Anyone with `contents: write` can force-push the ref, which is the repo's own trust
-boundary, not this primitive's.
+boundary, not this primitive's; break-glass is the operator's remedy for a wedged or hostile tip.
+
+**Caller rule (for the monsters' claim and fence).** TTL 10 min, renew every 3 min or less; on renew
+`error` retry with backoff, on `lost: true` stop at once and never reuse the token. Keep a local
+wall-clock deadline from the last successful renew or fence (`Date.now()` at request start plus
+`expiresInMs`, minus slack). Immediately before each mutating act, `assertHeld` with `minRemainingMs`
+covering the act's own timeout plus slack, then re-check the wall clock before sending. After a
+takeover (`tookOverExpired` / `tookOverMalformed`), wait at least that long before the first mutating
+act, so a zombie holder's in-flight action has finished or failed. `heldBySelf` and `error` are never
+held. Release on clean shutdown.
 
 ### Handover
 
