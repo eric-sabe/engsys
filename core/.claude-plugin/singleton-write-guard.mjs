@@ -345,7 +345,7 @@ const SCRIPT_INTERPRETERS = new Set(['bash', 'sh', 'zsh', 'node']);
 const SCRIPT_FILE = /\.(sh|bash|mjs|cjs|js)$/;
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 /** Commands that run the command after them, and their flags that take a value. */
-const PREFIX_COMMANDS = new Map([['env', ['-u', '-C', '-S']], ['command', []], ['exec', ['-a']], ['xargs', ['-n', '-I', '-P', '-L', '-s', '-d', '-E']], ['parallel', ['-j', '-I']],
+const PREFIX_COMMANDS = new Map([['env', ['-u', '-C', '-S']], ['command', []], ['exec', ['-a']], ['xargs', ['-n', '-I', '-P', '-L', '-s', '-d', '-E', '--max-args', '--max-procs', '--max-lines', '--delimiter']], ['parallel', ['-j', '--jobs', '-I']],
   ['timeout', ['-s', '-k']], ['nohup', []], ['sudo', ['-u', '-g']], ['nice', ['-n']], ['time', []], ['stdbuf', []]]);
 
 /**
@@ -432,9 +432,9 @@ function heredocSink(s, lineStart, at, after) {
   const tail = s.slice(after, (s.indexOf('\n', after) + 1 || s.length + 1) - 1).split(/;|&&|\|\|/)[0];
   // Command boundaries, including shell keywords and a lone ( or { (not the {} in xargs -I{}).
   const SEP = /;|&&|\|\||\n|(?:^|\s)[({](?=\s|$)|\b(?:while|until|for|do|done|if|then|else|elif|fi)\b/;
-  // A loop redirected from the heredoc (`while read l; do eval "$l"; done <<EOF`) feeds every command
-  // in it, so read the whole command up to the heredoc, not just this line (#92 NF1).
-  const parts = /\bdone\s*$/.test(line) ? s.slice(0, at).split(SEP) : [line.split(SEP).pop()];
+  // A loop, group or subshell redirected from the heredoc (`while read l; do eval "$l"; done <<EOF`,
+  // `{ …; } 0<<EOF`) feeds every command in it, so read the whole command up to the heredoc (#92 NF1).
+  const parts = /(\bdone|[})])\s*\d*$/.test(line) ? s.slice(0, at).split(SEP) : [line.split(SEP).pop()];
   parts[parts.length - 1] = `${parts.at(-1)} ${tail}`;
   let sink = 'data';
   for (const segment of parts) {
@@ -460,12 +460,18 @@ function bodyExpansions(body) {
     const ch = body[i];
     if (ch === '\\') { i += 1; continue; }
     if (ch === '$' && body[i + 1] === '(') {
+      // To the matching ), skipping quoted text: `$(echo ")"; gh pr merge 5)` is one substitution.
       let depth = 0;
+      let quote = null;
       let j = i + 1;
       for (; j < body.length; j += 1) {
-        if (body[j] === '\\') { j += 1; continue; }
-        if (body[j] === '(') depth += 1;
-        else if (body[j] === ')' && --depth === 0) break;
+        const c = body[j];
+        if (quote === "'") { if (c === "'") quote = null; continue; }
+        if (c === '\\') { j += 1; continue; }
+        if (quote === '"') { if (c === '"') quote = null; continue; }
+        if (c === "'" || c === '"') { quote = c; continue; }
+        if (c === '(') depth += 1;
+        else if (c === ')' && --depth === 0) break;
       }
       code.push(body.slice(i + 2, j)); // unbalanced: the rest of the body, fail closed
       expands = true;

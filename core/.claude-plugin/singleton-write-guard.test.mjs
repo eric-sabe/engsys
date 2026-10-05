@@ -670,6 +670,9 @@ test('#92 NF1: an unquoted heredoc runs its substitutions whatever reads it; a q
     'tee /tmp/f <<EOF\nnote: $(gh pr merge 5) done\nEOF',
     'cat <<-EOF\n\t$(git push origin HEAD)\n\tEOF',
     'cat <<EOF\n$(echo $(gh pr merge 5))\nEOF',
+    'cat <<EOF\n$(echo ")"; gh pr merge 5)\nEOF',
+    "cat <<EOF\n$(echo ')' ; gh pr merge 5)\nEOF",
+    'cat <<EOF\n$(gh pr merge 5\nEOF',
     `${ACT} guard --repo o/r --state-dir d -- gh issue comment 5 --body-file - <<EOF\n$(gh pr merge 5)\nEOF`,
     'python3 <<EOF\n$(gh pr merge 5)\nEOF',
     'gh api graphql -F query=x <<EOF\n$QUERY\nEOF',
@@ -695,7 +698,12 @@ test('#92 NF1: a heredoc feeding eval, a read loop that evals, or xargs … sh -
     "xargs -I{} sh -c {} <<'EOF'\ngh pr merge 5\nEOF",
     "xargs -n1 bash -c <<'EOF'\ngh pr merge 5\nEOF",
     "parallel sh -c {} <<'EOF'\ngh pr merge 5\nEOF",
-    "eval \"$(cat)\" <<'EOF'\ngh pr merge 5\nEOF",
+    "source /dev/stdin <<'EOF'\ngh pr merge 5\nEOF",
+    "{ while read l; do eval \"$l\"; done; } <<'EOF'\ngh pr merge 5\nEOF",
+    "while read l; do eval \"$l\"; done 0<<'EOF'\ngh pr merge 5\nEOF",
+    "(while read l; do eval \"$l\"; done) <<'EOF'\ngh pr merge 5\nEOF",
+    "parallel --jobs 2 sh -c {} <<'EOF'\ngh pr merge 5\nEOF",
+    "xargs --max-args 1 sh -c <<'EOF'\ngh pr merge 5\nEOF",
   ]) assert.ok(deniedIn(c), `should deny: ${JSON.stringify(c)}`);
   for (const c of [
     "while read l; do echo \"$l\"; done <<'EOF'\ngh pr merge 5\nEOF",
