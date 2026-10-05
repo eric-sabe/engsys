@@ -87,6 +87,7 @@ runs them for you from an **instance repo** (section 4):
 | `fleet restart` | cycle sessions onto what is installed, when you choose |
 | `fleet launch [<name>]` | render templates and start missing sessions |
 | `fleet supervise` | one supervisor tick (what the launchd job runs) |
+| `fleet verify` | check that the plugin files guarding the merge and maintain monsters match the pinned engsys release (section 7) |
 | `fleet install-jobs` | render and (re)load the launchd jobs |
 | `fleet msg send\|inbox` | send a cross-fleet message; print a session's undelivered ones (multi-fleet, § 6.10) |
 | `fleet relay` | one poll of the cross-fleet relay (what the `fleet-relay` job runs) |
@@ -1033,6 +1034,90 @@ you have not yet restarted onto costs nothing but a pin PR. For an emergency wit
 `ENGSYS_REF` and/or `INSTANCE_REF` in `~/.config/<org>/fleet.local.conf`. `fleet sync` will follow that
 override; remove it once the rollback PR has merged, or the two sources of truth will disagree.
 
+### Plugin integrity: `fleet verify`
+
+The merge and maintain monsters run with bypassed permissions. The engsys singleton-write guard hook
+lets one plain call of a fenced wrapper (`mm-act.sh`, `mm-baton.sh`, `mm-heartbeat.sh` and the `mnt-*`
+versions) through, recognising each wrapper by its path in the plugin cache
+(`~/.claude/plugins/cache/<marketplace>/engsys/<version>/`). The sessions run as the same macOS user that
+owns that cache. A session that rewrote a wrapper, the hook, another hook registered beside it, or the
+lease code the wrappers run could get a raw GitHub write past the guard. `fleet verify` detects that. It
+does not isolate the sessions from the cache: everything on the host runs as one user, so the check makes
+tampering harder and visible, and no more.
+
+**The root of trust is GitHub.** `fleet verify` reads the pinned engsys tag through the tag namespace
+(`git/ref/tags/<tag>`, so a branch with the same name can't stand in), checks that its commit is on the
+repo's default branch (a tag pushed on an unmerged commit is a mismatch), and reads that commit's tree.
+It hashes each protected file in the installed plugin the way `git hash-object` does and compares it with
+the blob in that tree. Owner, repo and tag come from the engsys pin in the pin repo's
+`.claude/settings.json`, the same source `fleet sync` uses, and the pin must be a release tag (`vX.Y.Z`).
+No hash list is kept on the host or in the instance repo, because the sessions can write both.
+
+**What is protected: the whole install root.** Every regular file under the install directory must be a
+`core/` file of the verified commit, with the same content. An extra file anywhere is a mismatch, and so is
+a release file that is missing or a symlink. That matters because Claude Code loads files from fixed
+places that nothing references: a planted `hooks/hooks.json` (merged with the plugin's hooks), `.mcp.json`,
+`bin/` (put on the Bash tool's PATH), `monitors/monitors.json`, `settings.json` or `skills/<x>/SKILL.md`
+would each get past the guard while every referenced file still matched. The only thing skipped is Claude
+Code's own `.in_use/` directory of PID markers at the top of the install root. On a healthy host the
+install holds exactly the release's `core/` files (231 at v1.11.1), so `fleet verify` reports that count.
+
+**Which install.** It runs `claude plugin list --json` in `PIN_DIR`, where the sessions start, and looks at
+every `engsys@<marketplace>` entry that applies there (user scope, or a project entry for `PIN_DIR`),
+enabled or not. An applicable entry at another version, two different install paths, or a plugin that is
+disabled there is a mismatch.
+
+Where it runs:
+
+| When | What happens on a mismatch, or when the check can't run |
+|---|---|
+| `fleet launch` of a merge or maintain session (a named one, or the whole roster) | a named one is refused; a whole-roster launch leaves them out and starts the rest. Other sessions are never checked. One alert per incident |
+| every supervisor tick, when a merge or maintain monster is supervised | no relaunch of those monsters until the check passes, said once on the monster's ledger. A running session is never killed for it: check it yourself. One alert per incident |
+
+Merge and maintain sessions start only on a pass. A check that can't run (GitHub unreachable, no pin, the
+plugin not installed) holds them just like a mismatch, under its own alert
+(`wrapper-integrity-unverified`, next to `wrapper-integrity` for a mismatch), so you can tell an outage
+from a tampered file. A monster can't merge without GitHub anyway, and the supervisor tries again every
+tick. The mismatch alert repeats when the set of differing files changes.
+
+**The escape hatch** is typed by a person: `fleet launch <name> --skip-verify`, from an interactive
+terminal only. It prints a warning and posts an alert (`wrapper-integrity-skipped`); if the alert can't
+be delivered (to Slack or the fallback issue), the launch is refused. No config file or environment
+variable turns it on, and the supervisor never uses it. Alert text is escaped for Slack, so a file name
+in an alert can't turn into a link or a mention.
+
+**A forced engsys ref.** When `ENGSYS_REF` is overridden (in `fleet.local.conf` or the environment, the
+emergency rollback path) and differs from the pin, `fleet verify` says so on every run and alerts once
+(`engsys-ref-forced`). An older tag can carry a weaker guard, so the alert asks whoever set it to confirm.
+
+The supervisor asks GitHub at most once every `VERIFY_MAX_AGE_MIN` minutes (default 15; set it in
+`fleet.conf` or `fleet.local.conf`). Between calls it hashes the local files each tick and reuses the last
+pass only while they are unchanged. That cache (`.fleet/verify-wrappers.json`) is host state a session can
+rewrite, so it only bounds how quickly the supervisor notices; it is not a guarantee (engsys#96). A launch
+never uses it and always asks GitHub. `fleet verify` exits 0 on a match, 1 on a mismatch and 3 when it
+could not check.
+
+On an alert: look at the running merge and maintain sessions and stop any you don't trust. Then
+reinstall the plugin: `claude plugin uninstall engsys@<marketplace>`, delete its cache directory, and run
+`fleet sync`. `fleet verify` should then exit 0, and the next check resolves the alert.
+
+Two settings make the check stronger:
+
+- **A tag ruleset on the engsys repo.** The fleet's GitHub App can push to engsys. If it can create, move
+  or delete a `v*` tag, someone can publish a release that matches a tampered cache and point an override
+  at it. Add a tag ruleset (Settings, Rules, Rulesets, target: tags, pattern `v*`) that restricts
+  **creations, updates and deletions**, with Repository admin as the only bypass (not the App).
+- **Optional: lock the cache files.**
+  `find ~/.claude/plugins/cache/<marketplace>/engsys/<version> -type f -exec chflags uchg {} +` makes the
+  files immutable until someone clears the flag (`chflags nouchg`). Flag the files, not the directories:
+  Claude Code writes a marker file into the version directory. The owner can still clear the flag, so this
+  only stops casual writes. Clear it before `fleet sync` removes that version.
+
+What it does not cover yet: the verifier, the supervisor and the gh shim run from the host engsys checkout
+(`ENGSYS_DIR`), which the hook does not protect (engsys#88). Settings files, shell rc files and the `node`
+and `claude` binaries are outside the check too, and a running monster keeps its loaded files until it is
+stopped. Treat a change in the host checkout (`git -C ~/git/engsys status`) as seriously as a mismatch.
+
 ### Humans' machines
 
 Laptops do not follow the pins automatically: the marketplaces are pinned by tag and never auto-update.
@@ -1177,6 +1262,8 @@ major Claude Code upgrade.
 | Supervisor log: `RELAUNCH FAILED` with `claude not found on PATH` | the supervisor's launchd PATH can't see `claude`. The default job PATH covers `~/.local/bin` (native installer) and Homebrew; for anywhere else, override the PATH in `<instance>/jobs/launchd/fleet-supervisor.plist.tmpl`. Then `fleet install-jobs` (it warns until every tool resolves) and `fleet launch` for anything missing. The supervisor escalates a failed relaunch once on the ledger and comments again when it recovers |
 | Launchd job runs but `node: command not found` | node is not in `/opt/homebrew/bin` (nvm/fnm install). Install Homebrew node; launchd does not read your shell profile |
 | The fleet stopped after a reboot | the fleet user is not logged in (FileVault disables auto-login). Log in over Screen Sharing (section 6.2) |
+| `not launching acme-mm: its engsys plugin does not match vX.Y.Z` | `fleet verify` found protected plugin files, or an install, that don't match the pinned release. See "Plugin integrity" in section 7 |
+| `not launching acme-mm: the engsys plugin check could not run` | GitHub was unreachable, the pin is not a release tag, or the plugin is not installed (`fleet sync`). Merge and maintain stay held until `fleet verify` passes; the supervisor retries every tick |
 | A session shows `missing` | no tmux window with that name. `fleet launch <name>`; a name outside the namespace is refused by the launcher |
 | Session name got a `-2` suffix | a duplicate name existed somewhere under the same OS user, which silently breaks addressing. Stop the old session first, then relaunch |
 | Monster asked to rotate but never came back | is the supervisor job loaded (`launchctl list \| grep fleet-supervisor`)? Is its ledger issue open? Look at `~/Library/Logs/<org>-fleet/fleet-supervisor.log` and `logs/fleet-supervisor/supervisor.log` in the instance checkout. A live session is never killed on staleness alone; a closed ledger is never touched |

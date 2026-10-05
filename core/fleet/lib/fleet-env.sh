@@ -52,6 +52,9 @@ fleet_load_conf "$FLEET_REPO/fleet/fleet.conf"
 : "${READY_LABEL:=mm:ready}"
 : "${REVIEW_BLOCK_REGEX:=critical\\|warning}"
 : "${PIN_WAIT_MAX_MIN:=240}"
+# How long the supervisor reuses a passing `fleet verify` while the plugin files are unchanged (engsys#70).
+: "${VERIFY_MAX_AGE_MIN:=15}"
+[[ "$VERIFY_MAX_AGE_MIN" =~ ^[0-9]+$ ]] || fleet_die "VERIFY_MAX_AGE_MIN must be a whole number of minutes (got '$VERIFY_MAX_AGE_MIN')"
 : "${LOG_DIR:=$HOME/Library/Logs/${FLEET_ORG}-fleet}"
 # `fleet notify` config. SLACK_ENV: path to the bot's env file (SLACK_BOT_TOKEN, SLACK_CHANNEL_ID,
 # SLACK_OPERATORS_GROUP_ID, optional SLACK_OPERATOR_ID, FLEET_ID unless fleet.conf sets it) — empty means Slack is
@@ -83,7 +86,7 @@ for _k in PIN_REPO PIN_DIR; do
   [ -n "${!_k:-}" ] || fleet_die "$_k is not set in $FLEET_REPO/fleet/fleet.conf (or ~/.config/$FLEET_ORG/fleet.local.conf)"
 done
 unset _k
-export FLEET_ORG PIN_REPO PIN_DIR ENGSYS_DIR ENGSYS_MARKETPLACE INSTANCE_MARKETPLACE READY_LABEL REVIEW_BLOCK_REGEX PIN_WAIT_MAX_MIN LOG_DIR SLACK_ENV NOTIFY_FALLBACK_ISSUE FLEET_ID FEDERATION_FILE FLEET_INSTANCE_REPO OPERATOR_TIMEZONE OPERATOR_CLOCK
+export FLEET_ORG PIN_REPO PIN_DIR ENGSYS_DIR ENGSYS_MARKETPLACE INSTANCE_MARKETPLACE READY_LABEL REVIEW_BLOCK_REGEX PIN_WAIT_MAX_MIN VERIFY_MAX_AGE_MIN LOG_DIR SLACK_ENV NOTIFY_FALLBACK_ISSUE FLEET_ID FEDERATION_FILE FLEET_INSTANCE_REPO OPERATOR_TIMEZONE OPERATOR_CLOCK
 
 command -v jq >/dev/null || fleet_die "jq is required"
 

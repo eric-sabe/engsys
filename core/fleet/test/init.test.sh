@@ -376,7 +376,19 @@ cp -R "$KIT_SRC" "$E/core/fleet"; rm -rf "$E/core/fleet/test" "$E/core/fleet/sca
 cp -R "$CORE_SRC/lib" "$E/core/lib"   # federation.mjs reads gate-check's operator-source rules
 cp -R "$CORE_SRC/skills/agent-sessions" "$E/core/skills/agent-sessions"
 cp -R "$ROOT_SRC/stacks/cloud/azure/fleet" "$E/stacks/cloud/azure/fleet"
+# The gh identity shim as a pass-through (as in fleet.test.sh): there is no real App to mint a token from.
+cat >"$E/core/fleet/identity/bin/gh" <<'SH'
+#!/usr/bin/env bash
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+IFS=: read -r -a ds <<<"$PATH"
+for d in "${ds[@]}"; do [ -x "$d/gh" ] && [ "$(cd "$d" && pwd -P)" != "$here" ] && exec "$d/gh" "$@"; done
+exit 127
+SH
 git -C "$E" init -q && git -C "$E" add -A && git -C "$E" commit -q -m "engsys" && git -C "$E" tag v1.2.0
+# `fleet verify` (which gates the merge and maintain monsters) checks the plugin against that tag.
+# shellcheck source=fake-release.sh
+. "$HERE/fake-release.sh"
+fake_release "$E"
 # The pin repo: a local checkout whose .claude/settings.json pins engsys (and the instance marketplace).
 P="$HOME/git/app"
 mkdir -p "$P/.claude"
