@@ -127,6 +127,37 @@ printf 'TMUX_SESSION=acme\nLAUNCH_CMD=bash %s/launch.sh\nHOST_HEALTH_CMD=bash %s
 reset; run
 expect "no sessions at all: the alert still goes out" "^notify --level alert --incident host-health"
 
+# HEARTBEAT_CMD: once per tick, after classification, with a summary of up/rotating/down; soft on
+# failure (#58, follow-up to #40/#57 — the status-issue heartbeat cross-fleet claiming reads).
+cat >"$T/heartbeat.sh" <<'SH'
+#!/usr/bin/env bash
+if [ -f "$FAKE/heartbeat-fail" ]; then echo "heartbeat-attempt $*" >>"$FAKE/actions"; exit 1; fi
+echo "heartbeat $*" >>"$FAKE/actions"
+SH
+chmod +x "$T/heartbeat.sh"
+printf 'TMUX_SESSION=acme\nLAUNCH_CMD=bash %s/launch.sh\nHEARTBEAT_CMD=bash %s/heartbeat.sh\nREPO=o/r\nacme-mm|1|60\n' "$T" "$T" >"$T/w/sup.conf"
+
+reset; ledger 2 "ok — merging #12"; pane idle; run
+expect "alive + fresh heartbeat → heartbeat written once" "^heartbeat sessions: 1 up, 0 rotating, 0 down"
+run
+expect "  …same tick-minute, not written again" "!^heartbeat"
+
+reset; ledger 90 "ok — merging #12"; pane exited; run
+expect "crash recovery → counted as down in the summary" "^heartbeat sessions: 0 up, 0 rotating, 1 down"
+
+reset; ledger 10 "rotation requested"; pane idle; run
+expect "rotation in progress → counted as rotating" "^heartbeat sessions: 0 up, 1 rotating, 0 down"
+
+reset; ledger 2 "ok — merging #12"; pane idle; touch "$T/heartbeat-fail"; run
+expect "HEARTBEAT_CMD fails → attempted" "^heartbeat-attempt"
+expect "  …but soft: the tick is not aborted" "!^launch"
+rm -f "$T/heartbeat-fail"
+
+printf 'TMUX_SESSION=acme\nLAUNCH_CMD=bash %s/launch.sh\nREPO=o/r\nacme-mm|1|60\n' "$T" >"$T/w/sup.conf"
+reset; ledger 90 "ok — merging #12"; pane exited; run
+expect "HEARTBEAT_CMD unset → never called, the tick still runs" "!^heartbeat"
+expect "  …and the session is still relaunched" "^launch acme-mm"
+
 # A 5th field (marker): one status issue carries several heartbeats; only the named block counts (#54)
 status() { # status <fleet-heartbeat minutes-ago> <broker minutes-ago|none> <broker status>
   local b
