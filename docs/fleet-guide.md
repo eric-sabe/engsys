@@ -81,6 +81,7 @@ runs them for you from an **instance repo** (section 4):
 | Command | What it does |
 |---|---|
 | `fleet status` | pins vs host, and which sessions are behind |
+| `fleet status --federation [--json]` | every fleet (operator, enabled, status issue, fleet and broker heartbeat ages, relay) and every baton (home, standby, live holder, expiry, `!` when the holder's fleet is not the home). Read-only; a row that cannot be read shows `?` and a note |
 | `fleet pin` | release your instance plugin and open the pin PR (section 7) |
 | `fleet sync` | make the host match the pins: checkouts and plugins. Touches no running session |
 | `fleet restart` | cycle sessions onto what is installed, when you choose |
