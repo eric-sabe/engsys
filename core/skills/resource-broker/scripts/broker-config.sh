@@ -22,6 +22,21 @@
 #   broker_fill_var <VAR> <key>                       VAR from the config when VAR is empty
 #   broker_fill_path <VAR> <key>                      likewise; a relative path resolves against the config's directory
 #   broker_setup_pool                                 resolves POOL_CLI / LEASE_CLI and defines broker_pool / broker_lease
+#   broker_fleet_init                                 multi-fleet mode: sets BROKER_FLEET, BROKER_STATUS_REPO/_ISSUE
+#   broker_fill_ledger <REPO_VAR> <ISSUE_VAR>         where the heartbeat and kill switch live (see below)
+#   broker_fill_owner <OWNER_VAR> <PATTERN_VAR>       the lease owner and owner fence, fleet-qualified in multi-fleet mode
+#
+# Multi-fleet mode (docs/multi-fleet.md § 3) is on when FLEET_ID is set and the federation file exists
+# (FEDERATION_FILE, which `fleet launch` writes into the session env; else <FLEET_REPO>/federation.yml).
+# The same shared resource-broker.yml then serves every fleet, and the fleet-specific parts come from
+# the registry at run time:
+#   - the ledger is the fleet's own status issue (`fleets.<FLEET_ID>.status_issue`, in the instance
+#     repo), not `repo` + `ledger_issue`, so two fleets' brokers never write the same heartbeat. If it
+#     can't be resolved the scripts stop; they never fall back to the shared ledger;
+#   - lease.owner and lease.owner_pattern are prefixed with the fleet id (`acme-broker` becomes
+#     `bob-acme-broker`, `^acme-…` becomes `^bob-acme-…`) unless `lease.fleet_qualify: false`.
+# A flag (--repo, --issue/--ledger, --owner, --owner-pattern) is always used as given. FLEET_ID unset,
+# or no federation file: single-fleet mode, exactly as before.
 
 BROKER_CONFIG_FILE=""
 
@@ -132,6 +147,65 @@ broker_lease() {
   node "$LEASE_CLI" "$@" ${extra[@]+"${extra[@]}"}
 }
 
+# --- Multi-fleet ---------------------------------------------------------------------------------
+BROKER_FLEET="" BROKER_STATUS_REPO="" BROKER_STATUS_ISSUE="" BROKER_FLEET_READY=""
+
+broker_fleet_init() {
+  [ -z "$BROKER_FLEET_READY" ] || return 0
+  local fid="${FLEET_ID:-}" file="${FEDERATION_FILE:-federation.yml}" cli out
+  if [ -z "$fid" ]; then BROKER_FLEET_READY=1; return 0; fi
+  case "$file" in /*) ;; *) file="${FLEET_REPO:-${FLEET_INSTANCE:-$PWD}}/$file" ;; esac
+  if [ ! -f "$file" ]; then BROKER_FLEET_READY=1; return 0; fi
+  cli="${FEDERATION_CLI:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../fleet/lib/federation.mjs}"
+  command -v node >/dev/null || { echo "resource-broker: multi-fleet mode (FLEET_ID=$fid, $file) needs node to read the registry" >&2; return 1; }
+  [ -f "$cli" ] || { echo "resource-broker: registry reader not found at $cli (set FEDERATION_CLI)" >&2; return 1; }
+  if ! out="$(node "$cli" status-issue --file "$file" 2>&1)"; then
+    echo "resource-broker: multi-fleet mode (FLEET_ID=$fid, $file), but this fleet's status issue can't be resolved: ${out#federation: }" >&2
+    echo "resource-broker: not falling back to the shared ledger_issue, where another fleet's broker may already heartbeat" >&2
+    return 1
+  fi
+  BROKER_FLEET="$fid" BROKER_STATUS_REPO="${out%%#*}" BROKER_STATUS_ISSUE="${out##*#}" BROKER_FLEET_READY=1
+}
+
+# broker_fill_ledger <REPO_VAR> <ISSUE_VAR>: the fleet's status issue in multi-fleet mode, else `repo`
+# and `ledger_issue`. A var that is already set (a flag) wins.
+broker_fill_ledger() {
+  broker_fleet_init || return 1
+  if [ -n "$BROKER_FLEET" ]; then
+    [ -n "${!1:-}" ] || printf -v "$1" '%s' "$BROKER_STATUS_REPO"
+    [ -n "${!2:-}" ] || printf -v "$2" '%s' "$BROKER_STATUS_ISSUE"
+  else
+    broker_fill_var "$1" repo
+    broker_fill_var "$2" ledger_issue
+  fi
+}
+
+broker_qualify() { # broker_qualify owner|pattern <value> → the value with the fleet prefix (multi-fleet, fleet_qualify on)
+  local v="$2"
+  if [ -n "$BROKER_FLEET" ] && [ "$(broker_cfg lease.fleet_qualify)" != false ] && [ -n "$v" ]; then
+    case "$1:$v" in
+      "owner:$BROKER_FLEET-"* | "pattern:^$BROKER_FLEET-"*) ;;
+      owner:*) v="$BROKER_FLEET-$v" ;;
+      pattern:^*) v="^$BROKER_FLEET-${v#^}" ;;
+    esac
+  fi
+  printf '%s\n' "$v"
+}
+
+# broker_fill_owner <OWNER_VAR> <PATTERN_VAR>: lease.owner (else session_name, else resource-broker)
+# and lease.owner_pattern, fleet-qualified in multi-fleet mode. A var that is already set (a flag) is
+# used as given; an empty pattern (no fence) stays empty.
+broker_fill_owner() {
+  broker_fleet_init || return 1
+  local v
+  if [ -z "${!1:-}" ]; then
+    v="$(broker_cfg lease.owner)"
+    [ -n "$v" ] || v="$(broker_cfg session_name)"
+    printf -v "$1" '%s' "$(broker_qualify owner "${v:-resource-broker}")"
+  fi
+  [ -n "${!2:-}" ] || printf -v "$2" '%s' "$(broker_qualify pattern "$(broker_cfg lease.owner_pattern)")"
+}
+
 # Run directly: print the resolved config path and the requested keys (all the script-read keys by default).
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   set -euo pipefail
@@ -147,6 +221,17 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   broker_find_config "$explicit" "$cdir" || exit 1
   [ -n "$BROKER_CONFIG_FILE" ] || { echo "resource-broker: no config found (.claude/resource-broker.yml, or resource-broker.yml in --config-dir)" >&2; exit 1; }
   echo "config: $BROKER_CONFIG_FILE"
-  [ ${#keys[@]} -gt 0 ] || keys=(repo session_name ledger_issue state_dir poll_interval heartbeat_minutes stale_lock_minutes lease.pool_file lease.store lease.owner lease.owner_pattern host.health_cmd host.restart_cmd host.window_minutes)
+  all=0
+  [ ${#keys[@]} -gt 0 ] || all=1 keys=(repo session_name ledger_issue state_dir poll_interval heartbeat_minutes stale_lock_minutes lease.pool_file lease.store lease.owner lease.owner_pattern lease.fleet_qualify host.health_cmd host.restart_cmd host.window_minutes)
   for k in "${keys[@]}"; do printf '%s: %s\n' "$k" "$(broker_cfg "$k")"; done
+  [ "$all" = 1 ] || exit 0
+  # What the scripts will actually use, after the multi-fleet resolution.
+  broker_fleet_init || exit 1
+  LREPO="" LISSUE="" LOWNER="" LPATTERN=""
+  broker_fill_ledger LREPO LISSUE
+  broker_fill_owner LOWNER LPATTERN
+  if [ -n "$BROKER_FLEET" ]; then echo "mode: multi-fleet (fleet $BROKER_FLEET)"; else echo "mode: single-fleet"; fi
+  echo "effective ledger: ${LREPO:-?}#${LISSUE:-?}"
+  echo "effective owner: $LOWNER"
+  echo "effective owner_pattern: $LPATTERN"
 fi

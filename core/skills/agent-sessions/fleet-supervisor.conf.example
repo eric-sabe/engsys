@@ -22,9 +22,12 @@ REPO=owner/name
 # Minutes a live session must sit idle after its "rotation requested" heartbeat
 # before it is relaunched (it can't exit itself). Default 3.
 # ROTATE_GRACE_MIN=3
-# <session>|<ledger issue>|<stale minutes>[|<owner/name>]
+# <session>|<ledger issue>|<stale minutes>[|<owner/name>[|<marker>]]
 #   stale = heartbeat older than this; mirror the monster's stale_lock_minutes
-#   + grace. The optional 4th field overrides REPO= (multi-repo fleets).
+#   + grace. The optional 4th field overrides REPO= (multi-repo fleets). The
+#   optional 5th reads the heartbeat only from the <!-- <marker> --> block, for
+#   an issue that carries several (a fleet status issue). Under the fleet kit,
+#   `fleet supervise` writes it for the broker in multi-fleet mode.
 acme-mm|0|60
 acme-maintain|0|60
 # acme-<role>|0|60

@@ -8,9 +8,11 @@
 //   node federation.mjs home <owner/repo> <role> [--file f]
 //   node federation.mjs address <addr>                  {"fleet": ..., "session": ...} (bare = own FLEET_ID)
 //   node federation.mjs status [--file f]               the block `fleet status` prints
+//   node federation.mjs status-issue [--file f]         this fleet's status issue as owner/repo#N
 //
 // Exit codes: 0 ok, 1 invalid file or bad arguments, 3 not declared (no such path or role, or no
-// federation file at all: single-fleet mode).
+// federation file at all: single-fleet mode). status-issue exits 3 only in single-fleet mode (no file,
+// or no FLEET_ID) and 1 when the registry is on but names no status issue for this fleet.
 //
 // The file is `federation.yml` at the instance repo root, or FEDERATION_FILE (fleet-env.sh resolves
 // it against the instance and exports it). FLEET_ID comes from the environment (fleet.conf). No file
@@ -22,12 +24,14 @@
 // documents, ambiguous plain scalars such as `yes`, `1.5` or `010`) is an error naming the line,
 // never a guess.
 //
-// Zero dependencies: node builtins plus engsys core's gate-check (for the operator-source format).
+// Zero dependencies: node builtins plus engsys core's gate-check (for the operator-source format) and
+// git-env (the hermetic git call that reads the instance repo's origin).
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { operatorSource } from '../../lib/gate-check.mjs';
+import { hermeticGit } from '../../lib/git-env.mjs';
 
 /** A fleet id: lowercase, starts with a letter, 2-21 characters. Same rule as fleet-env.sh. */
 export const FLEET_ID_RE = /^[a-z][a-z0-9-]{1,20}$/;
@@ -525,6 +529,45 @@ export function isOwnAddress(addr, ownFleet = null) {
   return fleet === null || fleet === (ownFleet || null);
 }
 
+/** owner/repo from a GitHub remote URL (https, ssh or scp-like form), or null. */
+export function repoFromRemoteUrl(url) {
+  const m = String(url ?? '').trim().match(/^(?:https?:\/\/(?:[^@/]+@)?github\.com\/|ssh:\/\/git@github\.com(?::\d+)?\/|git@github\.com:)([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/);
+  return m && REPO_RE.test(m[1]) ? m[1] : null;
+}
+
+/**
+ * The repo that holds the fleets' status issues (the instance repo): FLEET_INSTANCE_REPO when set,
+ * else the `origin` remote of the checkout that holds the federation file. Null when neither works.
+ */
+export function instanceRepo(file, env = process.env) {
+  if (env.FLEET_INSTANCE_REPO) {
+    if (!REPO_RE.test(env.FLEET_INSTANCE_REPO)) throw new FederationError(`FLEET_INSTANCE_REPO ${show(env.FLEET_INSTANCE_REPO)} must be owner/name`);
+    return env.FLEET_INSTANCE_REPO;
+  }
+  try {
+    return repoFromRemoteUrl(hermeticGit(path.dirname(file), ['config', '--get', 'remote.origin.url'], { stdio: ['ignore', 'pipe', 'ignore'] }));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * This fleet's status issue, `{ repo, issue }`, or null in single-fleet mode (no registry, or no
+ * FLEET_ID). Throws when the registry is on but the issue can't be named: FLEET_ID not declared, no
+ * `status_issue`, or no instance repo. Callers fail closed on that rather than fall back to a
+ * shared per-repo ledger, which is the collision the status issue exists to avoid.
+ */
+export function statusIssueTarget(reg, fleetId, { file, env = process.env } = {}) {
+  if (!reg || !fleetId) return null;
+  const problems = fleetIdProblems(reg, fleetId);
+  if (problems.length) throw new FederationError(problems.join('; '));
+  const issue = reg.fleets[fleetId].status_issue;
+  if (!issue) throw new FederationError(`fleets.${fleetId}.status_issue is not declared in ${file || 'the federation file'}`);
+  const repo = instanceRepo(file, env);
+  if (!repo) throw new FederationError(`cannot tell which repo holds fleet ${fleetId}'s status issue: set FLEET_INSTANCE_REPO=owner/name, or give the checkout of ${file || 'the federation file'} a GitHub origin remote`);
+  return { repo, issue };
+}
+
 /** The lines `fleet status` prints for the registry. */
 export function statusLines(reg, { fleetId = null, file = '' } = {}) {
   const lines = [];
@@ -560,7 +603,8 @@ const USAGE = `usage: federation.mjs validate [file]
        federation.mjs get <path> [--file f]
        federation.mjs home <owner/repo> <role> [--file f]
        federation.mjs address <addr>
-       federation.mjs status [--file f]`;
+       federation.mjs status [--file f]
+       federation.mjs status-issue [--file f]`;
 
 export function main(argv, { env = process.env, out = process.stdout, err = process.stderr, cwd = process.cwd() } = {}) {
   const say = (s) => out.write(`${s}\n`);
@@ -641,6 +685,14 @@ export function main(argv, { env = process.env, out = process.stdout, err = proc
           return EXIT.ERROR;
         }
         for (const l of statusLines(reg, { fleetId, file: target })) say(l);
+        return EXIT.OK;
+      }
+      case 'status-issue': {
+        if (rest.length) { warn(USAGE); return EXIT.ERROR; }
+        const reg = load();
+        const t = statusIssueTarget(reg, fleetId, { file: target, env });
+        if (!t) { warn(reg ? 'FLEET_ID is not set: single-fleet mode' : `no federation file (${target}): single-fleet mode`); return EXIT.ABSENT; }
+        say(`${t.repo}#${t.issue}`);
         return EXIT.OK;
       }
       default:

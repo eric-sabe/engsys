@@ -183,11 +183,16 @@ a multi-repo fleet, give each line a fourth field:
 
 ```
 REPO=owner/repo
-# <session>|<ledger issue>|<stale minutes>[|<owner/name>]
+# <session>|<ledger issue>|<stale minutes>[|<owner/name>[|<marker>]]
 acme-mm-api|41|60|owner/api
 acme-mm-web|17|60|owner/web
 acme-maintain|42|60|owner/api
 ```
+
+An optional fifth field names the block the heartbeat is read from: only a `last:` line between
+`<!-- <marker> -->` and `<!-- /<marker> -->` counts. It is for an issue that carries several
+heartbeats, such as a fleet status issue (§ 6.11). You rarely write it yourself: in multi-fleet mode
+`fleet supervise` adds it to the resource broker's line.
 
 ### Where the pins live
 
@@ -706,6 +711,7 @@ lists, several documents, tabs in indentation, and plain values a YAML parser co
 | `fleet federation home <owner/repo> <merge\|maintain>` | the home fleet id |
 | `fleet federation address <addr>` | `{"fleet":…,"session":…}` (below) |
 | `fleet federation status` | the block `fleet status` prints first |
+| `fleet federation status-issue` | this fleet's status issue as `owner/repo#N`: `fleets.<FLEET_ID>.status_issue` in the instance repo, which is `FLEET_INSTANCE_REPO` (fleet.conf) or else the instance checkout's origin. Exit 3 in single-fleet mode, 1 when the registry names no status issue for this fleet |
 
 `get` and `home` exit 3 when the path or role is not declared, or when there is no file at all; 1 means
 an invalid file or bad arguments.
@@ -819,6 +825,25 @@ The supervisor is installed here only because `acme-broker` runs here and is sup
 `fleet sync` keep the supervisor job unloaded. Edit `fleet.local.conf`, then run `fleet install-jobs` to
 apply the change to the jobs. Starting sessions never needs a separate step: `fleet launch` reads the
 filter each time.
+
+**Each host's broker reports on its own fleet's status issue.** The broker is never excluded by the
+registry, so alice's host and bob's host each run `acme-broker` over their own pool. Both read the same
+`resource-broker.yml` and the same `acme-broker|13|60` line in `fleet/supervisor.conf.tmpl`, but in
+multi-fleet mode neither uses ledger 13:
+
+- the broker scripts heartbeat, label and comment on the fleet's status issue
+  (`fleet federation status-issue`), inside a `<!-- broker-heartbeat -->` block that sits beside the
+  supervisor's own `<!-- fleet-heartbeat -->` block on the same issue;
+- `fleet supervise` rewrites the broker's line to `acme-broker|12|60|acme/acme-fleet|broker-heartbeat`
+  (bob's status issue), so the supervisor reads only the broker's block;
+- lease owners and the owner fence get the fleet id as a prefix (`bob-acme-broker`, `^bob-acme-…`)
+  unless the config sets `lease.fleet_qualify: false`. Each host's lease store is a local path, so the
+  two pools never share records either way.
+
+If a fleet's status issue can't be resolved (no `status_issue` for it, an unreadable registry, or no
+instance repo), the broker scripts stop and `fleet supervise` comments the broker's line out with a
+warning. Neither falls back to the shared ledger. The resource-broker skill has the details
+(*Multi-fleet*).
 
 ---
 
@@ -1137,8 +1162,9 @@ format) overrides it per machine. Environment values for `ENGSYS_REF` / `INSTANC
 | `NOTIFY_FALLBACK_ISSUE` | no | `owner/repo#N` for `fleet notify`'s fallback comment when Slack is unconfigured or unreachable. Empty means the message is only printed as a warning |
 | `FLEET_ID` | no | This fleet's id in a federation (§ 6.10): `^[a-z][a-z0-9-]{1,20}$`, rejected otherwise. Written into every session env. Never inherited from the caller's environment. Unset means single-fleet mode |
 | `FEDERATION_FILE` | no | The registry file, relative to the instance root unless absolute. Default `federation.yml`. Missing file means single-fleet mode |
-| `CLAIM_PROJECT` | no | `<owner>/<number>` of the ProjectV2 board `claim.mjs acquire`/`release` mirror the `fleet:<id>` label onto (§ 3). Owner may be a user or org and may differ from the issue's repo — a cross-owner board needs `GH_APP_OWNER` set to it (engsys#55). Unset means no board sync, only the label |
-| `CLAIM_OWNER_FIELD` | no | The board field name `claim.mjs` writes the fleet id to: a TEXT or SINGLE_SELECT field (a SINGLE_SELECT field must already carry an option named exactly each fleet id — never created automatically). Default `Owner`. Ignored when `CLAIM_PROJECT` is unset |
+| `CLAIM_PROJECT` | no | `<owner>/<number>` of the ProjectV2 board `claim.mjs acquire`/`release` mirror the `fleet:<id>` label onto (§ 3). Owner may be a user or org and may differ from the issue's repo; a cross-owner board needs `GH_APP_OWNER` set to it (engsys#55). Unset means no board sync, only the label |
+| `CLAIM_OWNER_FIELD` | no | The board field name `claim.mjs` writes the fleet id to: a TEXT or SINGLE_SELECT field (a SINGLE_SELECT field must already carry an option named exactly each fleet id, never created automatically). Default `Owner`. Ignored when `CLAIM_PROJECT` is unset |
+| `FLEET_INSTANCE_REPO` | no | `owner/name` of the instance repo, which holds each fleet's status issue (§ 6.11). Default: the origin remote of the instance checkout. Written into every session env when set. Never inherited from the caller's environment |
 | `ROLES` | no | Set it in `fleet.local.conf`. An allowlist of the roster sessions this host runs: names, names without the namespace, or kinds (`merge`, `maintain`, `broker`, `monster`, `interactive`); § 6.11. Unset means every session. Never inherited from the caller's environment |
 | `ROSTER_EXCLUDE` | no | Set it in `fleet.local.conf`. A denylist with the same entries; it wins over `ROLES`. Never inherited from the caller's environment |
 | anything else | | Instance-defined template variables (model knobs, and so on) |

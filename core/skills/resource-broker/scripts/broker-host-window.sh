@@ -33,7 +33,8 @@
 #                              [--store DIR] [--owner-pattern REGEX] [--config FILE | --config-dir DIR]
 # Values default to resource-broker.yml (host.restart_cmd, host.health_cmd, host.window_minutes,
 # lease.*). With --repo and --ledger (or the config's), the ledger issue carries the
-# `broker:host-window` label for the duration, best effort.
+# `broker:host-window` label for the duration, best effort. In multi-fleet mode that issue is the
+# fleet's status issue and the owner and fence are fleet-qualified (broker-config.sh).
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,7 +42,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=broker-config.sh
 . "$here/broker-config.sh"
 
-REPO="" LEDGER="" OWNER="" POOL_FILE="" STORE="" OWNER_PATTERN="" CONFIG="" CONFIG_DIR="" SESSION_NAME=""
+REPO="" LEDGER="" OWNER="" POOL_FILE="" STORE="" OWNER_PATTERN="" CONFIG="" CONFIG_DIR=""
 RESTART_CMD="" HEALTH_CMD="" WINDOW_MIN="" REASON="host maintenance" DRAIN_SECS=600 HEALTH_SECS=300 DRY=0
 DRAIN_POLL="${BROKER_WINDOW_POLL_SECS:-2}"
 usage() { echo "usage: broker-host-window.sh [--reason TEXT] [--drain-timeout-secs N] [--health-timeout-secs N] [--restart-cmd CMD] [--health-cmd CMD] [--dry-run] [--config FILE | --config-dir DIR]" >&2; exit 2; }
@@ -66,14 +67,10 @@ while [ $# -gt 0 ]; do
   esac
 done
 broker_find_config "$CONFIG" "$CONFIG_DIR" || exit 1
-broker_fill_var REPO repo
-broker_fill_var LEDGER ledger_issue
-broker_fill_var OWNER lease.owner
-broker_fill_var SESSION_NAME session_name
-[ -n "$OWNER" ] || OWNER="${SESSION_NAME:-resource-broker}"
+broker_fill_ledger REPO LEDGER || exit 2
+broker_fill_owner OWNER OWNER_PATTERN || exit 2
 broker_fill_path POOL_FILE lease.pool_file
 broker_fill_path STORE lease.store
-broker_fill_var OWNER_PATTERN lease.owner_pattern
 broker_fill_var RESTART_CMD host.restart_cmd
 broker_fill_var HEALTH_CMD host.health_cmd
 broker_fill_var WINDOW_MIN host.window_minutes

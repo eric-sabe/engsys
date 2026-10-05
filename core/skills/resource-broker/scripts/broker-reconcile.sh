@@ -17,7 +17,8 @@
 # Usage: broker-reconcile.sh [--owner OWNER] [--pool FILE] [--store DIR] [--owner-pattern REGEX]
 #                            [--config FILE | --config-dir DIR]
 # Every value defaults to resource-broker.yml (lease.owner, lease.pool_file, lease.store,
-# lease.owner_pattern); POOL_CLI / LEASE_CLI override where the CLIs are found.
+# lease.owner_pattern), fleet-qualified in multi-fleet mode (broker-config.sh); POOL_CLI / LEASE_CLI
+# override where the CLIs are found.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -25,7 +26,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=broker-config.sh
 . "$here/broker-config.sh"
 
-OWNER="" POOL_FILE="" STORE="" OWNER_PATTERN="" CONFIG="" CONFIG_DIR="" SESSION_NAME=""
+OWNER="" POOL_FILE="" STORE="" OWNER_PATTERN="" CONFIG="" CONFIG_DIR=""
 usage() { echo "usage: broker-reconcile.sh [--owner OWNER] [--pool FILE] [--store DIR] [--owner-pattern REGEX] [--config FILE | --config-dir DIR]" >&2; exit 2; }
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -39,12 +40,9 @@ while [ $# -gt 0 ]; do
   esac
 done
 broker_find_config "$CONFIG" "$CONFIG_DIR" || exit 1
-broker_fill_var OWNER lease.owner
-broker_fill_var SESSION_NAME session_name
-[ -n "$OWNER" ] || OWNER="${SESSION_NAME:-resource-broker}"
+broker_fill_owner OWNER OWNER_PATTERN || exit 1
 broker_fill_path POOL_FILE lease.pool_file
 broker_fill_path STORE lease.store
-broker_fill_var OWNER_PATTERN lease.owner_pattern
 broker_setup_pool || exit 1
 
 # Each CLI prints one JSON object on stdout; anything on stderr is kept apart so it can never corrupt the JSON.

@@ -6,7 +6,9 @@
 # log what they run. Covers: config discovery from the fleet config dir; setup (ledger + labels,
 # idempotent); the heartbeat line the fleet supervisor parses; watch (a waiter, a stale grant that the
 # pump reaps, dropped silent waiters, a grant nudge reaching a waiting session); reconcile after a
-# crash; the host window (drain, lock, act, verify, all-clear, and its aborts); POOL_CLI override.
+# crash; the host window (drain, lock, act, verify, all-clear, and its aborts); POOL_CLI override;
+# multi-fleet mode (the fleet's status issue as the ledger, fleet-qualified owner fences, two fleets'
+# brokers side by side, and the fail-closed cases).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -35,6 +37,7 @@ rc_is() { if [ "$RC" = "$2" ]; then ok "$1"; else bad "$1" "want rc $2, got $RC;
 export HOME="$T/home" FAKE="$T/fake" GIT_CONFIG_GLOBAL="$T/home/.gitconfig" GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
 mkdir -p "$HOME" "$FAKE" "$T/bin" "$T/repo/sub" "$T/fleetcfg/repos/acme/app"
 unset LEASE_STORE LEASE_OWNER_PATTERN LEASE_POOL_FILE POOL_CLI LEASE_CLI POOL_PROVISION_CMD POOL_RESET_CMD POOL_HEALTH_CMD POOL_NUDGE_CMD
+unset FLEET_ID FEDERATION_FILE FEDERATION_CLI FLEET_REPO FLEET_INSTANCE FLEET_INSTANCE_REPO
 export TLIB="$LIB" TCFG="$T/fleetcfg/repos/acme/app" TSTORE="$T/store" TPAT='^acme-[a-z0-9][a-z0-9-]{0,62}$'
 export POOL_POLL_MS=200 POOL_WAITER_TIMEOUT_MS=30000 BROKER_WINDOW_POLL_SECS=0.2
 printf '[user]\n\tname = Sandbox\n\temail = sandbox@example.invalid\n[init]\n\tdefaultBranch = main\n' >"$HOME/.gitconfig"
@@ -82,7 +85,9 @@ case "$sub" in
   "issue edit")
     [ -z "$bodyfile" ] || cp "$bodyfile" "$D/$num/body"
     [ -z "$addl" ] || echo "+$addl" >>"$D/$num/labels"
-    [ -z "$reml" ] || echo "-$reml" >>"$D/$num/labels" ;;
+    [ -z "$reml" ] || echo "-$reml" >>"$D/$num/labels"
+    # a concurrent writer: the next edit of this issue is overwritten right after it lands
+    if [ -f "$FAKE/clobber-$num" ]; then mv "$FAKE/clobber-$num" "$D/$num/body"; fi ;;
   "issue reopen"|"issue close") exit 0 ;;
   "api repos/acme/app/issues/"*) echo "NODE_${sub##*/}" ;;
   "api graphql") # the pin mutation records the node id; the isPinned query reads it back
@@ -612,6 +617,140 @@ run bash "$S/broker-host-window.sh" --config "$T/no-health.yml" --restart-cmd "t
 rc_is "with no health command the window verifies nothing and completes" 0
 has "…still reaching the all-clear" "$OUT" "WINDOW_ALL_CLEAR"
 eq "the window's leases are gone from the store" "$(pc status | jq '[.slots[] | select(.state != "free")] | length')" 0
+
+echo "== K. multi-fleet: the fleet's status issue is the ledger, owners are fleet-qualified"
+INST="$T/instance"; mkdir -p "$INST"
+cat >"$INST/federation.yml" <<'YML'
+version: 1
+fleets:
+  alice:
+    status_issue: 11
+  bob:
+    status_issue: 12
+  carol:
+    enabled: true
+YML
+# The status issues as the supervisor (#58) leaves them: a fleet-heartbeat block, no broker block yet.
+mkstatus() { # mkstatus <n> <fleet>
+  mkdir -p "$FAKE/gh/issues/$1"; printf '%s' "Fleet $2 status" >"$FAKE/gh/issues/$1/title"; printf OPEN >"$FAKE/gh/issues/$1/state"
+  printf 'Status of fleet %s.\n\n<!-- fleet-heartbeat -->\nlast: 2026-10-04T12:00:00Z — status: 3 up, 0 down\n<!-- /fleet-heartbeat -->\n' "$2" >"$FAKE/gh/issues/$1/body"
+}
+mkstatus 11 alice; mkstatus 12 bob
+block() { awk -v m="$2" '$0 == "<!-- " m " -->" { on = 1; next } $0 == "<!-- /" m " -->" { on = 0 } on' <<<"$1" | sed -n 's/^last: \([0-9TZ:-]*\) — status: \(.*\)$/\1|\2/p' | head -1; }  # fleet-supervisor.sh's marker parse
+write_cfg "$CFG/resource-broker.yml" 101
+LEDGER_BEFORE="$(cat "$FAKE/gh/issues/101/body")"
+AS_ALICE=(env FLEET_ID=alice FEDERATION_FILE="$INST/federation.yml" FLEET_INSTANCE_REPO=acme/acme-fleet)
+AS_BOB=(env FLEET_ID=bob FEDERATION_FILE="$INST/federation.yml" FLEET_INSTANCE_REPO=acme/acme-fleet)
+
+run "${AS_ALICE[@]}" bash "$S/broker-config.sh" --config-dir "$CFG"
+rc_is "broker-config resolves multi-fleet mode" 0
+has "…says so" "$OUT" "mode: multi-fleet (fleet alice)"
+has "…the ledger is alice's status issue in the instance repo" "$OUT" "effective ledger: acme/acme-fleet#11"
+has "…the owner is fleet-qualified" "$OUT" "effective owner: alice-acme-broker"
+has "…and so is the fence" "$OUT" "effective owner_pattern: ^alice-acme-[a-z0-9][a-z0-9-]{0,62}\$"
+has "…while the shared config still says ledger_issue 101" "$OUT" "ledger_issue: 101"
+run bash "$S/broker-config.sh" --config-dir "$CFG"
+has "single-fleet mode with the same config" "$OUT" "mode: single-fleet"
+has "…keeps the configured ledger" "$OUT" "effective ledger: acme/app#101"
+has "…and the unqualified owner" "$OUT" "effective owner: acme-broker"
+run env FLEET_ID=alice FEDERATION_FILE="$T/no-such/federation.yml" bash "$S/broker-config.sh" --config-dir "$CFG"
+has "FLEET_ID with no federation file is still single-fleet" "$OUT" "effective ledger: acme/app#101"
+
+: >"$FAKE/gh.log"
+run "${AS_ALICE[@]}" bash "$S/broker-setup.sh" --config-dir "$CFG"
+rc_is "setup in multi-fleet mode exits 0" 0
+G="$(cat "$FAKE/gh.log")"
+has "…adopts the status issue" "$OUT" "adopting configured ledger issue #11"
+has "…reading it from the instance repo" "$G" "gh issue view 11 -R acme/acme-fleet"
+has "…creates the labels there" "$G" "gh label create broker:host-window -R acme/acme-fleet --force"
+hasnt "…never creates an issue" "$G" "gh issue create"
+hasnt "…never pins the fleet's issue" "$G" "pinIssue"
+hasnt "…never touches the shared ledger" "$G" "issue edit 101"
+has "…says nothing needs pasting" "$OUT" "multi-fleet: nothing to paste"
+BODY="$(cat "$FAKE/gh/issues/11/body")"
+has "…appends a broker block" "$OUT" "appended a broker heartbeat block to the status issue"
+eq "the fleet-heartbeat block is left alone, not wrapped" "$(block "$BODY" fleet-heartbeat)" "2026-10-04T12:00:00Z|3 up, 0 down"
+eq "…and the broker block reads separately" "$(block "$BODY" broker-heartbeat | cut -d'|' -f2)" "adopted by resource broker"
+o=$(ln "$BODY" '<!-- broker-heartbeat -->'); fc=$(ln "$BODY" '<!-- /fleet-heartbeat -->')
+if [ "$o" -gt "$fc" ]; then ok "…after the fleet-heartbeat block, not around it"; else bad "…after the fleet-heartbeat block, not around it" "$BODY"; fi
+cp "$FAKE/gh/issues/11/body" "$T/body.11"; : >"$FAKE/gh.log"
+run "${AS_ALICE[@]}" bash "$S/broker-setup.sh" --config-dir "$CFG"
+if cmp -s "$T/body.11" "$FAKE/gh/issues/11/body" && ! grep -q "issue edit" "$FAKE/gh.log"; then ok "a second multi-fleet setup is a no-op"; else bad "a second multi-fleet setup is a no-op" "$(cat "$FAKE/gh.log")"; fi
+
+run "${AS_ALICE[@]}" bash "$S/broker-heartbeat.sh" --config-dir "$CFG" --status "alice working"
+rc_is "heartbeat in multi-fleet mode exits 0" 0
+BODY="$(cat "$FAKE/gh/issues/11/body")"
+eq "it lands in the broker block of alice's status issue" "$(block "$BODY" broker-heartbeat | cut -d'|' -f2)" "alice working"
+eq "…leaving the supervisor's fleet-heartbeat line as it was" "$(block "$BODY" fleet-heartbeat)" "2026-10-04T12:00:00Z|3 up, 0 down"
+if [ "$(cat "$FAKE/gh/issues/101/body")" = "$LEDGER_BEFORE" ]; then ok "…and the shared ledger #101 is untouched"; else bad "…and the shared ledger #101 is untouched"; fi
+
+echo "== K2. two fleets' brokers, each on its own host, never interfere"
+run "${AS_BOB[@]}" bash "$S/broker-heartbeat.sh" --config-dir "$CFG" --status "bob working"
+rc_is "bob's first heartbeat exits 0 with no setup run" 0
+B12="$(cat "$FAKE/gh/issues/12/body")"; B11="$(cat "$FAKE/gh/issues/11/body")"
+eq "…appending its broker block to bob's status issue" "$(block "$B12" broker-heartbeat | cut -d'|' -f2)" "bob working"
+eq "…beside bob's fleet-heartbeat" "$(block "$B12" fleet-heartbeat)" "2026-10-04T12:00:00Z|3 up, 0 down"
+eq "alice's broker heartbeat is not bob's" "$(block "$B11" broker-heartbeat | cut -d'|' -f2)" "alice working"
+run "${AS_ALICE[@]}" bash "$S/broker-heartbeat.sh" --config-dir "$CFG" --status "rotation requested"
+eq "alice rotating does not change bob's block" "$(block "$(cat "$FAKE/gh/issues/12/body")" broker-heartbeat | cut -d'|' -f2)" "bob working"
+eq "…only alice's" "$(block "$(cat "$FAKE/gh/issues/11/body")" broker-heartbeat | cut -d'|' -f2)" "rotation requested"
+# Each host's store: the same shared config, a different lease.store per host.
+SA="$T/store-alice" SB="$T/store-bob"
+run "${AS_ALICE[@]}" bash "$S/broker-reconcile.sh" --config-dir "$CFG" --store "$SA"
+rc_is "alice's reconcile runs with the qualified fence" 0
+run "${AS_BOB[@]}" bash "$S/broker-reconcile.sh" --config-dir "$CFG" --store "$SB"
+rc_is "bob's too" 0
+touch "$FAKE/runtime-up"
+HOLD='node "$TLIB/pool-cli.mjs" status --pool "$TCFG/acme-pool.json" --store "$WSTORE" > "$FAKE/during-$WHO.json"'
+run "${AS_ALICE[@]}" WSTORE="$SA" WHO=alice bash "$S/broker-host-window.sh" --config-dir "$CFG" --store "$SA" --restart-cmd "$HOLD"
+rc_is "alice's host window completes" 0
+eq "…holding every slot as alice-acme-broker" "$(jq -r '[.slots[] | .holder] | unique | join(",")' "$FAKE/during-alice.json")" "alice-acme-broker"
+has "…labelling alice's status issue for the window" "$(cat "$FAKE/gh.log")" "gh issue edit 11 -R acme/acme-fleet --add-label broker:host-window"
+A="$(node "$LIB/pool-cli.mjs" acquire --owner bob-acme-build --no-wait --pool "$CFG/acme-pool.json" --store "$SB" --owner-pattern '^bob-acme-[a-z0-9][a-z0-9-]{0,62}$')"
+run "${AS_ALICE[@]}" WSTORE="$SA" WHO=alice2 bash "$S/broker-host-window.sh" --config-dir "$CFG" --store "$SA" --drain-timeout-secs 2 --restart-cmd "$HOLD"
+rc_is "a slot held on bob's host never blocks alice's window" 0
+eq "bob's lessee still holds its slot" "$(node "$LIB/pool-cli.mjs" status --pool "$CFG/acme-pool.json" --store "$SB" | jq -r '[.slots[] | select(.state == "held") | .holder] | join(",")')" "bob-acme-build"
+node "$LIB/pool-cli.mjs" release --slot "$(slot_of "$A")" --owner bob-acme-build --token "$(tok_of "$A")" --pool "$CFG/acme-pool.json" --store "$SB" --owner-pattern '^bob-acme-[a-z0-9][a-z0-9-]{0,62}$' >/dev/null
+run "${AS_BOB[@]}" bash "$S/broker-reconcile.sh" --config-dir "$CFG" --store "$SB" --owner bob-acme-x --owner-pattern '^alice-acme-[a-z0-9-]+$'
+rc_is "a fence that does not admit the owner is refused (flags are taken as given)" 1
+printf CLOSED >"$FAKE/gh/issues/11/state"
+OUT="$("${AS_ALICE[@]}" bash "$S/broker-watch.sh" --config-dir "$CFG" --store "$SA" --once 2>&1)"
+has "closing alice's status issue is alice's broker kill switch" "$OUT" "STOP"
+OUT="$("${AS_BOB[@]}" bash "$S/broker-watch.sh" --config-dir "$CFG" --store "$SB" --once 2>&1)"
+hasnt "…not bob's" "$OUT" "STOP"
+printf OPEN >"$FAKE/gh/issues/11/state"
+
+echo "== K3. opt-outs, flags, the concurrent writer, and the fail-closed cases"
+sed 's#^  owner_pattern: .*#&\n  fleet_qualify: false#' "$CFG/resource-broker.yml" >"$CFG/noqual.yml"
+run "${AS_ALICE[@]}" bash "$S/broker-config.sh" --config "$CFG/noqual.yml"
+has "lease.fleet_qualify: false keeps the owner as configured" "$OUT" "effective owner: acme-broker"
+has "…and the fence" "$OUT" "effective owner_pattern: $PAT"
+has "…while the ledger is still the status issue" "$OUT" "effective ledger: acme/acme-fleet#11"
+run "${AS_ALICE[@]}" bash "$S/broker-heartbeat.sh" --config-dir "$CFG" --repo acme/app --issue 101 --status "by flag"
+has "--repo/--issue win over the status issue" "$(cat "$FAKE/gh/issues/101/body")" "— status: by flag"
+cp "$T/body.good" "$FAKE/gh/issues/101/body"; LEDGER_BEFORE="$(cat "$FAKE/gh/issues/101/body")"
+cp "$FAKE/gh/issues/11/body" "$FAKE/clobber-11"
+run "${AS_ALICE[@]}" BROKER_HEARTBEAT_RETRY_SECS=0 bash "$S/broker-heartbeat.sh" --config-dir "$CFG" --status "after a race"
+rc_is "a heartbeat overwritten by a concurrent edit is retried" 0
+has "…saying so" "$OUT" "lost to a concurrent edit of acme/acme-fleet#11, retrying"
+eq "…and it sticks" "$(block "$(cat "$FAKE/gh/issues/11/body")" broker-heartbeat | cut -d'|' -f2)" "after a race"
+: >"$FAKE/gh.log"
+run env FLEET_ID=carol FEDERATION_FILE="$INST/federation.yml" FLEET_INSTANCE_REPO=acme/acme-fleet bash "$S/broker-heartbeat.sh" --config-dir "$CFG"
+rc_is "a fleet with no status_issue: heartbeat refuses" 1
+has "…naming the gap" "$OUT" "fleets.carol.status_issue is not declared"
+has "…and never falls back to the shared ledger" "$OUT" "not falling back to the shared ledger_issue"
+run env FLEET_ID=dave FEDERATION_FILE="$INST/federation.yml" FLEET_INSTANCE_REPO=acme/acme-fleet bash "$S/broker-watch.sh" --config-dir "$CFG" --once
+rc_is "a FLEET_ID the registry does not declare: watch refuses" 2
+has "…naming it" "$OUT" "FLEET_ID \"dave\" is not declared"
+run env FLEET_ID=alice FEDERATION_FILE="$INST/federation.yml" bash "$S/broker-setup.sh" --config-dir "$CFG"
+rc_is "no instance repo to be found: setup refuses" 1
+has "…saying how to name it" "$OUT" "set FLEET_INSTANCE_REPO=owner/name"
+printf 'version: 1\nfleets: [unterminated\n' >"$T/bad-federation.yml"
+run env FLEET_ID=alice FEDERATION_FILE="$T/bad-federation.yml" bash "$S/broker-reconcile.sh" --config-dir "$CFG" --store "$SA"
+rc_is "an unreadable registry: reconcile refuses" 1
+eq "none of them touched GitHub" "$(grep -c 'issue edit' "$FAKE/gh.log" || true)" 0
+if [ "$(cat "$FAKE/gh/issues/101/body")" = "$LEDGER_BEFORE" ]; then ok "…least of all the shared ledger"; else bad "…least of all the shared ledger"; fi
+rm -f "$FAKE/runtime-up"
 
 echo "== J. scripts are shellcheck-clean and parse"
 for f in "$S"/*.sh; do

@@ -342,12 +342,37 @@ rc_is "supervise exits 0" 0
 SUP="$(cat "$STATE/supervisor.conf")"
 has "conf: excluded sessions are dropped" "$SUP" "# not on this host: acme-mm (merge home for acme/app is fleet alice)"
 hasnt "conf: …no line for them" "$SUP" "acme-mm|11|60"
-has "conf: the rest stay" "$SUP" "acme-broker|13|60"
+has "conf: the rest stay" "$SUP" "acme-odd|14|60"
+has "conf: multi-fleet with no status issue for this fleet: the broker is not supervised on the shared ledger" "$SUP" "# broker not supervised: acme-broker (status issue unresolved: fleets.bob.status_issue is not declared"
+hasnt "conf: …no line on ledger 13" "$SUP" "acme-broker|13|60"
+has "…and the tick warns" "$OUT" "WARNING acme-broker not supervised: fleet bob's status issue can't be resolved"
 has "conf: HOST_CHECK_CMD points at fleet launch --check" "$SUP" "HOST_CHECK_CMD=bash $EH/core/fleet/bin/fleet --instance $I launch --check"
 hasnt "the excluded monsters' ledgers are never read" "$(cat "$FAKE/gh.log")" "issue view 11"
 hasnt "…and never commented on" "$(cat "$FAKE/gh.log")" "issue comment 12"
 hasnt "a stale excluded monster is not relaunched" "$(windows)" "acme-mm"
-has "a stale monster this host runs is relaunched" "$(windows)" "acme-broker"
+has "a stale monster this host runs is relaunched" "$(windows)" "acme-odd"
+hasnt "the unsupervised broker is not" "$(windows)" "acme-broker"
+# bob declares its status issue: the broker's line now points at it, read through its own block (#54)
+sed -i.bak 's/^  bob:/  bob:\n    status_issue: 22/' "$I/federation.yml"; rm -f "$I/federation.yml.bak"
+conf FLEET_ID=bob FLEET_INSTANCE_REPO=acme/acme-fleet; reset_tmux; stale_ledgers; : >"$FAKE/gh.log"
+jq -n --arg b "<!-- fleet-heartbeat -->
+last: $(iso 1) — status: 2 up
+<!-- /fleet-heartbeat -->
+
+<!-- broker-heartbeat -->
+last: $(iso 300) — status: working
+<!-- /broker-heartbeat -->" '{state: "OPEN", body: $b}' >"$FAKE/ledger-22.json"
+run fleet supervise
+rc_is "supervise with a status issue exits 0" 0
+SUP="$(cat "$STATE/supervisor.conf")"
+has "conf: the broker line is rewritten to the fleet's status issue and the broker block" "$SUP" "acme-broker|22|60|acme/acme-fleet|broker-heartbeat"
+has "the status issue is read in the instance repo" "$(cat "$FAKE/gh.log")" "issue view 22 -R acme/acme-fleet"
+hasnt "the shared ledger 13 is never read" "$(cat "$FAKE/gh.log")" "issue view 13"
+has "a stale broker block is relaunched, the fresh fleet-heartbeat beside it notwithstanding" "$(windows)" "acme-broker"
+conf; no_registry; reset_tmux; stale_ledgers
+run fleet supervise
+has "single-fleet: the broker stays on its ledger" "$(cat "$STATE/supervisor.conf")" "acme-broker|13|60"
+conf FLEET_ID=bob; registry alice alice
 local_conf ROLES=build,design; : >"$FAKE/gh.log"
 run fleet supervise
 rc_is "nothing left to supervise: exits 0" 0
