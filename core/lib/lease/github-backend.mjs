@@ -34,8 +34,10 @@
 //
 // Every success path in this file is a CAS win (or, for the first claim, a successful create).
 // There is no code path that reports "acquired" / "renewed" / "released" without the server having
-// accepted exactly the commit this caller built on exactly the tip it read. The one deliberate
-// exception is the operator break-glass (`force: true`), which is not reachable from any agent path.
+// accepted exactly the commit this caller built on exactly the tip it read. The operator break-glass
+// is a CAS too whenever the old tip is a readable commit; it falls back to `force: true` only for a
+// tip the API cannot serve as a commit. It requires the inspected tip sha, and the fleet settings
+// template denies the command to agent sessions (policy enforced by the harness, not by this file).
 //
 // Only refs under `refs/engsys/` are accepted, and a tip whose tree is not the empty tree is an
 // error for every operation (never a takeover): an empty-tree child commit on a real branch would
@@ -158,8 +160,10 @@ export const MAX_TTL_MINUTES = 1440;
 export const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 /** A fence read slower than this is refused: its numbers are too stale to act on. */
 export const DEFAULT_MAX_FENCE_READ_MS = 5_000;
-/** How many minted tokens per role an instance remembers for confirming unconfirmed writes. */
+/** How many unconfirmed tokens per role an instance remembers for confirming them from a later read. */
 const MINTED_MEMORY = 64;
+/** The API's Date header is truncated to whole seconds; remaining-time math subtracts this floor. */
+const DATE_RESOLUTION_MS = 1000;
 
 /** CLI exit codes. */
 export const EXIT = Object.freeze({
@@ -460,9 +464,13 @@ export function createGithubLease({
     let last = null;
     for (;;) {
       attempt += 1;
+      // `at` is the local SEND time of the request that produced the response: the server stamped
+      // its Date header after this instant, so "elapsed since `at`" is an upper bound on the time
+      // that passed since the stamp. Elapsed time measured from arrival would miss the transit.
+      const sentAt = now();
       try {
         const res = await api.request(method, path, body);
-        if (res.status < 500) return { ...res, at: now() };
+        if (res.status < 500) return { ...res, at: sentAt };
         last = { status: res.status, message: res.json?.message ?? null };
       } catch (err) {
         last = { status: null, message: String(err?.message ?? err) };
@@ -579,12 +587,14 @@ export function createGithubLease({
   // -- shared presentation ---------------------------------------------------------------------
 
   /**
-   * Remaining lifetime of `expiresMs` as of NOW, for a holder: the latest server time observed
-   * minus the local time elapsed since that response arrived. Never overstates: every term moves
-   * the number down as time passes.
+   * Remaining lifetime of `expiresMs` as of NOW, for a holder, as a lower bound: the latest server
+   * Date observed, minus DATE_RESOLUTION_MS (the header is truncated to the second, so true server
+   * time was up to 1 s later), minus the local time elapsed since that request was SENT (the stamp
+   * happened after the send, so this over-counts the elapsed time, never under). Every term errs on
+   * the side of less time; a local clock that runs at the right rate is the one remaining assumption.
    */
   function remainingMs(expiresMs, clock) {
-    return expiresMs - clock.serverNow - Math.max(0, now() - clock.at);
+    return expiresMs - clock.serverNow - DATE_RESOLUTION_MS - Math.max(0, now() - clock.at);
   }
 
   function expiryInfo(record, clock) {
@@ -641,7 +651,9 @@ export function createGithubLease({
 
   // -- operations ------------------------------------------------------------------------------
 
-  // Tokens this instance minted, per role (bounded). See acquire's liveness note.
+  // Tokens this instance minted whose CAS outcome is not known, per role (bounded). An entry is
+  // `pending` while its CAS is in flight and `unconfirmed` after a lost/error outcome; a clean win
+  // DELETES the entry, so a confirmed holder is never re-issued its token. See acquire.
   const mintedByRole = new Map();
   const mintedFor = (role) => { if (!mintedByRole.has(role)) mintedByRole.set(role, new Map()); return mintedByRole.get(role); };
 
@@ -649,14 +661,16 @@ export function createGithubLease({
    * Acquire the baton for `role`. Exactly one concurrent caller wins (the CAS). Over an expired,
    * released or malformed tip the win is flagged (`tookOverExpired` / `tookOverMalformed` plus
    * `previous`), so a takeover is always loud. A fresh baton held by another — or by this same
-   * holder name (`heldBySelf`, see heldByOther) — is refused with `held`.
+   * holder name (`heldBySelf`, see heldByOther) — is refused with `held`. That holds INSIDE a
+   * process too: two acquires on one instance never both succeed; the lease is the mutex.
    *
-   * Liveness: every token this INSTANCE mints is remembered (per role, bounded). If a CAS could not
-   * be confirmed (lost response, lagging replica) and a later read, in this call or a later one,
-   * shows the tip carrying one of our tokens for our holder name, unexpired, the write landed and
-   * acquire reports `acquired` with that token (`confirmedByRead`). A baton nobody holds for a full
-   * TTL is therefore never left behind by an unconfirmed write, as long as the process lives. A
-   * fresh process has no such memory and sees `heldBySelf`: it waits for expiry, by design.
+   * Liveness: a token whose CAS outcome could not be confirmed (lost response, lagging replica) is
+   * remembered as `unconfirmed`. If a later read, in this call or a later one, shows the tip
+   * carrying such a token for our holder name, unexpired, the write landed: acquire reports
+   * `acquired` with the TIP's record (`confirmedByRead`) and forgets the token, so exactly one caller
+   * can confirm it. A token whose CAS is still in flight (`pending`) is never confirmed by another
+   * caller: that caller sees `heldBySelf`. A clean win forgets the token at once. A fresh process
+   * has no such memory and sees `heldBySelf`: it waits for expiry, by design.
    */
   async function acquire({ role, holder, ttlMinutes, fleet = fleetOpt ?? fleetOf(holder) } = {}) {
     validateRole(role);
@@ -673,9 +687,13 @@ export function createGithubLease({
       let flags = {};
       if (tip.kind === "baton") {
         const ours = minted.get(tip.record.token);
-        if (ours && tip.record.holder === holder && !tip.expired) {
-          // An earlier round's CAS landed without us seeing it. Confirmed by this read.
-          return wonResult("acquired", role, ours.record, ttlMinutes, tip.sha, tip.clock, { ...ours.flags, ...(ours.previous ? { previous: ours.previous } : {}), confirmedByRead: true, acquiredAt: ours.record.acquiredAt });
+        if (ours && ours.state === "unconfirmed" && tip.record.holder === holder && !tip.expired) {
+          // An earlier CAS landed without us seeing it. Confirmed by this read; the token is
+          // forgotten so no second caller can confirm it too. Report what the TIP says (it may have
+          // been renewed since), not what we remembered.
+          minted.delete(tip.record.token);
+          const { expiresMs, ...tipRecord } = tip.record;
+          return wonResult("acquired", role, tipRecord, undefined, tip.sha, tip.clock, { ...ours.flags, ...(ours.previous ? { previous: ours.previous } : {}), confirmedByRead: true, acquiredAt: ours.acquiredAt });
         }
         if (!tip.expired && tip.record.holder !== RELEASED_HOLDER) {
           return { ...heldByOther(role, tip), heldBySelf: tip.record.holder === holder };
@@ -693,12 +711,17 @@ export function createGithubLease({
       const record = { holder, token, expires: new Date(expiresMs).toISOString(), protocol: PROTOCOL, fleet };
       const commit = await createCommit(formatBatonMessage(record, role), tip.kind === "free" ? [] : [tip.sha]);
       if (commit.failure) return errorResult(role, "could not create the baton commit", { failure: commit.failure });
-      minted.set(token, { record: { ...record, acquiredAt: new Date(tip.serverNow).toISOString() }, sha: commit.sha, flags, previous });
+      const acquiredAt = new Date(tip.serverNow).toISOString();
+      minted.set(token, { state: "pending", acquiredAt, flags, previous });
       if (minted.size > MINTED_MEMORY) minted.delete(minted.keys().next().value); // bounded: oldest out
       const result = await cas(ref, tip.kind === "free" ? null : tip.sha, commit.sha);
       if (result.outcome === "won") {
-        return wonResult("acquired", role, record, ttlMinutes, commit.sha, result.clock ?? tip.clock, { ...flags, ...(previous ? { previous } : {}), acquiredAt: new Date(tip.serverNow).toISOString() });
+        minted.delete(token); // confirmed: never re-issued
+        return wonResult("acquired", role, record, ttlMinutes, commit.sha, result.clock ?? tip.clock, { ...flags, ...(previous ? { previous } : {}), acquiredAt });
       }
+      // Not confirmed: a true loss, or a write that landed with its response lost (a later read of
+      // our token on the tip tells the two apart).
+      if (minted.has(token)) minted.get(token).state = "unconfirmed";
       if (result.outcome === "error") return errorResult(role, "the baton update failed", { failure: result.failure });
       lastLoss = result; // lost the CAS (or a settle read said so): re-read and decide again
     }
@@ -868,32 +891,54 @@ export function createGithubLease({
   }
 
   /**
-   * OPERATOR BREAK-GLASS. Force-resets the ref to a fresh `holder: none` commit, whatever the tip
-   * holds (a hostile `protocol: 9999`, an absurd expiry, a non-baton commit). This is the one write
-   * in this file that is not a compare-and-swap (`force: true`) and the one that ignores protocol
-   * and tree checks. It is for a human, by hand, from the CLI (`break-glass --i-know`); agents and
-   * monsters never call it. Returns what it overwrote so the operator can record it.
+   * OPERATOR BREAK-GLASS. Resets the ref to a fresh `holder: none` commit, whatever the tip holds (a
+   * hostile `protocol: 9999`, an absurd expiry, a non-baton commit). It ignores the protocol and tree
+   * checks, but it is still fenced two ways:
+   * - `expectSha` is required: the tip sha the operator inspected (from `status`). If the current tip
+   *   differs, nothing is written (`tip_moved`), so the operator decides on what they actually saw.
+   * - When the old tip's commit is readable, the reset commit is parented on it and the PATCH is a
+   *   normal compare-and-swap (`force: false`): a legitimate takeover that lands between the read
+   *   and the write wins, and the reset reports `tip_moved` instead of wiping a live baton. Only a
+   *   tip the API cannot serve as a commit (a non-commit object, an unreadable sha) is reset with a
+   *   parentless commit and `force: true`.
+   * It is for a human, by hand, from the CLI (`break-glass --expect-sha … --i-know`), and the fleet
+   * settings template denies that command to agent sessions. Returns what it overwrote.
    */
-  async function breakGlass({ role, reason } = {}) {
+  async function breakGlass({ role, reason, expectSha } = {}) {
     validateRole(role);
     const why = String(reason ?? "").replace(/[^\x20-\x7e]/g, "").trim().slice(0, 120);
     if (!why) throw new LeaseUsageError("break-glass needs a --reason (printable text, up to 120 chars)");
+    if (typeof expectSha !== "string" || !SHA_PATTERN.test(expectSha)) {
+      throw new LeaseUsageError("break-glass needs --expect-sha <40-hex tip sha> — the tip you inspected with `status`");
+    }
     const ref = refOf(role);
     const r = await readRef(ref);
     if (r.failure) return errorResult(role, "could not read the baton", { failure: r.failure });
     if (r.status === 404) return { ok: false, code: "not_held", role, reason: "no ref to reset" };
     if (r.serverNow === null) return errorResult(role, "response carried no Date header");
-    const prior = await readCommit(r.sha);
+    if (r.sha !== expectSha) {
+      return { ok: false, code: "tip_moved", role, expected: expectSha, current: r.sha, reason: "the tip is not the one you inspected; re-read with `status` and decide again" };
+    }
+    const readable = r.type === undefined || r.type === "commit";
+    const prior = readable ? await readCommit(r.sha) : { failure: { message: `ref points at a ${r.type}, not a commit` } };
     const previous = { sha: r.sha, ...(prior.failure ? { unreadable: prior.failure } : { tree: prior.tree, message: prior.message.slice(0, MAX_MESSAGE_BYTES), parsed: parseBatonMessage(prior.message) }) };
     const record = { holder: RELEASED_HOLDER, token: randomUUID(), expires: new Date(r.serverNow).toISOString(), protocol: PROTOCOL, fleet: fleetOpt ?? RELEASED_HOLDER };
     const message = `${formatBatonMessage(record, role).replace(/\n/, ` (break-glass: ${why})\n`)}`;
-    // Parent = the tip we read when the commit object is readable, so the history survives; a
-    // parentless commit otherwise (the old tip may be garbage the API refuses to serve).
-    const commit = await createCommit(message, prior.failure ? [] : [r.sha]);
+    const parented = !prior.failure;
+    const commit = await createCommit(message, parented ? [r.sha] : []);
     if (commit.failure) return errorResult(role, "could not create the reset commit", { failure: commit.failure });
+    if (parented) {
+      const result = await cas(ref, r.sha, commit.sha);
+      if (result.outcome === "won") return { ok: true, code: "broke_glass", role, reason: why, forced: false, previous, record: { ...record, role, sha: commit.sha } };
+      if (result.outcome === "error") return errorResult(role, "the reset failed", { failure: result.failure, previous });
+      // Someone moved the ref between our read and our write (a takeover of the wedged tip). Report
+      // the current tip; nothing of ours was written.
+      const nowTip = await readTip(ref);
+      return { ok: false, code: "tip_moved", role, expected: expectSha, current: nowTip.kind === "error" ? null : (nowTip.sha ?? null), now: describe(role, nowTip), reason: "the tip moved after you inspected it; nothing was written" };
+    }
     const res = await call("PATCH", `${base}/refs/${shortRef(ref)}`, { sha: commit.sha, force: true });
     if (res.status !== 200) return errorResult(role, "the forced reset failed", { failure: res.failure ?? { status: res.status, message: res.json?.message ?? null }, previous });
-    return { ok: true, code: "broke_glass", role, reason: why, previous, record: { ...record, role, sha: commit.sha } };
+    return { ok: true, code: "broke_glass", role, reason: why, forced: true, previous, record: { ...record, role, sha: commit.sha } };
   }
 
   /** Low-level ref access (the live test uses `remove` to clean up a scratch ref). */
@@ -923,7 +968,8 @@ function usage() {
     "  fence       --role R --token T [--min-remaining 30s]           exit 0 only while held",
     "  release     --role R --token T",
     "  list",
-    "  break-glass --role R --reason '<why>' --i-know                 OPERATOR ONLY: force-reset the ref to holder: none",
+    "  break-glass --role R --reason '<why>' --expect-sha <tip sha from status> --i-know",
+    "              OPERATOR ONLY (denied to agent sessions): reset the ref to holder: none if the tip is still <sha>",
     "common: --ref-prefix refs/engsys/<ns>  --fleet <id>  --pretty",
     "env: GH_TOKEN | GITHUB_TOKEN, else GH_APP_ENV_FILE (fleet App token helper), else `gh auth token`",
     "exit: 0 ok | 1 refused (held/lost/expired/not held) | 2 usage | 3 error | 4 protocol newer than this code",
@@ -990,9 +1036,9 @@ export async function main(argv, { api, env = process.env, out = process.stdout,
       case "list": result = await lease.list(); break;
       case "break-glass":
         if (flags["i-know"] !== true) {
-          throw new LeaseUsageError("break-glass force-resets the baton ref regardless of who holds it; this is an operator action, never an agent's. Re-run with --i-know to confirm");
+          throw new LeaseUsageError("break-glass resets the baton ref regardless of who holds it; this is an operator action, never an agent's. Re-run with --expect-sha <tip from status> --i-know to confirm");
         }
-        result = await lease.breakGlass({ role: need("role"), reason: need("reason") });
+        result = await lease.breakGlass({ role: need("role"), reason: need("reason"), expectSha: need("expect-sha") });
         break;
       default: throw new LeaseUsageError(`unknown op ${op}`);
     }

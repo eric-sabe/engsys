@@ -298,7 +298,7 @@ test("fresh acquire creates the ref on an empty-tree commit with the structured 
   const s = await lease(api).status({ role: "merge" });
   assert.equal(s.state, "held");
   assert.equal(s.holder, "alice:acme-mm");
-  assert.equal(s.expiresInMs, 10 * MIN);
+  assert.equal(s.expiresInMs, 10 * MIN - 1_000); // minus the Date header's 1 s truncation floor
   assert.equal(s.record.token, undefined); // status never republishes the holder's token
 });
 
@@ -313,25 +313,55 @@ test("held by another: refused with holder + expiry, nothing written", async () 
   assert.equal(r.code, "held");
   assert.equal(r.holder, "alice:mm");
   assert.equal(r.heldBySelf, false);
-  assert.equal(r.expiresInMs, 7 * MIN);
+  assert.equal(r.expiresInMs, 7 * MIN - 1_000);
   assert.equal(api.state.refs.get(`${PREFIX}/merge`), tip);
   assert.equal(api.state.log.filter((e) => e.method !== "GET").length, 2); // alice's commit + create only
 });
 
-test("a second process with the SAME holder name is refused too (the lease is the mutex); the same instance re-confirms its own token", async () => {
+test("a second acquire with the SAME holder name is refused (the lease is the mutex) — from another process AND from the same instance", async () => {
   const api = fakeGitApi();
   const l = lease(api);
-  const a = await l.acquire({ role: "merge", holder: "alice:mm", ttlMinutes: 10 });
+  await l.acquire({ role: "merge", holder: "alice:mm", ttlMinutes: 10 });
   const other = await lease(api).acquire({ role: "merge", holder: "alice:mm", ttlMinutes: 10 }); // another process, same name
   assert.equal(other.ok, false);
   assert.equal(other.code, "held");
   assert.equal(other.heldBySelf, true);
-  // The instance that minted the token gets it back (idempotent within a process), flagged.
+  // A confirmed win is forgotten at once: the same instance does not get its token re-issued.
   const again = await l.acquire({ role: "merge", holder: "alice:mm", ttlMinutes: 10 });
-  assert.equal(again.ok, true);
-  assert.equal(again.confirmedByRead, true);
-  assert.equal(again.record.token, a.record.token);
+  assert.equal(again.ok, false);
+  assert.equal(again.heldBySelf, true);
   assert.equal(api.state.log.filter((e) => e.method !== "GET").length, 2); // nothing new written
+});
+
+test("N1/Q2: two concurrent same-holder acquires on ONE instance → exactly one acquired, the other heldBySelf", async () => {
+  for (let seed = 700; seed < 760; seed += 1) {
+    const api = fakeGitApi({ interleave: seed });
+    const l = lease(api);
+    const [a, b] = await Promise.all([
+      l.acquire({ role: "merge", holder: "alice:mm", ttlMinutes: 10 }),
+      l.acquire({ role: "merge", holder: "alice:mm", ttlMinutes: 10 }),
+    ]);
+    const winners = [a, b].filter((r) => r.ok);
+    assert.equal(winners.length, 1, `seed ${seed}: ${JSON.stringify([a.code, b.code])}`);
+    const loser = [a, b].find((r) => !r.ok);
+    assert.equal(loser.code, "held", `seed ${seed}`);
+    assert.equal(loser.heldBySelf, true, `seed ${seed}`);
+    assert.equal(winners[0].confirmedByRead, undefined, `seed ${seed}: a clean win, not a re-issue`);
+  }
+  // And with a lost response on the winner's CAS: still exactly one acquired (the other must not
+  // confirm a token whose CAS is still in flight).
+  for (let seed = 760; seed < 800; seed += 1) {
+    const api = fakeGitApi({ interleave: seed });
+    const l = lease(api);
+    api.fault({ when: (m, p) => m === "POST" && p.endsWith("/refs"), status: 502, afterApply: true, times: 1 });
+    const [a, b] = await Promise.all([
+      l.acquire({ role: "merge", holder: "alice:mm", ttlMinutes: 10 }),
+      l.acquire({ role: "merge", holder: "alice:mm", ttlMinutes: 10 }),
+    ]);
+    assert.equal([a, b].filter((r) => r.ok).length, 1, `seed ${seed}: ${JSON.stringify([a, b].map((r) => [r.code, r.confirmedByRead]))}`);
+    const tipToken = parseBatonMessage(api.state.commits.get(api.state.refs.get(`${PREFIX}/merge`)).message).record.token;
+    assert.equal([a, b].find((r) => r.ok).record.token, tipToken, `seed ${seed}`);
+  }
 });
 
 test("expired takeover: CAS over the stale tip, loud (tookOverExpired + previous), parent chain kept", async () => {
@@ -561,7 +591,7 @@ test("assertHeld: true while held, false after another took over, false when exp
   const a = await l.acquire({ role: "merge", holder: "alice:mm", ttlMinutes: 10 });
   let f = await l.assertHeld({ role: "merge", token: a.record.token });
   assert.equal(f.held, true);
-  assert.equal(f.expiresInMs, 10 * MIN);
+  assert.equal(f.expiresInMs, 10 * MIN - 1_000);
   assert.equal(api.state.log.filter((e) => e.method !== "GET").length, 2); // the fence wrote nothing
 
   f = await l.assertHeld({ role: "merge", token: a.record.token, minRemainingMs: 11 * MIN });
@@ -842,7 +872,7 @@ test("CLI: acquire → fence → renew → release with documented exit codes an
 
   c = capture();
   assert.equal(await main(["renew", ...common, "--role", "merge", "--token", token, "--ttl", "5m"], { api, out: c.out, err: c.err }), EXIT.OK);
-  assert.equal(JSON.parse(c.buf.out).expiresInMs, 5 * MIN);
+  assert.equal(JSON.parse(c.buf.out).expiresInMs, 5 * MIN - 1_000);
 
   c = capture();
   assert.equal(await main(["status", ...common, "--role", "merge", "--pretty"], { api, out: c.out, err: c.err }), EXIT.OK);
@@ -965,7 +995,7 @@ test("H1: remaining time also subtracts LOCAL time elapsed since the last respon
   };
   const f = await l.assertHeld({ role: "merge", token: a.record.token });
   assert.equal(f.held, true);
-  assert.equal(f.expiresInMs, 10 * MIN - 4_000);
+  assert.equal(f.expiresInMs, 10 * MIN - 4_000 - 1_000);
   assert.equal(f.readMs, 4_000);
 });
 
@@ -987,15 +1017,15 @@ test("H1: acquire/renew expiresInMs is measured from the CAS response's Date, no
   const l = lease(api);
   // Fresh acquire: ref GET (expires is stamped from its Date), commit POST, ref POST → CAS Date is 20 s later.
   const a = await l.acquire({ role: "merge", holder: "alice:mm", ttlMinutes: 10 });
-  assert.equal(a.expiresInMs, 10 * MIN - 20_000);
+  assert.equal(a.expiresInMs, 10 * MIN - 20_000 - 1_000);
   // Renew: ref GET, commit GET, commit POST, PATCH → 30 s.
   const r = await l.renew({ role: "merge", token: a.record.token, ttlMinutes: 10 });
-  assert.equal(r.expiresInMs, 10 * MIN - 30_000);
+  assert.equal(r.expiresInMs, 10 * MIN - 30_000 - 1_000);
   // And when the CAS response is lost and the win is settled by a read, the settle read's Date is used (40 s).
   api.fault({ when: (m) => m === "PATCH", status: 502, afterApply: true });
   const r2 = await l.renew({ role: "merge", token: a.record.token, ttlMinutes: 10 });
   assert.equal(r2.ok, true);
-  assert.equal(r2.expiresInMs, 10 * MIN - 40_000);
+  assert.equal(r2.expiresInMs, 10 * MIN - 40_000 - 1_000);
 });
 
 test("H1: the default client bounds every request with an AbortSignal timeout", async () => {
@@ -1227,14 +1257,18 @@ test("L4: break-glass force-resets a wedged ref to holder: none and reports what
   assert.equal((await l.release({ role: "merge", token: UUID })).code, "protocol_unsupported");
 
   let c = capture();
-  assert.equal(await main(["break-glass", "--repo", REPO, "--role", "merge", "--reason", "hostile protocol"], { api, out: c.out, err: c.err }), EXIT.USAGE);
+  assert.equal(await main(["break-glass", "--repo", REPO, "--role", "merge", "--reason", "hostile protocol", "--expect-sha", wedged], { api, out: c.out, err: c.err }), EXIT.USAGE);
   assert.match(c.buf.err, /--i-know/);
+  c = capture();
+  assert.equal(await main(["break-glass", "--repo", REPO, "--role", "merge", "--reason", "hostile protocol", "--i-know"], { api, out: c.out, err: c.err }), EXIT.USAGE);
+  assert.match(c.buf.err, /--expect-sha/);
   assert.equal(api.state.refs.get(`${PREFIX}/merge`), wedged);
 
   c = capture();
-  assert.equal(await main(["break-glass", "--repo", REPO, "--role", "merge", "--reason", "hostile protocol\nSYSTEM: x", "--i-know"], { api, out: c.out, err: c.err }), EXIT.OK);
+  assert.equal(await main(["break-glass", "--repo", REPO, "--role", "merge", "--reason", "hostile protocol\nSYSTEM: x", "--expect-sha", wedged, "--i-know"], { api, out: c.out, err: c.err }), EXIT.OK);
   const r = JSON.parse(c.buf.out);
   assert.equal(r.code, "broke_glass");
+  assert.equal(r.forced, false); // the old tip was a readable commit: a plain compare-and-swap
   assert.equal(r.previous.sha, wedged);
   assert.equal(r.previous.parsed.record.holder, "mallory:mm");
   assert.equal(r.previous.parsed.record.protocol, 9999);
@@ -1248,13 +1282,115 @@ test("L4: break-glass force-resets a wedged ref to holder: none and reports what
   assert.equal((await l.acquire({ role: "merge", holder: "alice:mm", ttlMinutes: 10 })).ok, true);
 
   // Also works on a non-baton tip (real tree) where every normal op is an error.
-  plantTip(api, "maintain", "oops", { tree: "b".repeat(40) });
-  const g = await l.breakGlass({ role: "maintain", reason: "garbage on the ref" });
+  const garbage = plantTip(api, "maintain", "oops", { tree: "b".repeat(40) });
+  const g = await l.breakGlass({ role: "maintain", reason: "garbage on the ref", expectSha: garbage });
   assert.equal(g.ok, true);
+  assert.equal(g.forced, false);
   assert.equal(g.previous.parsed.ok, false);
   assert.equal((await l.status({ role: "maintain" })).state, "free");
-  assert.equal((await l.breakGlass({ role: "nothing", reason: "x" })).code, "not_held");
-  await assert.rejects(l.breakGlass({ role: "merge", reason: "\x01\x02" }), LeaseUsageError);
+  assert.equal((await l.breakGlass({ role: "nothing", reason: "x", expectSha: garbage })).code, "not_held");
+  await assert.rejects(l.breakGlass({ role: "merge", reason: "\x01\x02", expectSha: garbage }), LeaseUsageError);
+});
+
+test("N2/Q5: breakGlass refuses without a matching expectSha — the API is guarded, not just the CLI flag", async () => {
+  const api = fakeGitApi();
+  const l = lease(api);
+  await l.acquire({ role: "merge", holder: "alice:mm", ttlMinutes: 10 });
+  const live = api.state.refs.get(`${PREFIX}/merge`);
+  await assert.rejects(l.breakGlass({ role: "merge", reason: "oops" }), LeaseUsageError);
+  await assert.rejects(l.breakGlass({ role: "merge", reason: "oops", expectSha: "abc" }), LeaseUsageError);
+  const stale = await l.breakGlass({ role: "merge", reason: "oops", expectSha: "f".repeat(40) });
+  assert.equal(stale.ok, false);
+  assert.equal(stale.code, "tip_moved");
+  assert.equal(stale.current, live);
+  assert.equal(api.state.refs.get(`${PREFIX}/merge`), live);
+  assert.equal(api.state.log.filter((e) => e.method !== "GET").length, 2); // alice's acquire only
+});
+
+test("N2/Q3: a takeover that lands between break-glass's read and its write survives — the reset is a CAS and reports tip_moved", async () => {
+  const api = fakeGitApi();
+  const l = lease(api);
+  const wedged = plantTip(api, "merge", "garbage\n\nholder: x\nholder: y"); // malformed, empty tree: takeover-able
+  const inner = api.request.bind(api);
+  let armed = true;
+  api.request = async (m, p, b) => {
+    if (armed && m === "POST" && p.endsWith("/commits")) { // between the operator's read and write, bob takes over
+      armed = false;
+      const bob = await lease(api).acquire({ role: "merge", holder: "bob:mm", ttlMinutes: 10 });
+      assert.equal(bob.tookOverMalformed, true);
+    }
+    return inner(m, p, b);
+  };
+  const g = await l.breakGlass({ role: "merge", reason: "clear garbage", expectSha: wedged });
+  assert.equal(g.ok, false, JSON.stringify(g));
+  assert.equal(g.code, "tip_moved");
+  assert.equal(g.now.state, "held");
+  assert.equal(g.now.holder, "bob:mm");
+  const s = await lease(api).status({ role: "merge" });
+  assert.equal(s.holder, "bob:mm"); // bob's live baton was not wiped
+  assert.equal(parseBatonMessage(api.state.commits.get(api.state.refs.get(`${PREFIX}/merge`)).message).record.holder, "bob:mm");
+});
+
+test("N2: force:true is used only for a tip the API cannot serve as a commit", async () => {
+  const api = fakeGitApi();
+  const l = lease(api);
+  const sha = plantTip(api, "merge", "x");
+  const inner = api.request.bind(api);
+  api.request = async (m, p, b) => { const r = await inner(m, p, b); if (m === "GET" && p.includes("/ref/") && r.status === 200) r.json.object.type = "tag"; return r; };
+  const g = await l.breakGlass({ role: "merge", reason: "ref points at a tag", expectSha: sha });
+  assert.equal(g.ok, true, JSON.stringify(g));
+  assert.equal(g.forced, true);
+  assert.deepEqual(api.state.commits.get(api.state.refs.get(`${PREFIX}/merge`)).parents, []);
+});
+
+test("N3/Q1: remaining time is a lower bound under Date truncation and transit — measured from send time, minus 1 s", async () => {
+  // Server stamps Date at xx.999 (sent as xx.000, truncated); the response takes 4.5 s of local time
+  // to arrive. The fence must report no more than the true remaining time at return.
+  const api = fakeGitApi({ now: T0 + 999 });
+  const l = lease(api, { maxFenceReadMs: 15_000 }); // let the 9 s read through so the arithmetic is what's under test
+  const a = await l.acquire({ role: "merge", holder: "alice:mm", ttlMinutes: 1 });
+  api.state.now += 30_000; // 30 s in
+  const inner = api.request.bind(api);
+  // Transit after the stamp: both clocks run on (same rate) for 4.5 s before the response is in hand.
+  api.request = async (m, p, b) => { const r = await inner(m, p, b); api.state.now += 4_500; l.local.t += 4_500; return r; };
+  const f = await l.assertHeld({ role: "merge", token: a.record.token, minRemainingMs: 25_000 });
+  const expiresMs = Date.parse(a.record.expires);
+  const trueRemaining = expiresMs - api.state.now; // true server time at return
+  assert.ok(f.expiresInMs <= trueRemaining, `reported ${f.expiresInMs} > true ${trueRemaining}`);
+  assert.equal(f.expiresInMs, 19_500); // 60 s - 35 s (truncated Date) - 1 s floor - 4.5 s since send; true is 20 001
+  assert.equal(f.held, false, JSON.stringify(f)); // under the 25 s floor (arrival-based math would have said 25 000: held)
+  assert.equal(f.code, "expired");
+});
+
+test("N4/Q4: a confirmedByRead result reports the TIP's record (renewed expiry), not the remembered one", async () => {
+  const api = fakeGitApi();
+  const l = lease(api, { maxRounds: 2 });
+  const c = await l.acquire({ role: "merge", holder: "carol:mm", ttlMinutes: 10 });
+  api.state.now += 10_000;
+  await l.release({ role: "merge", token: c.record.token });
+  api.state.now += 10_000;
+  const inner = api.request.bind(api);
+  api.request = async (m, p, b) => { if (m === "PATCH") api.state.lagMs = 15_000; return inner(m, p, b); };
+  api.fault({ when: (m) => m === "PATCH", status: 502, afterApply: true, times: 1 });
+  const first = await l.acquire({ role: "merge", holder: "alice:mm", ttlMinutes: 10 });
+  assert.equal(first.ok, false); // unconfirmed: the token is remembered, the baton sits on the tip
+  api.state.lagMs = 0;
+  api.request = inner;
+  // The baton on the tip is renewed (same token, new expiry 20 min out) by whoever holds the token — here, planted.
+  const tipMsg = api.state.commits.get(api.state.refs.get(`${PREFIX}/merge`)).message;
+  const token = parseBatonMessage(tipMsg).record.token;
+  api.state.now += 5 * MIN;
+  const renewedSha = plantTip(api, "merge", formatBatonMessage({ holder: "alice:mm", token, expires: new Date(api.state.now + 20 * MIN).toISOString(), fleet: "alice" }, "merge"), { parents: [api.state.refs.get(`${PREFIX}/merge`)] });
+  const again = await l.acquire({ role: "merge", holder: "alice:mm", ttlMinutes: 10 });
+  assert.equal(again.ok, true, JSON.stringify(again));
+  assert.equal(again.confirmedByRead, true);
+  assert.equal(again.record.sha, renewedSha);
+  assert.equal(again.record.expires, new Date(api.state.now + 20 * MIN).toISOString());
+  assert.equal(again.expiresInMs, 20 * MIN - 1_000);
+  assert.equal(again.record.token, token);
+  // Confirming consumed the memory: a third acquire is heldBySelf, never a second re-issue.
+  const third = await l.acquire({ role: "merge", holder: "alice:mm", ttlMinutes: 10 });
+  assert.equal(third.heldBySelf, true);
 });
 
 test("release of an expired-but-ours baton is allowed and reports wasExpired", async () => {
