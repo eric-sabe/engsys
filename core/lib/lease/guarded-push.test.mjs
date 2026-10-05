@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { scrubbedGitEnv, hermeticGit } from "../git-env.mjs";
-import { parseConfigList, pushConfigArgs, pushEnv, readPushConfig, unsafePushConfig } from "./baton.mjs";
+import { parseConfigList, pushConfigArgs, pushEnv, pushGit, readPushConfig, unsafePushConfig } from "./baton.mjs";
 
 const TOKEN = "fleet-token-123";
 const ROOT = mkdtempSync(join(tmpdir(), "guarded-push-"));
@@ -122,8 +122,8 @@ function sessionEnv({ fleet = true, globalConfig = "/dev/null", helper = FLEET_H
   return env;
 }
 
-const git = (wt, args, env) => new Promise((done) => {
-  execFile("git", args, { cwd: wt, env, timeout: 30_000 }, (err, stdout, stderr) => done({ code: err ? (typeof err.code === "number" ? err.code : 1) : 0, stdout, stderr }));
+const git = (wt, args, env, exe = "git") => new Promise((done) => {
+  execFile(exe, args, { cwd: wt, env, timeout: 30_000 }, (err, stdout, stderr) => done({ code: err ? (typeof err.code === "number" ? err.code : 1) : 0, stdout, stderr }));
 });
 /** The guard's options for this checkout, read the way the guarded push reads them. */
 async function guardArgs(wt, env) {
@@ -181,7 +181,7 @@ test("#71 L3: an operator's global helper (no env-scoped config) is kept under t
   assert.equal(readFileSync(global, "utf8").includes("evil"), false, "the global file is untouched");
 });
 
-test("#85 L3: the push's cleaned environment still authenticates through the fleet helper, and drops planted GIT_ASKPASS / NODE_OPTIONS / GIT_SSH_COMMAND", async () => {
+test("#85 L3: the push's cleaned environment still authenticates through the fleet helper, and drops planted GIT_ASKPASS / NODE_OPTIONS / GIT_SSH_COMMAND", async (t) => {
   resetMarks();
   const wt = checkout("wt-env", { plant: false });
   const home = mkdtempSync(join(ROOT, "home-"));
@@ -189,7 +189,10 @@ test("#85 L3: the push's cleaned environment still authenticates through the fle
   const entries = await readPushConfig(wt, { ...sessionEnv({ helper: APP_HELPER }), HOME: home });
   assert.deepEqual(unsafePushConfig(entries), [], "the fleet's env-scoped helper passes the scan");
   assert.deepEqual(unsafePushConfig(await readPushConfig(wt, { ...sessionEnv(), HOME: home })), [`credential.${ORIGIN.replace(/\/r\.git$/, "")}.helper`], "any other env-scoped helper is refused");
-  const r = await git(wt, [...pushConfigArgs(entries), "push", "origin", "HEAD:refs/heads/agent/5-x"], env);
+  // #92 NF2: the push's own git, by absolute path from a root-owned directory (skip where there is none).
+  const trusted = pushGit();
+  if (!trusted) { t.skip("no root-owned git on this host"); return; }
+  const r = await git(wt, [...pushConfigArgs(entries), "push", "origin", "HEAD:refs/heads/agent/5-x"], env, trusted);
   assert.equal(r.code, 0, r.stderr);
   assert.ok(remoteHas("agent/5-x"));
   assert.ok(ran("fleet-helper"));
