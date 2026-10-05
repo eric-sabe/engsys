@@ -12,6 +12,8 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck source=scrub-env.sh
+. "$HERE/scrub-env.sh"
 KIT_SRC="$(cd "$HERE/.." && pwd -P)"       # core/fleet
 CORE_SRC="$(cd "$KIT_SRC/.." && pwd -P)"   # core
 ROOT_SRC="$(cd "$CORE_SRC/.." && pwd -P)"  # the engsys repo root (has ./install)

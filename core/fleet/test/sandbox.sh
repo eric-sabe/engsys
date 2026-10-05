@@ -4,6 +4,9 @@
 # The sourcing test sets nothing up in advance; it gets $T (sandbox root), $HOME, $FAKE, remotes/ and PATH
 # with $T/bin first (the test installs its stubs there).
 
+# shellcheck source=scrub-env.sh
+. "$(dirname "${BASH_SOURCE[0]}")/scrub-env.sh"
+
 T="$(cd "$(mktemp -d)" && pwd -P)"
 PIDS=()
 cleanup() {
