@@ -26,12 +26,18 @@
 #                     [--default-branch main] [--ledger N]
 #                    [--session NAME] [--pulse-max 20m]
 #
-# Baton keepalive (engsys#62): while <state-dir>/baton-maintain.json carries this session's token, a
-# background `baton.mjs keepalive` renews the lease every 2.5 min (the caller rule: TTL 10 min, renew
-# <= 3m20s; the heartbeat tick is far too slow). It stops renewing when its session process (the
-# claude process it finds by walking up past the shells) is gone, when this bus is orphaned, when the
-# model has not touched the baton for --pulse-max (default 20m, so a live bus under a wedged or dead
-# model never keeps the role), and on loss. --session defaults to ENGSYS_SESSION.
+# Baton keepalive (engsys#62, #87): while <state-dir>/baton-maintain.json carries this session's token,
+# a `baton.mjs keepalive` renews the lease every 2.5 min (the caller rule: TTL 10 min, renew <= 3m20s;
+# the heartbeat tick is far too slow). It runs DETACHED, not as a child of this bus: a Monitor ends
+# (expiry, crash, re-arm gap) and the renewer must not end with it. This bus asks `keepalive --detach`
+# to adopt the session's running renewer (pidfile <state-dir>/baton-maintain.keepalive.pid, checked by
+# pid and process start time) or start one, and never kills it on exit. The renewer stops when its
+# session process (the claude process found by walking up past the shells) is gone, when the token is
+# released or lost, and when the model has not touched the baton for --pulse-max (default 20m, so a
+# wedged or dead model never keeps the role). Its BATON_* lines go to <state-dir>/baton-maintain.events,
+# which this bus relays (offset in <state-dir>/.watch/baton-events.off, so a new bus also reports what
+# happened while no bus ran). Without a session process to bound it, the renewer runs attached to this
+# bus as before. --session defaults to ENGSYS_SESSION.
 set -u
 
 REPO="" DIR="" INTERVAL=30 DEFBRANCH=main LEDGER="" SESSION="${ENGSYS_SESSION:-}" PULSE_MAX=20m
@@ -56,21 +62,65 @@ touch "$W/deps_pr.tsv" "$W/dep_alerts.tsv" "$W/codeql_alerts.tsv" "$W/secretrun.
 # --- baton keepalive (see the header) ----------------------------------------
 BATON_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/lease/baton.mjs"
 BATON_STATE="$DIR/baton-maintain.json"
-KEEP_PID=""
+KEEP_PIDFILE="$DIR/baton-maintain.keepalive.pid"
+KEEP_EVENTS="$DIR/baton-maintain.events"
+KEEP_PID=""    # only the attached fallback; a detached renewer is never this bus's to kill
+ENSURED=0      # asked baton.mjs once this run (it adopts or replaces another launch's renewer)
+LOST_SAID=0
 INIT_PPID="$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')"
 trap '[ -z "$KEEP_PID" ] || kill "$KEEP_PID" 2>/dev/null || true' EXIT
+# keepalive_running → 0 when the pidfile names a live process with the recorded start time (a recycled
+# pid has another start time).
+keepalive_running() {
+  local kp kstart rest
+  [ -f "$KEEP_PIDFILE" ] && IFS='|' read -r kp kstart rest <"$KEEP_PIDFILE" || return 1
+  case "$kp" in '' | *[!0-9]*) return 1 ;; esac
+  [ -n "$kstart" ] && [ "$(ps -o lstart= -p "$kp" 2>/dev/null | awk '{$1=$1; print}')" = "$kstart" ]
+}
+# relay_events: print the renewer's BATON_* lines this bus has not printed yet.
+relay_events() {
+  local size off new
+  if [ ! -f "$KEEP_EVENTS" ]; then printf '0\n' >"$W/baton-events.off"; return 0; fi
+  size=$(wc -c <"$KEEP_EVENTS" | tr -d ' ')
+  off=$(cat "$W/baton-events.off" 2>/dev/null || true)
+  case "$off" in '' | *[!0-9]*) off="$size" ;; esac # events from before any bus kept an offset: no replay
+  [ "$off" -le "$size" ] || off=0                     # the file was replaced
+  if [ "$size" -gt "$off" ]; then
+    new=$(tail -c +"$((off + 1))" "$KEEP_EVENTS" | head -c "$((size - off))")
+    printf '%s\n' "$new" | sed '/^$/d'
+    case "$new" in *"BATON_LOST "*) LOST_SAID=1 ;; esac
+  fi
+  printf '%s\n' "$size" >"$W/baton-events.off"
+}
 # baton_tick → 1 when the bus must stop (baton lost, or this bus outlived its session).
 baton_tick() {
+  local out code
   # Orphaned (reparented to init since start): the session is gone. A bus started without a parent
-  # can't tell, and leans on the keepalive's --pulse-max instead.
+  # can't tell, and leans on the keepalive's own bounds instead.
   if [ "$INIT_PPID" != 1 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" = 1 ]; then return 1; fi
-  [ ! -f "$DIR/baton-maintain.lost" ] || return 1
+  relay_events
+  if [ -f "$DIR/baton-maintain.lost" ]; then
+    if [ "$LOST_SAID" = 0 ]; then
+      code=$(sed -n 's/.*"code":"\([^"]*\)".*/\1/p' "$DIR/baton-maintain.lost" | head -1)
+      echo "BATON_LOST maintain ${code:-lost}"
+    fi
+    return 1
+  fi
   [ -f "$BATON_STATE" ] && grep -q '"token": "' "$BATON_STATE" || return 0
   [ -n "$SESSION" ] || return 0
   if [ -n "$KEEP_PID" ] && kill -0 "$KEEP_PID" 2>/dev/null; then return 0; fi
-  node "$BATON_LIB" keepalive --role maintain --repo "$REPO" --state-dir "$DIR" --session "$SESSION" \
-    --pulse-max "$PULSE_MAX" &
-  KEEP_PID=$!
+  if [ "$ENSURED" = 1 ] && keepalive_running; then return 0; fi
+  out=$(node "$BATON_LIB" keepalive --detach --role maintain --repo "$REPO" --state-dir "$DIR" --session "$SESSION" \
+    --pulse-max "$PULSE_MAX" 2>>"$DIR/baton-maintain.keepalive.log") || true
+  ENSURED=1
+  case "$out" in
+    *'"code":"no_owner"'*)
+      node "$BATON_LIB" keepalive --role maintain --repo "$REPO" --state-dir "$DIR" --session "$SESSION" \
+        --pulse-max "$PULSE_MAX" &
+      KEEP_PID=$! ;;
+    *'"code":"idle"'*) relay_events ;;
+  esac
+  return 0
 }
 
 # emit_diff <old-file> <new-file> <added-prefix> [removed-prefix]

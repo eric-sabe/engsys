@@ -88,10 +88,12 @@ lost merge
 run bash "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1
 rc_is "mm-watch.sh exits at once on a lost baton" 0
 no_gh "  …before polling anything"
+has "  …and tells the Monitor (BATON_LOST from the marker, engsys#87)" "BATON_LOST merge lost"
 lost maintain
 run bash "$MNT/mnt-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1
 rc_is "mnt-watch.sh too" 0
 no_gh "  …before polling anything"
+has "  …BATON_LOST maintain" "BATON_LOST maintain lost"
 
 echo "mm-baton.test: $pass passed, $fail failed"
 [ "$fail" = 0 ]

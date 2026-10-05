@@ -597,7 +597,8 @@ wraps the backend with the caller rule; the monsters call it through `mm-baton.s
 
 | Rule | Where |
 |---|---|
-| TTL 10 min, renew at most every 3m20s | `TTL_MINUTES`, `RENEW_EVERY_MS`; `keepalive` (run by `mm-watch.sh` / `mnt-watch.sh`) renews every 2.5 min, and `mm-heartbeat.sh --state-dir` on every heartbeat |
+| TTL 10 min, renew at most every 3m20s | `TTL_MINUTES`, `RENEW_EVERY_MS`; `keepalive` renews every 2.5 min (detached, started or adopted by `mm-watch.sh` / `mnt-watch.sh`, alive as long as the claude session), and `mm-heartbeat.sh --state-dir` on every heartbeat |
+| on renew `error`, retry with backoff | the keepalive retries every 30 s, and a failed token mint counts as a renew error (it never ends the keepalive); the model's renew (`renew`, `mm-heartbeat.sh` / `mnt-heartbeat.sh --state-dir`) retries a transient error (transport, 5xx, 429, secondary rate limit) after 2 s and 6 s while the local deadline holds |
 | on `lost: true` stop, alert once, exit | a sticky `baton-<role>.lost` marker created with `O_EXCL`; its creator sends the one `fleet notify --level alert --incident baton-lost-<role>`; every later call refuses with no request; the token is never used again |
 | local deadline | `Date.now()` at the start of the last good renew or `assertHeld`, plus its `expiresInMs`, minus 2 s; checked with `Date.now()` before every fence and again before every send |
 | fence before each merge | `assertHeld` with `minRemainingMs: 60000`, the local deadline, the post-takeover wait, then < 30 s since the fence started, then `PUT /pulls/{n}/merge` with `sha=<validated head>` and a 30 s timeout, never retried |
@@ -610,10 +611,21 @@ The token is written 0600 to the monster's state dir so later shell calls of the
 bound to the holder and to the launch (`ENGSYS_SESSION_RUN`, exported per launch by
 `launch-agent-sessions.sh` with `ENGSYS_SESSION`): a new launch archives its predecessor's file unread
 and waits out that baton (`wait_self`) rather than reuse its token. A session started by hand, without
-`ENGSYS_SESSION_RUN`, uses its claude process's pid and start time instead. The background renewer stops
-when its session process is gone (it walks up past the shells to claude) or the model has not touched the
-baton for 20 minutes (the monsters tick at most every 10), so a renewer can never keep a dead or wedged
-session's role alive. Holder: `<FLEET_ID>:<session>`, or `<hostname>:<session>` in single-fleet mode
+`ENGSYS_SESSION_RUN`, uses its claude process's pid and start time instead. The background renewer runs detached from the watch bus that starts it (engsys#87): a bus runs
+under a Monitor, and a Monitor ends at its timeout (30 minutes at most) or when it dies, so a renewer
+tied to the bus left the lease to the 10-minute heartbeat, which can't hold it. The bus calls
+`baton.mjs keepalive --detach`, which adopts the session's running renewer or starts one in its own
+process session. At most one renewer runs per state dir: the pidfile `baton-<role>.keepalive.pid`
+records its pid, its process start time (so a recycled pid is never taken for it), its owner and its
+launch; a lock serialises two buses starting at once; a renewer that finds the pidfile naming another
+live renewer stops; a renewer recorded for another launch is stopped and replaced. The renewer is
+bounded by its owner, the claude process the bus runs under (found by walking up past the shells):
+it stops when that process is gone, when the token is released or lost, or when the model has not
+touched the baton for 20 minutes (the monsters tick at most every 10), so a renewer can never keep a
+dead or wedged session's role alive. It writes its `BATON_*` lines to `baton-<role>.events`, which
+each bus relays to its Monitor from a saved offset, so a new bus also reports what happened while no
+bus ran. A long-lived renewer resolves its API token again every 5 minutes, so an App installation
+token (one hour) never expires under it. Holder: `<FLEET_ID>:<session>`, or `<hostname>:<session>` in single-fleet mode
 (no `FLEET_ID` or no federation file), where the lease still guards against an accidental second session.
 A role the registry declares no home for is decided by the lease alone (host-roles does not exclude
 such a session either); an unreadable registry, or a `FLEET_ID` it does not declare, fails closed.
@@ -623,9 +635,14 @@ conf (6th field). Before any relaunch of such a session, the supervisor runs `ba
 relaunch only when this fleet is home and nobody holds a live baton (free, released, expired, or a
 malformed tip the monster will take over loudly). A live baton held by another fleet, or by this
 session's own earlier launch, is a wait. A lease or registry read error is a wait plus one alert via
-`NOTIFY_CMD` (`baton-read-<name>`), resolved on the next clean read. Two triggers are new and apply to
-these sessions only: a `handover` heartbeat with the process gone, and a stale heartbeat with the
-session idle at its prompt and its baton forfeited.
+`NOTIFY_CMD` (`baton-read-<name>`), resolved on the next clean read. Three triggers are new and apply
+to these sessions only: a `handover` heartbeat with the process gone; a stale heartbeat with the
+session idle at its prompt and its baton forfeited; and (engsys#87) a heartbeat at least a TTL old,
+not stale yet, with the session idle at its prompt and `supervise` reporting the baton expired with
+its tip still naming this session (`forfeited: true`). The last one relaunches a session that stopped
+on `BATON_LOST` after its lease ran out within a tick, where it used to wait for the heartbeat to go
+stale (60 minutes). A lost session writes no final heartbeat: the ledger is shared, and the new
+holder may already be writing it.
 
 ### P2: Cross-fleet messages
 
