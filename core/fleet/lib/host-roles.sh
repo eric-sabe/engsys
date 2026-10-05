@@ -132,6 +132,13 @@ fleet_host_excluded() { # fleet_host_excluded <name> → 0 + prints the reason w
   done <<<"$FLEET_HOST_TABLE"
   return 1
 }
+fleet_host_kind_of() { # fleet_host_kind_of <name> → its kind (merge | maintain | broker | monster | interactive), '' if unknown
+  local name kind _r
+  while IFS='|' read -r name kind _r; do
+    if [ "$name" = "$1" ]; then printf '%s\n' "$kind"; return 0; fi
+  done <<<"$FLEET_HOST_TABLE"
+  return 0
+}
 fleet_host_sessions() { # roster sessions that run on this host
   printf '%s' "$FLEET_HOST_TABLE" | awk -F'|' '$1 != "" && $3 == "" { print $1 }'
 }

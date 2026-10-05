@@ -41,7 +41,7 @@ export FLEET_INSTANCE="$FLEET_REPO" FLEET_REPO FLEET_STATE ENV_DIR FLEET_KIT_DIR
 unset TMUX_SESSION LOG_DIR
 # The fleet's identity comes only from its own config files, never from a caller's environment (a
 # session env carries FLEET_ID too). The same goes for the per-host role filter (lib/host-roles.sh).
-unset FLEET_ID FEDERATION_FILE ROLES ROSTER_EXCLUDE
+unset FLEET_ID FEDERATION_FILE FLEET_INSTANCE_REPO ROLES ROSTER_EXCLUDE
 fleet_load_conf "$FLEET_REPO/fleet/fleet.conf"
 [ -n "${FLEET_ORG:-}" ] || fleet_die "FLEET_ORG is not set in $FLEET_REPO/fleet/fleet.conf"
 [ -f "$HOME/.config/$FLEET_ORG/fleet.local.conf" ] && fleet_load_conf "$HOME/.config/$FLEET_ORG/fleet.local.conf"
@@ -60,17 +60,20 @@ fleet_load_conf "$FLEET_REPO/fleet/fleet.conf"
 : "${NOTIFY_FALLBACK_ISSUE:=}"
 # Multi-fleet registry (docs/multi-fleet.md § 1). FLEET_ID unset = single-fleet mode, unchanged.
 # FEDERATION_FILE is relative to the instance repo unless absolute; no file = single-fleet mode too.
+# FLEET_INSTANCE_REPO (owner/name) names the repo holding the fleets' status issues; unset = the instance
+# checkout's origin (federation.mjs status-issue).
 : "${FLEET_ID:=}"
 if [ -n "$FLEET_ID" ] && ! [[ "$FLEET_ID" =~ ^[a-z][a-z0-9-]{1,20}$ ]]; then
   fleet_die "FLEET_ID '$FLEET_ID' must be 2-21 characters: a lowercase letter, then lowercase letters, digits or hyphens"
 fi
 : "${FEDERATION_FILE:=federation.yml}"
 case "$FEDERATION_FILE" in /*) ;; *) FEDERATION_FILE="$FLEET_REPO/$FEDERATION_FILE" ;; esac
+: "${FLEET_INSTANCE_REPO:=}"
 for _k in PIN_REPO PIN_DIR; do
   [ -n "${!_k:-}" ] || fleet_die "$_k is not set in $FLEET_REPO/fleet/fleet.conf (or ~/.config/$FLEET_ORG/fleet.local.conf)"
 done
 unset _k
-export FLEET_ORG PIN_REPO PIN_DIR ENGSYS_DIR ENGSYS_MARKETPLACE INSTANCE_MARKETPLACE READY_LABEL REVIEW_BLOCK_REGEX PIN_WAIT_MAX_MIN LOG_DIR SLACK_ENV NOTIFY_FALLBACK_ISSUE FLEET_ID FEDERATION_FILE
+export FLEET_ORG PIN_REPO PIN_DIR ENGSYS_DIR ENGSYS_MARKETPLACE INSTANCE_MARKETPLACE READY_LABEL REVIEW_BLOCK_REGEX PIN_WAIT_MAX_MIN LOG_DIR SLACK_ENV NOTIFY_FALLBACK_ISSUE FLEET_ID FEDERATION_FILE FLEET_INSTANCE_REPO
 
 command -v jq >/dev/null || fleet_die "jq is required"
 

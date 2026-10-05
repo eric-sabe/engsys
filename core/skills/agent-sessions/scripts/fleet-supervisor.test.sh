@@ -127,5 +127,36 @@ printf 'TMUX_SESSION=acme\nLAUNCH_CMD=bash %s/launch.sh\nHOST_HEALTH_CMD=bash %s
 reset; run
 expect "no sessions at all: the alert still goes out" "^notify --level alert --incident host-health"
 
+# A 5th field (marker): one status issue carries several heartbeats; only the named block counts (#54)
+status() { # status <fleet-heartbeat minutes-ago> <broker minutes-ago|none> <broker status>
+  local b
+  b="Fleet status.
+
+<!-- fleet-heartbeat -->
+last: $(iso "$1") — status: 3 up
+<!-- /fleet-heartbeat -->"
+  [ "$2" = none ] || b="$b
+
+<!-- broker-heartbeat -->
+last: $(iso "$2") — status: $3
+<!-- /broker-heartbeat -->"
+  jq -n --arg b "$b" '{state:"OPEN", body:$b}' >"$T/ledger-30.json"
+}
+printf 'TMUX_SESSION=acme\nLAUNCH_CMD=bash %s/launch.sh\nREPO=o/r\nacme-broker|30|60|o/fleet|broker-heartbeat\n' "$T" >"$T/w/sup.conf"
+bpane() { case "$1" in exited) echo zsh ;; *) echo "2.1.290" ;; esac >"$T/pane-acme-broker"; : >"$T/capture-acme-broker"; }
+reset; status 1 90 "working"; bpane exited; run
+expect "marker: a fresh fleet-heartbeat never stands in for a stale broker block" "^launch acme-broker"
+reset; status 90 2 "working"; bpane exited; run
+expect "marker: a fresh broker block counts, whatever the fleet-heartbeat says" "!^launch"
+reset; status 1 none ""; bpane exited; run
+expect "marker: no broker block yet reads as never heartbeated (stale)" "^launch acme-broker"
+reset; status 1 10 "rotation requested"; bpane idle; run
+expect "marker: the rotation request is read from the broker block" "^launch acme-broker"
+reset; status 1 10 "session end"; bpane exited; run
+expect "marker: session end in the broker block leaves it stopped" "!^launch"
+printf 'TMUX_SESSION=acme\nLAUNCH_CMD=bash %s/launch.sh\nREPO=o/r\nacme-broker|30|60|o/fleet|Bad Marker\n' "$T" >"$T/w/sup.conf"
+reset; status 1 90 "working"; bpane exited; run
+expect "marker: an invalid marker skips the line" "!^launch"
+
 echo "$pass passed, $fail failed."
 [ "$fail" = 0 ]

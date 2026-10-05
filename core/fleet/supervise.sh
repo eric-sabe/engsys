@@ -16,6 +16,14 @@
 # `fleet notify --level alert --incident fleet-registry-unreadable` and resolves it once the registry
 # reads clean again.
 #
+# Multi-fleet mode (FLEET_ID set and the federation file present): the resource broker heartbeats on
+# its fleet's status issue, not on the repo ledger named in the template (docs/multi-fleet.md § 3), so
+# the broker's line is rewritten to `<name>|<status issue>|<stale>|<instance repo>|broker-heartbeat`:
+# the supervisor then reads only the broker's own block of that issue, never the fleet-heartbeat
+# block beside it. The status issue comes from `federation.mjs status-issue` (FLEET_INSTANCE_REPO in
+# fleet.conf, else the instance checkout's origin, names its repo). If it can't be resolved, the line
+# is commented out with a warning rather than left on the shared ledger another fleet's broker may use.
+#
 # Usage: supervise.sh [--instance <dir>]
 set -euo pipefail
 if [ "${1:-}" = --instance ]; then FLEET_INSTANCE="${2:?--instance needs a directory}"; export FLEET_INSTANCE; shift 2; fi
@@ -28,12 +36,25 @@ fleet_check_engsys
 conf="$FLEET_STATE/supervisor.conf"
 fleet_render "$FLEET_REPO/fleet/supervisor.conf.tmpl" "$conf"
 fleet_host_init
-kept=0 dropped=""
+kept=0 dropped="" status_target="" status_why=""
+if [ -n "$FLEET_ID" ] && [ -f "$FEDERATION_FILE" ]; then
+  status_target="$(node "$FLEET_KIT_DIR/lib/federation.mjs" status-issue --file "$FEDERATION_FILE" 2>&1)" || { status_why="${status_target#federation: }"; status_target=""; }
+  [ -n "$status_target" ] || [ -n "$status_why" ] || status_why="no status issue resolved"
+fi
 while IFS= read -r line; do
   case "$line" in
     [a-z0-9]*\|*)
       n="${line%%|*}"
       if why="$(fleet_host_excluded "$n")"; then dropped="$dropped $n"; printf '# not on this host: %s (%s)\n' "$n" "$why"; continue; fi
+      if [ "$(fleet_host_kind_of "$n")" = broker ] && { [ -n "$status_target" ] || [ -n "$status_why" ]; }; then
+        if [ -z "$status_target" ]; then
+          echo "fleet supervise: WARNING $n not supervised: fleet $FLEET_ID's status issue can't be resolved ($status_why)" >&2
+          printf '# broker not supervised: %s (status issue unresolved: %s)\n' "$n" "$status_why"
+          continue
+        fi
+        IFS='|' read -r _ _ stale _ <<<"$line"
+        line="$n|${status_target##*#}|$stale|${status_target%%#*}|broker-heartbeat"
+      fi
       kept=$((kept + 1)) ;;
   esac
   printf '%s\n' "$line"

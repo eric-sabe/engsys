@@ -60,9 +60,17 @@
 #                              kit: `fleet notify`). Unset or failing = logged
 #                              only; a failed alert is retried next tick and
 #                              never stops the tick.
-#   <session-name>|<ledger-issue>|<stale-minutes>[|<owner/name>]
+#   <session-name>|<ledger-issue>|<stale-minutes>[|<owner/name>[|<marker>]]
 #                              one line per monster; the 4th field overrides
-#                              REPO= for that session (multi-repo fleets)
+#                              REPO= for that session (multi-repo fleets).
+#                              The 5th names the block to read the heartbeat
+#                              from: only a `last:` line between
+#                              `<!-- <marker> -->` and `<!-- /<marker> -->`
+#                              counts. Use it when one issue carries several
+#                              heartbeats (a fleet status issue: the broker's
+#                              broker-heartbeat block beside the supervisor's
+#                              own fleet-heartbeat). Without it, the first
+#                              `last:` line in the body counts, as before.
 # Repo resolution per session: 4th field → REPO= → `gh repo view` in the cwd
 # (the last is the single-repo mode where the supervisor runs inside the
 # target repo; a separate fleet repo must set REPO= or the 4th field).
@@ -219,8 +227,9 @@ fi
 NOW=$(date +%s)
 
 for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
-  IFS='|' read -r name ledger stale_min repo <<<"$spec"
+  IFS='|' read -r name ledger stale_min repo marker <<<"$spec"
   [ -n "$name" ] && [ -n "$ledger" ] && [ -n "$stale_min" ] || { log "SKIP bad line: $spec"; continue; }
+  case "$marker" in *[!a-z0-9-]*) log "SKIP bad line (marker must be lowercase letters, digits, hyphens): $spec"; continue ;; esac
   if [ -n "$HOST_CHECK_CMD" ]; then
     # word-split on purpose, like LAUNCH_CMD
     # shellcheck disable=SC2086
@@ -243,7 +252,12 @@ for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
     log "$name: ledger $REPO_SLUG#$ledger CLOSED (kill switch) — not touching"
     continue
   fi
-  HB=$(jq -r .body <<<"$ISSUE" | sed -n 's/^last: \([0-9TZ:-]*\) — status: \(.*\)$/\1|\2/p' | head -1)
+  if [ -n "$marker" ]; then # only the line inside this session's own block (a shared status issue)
+    HB=$(jq -r .body <<<"$ISSUE" | awk -v m="$marker" '{ sub(/\r$/, "") } $0 == "<!-- " m " -->" { on = 1; next } $0 == "<!-- /" m " -->" { on = 0 } on' \
+      | sed -n 's/^last: \([0-9TZ:-]*\) — status: \(.*\)$/\1|\2/p' | head -1)
+  else
+    HB=$(jq -r .body <<<"$ISSUE" | sed -n 's/^last: \([0-9TZ:-]*\) — status: \(.*\)$/\1|\2/p' | head -1)
+  fi
   HB_TS="${HB%%|*}"
   HB_STATUS="${HB#*|}"
   HB_EPOCH=$(iso_to_epoch "$HB_TS")
