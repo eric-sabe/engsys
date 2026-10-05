@@ -164,19 +164,34 @@ review):
   in-flight act has finished or failed.
 - **Renew.** TTL 10 minutes. `mm-watch.sh` renews every 2.5 minutes in the
   background; `mm-heartbeat.sh --state-dir` renews on every heartbeat and
-  writes the heartbeat only while MM holds the lease. The background renewer
-  stops when its session is gone, or when the model has not touched the baton
-  for 45 minutes, so a live watch bus never keeps a dead session's role.
+  writes the heartbeat only while MM holds the lease. MM ticks at most every
+  10 minutes while holding. The background renewer stops when its session
+  process (claude) is gone, or when the model has not touched the baton for
+  20 minutes, so a live watch bus never keeps a dead or wedged session's role.
 - **Fence.** Every write to GitHub goes through `mm-act.sh`: it checks the
   lease has at least 60 s left by GitHub's clock, that the local deadline
   (`Date.now()` at the start of the last good renew or check, plus the time it
   had left, minus 2 s) has not passed, and that under 30 s went by since the
   check started, then sends with a 30 s timeout. A merge is
-  `PUT /pulls/{n}/merge` with `sha=<validated head>`, never retried.
+  `PUT /pulls/{n}/merge` with `sha=<validated head>`, never retried. Agents MM
+  dispatches never write to GitHub: a rebase or fix agent commits in its
+  worktree and hands back, and MM pushes with `mm-act.sh guard -- git push
+  --force-with-lease`.
+- **Guard hook.** Fleet monsters run with `--dangerously-skip-permissions`, so
+  no permission prompt stands in front of a raw `gh pr merge`. The engsys
+  plugin's PreToolUse hook (`core/.claude-plugin/singleton-write-guard.mjs`)
+  does: in a session the launcher marked `ENGSYS_SINGLETON_ROLE=merge` (or
+  `maintain`), it denies every Bash GitHub write (`gh` pr/issue/label/
+  workflow/run writes, `gh api` with a write method or fields, GraphQL
+  mutations, `git push`) unless the whole command is one plain invocation of
+  the fenced wrappers or the heartbeat. Subagents run in the session's process
+  and get it too. It is a guard rail against drift, not a boundary: an
+  obfuscated command can still get past a lexical check, and the lease and the
+  sha-pinned merge are the control.
 - **Lost.** A renew or fence that finds another token on the tip writes a
   sticky marker, sends one `fleet notify --level alert --incident
   baton-lost-merge`, and every later call refuses without a request. MM stops
-  at once and idles.
+  every agent it dispatched, then stops at once and idles.
 - **Release** on rotation, clean exit and handover; a release that finds the
   lease already expired is alerted as an incident (`baton-overrun-merge`).
 - **Handover.** When `federation.yml` moves `merge.home` away, MM finishes or
@@ -336,7 +351,7 @@ default_branch: main
 ledger_issue: 0              # written by mm-setup.sh
 state_dir: logs/merge-monster
 poll_interval: 30            # seconds, watch-script cadence
-heartbeat_minutes: 30        # ScheduleWakeup fallback tick
+heartbeat_minutes: 10        # ScheduleWakeup fallback tick; at most 10 while holding the baton
 stale_lock_minutes: 45       # baton freshness contract
 merge_method:
   multi_commit: merge        # preserve per-issue commits in batches

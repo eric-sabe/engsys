@@ -25,6 +25,8 @@ import {
   homeCheck,
   hostSlug,
   main,
+  sameProcessAlive,
+  sessionProcess,
   supervisorDecision,
 } from "./baton.mjs";
 
@@ -514,7 +516,7 @@ test("guard: fences, then runs the command; refuses everything but gh and this e
   assert.equal(r.stdout, "ok\n");
   assert.deepEqual(s.spawned[0].args, ["pr", "edit", "12", "--add-label", "mm:active"]);
   assert.equal(s.spawned[0].opts.timeout, 30_000);
-  assert.throws(() => guardCommand(["rm", "-rf", "/"]), /gh or gate-request/);
+  assert.throws(() => guardCommand(["rm", "-rf", "/"]), /gh, git push or gate-request/);
   assert.throws(() => guardCommand(["gh", "pr", "merge", "12"]), /merges go through/);
   assert.throws(() => guardCommand(["gh", "-R", "o/r", "pr", "merge", "12"]), /merges go through/);
   assert.throws(() => guardCommand(["gh", "api", "-X", "PUT", "repos/o/r/pulls/12/merge"]), /merges go through/);
@@ -674,4 +676,102 @@ test("CLI: startup → fence → guard → merge → release, one JSON line each
   assert.equal(out.join("").includes(JSON.parse(readFileSync(join(dir, "baton-merge.json"), "utf8")).token ?? "\u0000"), false);
   assert.ok(existsSync(join(dir, "baton-merge.json")));
   assert.ok(readdirSync(dir).every((f) => !f.endsWith(".tmp")), "no temp files left behind");
+});
+
+// ------------------------------------------------------------------ review follow-ups (#69) --
+
+test("L1: guard refuses every merge form, not just `gh pr merge` and numeric merge paths", () => {
+  for (const argv of [
+    ["gh", "api", "-X", "PUT", "repos/o/r/pulls/{pull_number}/merge", "-f", "pull_number=5"],
+    ["gh", "api", "graphql", "-f", "query=mutation{mergePullRequest(input:{pullRequestId:\"x\"}){clientMutationId}}"],
+    ["gh", "api", "graphql", "-f", "query=mutation{enablePullRequestAutoMerge(input:{pullRequestId:\"x\"}){clientMutationId}}"],
+    ["gh", "api", "-X", "POST", "repos/o/r/merges", "-f", "base=main"],
+  ]) assert.throws(() => guardCommand(argv), /merges go through/, argv.join(" "));
+});
+
+test("M2: guard sends a PR-branch push (force-with-lease) and refuses force, delete, default branch and refs/engsys", () => {
+  assert.deepEqual(guardCommand(["git", "-C", "../wt", "push", "--force-with-lease", "origin", "agent/1-x"]),
+    { exe: "git", args: ["-C", "../wt", "push", "--force-with-lease", "origin", "agent/1-x"] });
+  assert.deepEqual(guardCommand(["git", "push", "-u", "origin", "HEAD:agent/2-y"]).exe, "git");
+  for (const argv of [
+    ["git", "push", "--force", "origin", "x"],
+    ["git", "push", "-f", "origin", "x"],
+    ["git", "push", "origin", "+x"],
+    ["git", "push", "--delete", "origin", "x"],
+    ["git", "push", "origin", "main"],
+    ["git", "push", "origin", "HEAD:refs/heads/master"],
+    ["git", "push", "origin", "x:refs/engsys/batons/merge"],
+    ["git", "push", "--mirror", "origin"],
+    ["git", "commit", "-m", "x"],
+  ]) assert.throws(() => guardCommand(argv), /guard/, argv.join(" "));
+});
+
+test("M3: sessionProcess walks past shells to the session process; sameProcessAlive tells a reused pid apart", () => {
+  const table = {
+    40: { ppid: 30, start: "Sun Oct 4 12:00:03 2026", comm: "bash" },
+    30: { ppid: 20, start: "Sun Oct 4 12:00:02 2026", comm: "/bin/zsh" },
+    20: { ppid: 10, start: "Sun Oct 4 12:00:01 2026", comm: "2.1.233" },
+    10: { ppid: 1, start: "Sun Oct 4 11:00:00 2026", comm: "-zsh" },
+  };
+  const ps = (pid) => table[pid] ?? null;
+  assert.deepEqual(sessionProcess({ startPid: 40, ps }), { pid: 20, start: "Sun Oct 4 12:00:01 2026" });
+  // claude died: the intermediate shell was reparented to init.
+  const orphan = { 40: table[40], 30: { ...table[30], ppid: 1 } };
+  assert.equal(sessionProcess({ startPid: 40, ps: (pid) => orphan[pid] ?? null }), null);
+  assert.equal(sameProcessAlive({ pid: 20, start: "Sun Oct 4 12:00:01 2026" }, ps), true);
+  assert.equal(sameProcessAlive({ pid: 20, start: "Sun Oct 4 12:59:59 2026" }, ps), false, "same pid, another process");
+  assert.equal(sameProcessAlive({ pid: 99, start: "x" }, ps), false);
+  const real = sessionProcess();
+  assert.ok(real === null || (real.pid > 1 && typeof real.start === "string"), "the real ps parses");
+});
+
+test("M3: keepalive stops, renewing nothing, once its session process is gone; the pulse limit is 20 min", async () => {
+  const w = world();
+  const s = session(w);
+  await s.baton.startup();
+  const n = w.api.state.log.length;
+  assert.equal(await s.baton.keepalive({ out: () => {}, parentAlive: () => true, ownerAlive: () => false, pulseMaxMs: 0 }), EXIT.OK);
+  assert.equal(w.api.state.log.length, n);
+  const lines = [];
+  w.sleepLocal(21 * MIN);
+  await s.baton.keepalive({ out: (l) => lines.push(l), parentAlive: () => true });
+  assert.match(lines[0] ?? "", /^BATON_IDLE merge/, "default pulse limit is 20 minutes");
+});
+
+test("L2: without ENGSYS_SESSION_RUN the session's process id stands in, so a re-run of startup keeps its own token", async () => {
+  const w = world();
+  const dir = mkdtempSync(join(tmpdir(), "baton-l2-"));
+  const out = [];
+  const deps = (run) => ({ env: { ENGSYS_SESSION: "acme-mm" }, hostname: "mini", api: w.api, run, out: { write: (x) => out.push(x) }, err: { write: () => {} }, notify: async () => true, now: () => w.local.t });
+  const common = ["--repo", REPO, "--role", "merge", "--state-dir", dir];
+  assert.equal(await main(["startup", ...common], deps("pid:4242@Sun Oct 4 12:00:00 2026")), EXIT.OK);
+  assert.equal(await main(["startup", ...common], deps("pid:4242@Sun Oct 4 12:00:00 2026")), EXIT.OK);
+  assert.equal(JSON.parse(out.at(-1)).decision, "resumed");
+  assert.equal(await main(["startup", ...common], deps("pid:5151@Sun Oct 4 13:00:00 2026")), EXIT.REFUSED, "another session never reads the token");
+  assert.equal(JSON.parse(out.at(-1)).decision, "wait_self");
+});
+
+test("L3: a keepalive renew answered between our release CAS and its state write is no loss", async () => {
+  const w = world();
+  const s = session(w);
+  await s.baton.startup();
+  const keep = session(w, { dir: s.stateDir });
+  const release = s.lease.release;
+  let raced = null;
+  s.lease.release = async (o) => { const r = await release(o); raced = await keep.baton.renew({ source: "keepalive" }); return r; };
+  assert.equal((await s.baton.release({ reason: "rotation" })).result.released, true);
+  assert.notEqual(raced.result.lost, true);
+  assert.equal(existsSync(s.store.lostFile), false, "no sticky marker");
+  assert.equal(s.notes.length + keep.notes.length, 0, "no alert");
+  assert.equal(s.store.load().releasing, undefined);
+});
+
+test("L3: a failed release clears its in-progress mark, so a real loss later still alerts", async () => {
+  const w = world();
+  const s = session(w);
+  await s.baton.startup();
+  w.api.fault({ when: () => true, status: 500, times: 99 });
+  assert.equal((await s.baton.release({ reason: "exit" })).exit, EXIT.ERROR);
+  assert.equal(s.store.load().releasing, undefined);
+  assert.ok(s.store.load().token);
 });

@@ -309,7 +309,7 @@ message, or Slack reply alone approves nothing.
 - **Validate the fix against the _right_ gate, bound to the fix commit.** Trivy
   image-scan runs on **push/dispatch, not PR** — a green PR does not prove a CVE
   fix. Dispatch `gh workflow run services-ci.yml --ref "$FIX_REF" -f
-force_all=true` (never rely on the default-branch default when `--ref` is
+force_all=true` through the fence (`mnt-act.sh guard … -- gh workflow run …`; never rely on the default-branch default when `--ref` is
   omitted), record the run's resolved head SHA, and accept the scan **only when
   that SHA matches the fix commit** — a mutable branch ref alone is not enough.
   Or `docker build` + `trivy` locally. (See the Trivy-push-only lesson.)
@@ -331,7 +331,7 @@ repo: acme/app
 session_name: acme-maintain # advertised in its own ledger (discovery)
 ledger_issue: <new pinned issue, distinct from MM — created by mnt-setup.sh>
 state_dir: logs/maintenance-monster
-heartbeat_minutes: 30
+heartbeat_minutes: 10 # at most 10 while holding the baton
 stale_lock_minutes: 45 # continuous watchdog: own Monitor + heartbeat, mirrors MM
 phase: read_only # Phase 1: watch + triage + report; no auto-PRs (raise to auto_drive later)
 watch:
@@ -400,9 +400,9 @@ a startup holder check against `federation.yml` and the lease
 (`mnt-baton.sh startup`: not home → never acquire, held elsewhere → stand by),
 a background renew every 2.5 minutes in `mnt-watch.sh` plus one on every
 `mnt-heartbeat.sh --state-dir`, a fence before every write (`mnt-act.sh guard`
-for `gh` writes and gate requests; `mnt-fp-dismiss.sh` fences itself before
-its PATCH whenever its state dir carries the baton; `mnt-baton.sh fence` before
-dispatching a fix agent or pushing), stop-and-alert-once on loss
+for `gh` writes and gate requests; `mnt-fp-dismiss.sh` always fences itself
+before its PATCH, unless an operator outside any session passes `--no-baton`; `mnt-baton.sh fence` before
+dispatching a fix agent; pushes go through `mnt-act.sh guard -- git push`), stop-and-alert-once on loss
 (`baton-lost-maintain`), release on rotation, clean exit and handover, and the
 same handover when `maintain.home` moves.
 

@@ -45,7 +45,7 @@
 //
 //   startup    home check, then acquire when free/expired and home        exit 0 act | 1 don't | 3 | 4
 //   renew      [--if-due 150s] renew with the session's token             exit 0 | 1 lost | 3 | 5
-//   keepalive  [--owner-pid P] [--pulse-max 45m] renew loop for the watch bus; prints BATON_* events
+//   keepalive  [--pulse-max 20m] renew loop for the watch bus; prints BATON_* events
 //   fence      the check before a mutating act                            exit 0 held | 1 | 3 | 5
 //   guard -- <gh …|gate-request.sh …>   fence, then run the command (30 s timeout)
 //   merge      --pr N --sha S --method merge|squash|rebase                exit 0 merged | 1 | 3
@@ -57,8 +57,8 @@
 // github-backend's: 0 ok, 1 refused, 2 usage, 3 error, 4 newer protocol, 5 not started (no token in
 // this session).
 
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, writeFileSync, writeSync } from "node:fs";
-import { execFile } from "node:child_process";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmdirSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { execFile, execFileSync } from "node:child_process";
 import { hostname as osHostname } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -73,8 +73,12 @@ export const RENEW_EVERY_MS = 200_000;
 export const KEEPALIVE_EVERY_MS = 150_000;
 /** keepalive's retry after a renew error (the local deadline still bounds every act). */
 export const KEEPALIVE_RETRY_MS = 30_000;
-/** keepalive stops renewing when the model has not touched the baton for this long. */
-export const DEFAULT_PULSE_MAX_MS = 45 * 60_000;
+/**
+ * keepalive stops renewing when the model has not touched the baton for this long (the SKILLs tick at
+ * most every 10 minutes while holding, and every tick renews), so a wedged session forfeits its role
+ * within ~30 minutes instead of an hour.
+ */
+export const DEFAULT_PULSE_MAX_MS = 20 * 60_000;
 /** A fence passes only with at least this much lease left (the act's 30 s timeout + slack). */
 export const FENCE_MIN_REMAINING_MS = 60_000;
 /** Every fenced send must start within this long of the fence's start ... */
@@ -113,6 +117,43 @@ export function holderFor({ env = process.env, session, hostname = osHostname() 
 
 function firstLine(text) {
   return String(text ?? "").split("\n")[0];
+}
+
+/** Process names skipped when walking up to the session (the claude process). */
+const WRAPPER_PROCESSES = new Set(["bash", "sh", "zsh", "dash", "fish", "ksh", "env", "timeout", "nohup", "login"]);
+
+/** ps for one pid -> { ppid, start, comm } or null. */
+function defaultPs(pid) {
+  try {
+    const out = execFileSync("ps", ["-o", "ppid=,lstart=,comm=", "-p", String(pid)], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000 });
+    const m = /^\s*(\d+)\s+(\w{3}\s+\w{3}\s+\d+\s+[\d:]+\s+\d{4})\s+(.+?)\s*$/.exec(out);
+    return m ? { ppid: Number(m[1]), start: m[2].replace(/\s+/g, " "), comm: m[3] } : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The session process this call runs under: the first ancestor of `startPid` that is not a shell
+ * wrapper (the Bash tool's shell, a watch bus, `bash script.sh`). For a monster that is the claude
+ * process, which lives exactly as long as the session. -> { pid, start } or null (pid 1 reached, or
+ * ps unavailable). `start` (the process start time) tells a live session from a reused pid.
+ */
+export function sessionProcess({ startPid = process.ppid, ps = defaultPs } = {}) {
+  let pid = Number(startPid);
+  for (let i = 0; i < 16 && pid > 1; i += 1) {
+    const info = ps(pid);
+    if (!info) return null;
+    if (!WRAPPER_PROCESSES.has(basename(info.comm).replace(/^-/, ""))) return { pid, start: info.start };
+    pid = info.ppid;
+  }
+  return null;
+}
+
+/** True while the process `{pid, start}` is the same live process. */
+export function sameProcessAlive(proc, ps = defaultPs) {
+  const info = ps(proc.pid);
+  return Boolean(info && info.start === proc.start);
 }
 
 /**
@@ -196,6 +237,25 @@ export function createStateStore({ stateDir, role }) {
   const lostFile = join(stateDir, `baton-${role}.lost`);
   const noticeFile = join(stateDir, `baton-${role}.notice`);
   const ensureDir = () => mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  const lockDir = join(stateDir, `baton-${role}.lock`);
+  /** mkdir lock: up to ~3 s of waiting; a lock older than 10 s is a crashed writer and is broken. */
+  const withLock = (fn) => {
+    ensureDir();
+    for (let i = 0; ; i += 1) {
+      try {
+        mkdirSync(lockDir);
+        break;
+      } catch (e) {
+        if (e.code !== "EEXIST") throw e;
+        let age = 0;
+        try { age = Date.now() - statSync(lockDir).mtimeMs; } catch { continue; }
+        if (age > 10_000) { try { rmdirSync(lockDir); } catch { /* raced */ } continue; }
+        if (i >= 300) throw new Error(`baton state lock ${lockDir} is held`);
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+      }
+    }
+    try { return fn(); } finally { try { rmdirSync(lockDir); } catch { /* gone */ } }
+  };
   const readJson = (f) => {
     try {
       return JSON.parse(readFileSync(f, "utf8"));
@@ -215,11 +275,16 @@ export function createStateStore({ stateDir, role }) {
     lostFile,
     load: () => readJson(file),
     save: (state) => writeJson(file, state),
-    /** Read-modify-write; `fn` returns the next state or null to leave the file alone. */
+    /**
+     * Read-modify-write under a lock (a keepalive and the model's calls run in separate processes);
+     * `fn` returns the next state or null to leave the file alone.
+     */
     update(fn) {
-      const next = fn(readJson(file));
-      if (next) writeJson(file, next);
-      return next;
+      return withLock(() => {
+        const next = fn(readJson(file));
+        if (next) writeJson(file, next);
+        return next;
+      });
     },
     lost: () => readJson(lostFile),
     /** true only for the caller that created the marker: that caller sends the one alert. */
@@ -447,7 +512,7 @@ export function createBaton({ lease, repo, role, holder, run = null, store, home
     if (r.lost) {
       // A release by this session that landed first is not a loss.
       const again = store.load();
-      if (!again || again.token !== state.token) return { exit: EXIT.NOT_STARTED, result: { ok: false, code: "released", role, holder } };
+      if (!again || again.token !== state.token || again.releasing) return { exit: EXIT.NOT_STARTED, result: { ok: false, code: "released", role, holder } };
       return { exit: EXIT.REFUSED, result: await onLost(r, `renew (${source})`) };
     }
     store.update((s) => (s && s.token === state.token ? { ...s, lastRenewErrorMs: now(), ...pulse } : null));
@@ -537,9 +602,13 @@ export function createBaton({ lease, repo, role, holder, run = null, store, home
     const u = usable(state, holder, run);
     if (!u.ok) return { exit: EXIT.OK, result: { ok: true, released: false, code: u.code, role, holder, reason: u.reason } };
     await prepare?.();
+    // Mark the release first, so a keepalive renew answered between our CAS and the state write below
+    // reads "released", not "lost" (no false alert, no sticky marker).
+    store.update((s) => (s && s.token === state.token ? { ...s, releasing: iso(now()) } : null));
     const r = await lease.release({ role, token: state.token });
+    if (!r.ok) store.update((s) => (s && s.token === state.token ? (({ releasing, ...rest }) => rest)(s) : null));
     if (r.ok) {
-      store.update((s) => (s && s.token === state.token ? { ...s, token: null, releasedAt: iso(now()), releaseReason: reason } : null));
+      store.update((s) => (s && s.token === state.token ? (({ releasing, ...rest }) => ({ ...rest, token: null, releasedAt: iso(now()), releaseReason: reason }))(s) : null));
       if (r.wasExpired) {
         await notify({
           level: "alert",
@@ -580,15 +649,16 @@ export function createBaton({ lease, repo, role, holder, run = null, store, home
   /**
    * The watch bus's renewer. Prints one line per event for the Monitor: BATON_LOST, BATON_HANDOVER
    * (once), BATON_RENEW_ERROR (once per error streak), BATON_IDLE (stopped: no model pulse). Stops
-   * renewing, and returns, when: the lease is lost; the token is gone (released); its parent or
-   * `ownerPid` is gone (an orphaned renewer must never keep a dead session's baton alive); or the
+   * renewing, and returns, when: the lease is lost; the token is gone (released); its parent or its
+   * session process (`owner`, the claude process found by sessionProcess(); an orphaned renewer must
+   * never keep a dead session's baton alive, and an intermediate shell can outlive claude); or the
    * model has not touched the baton for `pulseMaxMs` (a live bus under a dead model, same reason).
    */
-  async function keepalive({ out, ownerPid = null, pulseMaxMs = DEFAULT_PULSE_MAX_MS, parentAlive = defaultParentAlive(), maxCycles = Infinity } = {}) {
+  async function keepalive({ out, owner = null, ownerAlive = owner ? () => sameProcessAlive(owner) : () => true, pulseMaxMs = DEFAULT_PULSE_MAX_MS, parentAlive = defaultParentAlive(), maxCycles = Infinity } = {}) {
     let announcedHandover = false;
     let erroring = false;
     for (let cycle = 0; cycle < maxCycles; cycle += 1) {
-      if (!parentAlive() || (ownerPid && !pidAlive(ownerPid))) { log("keepalive: owner gone, stopping"); return EXIT.OK; }
+      if (!parentAlive() || !ownerAlive()) { log("keepalive: its session is gone, stopping"); return EXIT.OK; }
       if (store.lost()) return EXIT.REFUSED;
       const state = store.load();
       if (!usable(state, holder, run).ok) return EXIT.OK;
@@ -644,8 +714,9 @@ function defaultParentAlive() {
 }
 
 /**
- * What `guard` may run: `gh …` (never `gh pr merge`, which goes through `merge` and its sha pin, and
- * never `--admin`) or this engsys's own gate-request.sh (optionally as `bash <path>`). The guard is a
+ * What `guard` may run: `gh …` (never a merge of any form, which goes through `merge` and its sha
+ * pin, and never `--admin`), `git [-C dir] push` for a PR branch (`--force-with-lease`, never a
+ * force, delete, the default branch or refs/engsys), or this engsys's own gate-request.sh. The guard is a
  * fence, not a way around the permission system, so it runs nothing else.
  */
 export function guardCommand(argv) {
@@ -656,10 +727,22 @@ export function guardCommand(argv) {
     if (args.includes("--admin")) throw new LeaseUsageError("guard never runs --admin");
     // Matched loosely on purpose (flags such as -R o/r can sit anywhere): any `pr … merge` or API
     // path to a merge endpoint is refused.
-    if ((args.includes("pr") && args.includes("merge")) || args.some((a) => /\/pulls\/\d+\/merge\b/.test(a))) {
-      throw new LeaseUsageError("merges go through `merge --pr N --sha <validated head> --method …`, never gh under guard");
+    if ((args.includes("pr") && args.includes("merge")) || args.some((a) => /\/merges?\b|mergePullRequest|enablePullRequestAutoMerge|mergeBranch/.test(a))) {
+      throw new LeaseUsageError("merges go through `merge --pr N --sha <validated head> --method …`, never gh under guard (no merge endpoint, placeholder path or GraphQL merge mutation)");
     }
     return { exe: "gh", args };
+  }
+  if (exe === "git") {
+    // A push for a PR branch, prepared by a dispatched agent and sent by the monster under the fence.
+    let i = 0;
+    const pre = [];
+    while (args[i] === "-C" && args[i + 1]) { pre.push("-C", args[i + 1]); i += 2; }
+    if (args[i] !== "push") throw new LeaseUsageError("guard runs `git [-C dir] push …` only");
+    const rest = args.slice(i + 1);
+    const bad = rest.find((a) => a === "--force" || a === "-f" || /^-[a-zA-Z]*f/.test(a) && !a.startsWith("--") || a === "--mirror" || a === "--all" || a === "--tags"
+      || a === "--delete" || a === "-d" || a.startsWith("+") || /refs\/engsys\//.test(a) || /(^|:)(refs\/heads\/)?(main|master)$/.test(a));
+    if (bad) throw new LeaseUsageError(`guard refuses git push ${bad}: --force-with-lease to a PR branch only, never a force, a delete, the default branch or refs/engsys`);
+    return { exe: "git", args: [...pre, "push", ...rest] };
   }
   if (basename(exe) === "gate-request.sh") {
     const own = resolve(HERE, "..", "..", "skills", "merge-monster", "scripts", "gate-request.sh");
@@ -670,7 +753,7 @@ export function guardCommand(argv) {
     if (real !== ownReal) throw new LeaseUsageError(`guard runs only this engsys's gate-request.sh (${own})`);
     return { exe: "bash", args: [real, ...args] };
   }
-  throw new LeaseUsageError(`guard runs gh or gate-request.sh only, not ${JSON.stringify(exe)}`);
+  throw new LeaseUsageError(`guard runs gh, git push or gate-request.sh only, not ${JSON.stringify(exe)}`);
 }
 
 function defaultSpawn(cmd, args, { timeout }) {
@@ -692,7 +775,7 @@ function usage() {
     "usage: baton.mjs <op> --repo o/r --role merge|maintain --state-dir DIR [--session NAME] [flags]",
     "  startup                         home check + acquire; exit 0 = act, 1 = do not act",
     "  renew      [--if-due 150s]      renew this session's baton",
-    "  keepalive  [--owner-pid P] [--pulse-max 45m]   renew loop for the watch bus",
+    "  keepalive  [--pulse-max 20m]   renew loop for the watch bus (stops with its session)",
     "  fence                           exit 0 only while it is safe to mutate",
     "  guard -- gh <args…> | <engsys>/skills/merge-monster/scripts/gate-request.sh <args…>",
     "  merge      --pr N --sha <validated head> --method merge|squash|rebase",
@@ -776,7 +859,7 @@ export async function main(argv, deps = {}) {
       repo: flags.repo,
       role: flags.role,
       holder,
-      run: env.ENGSYS_SESSION_RUN || null,
+      run: env.ENGSYS_SESSION_RUN || (deps.run !== undefined ? deps.run : fallbackRun(env)),
       store: stateDir ? createStateStore({ stateDir, role: flags.role }) : nullStore(),
       home: () => homeCheck({ env, repo: flags.repo, role: flags.role, cwd, federation: deps.federation }),
       now: deps.now ?? Date.now,
@@ -806,7 +889,7 @@ export async function main(argv, deps = {}) {
       case "keepalive":
         return await baton.keepalive({
           out: (line) => out.write(`${line}\n`),
-          ownerPid: flags["owner-pid"] ?? null,
+          owner: deps.owner !== undefined ? deps.owner : sessionProcess({ startPid: env.BATON_WALK_FROM || process.ppid }),
           pulseMaxMs: flags["pulse-max"] ? durationMs(flags["pulse-max"], "pulse-max") : DEFAULT_PULSE_MAX_MS,
           ...(deps.parentAlive ? { parentAlive: deps.parentAlive } : {}),
           ...(deps.maxCycles ? { maxCycles: deps.maxCycles } : {}),
@@ -823,6 +906,17 @@ export async function main(argv, deps = {}) {
     emit({ ok: false, code: "error", reason: String(e?.message ?? e) });
     return EXIT.ERROR;
   }
+}
+
+/**
+ * The launch id when the launcher did not set ENGSYS_SESSION_RUN (a session started by hand): the
+ * session process's pid and start time, constant for the session and different for its successor, so
+ * a re-run of startup resumes its own token and a new session still never reads its predecessor's.
+ * null when it can't be found (startup then always starts fresh).
+ */
+function fallbackRun(env) {
+  const p = sessionProcess({ startPid: env.BATON_WALK_FROM || process.ppid });
+  return p ? `pid:${p.pid}@${p.start}` : null;
 }
 
 /** `supervise` reads no local state. */

@@ -6,7 +6,7 @@
 //                              [--repo-dir DIR] [--default-branch NAME]
 //   node mnt-fp.mjs dismiss    --repo owner/name --config FILE --alert N --policy ID
 //                              --shape TEXT --evidence TEXT [--state-dir DIR] [--repo-dir DIR]
-//                              [--default-branch NAME]
+//                              [--default-branch NAME] [--no-baton]
 //
 // Design. A reviewed, standing policy (config `fp_policies:`) says: "alerts of this rule are false
 // positives when the code matches one of these shapes, and while these structural tripwires hold".
@@ -14,7 +14,7 @@
 // the alert's own commit AND at the default branch. It never dismisses. The per-alert code judgment
 // belongs to the calling model. `dismiss` is the only mutating path: it re-runs the same evaluation
 // for one alert (the tripwire may have tripped since the candidate list was made), then PATCHes,
-// fenced by the Maintenance Monster baton when its state dir carries one (batonFence, engsys#62).
+// fenced by the Maintenance Monster baton (batonFence, engsys#62; --no-baton outside a session only).
 //
 // Fail-closed throughout: any gh or git error means ERROR and no CANDIDATE for that policy; an
 // invalid policy is reported and never evaluated.
@@ -991,15 +991,21 @@ const BATON_SEND_WINDOW_MS = 30_000;
 const BATON_ACTION_TIMEOUT_MS = 30_000;
 
 /**
- * A dismissal is a mutating act: when the state dir carries a Maintenance Monster baton (engsys#62),
- * dismiss only under a passing fence, sent within 30 s of the fence's start and bounded by a 30 s
- * timeout. No baton file there means no monster runs from this state dir (an operator by hand).
+ * A dismissal is a mutating act (engsys#62): it is sent only under a passing Maintenance Monster
+ * fence, within 30 s of the fence's start and bounded by a 30 s timeout. Decided by WHO runs it, not
+ * by which files exist: unfenced only with an explicit --no-baton (an operator at a shell), and never
+ * inside a launched session (ENGSYS_SESSION set), where a monster could otherwise dismiss after
+ * standing down. The skills never pass --no-baton.
  */
-function batonFence(repo, stateDir) {
-  const has = (f) => fs.existsSync(path.join(stateDir, f));
-  if (!has('baton-maintain.json') && !has('baton-maintain.lost')) return { ok: true, skipped: true };
+function batonFence(repo, stateDir, noBaton) {
+  if (noBaton) {
+    if (process.env.ENGSYS_SESSION) return { ok: false, why: '--no-baton is refused inside a launched session (ENGSYS_SESSION is set): a monster always fences' };
+    return { ok: true, skipped: true };
+  }
   const started = Date.now();
-  const r = spawnSync(process.execPath, [BATON, 'fence', '--role', 'maintain', '--repo', repo, '--state-dir', stateDir], { encoding: 'utf8', timeout: 20_000 });
+  const r = spawnSync(process.execPath, [BATON, 'fence', '--role', 'maintain', '--repo', repo, '--state-dir', stateDir], {
+    encoding: 'utf8', timeout: 20_000, env: { ...process.env, BATON_WALK_FROM: String(process.ppid) },
+  });
   if (r.status !== 0) {
     let why = `fence refused (exit ${r.status ?? 'timeout'})`;
     try {
@@ -1018,7 +1024,7 @@ function cmdDismiss(argv) {
   const o = parseArgs(argv, {
     '--repo': { key: 'repo' }, '--config': { key: 'config' }, '--alert': { key: 'alert' }, '--policy': { key: 'policy' },
     '--shape': { key: 'shape' }, '--evidence': { key: 'evidence' }, '--state-dir': { key: 'stateDir' },
-    '--repo-dir': { key: 'repoDir' }, '--default-branch': { key: 'defaultBranch' },
+    '--repo-dir': { key: 'repoDir' }, '--default-branch': { key: 'defaultBranch' }, '--no-baton': { key: 'noBaton', flag: true },
   });
   checkCommon(o);
   if (!/^[1-9][0-9]*$/.test(o.alert || '')) throw new UsageError('--alert N (a positive integer) is required');
@@ -1078,7 +1084,7 @@ function cmdDismiss(argv) {
   }
 
   const comment = fitComment(`fp-policy ${policy.id}: ${o.shape} — ${evidence}`);
-  const fence = batonFence(o.repo, stateDir);
+  const fence = batonFence(o.repo, stateDir, Boolean(o.noBaton));
   if (!fence.ok) return refuse(`baton: ${fence.why}`);
   const res = gh([
     'api', '-X', 'PATCH', `repos/${o.repo}/code-scanning/alerts/${alertNo}`,

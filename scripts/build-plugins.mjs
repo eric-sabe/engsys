@@ -80,6 +80,10 @@ out.set('core/.claude-plugin/hooks.json', json({
     // (their plugin-cache path can't be pre-approved by a portable permission rule).
     PreToolUse: [
       { matcher: 'Bash', hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/approve-own-scripts.mjs"' }] },
+      // Singleton-write guard (engsys#62): in a merge/maintain monster session (ENGSYS_SINGLETON_ROLE),
+      // deny GitHub writes that bypass the baton's fenced wrappers. Hooks run even under
+      // --dangerously-skip-permissions; a deny here wins over the allow above.
+      { matcher: 'Bash', hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/singleton-write-guard.mjs"' }] },
     ],
     // Hand-back guard: a subagent can't hand back "still running, I'll continue once…" (nothing would
     // wake it), and a session can't end its turn on an unhandled INCOMPLETE hand-back.

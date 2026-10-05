@@ -604,13 +604,16 @@ wraps the backend with the caller rule; the monsters call it through `mm-baton.s
 | wait 60 s after a takeover | `notBeforeMs` (acquire return + 60 s); every fenced act refuses until then |
 | `heldBySelf` and errors are never held | startup answers `wait_self` / `error` with `act: false`; a fence holds only on `held: true` |
 | `wasExpired` release is an incident | `fleet notify --level alert --incident baton-overrun-<role>` |
+| no write bypasses the fence | `core/.claude-plugin/singleton-write-guard.mjs`, a PreToolUse hook armed by `ENGSYS_SINGLETON_ROLE` (the launcher sets it for merge and maintain sessions): denies Bash GitHub writes that are not one plain invocation of the fenced wrappers, in the monster and every agent it dispatches, even under `--dangerously-skip-permissions`. A guard rail, not a boundary; dispatched agents hand pushes back to the monster, which pushes through `guard -- git push`. `mnt-fp-dismiss` always fences (`--no-baton` only outside a session) |
 
 The token is written 0600 to the monster's state dir so later shell calls of the same session can use it,
 bound to the holder and to the launch (`ENGSYS_SESSION_RUN`, exported per launch by
 `launch-agent-sessions.sh` with `ENGSYS_SESSION`): a new launch archives its predecessor's file unread
-and waits out that baton (`wait_self`) rather than reuse its token. The background renewer stops when its
-watch bus is orphaned or the model has not touched the baton for 45 minutes, so a renewer can never keep a
-dead session's role alive. Holder: `<FLEET_ID>:<session>`, or `<hostname>:<session>` in single-fleet mode
+and waits out that baton (`wait_self`) rather than reuse its token. A session started by hand, without
+`ENGSYS_SESSION_RUN`, uses its claude process's pid and start time instead. The background renewer stops
+when its session process is gone (it walks up past the shells to claude) or the model has not touched the
+baton for 20 minutes (the monsters tick at most every 10), so a renewer can never keep a dead or wedged
+session's role alive. Holder: `<FLEET_ID>:<session>`, or `<hostname>:<session>` in single-fleet mode
 (no `FLEET_ID` or no federation file), where the lease still guards against an accidental second session.
 A role the registry declares no home for is decided by the lease alone (host-roles does not exclude
 such a session either); an unreadable registry, or a `FLEET_ID` it does not declare, fails closed.

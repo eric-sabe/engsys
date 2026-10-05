@@ -105,7 +105,9 @@ engsys (spec travels with the skill; the config travels with the repo).
    <your session name>`.
 
 6. Schedule the fallback tick: **ScheduleWakeup** at `heartbeat_minutes`
-   (repeat every cycle). The Monitors are the primary wake signal; this tick
+   (repeat every cycle), but **never more than 10 minutes while you hold the
+   baton**: each tick's heartbeat renews it, and the watch bus's keepalive
+   stops renewing after 20 minutes without a renew from you. The Monitors are the primary wake signal; this tick
    refreshes the heartbeat, rewrites `state.md`, picks up Dependabot idle
    work, and restarts either Monitor if it died — plus runs
    `mm-agent-watch.sh --once` as a synchronous backstop scan, so the liveness
@@ -187,6 +189,8 @@ dispatching an agent that will push.
 | merge | `<skill-dir>/scripts/mm-act.sh merge --repo <repo> --state-dir <state_dir> --pr N --sha <validated head> --method merge\|squash` |
 | any other `gh` write | `<skill-dir>/scripts/mm-act.sh guard --repo <repo> --state-dir <state_dir> -- gh <args…>` |
 | gate request | `<skill-dir>/scripts/mm-act.sh guard --repo <repo> --state-dir <state_dir> -- <skill-dir>/scripts/gate-request.sh <args…>` |
+| CI re-run | `<skill-dir>/scripts/mm-act.sh guard --repo <repo> --state-dir <state_dir> -- gh run rerun <run-id> --failed` |
+| push a branch a rebase or fix agent prepared | `<skill-dir>/scripts/mm-act.sh guard --repo <repo> --state-dir <state_dir> -- git -C <worktree> push --force-with-lease origin <branch>` (the guard refuses a force, a delete, the default branch and `refs/engsys`) |
 | dispatch a fix or rebase agent | `<skill-dir>/scripts/mm-baton.sh fence --repo <repo> --state-dir <state_dir>` immediately before the dispatch; dispatch only on exit 0 |
 
 `mm-act.sh` fences (the lease must have at least 60 s left by GitHub's clock,
@@ -195,6 +199,22 @@ over), checks that under 30 s went by since the fence started, then sends with
 a 30 s timeout. A refused fence sends nothing. Exempt: the heartbeat script
 (it renews), read-only calls, and local git (`git branch -D`, worktree
 removal). Never run a `gh` write any other way.
+
+**Agents you dispatch never write to GitHub.** They commit in their worktree
+and hand back; you push and label under the fence. Nothing they do later is
+covered by the fence you took before dispatching them.
+
+**The guard hook.** In this session (`ENGSYS_SINGLETON_ROLE=merge`, set by the
+launcher), the engsys plugin's PreToolUse hook denies any Bash command that
+writes to GitHub (`gh pr|issue|label|workflow|run` writes, `gh api` with a
+write method or fields, GraphQL mutations, `git push`) unless the whole
+command is one plain invocation of `mm-act.sh`, `mm-heartbeat.sh` or
+`mm-baton.sh`: no `;`, `&&`, `|`, redirects, `$( )` or backticks around it.
+Agents you dispatch run in this session and get the same hook. It runs even
+under `--dangerously-skip-permissions`. It is a guard rail against drift (a
+compacted model reaching for `gh pr merge`), not a boundary: the lease and the
+sha-pinned merge are the control. A denial means: run the act through the
+wrapper, or don't.
 
 **On a refusal, do not act.** Read `code`:
 
@@ -209,7 +229,10 @@ removal). Never run a `gh` write any other way.
   startup`.
 
 **Lost baton.** On `BATON_LOST`, or any result with `lost: true`: stop at
-once. No further mutations of any kind, not even label cleanup, a heartbeat
+once. **First stop every agent you dispatched** that is still running
+(`TaskStop` each one; with `liveness:`, `mm-agent-reg.sh fence --name <name>`
+for each running row), so none of them acts for a role you no longer hold.
+Then no further mutations of any kind, not even label cleanup, a heartbeat
 or a digest: someone else may hold the role now. The script has already sent
 the one `fleet notify --level alert --incident baton-lost-merge`. Journal it
 locally, stop both Monitors, schedule no tick, and idle at the prompt. The
@@ -259,10 +282,12 @@ from `gh pr view` together with a `reviewThreads` GraphQL query into one object.
 ## Failure handling (active PR goes red)
 
 1. Classify first: **flake/infra** (known-flaky suite, runner death, zombie
-   check) → exactly one re-run (`ci_reruns_max`). **Real** → step 2.
+   check) → exactly one re-run (`ci_reruns_max`), fenced:
+   `mm-act.sh guard … -- gh run rerun <run-id> --failed`. **Real** → step 2.
 2. Dispatch a fix agent — infra/CI agent for workflow failures, the
    implementation agent for code — in the PR's branch (worktree), capped at
-   `fix_attempts_max` (default 2).
+   `fix_attempts_max` (default 2). It commits in the worktree and hands the
+   push back to you (§ The baton); you push under the fence.
 3. Still red → `mm:escalated` + diagnosis comment (what failed, what was
    tried, your read on root cause) + escalation message (config channel).
    Clear `<state_dir>/active`, move to the next PR. **Never** head-of-line
@@ -272,8 +297,11 @@ from `gh pr view` together with a `reviewThreads` GraphQL query into one object.
 
 Background agent in a worktree: `git fetch origin && git rebase
 origin/<default_branch>`; regenerate lockfiles per repo convention rather than
-hand-merging them; `git push --force-with-lease`. Never plain `--force`. If
-the branch head moved since your snapshot, re-verify before touching it.
+hand-merging them; then it hands back (worktree path, branch, new head) without
+pushing. You push under the fence: `mm-act.sh guard … -- git -C <worktree>
+push --force-with-lease origin <branch>`. Never plain `--force` (the guard
+refuses it). If the branch head moved since your snapshot, re-verify before
+touching it.
 
 ## Subagent liveness (optional — `liveness:` config block)
 
@@ -555,7 +583,9 @@ Never push to the default branch · never merge red required checks · never
 `--force` (lease only) · never admin-bypass · never resolve substantive
 review threads to unblock · never apply DB migrations where that is
 operator-only (ping instead) · never post `/approve`, `/deny`, or an approving PR review yourself, on any thread, under any identity (your own `gh` login included); approvals come only from a human acting on GitHub · never mutate GitHub without a
-passing fence (`mm-act.sh`; § The baton) · never merge except through
+passing fence (`mm-act.sh`; § The baton) · dispatched agents never push or
+write to GitHub (they hand back; you act under the fence) · on a lost baton,
+stop your dispatched agents before anything else · never merge except through
 `mm-act.sh merge --sha <validated head>` · after a lost baton, never act
 again in this session · never print, copy or pass on the baton token · never
 take the baton when this fleet is not the role's home · never merge a gated

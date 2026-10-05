@@ -105,7 +105,8 @@ how confident a disposition looks.
    `ENGSYS_SESSION`, else `--session <your session name>`).
 
 6. Schedule the fallback tick: **ScheduleWakeup** at `heartbeat_minutes`
-   (repeat every cycle). The Monitors are the primary wake signal; this tick
+   (repeat every cycle), never more than 10 minutes while you hold the baton
+   (§ The baton). The Monitors are the primary wake signal; this tick
    refreshes the heartbeat, rewrites `state.md`, sweeps the slow-moving
    surfaces that aren't on the event bus (the package manager's audit,
    base-image staleness, and — when `watch.entra_app_credentials` or a
@@ -174,13 +175,21 @@ the `maintain` role (`refs/engsys/batons/maintain`, state in
 | --- | --- |
 | any `gh` write: opening a PR, `mnt:*` / `mm:ready` labels, issue create / comment / close, escalation and ledger comments | `<skill-dir>/scripts/mnt-act.sh guard --repo <repo> --state-dir <state_dir> -- gh <args…>` |
 | gate request | `<skill-dir>/scripts/mnt-act.sh guard --repo <repo> --state-dir <state_dir> -- <engsys-root>/skills/merge-monster/scripts/gate-request.sh <args…>` |
-| dismissal under an `fp_policies` entry | `mnt-fp-dismiss.sh` fences itself right before its PATCH whenever the state dir it journals to (the config's `state_dir`, or `--state-dir`) carries the baton; run it from the session, never pass another state dir |
-| dispatch a fix agent that will push, or push a fix branch yourself | `<skill-dir>/scripts/mnt-baton.sh fence --repo <repo> --state-dir <state_dir>` immediately before the dispatch or the `git push`; go ahead only on exit 0 |
+| dismissal under an `fp_policies` entry | `mnt-fp-dismiss.sh` always fences itself right before its PATCH, with the baton in the state dir it journals to (the config's `state_dir`, or `--state-dir`); never pass another state dir, and never `--no-baton` (it is for an operator outside a session and is refused in yours) |
+| CI dispatch (e.g. the push-only image scan) | `<skill-dir>/scripts/mnt-act.sh guard --repo <repo> --state-dir <state_dir> -- gh workflow run <workflow> --ref <fix ref> …` |
+| push a fix branch | `<skill-dir>/scripts/mnt-act.sh guard --repo <repo> --state-dir <state_dir> -- git -C <worktree> push --force-with-lease origin <branch>`; a fix agent commits in its worktree and hands the push back, it never pushes |
+| dispatch a fix agent | `<skill-dir>/scripts/mnt-baton.sh fence --repo <repo> --state-dir <state_dir>` immediately before the dispatch; go ahead only on exit 0 |
 
 Phase 1 writes too (escalation comments, ledger digests, tracking issues): they
 go through `mnt-act.sh guard` like everything else. A refused fence sends
-nothing; read its `code` as Merge Monster's § The baton lists. **Lost**: stop at
-once, no further writes of any kind; the script already sent the one
+nothing; read its `code` as Merge Monster's § The baton lists. The same guard
+hook applies (`ENGSYS_SINGLETON_ROLE=maintain`): raw GitHub writes are denied
+unless the whole command is one plain `mnt-act.sh`, `mnt-heartbeat.sh` or
+`mnt-baton.sh` invocation, for you and every agent you dispatch. **Tick at most
+every 10 minutes** while holding (each tick renews; the keepalive stops after 20
+minutes without one). **Lost**: first stop every agent you dispatched that is
+still running (`TaskStop`, then `mm-agent-reg.sh fence` for its row), then stop
+at once, no further writes of any kind; the script already sent the one
 `--incident baton-lost-maintain` alert; stop the Monitors, schedule nothing,
 idle. **Release** (`mnt-baton.sh release … --reason rotation|exit|handover`)
 after the final heartbeat on rotation, clean exit and handover. **Handover**
@@ -338,8 +347,8 @@ does the analysis.
   the weekly digest).
 - **Validate a fix against the _right_ gate, bound to the fix commit.** Trivy
   image-scan runs on push/dispatch, not PR — a green PR does not prove a CVE
-  fix. When Phase 2 drives a fix, dispatch
-  `gh workflow run services-ci.yml --ref "$FIX_REF" -f force_all=true`
+  fix. When Phase 2 drives a fix, dispatch it under the fence:
+  `mnt-act.sh guard … -- gh workflow run services-ci.yml --ref "$FIX_REF" -f force_all=true`
   (never rely on the default-branch default when `--ref` is omitted), record
   the run's resolved head SHA, and accept the scan only when that SHA matches
   the fix commit — a mutable branch ref alone is not enough.

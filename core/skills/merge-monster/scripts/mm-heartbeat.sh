@@ -6,7 +6,8 @@
 #   --state-dir  the monster's state_dir: renew this session's merge baton first (engsys#62). The
 #                heartbeat is the HOLDER's human surface, so without a held baton it is not written:
 #                exit 1 + BATON_LOST (lost: stop all mutations now) or exit 5 (no baton in this
-#                session). A renew error only warns. Prints BATON_HANDOVER <fleet> when federation.yml
+#                session). A renew error writes the heartbeat only while the local deadline holds
+#                (else exit 3). Prints BATON_HANDOVER <fleet> when federation.yml
 #                moved the role's home away from this fleet.
 set -euo pipefail
 
@@ -33,7 +34,14 @@ if [ -n "$STATE_DIR" ]; then
        fi ;;
     1) echo "BATON_LOST merge: heartbeat not written; stop all mutations now: $BATON_OUT"; exit 1 ;;
     5) echo "baton: this session holds no merge baton; heartbeat not written: $BATON_OUT"; exit 5 ;;
-    *) echo "WARNING baton renew failed (exit $BATON_RC), writing the heartbeat anyway; fences refuse once the local deadline passes: $BATON_OUT" >&2 ;;
+    *) # A renew that errored: write the heartbeat only while the local deadline still holds, so a
+       # session that may have lost the baton never keeps the shared ledger looking fresh.
+       if printf '%s' "$BATON_OUT" | jq -e '(.deadlineInMs // 0) > 0' >/dev/null 2>&1; then
+         echo "WARNING baton renew failed (exit $BATON_RC), still inside the local deadline; writing the heartbeat: $BATON_OUT" >&2
+       else
+         echo "baton renew failed (exit $BATON_RC) and the local deadline has passed (or is unknown); heartbeat not written: $BATON_OUT"
+         exit 3
+       fi ;;
   esac
 fi
 

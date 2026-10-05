@@ -10,7 +10,7 @@ ledger_issue: 0              # printed by scripts/mm-setup.sh --repo owner/name
 
 state_dir: logs/merge-monster # working memory: state.md, journal, .watch/ (keep gitignored)
 poll_interval: 30            # seconds — mm-watch.sh cadence (2-4 gh calls/cycle)
-heartbeat_minutes: 30        # ScheduleWakeup fallback tick
+heartbeat_minutes: 10        # ScheduleWakeup fallback tick; at most 10 while holding the baton (it renews it)
 stale_lock_minutes: 45       # heartbeat older than this ⇒ baton is stale, manual merging allowed
 
 merge_method:

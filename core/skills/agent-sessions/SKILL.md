@@ -183,7 +183,11 @@ them only:
 The launcher exports `ENGSYS_SESSION` (the session name) and
 `ENGSYS_SESSION_RUN` (a per-launch id) into every session: the baton's holder
 is `<FLEET_ID or hostname>:<ENGSYS_SESSION>`, and a fencing token on disk is
-honored only by the launch that took it.
+honored only by the launch that took it. A session whose prompt runs the merge
+or maintenance monster also gets `ENGSYS_SINGLETON_ROLE=merge|maintain`, which
+arms the engsys plugin's singleton-write guard hook: raw GitHub writes are
+denied unless they go through the monster's fenced wrappers (merge-monster
+SKILL.md § The baton). Every other session has it unset.
 
 **A Claude session can't exit itself.** A monster that honors a rotation
 request posts its digest + final `rotation requested` heartbeat, stops its

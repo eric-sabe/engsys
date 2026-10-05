@@ -73,6 +73,9 @@ printf '{"v":1,"holder":"alice:acme-mm","run":"r1","token":"11111111-1111-4111-8
 run env FLEET_ID=alice bash "$HERE/mm-act.sh" guard --repo acme/app --state-dir "$T/state" -- gh pr ready 12
 rc_is "a fence that can't reach GitHub (no token here) is an error, never held → exit 3" 3
 case "$(cat "$T/gh.log")" in *"pr ready"*) bad "  …and the command never ran" "$(cat "$T/gh.log")" ;; *) ok "  …and the command never ran" ;; esac
+run env FLEET_ID=alice bash "$HERE/mm-heartbeat.sh" --repo acme/app --issue 7 --state-dir "$T/state" --status running
+rc_is "a renew that errors with no known local deadline → heartbeat not written, exit 3" 3
+case "$(cat "$T/gh.log")" in *"issue edit"* | *"issue view"*) bad "  …the ledger untouched" "$(cat "$T/gh.log")" ;; *) ok "  …the ledger untouched" ;; esac
 rm -f "$T/state"/baton-*
 
 echo "watch bus"

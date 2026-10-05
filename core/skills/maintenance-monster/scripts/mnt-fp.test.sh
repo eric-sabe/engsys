@@ -193,7 +193,11 @@ run_c() { # candidates run with the standard flags; a PATCH from it is a failure
   RC=0; OUT="$("$S/mnt-fp-candidates.sh" --repo acme/app --repo-dir "$CL" "$@" 2>&1)" || RC=$?
   if grep -q -- 'PATCH' "$FAKE/gh.log"; then bad "candidates issued a PATCH" "$(cat "$FAKE/gh.log")"; fi
 }
-run_d() { # alert shape evidence [extra flags]
+run_d() { # alert shape evidence [extra flags] — an operator run (--no-baton); run_db below runs as a monster
+  local a="$1" sh="$2" ev="$3"; shift 3
+  RC=0; OUT="$("$S/mnt-fp-dismiss.sh" --repo acme/app --repo-dir "$CL" --config "$CFG" --alert "$a" --policy "$POLICY" --shape "$sh" --evidence "$ev" --no-baton "$@" 2>&1)" || RC=$?
+}
+run_db() { # same, without --no-baton: the baton fence applies
   local a="$1" sh="$2" ev="$3"; shift 3
   RC=0; OUT="$("$S/mnt-fp-dismiss.sh" --repo acme/app --repo-dir "$CL" --config "$CFG" --alert "$a" --policy "$POLICY" --shape "$sh" --evidence "$ev" "$@" 2>&1)" || RC=$?
 }
@@ -585,21 +589,30 @@ has "HTTP 403: says what permission is missing" "$OUT" "Code scanning alerts: Re
 has "  names the API permission" "$OUT" "security_events: write"
 no_side_effects
 rm -f "$FAKE/patch.403"
-# The baton fence (engsys#62): a state dir that carries a Maintenance Monster baton dismisses only
-# under a passing fence. Both cases below are refused before any request (no token of this session /
-# a lost baton), so they run offline.
+# The baton fence (engsys#62, review M1): without --no-baton a dismissal goes out only under a passing
+# fence, whatever files the state dir holds, and --no-baton is refused inside a launched session. Every
+# case below is refused before any request, so it runs offline.
 export ENGSYS_SESSION=acme-maintain
-printf '{"v":1,"holder":"zed:acme-maintain","token":"00000000-0000-4000-8000-000000000000","deadlineMs":0}\n' >"$T/state/baton-maintain.json"
+run_db 1 "$SHAPE1" "hmac"
+has "a launched session with no baton at all (archived by a standing-down startup)" "$OUT" "REFUSED 1 $POLICY baton: fence refused: not_started"
+no_side_effects
 run_d 1 "$SHAPE1" "hmac"
+has "--no-baton inside a launched session" "$OUT" "REFUSED 1 $POLICY baton: --no-baton is refused inside a launched session"
+no_side_effects
+printf '{"v":1,"holder":"zed:acme-maintain","token":"00000000-0000-4000-8000-000000000000","deadlineMs":0}\n' >"$T/state/baton-maintain.json"
+run_db 1 "$SHAPE1" "hmac"
 has "a baton in the state dir that this session does not hold" "$OUT" "REFUSED 1 $POLICY baton: fence refused: not_started"
 no_side_effects
 rm -f "$T/state/baton-maintain.json"
 printf '{"at":"2026-10-04T12:00:00.000Z","code":"lost"}\n' >"$T/state/baton-maintain.lost"
-run_d 1 "$SHAPE1" "hmac"
+run_db 1 "$SHAPE1" "hmac"
 has "a lost baton" "$OUT" "REFUSED 1 $POLICY baton: fence refused: lost_earlier"
 no_side_effects
 rm -f "$T/state/baton-maintain.lost"
 unset ENGSYS_SESSION
+run_db 1 "$SHAPE1" "hmac"
+has "outside a session, no --no-baton: still fenced (no session name, so refused)" "$OUT" "REFUSED 1 $POLICY baton: fence refused"
+no_side_effects
 CFG_KEEP="$CFG"
 CFG="$T/bad.yml"
 write_cfg "$CFG" "$(printf '%s\n' "$GOOD_POLICY" | grep -v '^    approved_by:')"
@@ -616,7 +629,7 @@ has "a failed fetch of the default branch (fail-closed)" "$OUT" "default branch 
 no_side_effects
 git -C "$CL" remote set-url origin "$T/origin.git"
 CFG="$CFG_KEEP"
-RC=0; OUT="$("$S/mnt-fp-dismiss.sh" --repo acme/app --repo-dir "$CL" --config "$CFG" --alert 1 --policy "$POLICY" --shape "$SHAPE1" 2>&1)" || RC=$?
+RC=0; OUT="$("$S/mnt-fp-dismiss.sh" --repo acme/app --repo-dir "$CL" --config "$CFG" --alert 1 --policy "$POLICY" --shape "$SHAPE1" --no-baton 2>&1)" || RC=$?
 rc_is "missing --evidence is a usage error" 2
 no_side_effects
 run_d 1 "$SHAPE1" "hmac" --state-dir /dev/null/nope

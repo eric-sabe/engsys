@@ -25,16 +25,17 @@
 #
 # Usage: mm-watch.sh --repo owner/name --state-dir DIR [--interval 30]
 #                    [--default-branch main] [--ledger N]
-#                    [--session NAME] [--pulse-max 45m]
+#                    [--session NAME] [--pulse-max 20m]
 #
 # Baton keepalive (engsys#62): while <state-dir>/baton-merge.json carries this session's token, a
 # background `baton.mjs keepalive` renews the lease every 2.5 min (the caller rule: TTL 10 min, renew
-# <= 3m20s; the 30-minute heartbeat tick is far too slow). It stops renewing when this bus loses its
-# session (orphaned), when the model has not touched the baton for --pulse-max (default 45m, so a live
-# bus under a dead model never keeps the role), and on loss. --session defaults to ENGSYS_SESSION.
+# <= 3m20s; the heartbeat tick is far too slow). It stops renewing when its session process (the
+# claude process it finds by walking up past the shells) is gone, when this bus is orphaned, when the
+# model has not touched the baton for --pulse-max (default 20m, so a live bus under a wedged or dead
+# model never keeps the role), and on loss. --session defaults to ENGSYS_SESSION.
 set -u
 
-REPO="" DIR="" INTERVAL=30 DEFBRANCH=main LEDGER="" SESSION="${ENGSYS_SESSION:-}" PULSE_MAX=45m
+REPO="" DIR="" INTERVAL=30 DEFBRANCH=main LEDGER="" SESSION="${ENGSYS_SESSION:-}" PULSE_MAX=20m
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) REPO="$2"; shift 2 ;;
@@ -58,8 +59,6 @@ BATON_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/lease/bato
 BATON_STATE="$DIR/baton-merge.json"
 KEEP_PID=""
 INIT_PPID="$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')"
-OWNER_ARGS=() # the keepalive also stops once this bus's own parent (the session) is gone
-[ -z "$INIT_PPID" ] || [ "$INIT_PPID" = 1 ] || OWNER_ARGS=(--owner-pid "$INIT_PPID")
 trap '[ -z "$KEEP_PID" ] || kill "$KEEP_PID" 2>/dev/null || true' EXIT
 # baton_tick → 1 when the bus must stop (baton lost, or this bus outlived its session).
 baton_tick() {
@@ -71,7 +70,7 @@ baton_tick() {
   [ -n "$SESSION" ] || return 0
   if [ -n "$KEEP_PID" ] && kill -0 "$KEEP_PID" 2>/dev/null; then return 0; fi
   node "$BATON_LIB" keepalive --role merge --repo "$REPO" --state-dir "$DIR" --session "$SESSION" \
-    ${OWNER_ARGS[@]+"${OWNER_ARGS[@]}"} --pulse-max "$PULSE_MAX" &
+    --pulse-max "$PULSE_MAX" &
   KEEP_PID=$!
 }
 
