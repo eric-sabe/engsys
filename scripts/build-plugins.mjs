@@ -86,7 +86,8 @@ out.set('core/.claude-plugin/hooks.json', json({
       // Singleton-write guard (engsys#62): in a merge/maintain monster session (ENGSYS_SINGLETON_ROLE),
       // deny GitHub writes that bypass the baton's fenced wrappers. Hooks run even under
       // --dangerously-skip-permissions; a deny here wins over the allow above.
-      { matcher: 'Bash', hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/singleton-write-guard.mjs"' }] },
+      // Monitor runs a shell command too (#85 M1).
+      { matcher: 'Bash|Monitor', hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/singleton-write-guard.mjs"' }] },
       // …and its settings/plugin-file and GitHub-MCP checks (#69 review N1, L-c).
       { matcher: 'Write|Edit|MultiEdit|NotebookEdit|mcp__.*', hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/singleton-write-guard.mjs"' }] },
     ],

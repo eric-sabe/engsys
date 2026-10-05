@@ -58,11 +58,12 @@
 // this session).
 
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmdirSync, statSync, writeFileSync, writeSync } from "node:fs";
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawn as spawnChild } from "node:child_process";
 import { hostname as osHostname } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { GIT_LOCATION_VARS } from "../git-env.mjs";
 import { EXIT as LEASE_EXIT, HOLDER_PATTERN, LeaseUsageError, PROTOCOL, createGithubLease, githubFetchClient, resolveToken } from "./github-backend.mjs";
 
 export const ROLES = Object.freeze(["merge", "maintain"]);
@@ -95,6 +96,8 @@ export const EXIT = Object.freeze({ ...LEASE_EXIT, NOT_STARTED: 5 });
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
 const REPO_PATTERN = /^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/;
 const HERE = dirname(fileURLToPath(import.meta.url));
+/** Branch prefixes a `--new-branch` push may create, unless ENGSYS_NEW_BRANCH_PREFIX names others (#71). */
+export const DEFAULT_NEW_BRANCH_PREFIXES = Object.freeze(["agent/"]);
 
 // ------------------------------------------------------------------------------ pure helpers --
 
@@ -359,8 +362,10 @@ export function defaultNotify({ env = process.env, err = process.stderr } = {}) 
  *   spawn     (cmd, args, {timeout}) => Promise<{code, stdout, stderr, timedOut}>
  *   prepare   async () => void: resolve the API token; called once an op is past its offline checks
  *   remoteUrl async (dir) => origin's push URL in that checkout (for a guarded git push)
+ *   pushConfig async (dir) => that checkout's git config as [{scope, key, value}] (pushConfigEntries)
+ *   newBranchPrefixes  the prefixes a --new-branch push may create (default DEFAULT_NEW_BRANCH_PREFIXES)
  */
-export function createBaton({ lease, repo, role, holder, run = null, store, home, now = Date.now, notify = async () => false, mergeApi, spawn, sleep, prepare = null, remoteUrl = defaultRemoteUrl, log = () => {} }) {
+export function createBaton({ lease, repo, role, holder, run = null, store, home, now = Date.now, notify = async () => false, mergeApi, spawn, sleep, prepare = null, remoteUrl = defaultRemoteUrl, pushConfig = defaultPushConfig, newBranchPrefixes = DEFAULT_NEW_BRANCH_PREFIXES, log = () => {} }) {
   if (!ROLES.includes(role)) throw new LeaseUsageError(`role must be one of ${ROLES.join(", ")}, got ${JSON.stringify(role)}`);
   if (typeof repo !== "string" || !REPO_PATTERN.test(repo)) throw new LeaseUsageError(`invalid repo ${JSON.stringify(repo)}`);
   const sleepFn = sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
@@ -603,6 +608,13 @@ export function createBaton({ lease, repo, role, holder, run = null, store, home
     const fail = (reason) => ({ refusal: { exit: EXIT.ERROR, result: { sent: false, code: "error", role, holder, reason } } });
     const hasPr = /^[1-9]\d{0,9}$/.test(String(pr ?? ""));
     if (hasPr === Boolean(newBranch)) throw new LeaseUsageError("guard: a git push needs exactly one of --pr <n> (update that PR's head branch) or --new-branch (create a branch origin does not have yet)");
+    // A new branch only under a configured prefix, so a fenced push can't create a branch a
+    // branch-filtered workflow trigger (push: branches: …) watches (#71).
+    if (newBranch && !newBranchPrefixes.some((p) => push.branch.startsWith(p))) {
+      return refuse(newBranchPrefixes.length
+        ? `--new-branch creates only branches under ${newBranchPrefixes.join(", ")} (ENGSYS_NEW_BRANCH_PREFIX), not ${push.branch}`
+        : "--new-branch is refused: ENGSYS_NEW_BRANCH_PREFIX holds no valid prefix");
+    }
     let repoRes;
     let probe;
     try {
@@ -632,8 +644,22 @@ export function createBaton({ lease, repo, role, holder, run = null, store, home
     try { url = await remoteUrl(push.dir); } catch (e) { return refuse(`could not read origin's push URL: ${firstLine(e?.message ?? e)}`); }
     const urlRepo = repoOfUrl(url);
     if (!urlRepo || urlRepo.toLowerCase() !== repo.toLowerCase()) return refuse(`origin's push URL (${url}) is not ${repo}`);
-    // No hooks a dispatched agent could have planted in its worktree, no file:// or local transport.
-    return { args: ["-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=never", ...(push.dir ? ["-C", push.dir] : []), "push", ...push.flags, "origin", push.refspec] };
+    const scanned = await pushArgs(push);
+    return scanned.reason ? refuse(scanned.reason) : scanned;
+  }
+
+  /**
+   * #71 L3: the checkout was prepared by a dispatched agent, so its config may carry a planted program
+   * or a proxy. Scan it; refuse what `-c` can't mask, mask the rest. -> { args } or { reason }.
+   */
+  async function pushArgs(push) {
+    let entries;
+    try { entries = await pushConfig(push.dir); } catch (e) { return { reason: `could not read the checkout's git config: ${firstLine(e?.message ?? e)}` }; }
+    const unsafe = unsafePushConfig(entries);
+    if (unsafe.length) {
+      return { reason: `git config for this push sets ${unsafe.slice(0, 5).join(", ")}${unsafe.length > 5 ? ", …" : ""}: a guarded push never runs with credential, proxy, TLS, URL-rewrite, include or transport settings from the checkout or the environment (remove them)` };
+    }
+    return { args: [...pushConfigArgs(entries), ...(push.dir ? ["-C", push.dir] : []), "push", ...push.flags, "origin", push.refspec] };
   }
 
   async function guard(argv, { pr, newBranch = false } = {}) {
@@ -650,7 +676,14 @@ export function createBaton({ lease, repo, role, holder, run = null, store, home
       cmd.args = p.args;
     }
     return fenced(async ({ elapsedMs }) => {
-      const r = await spawn(cmd.exe, cmd.args, { timeout: ACTION_TIMEOUT_MS });
+      if (cmd.push) {
+        // #85 L4: scan again right before the push, so a key planted while the fence ran is caught.
+        const again = await pushArgs(cmd.push);
+        if (again.reason) return { exit: EXIT.REFUSED, result: { sent: false, code: "push_refused", role, holder, reason: again.reason } };
+        cmd.args = again.args;
+      }
+      // #85 L3: the push runs with a cleaned environment (no GIT_SSH_COMMAND, askpass, proxies, NODE_OPTIONS; a fixed PATH).
+      const r = await spawn(cmd.exe, cmd.args, { timeout: ACTION_TIMEOUT_MS, ...(cmd.push ? { env: pushEnv() } : {}) });
       return {
         exit: r.timedOut ? EXIT.ERROR : r.code,
         result: { sent: true, code: r.timedOut ? "timeout" : "ran", exitCode: r.code, sentAfterFenceMs: elapsedMs, ...(r.timedOut ? { reason: "killed after 30 s: its effect is unknown; re-snapshot before acting again" } : {}) },
@@ -797,6 +830,13 @@ export function guardCommand(argv) {
     if ((args.includes("pr") && args.includes("merge")) || args.some((a) => /\/merges?\b|mergePullRequest|enablePullRequestAutoMerge|mergeBranch/.test(a))) {
       throw new LeaseUsageError("merges go through `merge --pr N --sha <validated head> --method …`, never gh under guard (no merge endpoint, placeholder path or GraphQL merge mutation)");
     }
+    // #85 L5: a GraphQL document must be visible to the merge check above, never read from a file.
+    if (args.includes("api") && args.some((a) => /^\/?graphql$/i.test(a))) {
+      const fromFile = args.some((a, k) => a === "--input" || a.startsWith("--input=")
+        || (["-f", "-F", "--field", "--raw-field"].includes(a) && /^[^=]*=@/.test(String(args[k + 1] ?? "")))
+        || /^--(raw-)?field=[^=]*=@/.test(a) || /^-[fF]=?[^=]*=@/.test(a));
+      if (fromFile) throw new LeaseUsageError("guard runs gh api graphql only with the document inline (no --input, no field=@file): the merge check must see it");
+    }
     return { exe: "gh", args };
   }
   if (exe === "git") {
@@ -864,19 +904,188 @@ export function repoOfUrl(url) {
 
 function defaultRemoteUrl(dir) {
   return new Promise((done, fail) => {
-    execFile("git", [...(dir ? ["-C", dir] : []), "remote", "get-url", "--push", "origin"], { timeout: 10_000 }, (err, stdout) => {
+    execFile("git", [...(dir ? ["-C", dir] : []), "remote", "get-url", "--push", "origin"], { timeout: 10_000, env: pushEnv() }, (err, stdout) => {
       if (err) fail(err); else done(String(stdout).trim());
     });
   });
 }
 
-function defaultSpawn(cmd, args, { timeout }) {
+/**
+ * `git config --list --show-scope [--show-origin] -z` output -> [{scope, origin?, key, value}]
+ * (value null for a bare key). With `origin`, each entry is scope, origin, key\nvalue.
+ */
+export function parseConfigList(out, { origin = false } = {}) {
+  const parts = String(out ?? "").split("\0");
+  const entries = [];
+  const step = origin ? 3 : 2;
+  for (let i = 0; i + step - 1 < parts.length; i += step) {
+    const kv = parts[i + step - 1];
+    const nl = kv.indexOf("\n");
+    entries.push({ scope: parts[i], ...(origin ? { origin: parts[i + 1] } : {}), key: nl < 0 ? kv : kv.slice(0, nl), value: nl < 0 ? null : kv.slice(nl + 1) });
+  }
+  return entries;
+}
+
+/** realpath of `p`, or of its deepest existing ancestor with the rest appended (a missing file still compares right). */
+function realOr(p) {
+  const abs = resolve(p);
+  try { return realpathSync(abs); } catch { /* resolve the parent */ }
+  const parent = dirname(abs);
+  return parent === abs ? abs : join(realOr(parent), basename(abs));
+}
+
+/**
+ * #85 L3: an entry git labels system or global but read from a file inside the checkout (an
+ * includeIf in ~/.gitconfig pointing there) is the checkout's config: relabel it local.
+ */
+export function localizeIncludes(entries, roots) {
+  const inside = roots.filter(Boolean).map(realOr);
+  return entries.map((e) => {
+    if (e.scope !== "system" && e.scope !== "global") return e;
+    const m = /^file:(.+)$/.exec(String(e.origin ?? ""));
+    if (!m) return e;
+    const file = realOr(m[1]);
+    return inside.some((r) => file === r || file.startsWith(`${r}/`)) ? { ...e, scope: "local" } : e;
+  });
+}
+
+function gitOut(args, env) {
+  return new Promise((done, fail) => {
+    execFile("git", args, { timeout: 10_000, maxBuffer: 4 * 1024 * 1024, env: pushEnv(env) }, (err, stdout) => (err ? fail(err) : done(String(stdout))));
+  });
+}
+
+/**
+ * The git config a guarded push from `dir` will see, read with the push's own environment
+ * (pushEnv), each entry labeled with its scope and origin; includes into the checkout count as local.
+ */
+export async function readPushConfig(dir, env = process.env) {
+  const C = dir ? ["-C", dir] : [];
+  const roots = (await gitOut([...C, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir", "--absolute-git-dir"], env)).split("\n");
+  return localizeIncludes(parseConfigList(await gitOut([...C, "config", "--list", "--show-scope", "--show-origin", "-z"], env), { origin: true }), roots);
+}
+const defaultPushConfig = (dir) => readPushConfig(dir);
+
+/** A PATH the guarded push trusts, whatever the session's PATH has become (#85 L3). */
+export const PUSH_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+
+/**
+ * The environment the guarded push (and its config scan and URL read) runs with (#85 L3): no GIT_*
+ * except the fleet's env-scoped config (GIT_CONFIG_COUNT/KEY_n/VALUE_n, which the scan checks), so no
+ * GIT_SSH_COMMAND, GIT_ASKPASS, GIT_PROXY_COMMAND, GIT_EXEC_PATH, GIT_CONFIG_PARAMETERS or repo-location
+ * vars; no SSH_ASKPASS, NODE_OPTIONS, proxies, CA overrides or preload libraries; a fixed PATH.
+ */
+export function pushEnv(env = process.env) {
+  const out = {};
+  for (const [k, v] of Object.entries(env)) {
+    if (k.startsWith("GIT_") && !(k === "GIT_CONFIG_COUNT" || /^GIT_CONFIG_(KEY|VALUE)_\d+$/.test(k))) continue;
+    if (/^(SSH_ASKPASS|NODE_OPTIONS|NODE_PATH|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_.*|SSL_CERT_FILE|SSL_CERT_DIR|CURL_CA_BUNDLE|all_proxy|ALL_PROXY|https?_proxy|HTTPS?_PROXY|ftp_proxy|FTP_PROXY)$/.test(k)) continue;
+    out[k] = v;
+  }
+  for (const k of GIT_LOCATION_VARS) delete out[k];
+  out.PATH = PUSH_PATH;
+  out.GIT_TERMINAL_PROMPT = "0";
+  return out;
+}
+
+/** Config scopes a dispatched agent prepares: the checkout's own .git/config (and includes) and config.worktree. */
+const LOCAL_SCOPES = new Set(["local", "worktree"]);
+/** `http.*` variables that change no destination, credential or TLS check (a large push may need postBuffer). */
+const HTTP_SAFE_VARS = new Set(["postbuffer", "lowspeedlimit", "lowspeedtime", "maxrequests", "minsessions", "version"]);
+
+/** The fleet's env-scoped credential helper (core/fleet/identity/git-env.sh), or a reset of the list. */
+const FLEET_HELPER = /(^$)|gh-app-token\.mjs['"]?\s+git-credential\s*$/;
+
+/**
+ * Keys a guarded push refuses, in the checkout's own config (local, worktree) and in env-scoped
+ * config (scope command, #85 L3): they can't be masked with `-c` (a URL-scoped `http.<url>.proxy`
+ * outranks an unscoped one) or they redirect where the push and its credential go. In scope command
+ * the fleet's own helper and useHttpPath are expected. -> the offending keys.
+ */
+export function unsafePushConfig(entries) {
+  const bad = new Set();
+  for (const { scope, key, value } of entries ?? []) {
+    if (!LOCAL_SCOPES.has(scope) && scope !== "command") continue;
+    const k = key.toLowerCase();
+    const last = k.slice(k.lastIndexOf(".") + 1);
+    if (scope === "command" && /^credential\./.test(k) && ((last === "helper" && FLEET_HELPER.test(String(value ?? ""))) || last === "usehttppath")) continue;
+    if (/^(credential|url|include|includeif|protocol)\./.test(k)
+      || (k.startsWith("http.") && !HTTP_SAFE_VARS.has(last))
+      || /^remote\..+\.(proxy|proxyauthmethod|vcs|receivepack|uploadpack)$/.test(k)
+      || k === "core.gitproxy"
+      || (scope === "command" && /^core\.(sshcommand|askpass|fsmonitor|hookspath)$/.test(k))) bad.add(key);
+  }
+  return [...bad];
+}
+
+/** Back-compat name (#71). */
+export const unsafeLocalConfig = unsafePushConfig;
+
+/**
+ * The `-c` options a guarded push runs with (#69 N2, #71 L3): no hooks, no file transport, and the
+ * programs git may run during a push (credential helpers, ssh, askpass, fsmonitor, gpg) taken only
+ * from config outside the checkout. `credential.helper=` empties the helper list, and git reads
+ * environment-scoped config (the fleet's GIT_CONFIG_COUNT helper) BEFORE `-c`, so the reset would
+ * drop the fleet's helper too: every helper from a non-local scope is added back after it, in order.
+ */
+export function pushConfigArgs(entries) {
+  const outside = (entries ?? []).filter((e) => !LOCAL_SCOPES.has(e.scope));
+  const lastValue = (name) => {
+    let v;
+    for (const e of outside) if (e.key.toLowerCase() === name) v = e.value ?? "";
+    return v;
+  };
+  const helpers = outside.filter((e) => /^credential\.(.+\.)?helper$/i.test(e.key));
+  const c = (kv) => ["-c", kv];
+  return [
+    ...c("core.hooksPath=/dev/null"),
+    ...c("protocol.file.allow=never"),
+    ...c("core.fsmonitor=false"),
+    ...c("http.sslVerify=true"),
+    ...c(`core.sshCommand=${lastValue("core.sshcommand") ?? "ssh"}`),
+    ...c(`core.askPass=${lastValue("core.askpass") ?? ""}`),
+    ...c("credential.helper="),
+    ...helpers.flatMap((e) => c(`${e.key}=${e.value ?? ""}`)),
+    ...c("push.gpgSign=false"),
+    ...c("push.recurseSubmodules=no"),
+  ];
+}
+
+/**
+ * ENGSYS_NEW_BRANCH_PREFIX (comma or space separated) -> prefixes; the default when unset. An invalid
+ * value yields [] so every --new-branch push is refused (fail closed) while other ops keep working.
+ */
+export function newBranchPrefixesFrom(env = process.env) {
+  const list = String(env.ENGSYS_NEW_BRANCH_PREFIX ?? "").split(/[\s,]+/).filter(Boolean);
+  if (!list.length) return [...DEFAULT_NEW_BRANCH_PREFIXES];
+  return list.every((p) => /^[A-Za-z0-9][A-Za-z0-9._\/-]{0,100}$/.test(p) && !p.includes("..")) ? list : [];
+}
+
+function defaultSpawn(cmd, args, { timeout, env = process.env }) {
+  // stdin passes through, so `guard -- gh issue comment N --body-file - <<'EOF'` sends its body.
   return new Promise((done) => {
-    execFile(cmd, args, { timeout, killSignal: "SIGTERM", maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
-      const timedOut = Boolean(err && err.killed);
-      const code = err ? (typeof err.code === "number" ? err.code : 1) : 0;
-      done({ code, stdout: String(stdout ?? ""), stderr: String(stderr ?? ""), timedOut });
-    });
+    const child = spawnChild(cmd, args, { env, stdio: ["inherit", "pipe", "pipe"] });
+    const out = [];
+    const err = [];
+    let timedOut = false;
+    let settled = false;
+    let killer = null;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+      killer = setTimeout(() => child.kill("SIGKILL"), 5_000); // a child that ignores SIGTERM
+    }, timeout);
+    child.stdout.on("data", (c) => out.push(c));
+    child.stderr.on("data", (c) => err.push(c));
+    const finish = (code) => {
+      if (settled) return; // error and close can both fire
+      settled = true;
+      clearTimeout(timer);
+      clearTimeout(killer);
+      done({ code, stdout: Buffer.concat(out).toString(), stderr: Buffer.concat(err).toString(), timedOut });
+    };
+    child.on("error", (e) => { err.push(Buffer.from(String(e?.message ?? e))); finish(127); });
+    child.on("close", (code) => finish(typeof code === "number" ? code : 1));
   });
 }
 
@@ -893,13 +1102,14 @@ function usage() {
     "  fence                           exit 0 only while it is safe to mutate",
     "  guard -- gh <args…> | <engsys>/skills/merge-monster/scripts/gate-request.sh <args…> | fleet msg send <args…>",
     "  guard --pr N -- git [-C <dir>] push [--force-with-lease] origin HEAD:refs/heads/<PR head branch>",
-    "  guard --new-branch -- git [-C <dir>] push origin HEAD:refs/heads/<branch origin lacks>",
+    "  guard --new-branch -- git [-C <dir>] push origin HEAD:refs/heads/<agent/… branch origin lacks>",
     "  merge      --pr N --sha <validated head> --method merge|squash|rebase",
     "  release    [--reason rotation|exit|handover]",
     "  status",
     "  supervise                       relaunch decision for the fleet supervisor (no --state-dir)",
     "env: ENGSYS_SESSION (session name), ENGSYS_SESSION_RUN (per launch), FLEET_ID, FEDERATION_FILE,",
-    "     GH_TOKEN | GH_APP_ENV_FILE | gh auth token, BATON_NOTIFY_CMD | FLEET_BIN (default: this kit's core/fleet/bin/fleet notify)",
+    "     GH_TOKEN | GH_APP_ENV_FILE | gh auth token, BATON_NOTIFY_CMD | FLEET_BIN (default: this kit's core/fleet/bin/fleet notify),",
+    "     ENGSYS_NEW_BRANCH_PREFIX (prefixes --new-branch may create; default agent/)",
     "exit: 0 ok | 1 refused | 2 usage | 3 error | 4 newer protocol | 5 not started in this session",
   ].join("\n");
 }
@@ -982,6 +1192,8 @@ export async function main(argv, deps = {}) {
       notify: deps.notify ?? defaultNotify({ env, err }),
       mergeApi,
       spawn: deps.spawn ?? defaultSpawn,
+      ...(deps.pushConfig ? { pushConfig: deps.pushConfig } : {}),
+      newBranchPrefixes: newBranchPrefixesFrom(env),
       sleep: deps.sleep,
       prepare: deps.api || deps.lease ? null : async () => { await client(); },
       log: (s) => err.write(`baton: ${s}\n`),

@@ -196,7 +196,7 @@ dispatching an agent that will push.
 | any other `gh` write | `<skill-dir>/scripts/mm-act.sh guard --repo <repo> --state-dir <state_dir> -- gh <args…>` |
 | gate request | `<skill-dir>/scripts/mm-act.sh guard --repo <repo> --state-dir <state_dir> -- <skill-dir>/scripts/gate-request.sh <args…>` |
 | CI re-run | `<skill-dir>/scripts/mm-act.sh guard --repo <repo> --state-dir <state_dir> -- gh run rerun <run-id> --failed` |
-| push a branch a rebase or fix agent prepared | `<skill-dir>/scripts/mm-act.sh guard --repo <repo> --state-dir <state_dir> --pr N -- git -C <worktree> push --force-with-lease origin HEAD:refs/heads/<PR head branch>`. An allowlist: remote `origin` whose push URL is this repo, one refspec naming PR N's head branch (checked against GitHub; never the default branch), `--force-with-lease` the only flag; git runs with hooks off |
+| push a branch a rebase or fix agent prepared | `<skill-dir>/scripts/mm-act.sh guard --repo <repo> --state-dir <state_dir> --pr N -- git -C <worktree> push --force-with-lease origin HEAD:refs/heads/<PR head branch>`. An allowlist: remote `origin` whose push URL is this repo, one refspec naming PR N's head branch (checked against GitHub; never the default branch), `--force-with-lease` the only flag; git runs with hooks off, and credential helpers, ssh and askpass come only from config outside the checkout (a checkout whose own config sets credential, proxy, TLS, URL-rewrite or include keys is refused) |
 | dispatch a fix or rebase agent | `<skill-dir>/scripts/mm-baton.sh fence --repo <repo> --state-dir <state_dir>` immediately before the dispatch; dispatch only on exit 0 |
 
 `mm-act.sh` fences (the lease must have at least 60 s left by GitHub's clock,
@@ -211,16 +211,20 @@ and hand back; you push and label under the fence. Nothing they do later is
 covered by the fence you took before dispatching them.
 
 **The guard hook.** In this session (`ENGSYS_SINGLETON_ROLE=merge`, set by the
-launcher), the engsys plugin's PreToolUse hook is an allowlist. A Bash command
-passes if it is one plain invocation of `mm-act.sh`, `mm-baton.sh` or
-`mm-heartbeat.sh --state-dir …` (no `;`, `&&`, `|`, redirects, `$( )` or
-backticks around it), or if every `gh`, `git` and HTTP client in it is a known
+launcher), the engsys plugin's PreToolUse hook is an allowlist for Bash and
+Monitor commands. A command passes if it is one plain invocation of `mm-act.sh`,
+`mm-baton.sh` or `mm-heartbeat.sh --state-dir …` (no `;`, `&&`, redirects,
+`$( )` or backticks around it; `2>&1`, `| jq …`, `| cat`, `; echo $?` and a
+heredoc body for `--body-file -` may follow), or if every `gh`, `git` and HTTP client in it is a known
 read: `gh pr|issue|run|workflow|repo|release view|list|status|diff|checks`,
-`gh search`, `gh api` GETs and non-mutation GraphQL queries, local `git` work
-(status, log, fetch, commit, rebase, worktree, …), never `git push`, git
-aliases, config writes or an HTTP client towards GitHub. Settings files and
-the plugin cache are read-only (Bash and the Write/Edit tools), and GitHub MCP
-tools that may write are denied.
+`gh search`, `gh api` GETs and non-mutation GraphQL queries written out in
+the command (no `$VAR`, `$( )` or backticks in it, never `mergePullRequest`),
+local `git` work (status, log, fetch, commit, rebase, worktree, …), never
+`git push`, git aliases, config writes, `hub`, an HTTP client towards GitHub,
+or `node`/`python`/`ruby`/`perl` code that names Octokit, PyGithub or a
+protected path (running the skill's own scripts is fine). Settings files, git
+config and the plugin cache are read-only (Bash and the Write/Edit tools), and
+GitHub MCP tools that may write are denied.
 Agents you dispatch run in this session and get the same hook. It runs even
 under `--dangerously-skip-permissions`. It is a guard rail against drift (a
 compacted model reaching for `gh pr merge`), not a boundary: the lease and the
