@@ -30,6 +30,18 @@ gh issue edit 42 --repo <owner>/<repo> --add-assignee @me
 
 Everything GitHub goes through `gh` — including project board operations (priorities, fields, statuses) via `gh project` / `gh api graphql`. No GitHub MCP server.
 
+**Multi-fleet** (`FLEET_ID` set — docs/multi-fleet.md § 3 in engsys, `fleet-guide.md` § 6.10): also
+claim the issue from the fleet queue, before the worktree in Step 2:
+
+```bash
+node <engsys-root>/lib/claim.mjs acquire <owner/repo>#42
+```
+
+This adds a `fleet:<id>` label (created on the repo if missing). Exits `4` and prints who holds it if
+another fleet's claim is still active (its label younger than 7 days, or its status-issue heartbeat
+fresh) — **stop, don't implement the issue**. A claim stale on both signals can be taken over with
+`--takeover` (it comments on the issue). Single-fleet mode (no `FLEET_ID`): a no-op, exit 0.
+
 #### Step 2: Create Worktree and Branch
 
 **CRITICAL**: Create branch and worktree together using `-b` flag:
@@ -44,10 +56,13 @@ git checkout main
 git pull origin main
 
 # Create worktree AND branch together (required)
-git worktree add ../worktrees/issue-<number>-<slug> -b agent/<issue>-<slug>
+# Fleet-prefixed when FLEET_ID is set (agent/<fleet>/<issue>-<slug>), unchanged otherwise.
+git worktree add ../worktrees/issue-<number>-<slug> -b agent/${FLEET_ID:+$FLEET_ID/}<issue>-<slug>
 
-# Example:
+# Example (single-fleet):
 git worktree add ../worktrees/issue-42-tenant-validation -b agent/42-tenant-validation
+# Example (multi-fleet, FLEET_ID=bob):
+git worktree add ../worktrees/issue-42-tenant-validation -b agent/bob/42-tenant-validation
 ```
 
 **Common Mistake to Avoid:**
@@ -235,6 +250,12 @@ git branch -d agent/42-tenant-validation
 
 # Delete remote branch if not auto-deleted
 git push origin --delete agent/42-tenant-validation
+```
+
+**Multi-fleet:** release the claim too (merge here, or right away on abandonment before merging):
+
+```bash
+node <engsys-root>/lib/claim.mjs release <owner/repo>#42   # no-op in single-fleet mode
 ```
 
 ## Critical Rules

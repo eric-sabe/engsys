@@ -2,8 +2,10 @@
 
 > **Status:** Design (proposed 2026-10), being built in phases (section 10). Implemented so far: the
 > registry, `FLEET_ID` and addresses (engsys#39, operator guide in
-> [`fleet-guide.md` § 6.10](fleet-guide.md#610-registry-multi-fleet)), `gate-check` (#41),
-> `fleet notify` (#42) and per-host roles (#53, [`fleet-guide.md` § 6.11](fleet-guide.md#611-host-roles-which-sessions-run-on-this-host)). Nothing in this doc changes how a single fleet behaves today.
+> [`fleet-guide.md` § 6.10](fleet-guide.md#610-registry-multi-fleet)), work claiming and
+> fleet-prefixed branches (`core/lib/claim.mjs`, #40), `gate-check` (#41), `fleet notify` (#42) and
+> per-host roles (#53, [`fleet-guide.md` § 6.11](fleet-guide.md#611-host-roles-which-sessions-run-on-this-host)).
+> Nothing in this doc changes how a single fleet behaves today.
 >
 > **Related:** [`agent-messaging.md`](agent-messaging.md) (same-fleet messaging and the "GitHub
 > channel" Phase 2 this builds on), [`fleet-guide.md`](fleet-guide.md) (running one fleet),
@@ -424,7 +426,7 @@ What to do: approve the PR on GitHub: <link>. Nothing else is blocked.
 ### P0: Separate identities
 
 Do this before a second fleet stands anything up. Tracking: #39 (registry, `FLEET_ID`), #40 (work claiming),
-#41 (GitHub-only approval), #42 (`fleet notify`), #43 (baton spike, unblocks P1).
+#41 (GitHub-only approval), #42 (`fleet notify`), #43 (baton spike, unblocks P1), #53 (per-host roles).
 
 - Create the new fleet's GitHub App, its cloud workload identity with role assignments in IaC, the
   operator's model-provider seat, and a code-review tool key.

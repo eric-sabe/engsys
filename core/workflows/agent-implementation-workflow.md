@@ -43,6 +43,20 @@ Before creating the worktree:
 gh issue edit <number> --add-assignee "@me"
 ```
 
+**Multi-fleet** (`FLEET_ID` set — docs/multi-fleet.md § 3, `fleet-guide.md` § 6.10): claim every issue in
+the batch from the fleet queue **before** creating the worktree, same as the assignee claim above:
+
+```bash
+node <engsys-root>/lib/claim.mjs acquire <owner/repo>#<number>
+```
+
+This adds a `fleet:<id>` label (creating it on the repo if missing) and refuses — exit `4`, printing
+who holds it — if another fleet's claim on that issue is still active (its label is younger than 7
+days, or its status-issue heartbeat reads fresh). **Stop the batch** on a refusal rather than skip the
+issue silently; report who holds it. A claim that is stale on both signals can be taken over with
+`--takeover` (it comments on the issue recording the takeover). Single-fleet mode (no `FLEET_ID`) makes
+`acquire` a no-op, exit 0 — nothing here changes for a single fleet.
+
 ---
 
 ## Phase 1: Setup
@@ -58,7 +72,7 @@ git fetch origin && git checkout main && git pull --ff-only origin main
 #   git worktree add ../worktrees/<slug> -b agent/<slug> origin/main
 
 # Create the worktree AND branch in one command (-b flag is CRITICAL)
-git worktree add ../worktrees/<phase-or-project-slug> -b agent/<phase-or-project-slug> origin/main
+git worktree add ../worktrees/<phase-or-project-slug> -b agent/${FLEET_ID:+$FLEET_ID/}<phase-or-project-slug> origin/main
 
 cd ../worktrees/<phase-or-project-slug>
 # install deps + run any codegen the project requires (see CLAUDE.md)
@@ -69,6 +83,11 @@ Use a branch slug that describes the batch, not just the first issue. Examples:
 - `agent/project-11-phase-2-enrichment`
 - `agent/settings-billing-metrics`
 - `agent/957-tenant-switching` for a single-issue PR
+
+**Multi-fleet:** branches carry the fleet id — `agent/<fleet>/<slug>` (e.g.
+`agent/bob/project-11-phase-2-enrichment`, `agent/bob/957-tenant-switching`) — built by `claim.mjs`'s
+`branchName`/`issueBranchSlug` helpers. Single-fleet mode (no `FLEET_ID`) keeps today's names
+unchanged.
 
 > **Project bootstrap:** a fresh worktree has no installed dependencies and may need codegen (client generation, schema build, etc.). Run the project's bootstrap (`CLAUDE.md` § setup) inside the worktree before building.
 
@@ -238,6 +257,15 @@ git worktree prune
 
 If the branch was already deleted remotely by the tracker, local branch deletion is still required. If `git branch -d` refuses because a squash merge changed commit IDs, verify the PR is merged, then use `git branch -D agent/<phase-or-project-slug>`.
 
+**Multi-fleet:** release each issue's claim once its work is done — on merge here, or immediately on
+abandonment if the batch is dropped before merging (don't leave a claim held on work nobody is doing):
+
+```bash
+node <engsys-root>/lib/claim.mjs release <owner/repo>#<number>   # per issue in the batch
+```
+
+No-op in single-fleet mode.
+
 ---
 
 ## Stacked Branches
@@ -307,6 +335,7 @@ git push --force-with-lease origin agent/<child-slug>
 [ ] Human squash-merged the PR
 [ ] main checked out and pulled
 [ ] Worktree removed, local branch deleted, worktrees pruned
+[ ] Multi-fleet only: every issue's claim released (merge or abandonment)
 ```
 
 ---
