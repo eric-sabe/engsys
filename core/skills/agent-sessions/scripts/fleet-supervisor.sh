@@ -145,6 +145,20 @@ mkdir -p "$STATE_DIR"
 LOG="$STATE_DIR/supervisor.log"
 log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | tee -a "$LOG"; }
 
+# Text for people (ledger comments) shows times in the operator's zone and clock when the fleet sets
+# OPERATOR_TIMEZONE / OPERATOR_CLOCK (fleet-env.sh exports them); the log, latches and every machine
+# field stay ISO 8601 UTC. Unset, or any failure, passes the text through unchanged.
+OPERATOR_TIME_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../lib" 2>/dev/null && pwd)/operator-time.mjs"
+human_text() { # human_text <text> → text with ISO UTC timestamps in the operator's format
+  local out
+  if [ -n "${OPERATOR_TIMEZONE:-}${OPERATOR_CLOCK:-}" ] && [ -f "$OPERATOR_TIME_LIB" ] && command -v node >/dev/null 2>&1 \
+    && out="$(printf '%s' "$1" | node "$OPERATOR_TIME_LIB" humanize 2>/dev/null)"; then
+    printf '%s' "$out"
+  else
+    printf '%s' "$1"
+  fi
+}
+
 # One supervisor run at a time: launchd tick + a manual invocation overlapping
 # could both classify-then-act. mkdir lock; a lock older than 10 min is a
 # crashed run — steal via atomic mv (never rmdir a path another waiter may
@@ -233,6 +247,7 @@ pane_busy() {
 # every tick and buries the alert.
 relaunch() { # relaunch <name> <ledger> <repo> <reason>
   local name="$1" ledger="$2" repo="$3" reason="$4" out failed="$STATE_DIR/$1.launch-failed"
+  local reason_h; reason_h="$(human_text "$reason")" # the comments read to a person; the log keeps $reason as is
   log "$name: relaunching — $reason"
   tmux kill-window -t "${TMUX_SESSION}:$name" 2>/dev/null || true
   out="$(mktemp "${TMPDIR:-/tmp}/fleet-supervisor.XXXXXX")"
@@ -243,10 +258,10 @@ relaunch() { # relaunch <name> <ledger> <repo> <reason>
     log "$name: relaunched"
     printf '%s|%s\n' "${CUR_TARGET:-$repo|$ledger|}" "$(date +%s)" >"$STATE_DIR/$name.target"
     if [ -f "$failed" ]; then
-      gh issue comment "$ledger" -R "$repo" --body "✅ fleet-supervisor: \`$name\` relaunched after failed attempts since $(cat "$failed") ($reason, $(date -u +%Y-%m-%dT%H:%M:%SZ)). Startup reconcile recovers state from this ledger + state.md." >/dev/null || true
+      gh issue comment "$ledger" -R "$repo" --body "✅ fleet-supervisor: \`$name\` relaunched after failed attempts since $(human_text "$(cat "$failed")") ($reason_h, $(human_text "$(date -u +%Y-%m-%dT%H:%M:%SZ)")). Startup reconcile recovers state from this ledger + state.md." >/dev/null || true
       rm -f "$failed"
     else
-      gh issue comment "$ledger" -R "$repo" --body "🔁 fleet-supervisor: relaunched \`$name\` ($reason, $(date -u +%Y-%m-%dT%H:%M:%SZ)). Startup reconcile recovers state from this ledger + state.md." >/dev/null || true
+      gh issue comment "$ledger" -R "$repo" --body "🔁 fleet-supervisor: relaunched \`$name\` ($reason_h, $(human_text "$(date -u +%Y-%m-%dT%H:%M:%SZ)")). Startup reconcile recovers state from this ledger + state.md." >/dev/null || true
     fi
   else
     local tail_lines
@@ -256,7 +271,7 @@ relaunch() { # relaunch <name> <ledger> <repo> <reason>
       log "$name: RELAUNCH FAILED — already escalated (failing since $(cat "$failed")), retrying next tick"
     else
       log "$name: RELAUNCH FAILED — escalating on ledger $repo#$ledger"
-      gh issue comment "$ledger" -R "$repo" --body "🚨 fleet-supervisor: relaunch of \`$name\` FAILED ($reason). Operator needed. The supervisor retries every tick without commenting again, and comments once more when a relaunch succeeds. Launcher output:
+      gh issue comment "$ledger" -R "$repo" --body "🚨 fleet-supervisor: relaunch of \`$name\` FAILED ($reason_h). Operator needed. The supervisor retries every tick without commenting again, and comments once more when a relaunch succeeds. Launcher output:
 \`\`\`
 ${tail_lines:-(no output)}
 \`\`\`
@@ -443,7 +458,7 @@ for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
         rm -f "$LATCH"
         relaunch "$name" "$ledger" "$REPO_SLUG" "heartbeat stale (last: ${HB_TS:-never}), session idle at its prompt, $role baton forfeited ($BATON_WHY)"
       elif [ ! -f "$LATCH" ]; then
-        gh issue comment "$ledger" -R "$REPO_SLUG" --body "⚠️ fleet-supervisor: heartbeat stale (last: ${HB_TS:-never}) but the \`$name\` process is still alive. Not touching it — a live process is never killed on staleness alone (probe-then-classify is a judgment call, not a script's). Needs a probe: operator or maintenance watchdog." >/dev/null \
+        gh issue comment "$ledger" -R "$REPO_SLUG" --body "⚠️ fleet-supervisor: heartbeat stale (last: $(human_text "${HB_TS:-never}")) but the \`$name\` process is still alive. Not touching it — a live process is never killed on staleness alone (probe-then-classify is a judgment call, not a script's). Needs a probe: operator or maintenance watchdog." >/dev/null \
           && touch "$LATCH" && log "$name: STALE+ALIVE — escalated on ledger $REPO_SLUG#$ledger"
       else
         log "$name: STALE+ALIVE — already escalated, holding"

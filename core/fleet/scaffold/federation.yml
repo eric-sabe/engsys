@@ -18,6 +18,8 @@ fleets:
     # github_app: <app-slug>            # the bot login is <app-slug>[bot]
     # cloud_identity: <name-or-id>
     # slack_operator: U0000000000       # Slack member id to mention for this fleet
+    # timezone: America/New_York        # IANA zone for times shown to people (default UTC)
+    # clock: 12h                        # 12h or 24h (default 24h)
     # status_issue: <issue-number>      # this fleet's heartbeat and digest issue in the instance repo
     enabled: true
 repos:

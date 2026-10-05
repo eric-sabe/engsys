@@ -3,7 +3,8 @@
 # Fires immediately AFTER context compaction; stdout is injected into the
 # fresh context. (PreCompact stdout is NOT injected into the summarization —
 # this post-compaction channel is the one that reaches the model.)
-# Must be fast and fail-open: static text only, no network calls, no state reads.
+# Must be fast and fail-open: static text only, no network calls, no state reads. The one
+# exception is the operator time line below: it formats the current time from OPERATOR_* env, no I/O.
 # Rendered by the engsys installer; static content, no project fills.
 cat <<'EOF'
 Context was just compacted. Durable state, not the summary, is the source of truth:
@@ -11,3 +12,8 @@ Context was just compacted. Durable state, not the summary, is the source of tru
 2. Treat summarized precision as unverified: PR/issue numbers, SHAs, attempt counters, deadlines. Re-check from files or GitHub before acting on any of them.
 3. If you were mid-task: your working tree (git status), the task list, and your own state files are the resume point — not the summary's narrative.
 EOF
+# Operator time format (fleet sessions): same line the session-start context carries. Silent when no
+# setting exists, the plugin lib is missing, or node is absent.
+if [ -n "${OPERATOR_TIMEZONE:-}${OPERATOR_CLOCK:-}" ] && [ -f "${CLAUDE_PLUGIN_ROOT:-}/lib/operator-time.mjs" ] && command -v node >/dev/null 2>&1; then
+  node "${CLAUDE_PLUGIN_ROOT}/lib/operator-time.mjs" context-line 2>/dev/null || true
+fi

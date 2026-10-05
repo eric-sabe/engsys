@@ -32,6 +32,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { operatorSource } from '../../lib/gate-check.mjs';
 import { hermeticGit } from '../../lib/git-env.mjs';
+import { CLOCKS, isValidTimeZone } from '../../lib/operator-time.mjs';
 
 /** A fleet id: lowercase, starts with a letter, 2-21 characters. Same rule as fleet-env.sh. */
 export const FLEET_ID_RE = /^[a-z][a-z0-9-]{1,20}$/;
@@ -44,7 +45,7 @@ const SLACK_MEMBER_RE = /^[UW][A-Z0-9]{2,20}$/;
 const TOKEN_RE = /^[^\s'"`<>]{1,200}$/;
 export const ROLES = ['merge', 'maintain'];
 export const FAILOVER = ['escalate', 'auto'];
-const FLEET_KEYS = ['operator', 'host', 'github_app', 'github_app_id', 'cloud_identity', 'slack_operator', 'status_issue', 'enabled'];
+const FLEET_KEYS = ['operator', 'host', 'github_app', 'github_app_id', 'cloud_identity', 'slack_operator', 'status_issue', 'enabled', 'timezone', 'clock'];
 const ROLE_KEYS = ['home', 'ledger', 'standby', 'failover'];
 const TOP_KEYS = ['version', 'operators_team', 'operators', 'fleets', 'repos'];
 const EXIT = { OK: 0, ERROR: 1, ABSENT: 3 };
@@ -380,6 +381,14 @@ export function validateFederation(doc, { file = '' } = {}) {
         if (!isPosInt(f.github_app_id)) err(`${at}.github_app_id: must be the App's numeric id (a positive integer), got ${show(f.github_app_id)}`);
         else if (fl.github_app === undefined) err(`${at}.github_app_id: set github_app (the App slug) too`);
         else fl.github_app_id = f.github_app_id;
+      }
+      if (f.timezone !== undefined && f.timezone !== null) {
+        if (typeof f.timezone !== 'string' || !isValidTimeZone(f.timezone)) err(`${at}.timezone: must be an IANA time zone name (America/New_York), got ${show(f.timezone)}`);
+        else fl.timezone = f.timezone;
+      }
+      if (f.clock !== undefined && f.clock !== null) {
+        if (!CLOCKS.includes(f.clock)) err(`${at}.clock: must be ${CLOCKS.join(' or ')}, got ${show(f.clock)}`);
+        else fl.clock = f.clock;
       }
       if (f.status_issue !== undefined && f.status_issue !== null) {
         if (!isPosInt(f.status_issue)) err(`${at}.status_issue: must be a positive issue number, got ${show(f.status_issue)}`);
