@@ -3,8 +3,10 @@
 > **Status:** Design (proposed 2026-10), being built in phases (section 10). Implemented so far: the
 > registry, `FLEET_ID` and addresses (engsys#39, operator guide in
 > [`fleet-guide.md` § 6.10](fleet-guide.md#610-registry-multi-fleet)), work claiming and
-> fleet-prefixed branches (`core/lib/claim.mjs`, #40), `gate-check` (#41), `fleet notify` (#42) and
-> per-host roles (#53, [`fleet-guide.md` § 6.11](fleet-guide.md#611-host-roles-which-sessions-run-on-this-host)).
+> fleet-prefixed branches (`core/lib/claim.mjs`, #40), `gate-check` (#41), `fleet notify` (#42),
+> per-host roles (#53, [`fleet-guide.md` § 6.11](fleet-guide.md#611-host-roles-which-sessions-run-on-this-host)),
+> the baton lease and the monsters' claim and fence (#61, #62), and cross-fleet messages: the
+> `fleet-msg` format, `fleet msg send` and the relay job (#76, #77, section 4).
 > Nothing in this doc changes how a single fleet behaves today.
 >
 > **Related:** [`agent-messaging.md`](agent-messaging.md) (same-fleet messaging and the "GitHub
@@ -102,6 +104,7 @@ fleets:
     operator: alice                         # GitHub login
     host: alice-host
     github_app: acme-fleet-alice            # bot login: acme-fleet-alice[bot]
+    github_app_id: 1000001                  # the App's numeric id; required with 2+ enabled fleets
     cloud_identity: fleet-alice             # e.g. an Azure SP, AWS IAM role or GCP service account
     slack_operator: U0000000001             # Slack member id to mention for this fleet
     status_issue: 11                        # this fleet's own heartbeat/digest issue in acme/acme-fleet
@@ -110,6 +113,7 @@ fleets:
     operator: bob
     host: bob-host
     github_app: acme-fleet-bob
+    github_app_id: 1000002
     cloud_identity: fleet-bob
     slack_operator: U0000000002
     status_issue: 12
@@ -133,6 +137,10 @@ repos:
 - **`operators_team`** is the operator source `gate-check` reads (section 6). A user-owned repo has no
   teams, so `operators: [login:account-id, ...]` is accepted instead, with the same rules as
   [gate-check.md](gate-check.md#configuration-and-permissions).
+- **`github_app_id`** is the App's numeric id, which the API reports on every comment the App makes
+  (`performed_via_github_app.id`). Cross-fleet messages are matched on it as well as on the bot login
+  (section 4), so it is required once two or more fleets are enabled; `fleet federation validate` and
+  `fleet status` warn when it is missing.
 - **Optional fields.** Every fleet field except `enabled` (default `true`) is optional, and so is a
   role's `ledger`, so a new instance's registry is valid before its ledger issues exist. `standby`
   defaults to `[]` and `failover` to `escalate`.
@@ -357,18 +365,53 @@ Bounced #412: the migration has no down step. Details in the review comment abov
 
 - **Relay.** Each fleet runs a small scheduled job with no LLM (launchd on macOS, like the
   supervisor). It polls GitHub every minute or so for `fleet-msg` blocks addressed to its fleet, using
-  conditional requests so that an unchanged poll costs nothing against the rate limit. It delivers each
-  message as a local `SendMessage` to the named session. If that session is gone, the message stays on
-  GitHub, and the session finds it at its next startup. This is the "GitHub channel" Phase 2 from
+  conditional requests so that an unchanged poll costs nothing against the rate limit. It records each
+  accepted message in the addressed session's inbox on the host. It sends no keystrokes. A session
+  learns about waiting messages from the engsys plugin's inbox hook, which runs when the session starts
+  and on every prompt, and a monster also gets a `FLEET_MSG` event on its watch bus. The session then
+  reads each message with `fleet msg read`, which fetches the comment again, re-checks it, and prints
+  the body as untrusted data. This is the "GitHub channel" Phase 2 from
   [`agent-messaging.md`](agent-messaging.md), built as a polling job. A channel plugin would need an
   inbound endpoint on the operator's network; a polling job does not.
-- **Sender verification.** A `fleet-msg` is acted on only if the comment's author is a bot login
-  registered in `federation.yml`, the `to` address names this fleet, and the referenced PR or issue
-  exists. Then, as today, the receiver re-verifies everything on GitHub and treats the message as a
-  pointer, never as authority. Per-fleet Apps (section 5) are what make the author check meaningful:
-  with one shared App, every fleet's comments come from the same login.
+- **Sender verification.** A `fleet-msg` is acted on only if the comment was made through the App
+  registered for the sending fleet in `federation.yml`, the `to` address names this fleet, and the
+  referenced PR or issue exists. Then, as today, the receiver re-verifies everything on GitHub and treats
+  the message as a pointer, never as authority. Per-fleet Apps (section 5) are what make the author check
+  meaningful: with one shared App, every fleet's comments come from the same login.
 - **Same-account cross-machine messaging** (Remote Control) stays available as an optimization when one
   person runs two hosts on one account. Nothing depends on it.
+
+### Implemented (engsys#76, #77)
+
+| Piece | Where |
+|---|---|
+| Format: `render`, `parse`, `verify` | [`core/fleet/lib/fleet-msg.mjs`](../core/fleet/lib/fleet-msg.mjs). The header must be the comment's first line, exactly `<!-- fleet-msg to="…" from="…" [re="…"] protocol="N" -->`. Unknown, repeated or missing attributes, a second header anywhere in the comment (including spellings with zero-width or fullwidth characters), and values outside `<fleet>:<session>` / `owner/repo#n` are rejected |
+| Sender check | `verify()`: the API's `user.type` is `Bot` and `user.login` is `<github_app>[bot]` of exactly one fleet in `federation.yml` (two fleets sharing an App are rejected, since the author can't tell them apart). When that fleet declares `github_app_id`, the comment's `performed_via_github_app.id` must equal it; a registry with two or more enabled fleets must declare it (otherwise the message is rejected and `fleet federation validate` warns), because a renamed or deleted App's slug can be registered again by anyone. That fleet is the `from` fleet, is enabled, and is not this fleet; `to` names this fleet (`FLEET_ID`) and, when the roster is known, one of its sessions; the comment was never edited (`updated_at == created_at`); the protocol is one this kit reads (a newer one is rejected with "sync your pins"); `re` names a registry repo or the instance repo, and the PR or issue exists (free when the comment is on that thread, otherwise one `GET`) |
+| `fleet msg send --to <fleet>:<session> [--re owner/repo#n] --body-file <f>` | [`core/fleet/msg.mjs`](../core/fleet/msg.mjs). Posts on the `re` thread, or on the target fleet's `status_issue` in the instance repo. The header is generated; a body that carries one is refused. `--to` naming this fleet (or a bare session name, or no `FLEET_ID`) prints `same fleet: use SendMessage to <session>` and exits 3. In a merge or maintain monster session it is a fenced write: the singleton write guard denies it unwrapped, and the monster sends through `mm-act.sh` / `mnt-act.sh guard -- fleet msg send …` |
+| Relay | [`core/fleet/relay.mjs`](../core/fleet/relay.mjs), run by `fleet relay` and the `fleet-relay` launchd job (every 60 s, installed only in multi-fleet mode on a host that runs at least one roster session). One `GET /repos/{o}/{r}/issues/comments?since=…&sort=updated&direction=asc` per repo (registry repos plus the instance repo) with `If-None-Match`. The `since` cursor holds for an hour, so the URL and its ETag stay the same and an unchanged repo answers 304. Dedupe on comment id. A `re` lookup that fails for a transient reason is retried on the next polls, at most 5 times, then rejected; it never stops the rest of the repo from being read. At most 30 accepted messages per sender fleet per hour (`RELAY_CAP_PER_HOUR`), the rest dropped with one `fleet notify --level info` per fleet per hour. `fleet-relay.log` rotates to `.1` past 1 MB |
+| Inbox | `$FLEET_STATE/inbox/<session>.jsonl` ([`core/fleet/lib/inbox.mjs`](../core/fleet/lib/inbox.mjs)): `{id, url, from, re, sha256, received_at, delivered_at}`, where `sha256` is the hash of the comment body the relay accepted. Identifiers only. A reader shows an entry only when every field matches its pattern, the comment's repo and `re` repo are in the registry (or the instance repo), the `from` fleet is another enabled fleet, and the relay's own state lists the id as accepted. Delivered entries are pruned after 7 days, undelivered ones after 30. Directories 0700, files 0600, rewrites atomic under a lock that is removed only by its owner |
+| Delivery, no keystrokes | The core plugin's [`fleet-inbox.mjs`](../core/.claude-plugin/fleet-inbox.mjs) hook, on `SessionStart` and `UserPromptSubmit`, injects up to 10 pointers (`from <fleet:session> re <ref>: <comment url>`) plus how to read them, and marks those delivered. It runs only in the session that owns the inbox: `TMUX_PANE` is set, that pane's window is named `ENGSYS_SESSION`, and the claude process the hook runs under is the pane's own (so a `claude -p` started inside the session does not consume it). `fleet launch` writes `FLEET_INBOX_DIR` into session envs in multi-fleet mode; without it a grep in `hooks.json` skips the hook. Monsters also get `FLEET_MSG` on `mm-watch.sh` / `mnt-watch.sh` when a new entry arrives: one fixed line naming the command to run, no ids or text |
+| Reading | `fleet msg inbox [<session>] [--mark-read]` lists the pointers. `fleet msg read <comment-url>` fetches the comment, re-runs `parse()` and `verify()` (sender App, never edited, addressed to this fleet, registry repo), compares the body with the recorded `sha256`, and prints it inside the [`untrusted.mjs`](../core/lib/untrusted.mjs) envelope; any failed check prints nothing of the body and exits 1. Inside a fleet session both run as `node <engsys>/core/fleet/msg.mjs …` (the hook names the path) |
+| Health | `$FLEET_STATE/relay/last-poll.json`; `fleet status` prints `relay: last poll <age> ago` (STALE after 5 minutes) and any undelivered inbox counts |
+
+Why no keystrokes: an earlier version typed one line into the session's tmux window. A line typed while
+the session shows a permission prompt or a picker can select an option, and no check of the pane text
+recognises every dialog reliably. The hook and the watch event reach a running session through the
+model's own context instead.
+
+What the relay trusts: the GitHub API's identity fields for the comment author (`user.login`,
+`user.type`, `performed_via_github_app.id`), the registry (`federation.yml`, changed only by reviewed
+PR) for which App belongs to which fleet, and its own host state. It does not trust the comment body:
+only the header grammar is read from it, and only identifiers that match fixed patterns leave the
+parser. The body reaches a model only through `fleet msg read`, inside the untrusted-data envelope.
+
+Two limits to keep in mind:
+
+- **The session half of `from` is the sender's own claim.** `--from` lets any session in the sending
+  fleet name any session. Only the fleet half is verified (by its App).
+- **A sending fleet is as trustworthy as the least-guarded holder of its App key.** Every session and
+  subagent on the sending host can mint that App's installation token, and so can any workflow that
+  holds the key. That is why a message stays a pointer and never authority.
 
 ## 5. Identity: one per fleet, everywhere
 
@@ -540,7 +583,9 @@ What to do: approve the PR on GitHub: <link>. Nothing else is blocked.
   monster anyway. Other fleets run `fleet sync` when they see the pin change, through the relay or on
   their next supervisor tick.
 - **Every baton commit and `fleet-msg` carries `protocol: N`.** A fleet whose protocol is older than the
-  holder's stays out of singleton roles until it syncs. That keeps a mixed-version rollout safe.
+  holder's stays out of singleton roles until it syncs. That keeps a mixed-version rollout safe. For
+  `fleet-msg` this is the header's `protocol="1"`: a relay rejects a message with a protocol newer than
+  its kit reads, and its log says to sync the pins (section 4).
 
 ## 9. What engsys core provides vs what an instance configures
 
@@ -629,8 +674,16 @@ session idle at its prompt and its baton forfeited.
 
 ### P2: Cross-fleet messages
 
-- `fleet-msg` format, relay job, delivery to addresses in other fleets (the `mm-handoff` field already
-  accepts them, from P0), `fleet status --federation`.
+- `fleet-msg` format, sender check and `fleet msg send` (#76, done: section 4,
+  [`core/fleet/lib/fleet-msg.mjs`](../core/fleet/lib/fleet-msg.mjs), [`core/fleet/msg.mjs`](../core/fleet/msg.mjs)).
+- Relay job, per-session inbox, inbox hook, monsters' `FLEET_MSG` event, `fleet msg read`, the fenced
+  send for monsters and relay age in `fleet status` (#77, done: section 4,
+  [`core/fleet/relay.mjs`](../core/fleet/relay.mjs), the `fleet-relay` launchd job). The security
+  review's follow-ups on #84 (no keystrokes, fenced send, re-verified reads, registry-bound inbox,
+  `github_app_id`) landed in the same PR.
+- `fleet status --federation` (#79, done).
+- Still to do: the skills that send messages to addresses in other fleets (P2-C; the `mm-handoff`
+  field already accepts them, from P0).
 
 ### P3: Handover
 

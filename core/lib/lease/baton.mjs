@@ -47,7 +47,7 @@
 //   renew      [--if-due 150s] renew with the session's token             exit 0 | 1 lost | 3 | 5
 //   keepalive  [--pulse-max 20m] renew loop for the watch bus; prints BATON_* events
 //   fence      the check before a mutating act                            exit 0 held | 1 | 3 | 5
-//   guard -- <gh …|gate-request.sh …>   fence, then run the command (30 s timeout)
+//   guard -- <gh …|gate-request.sh …|fleet msg send …>   fence, then run the command (30 s timeout)
 //   merge      --pr N --sha S --method merge|squash|rebase                exit 0 merged | 1 | 3
 //   release    [--reason rotation|exit|handover]                          exit 0 | 1 lost | 3
 //   status     lease + local view (never the token)
@@ -815,7 +815,8 @@ function defaultParentAlive() {
 /**
  * What `guard` may run: `gh …` (never a merge of any form, which goes through `merge` and its sha
  * pin, and never `--admin`), `git [-C dir] push [--force-with-lease] origin <PR head branch>` (an
- * allowlist, checked against the PR by guard()), or this engsys's own gate-request.sh. The guard is a
+ * allowlist, checked against the PR by guard()), this engsys's own gate-request.sh, or `fleet msg send …`
+ * (this engsys's core/fleet/msg.mjs, the cross-fleet message post). The guard is a
  * fence, not a way around the permission system, so it runs nothing else.
  */
 export function guardCommand(argv) {
@@ -866,6 +867,23 @@ export function guardCommand(argv) {
     }
     return { exe: "git", push: { dir, flags, refspec, branch: m[1] } };
   }
+  // `fleet msg send …` (a cross-fleet message, engsys#77) runs this engsys's own msg.mjs. Named as
+  // `fleet msg send`, or as this engsys's msg.mjs (directly or through node); never another subcommand.
+  if (exe === "node" && args.length) [exe, ...args] = args;
+  const ownMsg = resolve(HERE, "..", "..", "fleet", "msg.mjs");
+  const isFleetMsg = exe === "fleet" && args[0] === "msg";
+  if (isFleetMsg || basename(exe) === "msg.mjs") {
+    const sub = isFleetMsg ? args.slice(1) : args;
+    if (!isFleetMsg) {
+      let real;
+      try { real = realpathSync(exe); } catch { real = null; }
+      let ownReal;
+      try { ownReal = realpathSync(ownMsg); } catch { ownReal = ownMsg; }
+      if (real !== ownReal) throw new LeaseUsageError(`guard runs only this engsys's msg.mjs (${ownMsg})`);
+    }
+    if (sub[0] !== "send") throw new LeaseUsageError("guard runs `fleet msg send …` only (inbox and read need no fence)");
+    return { exe: process.execPath, args: [ownMsg, ...sub] };
+  }
   if (basename(exe) === "gate-request.sh") {
     const own = resolve(HERE, "..", "..", "skills", "merge-monster", "scripts", "gate-request.sh");
     let real;
@@ -875,7 +893,7 @@ export function guardCommand(argv) {
     if (real !== ownReal) throw new LeaseUsageError(`guard runs only this engsys's gate-request.sh (${own})`);
     return { exe: "bash", args: [real, ...args] };
   }
-  throw new LeaseUsageError(`guard runs gh, git push or gate-request.sh only, not ${JSON.stringify(exe)}`);
+  throw new LeaseUsageError(`guard runs gh, git push, gate-request.sh or fleet msg send only, not ${JSON.stringify(exe)}`);
 }
 
 /** owner/repo from a GitHub remote URL (https, ssh, scp-like), or null. */
@@ -1082,7 +1100,7 @@ function usage() {
     "  renew      [--if-due 150s]      renew this session's baton",
     "  keepalive  [--pulse-max 20m]   renew loop for the watch bus (stops with its session)",
     "  fence                           exit 0 only while it is safe to mutate",
-    "  guard -- gh <args…> | <engsys>/skills/merge-monster/scripts/gate-request.sh <args…>",
+    "  guard -- gh <args…> | <engsys>/skills/merge-monster/scripts/gate-request.sh <args…> | fleet msg send <args…>",
     "  guard --pr N -- git [-C <dir>] push [--force-with-lease] origin HEAD:refs/heads/<PR head branch>",
     "  guard --new-branch -- git [-C <dir>] push origin HEAD:refs/heads/<agent/… branch origin lacks>",
     "  merge      --pr N --sha <validated head> --method merge|squash|rebase",
