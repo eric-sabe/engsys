@@ -37,8 +37,9 @@
 # released or lost, and when the model has not touched the baton for --pulse-max (default 20m, so a
 # wedged or dead model never keeps the role). Its BATON_* lines go to <state-dir>/baton-merge.events,
 # which this bus relays (offset in <state-dir>/.watch/baton-events.off, so a new bus also reports what
-# happened while no bus ran). Without a session process to bound it, the renewer runs attached to this
-# bus as before. --session defaults to ENGSYS_SESSION.
+# happened while no bus ran; only `BATON_<NAME> merge …` lines, capped at 300 characters). When the
+# session process is not the claude CLI, the renewer runs attached to this bus as before, unless a
+# detached one is already running for this state dir. --session defaults to ENGSYS_SESSION.
 set -u
 
 REPO="" DIR="" INTERVAL=30 DEFBRANCH=main LEDGER="" SESSION="${ENGSYS_SESSION:-}" PULSE_MAX=20m
@@ -78,7 +79,9 @@ keepalive_running() {
   case "$kp" in '' | *[!0-9]*) return 1 ;; esac
   [ -n "$kstart" ] && [ "$(ps -o lstart= -p "$kp" 2>/dev/null | awk '{$1=$1; print}')" = "$kstart" ]
 }
-# relay_events: print the renewer's BATON_* lines this bus has not printed yet.
+# relay_events: print the renewer's BATON_* lines this bus has not printed yet. Only a line that looks
+# like one of this role's events reaches the Monitor (the model's context), capped at 300 characters;
+# anything else in the file goes to the log, never to the model.
 relay_events() {
   local size off new
   if [ ! -f "$KEEP_EVENTS" ]; then printf '0\n' >"$W/baton-events.off"; return 0; fi
@@ -87,8 +90,12 @@ relay_events() {
   case "$off" in '' | *[!0-9]*) off="$size" ;; esac # events from before any bus kept an offset: no replay
   [ "$off" -le "$size" ] || off=0                     # the file was replaced
   if [ "$size" -gt "$off" ]; then
-    new=$(tail -c +"$((off + 1))" "$KEEP_EVENTS" | head -c "$((size - off))")
-    printf '%s\n' "$new" | sed '/^$/d'
+    new=$(tail -c +"$((off + 1))" "$KEEP_EVENTS" | head -c "$((size - off))" \
+      | awk -v logf="$DIR/baton-merge.keepalive.log" '
+          $0 == "" { next }
+          /^BATON_[A-Z_]+ merge( |$)/ { print substr($0, 1, 300); next }
+          { print "relay: dropped a line that is not a merge BATON_* event: " substr($0, 1, 120) >> logf }')
+    [ -z "$new" ] || printf '%s\n' "$new"
     case "$new" in *"BATON_LOST "*) LOST_SAID=1 ;; esac
   fi
   printf '%s\n' "$size" >"$W/baton-events.off"
@@ -116,6 +123,8 @@ baton_tick() {
   ENSURED=1
   case "$out" in
     *'"code":"no_owner"'*)
+      # never beside a detached renewer that is already running for this state dir (one renewer)
+      keepalive_running && return 0
       node "$BATON_LIB" keepalive --role merge --repo "$REPO" --state-dir "$DIR" --session "$SESSION" \
         --pulse-max "$PULSE_MAX" &
       KEEP_PID=$! ;;

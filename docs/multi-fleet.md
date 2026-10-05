@@ -619,12 +619,18 @@ process session. At most one renewer runs per state dir: the pidfile `baton-<rol
 records its pid, its process start time (so a recycled pid is never taken for it), its owner and its
 launch; a lock serialises two buses starting at once; a renewer that finds the pidfile naming another
 live renewer stops; a renewer recorded for another launch is stopped and replaced. The renewer is
-bounded by its owner, the claude process the bus runs under (found by walking up past the shells):
-it stops when that process is gone, when the token is released or lost, or when the model has not
+bounded by its owner, the claude process the bus runs under (found by walking up past the shells,
+and accepted only when `ps` shows the claude CLI: `claude`, or the version string it renames itself
+to; otherwise the bus runs the renewer attached, as before, and never beside a running detached
+one). The owner never comes from the command line: the starter writes it to a one-time nonce file in
+the state dir and passes the nonce in the child's environment, and the child consumes the file or
+refuses to run. The renewer stops when its owner is gone, when the token is released or lost, or when the model has not
 touched the baton for 20 minutes (the monsters tick at most every 10), so a renewer can never keep a
 dead or wedged session's role alive. It writes its `BATON_*` lines to `baton-<role>.events`, which
 each bus relays to its Monitor from a saved offset, so a new bus also reports what happened while no
-bus ran. A long-lived renewer resolves its API token again every 5 minutes, so an App installation
+bus ran. Only lines shaped like that role's events (`BATON_<NAME> <role> …`, capped at 300
+characters) reach the Monitor; anything else in the file goes to the log, never into the model's
+context. A long-lived renewer resolves its API token again every 5 minutes, so an App installation
 token (one hour) never expires under it. Holder: `<FLEET_ID>:<session>`, or `<hostname>:<session>` in single-fleet mode
 (no `FLEET_ID` or no federation file), where the lease still guards against an accidental second session.
 A role the registry declares no home for is decided by the lease alone (host-roles does not exclude

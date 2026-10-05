@@ -45,8 +45,11 @@
 // adopts that process instead of starting a second one. The start time tells a live renewer from a
 // recycled pid; a mkdir lock serialises two buses starting at once; a renewer that finds the pidfile
 // naming another live renewer stops. The renewer is bounded by its owner, the claude process
-// (sessionProcess() of the bus): it stops when the owner is gone, when the token is gone or lost,
-// or after --pulse-max without a model renew. It writes its BATON_* lines to
+// (sessionProcess() of the bus, accepted only when `ps` shows the claude CLI): it stops when the
+// owner is gone, when the token is gone or lost, or after --pulse-max without a model renew. The
+// owner never comes from the command line: the starter writes it to a one-time nonce file
+// (`baton-<role>.keepalive.nonce-<hex>`) and passes the nonce in the child's environment; the child
+// reads and deletes the file, and refuses to run without it. It writes its BATON_* lines to
 // `baton-<role>.events` (the bus relays them to its Monitor) and its log to `baton-<role>.keepalive.log`.
 //
 // ## Holder
@@ -73,8 +76,9 @@
 // github-backend's: 0 ok, 1 refused, 2 usage, 3 error, 4 newer protocol, 5 not started (no token in
 // this session).
 
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmdirSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { execFile, execFileSync, spawn as spawnProcess } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { hostname as osHostname } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -174,6 +178,15 @@ export function sessionProcess({ startPid = process.ppid, ps = defaultPs } = {})
     pid = info.ppid;
   }
   return null;
+}
+
+/**
+ * Is this `ps` comm the claude CLI? `claude` (as a path or a bare name), or the version string the
+ * CLI renames its process to (e.g. `2.1.233`; fleet-supervisor.sh reads the same thing from tmux).
+ */
+export function isClaudeCommand(comm) {
+  const name = basename(String(comm ?? "").trim()).replace(/^-/, "");
+  return name === "claude" || /^\d+\.\d+\.\d+$/.test(name);
 }
 
 /** True while the process `{pid, start}` is the same live process. */
@@ -356,6 +369,27 @@ export function createStateStore({ stateDir, role }) {
       const tmp = `${keepalivePidFile}.${process.pid}.tmp`;
       writeFileSync(tmp, `${[pid, start, ownerPid, ownerStart, run ?? ""].join("|")}\n`, { mode: 0o600 });
       renameSync(tmp, keepalivePidFile);
+    },
+    /** A one-time nonce naming the renewer's owner (0600, created exclusively) -> the nonce. */
+    writeKeepaliveNonce({ pid, start }) {
+      ensureDir();
+      const nonce = randomBytes(16).toString("hex");
+      const fd = openSync(join(stateDir, `baton-${role}.keepalive.nonce-${nonce}`), "wx", 0o600);
+      try { writeSync(fd, `${pid}|${start}\n`); } finally { closeSync(fd); }
+      return nonce;
+    },
+    /** Consume a nonce: -> the owner it names ({pid, start}), deleting it; null if absent. Usable once. */
+    takeKeepaliveNonce(nonce) {
+      if (!/^[0-9a-f]{32}$/.test(String(nonce ?? ""))) return null;
+      const f = join(stateDir, `baton-${role}.keepalive.nonce-${nonce}`);
+      const taken = `${f}.${process.pid}.taken`;
+      try { renameSync(f, taken); } catch { return null; } // atomic: only one taker wins
+      let text = "";
+      try { text = readFileSync(taken, "utf8"); } catch { /* unreadable */ }
+      try { rmSync(taken); } catch { /* gone */ }
+      const [pid, ...start] = text.replace(/\n$/, "").split("|");
+      if (!/^[1-9]\d*$/.test(pid ?? "") || !start.join("|")) return null;
+      return { pid: Number(pid), start: start.join("|") };
     },
     /** One bus at a time decides whether to adopt or start the renewer. */
     withKeepaliveLock: lockAt(join(stateDir, `baton-${role}.keepalive.lock`)),
@@ -835,16 +869,20 @@ export function createBaton({ lease, repo, role, holder, run = null, store, home
    * The watch bus's call (`keepalive --detach`): make sure exactly one renewer runs for this session.
    * Adopts the recorded one when it is the same live process (pid AND start time) for the same owner
    * and launch; otherwise stops a recorded one that is alive (another launch's), starts a new one
-   * with `spawnChild(owner)` -> pid, and records it. Never starts one without an owner to bound it.
+   * with `spawnChild(nonce)` -> pid (the nonce file names the owner), and records it. Never starts one
+   * without an owner to bound it, and the owner must be the claude CLI (`no_owner` otherwise: the bus
+   * then runs the renewer attached, bounded by the bus as before).
    *   isAlive ({pid, start}) => boolean      kill (pid) => void      startOf (pid) => start | null
+   *   ownerIsClaude ({pid, start}) => boolean
    */
-  function ensureKeepalive({ owner, spawnChild, out, pulseMaxMs = DEFAULT_PULSE_MAX_MS, isAlive = (p) => sameProcessAlive(p), kill = (pid) => process.kill(pid, "SIGTERM"), startOf = (pid) => defaultPs(pid)?.start ?? null }) {
+  function ensureKeepalive({ owner, spawnChild, out, pulseMaxMs = DEFAULT_PULSE_MAX_MS, isAlive = (p) => sameProcessAlive(p), kill = (pid) => process.kill(pid, "SIGTERM"), startOf = (pid) => defaultPs(pid)?.start ?? null, ownerIsClaude = (o) => isClaudeCommand(defaultPs(o.pid)?.comm) }) {
     const lost = store.lost();
     if (lost) return { exit: EXIT.REFUSED, result: { ok: false, lost: true, code: "lost_earlier", role, holder, lostAt: lost.at } };
     const state = store.load();
     const u = usable(state, holder, run);
     if (!u.ok) return { exit: EXIT.NOT_STARTED, result: { ok: false, code: u.code, role, holder, reason: u.reason } };
     if (!owner) return { exit: EXIT.ERROR, result: { ok: false, code: "no_owner", role, holder, reason: "no session process found above this call: a detached renewer would have nothing to bound it" } };
+    if (!ownerIsClaude(owner)) return { exit: EXIT.ERROR, result: { ok: false, code: "no_owner", role, holder, reason: `the session process above this call (pid ${owner.pid}) is not the claude CLI: a detached renewer bound to it might outlive the session` } };
     if (idleStop(state, pulseMaxMs, out)) return { exit: EXIT.OK, result: { ok: true, code: "idle", role, holder } };
     return store.withKeepaliveLock(() => {
       const rec = store.keepalivePid();
@@ -855,9 +893,12 @@ export function createBaton({ lease, repo, role, holder, run = null, store, home
         try { kill(rec.pid); } catch { /* already gone */ }
         log(`keepalive: stopped the renewer of another launch or session process (pid ${rec.pid})`);
       }
-      const pid = spawnChild(owner);
+      const nonce = store.writeKeepaliveNonce(owner);
+      let pid = null;
+      try { pid = spawnChild(nonce); } catch (e) { log(`keepalive: could not start the renewer: ${firstLine(e?.message ?? e)}`); }
       const start = pid ? startOf(pid) : null;
       if (!start) {
+        store.takeKeepaliveNonce(nonce);
         if (pid) { try { kill(pid); } catch { /* gone */ } }
         return { exit: EXIT.ERROR, result: { ok: false, code: "spawn_failed", role, holder, reason: pid ? `could not read the start time of pid ${pid}` : "the renewer did not start" } };
       }
@@ -1022,7 +1063,7 @@ function parseArgs(argv) {
     if (arg === "--") { command = rest.slice(i + 1); break; }
     if (!arg.startsWith("--")) throw new LeaseUsageError(`unexpected argument ${JSON.stringify(arg)}`);
     const name = arg.slice(2);
-    if (name === "pretty" || name === "new-branch" || name === "detach") { flags[name] = true; continue; }
+    if (name === "pretty" || name === "new-branch" || name === "detach" || name === "detached-child") { flags[name] = true; continue; }
     const value = rest[i + 1];
     if (value === undefined || value.startsWith("--")) throw new LeaseUsageError(`--${name} requires a value`);
     flags[name] = value;
@@ -1138,9 +1179,10 @@ export async function main(argv, deps = {}) {
           const run = env.ENGSYS_SESSION_RUN || (deps.run !== undefined ? deps.run : fallbackRun(env));
           const childArgs = ["keepalive", "--repo", flags.repo, "--role", flags.role, "--state-dir", stateDir, "--session", holderFor({ env, session: flags.session, hostname: deps.hostname ?? osHostname() }).session,
             "--pulse-max", `${pulseMaxMs}ms`];
-          const spawnChild = (o) => (deps.spawnKeepalive ?? defaultSpawnKeepalive)({
-            args: [...childArgs, "--owner-pid", String(o.pid), "--owner-start", o.start],
-            env: { ...env, ...(run ? { ENGSYS_SESSION_RUN: run } : {}) },
+          // The owner travels in a one-time nonce file, never on argv (#95 review L1).
+          const spawnChild = (nonce) => (deps.spawnKeepalive ?? defaultSpawnKeepalive)({
+            args: [...childArgs, "--detached-child"],
+            env: { ...env, BATON_KEEPALIVE_NONCE: nonce, ...(run ? { ENGSYS_SESSION_RUN: run } : {}) },
             files: files.keepaliveFiles,
           });
           r = baton.ensureKeepalive({
@@ -1151,14 +1193,19 @@ export async function main(argv, deps = {}) {
             ...(deps.isAlive ? { isAlive: deps.isAlive } : {}),
             ...(deps.kill ? { kill: deps.kill } : {}),
             ...(deps.startOf ? { startOf: deps.startOf } : {}),
+            ...(deps.ownerIsClaude ? { ownerIsClaude: deps.ownerIsClaude } : {}),
           });
           break;
         }
-        if (flags["owner-pid"] !== undefined) {
-          // The detached renewer itself: bounded by the owner it was given, not by its parent (the
-          // starter exits at once); stdout is the events file.
-          if (!/^[1-9]\d{0,9}$/.test(flags["owner-pid"]) || !flags["owner-start"]) throw new LeaseUsageError("--owner-pid needs a pid and --owner-start its process start time");
-          const owner = { pid: Number(flags["owner-pid"]), start: flags["owner-start"] };
+        if (flags["detached-child"]) {
+          // The detached renewer itself: bounded by the owner its starter recorded in the one-time
+          // nonce file (consumed here), not by its parent (the starter exits at once); stdout is the
+          // events file. No valid nonce, no renewer.
+          const owner = files.takeKeepaliveNonce(env.BATON_KEEPALIVE_NONCE);
+          if (!owner) {
+            err.write("baton: keepalive --detached-child runs only when started by `keepalive --detach` (no valid one-time nonce)\n");
+            return EXIT.REFUSED;
+          }
           const selfStart = (deps.startOf ?? ((pid) => defaultPs(pid)?.start ?? null))(process.pid);
           return await baton.keepalive({
             out: (line) => out.write(`${line}\n`),

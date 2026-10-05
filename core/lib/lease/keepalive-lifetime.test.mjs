@@ -11,7 +11,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
+import { statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -24,6 +25,8 @@ import {
   TTL_MINUTES,
   createBaton,
   createStateStore,
+  isClaudeCommand,
+  main,
   supervisorDecision,
   transientRenewError,
 } from "./baton.mjs";
@@ -170,14 +173,16 @@ test("ensureKeepalive: starts one detached renewer, records it, and the next bus
     const deps = {
       owner: OWNER,
       out: () => {},
-      spawnChild: (o) => { const pid = 7000 + spawned.length; spawned.push({ pid, owner: o }); alive.add(pid); return pid; },
+      ownerIsClaude: () => true,
+      // the child consumes the one-time nonce the starter wrote, and gets its owner from it
+      spawnChild: (nonce) => { const pid = 7000 + spawned.length; spawned.push({ pid, owner: s.store.takeKeepaliveNonce(nonce) }); alive.add(pid); return pid; },
       isAlive: ({ pid, start }) => alive.has(pid) && start === `start-${pid}`,
       startOf: (pid) => `start-${pid}`,
       kill: (pid) => alive.delete(pid),
     };
     const a = s.baton.ensureKeepalive(deps);
     assert.equal(a.result.code, "started");
-    assert.deepEqual(spawned[0].owner, OWNER, "the renewer is bound to the claude process");
+    assert.deepEqual(spawned[0].owner, OWNER, "the renewer is bound to the claude process, via the nonce file");
     assert.deepEqual(s.store.keepalivePid(), { pid: 7000, start: "start-7000", ownerPid: OWNER.pid, ownerStart: OWNER.start, run: "run-1" });
     // A second bus (the Monitor was re-armed): adopt, no second process.
     const b = s.baton.ensureKeepalive(deps);
@@ -206,6 +211,7 @@ test("ensureKeepalive: a renewer left by another launch is stopped and replaced;
   const deps = {
     owner: OWNER,
     out: () => {},
+    ownerIsClaude: () => true,
     spawnChild: () => { alive.add(9100); return 9100; },
     isAlive: ({ pid, start }) => alive.has(pid) && start === `start-${pid}`,
     startOf: (pid) => `start-${pid}`,
@@ -240,6 +246,59 @@ test("the keepalive pidfile round-trips, a launch id with '|' included", () => {
   writeFileSync(store.keepaliveFiles.pid, "garbage\n");
   assert.equal(store.keepalivePid(), null);
 });
+
+test("L1: isClaudeCommand accepts the claude CLI as ps shows it, and nothing else", () => {
+  for (const c of ["claude", "/Users/x/.local/bin/claude", "-claude", "2.1.233", " 2.1.300 "]) assert.equal(isClaudeCommand(c), true, c);
+  for (const c of ["node", "bash", "/usr/bin/login", "tmux", "claude-helper", "2.1", "v2.1.233", "", null]) assert.equal(isClaudeCommand(c), false, String(c));
+});
+
+test("L1: no detached renewer when the session process is not the claude CLI (the bus runs it attached)", async () => {
+  const w = world();
+  const s = session(w);
+  await s.baton.startup();
+  const r = s.baton.ensureKeepalive({ owner: OWNER, out: () => {}, ownerIsClaude: () => false, spawnChild: () => assert.fail("never started") });
+  assert.equal(r.result.code, "no_owner");
+  assert.match(r.result.reason, /not the claude CLI/);
+  assert.equal(readdirSync(s.stateDir).some((f) => f.includes(".nonce-")), false, "no nonce written");
+});
+
+test("L1: the owner travels in a one-time nonce file: consumed once, never forgeable from argv", async () => {
+  const w = world();
+  const s = session(w);
+  await s.baton.startup();
+  const nonce = s.store.writeKeepaliveNonce(OWNER);
+  assert.match(nonce, /^[0-9a-f]{32}$/);
+  assert.equal(statMode(join(s.stateDir, `baton-maintain.keepalive.nonce-${nonce}`)), 0o600);
+  assert.deepEqual(s.store.takeKeepaliveNonce(nonce), OWNER);
+  assert.equal(s.store.takeKeepaliveNonce(nonce), null, "a nonce is good once");
+  assert.equal(s.store.takeKeepaliveNonce("../../etc/passwd"), null);
+  assert.equal(s.store.takeKeepaliveNonce("f".repeat(32)), null, "a nonce nobody wrote");
+
+  // The renewer's own entry point refuses to run without a valid nonce, before any request.
+  const errs = [];
+  const io = { out: { write: () => {} }, err: { write: (t) => errs.push(t) } };
+  const env = { ENGSYS_SESSION: "acme-maintain", ENGSYS_SESSION_RUN: "run-1" };
+  const argv = ["keepalive", "--repo", REPO, "--role", "maintain", "--state-dir", s.stateDir, "--session", "acme-maintain", "--detached-child"];
+  const before = w.api.state.log.length;
+  assert.equal(await main(argv, { ...io, env, hostname: "mini", api: w.api }), EXIT.REFUSED);
+  assert.equal(await main(argv, { ...io, env: { ...env, BATON_KEEPALIVE_NONCE: "f".repeat(32) }, hostname: "mini", api: w.api }), EXIT.REFUSED);
+  assert.equal(await main([...argv, "--owner-pid", "1", "--owner-start", "x"], { ...io, env, hostname: "mini", api: w.api }), EXIT.REFUSED, "an owner on argv grants nothing");
+  assert.equal(w.api.state.log.length, before, "nothing renewed");
+  assert.match(errs.join(""), /no valid one-time nonce/);
+});
+
+test("L1: a renewer that fails to start leaves no nonce behind", async () => {
+  const w = world();
+  const s = session(w);
+  await s.baton.startup();
+  const r = s.baton.ensureKeepalive({ owner: OWNER, out: () => {}, ownerIsClaude: () => true, spawnChild: () => { throw new Error("EAGAIN"); } });
+  assert.equal(r.result.code, "spawn_failed");
+  assert.equal(readdirSync(s.stateDir).some((f) => f.includes(".nonce-")), false);
+});
+
+function statMode(f) {
+  return statSync(f).mode & 0o777;
+}
 
 // ---------------------------------------------------------------------- part 2: real processes --
 
@@ -278,7 +337,7 @@ const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { 
 /** Renewers for this state dir, from the process table (proves "one process, not two"). */
 function renewersFor(dir) {
   const ps = spawnSync("ps", ["-e", "-o", "pid=,args="], { encoding: "utf8" }).stdout;
-  return ps.split("\n").filter((l) => l.includes(dir) && l.includes(" keepalive ") && l.includes("--owner-pid")).map((l) => Number(l.trim().split(/\s+/)[0]));
+  return ps.split("\n").filter((l) => l.includes(dir) && l.includes(" keepalive ") && l.includes("--detached-child")).map((l) => Number(l.trim().split(/\s+/)[0]));
 }
 
 test("real processes: kill the bus → the renewer keeps renewing; a new bus adopts it; kill the claude owner → it stops", { timeout: 90_000 }, async (t) => {
@@ -314,7 +373,9 @@ test("real processes: kill the bus → the renewer keeps renewing; a new bus ado
 
   // The stand-in claude process: starts a watch bus (in its own process group, the way a Monitor
   // runs one) on SIGUSR1 and stays up until killed.
-  const owner = spawn(process.execPath, [join(HERE, "fixtures", "fake-claude.mjs"), join(HERE, "..", "..", "skills", "maintenance-monster", "scripts", "mnt-watch.sh"), dir, REPO, join(T, "bus")], { env, stdio: "ignore" });
+  // Run under the name `claude`, so `ps` shows the claude CLI (the renewer only binds to that).
+  symlinkSync(process.execPath, join(T, "bin", "claude"));
+  const owner = spawn(join(T, "bin", "claude"), [join(HERE, "fixtures", "fake-claude.mjs"), join(HERE, "..", "..", "skills", "maintenance-monster", "scripts", "mnt-watch.sh"), dir, REPO, join(T, "bus")], { env, stdio: "ignore" });
   t.after(() => { try { owner.kill("SIGKILL"); } catch { /* gone */ } });
   const busPid = (n) => { try { return Number(readFileSync(join(T, `bus-${n}.pid`), "utf8")); } catch { return null; } };
   await until("bus 1", () => busPid(1));
