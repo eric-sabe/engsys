@@ -45,7 +45,7 @@ cat >"$T/bin/gh" <<SH
 printf '%s\n' "\$*" >>"$FAKE/gh.log"
 [ -f "$FAKE/gh-fail" ] && exit 1
 case "\$1 \$2" in
-  "repo view") echo '{"nameWithOwner":"acme/acme-fleet"}' ;;
+  "repo view") echo '{"nameWithOwner":"acme/acme-fleet"}' | jq -r '.nameWithOwner' ;; # emulate --json/--jq like real gh
   "issue view") cat "$BODY_FILE" ;;
   "issue edit")
     # \$FAKE/gh-race simulates a concurrent writer's edit landing right after ours: our own edit
@@ -108,6 +108,9 @@ rc_is "a lost edit is retried until it sticks" 0
 has "it eventually landed" "$(cat "$BODY_FILE")" "status: after a race"
 EDIT_CALLS="$(grep -c '^issue edit' "$FAKE/gh.log")"
 eq "it took 3 attempts (2 lost to the race, 1 that stuck)" "$EDIT_CALLS" 3
+has "each lost attempt is logged" "$OUT" "lost to a concurrent edit"
+RETRY_LOGS="$(grep -c "lost to a concurrent edit" <<<"$OUT")"
+eq "...exactly twice (the 3rd attempt is the one that stuck, no retry logged after it)" "$RETRY_LOGS" 2
 rm -f "$FAKE/gh-race"
 
 # --- a race that never clears: gives up softly after 3 attempts, body left as it was ------------
@@ -116,6 +119,7 @@ BEFORE="$(cat "$BODY_FILE")"
 run heartbeat "never lands"
 rc_is "gives up after 3 attempts, still exits 0 (soft)" 0
 eq "body untouched (ours never stuck, and it never clobbers whatever is there)" "$(cat "$BODY_FILE")" "$BEFORE"
+has "the give-up is logged (not silent)" "$OUT" "gave up on acme/acme-fleet#42 after 3 attempts"
 rm -f "$FAKE/gh-race"
 
 # --- never touches another writer's block on the same issue -------------------------------------

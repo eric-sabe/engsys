@@ -23,9 +23,10 @@
 #
 # The status issue is shared (#54's resource-broker writes its own `<!-- broker-heartbeat -->`
 # block on the same issue in multi-fleet mode), so this rewrites only the fleet-heartbeat block —
-# never anything outside it — then reads the body back and retries (3 attempts) when a concurrent
-# edit of the same body dropped the line, the same way broker-heartbeat.sh does. A failure to land
-# after 3 attempts is still soft (exit 0): the next tick tries again.
+# never anything outside it — then reads the body back and retries (3 attempts, short jittered
+# backoff) when a concurrent edit of the same body dropped the line, the same way
+# broker-heartbeat.sh does. Giving up after 3 attempts is still soft (logged to stderr, exit 0):
+# the next tick tries again.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck source=lib/fleet-env.sh
@@ -84,6 +85,13 @@ while :; do
   if gh issue view "$ISSUE" -R "$REPO" --json body --jq .body 2>/dev/null | tr -d '\r' | grep -Fxq -- "$LINE"; then
     exit 0
   fi
-  [ "$attempt" -lt 3 ] || exit 0 # soft: give up quietly, the next tick tries again
-  sleep "${FLEET_HEARTBEAT_RETRY_SECS:-2}"
+  if [ "$attempt" -ge 3 ]; then
+    # soft: give up quietly (logged, the tick continues) — the next tick tries again
+    echo "fleet heartbeat: gave up on $REPO#$ISSUE after $attempt attempts (a concurrent edit kept winning)" >&2
+    exit 0
+  fi
+  echo "fleet heartbeat: lost to a concurrent edit of $REPO#$ISSUE, retrying" >&2
+  # Short jittered backoff, so two writers racing the same issue don't just keep re-colliding in lockstep.
+  base="${FLEET_HEARTBEAT_RETRY_SECS:-2}"
+  sleep "$base.$(printf '%03d' "$((RANDOM % 1000))")"
 done
