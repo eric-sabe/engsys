@@ -107,6 +107,20 @@ test('the wrapper and hook lists come from the release copy, not this checkout (
   ]);
 });
 
+test('the monster skills are protected whole: any script, a deleted file, an added file', () => {
+  for (const f of ['core/skills/merge-monster/SKILL.md', 'core/skills/merge-monster/scripts/mm-watch.sh', 'core/skills/merge-monster/scripts/gate-request.sh',
+    'core/skills/maintenance-monster/scripts/mnt-snapshot.sh']) assert.ok(CLOSURE.includes(f), `${f} protected`);
+  const root = makeCache();
+  fs.appendFileSync(cachePath(root, 'core/skills/merge-monster/scripts/mm-watch.sh'), '\ngh pr merge 1 --admin\n');
+  fs.rmSync(cachePath(root, 'core/skills/maintenance-monster/scripts/mnt-snapshot.sh'));
+  fs.writeFileSync(cachePath(root, 'core/skills/merge-monster/scripts/mm-extra.sh'), 'gh pr merge 2\n');
+  assert.deepEqual(kinds(compare(release.tree, localState([root]))), [
+    'missing core/skills/maintenance-monster/scripts/mnt-snapshot.sh',
+    'modified core/skills/merge-monster/scripts/mm-watch.sh',
+    'unexpected core/skills/merge-monster/scripts/mm-extra.sh',
+  ]);
+});
+
 test('compare: untouched passes; modified, missing, unexpected and symlinked files are caught', () => {
   const root = makeCache();
   assert.deepEqual(compare(release.tree, localState([root])), []);
@@ -129,11 +143,9 @@ test('compare: untouched passes; modified, missing, unexpected and symlinked fil
   const scripts = cachePath(viaDir, 'core/skills/merge-monster/scripts');
   fs.renameSync(scripts, `${scripts}.real`);
   fs.symlinkSync(`${scripts}.real`, scripts);
-  assert.deepEqual(kinds(compare(release.tree, localState([viaDir]))), [
-    'not-a-file core/skills/merge-monster/scripts/mm-act.sh',
-    'not-a-file core/skills/merge-monster/scripts/mm-baton.sh',
-    'not-a-file core/skills/merge-monster/scripts/mm-heartbeat.sh',
-  ]);
+  const viaDirKinds = kinds(compare(release.tree, localState([viaDir])));
+  for (const k of ['not-a-file core/skills/merge-monster/scripts', 'not-a-file core/skills/merge-monster/scripts/mm-act.sh',
+    'missing core/skills/merge-monster/scripts/mm-watch.sh']) assert.ok(viaDirKinds.includes(k), `${k} in ${viaDirKinds.join(', ')}`);
 
   // A file the release doesn't have: fine when absent locally too, caught when present.
   const older = parseTree({ tree: [...release.tree].filter(([p]) => p !== 'core/lib/untrusted.mjs').map(([p, sha]) => ({ path: p, type: 'blob', sha })) });
@@ -178,7 +190,7 @@ test('CLI: 0 untouched, 1 tampered (with a fingerprint per mismatch), 3 when Git
   const plugins = pluginList([userEntry(root)]);
   let c = capture();
   assert.equal(await run(args(plugins), { fetch, out: c.out }), 0);
-  assert.match(c.text(), /^verify: ok, 22 protected files/);
+  assert.match(c.text(), new RegExp(`^verify: ok, ${CLOSURE.length} protected files`));
 
   fs.appendFileSync(cachePath(root, 'core/skills/maintenance-monster/scripts/mnt-act.sh'), '# x\n');
   c = capture();

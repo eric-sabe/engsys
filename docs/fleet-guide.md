@@ -1010,7 +1010,9 @@ No hash list is kept on the host or in the instance repo, because the sessions c
 `plugin.json` and the `hooks.json` it points at, every script `hooks.json` registers (the guard,
 `approve-own-scripts.mjs`, `engsys-context.mjs`, `handback-guard.mjs`, the reground templates), the
 wrappers the guard's own `WRAPPERS` names, the lease code they run (`baton.mjs`, `github-backend.mjs`) and
-everything those import or execute. Walking the release's copy means a new hook or wrapper in a release
+everything those import or execute. The `merge-monster` and `maintenance-monster` skill directories are
+protected whole: the guard lets a monster run its own skill scripts and can't see inside them, so every
+script there is as trusted as a wrapper, and `SKILL.md` is the monster's protocol. Walking the release's copy means a new hook or wrapper in a release
 is covered without changing the verifier. `fleet verify` prints the count of files it checked.
 
 **Which install.** It runs `claude plugin list --json` in `PIN_DIR`, where the sessions start, and looks at

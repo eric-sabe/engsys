@@ -17,9 +17,9 @@
 // Each protected file in the plugin cache is hashed the way `git hash-object` does (sha1 of
 // "blob <size>\0" + content) and compared. No manifest is stored anywhere.
 //
-// The protected set is a closure walked from the cached files themselves: the SEEDS below, every
-// script hooks.json registers, the fenced wrappers named by the guard's own WRAPPERS, and everything
-// those import or run. Each file is read once, then hashed and parsed from the same buffer. Walking the
+// The protected set is a closure walked from the cached files themselves: the SEEDS below, every file
+// under SEED_DIRS (the monster skills), every script hooks.json registers, the fenced wrappers named by
+// the guard's own WRAPPERS, and everything those import or run. Each file is read once, then hashed and parsed from the same buffer. Walking the
 // local copy is sound: a file that changed what the walk reaches is itself a mismatch. So the wrapper
 // and hook lists are the release's own (engsys#86 review L4, M2), never the host checkout's.
 //
@@ -72,6 +72,13 @@ export const SEEDS = Object.freeze([
   P('fleet/identity/gh-app-token.mjs'),
   P('fleet/lib/federation.mjs'),
 ]);
+/**
+ * Directories protected whole: the two monster skills. The guard lets a monster run its own skill scripts
+ * by path, and it can't see what a script does inside, so every script there (mm-watch.sh,
+ * mm-snapshot.sh, gate-check.sh, ...) is as trusted as a fenced wrapper, and SKILL.md is the monster's
+ * protocol. A file in the release's copy of these directories that is missing locally is a mismatch too.
+ */
+export const SEED_DIRS = Object.freeze([P('skills/merge-monster/'), P('skills/maintenance-monster/')]);
 const GUARD = P('.claude-plugin/singleton-write-guard.mjs');
 
 export const TAG_RE = /^v\d+\.\d+\.\d+$/;
@@ -114,6 +121,8 @@ export function refsOf(repoPath, src) {
     }
   } else if (repoPath.endsWith('.sh') || repoPath.endsWith('.tmpl')) {
     for (const m of s.matchAll(/(?:\$here|\$\(dirname "\$\{BASH_SOURCE\[0\]\}"\))\/([A-Za-z0-9_./-]+\.(?:sh|mjs))/g)) rel(m[1]);
+    // `$<any script-dir variable>/../../../lib/x.mjs`: a relative climb is relative to the script's dir.
+    for (const m of s.matchAll(/\/((?:\.\.\/)+[A-Za-z0-9_./-]+\.(?:sh|mjs))/g)) rel(m[1]);
   }
   return out.filter((p) => p.startsWith(`${PLUGIN_SUBDIR}/`));
 }
@@ -123,11 +132,21 @@ export function refsOf(repoPath, src) {
  * null = absent; 'not-a-file' = a symlink, directory, anything but a regular file, or a file reached
  * through a symlinked directory (a symlink could be repointed after the check, so it never passes).
  */
-export function walk(root, seeds = SEEDS) {
+export function walk(root, seeds = SEEDS, dirs = SEED_DIRS) {
   let realRoot = root;
   try { realRoot = fs.realpathSync(root); } catch { /* missing root: every file reads as absent */ }
   const out = {};
   const queue = [...seeds];
+  const list = (repoDir) => { // every entry under a seed directory, as repo paths (a symlinked entry is not followed)
+    let ents;
+    try { ents = fs.readdirSync(cachePath(root, repoDir), { withFileTypes: true }); } catch { return; }
+    for (const e of ents) {
+      const p = `${repoDir}${e.name}`;
+      if (e.isDirectory()) list(`${p}/`);
+      else queue.push(p);
+    }
+  };
+  for (const d of dirs) list(d);
   while (queue.length) {
     const p = queue.shift();
     if (p in out) continue;
@@ -146,8 +165,8 @@ export function walk(root, seeds = SEEDS) {
 }
 
 /** Walk every root. → { [root]: walk(root) } */
-export function localState(roots, seeds = SEEDS) {
-  return Object.fromEntries(roots.map((r) => [r, walk(r, seeds)]));
+export function localState(roots, seeds = SEEDS, dirs = SEED_DIRS) {
+  return Object.fromEntries(roots.map((r) => [r, walk(r, seeds, dirs)]));
 }
 
 /** Parse a git trees API response into Map<path, blob sha>. Throws an Unverified on a bad or truncated tree. */
@@ -166,9 +185,12 @@ export function parseTree(json) {
  *   modified (different bytes) | missing (in the release, not on disk) | unexpected (on disk, not in the
  *   release) | not-a-file. A file in neither (a reference the release doesn't have either) is fine.
  */
-export function compare(tree, local) {
+export function compare(tree, local, dirs = SEED_DIRS) {
   const diffs = [];
   for (const [root, m] of Object.entries(local)) {
+    for (const p of tree.keys()) {
+      if (!(p in m) && dirs.some((d) => p.startsWith(d))) diffs.push({ root, path: p, kind: 'missing', have: '-' });
+    }
     for (const [p, have] of Object.entries(m)) {
       const want = tree.get(p) ?? null;
       if (have === 'not-a-file') diffs.push({ root, path: p, kind: 'not-a-file', have });

@@ -173,6 +173,9 @@ cp "$E/core/.claude-plugin/approve-own-scripts.mjs" "$CACHE/.claude-plugin/appro
 printf '\necho "export NODE_OPTIONS=--require=/tmp/x.js"\n' >>"$CACHE/templates/post-clear-reground.sh.tmpl"
 run fleet verify; rc_is "a tampered SessionStart script is a mismatch (review M2)" 1
 cp "$E/core/templates/post-clear-reground.sh.tmpl" "$CACHE/templates/post-clear-reground.sh.tmpl"
+printf '\ngh pr merge "$1" --admin\n' >>"$CACHE/skills/merge-monster/scripts/mm-watch.sh"
+run fleet verify; rc_is "a tampered monster skill script (not a wrapper) is a mismatch" 1; has "…reported" "$OUT" "mm-watch.sh"
+cp "$E/core/skills/merge-monster/scripts/mm-watch.sh" "$CACHE/skills/merge-monster/scripts/mm-watch.sh"
 
 echo "== PoC A: the version label edited (review H2)"
 echo '// tampered' >>"$CACHE/.claude-plugin/hooks.json"
