@@ -5,7 +5,8 @@
 # of memory files do not. This stdout is injected into the fresh context so the
 # session re-grounds its fleet + subagent operating discipline before acting.
 # Sibling of post-compact-reground.sh (matcher "compact").
-# Must be fast and fail-open: static text only, no network calls, no state reads.
+# Must be fast and fail-open: static text only, no network calls, no state reads. The one
+# exception is the operator time line below: it formats the current time from OPERATOR_* env, no I/O.
 # Rendered by the engsys installer; static content, no project fills.
 cat <<'EOF'
 Context was just cleared or resumed. CLAUDE.md and the memory INDEX reloaded, but your prior conversation, any loaded skill, and the memory-file BODIES did NOT. Re-ground before acting:
@@ -23,3 +24,8 @@ Context was just cleared or resumed. CLAUDE.md and the memory INDEX reloaded, bu
 
 Full detail: CLAUDE.md § "Subagent orchestration" and § "Context compaction".
 EOF
+# Operator time format (fleet sessions): same line the session-start context carries. Silent when no
+# setting exists, the plugin lib is missing, or node is absent.
+if [ -n "${OPERATOR_TIMEZONE:-}${OPERATOR_CLOCK:-}" ] && [ -f "${CLAUDE_PLUGIN_ROOT:-}/lib/operator-time.mjs" ] && command -v node >/dev/null 2>&1; then
+  node "${CLAUDE_PLUGIN_ROOT}/lib/operator-time.mjs" context-line 2>/dev/null || true
+fi

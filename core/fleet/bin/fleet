@@ -22,6 +22,9 @@
 #   heartbeat "<summary>"         write this fleet's heartbeat onto its own status issue (federation.yml
 #                                 fleets.<FLEET_ID>.status_issue); no-op in single-fleet mode. What the
 #                                 supervisor's HEARTBEAT_CMD calls once per tick.
+#   time <iso|epoch|now> [--date|--time|--relative]
+#                                 render a time the way this fleet's operator reads it (time zone +
+#                                 12h/24h, from federation.yml or fleet.conf); machine fields stay UTC
 #   federation validate|get|home|address|status ...
 #                                 the multi-fleet registry (federation.yml; see `fleet federation --help`)
 #   init ...                      scaffold a new fleet instance (engsys fleet init)
@@ -47,7 +50,7 @@ case "$cmd" in
   -h | --help | help) sed -n '2,/^set -/{/^set -/!p;}' "$0"; exit 0 ;;
   init) # the engsys CLI (this kit lives at <engsys>/core/fleet); no instance needed yet
     exec "$KIT/../../install" fleet init "$@" ;;
-  status | pin | sync | restart | launch | supervise | install-jobs | notify | heartbeat | federation) ;;
+  status | pin | sync | restart | launch | supervise | install-jobs | notify | heartbeat | time | federation) ;;
   *) echo "fleet: unknown command '$cmd' (fleet help)" >&2; exit 2 ;;
 esac
 
@@ -73,5 +76,6 @@ case "$cmd" in
   install-jobs) exec bash "$KIT/install-jobs.sh" "$@" ;;
   notify) exec bash "$KIT/notify.sh" "$@" ;;
   heartbeat) exec bash "$KIT/heartbeat.sh" "$@" ;;
+  time) exec bash "$KIT/time.sh" "$@" ;;
   federation) exec bash "$KIT/federation.sh" "$@" ;;
 esac

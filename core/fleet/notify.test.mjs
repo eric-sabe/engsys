@@ -365,3 +365,37 @@ test('incomplete SLACK_ENV (missing a required key) is treated as unconfigured',
   assert.match(r.stderr, /SLACK_ENV is missing/);
   assert.match(r.stderr, /SLACK_CHANNEL_ID/);
 });
+
+// --- operator time format (#89) -------------------------------------------------------------------
+
+test('time format set: an ISO UTC time becomes a Slack date token with the fleet-format fallback', async () => {
+  posts = [];
+  const r = await run(['--level', 'info', 'baton expires 2026-10-05T19:44:00Z'], {
+    env: { SLACK_ENV: slackEnv('t1.env'), OPERATOR_TIMEZONE: 'America/New_York', OPERATOR_CLOCK: '12h' },
+  });
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(posts.length, 1);
+  assert.match(posts[0].text, /^\[alice\] ℹ️ baton expires <!date\^1791229440\^\{date_short_pretty\} \{time\}\|[A-Z][a-z]{2} \d+(, \d{4})?, 3:44 PM EDT>$/);
+});
+
+test('no time format: the text is posted exactly as given', async () => {
+  posts = [];
+  const r = await run(['--level', 'info', 'baton expires 2026-10-05T19:44:00Z'], { env: { SLACK_ENV: slackEnv('t2.env') } });
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(posts[0].text, '[alice] ℹ️ baton expires 2026-10-05T19:44:00Z');
+});
+
+test('time format set, Slack down: the GitHub fallback comment reads in the fleet format, no Slack token', async () => {
+  const bin = path.join(TMP, 'fakebin-time');
+  const log = path.join(TMP, 'gh-time.log');
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(bin, 'gh'), `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >>"${log}"\n`, { mode: 0o755 });
+  const r = await run(['--level', 'info', 'stale since 2026-10-05T13:44:00Z'], {
+    env: { SLACK_ENV: path.join(TMP, 'missing.env'), NOTIFY_FALLBACK_ISSUE: 'acme/app#5', FLEET_ID: 'alice', OPERATOR_TIMEZONE: 'Europe/Berlin', OPERATOR_CLOCK: '24h' },
+    fakeBin: bin,
+  });
+  assert.equal(r.code, 0, r.stderr);
+  const logged = fs.readFileSync(log, 'utf8');
+  assert.match(logged, /stale since 5 Oct 15:44 CEST/);
+  assert.ok(!logged.includes('<!date^'), 'no Slack token in a GitHub comment');
+});

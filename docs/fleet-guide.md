@@ -684,6 +684,8 @@ fleets:
     cloud_identity: fleet-alice
     slack_operator: U0000000001        # Slack member id
     status_issue: 11                   # this fleet's status issue in the instance repo
+    timezone: America/New_York         # IANA zone for times shown to people (default UTC)
+    clock: 12h                         # 12h or 24h (default 24h)
     enabled: true                      # false = this fleet's kill switch
   bob:
     operator: bob
@@ -748,6 +750,20 @@ instance, add `FLEET_ID` and the file by hand.
 The `FLEET_ID` in `fleet.conf` is the one `fleet notify` prefixes posts with. A `FLEET_ID` in the
 Slack env file is then unnecessary; if both are set and differ, `fleet notify` warns and uses
 `fleet.conf`'s.
+
+#### Operator time format
+
+Each fleet sets how dates and times read to its operator: a time zone and a 12-hour or 24-hour clock.
+Set `timezone: America/New_York` and `clock: 12h` under the fleet in `federation.yml` (or, in single-fleet
+mode, `OPERATOR_TIMEZONE` and `OPERATOR_CLOCK` in `fleet.conf`). Default is UTC and 24h. `fleet federation
+validate` rejects an unknown zone; at run time a bad zone falls back to UTC with a warning.
+
+It changes only text a person reads: the session-start and re-ground context line, `fleet notify` (Slack
+shows each reader their own zone through a date token; the fallback text and the GitHub comment use the
+fleet's format), supervisor ledger comments, `fleet status --federation`, and the gate-request comment.
+Everything a script parses stays ISO 8601 UTC: heartbeat `last:` lines, baton commits, ledger markers,
+logs and `--json`. `fleet time <iso|epoch|now> [--date|--time|--relative]` renders one time the same way,
+for example `Oct 5, 3:44 PM EDT` or `5 Oct 15:44 CEST`.
 
 ### 6.11 Host roles: which sessions run on this host
 
@@ -1177,6 +1193,7 @@ format) overrides it per machine. Environment values for `ENGSYS_REF` / `INSTANC
 | `CLAIM_PROJECT` | no | `<owner>/<number>` of the ProjectV2 board `claim.mjs acquire`/`release` mirror the `fleet:<id>` label onto (§ 3). Owner may be a user or org and may differ from the issue's repo; a cross-owner board needs `GH_APP_OWNER` set to it (engsys#55). Unset means no board sync, only the label |
 | `CLAIM_OWNER_FIELD` | no | The board field name `claim.mjs` writes the fleet id to: a TEXT or SINGLE_SELECT field (a SINGLE_SELECT field must already carry an option named exactly each fleet id, never created automatically). Default `Owner`. Ignored when `CLAIM_PROJECT` is unset |
 | `FLEET_INSTANCE_REPO` | no | `owner/name` of the instance repo, which holds each fleet's status issue (§ 6.11). Default: the origin remote of the instance checkout. Written into every session env when set. Never inherited from the caller's environment |
+| `OPERATOR_TIMEZONE` / `OPERATOR_CLOCK` | no | Single-fleet mode only: how times read to a person (§ 6.10, "Operator time format"). An IANA zone and `12h` or `24h`. Default UTC, 24h. With a registry, the fleet's `timezone` / `clock` in `federation.yml` win. Written into every session env when set |
 | `ROLES` | no | Set it in `fleet.local.conf`. An allowlist of the roster sessions this host runs: names, names without the namespace, or kinds (`merge`, `maintain`, `broker`, `monster`, `interactive`); § 6.11. Unset means every session. Never inherited from the caller's environment |
 | `ROSTER_EXCLUDE` | no | Set it in `fleet.local.conf`. A denylist with the same entries; it wins over `ROLES`. Never inherited from the caller's environment |
 | anything else | | Instance-defined template variables (model knobs, and so on) |

@@ -105,6 +105,8 @@ fleets:
     cloud_identity: fleet-alice             # e.g. an Azure SP, AWS IAM role or GCP service account
     slack_operator: U0000000001             # Slack member id to mention for this fleet
     status_issue: 11                        # this fleet's own heartbeat/digest issue in acme/acme-fleet
+    timezone: America/New_York              # optional: IANA zone for times shown to people (default UTC)
+    clock: 12h                              # optional: 12h or 24h (default 24h); machine timestamps stay ISO UTC
     enabled: true
   bob:
     operator: bob
