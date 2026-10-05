@@ -40,8 +40,8 @@ export FLEET_INSTANCE="$FLEET_REPO" FLEET_REPO FLEET_STATE ENV_DIR FLEET_KIT_DIR
 # may still set them.
 unset TMUX_SESSION LOG_DIR
 # The fleet's identity comes only from its own config files, never from a caller's environment (a
-# session env carries FLEET_ID too).
-unset FLEET_ID FEDERATION_FILE
+# session env carries FLEET_ID too). The same goes for the per-host role filter (lib/host-roles.sh).
+unset FLEET_ID FEDERATION_FILE ROLES ROSTER_EXCLUDE
 fleet_load_conf "$FLEET_REPO/fleet/fleet.conf"
 [ -n "${FLEET_ORG:-}" ] || fleet_die "FLEET_ORG is not set in $FLEET_REPO/fleet/fleet.conf"
 [ -f "$HOME/.config/$FLEET_ORG/fleet.local.conf" ] && fleet_load_conf "$HOME/.config/$FLEET_ORG/fleet.local.conf"
@@ -164,6 +164,10 @@ export TMUX_SESSION
 # word-splits it, so keep the kit and instance paths free of spaces.)
 LAUNCH_CMD="bash $FLEET_KIT_DIR/bin/fleet --instance $FLEET_REPO launch"
 export LAUNCH_CMD
+
+# Which roster sessions run on this host (ROLES, ROSTER_EXCLUDE, the registry): fleet_host_init + readers.
+# shellcheck source=host-roles.sh
+. "$FLEET_KIT_DIR/lib/host-roles.sh"
 
 # --- Identity ----------------------------------------------------------------------------------
 # GH_APP_ENV set = identity kit on: every gh call from the fleet host tooling goes through the App

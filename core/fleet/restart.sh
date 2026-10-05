@@ -13,6 +13,8 @@
 #   interactive roles (everything else in the roster) — if idle: `/exit`, then relaunched. If busy
 #       (mid-turn) they're skipped unless --force (which interrupts the turn first).
 #   exited or missing windows — relaunched directly.
+# Sessions that are not on this host (ROLES / ROSTER_EXCLUDE, or a monster whose registry home is
+# another fleet: lib/host-roles.sh) are never cycled; status lists them as "not on this host".
 #
 # Usage: restart.sh [--instance <dir>]               # status only (same as --status)
 #        restart.sh --stale                          # cycle every session that's behind
@@ -42,6 +44,8 @@ done
 LAST_CHANGE="$(cat "$FLEET_STATE/last-change" 2>/dev/null || echo 0)"
 LEDGER="$(fleet_ledger_sessions)"
 ROSTER="$(fleet_roster_sessions)"
+fleet_host_init
+HOST_ROSTER="$(fleet_host_sessions)"
 
 is_monster() { grep -Fxq "$1" <<<"$LEDGER"; }
 win() { echo "${TMUX_SESSION}:$1"; }
@@ -84,13 +88,19 @@ status() {
     [ -n "$n" ] || continue
     kind=interactive; if is_monster "$n"; then kind=monster; fi
     st="$(state_of "$n")"; s=""; when="-"; behind="-"
+    if why="$(fleet_host_excluded "$n")" && [ "$st" = missing ]; then
+      printf '%-22s %-12s %s\n' "$n" "$kind" "not on this host ($why)"
+      continue
+    fi
     if [ "$st" = busy ] || [ "$st" = idle ]; then
       s="$(started_at "$n")"
       [ -z "$s" ] || when="$(fmt_time "$s")"
       if is_behind "$n"; then behind="BEHIND"; else behind="current"; fi
     fi
+    if why="$(fleet_host_excluded "$n")"; then behind="$behind  (window present, but not on this host: $why)"; fi
     printf '%-22s %-12s %-8s %-17s %s\n' "$n" "$kind" "$st" "$when" "$behind"
   done <<<"$ROSTER"
+  fleet_host_warnings
   if [ "$LAST_CHANGE" != 0 ]; then
     echo "last host change: $(date -r "$LAST_CHANGE" '+%Y-%m-%d %H:%M' 2>/dev/null || date -d "@$LAST_CHANGE" '+%Y-%m-%d %H:%M')  ($(tail -1 "$FLEET_STATE/sync.log" 2>/dev/null | cut -d' ' -f2-))"
   fi
@@ -109,6 +119,8 @@ ROTATE_MSG="Operator: the fleet host was upgraded (pins: $pins_text). Rotate at 
 cycle() {
   local n="$1" st
   grep -Fxq "$n" <<<"$ROSTER" || { echo "$n: not in the roster — skipped" >&2; return 0; }
+  local why
+  if why="$(fleet_host_excluded "$n")"; then echo "$n: not on this host ($why), skipped (fleet launch $n --force-excluded starts it anyway)"; return 0; fi
   st="$(state_of "$n")"
   case "$st" in
     missing | exited) relaunch "$n"; return 0 ;;
@@ -138,9 +150,13 @@ case "$mode" in
       st="$(state_of "$n")"
       { [ "$st" = busy ] || [ "$st" = idle ]; } && is_behind "$n" || continue
       any=1; cycle "$n"
-    done <<<"$ROSTER"
+    done <<<"$HOST_ROSTER"
     [ "$any" = 1 ] || echo "nothing behind."
     ;;
-  all) while IFS= read -r n; do [ -z "$n" ] || cycle "$n"; done <<<"$ROSTER" ;;
+  all)
+    while IFS= read -r n; do [ -z "$n" ] || cycle "$n"; done <<<"$HOST_ROSTER"
+    off="$(grep -Fxv -f <(printf '%s\n' "$HOST_ROSTER") <<<"$ROSTER" | paste -sd' ' - || true)"
+    [ -z "$off" ] || echo "not on this host, left alone: $off"
+    ;;
   names) for n in "${names[@]}"; do cycle "$n"; done ;;
 esac

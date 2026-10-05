@@ -38,6 +38,28 @@
 #   ROTATE_GRACE_MIN=<minutes> optional (default 3): how long a live session
 #                              must sit idle after its "rotation requested"
 #                              heartbeat before it is relaunched
+#   HOST_CHECK_CMD=<command>   optional: asked first, every tick, for every
+#                              session (supervisor appends the name); exit 0 =
+#                              this host runs it, anything else = skip the
+#                              session entirely (no ledger read, no comment, no
+#                              relaunch), so a stale conf can never start a
+#                              session another host owns. Fails closed: a check
+#                              that errors skips the session too. The engsys
+#                              fleet kit sets it to `fleet launch --check`.
+#   HOST_HEALTH_CMD=<command>  optional: run once per tick, before the
+#                              sessions. Exit 0 = healthy; anything else = its
+#                              stdout is an alert, posted ONCE per incident via
+#                              NOTIFY_CMD (latch: host-health.alerted), and
+#                              resolved once the command exits 0 again. The
+#                              fleet kit uses it for an unreadable federation
+#                              registry (`fleet launch --host-health`).
+#   HOST_HEALTH_INCIDENT=<key> optional (default host-health): the incident key
+#   NOTIFY_CMD=<command>       optional: called as `<cmd> --level alert
+#                              --incident <key> <text>` and `<cmd> --level info
+#                              --incident <key> --resolve <text>` (the fleet
+#                              kit: `fleet notify`). Unset or failing = logged
+#                              only; a failed alert is retried next tick and
+#                              never stops the tick.
 #   <session-name>|<ledger-issue>|<stale-minutes>[|<owner/name>]
 #                              one line per monster; the 4th field overrides
 #                              REPO= for that session (multi-repo fleets)
@@ -76,7 +98,8 @@ if ! mkdir "$LOCKDIR" 2>/dev/null; then
 fi
 trap 'rmdir "$LOCKDIR" 2>/dev/null || true' EXIT
 
-TMUX_SESSION="" LAUNCH_CMD="" DEFAULT_REPO="" ROTATE_GRACE_MIN=3
+TMUX_SESSION="" LAUNCH_CMD="" DEFAULT_REPO="" ROTATE_GRACE_MIN=3 HOST_CHECK_CMD=""
+HOST_HEALTH_CMD="" HOST_HEALTH_INCIDENT="host-health" NOTIFY_CMD=""
 SESSIONS=()
 while IFS= read -r line; do
   line="${line%%$'\r'}"
@@ -86,6 +109,10 @@ while IFS= read -r line; do
     LAUNCH_CMD=*) LAUNCH_CMD="${line#LAUNCH_CMD=}" ;;
     REPO=*) DEFAULT_REPO="${line#REPO=}" ;;
     ROTATE_GRACE_MIN=*) ROTATE_GRACE_MIN="${line#ROTATE_GRACE_MIN=}" ;;
+    HOST_CHECK_CMD=*) HOST_CHECK_CMD="${line#HOST_CHECK_CMD=}" ;;
+    HOST_HEALTH_CMD=*) HOST_HEALTH_CMD="${line#HOST_HEALTH_CMD=}" ;;
+    HOST_HEALTH_INCIDENT=*) HOST_HEALTH_INCIDENT="${line#HOST_HEALTH_INCIDENT=}" ;;
+    NOTIFY_CMD=*) NOTIFY_CMD="${line#NOTIFY_CMD=}" ;;
     *\|*) SESSIONS+=("$line") ;;
     *) echo "fleet-supervisor: bad conf line: $line" >&2; exit 1 ;;
   esac
@@ -160,11 +187,48 @@ Full log: logs/fleet-supervisor/supervisor.log on the host." >/dev/null \
   fi
 }
 
+# Host health: one alert per incident, resolved on recovery. Never stops the tick.
+notify() { # notify <args...> → 0 when NOTIFY_CMD ran and succeeded
+  [ -n "$NOTIFY_CMD" ] || return 1
+  # shellcheck disable=SC2086
+  $NOTIFY_CMD "$@" >>"$LOG" 2>&1
+}
+if [ -n "$HOST_HEALTH_CMD" ]; then
+  HEALTH_LATCH="$STATE_DIR/host-health.alerted"
+  # shellcheck disable=SC2086
+  if HEALTH_MSG=$($HOST_HEALTH_CMD 2>/dev/null); then
+    if [ -f "$HEALTH_LATCH" ]; then
+      if notify --level info --incident "$HOST_HEALTH_INCIDENT" --resolve "Resolved: host health is ok again (since $(cat "$HEALTH_LATCH") on $(hostname -s 2>/dev/null || echo this host))."; then
+        rm -f "$HEALTH_LATCH"; log "host health: ok again, alert $HOST_HEALTH_INCIDENT resolved"
+      else
+        log "host health: ok again, but resolving alert $HOST_HEALTH_INCIDENT failed (NOTIFY_CMD unset or failing); retrying next tick"
+      fi
+    fi
+  else
+    HEALTH_MSG="$(printf '%s' "${HEALTH_MSG:-host health check failed}" | head -n 5)"
+    if [ -f "$HEALTH_LATCH" ]; then
+      log "host health: still failing, alert $HOST_HEALTH_INCIDENT already posted"
+    elif notify --level alert --incident "$HOST_HEALTH_INCIDENT" "$HEALTH_MSG"; then
+      date -u +%Y-%m-%dT%H:%M:%SZ >"$HEALTH_LATCH"; log "host health: FAILING, alert $HOST_HEALTH_INCIDENT posted: $HEALTH_MSG"
+    else
+      log "host health: FAILING, and the alert could not be posted (NOTIFY_CMD unset or failing); retrying next tick: $HEALTH_MSG"
+    fi
+  fi
+fi
+
 NOW=$(date +%s)
 
-for spec in "${SESSIONS[@]}"; do
+for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
   IFS='|' read -r name ledger stale_min repo <<<"$spec"
   [ -n "$name" ] && [ -n "$ledger" ] && [ -n "$stale_min" ] || { log "SKIP bad line: $spec"; continue; }
+  if [ -n "$HOST_CHECK_CMD" ]; then
+    # word-split on purpose, like LAUNCH_CMD
+    # shellcheck disable=SC2086
+    if ! WHY=$($HOST_CHECK_CMD "$name" 2>&1); then
+      log "$name: not on this host, never touched here ($(printf '%s' "${WHY:-host check failed}" | tail -n 1 | cut -c1-200))"
+      continue
+    fi
+  fi
   REPO_SLUG="${repo:-$DEFAULT_REPO}"
   [ -n "$REPO_SLUG" ] || REPO_SLUG=$(cwd_repo)
   [ -n "$REPO_SLUG" ] || { log "$name: cannot resolve repo (set REPO= or the 4th field; gh auth?) — skipping"; continue; }
