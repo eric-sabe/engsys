@@ -126,9 +126,11 @@ mismatch, and exits 1 if they still disagree.
 A passing check only says the head was approved when it ran. The merge must not take a newer head:
 
 1. re-run `check` immediately before merging and proceed only on exit 0;
-2. merge pinned to the approved commit (`approval.commit`):
-   `gh pr merge N --merge|--squash --match-head-commit <approved sha>` (the REST equivalent is the
-   `sha` parameter of `PUT /repos/{o}/{r}/pulls/{n}/merge`).
+2. merge pinned to the approved commit (`approval.commit`). A merge or maintenance monster does it
+   through its fenced wrapper, `mm-act.sh merge --repo <repo> --state-dir <state_dir> --pr N --sha
+   <approved sha> --method merge|squash`, which sends `PUT /repos/{o}/{r}/pulls/{n}/merge` with that
+   `sha` under its baton (engsys#62; a raw `gh pr merge` is denied in a monster session). Anyone
+   else: `gh pr merge N --merge|--squash --match-head-commit <approved sha>`.
 
 GitHub refuses the merge if the head moved in between. The agent then posts a new gate request for
 the new head.

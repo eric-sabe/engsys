@@ -11,7 +11,7 @@ ledger_issue: 0 # printed by scripts/mnt-setup.sh --repo owner/name — distinct
 
 state_dir: logs/maintenance-monster # working memory: state.md, journal, .watch/ (keep gitignored)
 poll_interval: 30 # seconds — mnt-watch.sh cadence
-heartbeat_minutes: 30 # ScheduleWakeup fallback tick
+heartbeat_minutes: 10 # ScheduleWakeup fallback tick; at most 10 while holding the baton (it renews it)
 stale_lock_minutes: 45 # continuous watchdog: own Monitor + heartbeat, mirrors Merge Monster
 
 # Phase gate. Phase 1 = watch + triage + REPORT only, no auto-PRs. Flip to

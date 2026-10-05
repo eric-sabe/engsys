@@ -17,8 +17,15 @@ Monster's ledger — with the same heartbeat-freshness contract:
   Don't triage Dependabot PRs yourself, don't dismiss a Trivy/CodeQL finding,
   and don't touch `mnt:*` labels — that's its job.
 - Heartbeat stale or the ledger issue closed → it isn't running; normal manual
-  triage discipline applies (the repo's Dependabot triage playbook, if it carries one — config
-  `triage_playbook` — is still the phase model).
+  triage discipline applies (the repo's Dependabot triage playbook, if it carries one, config
+  `triage_playbook`, is still the phase model), unless the lease below says it
+  holds the role.
+
+Under the heartbeat sits the authority: the `maintain` lease on GitHub, the ref
+`refs/engsys/batons/maintain`. To see the holder:
+`node <engsys-root>/lib/lease/github-backend.mjs status --repo <owner/name> --role maintain`.
+`"state": "held"` means a Maintenance Monster session owns the watch surface right
+now, whatever the heartbeat looks like. Never write to that ref yourself.
 
 ## What it produces (and doesn't)
 

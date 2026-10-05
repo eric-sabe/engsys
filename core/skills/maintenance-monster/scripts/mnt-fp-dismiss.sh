@@ -6,8 +6,11 @@
 #
 # Usage: mnt-fp-dismiss.sh --repo owner/name --config FILE --alert N --policy ID
 #                          --shape "<known_fp_shape, verbatim>" --evidence "<one line: what the code does>"
-#                          [--state-dir DIR] [--repo-dir DIR] [--default-branch NAME]
-#   --state-dir  where the journal goes (default: the config's state_dir)
+#                          [--state-dir DIR] [--repo-dir DIR] [--default-branch NAME] [--no-baton]
+#   --state-dir  where the journal goes (default: the config's state_dir); in a monster session also
+#                where its maintain baton lives: the dismissal is sent only under a passing fence
+#   --no-baton   an operator at a shell, outside any monster session: skip the fence. Refused when
+#                ENGSYS_SESSION is set (a launched session); the skills never pass it
 #
 # Needs the GitHub permission "Code scanning alerts: Read and write" (security_events: write).
 # Output: `DISMISSED <alert#> <policy> <path>:<line> <sha>`, `REFUSED <alert#> <policy> <why>` or

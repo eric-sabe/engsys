@@ -6,14 +6,15 @@
 //                              [--repo-dir DIR] [--default-branch NAME]
 //   node mnt-fp.mjs dismiss    --repo owner/name --config FILE --alert N --policy ID
 //                              --shape TEXT --evidence TEXT [--state-dir DIR] [--repo-dir DIR]
-//                              [--default-branch NAME]
+//                              [--default-branch NAME] [--no-baton]
 //
 // Design. A reviewed, standing policy (config `fp_policies:`) says: "alerts of this rule are false
 // positives when the code matches one of these shapes, and while these structural tripwires hold".
 // `candidates` is read-only: it finds open alerts a policy covers and proves the tripwires hold at
 // the alert's own commit AND at the default branch. It never dismisses. The per-alert code judgment
 // belongs to the calling model. `dismiss` is the only mutating path: it re-runs the same evaluation
-// for one alert (the tripwire may have tripped since the candidate list was made), then PATCHes.
+// for one alert (the tripwire may have tripped since the candidate list was made), then PATCHes,
+// fenced by the Maintenance Monster baton (batonFence, engsys#62; --no-baton outside a session only).
 //
 // Fail-closed throughout: any gh or git error means ERROR and no CANDIDATE for that policy; an
 // invalid policy is reported and never evaluated.
@@ -530,8 +531,8 @@ function git(dir, args, opts = {}) {
   return { status: r.status, stdout: r.stdout, stderr };
 }
 
-function gh(args) {
-  const r = spawnSync('gh', args, { encoding: 'utf8', maxBuffer: 1 << 29 });
+function gh(args, { timeout } = {}) {
+  const r = spawnSync('gh', args, { encoding: 'utf8', maxBuffer: 1 << 29, ...(timeout ? { timeout } : {}) });
   if (r.error) return { ok: false, stdout: '', stderr: `gh: ${r.error.message}`, status: null };
   return { ok: r.status === 0, stdout: r.stdout || '', stderr: r.stderr || '', status: r.status };
 }
@@ -985,11 +986,45 @@ function fitComment(s) {
   return out.join('') + '…';
 }
 
+const BATON = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'lib', 'lease', 'baton.mjs');
+const BATON_SEND_WINDOW_MS = 30_000;
+const BATON_ACTION_TIMEOUT_MS = 30_000;
+
+/**
+ * A dismissal is a mutating act (engsys#62): it is sent only under a passing Maintenance Monster
+ * fence, within 30 s of the fence's start and bounded by a 30 s timeout. Decided by WHO runs it, not
+ * by which files exist: unfenced only with an explicit --no-baton (an operator at a shell), and never
+ * inside a launched session (ENGSYS_SESSION set), where a monster could otherwise dismiss after
+ * standing down. The skills never pass --no-baton.
+ */
+function batonFence(repo, stateDir, noBaton) {
+  if (noBaton) {
+    if (process.env.ENGSYS_SESSION) return { ok: false, why: '--no-baton is refused inside a launched session (ENGSYS_SESSION is set): a monster always fences' };
+    return { ok: true, skipped: true };
+  }
+  const started = Date.now();
+  const r = spawnSync(process.execPath, [BATON, 'fence', '--role', 'maintain', '--repo', repo, '--state-dir', stateDir], {
+    encoding: 'utf8', timeout: 20_000, env: { ...process.env, BATON_WALK_FROM: String(process.ppid) },
+  });
+  if (r.status !== 0) {
+    let why = `fence refused (exit ${r.status ?? 'timeout'})`;
+    try {
+      const j = JSON.parse(String(r.stdout).trim().split('\n').pop());
+      why = `fence refused: ${j.code}${j.reason ? ` (${j.reason})` : ''}`;
+    } catch {
+      if (r.stderr) why += `: ${oneLine(r.stderr, 200)}`;
+    }
+    return { ok: false, why };
+  }
+  if (Date.now() - started >= BATON_SEND_WINDOW_MS) return { ok: false, why: 'fence passed but 30 s went by before the send; nothing sent' };
+  return { ok: true };
+}
+
 function cmdDismiss(argv) {
   const o = parseArgs(argv, {
     '--repo': { key: 'repo' }, '--config': { key: 'config' }, '--alert': { key: 'alert' }, '--policy': { key: 'policy' },
     '--shape': { key: 'shape' }, '--evidence': { key: 'evidence' }, '--state-dir': { key: 'stateDir' },
-    '--repo-dir': { key: 'repoDir' }, '--default-branch': { key: 'defaultBranch' },
+    '--repo-dir': { key: 'repoDir' }, '--default-branch': { key: 'defaultBranch' }, '--no-baton': { key: 'noBaton', flag: true },
   });
   checkCommon(o);
   if (!/^[1-9][0-9]*$/.test(o.alert || '')) throw new UsageError('--alert N (a positive integer) is required');
@@ -1049,10 +1084,12 @@ function cmdDismiss(argv) {
   }
 
   const comment = fitComment(`fp-policy ${policy.id}: ${o.shape} — ${evidence}`);
+  const fence = batonFence(o.repo, stateDir, Boolean(o.noBaton));
+  if (!fence.ok) return refuse(`baton: ${fence.why}`);
   const res = gh([
     'api', '-X', 'PATCH', `repos/${o.repo}/code-scanning/alerts/${alertNo}`,
     '-f', 'state=dismissed', '-f', 'dismissed_reason=false positive', '-f', `dismissed_comment=${comment}`,
-  ]);
+  ], fence.skipped ? {} : { timeout: BATON_ACTION_TIMEOUT_MS });
   if (!res.ok) {
     if (/HTTP 403|Resource not accessible/i.test(res.stderr + res.stdout)) {
       process.stdout.write(`ERROR alert ${alertNo} not dismissed: HTTP 403. Dismissing code-scanning alerts needs the GitHub App permission "Code scanning alerts: Read and write" (security_events: write); add it to the App, accept it on the installation, and list it in GH_APP_REQUIRED_PERMS (core/fleet/identity/README.md).\n`);

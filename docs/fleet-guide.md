@@ -194,6 +194,17 @@ An optional fifth field names the block the heartbeat is read from: only a `last
 heartbeats, such as a fleet status issue (§ 6.11). You rarely write it yourself: in multi-fleet mode
 `fleet supervise` adds it to the resource broker's line.
 
+A sixth field, `merge` or `maintain`, marks a singleton monster (`acme-mm|7|60|||merge`; leave the
+fourth and fifth empty to skip them). `fleet supervise` adds it to every merge and maintain line from
+the roster, so you never write it either. For those sessions the supervisor reads the role's holder
+from the github lease before any relaunch (`core/lib/lease/baton.mjs supervise`, or `BATON_CMD=` in the
+conf): it relaunches only when this fleet is the role's home and nobody holds a live baton, waits while
+any session holds one (another fleet's, or this session's own earlier launch), and treats a lease or
+registry read it cannot complete as a wait plus one `fleet notify --level alert --incident
+baton-read-<name>`, resolved on the next clean read. It also relaunches such a session when the old
+home has handed the role over (a `handover` heartbeat, process gone) and when the session sits idle at
+its prompt with a stale heartbeat and a forfeited baton. Design: [`multi-fleet.md` § 10 P1](multi-fleet.md#p1-real-batons).
+
 ### Where the pins live
 
 **One place: the pin repo's `.claude/settings.json`**, at `extraKnownMarketplaces.<name>.source.ref`
@@ -782,7 +793,7 @@ Values come only from `fleet.conf` and `fleet.local.conf`, never from the caller
 | `fleet restart --all`, `--stale`, `<name>` | never cycles an excluded session |
 | `fleet status` | lists an excluded session as `not on this host (<reason>)`, not `missing`, and warns about what the filter can't decide (below) |
 | `fleet install-jobs`, `fleet sync` | install the supervisor job only when at least one supervised session runs here. Otherwise they boot out a loaded copy and delete its plist, so launchd won't load it at the next login. `fleet sync` checks this on every run, and reinstalls the jobs when the roster, the supervisor conf or the registry changes |
-| `fleet supervise` (the supervisor job) | drops excluded sessions from `.fleet/supervisor.conf`, does nothing when none are left, and adds `HOST_CHECK_CMD=… launch --check`. The supervisor asks that command before it reads any session's ledger, so even a stale conf never relaunches, or comments about, a session this host doesn't run. A check that fails for any reason skips the session |
+| `fleet supervise` (the supervisor job) | drops excluded sessions from `.fleet/supervisor.conf`, does nothing when none are left, and adds `HOST_CHECK_CMD=… launch --check`. The supervisor asks that command before it reads any session's ledger, so even a stale conf never relaunches, or comments about, a session this host doesn't run. A check that fails for any reason skips the session. Merge and maintain lines also get their role, so a relaunch also needs the lease to be free (§ The supervisor's view) |
 
 **When an unreadable registry pauses the monsters**, the supervisor posts one
 `fleet notify --level alert --incident fleet-registry-unreadable` (§ 6.9) with the validator's first

@@ -19,6 +19,9 @@ REPO={{PIN_REPO}}
 # session whose ledger it cannot read, so a 0 is skipped (and logged) every cycle until it is filled in.
 # Stale minutes = the monster's stale_lock_minutes plus a grace period (its config default is 45).
 # A monster for another repo takes the optional 4th field: acme-other-mm|0|60|owner/other-repo
+# `fleet supervise` appends the role (merge / maintain) to the monster lines as a 6th field: before any
+# relaunch the supervisor reads that role's holder from the github lease and relaunches only where this
+# fleet is home and nobody holds a live baton (engsys docs/multi-fleet.md § 2). Nothing to write here.
 {{NAMESPACE}}-mm|0|60
 {{NAMESPACE}}-maintain|0|60
 {{#if resource_broker}}

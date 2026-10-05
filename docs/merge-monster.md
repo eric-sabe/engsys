@@ -145,6 +145,69 @@ A pinned issue, **`🧌 Merge Monster ledger`**, is the baton:
 - **Session digests:** MM comments on the issue at session start and end
   (merged N, escalated M, Dependabot auto-merged K, notable decisions).
 
+### The lease under the ledger (engsys#62)
+
+The heartbeat is the human surface. The authority is a lease on GitHub: the
+ref `refs/engsys/batons/merge`, a compare-and-swap baton whose tip names the
+holder (`<FLEET_ID>:<session>`, or `<hostname>:<session>` without a fleet id),
+a fencing token and an expiry ([`multi-fleet.md` § 2](multi-fleet.md#2-singleton-batons-a-real-lease-on-github)).
+Two fleets, or two sessions of one fleet, can never both hold it. MM uses it
+through `mm-baton.sh` and `mm-act.sh` (thin wrappers over
+`core/lib/lease/baton.mjs`, which carries the caller rule from the #64
+review):
+
+- **Startup check.** Before anything touches GitHub, `mm-baton.sh startup`
+  reads `federation.yml` and the lease. Not home → MM stops (never acquires).
+  Home and free or expired → it acquires. Held by another session → it stands
+  by: no heartbeat, no writes, `startup` again on each tick. After taking over
+  a dead holder's baton, nothing mutates for 60 s, so the dead holder's
+  in-flight act has finished or failed.
+- **Renew.** TTL 10 minutes. `mm-watch.sh` renews every 2.5 minutes in the
+  background; `mm-heartbeat.sh --state-dir` renews on every heartbeat and
+  writes the heartbeat only while MM holds the lease. MM ticks at most every
+  10 minutes while holding. The background renewer stops when its session
+  process (claude) is gone, or when the model has not touched the baton for
+  20 minutes, so a live watch bus never keeps a dead or wedged session's role.
+- **Fence.** Every write to GitHub goes through `mm-act.sh`: it checks the
+  lease has at least 60 s left by GitHub's clock, that the local deadline
+  (`Date.now()` at the start of the last good renew or check, plus the time it
+  had left, minus 2 s) has not passed, and that under 30 s went by since the
+  check started, then sends with a 30 s timeout. A merge is
+  `PUT /pulls/{n}/merge` with `sha=<validated head>`, never retried. Agents MM
+  dispatches never write to GitHub: a rebase or fix agent commits in its
+  worktree and hands back, and MM pushes with `mm-act.sh guard --pr N -- git
+  push --force-with-lease origin HEAD:refs/heads/<PR head branch>` (an
+  allowlist checked against the PR and `origin`'s URL, run with hooks off).
+- **Guard hook.** Fleet monsters run with `--dangerously-skip-permissions`, so
+  no permission prompt stands in front of a raw `gh pr merge`. The engsys
+  plugin's PreToolUse hook (`core/.claude-plugin/singleton-write-guard.mjs`)
+  does: in a session the launcher marked `ENGSYS_SINGLETON_ROLE=merge` (or
+  `maintain`), it is an allowlist. Bash passes only as one plain invocation of
+  the fenced wrappers (the heartbeat with `--state-dir`), or when every `gh`,
+  `git` and HTTP client in it is a known read (aliases, extensions, `git push`,
+  config writes and HTTP clients towards GitHub are denied). Settings files
+  and the plugin cache are read-only to Bash and the edit tools, and GitHub
+  MCP write tools are denied. Subagents run in the session's process
+  and get it too. It is a guard rail against drift, not a boundary: an
+  obfuscated command can still get past a lexical check, and the lease and the
+  sha-pinned merge are the control.
+- **Lost.** A renew or fence that finds another token on the tip writes a
+  sticky marker, sends one `fleet notify --level alert --incident
+  baton-lost-merge`, and every later call refuses without a request. MM stops
+  every agent it dispatched, then stops at once and idles.
+- **Release** on rotation, clean exit and handover; a release that finds the
+  lease already expired is alerted as an incident (`baton-overrun-merge`).
+- **Handover.** When `federation.yml` moves `merge.home` away, MM finishes or
+  parks the active PR, posts a handover digest, writes a final `handover to
+  <fleet>` heartbeat and releases. The new home's supervisor relaunches its MM
+  once the lease is free.
+- **Supervisor.** The fleet supervisor relaunches a merge monster only when
+  its fleet is home and nobody holds a live baton; a lease it cannot read is a
+  wait plus one alert ([`fleet-guide.md`](fleet-guide.md)).
+
+Single-fleet mode uses the lease too: it costs about four API calls per renew
+and stops an accidental second session.
+
 ## 6. Ordering principles
 
 Applied top-down; earlier rules dominate. The queue is re-evaluated on every
@@ -195,7 +258,7 @@ mm:ready ──► preflight ──► [rebase if conflicting] ──► mark re
   checks left over from a force-push; base branch correct.
 - **Rebase** (only when needed): dispatch a background agent into a worktree —
   `git rebase origin/<default>`, regenerate lockfiles per project convention,
-  `git push --force-with-lease`. Never plain `--force`; never rebase a branch
+  hand back; MM pushes `--force-with-lease` through `mm-act.sh guard --pr N`. Never plain `--force`; never rebase a branch
   whose head moved since the queue snapshot (re-verify first).
 - **Mark ready** is the CI trigger in draft-PR workflows; MM does it as late
   as possible, one PR at a time.
@@ -291,7 +354,7 @@ default_branch: main
 ledger_issue: 0              # written by mm-setup.sh
 state_dir: logs/merge-monster
 poll_interval: 30            # seconds, watch-script cadence
-heartbeat_minutes: 30        # ScheduleWakeup fallback tick
+heartbeat_minutes: 10        # ScheduleWakeup fallback tick; at most 10 while holding the baton
 stale_lock_minutes: 45       # baton freshness contract
 merge_method:
   multi_commit: merge        # preserve per-issue commits in batches

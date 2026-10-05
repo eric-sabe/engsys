@@ -410,6 +410,9 @@ has "roster: investigate" "$R" "acme-investigate|$P||--add-dir $HOME/git/worktre
 has "roster: design" "$R" "acme-design|$P||--add-dir $HOME/git/worktrees --model claude-opus-5-5 --effort medium --remote-control --permission-mode auto"
 eq "five windows launched" "$(grep -c . "$FAKE/tmux/windows")" 5
 has "mm runs in the session env" "$(launched acme-mm)" "set -a && . $STATE/env/session.env && set +a && claude --name acme-mm"
+has "mm gets its session name and a launch id (the baton's holder, engsys#62)" "$(launched acme-mm)" "export ENGSYS_SESSION=acme-mm ENGSYS_SESSION_RUN="
+has "mm arms the singleton-write guard" "$(launched acme-mm)" "ENGSYS_SINGLETON_ROLE=merge && "
+has "maintain arms it for its role" "$(launched acme-maintain)" "ENGSYS_SINGLETON_ROLE=maintain && "
 has "the prompt precedes the flags" "$(launched acme-mm)" "/engsys:merge-monster --model claude-opus-5-5"
 has "maintain: the 5th field replaces the session env" "$(launched acme-maintain)" "set -a && . $STATE/env/security.env && set +a && claude --name acme-maintain"
 S="$(cat "$STATE/env/session.env")"
@@ -510,6 +513,7 @@ has "roster: the broker line, rendered" "$R" "acme-broker|$P|/engsys:resource-br
 eq "six windows launched" "$(grep -c . "$FAKE/tmux/windows")" 6
 has "the broker runs in the session env with its prompt before the flags" "$(launched acme-broker)" "set -a && . $STATE/env/session.env && set +a && claude --name acme-broker"
 has "…and the command file's prompt" "$(launched acme-broker)" "/engsys:resource-broker"
+has "the broker does not arm the singleton-write guard" "$(launched acme-broker)" "&& unset ENGSYS_SINGLETON_ROLE && "
 if [ -f "$CFG/resource-broker.yml" ] && [ -f "$CFG/acme-pool.json" ]; then ok "the config dir the prompt names holds the broker config and its pool file"; else bad "the config dir the prompt names holds the broker config and its pool file"; fi
 run "$INST/scripts/fleet" supervise
 rc_is "supervise ticks" 0
