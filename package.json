@@ -15,7 +15,7 @@
     "engsys.config.example.yaml"
   ],
   "scripts": {
-    "test": "node lib/selftest.js && node scripts/build-plugins.mjs --check && node --test core/.claude-plugin/approve-own-scripts.test.mjs core/.claude-plugin/handback-guard.test.mjs core/.claude-plugin/singleton-write-guard.test.mjs core/fleet/identity/gh-app-token.test.mjs core/fleet/notify.test.mjs core/fleet/lib/federation.test.mjs core/lib/untrusted.test.mjs core/lib/git-env.test.mjs core/lib/gate-check.test.mjs core/lib/claim.test.mjs core/lib/lease/durable-lease.test.mjs core/lib/lease/github-backend.test.mjs core/lib/lease/baton.test.mjs core/lib/lease/pool.test.mjs core/scripts/review-bakeoff.test.mjs && bash core/fleet/identity/git-env.test.sh && bash core/fleet/identity/gh-shim.test.sh && bash core/fleet/test/fleet.test.sh && bash core/fleet/test/notify.test.sh && bash core/fleet/test/heartbeat.test.sh && bash core/fleet/test/federation.test.sh && bash core/fleet/test/host-roles.test.sh && bash core/fleet/test/pin.test.sh && bash core/fleet/test/init.test.sh && bash core/templates/repo-gates/test/repo-gates.test.sh && bash core/templates/review/test/review.test.sh && bash core/skills/durable-lease/scripts/pool-run.test.sh && bash core/skills/resource-broker/scripts/broker.test.sh && bash core/skills/agent-sessions/scripts/fleet-supervisor.test.sh && bash core/scripts/worker-run.test.sh && bash core/scripts/worker-package.test.sh && bash core/skills/maintenance-monster/scripts/mnt-fp.test.sh && bash core/skills/merge-monster/scripts/mm-baton.test.sh",
+    "test": "node scripts/run-tests.mjs",
     "prepublishOnly": "node lib/selftest.js && node scripts/build-plugins.mjs --check",
     "build:plugins": "node scripts/build-plugins.mjs"
   },
