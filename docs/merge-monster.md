@@ -185,7 +185,11 @@ review):
   `maintain`), it is an allowlist. Bash passes only as one plain invocation of
   the fenced wrappers (the heartbeat with `--state-dir`), or when every `gh`,
   `git` and HTTP client in it is a known read (aliases, extensions, `git push`,
-  config writes and HTTP clients towards GitHub are denied). Settings files
+  config writes, `hub` and HTTP clients towards GitHub are denied; a GraphQL
+  query must be written out in the command, with no `$VAR`, `$( )` or
+  backticks, and is never a mutation or `mergePullRequest`; interpreter code
+  that names Octokit, PyGithub, github.com with a write verb or a protected
+  path is denied, the kit's own scripts excepted). Settings files, git config
   and the plugin cache are read-only to Bash and the edit tools, and GitHub
   MCP write tools are denied. Subagents run in the session's process
   and get it too. It is a guard rail against drift, not a boundary: an

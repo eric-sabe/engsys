@@ -17,15 +17,23 @@
 //            gh     pr|issue|run|workflow|repo|release|label|cache view|list|status|diff|checks|
 //                   download|watch, search, auth status, api with no method or GET, no --input,
 //                   and fields only under an explicit -X GET (query parameters),
-//                   api graphql with an inline query that is not a mutation. Anything else, including
-//                   aliases and extensions, is denied.
+//                   api graphql with an inline, visible query that is not a mutation: no field the
+//                   shell expands ($VAR, $( ), backticks) and no substitution anywhere in the command,
+//                   and never a merge mutation (#71 L1); gh api never fed by xargs or parallel.
+//                   Anything else, including aliases and extensions, is denied.
+//            hub    never (another GitHub client).
 //            git    a known local or read subcommand (status, log, diff, fetch, commit, rebase, …);
 //                   never push, config writes, remote changes, aliases or a -c outside a short list.
 //            curl, wget, http, xh …  never towards github.com; and no command may name
 //                   api.github.com or uploads.github.com at all.
-//          Nor may a command touch a settings file (.claude/settings*.json, managed-settings.json, the
-//          .claude dir itself) or the plugin cache except to read it.
-//   Write | Edit | MultiEdit | NotebookEdit   denied on those same settings and plugin paths.
+//            node, python, ruby, perl, deno, bun, npx   not when their code (inline, a heredoc, stdin
+//                   or their arguments) names Octokit/PyGithub, calls github.com with a write-ish
+//                   verb, or names a protected path; running the kit's own scripts is fine (#71 L2).
+//          The fenced wrappers and gate-request.sh run only as that one plain invocation. Nor may a
+//          command touch a settings file (.claude/settings*.json, managed-settings.json, the .claude
+//          dir itself), git config (.git/config, ~/.gitconfig) or the plugin cache except to read
+//          it; a path glued to code (`open('.claude/settings.json','w')`) counts.
+//   Write | Edit | MultiEdit | NotebookEdit   denied on those same settings, git config and plugin paths.
 //   mcp__*github*   only tools whose name starts with get_/list_/search_/read_/fetch_/download_/view_.
 //
 // It raises the bar; it is not a boundary. A determined obfuscation (a script file, an interpreter
@@ -72,16 +80,26 @@ const HTTP_CLIENTS = new Set(['curl', 'wget', 'http', 'https', 'xh', 'httpie', '
 const READ_TOOLS = new Set(['cat', 'head', 'tail', 'less', 'more', 'grep', 'rg', 'jq', 'ls', 'stat', 'wc', 'file', 'diff', 'shasum',
   'sha256sum', 'md5', 'od', 'xxd', 'realpath', 'readlink', 'test', '[']);
 
+/**
+ * A small shell lexer: simple commands split on ; & | < > ( ) and newlines. `subst` is set by a
+ * command or process substitution anywhere ($( ), backticks, <( ), >( )), quoted or not. `exp`
+ * parallels `words`: true for a word whose text the shell would expand ($ or a backtick outside
+ * single quotes), so what the lexer sees is not what the command receives.
+ */
 export function lex(cmd) {
   const s = String(cmd ?? '');
   const commands = [[]];
+  const exps = [[]];
   let cur = '';
   let inWord = false;
+  let curExp = false;
   let quote = null;
   let subst = false;
   let ops = false;
-  const end = () => { if (inWord) { commands[commands.length - 1].push(cur); cur = ''; inWord = false; } };
-  const split = () => { end(); ops = true; if (commands[commands.length - 1].length) commands.push([]); };
+  const end = () => {
+    if (inWord) { commands[commands.length - 1].push(cur); exps[exps.length - 1].push(curExp); cur = ''; inWord = false; curExp = false; }
+  };
+  const split = () => { end(); ops = true; if (commands[commands.length - 1].length) { commands.push([]); exps.push([]); } };
   for (let i = 0; i < s.length; i += 1) {
     const ch = s[i];
     if (quote === "'") {
@@ -92,6 +110,7 @@ export function lex(cmd) {
       if (ch === '"') { quote = null; continue; }
       if (ch === '\\' && i + 1 < s.length) { cur += s[i + 1]; i += 1; continue; }
       if (ch === '`' || (ch === '$' && s[i + 1] === '(')) subst = true;
+      if (ch === '`' || (ch === '$' && i + 1 < s.length && s[i + 1] !== '"')) curExp = true;
       cur += ch;
       continue;
     }
@@ -104,13 +123,16 @@ export function lex(cmd) {
     if (ch === ' ' || ch === '\t') { end(); continue; }
     if (ch === '$' && s[i + 1] === '(') { subst = true; split(); i += 1; continue; }
     if (ch === '`') { subst = true; split(); continue; }
+    if ((ch === '<' || ch === '>') && s[i + 1] === '(') subst = true; // process substitution
     if (';&|<>()\n\r'.includes(ch)) { split(); continue; }
+    if (ch === '$' && i + 1 < s.length && !' \t\n'.includes(s[i + 1])) curExp = true; // $VAR, ${…}, $'…' (ANSI-C)
     cur += ch;
     inWord = true;
   }
-  if (quote) return { words: commands, subst, ops, ok: false };
+  if (quote) return { words: commands, exp: exps, subst, ops, ok: false };
   end();
-  return { words: commands.filter((c) => c.length), subst, ops, ok: true };
+  const keep = commands.map((c, i) => [c, exps[i]]).filter(([c]) => c.length);
+  return { words: keep.map(([c]) => c), exp: keep.map(([, e]) => e), subst, ops, ok: true };
 }
 
 const base = (w) => w.split('/').pop();
@@ -126,8 +148,15 @@ function positionals(args, valueFlags) {
   return out;
 }
 
-/** gh api: GET only, no fields, no --input; graphql only an inline, non-mutation query. -> deny reason or null. */
-function ghApiVerdict(args, endpoint) {
+/** GraphQL mutations that merge: never through gh in a singleton session (merges use the sha-pinned mm-act.sh merge). */
+const GRAPHQL_MERGE = /mergePullRequest|enablePullRequestAutoMerge|mergeBranch/i;
+
+/**
+ * gh api: GET only, no fields, no --input; graphql only an inline, visible, non-mutation query.
+ * `exp` parallels `args` (lex's expansion flags); `subst` is set when the whole command carries a
+ * command or process substitution. -> deny reason or null.
+ */
+function ghApiVerdict(args, endpoint, { exp = [], subst = false } = {}) {
   let method = null;
   let input = false;
   const fields = [];
@@ -137,36 +166,44 @@ function ghApiVerdict(args, endpoint) {
     if (a === '-X' || a === '--method') { method = String(args[i + 1] ?? ''); i += 1; }
     else if (a.startsWith('--method=')) method = a.slice(9);
     else if (/^-X./.test(a)) method = a.slice(2).replace(/^=/, ''); // pflag: -XPUT, -X=PUT
-    else if (['-f', '-F', '--field', '--raw-field'].includes(a)) { fields.push(String(args[i + 1] ?? '')); i += 1; }
-    else if (/^--(raw-)?field=/.test(a)) fields.push(a.slice(a.indexOf('=') + 1));
-    else if (/^-[fF]./.test(a)) fields.push(a.slice(2).replace(/^=/, ''));
+    else if (['-f', '-F', '--field', '--raw-field'].includes(a)) { fields.push({ v: String(args[i + 1] ?? ''), exp: Boolean(exp[i + 1]) }); i += 1; }
+    else if (/^--(raw-)?field=/.test(a)) fields.push({ v: a.slice(a.indexOf('=') + 1), exp: Boolean(exp[i]) });
+    else if (/^-[fF]./.test(a)) fields.push({ v: a.slice(2).replace(/^=/, ''), exp: Boolean(exp[i]) });
     else if (a === '--input' || a.startsWith('--input=')) input = true;
     else if (a === '-H' || a === '--header') { headers.push(String(args[i + 1] ?? '')); i += 1; }
     else if (/^(--header=|-H.)/.test(a)) headers.push(a.replace(/^(--header=|-H=?)/, ''));
   }
   if (headers.some((h) => /method-override/i.test(h))) return 'gh api with a method-override header';
-  if (endpoint === 'graphql') {
+  if (/^\/?graphql$/i.test(String(endpoint ?? ''))) {
     if (input) return 'gh api graphql --input (the document is not visible)';
-    if (fields.some((v) => /^[^=]*=@/.test(v))) return 'gh api graphql with a field read from a file or stdin';
-    if (fields.some((v) => /\bmutation\b/i.test(v))) return 'gh api graphql mutation';
+    if (fields.some((f) => /^[^=]*=@/.test(f.v))) return 'gh api graphql with a field read from a file or stdin';
+    // #71 L1: the document must be visible text. A substitution or a variable can hold a mutation.
+    if (subst) return 'gh api graphql in a command with a command or process substitution (the document is not visible)';
+    if (fields.some((f) => f.exp)) return 'gh api graphql with a field the shell expands ($VAR, ${…}, $( ) or backticks: the document is not visible)';
+    if (fields.some((f) => GRAPHQL_MERGE.test(f.v))) return 'gh api graphql merge (merges go through the sha-pinned mm-act.sh merge)';
+    if (fields.some((f) => /\bmutation\b/i.test(f.v))) return 'gh api graphql mutation';
     return null;
   }
   if (method !== null && method.toUpperCase() !== 'GET') return `gh api -X ${method}`;
   if (input) return 'gh api --input';
   // Fields make gh POST, unless the method is an explicit GET (then they are query parameters).
   if (fields.length && method === null) return 'gh api with fields (gh sends them as a POST)';
-  if (fields.some((v) => /^[^=]*=@/.test(v))) return 'gh api with a field read from a file';
+  if (fields.some((f) => /^[^=]*=@/.test(f.v))) return 'gh api with a field read from a file';
   return null;
 }
 
-/** -> deny reason, or null for a known read. */
-function ghVerdict(args) {
+/** -> deny reason, or null for a known read. `opts` carries lex's expansion flags for `args`. */
+function ghVerdict(args, opts = {}) {
   const pos = positionals(args, GH_VALUE_FLAGS);
   const [group, verb] = pos;
   if (group === undefined || group === 'help' || group === 'version') return null;
   if (group === 'search') return null;
   if (group === 'auth') return verb === 'status' ? null : `gh auth ${verb ?? ''}`.trim();
-  if (group === 'api') return ghApiVerdict(args, verb);
+  if (group === 'api') {
+    // xargs/parallel append arguments the lexer never sees (-X PUT, -f query=mutation…).
+    if (opts.appended) return 'gh api with arguments xargs or parallel supplies (not visible)';
+    return ghApiVerdict(args, verb, opts);
+  }
   if (GH_READ_GROUPS.has(group) && GH_READ_VERBS.has(verb)) return null;
   return `gh ${group}${verb ? ` ${verb}` : ''} (not a known read; aliases and extensions are denied too)`;
 }
@@ -221,6 +258,9 @@ export function protectedPath(p, { env = process.env, cwd = process.cwd() } = {}
   if (/(^|\/)\.claude\/(settings[^/]*\.json|managed-settings\.json)$/.test(abs)) return true;
   if (/managed-settings\.json$/.test(abs)) return true;
   if (/(^|\/)\.claude\/plugins(\/|$)/.test(abs)) return true;
+  // #71 L3: git config a planted credential helper, ssh command or proxy could live in.
+  if (/(^|\/)\.git\/(config|config\.worktree|worktrees\/[^/]+\/config\.worktree)$/.test(abs)) return true;
+  if (abs === path.join(home, '.gitconfig') || abs === path.join(env.XDG_CONFIG_HOME ? path.resolve(expandHome(env.XDG_CONFIG_HOME, home)) : path.join(home, '.config'), 'git', 'config')) return true;
   if (env.CLAUDE_CONFIG_DIR) {
     const cfg = path.resolve(expandHome(env.CLAUDE_CONFIG_DIR, home));
     if (abs === cfg || abs.startsWith(`${cfg}/plugins`) || (path.dirname(abs) === cfg && /^settings[^/]*\.json$/.test(path.basename(abs)))) return true;
@@ -261,23 +301,94 @@ export function scriptExecution(simple, i, simpleIndex = 0) {
   return j === i;
 }
 
+/** Words that may hold a path glued to code or punctuation (`open('.claude/settings.json','w')`). */
+function pathTokens(w) {
+  return [w, ...w.split(/[\s'"`(),;=:<>|&{}[\]+]+/).filter((t) => t && t !== w)];
+}
+
+/** The fenced wrappers and gate-request.sh: they run only as one plain wrapper invocation (gate-request under guard). */
+const FENCED_SCRIPTS = new Set([...WRAPPERS, 'merge-monster/scripts/gate-request.sh'].map((rel) => rel.split('/').pop()));
+
+/** Interpreters that can run GitHub client code inline, from stdin or from a script (#71 L2). */
+const INTERPRETER = /^(node|nodejs|python[0-9.]*|ruby|perl|deno|bun|bunx|npx)$/;
+/** Flags that make the next argument inline code (node -e/-p, python -c, ruby/perl -e/-E, clusters such as -ne). */
+const INLINE_FLAG = /^(-[A-Za-z]*[ceE]|-p|--eval|--print|--eval=.*|--print=.*)$/;
+/** Text that marks interpreter code as a GitHub client. */
+const GITHUB_LIB = /octokit|PyGithub|from\s+github\s+import|import\s+github\b|Net::GitHub|Pithub|\bghapi\b/i;
+const GITHUB_WEB = /github\.com\//i;
+const WRITEISH = /\b(PUT|POST|PATCH|DELETE|method|urlopen|fetch|requests?|axios|got|Request|HTTPSConnection|Net::HTTP|LWP|HTTP::Tiny|merge|push|graphql|mutation|authorization|token)\b/i;
+/** Protected paths in code; a monster's own config (`.claude/merge-monster.yml`) is not one. */
+const SETTINGS_TEXT = /\.claude(?!\/[\w.-]+\.(?:ya?ml|md)\b)|managed-settings|\.gitconfig\b|\.git\/(config|worktrees)\b|CLAUDE_PLUGIN_ROOT|CLAUDE_CONFIG_DIR/;
+
+/** The bodies of every heredoc in `cmd` (so code fed on stdin is seen whoever reads it). */
+function heredocBodies(cmd) {
+  const out = [];
+  const re = /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1[^\n]*\n([\s\S]*?)(?:\n[ \t]*\2[ \t]*(?:\n|$)|$)/g;
+  let m;
+  while ((m = re.exec(String(cmd)))) out.push(m[3]);
+  const here = /<<<\s*(\S+)/g;
+  while ((m = here.exec(String(cmd)))) out.push(m[1]);
+  return out.join('\n');
+}
+
+/** A script inside the installed plugin (cache or CLAUDE_PLUGIN_ROOT): the kit's own code, not the agent's. */
+const kitScript = (w, ctx) => SCRIPT_FILE.test(w) && protectedPath(w, ctx);
+
+/**
+ * #71 L2: an interpreter at simple[i] whose code may be a GitHub client or touch settings. A run of
+ * the kit's own script (`node <plugin>/…/mnt-fp.mjs …`) is exempt. Code is the whole command when the
+ * interpreter reads its program from stdin (no script, no inline flag, or `-`), else its own words
+ * plus any heredoc. -> deny reason or null.
+ */
+function interpreterVerdict(simple, i, cmd, ctx) {
+  let mode = 'stdin';
+  let script = null;
+  for (let j = i + 1; j < simple.length; j += 1) {
+    const a = simple[j];
+    if (INLINE_FLAG.test(a)) { mode = 'inline'; break; }
+    if (a === '-') break;
+    if (a.startsWith('-')) continue;
+    if (['run', 'x', 'exec'].includes(a) && /^(deno|bun)$/.test(base(simple[i]))) continue; // deno/bun subcommands
+    if (a === 'eval') { mode = 'inline'; break; }
+    mode = 'script';
+    script = a;
+    break;
+  }
+  if (mode === 'script' && kitScript(script, ctx)) return null;
+  const text = mode === 'stdin' ? String(cmd) : `${simple.slice(i).join(' ')}\n${heredocBodies(cmd)}`;
+  const roots = [ctx.env?.CLAUDE_PLUGIN_ROOT, ctx.env?.CLAUDE_CONFIG_DIR].filter(Boolean);
+  if (GITHUB_LIB.test(text)) return `${base(simple[i])} running GitHub client code (Octokit, PyGithub, …)`;
+  if (GITHUB_WEB.test(text) && WRITEISH.test(text)) return `${base(simple[i])} code that calls github.com`;
+  if (SETTINGS_TEXT.test(text) || roots.some((r) => text.includes(r))) return `${base(simple[i])} code that names a protected settings, git config or plugin path`;
+  return null;
+}
+
 /** Every reason to deny `cmd` in a singleton session (nested quoted commands too). */
-export function bashFindings(cmd, ctx = {}, depth = 0) {
+export function bashFindings(cmd, ctx = {}, depth = 0, outerSubst = false) {
   const found = [];
-  const { words } = lex(cmd);
-  for (const [simpleIndex, simple] of words.entries()) {
+  const l = lex(cmd);
+  const subst = outerSubst || l.subst;
+  for (const [simpleIndex, simple] of l.words.entries()) {
     const head = base(simple[0] ?? '');
+    const exp = l.exp[simpleIndex] ?? [];
     for (let i = 0; i < simple.length; i += 1) {
       const w = simple[i];
-      if (/\s/.test(w) && depth < 3) found.push(...bashFindings(w, ctx, depth + 1));
+      if (/\s/.test(w) && depth < 3) found.push(...bashFindings(w, ctx, depth + 1, subst));
       const b = base(w);
       let hit = null;
-      if (b === 'gh') hit = ghVerdict(simple.slice(i + 1));
+      if (b === 'gh') hit = ghVerdict(simple.slice(i + 1), { exp: exp.slice(i + 1), subst, appended: simple.slice(0, i).some((x) => ['xargs', 'parallel'].includes(base(x))) });
+      else if (b === 'hub') hit = 'hub (another GitHub client; reads and writes go through gh here)';
       else if (b === 'git') hit = gitVerdict(simple.slice(i + 1));
       else if (HTTP_CLIENTS.has(b)) hit = httpVerdict(simple.slice(i + 1));
+      else if (INTERPRETER.test(b)) hit = interpreterVerdict(simple, i, cmd, ctx);
       if (hit) found.push(hit);
       if (/(^|[/@.])(api|uploads)\.github\.com/i.test(w)) found.push('a command that names the GitHub API host');
-      if (protectedPath(w, ctx) && !READ_TOOLS.has(head) && !scriptExecution(simple, i, simpleIndex)) found.push(`a write to a protected settings or plugin path (${w})`);
+      if (FENCED_SCRIPTS.has(b) && !READ_TOOLS.has(head)) {
+        found.push(`${b} not run as one plain command (no ;, &&, |, redirects or substitution; the heartbeat needs --state-dir; gate-request.sh only under guard)`);
+      }
+      if (!READ_TOOLS.has(head) && !scriptExecution(simple, i, simpleIndex) && pathTokens(w).some((t) => protectedPath(t, ctx))) {
+        found.push(`a write to a protected settings, git config or plugin path (${w})`);
+      }
     }
   }
   return [...new Set(found)];
@@ -328,7 +439,7 @@ export function decide({ tool_name: tool = 'Bash', tool_input: input = {}, comma
   }
   if (['Write', 'Edit', 'MultiEdit', 'NotebookEdit'].includes(tool)) {
     const p = input.file_path ?? input.notebook_path ?? input.path;
-    return protectedPath(p, ctx) ? { deny: `engsys singleton-write guard: settings and plugin files are read-only in a ${role} monster session (${p}): changing them could switch off the hooks that fence its GitHub writes.` } : null;
+    return protectedPath(p, ctx) ? { deny: `engsys singleton-write guard: settings, git config and plugin files are read-only in a ${role} monster session (${p}): changing them could switch off the hooks that fence its GitHub writes, or plant a program in its push.` } : null;
   }
   if (/^mcp__/.test(tool) && /github/i.test(tool)) {
     const name = tool.split('__').pop();

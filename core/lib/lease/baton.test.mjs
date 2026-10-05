@@ -28,9 +28,13 @@ import {
   defaultNotify,
   resolveNotifyCommand,
   main,
+  newBranchPrefixesFrom,
+  parseConfigList,
+  pushConfigArgs,
   sameProcessAlive,
   sessionProcess,
   supervisorDecision,
+  unsafeLocalConfig,
 } from "./baton.mjs";
 
 const MIN = 60_000;
@@ -730,6 +734,22 @@ function pushApi({ headRef = "agent/1-x", headRepo = REPO, state = "open", defau
   };
 }
 
+/** A checkout's git config the way `git config --list --show-scope` reports it in a fleet session. */
+const FLEET_CONFIG = [
+  { scope: "system", key: "credential.helper", value: "osxkeychain" },
+  { scope: "local", key: "core.hookspath", value: ".husky/_" },
+  { scope: "local", key: "remote.origin.url", value: `https://github.com/${REPO}.git` },
+  { scope: "local", key: "branch.agent/1-x.merge", value: "refs/heads/agent/1-x" },
+  { scope: "command", key: "credential.https://github.com.helper", value: "" },
+  { scope: "command", key: "credential.https://github.com.helper", value: "!node /fleet/gh-app-token.mjs git-credential" },
+  { scope: "command", key: "user.name", value: "fleet[bot]" },
+];
+const PUSH_C = [
+  "-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=never", "-c", "core.fsmonitor=false", "-c", "core.sshCommand=ssh", "-c", "core.askPass=",
+  "-c", "credential.helper=", "-c", "credential.helper=osxkeychain", "-c", "credential.https://github.com.helper=",
+  "-c", "credential.https://github.com.helper=!node /fleet/gh-app-token.mjs git-credential", "-c", "push.gpgSign=false", "-c", "push.recurseSubmodules=no",
+];
+
 test("N2: a guarded push is checked against the PR and origin, then sent with hooks off and file transport refused", async () => {
   const run = async (argv, { opts = {}, url = `https://github.com/${REPO}.git`, pr = 5 } = {}) => {
     const w = world();
@@ -741,13 +761,14 @@ test("N2: a guarded push is checked against the PR and origin, then sent with ho
       mergeApi: { request: async (m, p) => reply(0, m, p) },
       spawn: async (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "", timedOut: false }; },
       remoteUrl: async () => url,
+      pushConfig: async () => FLEET_CONFIG,
     });
     await s.baton.startup();
     return { r: await b.guard(argv, { pr }), calls };
   };
   const ok = await run(["git", "-C", "../wt", "push", "--force-with-lease", "origin", "HEAD:refs/heads/agent/1-x"]);
   assert.equal(ok.r.result.code, "ran");
-  assert.deepEqual(ok.calls[0], { cmd: "git", args: ["-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=never", "-C", "../wt", "push", "--force-with-lease", "origin", "HEAD:refs/heads/agent/1-x"] });
+  assert.deepEqual(ok.calls[0], { cmd: "git", args: [...PUSH_C, "-C", "../wt", "push", "--force-with-lease", "origin", "HEAD:refs/heads/agent/1-x"] });
   const refused = [
     [["git", "push", "origin", "HEAD:refs/heads/other"], {}, "head branch is agent/1-x"],
     [["git", "push", "origin", "HEAD:refs/heads/develop"], { opts: { headRef: "develop", defaultBranch: "develop" } }, "default branch"],
@@ -767,7 +788,7 @@ test("N2: a guarded push is checked against the PR and origin, then sent with ho
 });
 
 test("N2: --new-branch creates a branch origin lacks (no force, never the default branch) and nothing else", async () => {
-  const run = async (argv, { exists = false, defaultBranch = "main" } = {}) => {
+  const run = async (argv, { exists = false, defaultBranch = "main", newBranchPrefixes } = {}) => {
     const w = world();
     const calls = [];
     const s = session(w);
@@ -776,16 +797,127 @@ test("N2: --new-branch creates a branch origin lacks (no force, never the defaul
       mergeApi: { request: async (m, p) => (p === `/repos/${REPO}` ? { status: 200, json: { default_branch: defaultBranch } } : p.startsWith(`/repos/${REPO}/git/ref/heads/`) ? { status: exists ? 200 : 404, json: {} } : { status: 404, json: {} }) },
       spawn: async (cmd, args) => { calls.push(args); return { code: 0, stdout: "", stderr: "", timedOut: false }; },
       remoteUrl: async () => `git@github.com:${REPO}.git`,
+      pushConfig: async () => FLEET_CONFIG,
+      ...(newBranchPrefixes ? { newBranchPrefixes } : {}),
     });
     await b.startup();
     return { r: await b.guard(argv, { newBranch: true }), calls };
   };
-  const ok = await run(["git", "-C", "../wt", "push", "origin", "HEAD:refs/heads/mnt/fix-1"]);
+  const ok = await run(["git", "-C", "../wt", "push", "origin", "HEAD:refs/heads/agent/mnt-fix-1"]);
   assert.equal(ok.r.result.code, "ran");
-  assert.deepEqual(ok.calls[0].slice(-3), ["push", "origin", "HEAD:refs/heads/mnt/fix-1"]);
-  assert.match((await run(["git", "push", "origin", "mnt/fix-1"], { exists: true })).r.result.reason, /already exists/);
-  assert.match((await run(["git", "push", "--force-with-lease", "origin", "mnt/fix-1"])).r.result.reason, /no --force-with-lease/);
-  assert.match((await run(["git", "push", "origin", "trunk"], { defaultBranch: "trunk" })).r.result.reason, /default branch/);
+  assert.deepEqual(ok.calls[0].slice(-3), ["push", "origin", "HEAD:refs/heads/agent/mnt-fix-1"]);
+  assert.match((await run(["git", "push", "origin", "agent/mnt-fix-1"], { exists: true })).r.result.reason, /already exists/);
+  assert.match((await run(["git", "push", "--force-with-lease", "origin", "agent/mnt-fix-1"])).r.result.reason, /no --force-with-lease/);
+  assert.match((await run(["git", "push", "origin", "agent/x"], { defaultBranch: "agent/x" })).r.result.reason, /default branch/);
+  // #71: only under a configured prefix (default agent/), so a push can't create a branch a
+  // branch-filtered workflow trigger watches.
+  for (const branch of ["mnt/fix-1", "release/2.0", "main-hotfix", "agentx/1"]) {
+    const { r, calls } = await run(["git", "push", "origin", `HEAD:refs/heads/${branch}`]);
+    assert.equal(r.result.code, "push_refused", branch);
+    assert.match(r.result.reason, /only branches under agent\//, branch);
+    assert.equal(calls.length, 0, branch);
+  }
+  assert.equal((await run(["git", "push", "origin", "mnt/fix-1"], { newBranchPrefixes: ["mnt/fix-", "agent/"] })).r.result.code, "ran");
+  assert.match((await run(["git", "push", "origin", "agent/1"], { newBranchPrefixes: [] })).r.result.reason, /no valid prefix/);
+});
+
+test("#71: ENGSYS_NEW_BRANCH_PREFIX sets the prefixes; unset means agent/, an invalid value refuses every new branch", () => {
+  assert.deepEqual(newBranchPrefixesFrom({}), ["agent/"]);
+  assert.deepEqual(newBranchPrefixesFrom({ ENGSYS_NEW_BRANCH_PREFIX: "" }), ["agent/"]);
+  assert.deepEqual(newBranchPrefixesFrom({ ENGSYS_NEW_BRANCH_PREFIX: "agent/acme/, mnt/fix-" }), ["agent/acme/", "mnt/fix-"]);
+  for (const bad of ["../x", "-x", "agent/ $(id)", "*"]) assert.deepEqual(newBranchPrefixesFrom({ ENGSYS_NEW_BRANCH_PREFIX: bad }), [], bad);
+});
+
+test("#71 L3: the push masks the checkout's credential helper, ssh command, askpass and fsmonitor, and keeps the fleet's helper", () => {
+  const entries = [
+    { scope: "system", key: "credential.helper", value: "osxkeychain" },
+    { scope: "global", key: "core.sshcommand", value: "ssh -i ~/.ssh/fleet" },
+    { scope: "local", key: "core.sshcommand", value: "/tmp/evil-ssh" },
+    { scope: "local", key: "core.askpass", value: "/tmp/evil-askpass" },
+    { scope: "worktree", key: "core.fsmonitor", value: "/tmp/evil-fsmonitor" },
+    { scope: "command", key: "credential.https://github.com.helper", value: "" },
+    { scope: "command", key: "credential.https://github.com.helper", value: "!fleet-helper" },
+  ];
+  const args = pushConfigArgs(entries);
+  const values = args.filter((_, i) => i % 2 === 1);
+  assert.ok(args.every((a, i) => i % 2 === 1 || a === "-c"), "only -c options");
+  assert.ok(values.includes("core.sshCommand=ssh -i ~/.ssh/fleet"), "the operator's ssh command, not the checkout's");
+  assert.ok(values.includes("core.askPass="), "askpass off (also stops the SSH_ASKPASS fallback)");
+  assert.ok(values.includes("core.fsmonitor=false"));
+  assert.ok(!values.some((v) => v.includes("/tmp/evil")), "nothing from the checkout");
+  // The reset comes first, then every non-local helper in git's read order: the fleet's env-scoped one last.
+  const reset = values.indexOf("credential.helper=");
+  assert.deepEqual(values.slice(reset, reset + 4), ["credential.helper=", "credential.helper=osxkeychain", "credential.https://github.com.helper=", "credential.https://github.com.helper=!fleet-helper"]);
+  assert.ok(values.includes("core.sshCommand=ssh") === false);
+  assert.ok(pushConfigArgs([]).includes("core.sshCommand=ssh"), "no ssh command anywhere: plain ssh");
+});
+
+test("#71 L3: a guarded push refuses a checkout whose own config sets credential, proxy, TLS, URL-rewrite, include or transport keys", async () => {
+  const unsafe = [
+    ["local", "credential.helper", "!evil"],
+    ["local", "credential.https://github.com/acme/app.helper", "!evil"],
+    ["local", "credential.https://github.com.username", "x"],
+    ["local", "http.proxy", "http://attacker:8080"],
+    ["local", "http.https://github.com.proxy", "http://attacker:8080"],
+    ["local", "http.sslverify", "false"],
+    ["local", "http.https://github.com.sslcainfo", "/tmp/ca.pem"],
+    ["local", "http.extraheader", "X: y"],
+    ["local", "http.curloptresolve", "github.com:443:10.0.0.1"],
+    ["local", "url.https://evil.example/.insteadof", "https://github.com/"],
+    ["local", "url.git@evil:.pushinsteadof", "https://github.com/"],
+    ["local", "include.path", "/tmp/x"],
+    ["local", "includeif.gitdir:/x/.path", "/tmp/x"],
+    ["local", "remote.origin.proxy", "http://attacker"],
+    ["local", "remote.origin.vcs", "evil"],
+    ["local", "remote.origin.receivepack", "evil"],
+    ["local", "protocol.ext.allow", "always"],
+    ["local", "core.gitproxy", "/tmp/evil"],
+    ["worktree", "http.proxy", "http://attacker"],
+  ];
+  for (const [scope, key, value] of unsafe) assert.deepEqual(unsafeLocalConfig([{ scope, key, value }]), [key], key);
+  const fine = [
+    ["local", "http.postbuffer", "524288000"],
+    ["local", "http.https://github.com.lowspeedlimit", "1000"],
+    ["local", "core.hookspath", ".husky/_"],
+    ["local", "core.sshcommand", "/tmp/masked-anyway"],
+    ["local", "remote.origin.url", `https://github.com/${REPO}.git`],
+    ["local", "remote.origin.pushurl", `https://github.com/${REPO}.git`],
+    ["local", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"],
+    ["local", "branch.agent/1-x.merge", "refs/heads/agent/1-x"],
+    ["global", "http.proxy", "http://corp-proxy"],
+    ["global", "url.git@github.com:.insteadof", "https://github.com/"],
+    ["command", "credential.https://github.com.helper", "!fleet"],
+  ];
+  assert.deepEqual(unsafeLocalConfig(fine.map(([scope, key, value]) => ({ scope, key, value }))), []);
+
+  const w = world();
+  const calls = [];
+  const s = session(w);
+  const mk = (pushConfig) => createBaton({
+    lease: s.lease, repo: REPO, role: "merge", holder: s.holder, run: "run-1", store: s.store, home: async () => HOME, now: () => w.local.t,
+    mergeApi: { request: async (m, p) => pushApi()(0, m, p) },
+    spawn: async (cmd, args) => { calls.push(args); return { code: 0, stdout: "", stderr: "", timedOut: false }; },
+    remoteUrl: async () => `https://github.com/${REPO}.git`,
+    pushConfig,
+  });
+  await s.baton.startup();
+  const planted = await mk(async () => [...FLEET_CONFIG, { scope: "local", key: "http.https://github.com.proxy", value: "http://attacker" }])
+    .guard(["git", "-C", "../wt", "push", "origin", "agent/1-x"], { pr: 5 });
+  assert.equal(planted.result.code, "push_refused");
+  assert.match(planted.result.reason, /http\.https:\/\/github\.com\.proxy/);
+  const unreadable = await mk(async () => { throw new Error("fatal: bad config line 3"); }).guard(["git", "push", "origin", "agent/1-x"], { pr: 5 });
+  assert.equal(unreadable.result.code, "push_refused");
+  assert.match(unreadable.result.reason, /could not read the checkout's git config/);
+  assert.equal(calls.length, 0, "nothing ran");
+});
+
+test("#71 L3: parseConfigList reads git config --list --show-scope -z", () => {
+  assert.deepEqual(parseConfigList("system\0credential.helper\nosxkeychain\0local\0core.bare\0command\0credential.https://github.com.helper\n!a b=c\nd\0"), [
+    { scope: "system", key: "credential.helper", value: "osxkeychain" },
+    { scope: "local", key: "core.bare", value: null },
+    { scope: "command", key: "credential.https://github.com.helper", value: "!a b=c\nd" },
+  ]);
+  assert.deepEqual(parseConfigList(""), []);
 });
 
 test("M3: sessionProcess walks past shells to the session process; sameProcessAlive tells a reused pid apart", () => {

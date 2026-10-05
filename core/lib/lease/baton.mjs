@@ -95,6 +95,8 @@ export const EXIT = Object.freeze({ ...LEASE_EXIT, NOT_STARTED: 5 });
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
 const REPO_PATTERN = /^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/;
 const HERE = dirname(fileURLToPath(import.meta.url));
+/** Branch prefixes a `--new-branch` push may create, unless ENGSYS_NEW_BRANCH_PREFIX names others (#71). */
+export const DEFAULT_NEW_BRANCH_PREFIXES = Object.freeze(["agent/"]);
 
 // ------------------------------------------------------------------------------ pure helpers --
 
@@ -359,8 +361,10 @@ export function defaultNotify({ env = process.env, err = process.stderr } = {}) 
  *   spawn     (cmd, args, {timeout}) => Promise<{code, stdout, stderr, timedOut}>
  *   prepare   async () => void: resolve the API token; called once an op is past its offline checks
  *   remoteUrl async (dir) => origin's push URL in that checkout (for a guarded git push)
+ *   pushConfig async (dir) => that checkout's git config as [{scope, key, value}] (pushConfigEntries)
+ *   newBranchPrefixes  the prefixes a --new-branch push may create (default DEFAULT_NEW_BRANCH_PREFIXES)
  */
-export function createBaton({ lease, repo, role, holder, run = null, store, home, now = Date.now, notify = async () => false, mergeApi, spawn, sleep, prepare = null, remoteUrl = defaultRemoteUrl, log = () => {} }) {
+export function createBaton({ lease, repo, role, holder, run = null, store, home, now = Date.now, notify = async () => false, mergeApi, spawn, sleep, prepare = null, remoteUrl = defaultRemoteUrl, pushConfig = defaultPushConfig, newBranchPrefixes = DEFAULT_NEW_BRANCH_PREFIXES, log = () => {} }) {
   if (!ROLES.includes(role)) throw new LeaseUsageError(`role must be one of ${ROLES.join(", ")}, got ${JSON.stringify(role)}`);
   if (typeof repo !== "string" || !REPO_PATTERN.test(repo)) throw new LeaseUsageError(`invalid repo ${JSON.stringify(repo)}`);
   const sleepFn = sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
@@ -603,6 +607,13 @@ export function createBaton({ lease, repo, role, holder, run = null, store, home
     const fail = (reason) => ({ refusal: { exit: EXIT.ERROR, result: { sent: false, code: "error", role, holder, reason } } });
     const hasPr = /^[1-9]\d{0,9}$/.test(String(pr ?? ""));
     if (hasPr === Boolean(newBranch)) throw new LeaseUsageError("guard: a git push needs exactly one of --pr <n> (update that PR's head branch) or --new-branch (create a branch origin does not have yet)");
+    // A new branch only under a configured prefix, so a fenced push can't create a branch a
+    // branch-filtered workflow trigger (push: branches: …) watches (#71).
+    if (newBranch && !newBranchPrefixes.some((p) => push.branch.startsWith(p))) {
+      return refuse(newBranchPrefixes.length
+        ? `--new-branch creates only branches under ${newBranchPrefixes.join(", ")} (ENGSYS_NEW_BRANCH_PREFIX), not ${push.branch}`
+        : "--new-branch is refused: ENGSYS_NEW_BRANCH_PREFIX holds no valid prefix");
+    }
     let repoRes;
     let probe;
     try {
@@ -632,8 +643,13 @@ export function createBaton({ lease, repo, role, holder, run = null, store, home
     try { url = await remoteUrl(push.dir); } catch (e) { return refuse(`could not read origin's push URL: ${firstLine(e?.message ?? e)}`); }
     const urlRepo = repoOfUrl(url);
     if (!urlRepo || urlRepo.toLowerCase() !== repo.toLowerCase()) return refuse(`origin's push URL (${url}) is not ${repo}`);
-    // No hooks a dispatched agent could have planted in its worktree, no file:// or local transport.
-    return { args: ["-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=never", ...(push.dir ? ["-C", push.dir] : []), "push", ...push.flags, "origin", push.refspec] };
+    // #71 L3: the checkout was prepared by a dispatched agent, so its own config may carry a planted
+    // program or a proxy. Refuse what can't be masked; mask the rest on the command line.
+    let entries;
+    try { entries = await pushConfig(push.dir); } catch (e) { return refuse(`could not read the checkout's git config: ${firstLine(e?.message ?? e)}`); }
+    const unsafe = unsafeLocalConfig(entries);
+    if (unsafe.length) return refuse(`the checkout's own git config sets ${unsafe.slice(0, 5).join(", ")}${unsafe.length > 5 ? ", …" : ""}: a guarded push never runs with local credential, proxy, TLS, URL-rewrite, include or transport settings (remove them from the checkout)`);
+    return { args: [...pushConfigArgs(entries), ...(push.dir ? ["-C", push.dir] : []), "push", ...push.flags, "origin", push.refspec] };
   }
 
   async function guard(argv, { pr, newBranch = false } = {}) {
@@ -852,6 +868,88 @@ function defaultRemoteUrl(dir) {
   });
 }
 
+/** `git config --list --show-scope -z` output -> [{scope, key, value}] (value null for a bare key). */
+export function parseConfigList(out) {
+  const parts = String(out ?? "").split("\0");
+  const entries = [];
+  for (let i = 0; i + 1 < parts.length; i += 2) {
+    const nl = parts[i + 1].indexOf("\n");
+    entries.push({ scope: parts[i], key: nl < 0 ? parts[i + 1] : parts[i + 1].slice(0, nl), value: nl < 0 ? null : parts[i + 1].slice(nl + 1) });
+  }
+  return entries;
+}
+
+function defaultPushConfig(dir) {
+  return new Promise((done, fail) => {
+    execFile("git", [...(dir ? ["-C", dir] : []), "config", "--list", "--show-scope", "-z"], { timeout: 10_000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
+      if (err) fail(err); else done(parseConfigList(stdout));
+    });
+  });
+}
+
+/** Config scopes a dispatched agent prepares: the checkout's own .git/config (and includes) and config.worktree. */
+const LOCAL_SCOPES = new Set(["local", "worktree"]);
+/** `http.*` variables that change no destination, credential or TLS check (a large push may need postBuffer). */
+const HTTP_SAFE_VARS = new Set(["postbuffer", "lowspeedlimit", "lowspeedtime", "maxrequests", "minsessions", "version"]);
+
+/**
+ * Keys in the checkout's own config that a guarded push refuses: they can't be masked with `-c`
+ * (a URL-scoped `http.<url>.proxy` outranks an unscoped one) or they redirect where the push and its
+ * credential go. -> the offending keys.
+ */
+export function unsafeLocalConfig(entries) {
+  const bad = new Set();
+  for (const { scope, key } of entries ?? []) {
+    if (!LOCAL_SCOPES.has(scope)) continue;
+    const k = key.toLowerCase();
+    const last = k.slice(k.lastIndexOf(".") + 1);
+    if (/^(credential|url|include|includeif|protocol)\./.test(k)
+      || (k.startsWith("http.") && !HTTP_SAFE_VARS.has(last))
+      || /^remote\..+\.(proxy|proxyauthmethod|vcs|receivepack|uploadpack)$/.test(k)
+      || k === "core.gitproxy") bad.add(key);
+  }
+  return [...bad];
+}
+
+/**
+ * The `-c` options a guarded push runs with (#69 N2, #71 L3): no hooks, no file transport, and the
+ * programs git may run during a push (credential helpers, ssh, askpass, fsmonitor, gpg) taken only
+ * from config outside the checkout. `credential.helper=` empties the helper list, and git reads
+ * environment-scoped config (the fleet's GIT_CONFIG_COUNT helper) BEFORE `-c`, so the reset would
+ * drop the fleet's helper too: every helper from a non-local scope is added back after it, in order.
+ */
+export function pushConfigArgs(entries) {
+  const outside = (entries ?? []).filter((e) => !LOCAL_SCOPES.has(e.scope));
+  const lastValue = (name) => {
+    let v;
+    for (const e of outside) if (e.key.toLowerCase() === name) v = e.value ?? "";
+    return v;
+  };
+  const helpers = outside.filter((e) => /^credential\.(.+\.)?helper$/i.test(e.key));
+  const c = (kv) => ["-c", kv];
+  return [
+    ...c("core.hooksPath=/dev/null"),
+    ...c("protocol.file.allow=never"),
+    ...c("core.fsmonitor=false"),
+    ...c(`core.sshCommand=${lastValue("core.sshcommand") ?? "ssh"}`),
+    ...c(`core.askPass=${lastValue("core.askpass") ?? ""}`),
+    ...c("credential.helper="),
+    ...helpers.flatMap((e) => c(`${e.key}=${e.value ?? ""}`)),
+    ...c("push.gpgSign=false"),
+    ...c("push.recurseSubmodules=no"),
+  ];
+}
+
+/**
+ * ENGSYS_NEW_BRANCH_PREFIX (comma or space separated) -> prefixes; the default when unset. An invalid
+ * value yields [] so every --new-branch push is refused (fail closed) while other ops keep working.
+ */
+export function newBranchPrefixesFrom(env = process.env) {
+  const list = String(env.ENGSYS_NEW_BRANCH_PREFIX ?? "").split(/[\s,]+/).filter(Boolean);
+  if (!list.length) return [...DEFAULT_NEW_BRANCH_PREFIXES];
+  return list.every((p) => /^[A-Za-z0-9][A-Za-z0-9._\/-]{0,100}$/.test(p) && !p.includes("..")) ? list : [];
+}
+
 function defaultSpawn(cmd, args, { timeout }) {
   return new Promise((done) => {
     execFile(cmd, args, { timeout, killSignal: "SIGTERM", maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
@@ -875,13 +973,14 @@ function usage() {
     "  fence                           exit 0 only while it is safe to mutate",
     "  guard -- gh <args…> | <engsys>/skills/merge-monster/scripts/gate-request.sh <args…>",
     "  guard --pr N -- git [-C <dir>] push [--force-with-lease] origin HEAD:refs/heads/<PR head branch>",
-    "  guard --new-branch -- git [-C <dir>] push origin HEAD:refs/heads/<branch origin lacks>",
+    "  guard --new-branch -- git [-C <dir>] push origin HEAD:refs/heads/<agent/… branch origin lacks>",
     "  merge      --pr N --sha <validated head> --method merge|squash|rebase",
     "  release    [--reason rotation|exit|handover]",
     "  status",
     "  supervise                       relaunch decision for the fleet supervisor (no --state-dir)",
     "env: ENGSYS_SESSION (session name), ENGSYS_SESSION_RUN (per launch), FLEET_ID, FEDERATION_FILE,",
-    "     GH_TOKEN | GH_APP_ENV_FILE | gh auth token, BATON_NOTIFY_CMD | FLEET_BIN (default: this kit's core/fleet/bin/fleet notify)",
+    "     GH_TOKEN | GH_APP_ENV_FILE | gh auth token, BATON_NOTIFY_CMD | FLEET_BIN (default: this kit's core/fleet/bin/fleet notify),",
+    "     ENGSYS_NEW_BRANCH_PREFIX (prefixes --new-branch may create; default agent/)",
     "exit: 0 ok | 1 refused | 2 usage | 3 error | 4 newer protocol | 5 not started in this session",
   ].join("\n");
 }
@@ -964,6 +1063,8 @@ export async function main(argv, deps = {}) {
       notify: deps.notify ?? defaultNotify({ env, err }),
       mergeApi,
       spawn: deps.spawn ?? defaultSpawn,
+      ...(deps.pushConfig ? { pushConfig: deps.pushConfig } : {}),
+      newBranchPrefixes: newBranchPrefixesFrom(env),
       sleep: deps.sleep,
       prepare: deps.api || deps.lease ? null : async () => { await client(); },
       log: (s) => err.write(`baton: ${s}\n`),
