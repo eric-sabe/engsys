@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd job: the cross-fleet message relay (fleet relay), LLM-free. One poll of GitHub for
+  fleet-msg comments addressed to this fleet; delivers them to local sessions (core/fleet/relay.mjs).
+  TEMPLATE — rendered and loaded by `fleet install-jobs` (do not copy by hand). An instance can
+  override it with a same-named file in <instance>/jobs/launchd/.
+  Every 60 seconds. Installed only with FLEET_ID set and a federation file (multi-fleet mode).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>__LABEL__</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__ENGSYS_DIR__/core/fleet/bin/fleet</string>
+    <string>--instance</string>
+    <string>__FLEET_REPO__</string>
+    <string>relay</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__FLEET_REPO__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>StartInterval</key>
+  <integer>60</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/fleet-relay.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/fleet-relay.log</string>
+</dict>
+</plist>

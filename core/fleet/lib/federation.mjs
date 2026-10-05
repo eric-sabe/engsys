@@ -44,7 +44,7 @@ const SLACK_MEMBER_RE = /^[UW][A-Z0-9]{2,20}$/;
 const TOKEN_RE = /^[^\s'"`<>]{1,200}$/;
 export const ROLES = ['merge', 'maintain'];
 export const FAILOVER = ['escalate', 'auto'];
-const FLEET_KEYS = ['operator', 'host', 'github_app', 'cloud_identity', 'slack_operator', 'status_issue', 'enabled'];
+const FLEET_KEYS = ['operator', 'host', 'github_app', 'github_app_id', 'cloud_identity', 'slack_operator', 'status_issue', 'enabled'];
 const ROLE_KEYS = ['home', 'ledger', 'standby', 'failover'];
 const TOP_KEYS = ['version', 'operators_team', 'operators', 'fleets', 'repos'];
 const EXIT = { OK: 0, ERROR: 1, ABSENT: 3 };
@@ -376,6 +376,11 @@ export function validateFederation(doc, { file = '' } = {}) {
       else str('github_app', APP_SLUG_RE, 'must be a GitHub App slug (lowercase letters, digits, hyphens)');
       str('cloud_identity', TOKEN_RE, 'must be an identity name or id without spaces');
       str('slack_operator', SLACK_MEMBER_RE, 'must be a Slack member id (U… or W…)');
+      if (f.github_app_id !== undefined && f.github_app_id !== null) {
+        if (!isPosInt(f.github_app_id)) err(`${at}.github_app_id: must be the App's numeric id (a positive integer), got ${show(f.github_app_id)}`);
+        else if (fl.github_app === undefined) err(`${at}.github_app_id: set github_app (the App slug) too`);
+        else fl.github_app_id = f.github_app_id;
+      }
       if (f.status_issue !== undefined && f.status_issue !== null) {
         if (!isPosInt(f.status_issue)) err(`${at}.status_issue: must be a positive issue number, got ${show(f.status_issue)}`);
         else fl.status_issue = f.status_issue;
@@ -465,6 +470,21 @@ export function loadFederation(file) {
     throw new FederationError(`cannot read ${file}: ${e.message}`);
   }
   return parseFederation(text, { file });
+}
+
+/**
+ * Advisories for a valid registry (never errors). With two or more enabled fleets, cross-fleet
+ * messages flow, and the sender check needs each enabled fleet's `github_app_id` (fleet-msg.mjs
+ * verify() rejects messages from a fleet without one): a login slug alone can be re-registered by
+ * anyone once the App is renamed or deleted.
+ */
+export function registryWarnings(reg) {
+  if (!reg) return [];
+  const enabled = Object.keys(reg.fleets).filter((id) => reg.fleets[id].enabled);
+  if (enabled.length < 2) return [];
+  return enabled
+    .filter((id) => !reg.fleets[id].github_app_id)
+    .map((id) => `fleets.${id}.github_app_id is not set: with ${enabled.length} enabled fleets it is required (cross-fleet messages from ${id} are rejected until it is)`);
 }
 
 /** Validate a FLEET_ID value ('' / undefined = unset, single-fleet). Returns the id or null. */
@@ -580,6 +600,7 @@ export function statusLines(reg, { fleetId = null, file = '' } = {}) {
   const ids = Object.keys(reg.fleets);
   lines.push(`federation: ${file} (${ids.length} fleet${ids.length === 1 ? '' : 's'}: ${ids.map((id) => (reg.fleets[id].enabled ? id : `${id} (disabled)`)).join(', ')})`);
   for (const p of fleetIdProblems(reg, fleetId)) lines.push(`  WARNING ${p}`);
+  for (const p of registryWarnings(reg)) lines.push(`  WARNING ${p}`);
   const rows = [];
   for (const [repo, roles] of Object.entries(reg.repos)) {
     for (const role of ROLES) {
@@ -646,6 +667,7 @@ export function main(argv, { env = process.env, out = process.stdout, err = proc
         const roles = Object.values(reg.repos).reduce((n, r) => n + Object.keys(r).length, 0);
         const nf = Object.keys(reg.fleets).length;
         say(`ok: ${target} (${nf} fleet${nf === 1 ? '' : 's'}, ${roles} repo role${roles === 1 ? '' : 's'})`);
+        for (const w of registryWarnings(reg)) warn(`WARNING ${w}`);
         return EXIT.OK;
       }
       case 'get': {

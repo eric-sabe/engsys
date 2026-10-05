@@ -417,7 +417,8 @@ rc_is "install-jobs exits 0" 0
 has "a loaded supervisor is booted out" "$OUT" "booted out: com.acme.fleet.fleet-supervisor (it was loaded)"
 has "…and its plist removed" "$OUT" "removed: $SUP_PLIST"
 [ ! -e "$SUP_PLIST" ] && ok "plist gone" || bad "plist gone"
-hasnt "the supervisor is never bootstrapped" "$(cat "$FAKE/launchctl.log")" "bootstrap"
+hasnt "the supervisor is never bootstrapped" "$(grep -F bootstrap "$FAKE/launchctl.log" || true)" "fleet-supervisor"
+has "…while the relay job (multi-fleet mode) is" "$(cat "$FAKE/launchctl.log")" "com.acme.fleet.fleet-relay.plist"
 run fleet install-jobs --only fleet-supervisor
 has "--only: nothing loaded now" "$OUT" "not loaded: com.acme.fleet.fleet-supervisor"
 local_conf ROLES=build,design,broker

@@ -29,6 +29,13 @@
 #                                 supervisor's HEARTBEAT_CMD calls once per tick.
 #   federation validate|get|home|address|status ...
 #                                 the multi-fleet registry (federation.yml; see `fleet federation --help`)
+#   msg send --to <fleet>:<session> [--re owner/repo#n] --body-file <f> [--from <session>]
+#                                 post a cross-fleet message (a fleet-msg comment); exit 3 = same fleet,
+#                                 use SendMessage
+#   msg inbox <session> [--mark-read]
+#                                 the session's undelivered cross-fleet messages
+#   relay [status]                one poll of the cross-fleet relay (what the fleet-relay job runs), or its
+#                                 health line; no-op in single-fleet mode
 #   init ...                      scaffold a new fleet instance (engsys fleet init)
 #
 # The instance is --instance <dir>, else $FLEET_INSTANCE, else the git toplevel of the current
@@ -52,7 +59,7 @@ case "$cmd" in
   -h | --help | help) sed -n '2,/^set -/{/^set -/!p;}' "$0"; exit 0 ;;
   init) # the engsys CLI (this kit lives at <engsys>/core/fleet); no instance needed yet
     exec "$KIT/../../install" fleet init "$@" ;;
-  status | pin | sync | restart | launch | supervise | verify | install-jobs | notify | heartbeat | federation) ;;
+  status | pin | sync | restart | launch | supervise | verify | install-jobs | notify | heartbeat | federation | msg | relay) ;;
   *) echo "fleet: unknown command '$cmd' (fleet help)" >&2; exit 2 ;;
 esac
 
@@ -67,7 +74,9 @@ if [ "$cmd" = status ]; then
 fi
 
 case "$cmd" in
-  status) bash "$KIT/federation.sh" status || true; echo; bash "$KIT/sync.sh" --check || true; echo; exec bash "$KIT/restart.sh" --status ;;
+  status)
+    bash "$KIT/federation.sh" status || true; bash "$KIT/relay.sh" status 2>/dev/null || true
+    echo; bash "$KIT/sync.sh" --check || true; echo; exec bash "$KIT/restart.sh" --status ;;
   pin)
     [ -f "$KIT/pin.sh" ] || { echo "fleet pin: not implemented yet" >&2; exit 1; }
     exec bash "$KIT/pin.sh" "$@" ;;
@@ -80,4 +89,6 @@ case "$cmd" in
   notify) exec bash "$KIT/notify.sh" "$@" ;;
   heartbeat) exec bash "$KIT/heartbeat.sh" "$@" ;;
   federation) exec bash "$KIT/federation.sh" "$@" ;;
+  msg) exec bash "$KIT/msg.sh" "$@" ;;
+  relay) exec bash "$KIT/relay.sh" "$@" ;;
 esac
