@@ -27,7 +27,8 @@
 #                                                  docs/subagent-liveness.md
 #                                                  in engsys)
 #   singleton monster (6th field merge|maintain) → every relaunch above also needs
-#                                                  the BATON to allow it (below)
+#                                                  the BATON to allow it (below),
+#                                                  and INTEGRITY_CMD to pass
 #   any relaunch that FAILS                      → escalate once on the ledger
 #                                                  (with the launcher's error),
 #                                                  retry each tick quietly,
@@ -105,6 +106,14 @@
 #                              line; exit 0 = may relaunch, 1 = held / not home, anything else =
 #                              error (no relaunch, alert once). Default: node core/lib/lease/baton.mjs
 #                              supervise (reads FLEET_ID / FEDERATION_FILE from the environment).
+#   INTEGRITY_CMD=<command>    optional: run once per tick, before the sessions, when any session
+#                              line has a 6th field. Exit 0 = the plugin files that guard the
+#                              singleton monsters are intact; 1 = they don't match their release:
+#                              no session with a 6th field is relaunched this tick (running ones
+#                              are never killed for it), and the command alerts on its own, once
+#                              per incident (the fleet kit: `fleet verify --alert --max-age N`,
+#                              engsys#70); anything else = it couldn't check: logged as a warning,
+#                              and the tick goes on as if it passed.
 #   <session-name>|<ledger-issue>|<stale-minutes>[|<owner/name>[|<marker>[|<role>]]]
 #                              one line per monster; the 4th field overrides
 #                              REPO= for that session (multi-repo fleets).
@@ -155,7 +164,7 @@ fi
 trap 'rmdir "$LOCKDIR" 2>/dev/null || true' EXIT
 
 TMUX_SESSION="" LAUNCH_CMD="" DEFAULT_REPO="" ROTATE_GRACE_MIN=3 HOST_CHECK_CMD=""
-HOST_HEALTH_CMD="" HOST_HEALTH_INCIDENT="host-health" NOTIFY_CMD="" HEARTBEAT_CMD="" BATON_CMD=""
+HOST_HEALTH_CMD="" HOST_HEALTH_INCIDENT="host-health" NOTIFY_CMD="" HEARTBEAT_CMD="" BATON_CMD="" INTEGRITY_CMD=""
 SESSIONS=()
 while IFS= read -r line; do
   line="${line%%$'\r'}"
@@ -171,6 +180,7 @@ while IFS= read -r line; do
     NOTIFY_CMD=*) NOTIFY_CMD="${line#NOTIFY_CMD=}" ;;
     HEARTBEAT_CMD=*) HEARTBEAT_CMD="${line#HEARTBEAT_CMD=}" ;;
     BATON_CMD=*) BATON_CMD="${line#BATON_CMD=}" ;;
+    INTEGRITY_CMD=*) INTEGRITY_CMD="${line#INTEGRITY_CMD=}" ;;
     *\|*) SESSIONS+=("$line") ;;
     *) echo "fleet-supervisor: bad conf line: $line" >&2; exit 1 ;;
   esac
@@ -292,6 +302,31 @@ baton_allows() { # baton_allows <name> <repo> <role> → 0 may relaunch
   fi
   return 2
 }
+
+# Singleton monsters: the integrity check (INTEGRITY_CMD, once per tick) and then the lease. Sets BATON_WHY.
+INTEGRITY_BLOCKED=0
+singleton_allows() { # singleton_allows <name> <repo> <role> → 0 may relaunch
+  if [ "$INTEGRITY_BLOCKED" = 1 ]; then
+    BATON_WHY="plugin integrity: the files guarding $3 monsters differ from their release (fleet verify)"
+    return 2
+  fi
+  baton_allows "$@"
+}
+if [ -n "$INTEGRITY_CMD" ]; then
+  for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
+    IFS='|' read -r _ _ _ _ _ s_role <<<"$spec"
+    [ -n "$s_role" ] || continue
+    # shellcheck disable=SC2086 # a command line, like LAUNCH_CMD
+    INTEGRITY_RC=0; INTEGRITY_OUT=$($INTEGRITY_CMD 2>&1 </dev/null) || INTEGRITY_RC=$?
+    printf '%s\n' "$INTEGRITY_OUT" >>"$LOG"
+    case "$INTEGRITY_RC" in
+      0) log "integrity: ok" ;;
+      1) INTEGRITY_BLOCKED=1; log "integrity: MISMATCH, no merge/maintain session is relaunched this tick; running ones are left alone (alert: INTEGRITY_CMD)" ;;
+      *) log "integrity: WARNING the check could not run (exit $INTEGRITY_RC), going on: $(printf '%s' "$INTEGRITY_OUT" | tail -n 1 | cut -c1-200)" ;;
+    esac
+    break
+  done
+fi
 
 if [ -n "$HOST_HEALTH_CMD" ]; then
   HEALTH_LATCH="$STATE_DIR/host-health.alerted"
@@ -418,8 +453,8 @@ for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
         log "$name: rotation requested ${AGE}m ago — letting it settle (grace ${ROTATE_GRACE_MIN}m)"
       elif pane_busy "$name"; then
         log "$name: rotation requested but the session is still mid-turn — waiting"
-      elif [ -n "$role" ] && ! baton_allows "$name" "$REPO_SLUG" "$role"; then
-        log "$name: rotation requested, but the $role baton does not allow a relaunch yet — waiting ($BATON_WHY)"
+      elif [ -n "$role" ] && ! singleton_allows "$name" "$REPO_SLUG" "$role"; then
+        log "$name: rotation requested, but a relaunch is held (baton or integrity) — waiting ($BATON_WHY)"
       else
         relaunch "$name" "$ledger" "$REPO_SLUG" "rotation requested; session idle at its prompt ${AGE}m after its final heartbeat"
         printf '%s\n' "$HB_TS" >"$ROTATED"
@@ -428,7 +463,7 @@ for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
       DOWN=$((DOWN + 1))
       # hung-or-thinking: never kill; escalate once per incident. The one exception is a singleton
       # monster idle at its prompt whose baton is forfeited (header).
-      if [ -n "$role" ] && ! pane_busy "$name" && baton_allows "$name" "$REPO_SLUG" "$role"; then
+      if [ -n "$role" ] && ! pane_busy "$name" && singleton_allows "$name" "$REPO_SLUG" "$role"; then
         rm -f "$LATCH"
         relaunch "$name" "$ledger" "$REPO_SLUG" "heartbeat stale (last: ${HB_TS:-never}), session idle at its prompt, $role baton forfeited ($BATON_WHY)"
       elif [ ! -f "$LATCH" ]; then
@@ -452,8 +487,8 @@ for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
     if [ "$ROTATION" = "1" ]; then REASON="rotation requested"
     elif [ "$HANDOVER" = "1" ]; then REASON="handover (${HB_STATUS})"
     else REASON="crash recovery (stale heartbeat, process gone)"; fi
-    if [ -n "$role" ] && ! baton_allows "$name" "$REPO_SLUG" "$role"; then
-      log "$name: $REASON, but the $role baton does not allow a relaunch — waiting ($BATON_WHY)"
+    if [ -n "$role" ] && ! singleton_allows "$name" "$REPO_SLUG" "$role"; then
+      log "$name: $REASON, but a relaunch is held (baton or integrity) — waiting ($BATON_WHY)"
       continue
     fi
     # TOCTOU guard: re-read the pane immediately before killing the window —

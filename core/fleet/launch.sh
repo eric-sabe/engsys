@@ -17,6 +17,11 @@
 # naming one is refused unless --force-excluded. The launcher gets .fleet/roster.host, the roster minus
 # those sessions; .fleet/roster stays the whole rendered roster.
 #
+# Merge and maintain sessions start only on plugin files that match the pinned engsys release on GitHub
+# (`fleet verify --alert`, engsys#70): on a mismatch a named one is refused and a whole-roster launch
+# leaves them out (no override), with one alert per incident. A check that can't run (GitHub
+# unreachable, plugin not installed at the pin) is a warning and they start.
+#
 # Usage: launch.sh [--instance <dir>]                              # every session that runs on this host
 #        launch.sh [--instance <dir>] <name> [--force-excluded]    # just one (the supervisor relaunches this way)
 #        launch.sh [--instance <dir>] --check <name>               # exit 0 if <name> runs on this host, else
@@ -102,9 +107,28 @@ if [ -f "$FEDERATION_FILE" ]; then
   fi
 fi
 
+# Plugin integrity (engsys#70), asked once per launch and only when a merge or maintain session is in it.
+integrity="" # '' = not asked yet | ok | mismatch
+singleton_integrity_ok() { # → 0 when merge/maintain sessions may start
+  if [ -z "$integrity" ]; then
+    local rc=0
+    bash "$FLEET_KIT_DIR/verify.sh" --instance "$FLEET_REPO" --alert </dev/null >&2 || rc=$?
+    case "$rc" in
+      0) integrity=ok ;;
+      1) integrity=mismatch ;;
+      *) integrity=ok; echo "fleet: WARNING the plugin integrity check could not run (exit $rc, above); starting merge/maintain sessions anyway" >&2 ;;
+    esac
+  fi
+  [ "$integrity" = ok ]
+}
+is_singleton() { case "$(fleet_host_kind_of "$1")" in merge | maintain) return 0 ;; esac; return 1; }
+
 cd "$PIN_DIR"
 if [ -n "$name" ]; then
   grep -q "^$name|" "$FLEET_STATE/roster" || fleet_die "no session named '$name' in the roster"
+  if is_singleton "$name" && ! singleton_integrity_ok; then
+    fleet_die "not launching $name: the engsys plugin files guarding it differ from $ENGSYS_REF (above). Check the running sessions, reinstall the plugin, then: fleet verify"
+  fi
   exec bash "$LAUNCHER" --roster "$FLEET_STATE/roster" "$name"
 fi
 
@@ -118,6 +142,11 @@ while IFS= read -r line; do
       if why="$(fleet_host_excluded "$n")"; then
         echo "skip: $n is not on this host ($why)"
         printf '# not on this host: %s (%s)\n' "$n" "$why" >>"$host_roster"
+        continue
+      fi
+      if is_singleton "$n" && ! singleton_integrity_ok; then
+        echo "skip: $n, its engsys plugin files differ from $ENGSYS_REF (fleet verify)"
+        printf '# plugin integrity mismatch: %s (fleet verify)\n' "$n" >>"$host_roster"
         continue
       fi
       kept=$((kept + 1)) ;;

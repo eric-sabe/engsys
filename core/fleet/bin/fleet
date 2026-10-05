@@ -15,6 +15,9 @@
 #                                 --check: does <name> run on this host (ROLES / ROSTER_EXCLUDE / registry)
 #                                 --host-health: is an unreadable registry keeping monsters off this host
 #   supervise                     one supervisor tick (what the launchd job runs)
+#   verify [--alert] [--max-age <min>]
+#                                 do the plugin files guarding merge/maintain match the pinned engsys
+#                                 release on GitHub? exit 0 match, 1 mismatch, 3 not verified
 #   install-jobs [--dry-run] [--only <job>] [--unload]
 #                                 render + (re)load the launchd jobs
 #   notify --level info|action|alert [--re <url>] [--incident <key>] [--resolve] "<text>"
@@ -47,7 +50,7 @@ case "$cmd" in
   -h | --help | help) sed -n '2,/^set -/{/^set -/!p;}' "$0"; exit 0 ;;
   init) # the engsys CLI (this kit lives at <engsys>/core/fleet); no instance needed yet
     exec "$KIT/../../install" fleet init "$@" ;;
-  status | pin | sync | restart | launch | supervise | install-jobs | notify | heartbeat | federation) ;;
+  status | pin | sync | restart | launch | supervise | verify | install-jobs | notify | heartbeat | federation) ;;
   *) echo "fleet: unknown command '$cmd' (fleet help)" >&2; exit 2 ;;
 esac
 
@@ -70,6 +73,7 @@ case "$cmd" in
   restart) exec bash "$KIT/restart.sh" "$@" ;;
   launch) exec bash "$KIT/launch.sh" "$@" ;;
   supervise) exec bash "$KIT/supervise.sh" "$@" ;;
+  verify) exec bash "$KIT/verify.sh" "$@" ;;
   install-jobs) exec bash "$KIT/install-jobs.sh" "$@" ;;
   notify) exec bash "$KIT/notify.sh" "$@" ;;
   heartbeat) exec bash "$KIT/heartbeat.sh" "$@" ;;

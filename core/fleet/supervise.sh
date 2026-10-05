@@ -28,6 +28,13 @@
 # fleet.conf, else the instance checkout's origin, names its repo). If it can't be resolved, the line
 # is commented out with a warning rather than left on the shared ledger another fleet's broker may use.
 #
+# It also gets INTEGRITY_CMD (`fleet verify --alert --max-age $VERIFY_MAX_AGE_MIN`, default 15): once
+# per tick the supervisor checks that the plugin files guarding the merge and maintain monsters match
+# the pinned engsys release on GitHub (engsys#70). GitHub is asked at most once per VERIFY_MAX_AGE_MIN
+# minutes while the local files are unchanged. A mismatch alerts once per incident and holds every
+# relaunch of those sessions; running ones are left alone. A check that can't run is logged and the
+# tick goes on.
+#
 # Merge and maintain monsters (by their roster prompt, lib/host-roles.sh) get their role appended as
 # the 6th field (`acme-mm|7|60|||merge`): the supervisor then reads the role's holder from the github
 # lease before any relaunch and relaunches only where this fleet is home and no live baton is held
@@ -84,6 +91,7 @@ grep -q '^HOST_CHECK_CMD=' "$conf" || printf 'HOST_CHECK_CMD=bash %s/bin/fleet -
 grep -q '^HOST_HEALTH_CMD=' "$conf" || printf 'HOST_HEALTH_CMD=bash %s/bin/fleet --instance %s launch --host-health\n' "$FLEET_KIT_DIR" "$FLEET_REPO" >>"$conf"
 grep -q '^HOST_HEALTH_INCIDENT=' "$conf" || printf 'HOST_HEALTH_INCIDENT=fleet-registry-unreadable\n' >>"$conf"
 grep -q '^NOTIFY_CMD=' "$conf" || printf 'NOTIFY_CMD=bash %s/bin/fleet --instance %s notify\n' "$FLEET_KIT_DIR" "$FLEET_REPO" >>"$conf"
+grep -q '^INTEGRITY_CMD=' "$conf" || printf 'INTEGRITY_CMD=bash %s/bin/fleet --instance %s verify --alert --max-age %s\n' "$FLEET_KIT_DIR" "$FLEET_REPO" "$VERIFY_MAX_AGE_MIN" >>"$conf"
 grep -q '^HEARTBEAT_CMD=' "$conf" || printf 'HEARTBEAT_CMD=bash %s/bin/fleet --instance %s heartbeat\n' "$FLEET_KIT_DIR" "$FLEET_REPO" >>"$conf"
 # Nothing to supervise, but an unreadable registry is what paused the monsters (or an open alert needs
 # resolving): run the tick anyway, for the alert.
