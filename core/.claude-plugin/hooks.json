@@ -59,6 +59,14 @@
         ]
       },
       {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/fleet-inbox.mjs\""
+          }
+        ]
+      },
+      {
         "matcher": "compact",
         "hooks": [
           {

@@ -487,6 +487,7 @@ rm -f "$INST/jobs/launchd/broken.plist.tmpl"
 mv "$INST/fleet/supervisor.conf.tmpl" "$T/sup.tmpl"
 run fleet install-jobs --dry-run
 has "no supervisor conf → no supervisor job" "$OUT" "skipped: com.acme.fleet.fleet-supervisor (no fleet/supervisor.conf.tmpl)"
+has "single-fleet mode → no relay job" "$OUT" "skipped: com.acme.fleet.fleet-relay (single-fleet mode"
 mv "$T/sup.tmpl" "$INST/fleet/supervisor.conf.tmpl"
 run fleet install-jobs
 rc_is "install exits 0" 0
@@ -504,7 +505,7 @@ fi
 : >"$FAKE/launchctl.log"
 run fleet install-jobs --unload
 rc_is "--unload exits 0" 0
-eq "--unload boots out every job" "$(grep -c '^launchctl bootout' "$FAKE/launchctl.log")" 3
+eq "--unload boots out every job" "$(grep -c '^launchctl bootout' "$FAKE/launchctl.log")" 4
 
 echo "== H. restart: status parsing, BEHIND, cycling"
 FT="$FAKE/tmux"

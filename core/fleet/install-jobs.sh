@@ -11,6 +11,8 @@
 #                     registry). When none does, a previously installed copy is booted out and its plist
 #                     removed, so a host that must not supervise monsters never does, even after a sync.
 #   gh-app-login      installed only when GH_APP_ENV is set
+#   fleet-relay       installed only in multi-fleet mode (FLEET_ID set and the federation file present);
+#                     otherwise a previously installed copy is booted out and its plist removed
 #
 # Usage: install-jobs.sh [--instance <dir>]                    # render + install + (re)load every job
 #        install-jobs.sh --dry-run                             # print what would be written; change nothing
@@ -64,6 +66,10 @@ fi
 
 fleet_host_init
 host_skip_reason() { # host_skip_reason <job> → why this HOST must not run the job ('' = no host objection)
+  if [ "$1" = fleet-relay ]; then # a relay left over from multi-fleet mode must not keep polling
+    { [ -n "$FLEET_ID" ] && [ -f "$FEDERATION_FILE" ]; } || echo "single-fleet mode (no FLEET_ID or no $FEDERATION_FILE)"
+    return 0
+  fi
   [ "$1" = fleet-supervisor ] && [ -f "$FLEET_REPO/fleet/supervisor.conf.tmpl" ] || return 0
   local all
   all="$(fleet_ledger_sessions)"
@@ -85,6 +91,7 @@ needs_of() { # needs_of <job> → commands the job runs that must resolve on its
       if [ -n "${GH_APP_ENV:-}" ] || { [ -n "$FLEET_ID" ] && [ -f "$FEDERATION_FILE" ]; }; then node=" node"; fi
       echo "tmux gh jq git claude$node" ;;
     gh-app-login) echo "node gh git" ;;
+    fleet-relay) echo "node gh tmux jq" ;;
   esac
 }
 

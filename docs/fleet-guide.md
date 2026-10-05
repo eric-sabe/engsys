@@ -87,6 +87,8 @@ runs them for you from an **instance repo** (section 4):
 | `fleet launch [<name>]` | render templates and start missing sessions |
 | `fleet supervise` | one supervisor tick (what the launchd job runs) |
 | `fleet install-jobs` | render and (re)load the launchd jobs |
+| `fleet msg send\|inbox` | send a cross-fleet message; print a session's undelivered ones (multi-fleet, § 6.10) |
+| `fleet relay` | one poll of the cross-fleet relay (what the `fleet-relay` job runs) |
 | `fleet init` | scaffold a new instance repo (`engsys fleet init`) |
 
 Sync and restart are deliberately separate. Sync changes what is *installed*; running sessions keep
@@ -584,10 +586,11 @@ fleet install-jobs --dry-run      # print what would be written
 fleet install-jobs
 ```
 
-Two jobs, both rendered from `core/fleet/jobs/launchd/*.plist.tmpl` with the label
+Three jobs, all rendered from `core/fleet/jobs/launchd/*.plist.tmpl` with the label
 `com.<org>.fleet.<job>`: **`fleet-supervisor`** (every 5 minutes; installed only when
-`fleet/supervisor.conf.tmpl` exists) and **`gh-app-login`** (every 30 minutes; installed only when
-`GH_APP_ENV` is set). Each is `plutil -lint`ed, then booted out and bootstrapped, so there are never two
+`fleet/supervisor.conf.tmpl` exists), **`gh-app-login`** (every 30 minutes; installed only when
+`GH_APP_ENV` is set) and **`fleet-relay`** (every 60 seconds; installed only in multi-fleet mode, with
+`FLEET_ID` set and a federation file, § 6.10; otherwise a loaded copy is booted out). Each is `plutil -lint`ed, then booted out and bootstrapped, so there are never two
 copies. A same-named file in the instance's `jobs/launchd/` overrides the default, and you can add jobs
 (for example an `az-sp-login` refresh). `--only <job>` acts on one; `--unload` boots everything out.
 Logs are in `~/Library/Logs/<org>-fleet/`.
@@ -743,6 +746,26 @@ field takes either form, and Merge Monster nudges only addresses in its own flee
 pin repo. Its TODO comments mark what to fill in: the fleet's fields, `operators_team` (or
 `operators`), and each role's `ledger` once the setup scripts print the ledger numbers. On an existing
 instance, add `FLEET_ID` and the file by hand.
+
+**Cross-fleet messages.** Sessions in the same fleet use `SendMessage`. A message to a session in
+another fleet is a GitHub comment carrying a `fleet-msg` header, which the other fleet's relay picks up
+(design: [`multi-fleet.md`](multi-fleet.md) § 4):
+
+```bash
+fleet msg send --to bob:acme-build --re acme/app#412 --body-file tmp/bounce.md
+fleet msg inbox acme-build              # undelivered messages for a session; --mark-read marks them
+fleet relay                              # one poll by hand (the fleet-relay job runs it every minute)
+```
+
+`send` posts on the `--re` PR or issue, or on the target fleet's `status_issue` when there is no
+`--re`, as this host's GitHub identity. The receiving relay accepts it only when that identity is the
+sending fleet's App (`github_app` in the registry), so post with the fleet's App, not a personal login.
+`--to` naming your own fleet exits 3 with `same fleet: use SendMessage to <session>`. The relay records
+each accepted message in `<instance>/.fleet/inbox/<session>.jsonl` and types one line into that
+session's tmux window: who sent it, which PR or issue, and the comment URL, never the message text. A
+session that was not running sees its waiting messages at startup through the engsys plugin's
+session-start hook. `fleet status` prints the relay's last poll and any undelivered messages; its log
+is `~/Library/Logs/<org>-fleet/fleet-relay.log`, one line per accepted, rejected or delivered message.
 
 The `FLEET_ID` in `fleet.conf` is the one `fleet notify` prefixes posts with. A `FLEET_ID` in the
 Slack env file is then unnecessary; if both are set and differ, `fleet notify` warns and uses

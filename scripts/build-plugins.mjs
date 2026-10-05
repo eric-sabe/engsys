@@ -97,6 +97,9 @@ out.set('core/.claude-plugin/hooks.json', json({
     ],
     SessionStart: [
       { hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/engsys-context.mjs"' }] },
+      // Cross-fleet inbox (engsys#77): a fleet session sees the messages the relay held while it was down.
+      // A no-op outside a multi-fleet session (needs FLEET_INBOX_DIR and ENGSYS_SESSION).
+      { hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/fleet-inbox.mjs"' }] },
       { matcher: 'compact', hooks: [{ type: 'command', command: 'bash "${CLAUDE_PLUGIN_ROOT}/templates/post-compact-reground.sh.tmpl"' }] },
       { matcher: 'clear|resume', hooks: [{ type: 'command', command: 'bash "${CLAUDE_PLUGIN_ROOT}/templates/post-clear-reground.sh.tmpl"' }] },
     ],

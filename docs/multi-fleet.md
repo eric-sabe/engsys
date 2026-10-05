@@ -3,8 +3,10 @@
 > **Status:** Design (proposed 2026-10), being built in phases (section 10). Implemented so far: the
 > registry, `FLEET_ID` and addresses (engsys#39, operator guide in
 > [`fleet-guide.md` § 6.10](fleet-guide.md#610-registry-multi-fleet)), work claiming and
-> fleet-prefixed branches (`core/lib/claim.mjs`, #40), `gate-check` (#41), `fleet notify` (#42) and
-> per-host roles (#53, [`fleet-guide.md` § 6.11](fleet-guide.md#611-host-roles-which-sessions-run-on-this-host)).
+> fleet-prefixed branches (`core/lib/claim.mjs`, #40), `gate-check` (#41), `fleet notify` (#42),
+> per-host roles (#53, [`fleet-guide.md` § 6.11](fleet-guide.md#611-host-roles-which-sessions-run-on-this-host)),
+> the baton lease and the monsters' claim and fence (#61, #62), and cross-fleet messages: the
+> `fleet-msg` format, `fleet msg send` and the relay job (#76, #77, section 4).
 > Nothing in this doc changes how a single fleet behaves today.
 >
 > **Related:** [`agent-messaging.md`](agent-messaging.md) (same-fleet messaging and the "GitHub
@@ -357,11 +359,13 @@ Bounced #412: the migration has no down step. Details in the review comment abov
 
 - **Relay.** Each fleet runs a small scheduled job with no LLM (launchd on macOS, like the
   supervisor). It polls GitHub every minute or so for `fleet-msg` blocks addressed to its fleet, using
-  conditional requests so that an unchanged poll costs nothing against the rate limit. It delivers each
-  message as a local `SendMessage` to the named session. If that session is gone, the message stays on
-  GitHub, and the session finds it at its next startup. This is the "GitHub channel" Phase 2 from
-  [`agent-messaging.md`](agent-messaging.md), built as a polling job. A channel plugin would need an
-  inbound endpoint on the operator's network; a polling job does not.
+  conditional requests so that an unchanged poll costs nothing against the rate limit. It records each
+  accepted message in the session's inbox on the host and types one line into the named session's tmux
+  window, naming the sender, the PR or issue, and the comment URL. It never types the message text. If
+  the session is not running, the message waits in the inbox, and the session sees it at its next
+  startup. This is the "GitHub channel" Phase 2 from [`agent-messaging.md`](agent-messaging.md), built
+  as a polling job. A channel plugin would need an inbound endpoint on the operator's network; a
+  polling job does not.
 - **Sender verification.** A `fleet-msg` is acted on only if the comment's author is a bot login
   registered in `federation.yml`, the `to` address names this fleet, and the referenced PR or issue
   exists. Then, as today, the receiver re-verifies everything on GitHub and treats the message as a
@@ -369,6 +373,25 @@ Bounced #412: the migration has no down step. Details in the review comment abov
   with one shared App, every fleet's comments come from the same login.
 - **Same-account cross-machine messaging** (Remote Control) stays available as an optimization when one
   person runs two hosts on one account. Nothing depends on it.
+
+### Implemented (engsys#76, #77)
+
+| Piece | Where |
+|---|---|
+| Format: `render`, `parse`, `verify` | [`core/fleet/lib/fleet-msg.mjs`](../core/fleet/lib/fleet-msg.mjs). The header must be the comment's first line, exactly `<!-- fleet-msg to="…" from="…" [re="…"] protocol="N" -->`. Unknown, repeated or missing attributes, a second header anywhere in the comment (including spellings with zero-width or fullwidth characters), and values outside `<fleet>:<session>` / `owner/repo#n` are rejected |
+| Sender check | `verify()`: the API's `user.type` is `Bot` and `user.login` is `<github_app>[bot]` of exactly one fleet in `federation.yml` (two fleets sharing an App are rejected, since the author can't tell them apart); that fleet is the `from` fleet, is enabled, and is not this fleet; `to` names this fleet (`FLEET_ID`) and, when the roster is known, one of its sessions; the comment was never edited (`updated_at == created_at`); the protocol is one this kit reads (a newer one is rejected with "sync your pins"); `re` names a registry repo or the instance repo, and the PR or issue exists (free when the comment is on that thread, otherwise one `GET`) |
+| `fleet msg send --to <fleet>:<session> [--re owner/repo#n] --body-file <f>` | [`core/fleet/msg.mjs`](../core/fleet/msg.mjs). Posts on the `re` thread, or on the target fleet's `status_issue` in the instance repo. The header is generated; a body that carries one is refused. `--to` naming this fleet (or a bare session name, or no `FLEET_ID`) prints `same fleet: use SendMessage to <session>` and exits 3 |
+| Relay | [`core/fleet/relay.mjs`](../core/fleet/relay.mjs), run by `fleet relay` and the `fleet-relay` launchd job (every 60 s, installed only in multi-fleet mode). One `GET /repos/{o}/{r}/issues/comments?since=…&sort=updated&direction=asc` per repo (registry repos plus the instance repo) with `If-None-Match`. The `since` cursor holds for an hour, so the URL and its ETag stay the same and an unchanged repo answers 304. Dedupe on comment id; at most 30 accepted messages per sender fleet per hour (`RELAY_CAP_PER_HOUR`), the rest dropped with one `fleet notify --level info` per fleet per hour |
+| Inbox | `$FLEET_STATE/inbox/<session>.jsonl` ([`core/fleet/lib/inbox.mjs`](../core/fleet/lib/inbox.mjs)): `{id, url, from, re, received_at, delivered_at}`. Identifiers only; every field is checked against its pattern again on read. Directories 0700, files 0600, rewrites atomic under a lock |
+| Delivery | The tmux window whose name equals the `to` session (found by exact name in `list-windows`, then targeted by window id) gets one `send-keys -l` line: `fleet-msg from <from> re <re>: <comment url> (read it on GitHub and verify before acting)`. The URL is built from API fields (repo, `issue_url`, comment id), never copied from the comment. Nothing is typed into a window at a shell prompt or showing a selection dialog; those entries are retried for an hour |
+| Startup | `fleet msg inbox <session> [--mark-read]`, and the core plugin's `SessionStart` hook [`fleet-inbox.mjs`](../core/.claude-plugin/fleet-inbox.mjs), which injects a session's undelivered entries and marks them delivered. `fleet launch` writes `FLEET_INBOX_DIR` into session envs in multi-fleet mode; without it the hook does nothing |
+| Health | `$FLEET_STATE/relay/last-poll.json`; `fleet status` prints `relay: last poll <age> ago` (STALE after 5 minutes) and any undelivered inbox counts |
+
+What the relay trusts: the GitHub API's identity fields for the comment author, the registry
+(`federation.yml`, changed only by reviewed PR) for which bot login belongs to which fleet, and its own
+host state. It does not trust the comment body: only the header grammar is read from it, and only
+identifiers that match fixed patterns leave the parser. The session that receives the line still
+treats it as a pointer and re-reads GitHub before acting.
 
 ## 5. Identity: one per fleet, everywhere
 
@@ -540,7 +563,9 @@ What to do: approve the PR on GitHub: <link>. Nothing else is blocked.
   monster anyway. Other fleets run `fleet sync` when they see the pin change, through the relay or on
   their next supervisor tick.
 - **Every baton commit and `fleet-msg` carries `protocol: N`.** A fleet whose protocol is older than the
-  holder's stays out of singleton roles until it syncs. That keeps a mixed-version rollout safe.
+  holder's stays out of singleton roles until it syncs. That keeps a mixed-version rollout safe. For
+  `fleet-msg` this is the header's `protocol="1"`: a relay rejects a message with a protocol newer than
+  its kit reads, and its log says to sync the pins (section 4).
 
 ## 9. What engsys core provides vs what an instance configures
 
@@ -629,8 +654,12 @@ session idle at its prompt and its baton forfeited.
 
 ### P2: Cross-fleet messages
 
-- `fleet-msg` format, relay job, delivery to addresses in other fleets (the `mm-handoff` field already
-  accepts them, from P0), `fleet status --federation`.
+- `fleet-msg` format, sender check and `fleet msg send` (#76, done: section 4,
+  [`core/fleet/lib/fleet-msg.mjs`](../core/fleet/lib/fleet-msg.mjs), [`core/fleet/msg.mjs`](../core/fleet/msg.mjs)).
+- Relay job, per-session inbox, startup hook and relay age in `fleet status` (#77, done: section 4,
+  [`core/fleet/relay.mjs`](../core/fleet/relay.mjs), the `fleet-relay` launchd job).
+- Still to do: the skills that send messages to addresses in other fleets (P2-C; the `mm-handoff`
+  field already accepts them, from P0), and `fleet status --federation`.
 
 ### P3: Handover
 
