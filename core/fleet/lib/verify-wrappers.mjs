@@ -14,14 +14,15 @@
 //   2. that commit must be on the default branch: compare/<commit>...<default> is `ahead` or
 //      `identical` (a tag pushed on an unmerged commit is a mismatch);
 //   3. git/trees/<commit>?recursive=1: the blob SHA of every file in that commit.
-// Each protected file in the plugin cache is hashed the way `git hash-object` does (sha1 of
-// "blob <size>\0" + content) and compared. No manifest is stored anywhere.
+// Every regular file under the install root is hashed the way `git hash-object` does (sha1 of
+// "blob <size>\0" + content) and compared with that tree. No manifest is stored anywhere.
 //
-// The protected set is a closure walked from the cached files themselves: the SEEDS below, every file
-// under SEED_DIRS (the monster skills), every script hooks.json registers, the fenced wrappers named by
-// the guard's own WRAPPERS, and everything those import or run. Each file is read once, then hashed and parsed from the same buffer. Walking the
-// local copy is sound: a file that changed what the walk reaches is itself a mismatch. So the wrapper
-// and hook lists are the release's own (engsys#86 review L4, M2), never the host checkout's.
+// The whole install root is compared (engsys#86 review N1): Claude Code loads files from fixed places
+// that nothing references (hooks/hooks.json, .mcp.json, bin/ on the Bash PATH, monitors/monitors.json,
+// settings.json, any skills/<x>/SKILL.md), so every regular file under the root must be a core/ blob of
+// the verified commit with the same content. An extra file is `unexpected`, a release file absent on disk
+// is `missing`, and a symlink anywhere is `not-a-file`. The only thing skipped is Claude Code's own
+// .in_use/ directory of PID markers at the top of the root.
 //
 // Which install is checked (engsys#86 review H2): every <plugin-id> entry of `claude plugin list
 // --json`, run in PIN_DIR, that applies there (no projectPath, or projectPath = PIN_DIR), any scope,
@@ -57,29 +58,8 @@ import { fileURLToPath } from 'node:url';
 export const PLUGIN_SUBDIR = 'core';
 const P = (rel) => `${PLUGIN_SUBDIR}/${rel}`;
 
-/**
- * Where the walk starts: the registration (plugin.json and the hooks.json it points at), the guard (its
- * WRAPPERS name the fenced wrappers), the conventions engsys-context.mjs injects at SessionStart, and the
- * lease code the wrappers run, listed as well as reached so a parser miss can't drop it.
- */
-export const SEEDS = Object.freeze([
-  P('.claude-plugin/plugin.json'),
-  P('.claude-plugin/hooks.json'),
-  P('.claude-plugin/singleton-write-guard.mjs'),
-  P('templates/CLAUDE.md.tmpl'),
-  P('lib/lease/baton.mjs'),
-  P('lib/lease/github-backend.mjs'),
-  P('fleet/identity/gh-app-token.mjs'),
-  P('fleet/lib/federation.mjs'),
-]);
-/**
- * Directories protected whole: the two monster skills. The guard lets a monster run its own skill scripts
- * by path, and it can't see what a script does inside, so every script there (mm-watch.sh,
- * mm-snapshot.sh, gate-check.sh, ...) is as trusted as a fenced wrapper, and SKILL.md is the monster's
- * protocol. A file in the release's copy of these directories that is missing locally is a mismatch too.
- */
-export const SEED_DIRS = Object.freeze([P('skills/merge-monster/'), P('skills/maintenance-monster/')]);
-const GUARD = P('.claude-plugin/singleton-write-guard.mjs');
+/** Claude Code's PID-marker directory at the top of an install root: written by Claude Code, never loaded. */
+export const IN_USE = '.in_use';
 
 export const TAG_RE = /^v\d+\.\d+\.\d+$/;
 const REPO_RE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
@@ -96,77 +76,30 @@ export function cachePath(root, repoPath) {
   return path.join(root, repoPath.slice(PLUGIN_SUBDIR.length + 1));
 }
 
-/** The fenced wrappers named in the guard's source: `export const WRAPPERS = new Set([...])`. */
-export function parseWrappers(src) {
-  const m = String(src).match(/export const WRAPPERS = new Set\(\[([\s\S]*?)\]\)/);
-  return m ? [...m[1].matchAll(/'([^']+)'|"([^"]+)"/g)].map((x) => x[1] ?? x[2]) : [];
-}
-
-/** Repo paths a protected file reaches: hook registrations, wrappers, imports and exec'd scripts. */
-export function refsOf(repoPath, src) {
-  const s = String(src);
-  const dir = path.posix.dirname(repoPath);
-  const out = [];
-  const rel = (r) => out.push(path.posix.normalize(path.posix.join(dir, r)));
-  const fromRoot = (r) => out.push(path.posix.normalize(P(r)));
-  if (repoPath.endsWith('/hooks.json')) {
-    for (const m of s.matchAll(/\$\{CLAUDE_PLUGIN_ROOT\}\/([A-Za-z0-9_./-]+)/g)) fromRoot(m[1]);
-  } else if (repoPath.endsWith('/plugin.json')) {
-    for (const m of s.matchAll(/"\.\/([A-Za-z0-9_./-]+)"/g)) fromRoot(m[1]);
-  } else if (repoPath.endsWith('.mjs') || repoPath.endsWith('.js')) {
-    if (repoPath === GUARD) for (const w of parseWrappers(s)) fromRoot(`skills/${w}`);
-    for (const m of s.matchAll(/(?:from\s+|import\(\s*)['"](\.{1,2}\/[^'"]+)['"]/g)) rel(m[1]);
-    for (const m of s.matchAll(/join\(HERE,\s*((?:['"][^'"]+['"],?\s*)+)\)/g)) {
-      rel([...m[1].matchAll(/['"]([^'"]+)['"]/g)].map((x) => x[1]).join('/'));
-    }
-  } else if (repoPath.endsWith('.sh') || repoPath.endsWith('.tmpl')) {
-    for (const m of s.matchAll(/(?:\$here|\$\(dirname "\$\{BASH_SOURCE\[0\]\}"\))\/([A-Za-z0-9_./-]+\.(?:sh|mjs))/g)) rel(m[1]);
-    // `$<any script-dir variable>/../../../lib/x.mjs`: a relative climb is relative to the script's dir.
-    for (const m of s.matchAll(/\/((?:\.\.\/)+[A-Za-z0-9_./-]+\.(?:sh|mjs))/g)) rel(m[1]);
-  }
-  return out.filter((p) => p.startsWith(`${PLUGIN_SUBDIR}/`));
-}
-
 /**
- * Walk the protected closure under one install root. → { [repoPath]: sha | null | 'not-a-file' }
- * null = absent; 'not-a-file' = a symlink, directory, anything but a regular file, or a file reached
- * through a symlinked directory (a symlink could be repointed after the check, so it never passes).
+ * Every entry under one install root. → { [repoPath]: sha | 'not-a-file' }. A symlink (to a file or a
+ * directory) or anything else that isn't a regular file or a real directory is 'not-a-file' and is not
+ * followed: a symlink could be repointed after the check. Only <root>/.in_use/ is skipped.
  */
-export function walk(root, seeds = SEEDS, dirs = SEED_DIRS) {
-  let realRoot = root;
-  try { realRoot = fs.realpathSync(root); } catch { /* missing root: every file reads as absent */ }
+export function scanRoot(root) {
   const out = {};
-  const queue = [...seeds];
-  const list = (repoDir) => { // every entry under a seed directory, as repo paths (a symlinked entry is not followed)
-    let ents;
-    try { ents = fs.readdirSync(cachePath(root, repoDir), { withFileTypes: true }); } catch { return; }
-    for (const e of ents) {
-      const p = `${repoDir}${e.name}`;
-      if (e.isDirectory()) list(`${p}/`);
-      else queue.push(p);
+  const visit = (absDir, relDir) => {
+    for (const e of fs.readdirSync(absDir, { withFileTypes: true })) {
+      if (relDir === '' && e.name === IN_USE && e.isDirectory()) continue;
+      const abs = path.join(absDir, e.name);
+      const rel = `${relDir}${e.name}`;
+      if (e.isDirectory()) visit(abs, `${rel}/`);
+      else if (e.isFile()) out[`${PLUGIN_SUBDIR}/${rel}`] = blobSha(fs.readFileSync(abs));
+      else out[`${PLUGIN_SUBDIR}/${rel}`] = 'not-a-file';
     }
   };
-  for (const d of dirs) list(d);
-  while (queue.length) {
-    const p = queue.shift();
-    if (p in out) continue;
-    const abs = cachePath(root, p);
-    let st;
-    try { st = fs.lstatSync(abs); } catch (e) {
-      if (e && e.code === 'ENOENT') { out[p] = null; continue; }
-      throw e;
-    }
-    if (!st.isFile() || fs.realpathSync(abs) !== cachePath(realRoot, p)) { out[p] = 'not-a-file'; continue; }
-    const buf = fs.readFileSync(abs);
-    out[p] = blobSha(buf);
-    queue.push(...refsOf(p, buf));
-  }
+  visit(root, '');
   return out;
 }
 
-/** Walk every root. → { [root]: walk(root) } */
-export function localState(roots, seeds = SEEDS, dirs = SEED_DIRS) {
-  return Object.fromEntries(roots.map((r) => [r, walk(r, seeds, dirs)]));
+/** Scan every root. → { [root]: scanRoot(root) } */
+export function localState(roots) {
+  return Object.fromEntries(roots.map((r) => [r, scanRoot(r)]));
 }
 
 /** Parse a git trees API response into Map<path, blob sha>. Throws an Unverified on a bad or truncated tree. */
@@ -181,22 +114,20 @@ export function parseTree(json) {
 }
 
 /**
- * Compare local hashes to the release tree. → [{ root, path, kind, have }] for every difference:
- *   modified (different bytes) | missing (in the release, not on disk) | unexpected (on disk, not in the
- *   release) | not-a-file. A file in neither (a reference the release doesn't have either) is fine.
+ * Compare each install root with the release's core/ tree. → [{ root, path, kind, have }] for every
+ * difference: modified (different bytes) | missing (in the release, not on disk) | unexpected (on disk,
+ * not in the release) | not-a-file (a symlink or other non-regular entry).
  */
-export function compare(tree, local, dirs = SEED_DIRS) {
+export function compare(tree, local) {
   const diffs = [];
   for (const [root, m] of Object.entries(local)) {
     for (const p of tree.keys()) {
-      if (!(p in m) && dirs.some((d) => p.startsWith(d))) diffs.push({ root, path: p, kind: 'missing', have: '-' });
+      if (p.startsWith(`${PLUGIN_SUBDIR}/`) && !(p in m)) diffs.push({ root, path: p, kind: 'missing', have: '-' });
     }
     for (const [p, have] of Object.entries(m)) {
       const want = tree.get(p) ?? null;
       if (have === 'not-a-file') diffs.push({ root, path: p, kind: 'not-a-file', have });
-      else if (want === null && have === null) continue;
       else if (want === null) diffs.push({ root, path: p, kind: 'unexpected', have });
-      else if (have === null) diffs.push({ root, path: p, kind: 'missing', have: '-' });
       else if (want !== have) diffs.push({ root, path: p, kind: 'modified', have });
     }
   }

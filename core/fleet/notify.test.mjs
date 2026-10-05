@@ -9,7 +9,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import {
-  apiBase, composeText, incidentSlug, mentionFor, missingSlackConfig, parseArgs, parseEnvFile,
+  apiBase, composeText, escapeSlack, incidentSlug, mentionFor, missingSlackConfig, parseArgs, parseEnvFile,
   resolveFleetId, validateArgs,
 } from './notify.mjs';
 
@@ -355,6 +355,30 @@ test('Slack API failure falls back to the issue comment, never fails the caller'
   assert.equal(r.code, 0, r.stderr);
   assert.match(r.stderr, /Slack API call failed/);
   assert.match(fs.readFileSync(log, 'utf8'), /issue comment 7 -R acme\/app --body/);
+});
+
+test('composeText escapes the caller text for Slack, not the mention or the link (engsys#86)', () => {
+  assert.equal(escapeSlack('a & <b> c'), 'a &amp; &lt;b&gt; c');
+  const t = composeText({ level: 'alert', text: 'file <https://evil|reinstall guide> & <!here>', re: 'https://x/3?a=1&b=2', fleetId: 'alice', mention: '<!subteam^S1>' });
+  assert.match(t, /<!subteam\^S1>/);
+  assert.match(t, /file &lt;https:\/\/evil\|reinstall guide&gt; &amp; &lt;!here&gt;/);
+  assert.doesNotMatch(t, /<https:\/\/evil/);
+  assert.match(t, /GitHub: https:\/\/x\/3\?a=1&b=2$/);
+});
+
+test('--require-delivery: exit 1 when nothing was delivered, 0 when the fallback posted', async () => {
+  let r = await run(['--level', 'alert', '--require-delivery', 'must go out'], { env: {} });
+  assert.equal(r.code, 1, r.stderr);
+  const fakeBin = path.join(TMP, 'fakebin-require');
+  fs.mkdirSync(fakeBin, { recursive: true });
+  fs.writeFileSync(path.join(fakeBin, 'gh'), '#!/usr/bin/env bash\nexit 1\n', { mode: 0o755 });
+  r = await run(['--level', 'alert', '--require-delivery', 'must go out'], { env: { NOTIFY_FALLBACK_ISSUE: 'acme/app#5' }, fakeBin });
+  assert.equal(r.code, 1, 'the fallback comment failed too');
+  fs.writeFileSync(path.join(fakeBin, 'gh'), '#!/usr/bin/env bash\ncat >/dev/null || true\n', { mode: 0o755 });
+  r = await run(['--level', 'alert', '--require-delivery', 'must go out'], { env: { NOTIFY_FALLBACK_ISSUE: 'acme/app#5' }, fakeBin });
+  assert.equal(r.code, 0, r.stderr);
+  r = await run(['--level', 'alert', 'no flag'], { env: {} });
+  assert.equal(r.code, 0, 'without the flag notify still never fails the caller');
 });
 
 test('incomplete SLACK_ENV (missing a required key) is treated as unconfigured', async () => {

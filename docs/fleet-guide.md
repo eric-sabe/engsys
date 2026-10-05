@@ -1006,14 +1006,14 @@ the blob in that tree. Owner, repo and tag come from the engsys pin in the pin r
 `.claude/settings.json`, the same source `fleet sync` uses, and the pin must be a release tag (`vX.Y.Z`).
 No hash list is kept on the host or in the instance repo, because the sessions can write both.
 
-**What is protected.** The set is walked from the plugin's own files (`core/fleet/lib/verify-wrappers.mjs`):
-`plugin.json` and the `hooks.json` it points at, every script `hooks.json` registers (the guard,
-`approve-own-scripts.mjs`, `engsys-context.mjs`, `handback-guard.mjs`, the reground templates), the
-wrappers the guard's own `WRAPPERS` names, the lease code they run (`baton.mjs`, `github-backend.mjs`) and
-everything those import or execute. The `merge-monster` and `maintenance-monster` skill directories are
-protected whole: the guard lets a monster run its own skill scripts and can't see inside them, so every
-script there is as trusted as a wrapper, and `SKILL.md` is the monster's protocol. Walking the release's copy means a new hook or wrapper in a release
-is covered without changing the verifier. `fleet verify` prints the count of files it checked.
+**What is protected: the whole install root.** Every regular file under the install directory must be a
+`core/` file of the verified commit, with the same content. An extra file anywhere is a mismatch, and so is
+a release file that is missing or a symlink. That matters because Claude Code loads files from fixed
+places that nothing references: a planted `hooks/hooks.json` (merged with the plugin's hooks), `.mcp.json`,
+`bin/` (put on the Bash tool's PATH), `monitors/monitors.json`, `settings.json` or `skills/<x>/SKILL.md`
+would each get past the guard while every referenced file still matched. The only thing skipped is Claude
+Code's own `.in_use/` directory of PID markers at the top of the install root. On a healthy host the
+install holds exactly the release's `core/` files (231 at v1.11.1), so `fleet verify` reports that count.
 
 **Which install.** It runs `claude plugin list --json` in `PIN_DIR`, where the sessions start, and looks at
 every `engsys@<marketplace>` entry that applies there (user scope, or a project entry for `PIN_DIR`),
@@ -1034,8 +1034,10 @@ from a tampered file. A monster can't merge without GitHub anyway, and the super
 tick. The mismatch alert repeats when the set of differing files changes.
 
 **The escape hatch** is typed by a person: `fleet launch <name> --skip-verify`, from an interactive
-terminal only. It prints a warning and posts an alert (`wrapper-integrity-skipped`). No config file or
-environment variable turns it on, and the supervisor never uses it.
+terminal only. It prints a warning and posts an alert (`wrapper-integrity-skipped`); if the alert can't
+be delivered (to Slack or the fallback issue), the launch is refused. No config file or environment
+variable turns it on, and the supervisor never uses it. Alert text is escaped for Slack, so a file name
+in an alert can't turn into a link or a mention.
 
 **A forced engsys ref.** When `ENGSYS_REF` is overridden (in `fleet.local.conf` or the environment, the
 emergency rollback path) and differs from the pin, `fleet verify` says so on every run and alerts once

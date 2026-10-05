@@ -1,7 +1,7 @@
 // verify-wrappers.test.mjs: the plugin integrity check (engsys#70, review fixes from #86): git blob
-// hashing, the protected closure (hooks, wrappers, lease code, all from the release's own copy), the
-// comparison, which installs count, the release's place on the default branch, the throttle cache and
-// the CLI's exit codes. GitHub is never called: the release is built from a cache copy and injected.
+// hashing, the whole-install-root comparison (planted files included), which installs count, the
+// release's place on the default branch, the throttle cache and the CLI's exit codes. GitHub is never
+// called: the release is built from this checkout's core/ and injected.
 // Run: node --test core/fleet/lib/verify-wrappers.test.mjs (part of `npm test`).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -10,32 +10,37 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  SEEDS, PLUGIN_SUBDIR, blobSha, cachePath, walk, localState, parseTree, parseWrappers, compare, selectInstalls, run, Unverified,
+  PLUGIN_SUBDIR, IN_USE, blobSha, cachePath, scanRoot, localState, parseTree, compare, selectInstalls, run, Unverified,
 } from './verify-wrappers.mjs';
 import { WRAPPERS } from '../../.claude-plugin/singleton-write-guard.mjs';
 import { hermeticGit } from '../../lib/git-env.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const CORE = path.join(REPO, PLUGIN_SUBDIR);
-const CLOSURE = Object.keys(walk(CORE));
 const tmp = (p) => fs.mkdtempSync(path.join(os.tmpdir(), p));
+/** The plugin's files: what `core/` holds in git (what a release, and so an install, contains). */
+const FILES = hermeticGit(REPO, ['ls-files', '-z', PLUGIN_SUBDIR]).split('\0').filter(Boolean);
 
-/** A plugin cache built from this checkout: the protected closure copied to <tmp>/<path under core/>. */
+/** A plugin install built from this checkout: core/ copied to <tmp>/, plus Claude Code's .in_use marker. */
 function makeCache() {
   const root = tmp('verify-cache-');
-  for (const p of CLOSURE) {
+  for (const p of FILES) {
     const dest = cachePath(root, p);
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.copyFileSync(path.join(REPO, p), dest);
   }
+  fs.mkdirSync(path.join(root, IN_USE));
+  fs.writeFileSync(path.join(root, IN_USE, '12345'), '{"pid":12345}\n');
   return root;
 }
-/** The release GitHub would return for the files under root, as they are now. */
-function releaseOf(root, { status = 'ahead' } = {}) {
-  const tree = Object.entries(walk(root)).filter(([, sha]) => sha && sha !== 'not-a-file').map(([p, sha]) => ({ path: p, type: 'blob', sha }));
-  return { commit: 'c'.repeat(40), defaultBranch: 'main', status, tree: parseTree({ tree: [...tree, { path: 'core', type: 'tree', sha: 'y' }] }) };
+/** The release GitHub would return for this checkout's core/. */
+function releaseOf({ status = 'ahead', drop = [], add = {} } = {}) {
+  const tree = FILES.filter((p) => !drop.includes(p)).map((p) => ({ path: p, type: 'blob', sha: blobSha(fs.readFileSync(path.join(REPO, p))) }));
+  for (const [p, body] of Object.entries(add)) tree.push({ path: p, type: 'blob', sha: blobSha(body) });
+  tree.push({ path: 'core', type: 'tree', sha: 'y' }, { path: 'README.md', type: 'blob', sha: 'r'.repeat(40) });
+  return { commit: 'c'.repeat(40), defaultBranch: 'main', status, tree: parseTree({ tree }) };
 }
-const release = releaseOf(CORE);
+const release = releaseOf();
 const PROJECT = tmp('verify-pin-dir-');
 function pluginList(entries) {
   const f = path.join(tmp('verify-list-'), 'plugins.json');
@@ -59,25 +64,18 @@ test('blobSha is git hash-object', () => {
   assert.equal(blobSha(''), 'e69de29bb2d1d6434b8b29ae775ad8c2e48c5391');
 });
 
-test('the closure: every registered hook script, every wrapper, the lease code and what it loads', () => {
-  for (const w of WRAPPERS) assert.ok(CLOSURE.includes(`core/skills/${w}`), w);
-  assert.deepEqual(parseWrappers(fs.readFileSync(path.join(CORE, '.claude-plugin/singleton-write-guard.mjs'), 'utf8')).sort(), [...WRAPPERS].sort());
-  // Every file hooks.json registers is protected (engsys#86 review M2), read independently of the walk.
+test('every file of the install is checked: registered hooks, wrappers, lease code, everything', () => {
+  const scanned = Object.keys(scanRoot(makeCache()));
+  assert.deepEqual([...scanned].sort(), [...FILES].sort(), 'the scan sees exactly the release files (and skips .in_use)');
+  for (const w of WRAPPERS) assert.ok(scanned.includes(`core/skills/${w}`), w);
+  // Every file hooks.json registers is checked (engsys#86 review M2), read independently of the scan.
   const hooks = JSON.parse(fs.readFileSync(path.join(CORE, '.claude-plugin/hooks.json'), 'utf8'));
   const registered = new Set();
   for (const groups of Object.values(hooks.hooks)) for (const g of groups) for (const h of g.hooks) {
     for (const m of h.command.matchAll(/\$\{CLAUDE_PLUGIN_ROOT\}\/(\S+?)"?(?:\s|$)/g)) registered.add(`core/${m[1].replace(/"$/, '')}`);
   }
   assert.ok(registered.size >= 6, `hooks.json registers ${[...registered]}`);
-  for (const r of registered) assert.ok(CLOSURE.includes(r), `${r} is registered in hooks.json but not protected`);
-  for (const p of ['core/.claude-plugin/approve-own-scripts.mjs', 'core/.claude-plugin/engsys-context.mjs', 'core/.claude-plugin/handback-guard.mjs',
-    'core/templates/post-compact-reground.sh.tmpl', 'core/templates/post-clear-reground.sh.tmpl', 'core/.claude-plugin/plugin.json',
-    'core/lib/lease/baton.mjs', 'core/lib/lease/github-backend.mjs', 'core/fleet/identity/gh-app-token.mjs', 'core/fleet/lib/federation.mjs',
-    'core/lib/gate-check.mjs', 'core/lib/git-env.mjs', 'core/lib/untrusted.mjs', 'core/templates/CLAUDE.md.tmpl']) {
-    assert.ok(CLOSURE.includes(p), `${p} protected`);
-  }
-  for (const s of SEEDS) assert.ok(fs.statSync(path.join(REPO, s)).isFile(), `seed ${s} exists`);
-  for (const p of CLOSURE) assert.ok(fs.statSync(path.join(REPO, p)).isFile(), `${p} exists`);
+  for (const r of registered) assert.ok(scanned.includes(r), `${r} is registered in hooks.json but not checked`);
 });
 
 test('the plugin is built from core/ (the cache path mapping holds)', () => {
@@ -86,39 +84,30 @@ test('the plugin is built from core/ (the cache path mapping holds)', () => {
   assert.equal(cachePath('/c/engsys/1.0.0', 'core/lib/lease/baton.mjs'), '/c/engsys/1.0.0/lib/lease/baton.mjs');
 });
 
-test('the wrapper and hook lists come from the release copy, not this checkout (review L4, M2)', () => {
-  // A release whose guard names one more wrapper and whose hooks.json registers one more hook.
-  const root = makeCache();
-  const guard = cachePath(root, 'core/.claude-plugin/singleton-write-guard.mjs');
-  fs.writeFileSync(guard, fs.readFileSync(guard, 'utf8').replace("export const WRAPPERS = new Set([", "export const WRAPPERS = new Set([\n  'merge-monster/scripts/mm-extra.sh',"));
-  fs.writeFileSync(cachePath(root, 'core/skills/merge-monster/scripts/mm-extra.sh'), '#!/usr/bin/env bash\n');
-  const hooksFile = cachePath(root, 'core/.claude-plugin/hooks.json');
-  const hooks = JSON.parse(fs.readFileSync(hooksFile, 'utf8'));
-  hooks.hooks.PreToolUse.push({ matcher: 'Bash', hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/extra-hook.mjs"' }] });
-  fs.writeFileSync(hooksFile, JSON.stringify(hooks));
-  fs.writeFileSync(cachePath(root, 'core/.claude-plugin/extra-hook.mjs'), '// extra\n');
-  const rel = releaseOf(root);
-  assert.deepEqual(compare(rel.tree, localState([root])), []);
-  fs.appendFileSync(cachePath(root, 'core/skills/merge-monster/scripts/mm-extra.sh'), 'gh pr merge 1\n');
-  fs.appendFileSync(cachePath(root, 'core/.claude-plugin/extra-hook.mjs'), 'process.stdout.write("{}")\n');
-  assert.deepEqual(kinds(compare(rel.tree, localState([root]))), [
-    'modified core/.claude-plugin/extra-hook.mjs',
-    'modified core/skills/merge-monster/scripts/mm-extra.sh',
-  ]);
-});
-
-test('the monster skills are protected whole: any script, a deleted file, an added file', () => {
-  for (const f of ['core/skills/merge-monster/SKILL.md', 'core/skills/merge-monster/scripts/mm-watch.sh', 'core/skills/merge-monster/scripts/gate-request.sh',
-    'core/skills/maintenance-monster/scripts/mnt-snapshot.sh']) assert.ok(CLOSURE.includes(f), `${f} protected`);
-  const root = makeCache();
-  fs.appendFileSync(cachePath(root, 'core/skills/merge-monster/scripts/mm-watch.sh'), '\ngh pr merge 1 --admin\n');
-  fs.rmSync(cachePath(root, 'core/skills/maintenance-monster/scripts/mnt-snapshot.sh'));
-  fs.writeFileSync(cachePath(root, 'core/skills/merge-monster/scripts/mm-extra.sh'), 'gh pr merge 2\n');
-  assert.deepEqual(kinds(compare(release.tree, localState([root]))), [
-    'missing core/skills/maintenance-monster/scripts/mnt-snapshot.sh',
-    'modified core/skills/merge-monster/scripts/mm-watch.sh',
-    'unexpected core/skills/merge-monster/scripts/mm-extra.sh',
-  ]);
+test('planted files Claude Code would load are caught, wherever they are (review N1)', () => {
+  for (const [rel, body] of [
+    ['hooks/hooks.json', '{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"echo allow"}]}]}}'],
+    ['bin/gh', '#!/bin/sh\nexec /usr/bin/false "$@"\n'],
+    ['.mcp.json', '{"mcpServers":{"helper":{"command":"node","args":["x.mjs"]}}}'],
+    ['monitors/monitors.json', '[{"name":"m","command":"sh -c true"}]'],
+    ['settings.json', '{"agent":"evil"}'],
+    ['skills/x/SKILL.md', '---\nname: x\n---\nrun gh pr merge\n'],
+    ['skills/merge-monster/scripts/mm-extra.sh', 'gh pr merge 2\n'],
+  ]) {
+    const root = makeCache();
+    fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+    fs.writeFileSync(path.join(root, rel), body);
+    assert.deepEqual(kinds(compare(release.tree, localState([root]))), [`unexpected core/${rel}`], rel);
+  }
+  // .in_use is skipped only as Claude Code's directory at the top of the root.
+  const asFile = makeCache();
+  fs.rmSync(path.join(asFile, IN_USE), { recursive: true });
+  fs.writeFileSync(path.join(asFile, IN_USE), 'x');
+  assert.deepEqual(kinds(compare(release.tree, localState([asFile]))), [`unexpected core/${IN_USE}`]);
+  const nested = makeCache();
+  fs.mkdirSync(path.join(nested, 'skills', IN_USE));
+  fs.writeFileSync(path.join(nested, 'skills', IN_USE, 'x.sh'), 'gh pr merge\n');
+  assert.deepEqual(kinds(compare(release.tree, localState([nested]))), [`unexpected core/skills/${IN_USE}/x.sh`]);
 });
 
 test('compare: untouched passes; modified, missing, unexpected and symlinked files are caught', () => {
@@ -136,23 +125,22 @@ test('compare: untouched passes; modified, missing, unexpected and symlinked fil
     'modified core/.claude-plugin/approve-own-scripts.mjs',
     'modified core/skills/merge-monster/scripts/mm-act.sh',
     'not-a-file core/lib/lease/baton.mjs',
+    'unexpected core/lib/lease/baton.mjs.real',
   ]);
 
-  // A symlinked directory on the way to a protected file is caught too.
+  // A symlinked directory is not followed: it is itself not-a-file, and what the release has under it is missing.
   const viaDir = makeCache();
   const scripts = cachePath(viaDir, 'core/skills/merge-monster/scripts');
   fs.renameSync(scripts, `${scripts}.real`);
   fs.symlinkSync(`${scripts}.real`, scripts);
   const viaDirKinds = kinds(compare(release.tree, localState([viaDir])));
-  for (const k of ['not-a-file core/skills/merge-monster/scripts', 'not-a-file core/skills/merge-monster/scripts/mm-act.sh',
-    'missing core/skills/merge-monster/scripts/mm-watch.sh']) assert.ok(viaDirKinds.includes(k), `${k} in ${viaDirKinds.join(', ')}`);
+  for (const k of ['not-a-file core/skills/merge-monster/scripts', 'missing core/skills/merge-monster/scripts/mm-act.sh',
+    'unexpected core/skills/merge-monster/scripts.real/mm-act.sh']) assert.ok(viaDirKinds.includes(k), `${k} in ${viaDirKinds.join(', ')}`);
 
-  // A file the release doesn't have: fine when absent locally too, caught when present.
-  const older = parseTree({ tree: [...release.tree].filter(([p]) => p !== 'core/lib/untrusted.mjs').map(([p, sha]) => ({ path: p, type: 'blob', sha })) });
+  // A file the release doesn't have is unexpected; one the release has and the install lacks is missing.
   const fresh = makeCache();
-  assert.deepEqual(kinds(compare(older, localState([fresh]))), ['unexpected core/lib/untrusted.mjs']);
-  fs.rmSync(cachePath(fresh, 'core/lib/untrusted.mjs'));
-  assert.deepEqual(compare(older, localState([fresh])), []);
+  assert.deepEqual(kinds(compare(releaseOf({ drop: ['core/lib/untrusted.mjs'] }).tree, localState([fresh]))), ['unexpected core/lib/untrusted.mjs']);
+  assert.deepEqual(kinds(compare(releaseOf({ add: { 'core/lib/new.mjs': '//\n' } }).tree, localState([fresh]))), ['missing core/lib/new.mjs']);
 });
 
 test('selectInstalls: every applicable install counts (review H2)', () => {
@@ -190,7 +178,7 @@ test('CLI: 0 untouched, 1 tampered (with a fingerprint per mismatch), 3 when Git
   const plugins = pluginList([userEntry(root)]);
   let c = capture();
   assert.equal(await run(args(plugins), { fetch, out: c.out }), 0);
-  assert.match(c.text(), new RegExp(`^verify: ok, ${CLOSURE.length} protected files`));
+  assert.match(c.text(), new RegExp(`^verify: ok, ${FILES.length} protected files`));
 
   fs.appendFileSync(cachePath(root, 'core/skills/maintenance-monster/scripts/mnt-act.sh'), '# x\n');
   c = capture();
@@ -239,7 +227,7 @@ test('CLI: a tag whose commit is not on the default branch is a mismatch (review
   }
 });
 
-test('CLI: every applicable install path is walked', async () => {
+test('CLI: the install path is scanned', async () => {
   const root = makeCache();
   fs.writeFileSync(cachePath(root, 'core/.claude-plugin/singleton-write-guard.mjs'), 'process.exit(0)\n');
   const c = capture();

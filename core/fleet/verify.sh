@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # verify.sh (`fleet verify`): do the engsys plugin files that guard the merge and maintain monsters
-# (the fenced wrappers, every hook the plugin registers and its registration, the baton lease code)
-# match the pinned engsys release on GitHub? (engsys#70; the protected closure and the comparison live
-# in lib/verify-wrappers.mjs.)
+# (the whole install root: the fenced wrappers, every hook, the lease code, and nothing planted beside
+# them) match the pinned engsys release on GitHub? (engsys#70; the comparison lives in
+# lib/verify-wrappers.mjs.)
 #
 # The release is ENGSYS_REF on ENGSYS_MARKETPLACE's repo (PIN_SETTINGS, the same source `fleet sync` and
 # `fleet pin` use), and it must be a release tag (vX.Y.Z). The files checked are the engsys installs
@@ -48,7 +48,7 @@ LATCH="$FLEET_STATE/verify-wrappers.alerted"
 UNVERIFIED_LATCH="$FLEET_STATE/verify-wrappers.unverified"
 FORCED_LATCH="$FLEET_STATE/verify-ref-forced.alerted"
 host="$(hostname -s 2>/dev/null || echo this host)"
-notify() { node "$FLEET_KIT_DIR/notify.mjs" "$@" >&2; } # a failed post leaves its latch as it was: retried next run
+notify() { node "$FLEET_KIT_DIR/notify.mjs" --require-delivery "$@" >&2; } # undelivered: its latch stays as it was, retried next run
 now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
 repo="$(fleet_pin_repo "$ENGSYS_MARKETPLACE")"

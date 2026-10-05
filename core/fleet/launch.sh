@@ -21,7 +21,8 @@
 # load matches the pinned engsys release on GitHub. Anything else, a mismatch or a check that could not
 # run, refuses a named one and leaves them out of a whole-roster launch, with one alert per incident
 # (engsys#86 review H1). Other sessions are never checked. The one way past it is typed by a person:
-# `fleet launch <name> --skip-verify`, from an interactive terminal only, which warns loudly and alerts.
+# `fleet launch <name> --skip-verify`, from an interactive terminal only, which warns loudly and alerts
+# (and refuses when the alert can't be delivered).
 # No config file or environment variable turns it on, and the supervisor never passes it.
 #
 # Usage: launch.sh [--instance <dir>]                              # every session that runs on this host
@@ -142,7 +143,9 @@ if [ -n "$name" ]; then
       echo "fleet: Its guard hook and fenced wrappers are not confirmed to match $ENGSYS_REF. The team is alerted."
       echo "fleet: ################################################################################"
     } >&2
-    node "$FLEET_KIT_DIR/notify.mjs" --level alert --incident wrapper-integrity-skipped "Plugin check skipped on $(hostname -s 2>/dev/null || echo this host): someone launched $name with --skip-verify, so its engsys plugin was not checked against $ENGSYS_REF. If that wasn't planned, please stop the session and run fleet verify." >&2 || true
+    # The alert is the control here, so the launch waits on it: no alert delivered, no launch.
+    node "$FLEET_KIT_DIR/notify.mjs" --level alert --require-delivery --incident wrapper-integrity-skipped "Plugin check skipped on $(hostname -s 2>/dev/null || echo this host): someone launched $name with --skip-verify, so its engsys plugin was not checked against $ENGSYS_REF. If that wasn't planned, please stop the session and run fleet verify." >&2 \
+      || fleet_die "not launching $name: the --skip-verify alert could not be posted (Slack and NOTIFY_FALLBACK_ISSUE both failed, above). Fix the alert path first."
   elif is_singleton "$name" && ! singleton_integrity_ok; then
     fleet_die "not launching $name: $why_held (above). Check the running sessions, fix or reinstall the plugin, then: fleet verify"
   fi
