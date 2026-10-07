@@ -101,6 +101,14 @@ status() {
     printf '%-22s %-12s %-8s %-17s %s\n' "$n" "$kind" "$st" "$when" "$behind"
   done <<<"$ROSTER"
   fleet_host_warnings
+  # the supervisor's hold on an expired Claude Code login (engsys#103; fleet-supervisor.sh header)
+  local sup_state="$FLEET_REPO/logs/fleet-supervisor" since held=""
+  if [ -f "$sup_state/auth.expired" ]; then
+    since="$(head -n 1 "$sup_state/auth.expired")"
+    since="$(node "$FLEET_KIT_DIR/../lib/operator-time.mjs" "$since" 2>/dev/null || printf '%s' "$since")"
+    [ ! -s "$sup_state/auth.held" ] || held="$(paste -sd, - <"$sup_state/auth.held" | sed 's/,/, /g')"
+    echo "auth: expired since $since. The supervisor relaunches and kills nothing until it works${held:+ (held: $held)}; run /login in any session, or claude /login"
+  fi
   if [ "$LAST_CHANGE" != 0 ]; then
     echo "last host change: $(date -r "$LAST_CHANGE" '+%Y-%m-%d %H:%M' 2>/dev/null || date -d "@$LAST_CHANGE" '+%Y-%m-%d %H:%M')  ($(tail -1 "$FLEET_STATE/sync.log" 2>/dev/null | cut -d' ' -f2-))"
   fi

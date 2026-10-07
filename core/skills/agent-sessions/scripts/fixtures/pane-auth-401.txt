@@ -1,0 +1,19 @@
+ ▐▛███▛█   Claude Code v2.1.285
+▝▜██████▀  Sonnet 5.5 · Claude API
+ ▝▝   ▝▝   /Users/acme/git/acme
+
+⚠ Remote managed settings failed to load (authentication rejected (401)) · no remote policy applied · /status for details
+
+❯ say hi
+
+⏺ Please run /login · API Error: 401 OAuth access token is invalid.
+
+✻ Churned for 1s · done 9:07 AM
+
+
+
+                                                          tmux focus-events off · add 'set -g focus-events on' to ~/.tmux.conf and reattach for focus tracking
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← 1 agent

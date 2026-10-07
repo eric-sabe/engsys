@@ -165,6 +165,27 @@ runs under launchd/cron every ~5 minutes with **no LLM in the restart path**
 | (per tick, not per session) `HOST_HEALTH_CMD` fails | | one alert through `NOTIFY_CMD` per incident, resolved once the check passes again; a failed post is retried next tick |
 | stale | **alive** | never kill; escalate once on the ledger |
 | any relaunch **fails** | | escalate once on the ledger with the launcher's error, retry each tick without commenting, comment once on recovery |
+| (per tick, not per session) a pane shows Claude Code's login error | any | hold **every** relaunch and kill nothing; one `NOTIFY_CMD --level action --incident claude-auth-expired`; resume, and resolve the alert, once the login works |
+
+**An expired Claude Code login (engsys#103).** A session whose login has expired answers its
+first prompt with `⏺ Login expired · Please run /login` and waits, while its launch command
+still exits 0. Without a check, the stale-heartbeat rows relaunch it every tick, and the
+failed-relaunch escalation never fires (on 2026-10-06 that was 501 relaunches over ~24 h, with
+no alert). So every tick the supervisor reads every live, idle pane in the tmux session, and
+after each relaunch it watches the new pane for up to `AUTH_CHECK_WAIT_SEC` (default 45). A
+pane counts when its last message line is one of Claude Code's own login error lines
+(`CLAUDE_AUTH_ERRORS` in the script, the one list), matched from the start of the message, so a
+reply that quotes "/login" does not count. The pane is the signal of record, because
+`claude auth status` can report a login the API rejects. Before holding, the supervisor makes
+one test request (`claude -p` with a one-line Haiku prompt, from an empty directory, with no
+plugins or hooks; `AUTH_PROBE=off` turns it off): if that request succeeds, the error on screen
+is old, and that pane is ignored until it shows something else. Otherwise relaunches are held for
+every session, nothing is killed, one action-level alert goes out, the stale-but-alive ledger
+comments wait, and the status-issue heartbeat reads `auth: expired since <ISO>` plus a line for
+people. The hold ends on the first tick where a pane that showed the error answers normally
+(including `⎿ Login successful` after `/login`), or where the test request succeeds. The alert is
+then resolved and the table runs as usual on that same tick, so each held session gets its one
+relaunch. `fleet status` prints `auth: expired since <time>` while the hold is on.
 
 **Moved ledger targets.** The supervisor records, per session, the ledger target it
 last launched it against (`logs/fleet-supervisor/<name>.target`). When the

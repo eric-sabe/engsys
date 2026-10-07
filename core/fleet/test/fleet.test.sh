@@ -68,7 +68,8 @@ for a in "$@"; do
   prev="$a"; last="$a"
 done
 w="${t#*:}"
-add_window() { grep -Fxq "$1" "$F/windows" || echo "$1" >>"$F/windows"; echo node >"$F/cmd-$1"; }
+# a launched session shows its first reply; the supervisor reads it for a login error (engsys#103)
+add_window() { grep -Fxq "$1" "$F/windows" || echo "$1" >>"$F/windows"; echo node >"$F/cmd-$1"; echo "⏺ Reading the ledger." >"$F/cap-$1"; }
 case "$sub" in
   list-windows) cat "$F/windows" ;;
   list-panes)
@@ -535,6 +536,15 @@ matches "interactive, busy (esc to interrupt) → BEHIND" "$OUT" '^acme-build +i
 matches "no window → missing" "$OUT" '^acme-security +monster +missing +- +-$'
 matches "shell in the foreground → exited" "$OUT" '^acme-rel +interactive +exited +- +-$'
 has "last host change shown from sync.log" "$OUT" "last host change:"
+hasnt "no login hold → no auth line" "$OUT" "auth: expired"
+# the supervisor holds relaunches for an expired Claude Code login (engsys#103): status says so
+mkdir -p "$INST/logs/fleet-supervisor"; printf '2026-10-06T12:44:25Z\nthe `acme-mm` window\n' >"$INST/logs/fleet-supervisor/auth.expired"
+printf 'acme-mm\nacme-rel\n' >"$INST/logs/fleet-supervisor/auth.held"
+run fleet restart --status
+has "login hold → auth: expired since <time>" "$OUT" "auth: expired since 6 Oct 12:44 UTC. The supervisor relaunches and kills nothing until it works (held: acme-mm, acme-rel); run /login in any session, or claude /login"
+run fleet status
+has "  …in \`fleet status\` too" "$OUT" "auth: expired since"
+rm -f "$INST/logs/fleet-supervisor/auth.expired" "$INST/logs/fleet-supervisor/auth.held"
 echo 1 >"$STATE/last-change"
 run fleet restart --status
 matches "started after the last change → current" "$OUT" '^acme-mm +monster +idle +[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2} +current$'
