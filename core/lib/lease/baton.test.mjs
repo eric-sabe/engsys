@@ -628,7 +628,11 @@ test("guard: --body-file refuses a hardlink in tmp/ (engsys#108 L3a)", () => {
   const cwd = sessionDir();
   linkSync(join(cwd, "secret.txt"), join(cwd, "tmp", "hl"));
   assert.throws(() => guardCommand(["fleet", "msg", "send", "--to", "bob:x", "--body-file", "tmp/hl"], { cwd }), /hardlinked file/);
-  // the original file, still linked twice, is refused too; a plain file next to it is not
+  // a file in tmp/ that also has a name elsewhere is refused under its tmp/ name too
+  writeFileSync(join(cwd, "tmp", "orig.txt"), "x\n");
+  linkSync(join(cwd, "tmp", "orig.txt"), join(cwd, "elsewhere.txt"));
+  assert.throws(() => guardCommand(["fleet", "msg", "send", "--to", "bob:x", "--body-file", "tmp/orig.txt"], { cwd }), /hardlinked file/);
+  // a plain (singly linked) file next to them is accepted
   assert.equal(guardCommand(["fleet", "msg", "send", "--to", "bob:x", "--body-file", "tmp/b.txt"], { cwd }).input, "bounced #12\n");
 });
 
