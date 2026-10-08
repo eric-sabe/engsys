@@ -32,7 +32,10 @@
 #                                 12h/24h, from federation.yml or fleet.conf); machine fields stay UTC
 #   federation validate|get|home|address|status ...
 #                                 the multi-fleet registry (federation.yml; see `fleet federation --help`)
-#   msg send --to <fleet>:<session> [--re owner/repo#n] --body-file <f> [--from <session>]
+#   msg route <address> [--repo owner/repo --role merge|maintain]
+#                                 where a nudge to <address> goes: exit 3 = same fleet (SendMessage),
+#                                 0 = another fleet (msg send)
+#   msg send --to <fleet>:<session> [--re owner/repo#n] --body-file <f|-> [--from <session>]
 #                                 post a cross-fleet message (a fleet-msg comment); exit 3 = same fleet,
 #                                 use SendMessage
 #   msg inbox <session> [--mark-read]

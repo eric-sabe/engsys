@@ -7,7 +7,7 @@
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, statSync, writeFileSync, existsSync, readdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, statSync, symlinkSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chmodSync } from "node:fs";
@@ -541,21 +541,73 @@ test("guard: fences, then runs the command; refuses everything but gh and this e
   assert.throws(() => guardCommand(["/tmp/gate-request.sh", "--repo", "o/r"]), /only this engsys/);
 });
 
+/** A session working directory with a tmp/ holding b.txt, and a file outside tmp/. */
+function sessionDir() {
+  const cwd = realpathSync(mkdtempSync(join(tmpdir(), "baton-guard-msg-")));
+  mkdirSync(join(cwd, "tmp"));
+  writeFileSync(join(cwd, "tmp", "b.txt"), "bounced #12\n");
+  writeFileSync(join(cwd, "secret.txt"), "not for posting\n");
+  return cwd;
+}
+
 test("guard: `fleet msg send` (engsys#77) runs this engsys's msg.mjs; other subcommands and other msg.mjs files are refused", () => {
   const own = fileURLToPath(new URL("../../fleet/msg.mjs", import.meta.url));
+  const cwd = sessionDir();
+  const body = join(cwd, "tmp", "b.txt");
   for (const argv of [
-    ["fleet", "msg", "send", "--to", "bob:acme-build", "--body-file", "b.txt"],
-    [own, "send", "--to", "bob:acme-build", "--body-file", "b.txt"],
-    ["node", own, "send", "--to", "bob:acme-build", "--body-file", "b.txt"],
+    ["fleet", "msg", "send", "--to", "bob:acme-build", "--body-file", "tmp/b.txt"],
+    [own, "send", "--to", "bob:acme-build", "--body-file", "tmp/b.txt"],
+    ["node", own, "send", "--to", "bob:acme-build", "--body-file", "tmp/b.txt"],
   ]) {
-    const c = guardCommand(argv);
+    const c = guardCommand(argv, { cwd });
     assert.equal(c.exe, process.execPath, argv.join(" "));
-    assert.deepEqual(c.args, [own, "send", "--to", "bob:acme-build", "--body-file", "b.txt"]);
+    assert.deepEqual(c.args, [own, "send", "--to", "bob:acme-build", "--body-file", body]);
   }
   assert.throws(() => guardCommand(["fleet", "msg", "inbox"]), /fleet msg send/);
   assert.throws(() => guardCommand(["fleet", "status"]), /gh, git push, gate-request\.sh or fleet msg send only/);
   assert.throws(() => guardCommand(["/tmp/msg.mjs", "send"]), /only this engsys's msg\.mjs/);
   assert.throws(() => guardCommand(["node", "/tmp/msg.mjs", "send"]), /only this engsys's msg\.mjs/);
+});
+
+test("guard: `fleet msg send --body-file` is confined to stdin or the session's tmp/ (engsys#78, Nyx #84 Info)", () => {
+  const own = fileURLToPath(new URL("../../fleet/msg.mjs", import.meta.url));
+  const cwd = sessionDir();
+  const send = (...rest) => guardCommand(["fleet", "msg", "send", "--to", "bob:acme-build", ...rest], { cwd });
+  // allowed: stdin, a relative or absolute path under tmp/, the --flag=value spelling
+  assert.deepEqual(send("--body-file", "-").args, [own, "send", "--to", "bob:acme-build", "--body-file", "-"]);
+  assert.equal(send("--body-file", join(cwd, "tmp", "b.txt")).args.at(-1), join(cwd, "tmp", "b.txt"));
+  assert.equal(send("--body-file=tmp/b.txt").args.at(-1), `--body-file=${join(cwd, "tmp", "b.txt")}`);
+  mkdirSync(join(cwd, "tmp", "sub"));
+  writeFileSync(join(cwd, "tmp", "sub", "c.txt"), "x\n");
+  assert.equal(send("--body-file", "tmp/sub/c.txt").args.at(-1), join(cwd, "tmp", "sub", "c.txt"));
+
+  // refused: anything outside tmp/, however it is spelled
+  symlinkSync(join(cwd, "secret.txt"), join(cwd, "tmp", "link.txt"));
+  symlinkSync(cwd, join(cwd, "tmp", "up"));
+  for (const [args, why] of [
+    [["--body-file", "secret.txt"], /outside/],
+    [["--body-file", join(cwd, "secret.txt")], /outside/],
+    [["--body-file", "tmp/../secret.txt"], /outside/],
+    [["--body-file", "tmp/sub/../../secret.txt"], /outside/],
+    [["--body-file", "/etc/hosts"], /outside/],
+    [["--body-file", "tmp/link.txt"], /outside/],              // a symlink in tmp/ pointing out
+    [["--body-file", "tmp/up/secret.txt"], /outside/],          // a directory symlink in tmp/ pointing up
+    [["--body-file=../secret.txt"], /outside|cannot resolve/],
+    [["--body-file", "tmp/missing.txt"], /cannot resolve/],
+    [["--body-file", "tmp/sub"], /not a regular file/],
+    [["--body-file", "tmp"], /outside/],
+    [["--body-file", ""], /no file named/],
+    [["--body-file"], /no file named/],
+    [["--body-file", "tmp/b.txt", "--body-file", "secret.txt"], /outside/], // every occurrence is checked
+  ]) assert.throws(() => send(...args), why, args.join(" "));
+
+  // refused: a tmp/ that is itself a symlink, or no tmp/ at all
+  const linked = realpathSync(mkdtempSync(join(tmpdir(), "baton-guard-msg-")));
+  symlinkSync(cwd, join(linked, "tmp"));
+  assert.throws(() => guardCommand(["fleet", "msg", "send", "--to", "bob:x", "--body-file", "tmp/secret.txt"], { cwd: linked }), /symlink/);
+  const bare = realpathSync(mkdtempSync(join(tmpdir(), "baton-guard-msg-")));
+  assert.throws(() => guardCommand(["fleet", "msg", "send", "--to", "bob:x", "--body-file", "tmp/b.txt"], { cwd: bare }), /does not exist/);
+  assert.equal(guardCommand(["fleet", "msg", "send", "--to", "bob:x", "--body-file", "-"], { cwd: bare }).args.at(-1), "-", "stdin needs no tmp/");
 });
 
 test("guard on a session that holds nothing runs nothing", async () => {

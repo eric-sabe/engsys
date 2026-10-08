@@ -298,8 +298,8 @@ test('withLock never deletes a lock it no longer owns', () => {
   assert.equal(fs.existsSync(path.join(d, '.lock')), false);
 });
 
-test('inboxLine: canonical identifiers only', () => {
-  assert.equal(inboxLine(ENTRY), 'from alice:acme-mm re acme/app#412: https://github.com/acme/app/issues/412#issuecomment-99');
+test('inboxLine: canonical identifiers only; the session half of `from` is labelled as the sender\'s claim (engsys#78)', () => {
+  assert.equal(inboxLine(ENTRY), 'from fleet alice (claims session acme-mm) re acme/app#412: https://github.com/acme/app/issues/412#issuecomment-99');
   assert.match(inboxLine({ ...ENTRY, re: null }), / re -: /);
 });
 
@@ -386,7 +386,7 @@ test('inbox: lists only trusted undelivered pointers with how to read them; --ma
   accept(d, 99);
   let out = sink();
   assert.equal(inbox([], { env: benv, out, err: sink() }), EXIT.OK); // session defaults to ENGSYS_SESSION
-  assert.match(out.text, /^from alice:acme-mm re acme\/app#412: https:\/\/github\.com\/acme\/app\/issues\/412#issuecomment-99\n/);
+  assert.match(out.text, /^from fleet alice \(claims session acme-mm\) re acme\/app#412: https:\/\/github\.com\/acme\/app\/issues\/412#issuecomment-99\n/);
   assert.doesNotMatch(out.text, /issuecomment-100/);
   assert.match(out.text, /msg\.mjs read <url>/);
   out = sink();

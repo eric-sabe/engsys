@@ -4,7 +4,9 @@
 #
 # Usage: mnt-act.sh guard --repo owner/name --state-dir DIR -- gh <args…>
 #        mnt-act.sh guard --repo owner/name --state-dir DIR -- <engsys-root>/skills/merge-monster/scripts/gate-request.sh <args…>
-#        mnt-act.sh guard --repo owner/name --state-dir DIR -- fleet msg send --to <fleet>:<session> [--re owner/repo#n] --body-file <f>
+#        mnt-act.sh guard --repo owner/name --state-dir DIR -- fleet msg send --to <fleet>:<session> [--re owner/repo#n] --body-file -|<tmp/ file>
+#          (route the address first: <engsys-root>/fleet/msg.mjs route <address> [--repo owner/name --role merge];
+#          exit 0 "other fleet" sends here, exit 3 is a SendMessage: engsys#78)
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 op="${1:-}"

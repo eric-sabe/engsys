@@ -331,6 +331,31 @@ test('engsys#77 M2: an unwrapped `fleet msg send` is denied in a singleton sessi
   assert.equal(denied(`bash ${MNT_ACT} guard --repo acme/app --state-dir /tmp/s -- fleet msg send --to bob:x --body-file b`, { ENGSYS_SINGLETON_ROLE: 'maintain' }), false);
 });
 
+test('engsys#78: the routed nudge passes; its cross-fleet reply goes on the PR only through the fence', () => {
+  // routing is a read: allowed unfenced in either monster
+  for (const cmd of [
+    'node /opt/engsys/core/fleet/msg.mjs route bob:acme-build',
+    'node /opt/engsys/core/fleet/msg.mjs route acme-mm --repo acme/app --role merge',
+    'fleet msg route bob:acme-build',
+  ]) {
+    assert.equal(denied(cmd), false, cmd);
+    assert.equal(denied(cmd, { ENGSYS_SINGLETON_ROLE: 'maintain' }), false, cmd);
+  }
+  // the fenced reply, body on a heredoc (the form the skills give), and the fenced PR comment
+  const reply = `${ACT} guard --repo acme/app --state-dir /tmp/s -- fleet msg send --to bob:acme-build --re acme/app#412 --body-file - <<'EOF'\nbounced #412: the migration has no down step\nEOF`;
+  assert.equal(denied(reply), false, 'MM fenced fleet-msg reply on the PR');
+  assert.equal(denied(`${MNT_ACT} guard --repo acme/app --state-dir /tmp/s -- fleet msg send --to bob:acme-mm --re acme/app#7 --body-file - <<'EOF'\nqueued fix PR #7: mm:ready\nEOF`, { ENGSYS_SINGLETON_ROLE: 'maintain' }), false, 'MNT fenced hand-off');
+  assert.equal(denied(`${ACT} guard --repo acme/app --state-dir /tmp/s -- fleet msg send --to bob:acme-build --re acme/app#412 --body-file tmp/bounce.md`), false, 'a tmp/ body file');
+  assert.equal(denied(`${ACT} guard --repo acme/app --state-dir /tmp/s -- gh pr comment 412 --body-file - <<'EOF'\nbounced\nEOF`), false, 'the fenced PR comment');
+  // the same reply unfenced, or a heredoc a shell would run, is denied
+  for (const cmd of [
+    `fleet msg send --to bob:acme-build --re acme/app#412 --body-file - <<'EOF'\nbounced\nEOF`,
+    `node /opt/engsys/core/fleet/msg.mjs send --to bob:acme-build --re acme/app#412 --body-file - <<'EOF'\nbounced\nEOF`,
+    `${ACT} guard --repo acme/app --state-dir /tmp/s -- fleet msg send --to bob:x --body-file - <<'EOF'\nx\nEOF\nfleet msg send --to bob:x --body-file /tmp/b`,
+    `bash <<'EOF'\n${ACT} guard --repo acme/app --state-dir /tmp/s -- fleet msg send --to bob:x --body-file -\nEOF`,
+  ]) assert.equal(denied(cmd), true, cmd);
+});
+
 // ------------------------------------------------------------------------------- #71 follow-ups --
 
 test('#71 L1: gh api graphql whose document is hidden behind a substitution or a variable is denied', () => {
@@ -491,7 +516,7 @@ test('#71: every command the monster skills document, and every monster script, 
         .replace(/\b(\w+)(?:\\?\|\w+)+/g, '$1') // notation: merge|squash or merge\|squash -> merge (a pipe has spaces)
         .replace(/\(([^()|]+?) \| [^()]*\)/g, '$1') // notation: (--issue N | --pr N) -> --issue N
         .replace(/gh <args…>/g, 'gh pr ready 12')
-        .replace(/<[^>]*>/g, 'x').replace(/…/g, '');
+        .replace(/<(?!<)[^<>\n]*>/g, 'x').replace(/…/g, ''); // a placeholder, never a heredoc's <<'EOF'
       const first = lex(cmd).words[0] ?? [];
       const script = first.find((w) => w.startsWith(core));
       if (!script || !fs.existsSync(script) || !fs.statSync(script).isFile()) continue;
@@ -500,6 +525,9 @@ test('#71: every command the monster skills document, and every monster script, 
     }
   }
   assert.ok(commands.length >= 15, `extracted only ${commands.length} documented commands`);
+  for (const monster of ['merge-monster', 'maintenance-monster']) {
+    assert.ok(commands.some((c) => c.includes(`${monster}/scripts/`) && / -- fleet msg send .*--body-file - <<'EOF'\n/.test(c)), `${monster}: the routed cross-fleet reply (engsys#78) is among the documented commands`);
+  }
   // Reads and local work the docs name inline (not as a full <skill-dir> command).
   commands.push(
     'gh pr view 12 --json state,headRefOid,mergeStateStatus',

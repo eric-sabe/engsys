@@ -247,7 +247,13 @@ export function pruneInbox(stateDir, session, { now = Date.now(), deliveredMs = 
   });
 }
 
-/** One inbox line for display: canonical identifiers only. */
+/**
+ * One inbox line for display: canonical identifiers only. Only the fleet half of `from` is verified (by
+ * its App); the session half is whatever the sender passed as --from, so it is labelled as a claim, the
+ * way `fleet msg read` labels it (engsys#78, Nyx's #84 review).
+ */
 export function inboxLine(entry) {
-  return `from ${entry.from} re ${entry.re ?? '-'}: ${entry.url}`;
+  const m = ADDRESS_RE.exec(entry.from);
+  const from = m ? `fleet ${m[1]} (claims session ${m[2]})` : entry.from;
+  return `from ${from} re ${entry.re ?? '-'}: ${entry.url}`;
 }

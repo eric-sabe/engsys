@@ -76,11 +76,11 @@
 // github-backend's: 0 ok, 1 refused, 2 usage, 3 error, 4 newer protocol, 5 not started (no token in
 // this session).
 
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { execFile, execFileSync, spawn as spawnProcess, spawn as spawnChild } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { hostname as osHostname } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { GIT_LOCATION_VARS } from "../git-env.mjs";
@@ -448,7 +448,7 @@ export function defaultNotify({ env = process.env, err = process.stderr } = {}) 
  *   pushConfig async (dir) => that checkout's git config as [{scope, key, value}] (pushConfigEntries)
  *   newBranchPrefixes  the prefixes a --new-branch push may create (default DEFAULT_NEW_BRANCH_PREFIXES)
  */
-export function createBaton({ lease, repo, role, holder, run = null, store, home, now = Date.now, notify = async () => false, mergeApi, spawn, sleep, prepare = null, remoteUrl = defaultRemoteUrl, pushConfig = defaultPushConfig, gitPath = pushGit, newBranchPrefixes = DEFAULT_NEW_BRANCH_PREFIXES, log = () => {} }) {
+export function createBaton({ lease, repo, role, holder, run = null, store, home, now = Date.now, notify = async () => false, mergeApi, spawn, sleep, prepare = null, remoteUrl = defaultRemoteUrl, pushConfig = defaultPushConfig, gitPath = pushGit, newBranchPrefixes = DEFAULT_NEW_BRANCH_PREFIXES, cwd = process.cwd(), log = () => {} }) {
   if (!ROLES.includes(role)) throw new LeaseUsageError(`role must be one of ${ROLES.join(", ")}, got ${JSON.stringify(role)}`);
   if (typeof repo !== "string" || !REPO_PATTERN.test(repo)) throw new LeaseUsageError(`invalid repo ${JSON.stringify(repo)}`);
   const sleepFn = sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
@@ -762,7 +762,7 @@ export function createBaton({ lease, repo, role, holder, run = null, store, home
   }
 
   async function guard(argv, { pr, newBranch = false } = {}) {
-    const cmd = guardCommand(argv);
+    const cmd = guardCommand(argv, { cwd });
     if (cmd.push) {
       if (/^[1-9]\d{0,9}$/.test(String(pr ?? "")) === Boolean(newBranch)) {
         throw new LeaseUsageError("guard: a git push needs exactly one of --pr <n> (update that PR's head branch) or --new-branch (create a branch origin does not have yet)");
@@ -986,10 +986,11 @@ function defaultParentAlive() {
  * What `guard` may run: `gh …` (never a merge of any form, which goes through `merge` and its sha
  * pin, and never `--admin`), `git [-C dir] push [--force-with-lease] origin <PR head branch>` (an
  * allowlist, checked against the PR by guard()), this engsys's own gate-request.sh, or `fleet msg send …`
- * (this engsys's core/fleet/msg.mjs, the cross-fleet message post). The guard is a
- * fence, not a way around the permission system, so it runs nothing else.
+ * (this engsys's core/fleet/msg.mjs, the cross-fleet message post, its --body-file confined to stdin or
+ * the session's tmp/: guardedMsgArgs). The guard is a fence, not a way around the permission system, so
+ * it runs nothing else. `cwd` is the session's working directory (the guard runs where the session does).
  */
-export function guardCommand(argv) {
+export function guardCommand(argv, { cwd = process.cwd() } = {}) {
   if (!Array.isArray(argv) || argv.length === 0) throw new LeaseUsageError("guard needs a command after --");
   let [exe, ...args] = argv;
   if (exe === "bash" && args.length) [exe, ...args] = args;
@@ -1052,7 +1053,7 @@ export function guardCommand(argv) {
       if (real !== ownReal) throw new LeaseUsageError(`guard runs only this engsys's msg.mjs (${ownMsg})`);
     }
     if (sub[0] !== "send") throw new LeaseUsageError("guard runs `fleet msg send …` only (inbox and read need no fence)");
-    return { exe: process.execPath, args: [ownMsg, ...sub] };
+    return { exe: process.execPath, args: [ownMsg, ...guardedMsgArgs(sub, cwd)] };
   }
   if (basename(exe) === "gate-request.sh") {
     const own = resolve(HERE, "..", "..", "skills", "merge-monster", "scripts", "gate-request.sh");
@@ -1064,6 +1065,47 @@ export function guardCommand(argv) {
     return { exe: "bash", args: [real, ...args] };
   }
   throw new LeaseUsageError(`guard runs gh, git push, gate-request.sh or fleet msg send only, not ${JSON.stringify(exe)}`);
+}
+
+/**
+ * engsys#78 (Nyx's #84 review, Info): a guarded `fleet msg send` posts whatever its --body-file names, so
+ * the body comes from stdin (`-`) or a regular file under the session's own tmp/ (`<cwd>/tmp`, a real
+ * directory, not a symlink). The path is resolved through every symlink before the check, so a link out
+ * of tmp/ or a `..` walk is refused, and the argument is rewritten to the resolved path, so msg.mjs reads
+ * the file that was checked. Every `--body-file` token is checked, wherever it sits (msg.mjs refuses a
+ * repeated flag anyway). Fail-closed: anything that can't be resolved is refused.
+ */
+export function guardedMsgArgs(sub, cwd) {
+  const out = [];
+  for (let i = 0; i < sub.length; i++) {
+    const a = sub[i];
+    if (a === "--body-file") {
+      out.push(a, guardedBodyFile(sub[i + 1], cwd));
+      i++;
+    } else if (a.startsWith("--body-file=")) {
+      out.push(`--body-file=${guardedBodyFile(a.slice("--body-file=".length), cwd)}`);
+    } else {
+      out.push(a);
+    }
+  }
+  return out;
+}
+
+function guardedBodyFile(value, cwd) {
+  const refuse = (why) => new LeaseUsageError(`guard: fleet msg send --body-file must be - (stdin) or a file under the session's tmp/ (${why})`);
+  if (value === "-") return value;
+  if (typeof value !== "string" || value === "") throw refuse("no file named");
+  let root;
+  try { root = realpathSync(cwd); } catch { throw refuse(`cannot resolve the working directory ${cwd}`); }
+  const tmp = join(root, "tmp");
+  let st;
+  try { st = lstatSync(tmp); } catch { throw refuse(`${tmp} does not exist`); }
+  if (!st.isDirectory()) throw refuse(`${tmp} is not a directory${st.isSymbolicLink() ? " (a symlink)" : ""}`);
+  let real;
+  try { real = realpathSync(resolve(cwd, value)); } catch { throw refuse(`cannot resolve ${value}`); }
+  if (!real.startsWith(tmp + sep)) throw refuse(`${value} resolves to ${real}, outside ${tmp}/`);
+  if (!statSync(real).isFile()) throw refuse(`${real} is not a regular file`);
+  return real;
 }
 
 /** owner/repo from a GitHub remote URL (https, ssh, scp-like), or null. */
@@ -1431,6 +1473,7 @@ export async function main(argv, deps = {}) {
       spawn: deps.spawn ?? defaultSpawn,
       ...(deps.pushConfig ? { pushConfig: deps.pushConfig } : {}),
       newBranchPrefixes: newBranchPrefixesFrom(env),
+      cwd,
       sleep: deps.sleep,
       prepare: deps.api || deps.lease ? null : async () => { await client(); },
       log: (s) => err.write(`baton: ${s}\n`),
