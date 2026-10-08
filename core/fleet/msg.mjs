@@ -106,7 +106,7 @@ export function send(argv, { env = process.env, out, err, post = postComment, re
   const { flags, positional } = parseFlags(argv, ['to', 're', 'body-file', 'from']);
   if (positional.length) throw new UsageError(`unexpected argument ${JSON.stringify(positional[0])}`);
   if (!flags.to) throw new UsageError('--to <fleet>:<session> is required');
-  if (!flags['body-file']) throw new UsageError('--body-file <file> is required');
+  if (!flags['body-file']) throw new UsageError('--body-file <file|-> is required');
 
   const fleetId = checkFleetId(env.FLEET_ID);
   let r;
