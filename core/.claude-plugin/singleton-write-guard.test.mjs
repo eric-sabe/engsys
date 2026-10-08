@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { WRAPPERS, decide, githubWrites, lex, wrapperInvocation } from './singleton-write-guard.mjs';
+import { WRAPPERS, decide, githubWrites, heredocOperator, lex, splitHeredocs, wrapperInvocation } from './singleton-write-guard.mjs';
 
 const HOOK = path.join(path.dirname(fileURLToPath(import.meta.url)), 'singleton-write-guard.mjs');
 
@@ -727,6 +727,7 @@ test('#92 NF1: an unquoted heredoc runs its substitutions whatever reads it; a q
     `${ACT} guard --repo o/r --state-dir d -- gh issue comment 5 --body-file - <<EOF\n$(gh pr merge 5)\nEOF`,
     'python3 <<EOF\n$(gh pr merge 5)\nEOF',
     'gh api graphql -F query=x <<EOF\n$QUERY\nEOF',
+    'gh api graphql -F query=x <<EOF\n$[1+1]\nEOF',
   ]) assert.ok(deniedIn(c), `should deny: ${JSON.stringify(c)}`);
   for (const c of [
     "cat <<'EOF'\n$(gh pr merge 5)\nEOF",
@@ -734,8 +735,39 @@ test('#92 NF1: an unquoted heredoc runs its substitutions whatever reads it; a q
     'cat <<\\EOF\n$(gh pr merge 5)\nEOF',
     'cat <<EOF\nescaped \\$(gh pr merge 5) and \\`gh pr merge 5\\`\nEOF',
     'cat > /tmp/b.md <<EOF\nPR $N: node 22 failed; next the guarded git push. Built $(date).\nEOF',
-    `${ACT} guard --repo o/r --state-dir d -- gh issue comment 5 --body-file - <<EOF\nPR $N failed on node 22\nEOF`,
   ]) assert.equal(deniedIn(c), false, `should allow: ${JSON.stringify(c)}`);
+});
+
+// ------------------------------------- #106: a fenced wrapper's heredoc must not expand the env --
+
+test('#106: a fenced wrapper fed an UNQUOTED heredoc is denied; $VAR, ${VAR} and $[…] would post the env', () => {
+  const env = { ...MERGE, HOME: '/Users/x', CLAUDE_PLUGIN_ROOT: ROOT };
+  const deniedIn = (command, e = env) => decide({ command, env: e, pluginRoot: ROOT, cwd: '/repo' }) !== null;
+  const MNT = { ...env, ENGSYS_SINGLETON_ROLE: 'maintain' };
+  const tails = [
+    '-- fleet msg send --to bob:x --re a/b#1 --body-file -',
+    '-- gh issue comment 1 --body-file -',
+    '-- gh pr comment 1 --body-file -',
+  ];
+  for (const [wrapper, e] of [[ACT, env], [MNT_ACT, MNT]]) {
+    for (const tail of tails) {
+      const head = `${wrapper} guard --repo a/b --state-dir /tmp/s ${tail}`;
+      for (const body of ['$GH_TOKEN', '${HOME}', '$[1+1]', 'token: ${SLACK_BOT_TOKEN:-x}', 'plain text, no expansion']) {
+        for (const op of ['<<EOF', '<<-EOF', '<< EOF']) {
+          const c = `${head} ${op}\n${body}\nEOF`;
+          assert.ok(deniedIn(c, e), `should deny: ${JSON.stringify(c)}`);
+          assert.equal(wrapperInvocation(c, ROOT, e), null, `not a plain wrapper invocation: ${JSON.stringify(c)}`);
+        }
+        for (const op of ["<<'EOF'", '<<"EOF"', '<<\\EOF', "<<-'EOF'"]) {
+          const c = `${head} ${op}\n${body}\nEOF`;
+          assert.equal(deniedIn(c, e), false, `should allow the quoted form: ${JSON.stringify(c)}`);
+        }
+      }
+    }
+  }
+  // the deny message says why
+  const d = decide({ command: `${ACT} guard --repo a/b --state-dir /tmp/s -- gh issue comment 1 --body-file - <<EOF\n$GH_TOKEN\nEOF`, env, pluginRoot: ROOT });
+  assert.match(d.deny, /quoted delimiter/);
 });
 
 test('#92 NF1: a heredoc feeding eval, a read loop that evals, or xargs … sh -c is code', () => {
@@ -761,4 +793,225 @@ test('#92 NF1: a heredoc feeding eval, a read loop that evals, or xargs … sh -
     "{ cat; } <<'EOF'\ngh pr merge 5\nEOF",
     "echo start; cat <<'EOF'\ngh pr merge 5\nEOF",
   ]) assert.equal(deniedIn(c), false, `should allow: ${JSON.stringify(c)}`);
+});
+
+// ----------------------------- #110: the heredoc delimiter is the whole word, as bash reads it --
+
+// Real shells, hermetic: an empty env but a fixed PATH and HOME, no git, no network, no rc files. The
+// system bash always; a bash 5+ too when one is installed beside it (macOS ships 3.2, which parses some
+// substitutions differently); zsh when installed (the fleet's Bash tool runs zsh). Missing ones are skipped.
+const BASH_ARGS = ['--noprofile', '--norc', '-c'];
+const bashMajor = (exe) => {
+  const r = spawnSync(exe, [...BASH_ARGS, 'echo ${BASH_VERSINFO[0]}'], { env: { PATH: '/usr/bin:/bin' }, encoding: 'utf8' });
+  return r.error ? 0 : Number(r.stdout.trim()) || 0;
+};
+const SYSTEM_BASH = ['/bin/bash', '/usr/bin/bash'].find((b) => bashMajor(b) > 0) ?? 'bash';
+const BASH5 = [SYSTEM_BASH, '/opt/homebrew/bin/bash', '/usr/local/bin/bash', '/usr/bin/bash'].find((b) => bashMajor(b) >= 5) ?? null;
+const SHELL_RUNNERS = [
+  ['bash', SYSTEM_BASH, BASH_ARGS],
+  ...(BASH5 && BASH5 !== SYSTEM_BASH ? [['bash5', BASH5, BASH_ARGS]] : []),
+  ['zsh', 'zsh', ['-f', '-c']],
+].filter(([name, exe, args]) => name !== 'zsh' || !spawnSync(exe, [...args, 'true']).error);
+function shellRun(sh, script) {
+  const [, exe, args] = SHELL_RUNNERS.find(([name]) => name === sh) ?? (sh === 'bash5' && BASH5 ? ['bash5', BASH5, BASH_ARGS] : []);
+  if (!exe) throw new Error(`no ${sh} here`);
+  const r = spawnSync(exe, [...args, script], { env: { PATH: '/usr/bin:/bin', HOME: '/h' }, encoding: 'utf8', timeout: 10_000 });
+  if (r.error) throw new Error(`${sh} could not run: ${r.error.message}`);
+  return r.stdout;
+}
+/** Run `script` in every available shell; -> [[shell, stdout]…]. */
+const everyShell = (script) => SHELL_RUNNERS.map(([sh]) => [sh, shellRun(sh, script)]);
+
+const DELIMS = [
+  // [operator, the terminator bash uses, quoted]
+  ["<<'EOF'X", 'EOFX', true],
+  ['<<"EOF"X', 'EOFX', true],
+  ['<<\\EOF\\X', 'EOFX', true],
+  ["<<'EO''F'", 'EOF', true],
+  ['<<E"O"F', 'EOF', true],
+  ["<<X'EOF'", 'XEOF', true],
+  ['<<E\\OF', 'EOF', true],
+  ["<<'E'\"O\"F", 'EOF', true],
+  ["<<-'EOF'Y", 'EOFY', true],
+  ["<<'EOF'", 'EOF', true],
+  ['<<"EOF"', 'EOF', true],
+  ['<<\\EOF', 'EOF', true],
+  ["<< 'EOF'", 'EOF', true],
+  ['<<EOF', 'EOF', false],
+  ['<<EOF.x', 'EOF.x', false],
+  ['<<-EOF', 'EOF', false],
+];
+
+test('#110: heredocOperator reads the terminator and its quoting exactly as bash does (checked in real bash)', () => {
+  for (const [op, term, quoted] of DELIMS) {
+    const parsed = heredocOperator(op, 0);
+    assert.ok(parsed, `parses: ${op}`);
+    assert.deepEqual([parsed.delim, parsed.quoted, parsed.raw], [term, quoted, op], op);
+    // bash ends the body at `term` (then runs the echo), and expands $HOME only when unquoted
+    const tab = op.startsWith('<<-') ? '\t' : '';
+    for (const [sh, out] of everyShell(`cat ${op}\nbody $HOME\n${tab}${term}\necho AFTER\n`)) {
+      assert.equal(out, `body ${quoted ? '$HOME' : '/h'}\nAFTER\n`, `${sh} agrees for ${op}`);
+    }
+  }
+  // not read (the caller fails closed): an expansion, an unclosed quote, a backslash in double quotes, nothing
+  for (const op of ["<<$'EOF'", '<<`x`', '<<E$X', "<<'EOF", '<<"EOF', '<<"E\\OF"', '<<', '<< ;', '<<\\']) {
+    assert.equal(heredocOperator(op, 0), null, op);
+  }
+});
+
+test('#110: a delimiter that continues after its quoted part cannot hide commands after the real terminator', () => {
+  const env = { ...MERGE, HOME: '/Users/x', CLAUDE_PLUGIN_ROOT: ROOT };
+  const deniedIn = (command) => decide({ command, env, pluginRoot: ROOT, cwd: '/repo' }) !== null;
+  for (const [op, term] of DELIMS.filter(([, , q]) => q).filter(([op]) => !["<<'EOF'", '<<"EOF"', '<<\\EOF', "<< 'EOF'"].includes(op))) {
+    const tab = op.startsWith('<<-') ? '\t' : '';
+    for (const head of [
+      `${ACT} guard --repo a/b --state-dir /tmp/s -- gh issue comment 1 --body-file -`,
+      `${MNT_ACT} guard --repo a/b --state-dir /tmp/s -- fleet msg send --to bob:x --re a/b#1 --body-file -`,
+      'cat',
+      'tee /tmp/x',
+    ]) {
+      const c = `${head} ${op}\nhi\n${tab}${term}\ngh pr merge 5 --admin\nEOF`;
+      assert.ok(deniedIn(c), `should deny: ${JSON.stringify(c)}`);
+      // and bash really does run the line after the terminator
+      if (head === 'cat') for (const [sh, out] of everyShell(`cat ${op}\nhi\n${tab}${term}\necho SMUGGLED-RAN\nEOF\n`)) assert.match(out, /SMUGGLED-RAN/, `${sh}: ${op}`);
+    }
+  }
+  // unreadable delimiters are denied when the command mentions gh, git or GitHub
+  for (const c of [
+    `cat <<$'EOF'\nhi\nEOF\ngh pr merge 5\nEOF`,
+    `cat <<"EOF\nhi\nEOF\ngh pr merge 5`,
+    `${ACT} guard --repo a/b --state-dir /tmp/s -- gh issue comment 1 --body-file - <<E$X\nhi\nE\nEOF`,
+  ]) assert.ok(deniedIn(c), `should deny: ${JSON.stringify(c)}`);
+  // an arithmetic shift is not a heredoc: the lines after it are commands
+  assert.ok(deniedIn('echo $((1 <<b))\ngh pr merge 5\nb'), 'a shift in $(( )) opens no heredoc');
+  assert.ok(deniedIn('(( x = 1 << y ))\ngh pr merge 5\ny'), 'nor in (( ))');
+  assert.deepEqual([splitHeredocs('echo $((1 << 2))').ok, splitHeredocs('echo $((1 << 2))').ops.length], [true, 0], 'a shift opens no heredoc');
+  // after the arithmetic closes, a heredoc is a heredoc again (nested parens included)
+  for (const c of ["echo $(( (1+2) * 3 )); cat <<'EOF'\ngh pr merge is prose here\nEOF", "(( n = 1 )); cat <<'EOF'\ngh pr merge is prose\nEOF"]) {
+    assert.equal(splitHeredocs(c).ok, true, c);
+    assert.equal(deniedIn(c), false, `should allow: ${JSON.stringify(c)}`);
+    for (const [sh, out] of everyShell(c)) assert.match(out, /prose/, `${sh} reads it as a heredoc too: ${c}`);
+  }
+  assert.ok(deniedIn('echo $(( (1) << (b) ))\ngh pr merge 5\nb'), 'a shift after nested parens is still inside');
+  // the plain quoted forms stay data, on the wrapper and on cat
+  for (const op of ["<<'EOF'", '<<"EOF"', '<<\\EOF', "<<-'EOF'", "<< 'EOF'"]) {
+    const tab = op.startsWith('<<-') ? '\t' : '';
+    for (const head of [`${ACT} guard --repo a/b --state-dir /tmp/s -- gh issue comment 1 --body-file -`, 'cat']) {
+      const c = `${head} ${op}\nnode 22 failed; next the guarded git push. gh pr merge is the merge step.\n${tab}EOF`;
+      assert.equal(deniedIn(c), false, `should allow: ${JSON.stringify(c)}`);
+    }
+  }
+  // the wrapper still passes a concatenated quoted delimiter used correctly (bash agrees it's data)
+  assert.equal(deniedIn(`${ACT} guard --repo a/b --state-dir /tmp/s -- gh issue comment 1 --body-file - <<'EO''F'\nbounced\nEOF`), false);
+});
+
+// ------------- #109 re-review N1/N2: a << where the shell opens no heredoc must not hide what follows --
+
+test('#109 N1/N2: $[ ], ${ }, a comment or a CRLF delimiter cannot hide the next line (checked in bash and zsh)', () => {
+  const env = { ...MERGE, HOME: '/Users/x', CLAUDE_PLUGIN_ROOT: ROOT };
+  const deniedIn = (command) => decide({ command, env, pluginRoot: ROOT, cwd: '/repo' }) !== null;
+  const cases = [
+    ['$[ ] arithmetic (N1)', 'echo $[1<<2]'],
+    ['an unquoted comment', 'echo hi # <<EOF'],
+    ['a comment after ;', 'echo hi;# <<EOF'],
+    ['${x:-<<EOF}', 'echo ${x:-<<EOF}'],
+    ['${x#<<EOF}', 'echo ${x#<<EOF}'],
+    ['nested ${ ${ } }', 'echo ${x:-${y:-<<EOF}}'],
+    ['CRLF delimiter', "cat <<'EOF'\r\nhi\r\nEOF\r"],
+  ];
+  for (const [what, first] of cases) {
+    const c = `${first}\ngh pr merge 5 --admin\nEOF`;
+    assert.ok(deniedIn(c), `${what}: should deny ${JSON.stringify(c)}`);
+    // and the fenced wrapper in front changes nothing
+    assert.ok(deniedIn(`${ACT} guard --repo a/b --state-dir /tmp/s -- gh issue comment 1 --body-file - <<'X'\nok\nX\n${c}`), `${what}: after a wrapper`);
+    // the shells really run the line after it (zsh skipped when absent)
+    for (const [sh, out] of everyShell(`${first}\necho SMUGGLED-RAN\nEOF\n`)) assert.match(out, /SMUGGLED-RAN/, `${sh} runs the next line: ${what}`);
+  }
+  // not over-denied: # inside a word, ${…} and $((…)) without a heredoc in them, then a real quoted heredoc
+  for (const c of [
+    "echo a#b; cat <<'EOF'\ngh pr merge is prose here\nEOF",
+    "echo ${x:-default}; cat <<'EOF'\ngh pr merge is prose here\nEOF",
+    "echo ${#x} $[1+1]; cat <<'EOF'\ngh pr merge is prose here\nEOF",
+    "echo $((1<<2)); cat <<'EOF'\ngh pr merge is prose here\nEOF",
+    "cat <<'EOF' # a note\ngh pr merge is prose here\nEOF",
+    `${ACT} guard --repo a/b --state-dir /tmp/s -- gh issue comment 1 --body-file - <<'EOF'\nsee #12 and $[x] and \${y}\nEOF`,
+  ]) {
+    assert.equal(deniedIn(c), false, `should allow: ${JSON.stringify(c)}`);
+    for (const [sh, out] of everyShell(c.startsWith(ACT) ? `cat ${c.slice(c.indexOf('<<'))}` : c)) assert.match(out, /prose|see #12/, `${sh} reads a heredoc there too: ${c}`);
+  }
+  assert.equal(deniedIn('echo $((1<<2))'), false, 'a shift alone is fine');
+  assert.equal(deniedIn('echo a#b'), false);
+  assert.equal(deniedIn('echo ${x:-default}'), false);
+});
+
+// ---------- #109 re-review N3: a substitution inside ${ }, $[ ] or (( )) can't end the context early --
+
+test('#109 N3: $( ) or a backtick inside ${ }, $[ ] or (( )) makes the command unreadable (bash runs the hidden line)', () => {
+  const env = { ...MERGE, HOME: '/Users/x', CLAUDE_PLUGIN_ROOT: ROOT };
+  const deniedIn = (command) => decide({ command, env, pluginRoot: ROOT, cwd: '/repo' }) !== null;
+  const repros = [
+    'echo ${x:-$(echo })<<EOF}',
+    'echo ${x:-`echo }`<<EOF}',
+    'echo $[ `echo ]` 1 <<EOF ]',
+    'echo $[ $(echo ]) 1 <<EOF ]',
+    '(( `echo ))` <<EOF ))',
+    'echo ${x:-"$(echo })"<<EOF}',
+  ];
+  for (const first of repros) {
+    const c = `${first}\ngh pr merge 5 --admin\nEOF`;
+    assert.equal(splitHeredocs(c).ok, false, `unreadable: ${first}`);
+    assert.equal(splitHeredocs(c).text, c, 'nothing is split: every line is read as commands');
+    assert.ok(deniedIn(c), `should deny: ${JSON.stringify(c)}`);
+    assert.ok(deniedIn(`${ACT} guard --repo a/b --state-dir /tmp/s -- gh issue comment 1 --body-file - <<'X'\nok\nX\n${c}`), `after a wrapper: ${first}`);
+  }
+  // bash 5 runs the line the old scan hid (bash 3.2 rejects two of them as syntax errors and zsh parses
+  // them differently: asserted on bash 5 when one is installed, the 3.2-runnable ones on the system bash)
+  for (const [k, first] of repros.slice(0, 5).entries()) {
+    const script = `${first}\necho SMUGGLED-RAN\nEOF\n`;
+    if (BASH5) assert.match(shellRun('bash5', script), /SMUGGLED-RAN/, `bash 5: ${first}`);
+    if (bashMajor(SYSTEM_BASH) < 5 && [1, 2, 4].includes(k)) assert.match(shellRun('bash', script), /SMUGGLED-RAN/, `bash 3.2: ${first}`);
+  }
+  // a substitution outside any context, or a context without one, is unchanged
+  for (const c of [
+    "echo $(date) ${x:-y}; cat <<'EOF'\ngh pr merge is prose here\nEOF",
+    "echo `date` $[1+1]; cat <<'EOF'\ngh pr merge is prose here\nEOF",
+  ]) {
+    assert.equal(splitHeredocs(c).ok, true, c);
+    assert.equal(deniedIn(c), false, `should allow: ${JSON.stringify(c)}`);
+  }
+});
+
+// -------- #109 re-review N4: a process substitution or any ( inside ${ } / $[ ] is unreadable too --
+
+test('#109 N4: <( >( and any ( inside ${ } or $[ ] make the command unreadable; (( )) keeps plain grouping', () => {
+  const env = { ...MERGE, HOME: '/Users/x', CLAUDE_PLUGIN_ROOT: ROOT };
+  const deniedIn = (command) => decide({ command, env, pluginRoot: ROOT, cwd: '/repo' }) !== null;
+  const runs = [ // bash 5 runs the line after these (checked below)
+    'echo ${x:-<(echo })<<EOF}',
+    'echo ${x:->(echo })<<EOF}',
+    'echo ${x:-x<(echo })<<EOF}',
+  ];
+  const others = [ // fail closed the same way, whatever the shell makes of them
+    'echo ${x/@(a|b)/c}<<EOF',
+    'echo ${x/!(a)/c} <<EOF',
+    'echo $[ (1) <(echo ]) <<EOF ]',
+    '(( <(echo ))) <<EOF ))',
+    '(( 1 >(echo ))) <<EOF ))',
+  ];
+  for (const first of [...runs, ...others]) {
+    const c = `${first}\ngh pr merge 5 --admin\nEOF`;
+    assert.deepEqual([splitHeredocs(c).ok, splitHeredocs(c).text], [false, c], `unreadable, nothing split: ${first}`);
+    assert.ok(deniedIn(c), `should deny: ${JSON.stringify(c)}`);
+    assert.ok(deniedIn(`${ACT} guard --repo a/b --state-dir /tmp/s -- gh issue comment 1 --body-file - <<'X'\nok\nX\n${c}`), `after a wrapper: ${first}`);
+  }
+  if (BASH5) for (const first of runs) assert.match(shellRun('bash5', `${first}\necho SMUGGLED-RAN\nEOF\n`), /SMUGGLED-RAN/, `bash 5: ${first}`);
+  // plain grouping in (( )) stays readable, and the quoted heredoc after it is data
+  for (const c of [
+    "(( (1+2)*3 )); cat <<'EOF'\ngh pr merge is prose here\nEOF",
+    "echo $(( ((1+2)) * (3) )); cat <<'EOF'\ngh pr merge is prose here\nEOF",
+  ]) {
+    assert.equal(splitHeredocs(c).ok, true, c);
+    assert.equal(deniedIn(c), false, `should allow: ${JSON.stringify(c)}`);
+    for (const [sh, out] of everyShell(c)) assert.match(out, /prose/, `${sh} reads a heredoc there too: ${c}`);
+  }
 });

@@ -194,10 +194,14 @@ them only:
 | "handover" (the old home released the role) | exited | relaunch, if the baton allows |
 | stale | **alive, idle at its prompt**, baton forfeited | relaunch: staleness + idle + a lease nobody holds is three signals, not one |
 
-The launcher exports `ENGSYS_SESSION` (the session name) and
-`ENGSYS_SESSION_RUN` (a per-launch id) into every session: the baton's holder
-is `<FLEET_ID or hostname>:<ENGSYS_SESSION>`, and a fencing token on disk is
-honored only by the launch that took it. A session whose prompt runs the merge
+The launcher exports `ENGSYS_SESSION` (the session name),
+`ENGSYS_SESSION_RUN` (a per-launch id) and `ENGSYS_SESSION_ROOT` (the resolved
+directory it launched the session in) into every session: the baton's holder
+is `<FLEET_ID or hostname>:<ENGSYS_SESSION>`, a fencing token on disk is
+honored only by the launch that took it, and a guarded `fleet msg send` takes
+its `--body-file` only from `<ENGSYS_SESSION_ROOT>/tmp/` (a relative path
+resolves against that root), wherever the session has `cd`'d since, and only a
+file the session user owns. A session whose prompt runs the merge
 or maintenance monster also gets `ENGSYS_SINGLETON_ROLE=merge|maintain`, which
 arms the engsys plugin's singleton-write guard hook: raw GitHub writes are
 denied unless they go through the monster's fenced wrappers (merge-monster

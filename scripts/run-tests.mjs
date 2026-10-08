@@ -30,6 +30,7 @@ const SUITES = [
   ["node --test core/.claude-plugin/engsys-context.test.mjs"],
   ["node --test core/fleet/lib/fleet-msg.test.mjs"],
   ["node --test core/fleet/lib/route.test.mjs"],
+  ["node --test core/fleet/lib/handoff.test.mjs"],
   ["node --test core/lib/untrusted.test.mjs"],
   ["node --test core/lib/git-env.test.mjs"],
   ["node --test core/lib/gate-check.test.mjs"],

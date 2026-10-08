@@ -177,7 +177,11 @@ launch_one() {
     *merge-monster*) role=merge ;;
     *maintenance-monster*) role=maintain ;;
   esac
-  cmd="export ENGSYS_SESSION=$(printf %q "$name") ENGSYS_SESSION_RUN=$(printf %q "$run")"
+  # ENGSYS_SESSION_ROOT is the directory the session was launched in: a guarded `fleet msg send`
+  # takes its --body-file only from <root>/tmp, wherever the session cd's later (engsys#108).
+  local root
+  root="$(cd "$workdir" && pwd -P)" || { echo "error: cannot resolve workdir for '$name': $workdir" >&2; return 1; }
+  cmd="export ENGSYS_SESSION=$(printf %q "$name") ENGSYS_SESSION_RUN=$(printf %q "$run") ENGSYS_SESSION_ROOT=$(printf %q "$root")"
   if [ -n "$role" ]; then cmd+=" ENGSYS_SINGLETON_ROLE=$role && "; else cmd+=" && unset ENGSYS_SINGLETON_ROLE && "; fi
   cmd+="cd $(printf %q "$workdir") && "
   if [ -n "$session_env" ]; then
