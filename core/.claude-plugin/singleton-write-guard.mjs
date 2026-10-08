@@ -510,17 +510,68 @@ function bodyExpansions(body) {
 }
 
 /**
+ * The delimiter word of a heredoc operator at s[i] (`<<` or `<<-`), read the way bash reads it (#110):
+ * the WHOLE word up to the next unquoted blank or metacharacter, with single-quoted, double-quoted,
+ * backslash-escaped and bare parts concatenated after quote removal, so `<<'EOF'X` ends at `EOFX` and
+ * `<<'EO''F'` at `EOF`. Any quoting makes it quoted (the body is not expanded). A `$` or backtick, a
+ * backslash inside double quotes, a quote that does not close, or an empty word is not parsed: null
+ * (the caller fails closed). -> { raw, delim, strip, quoted } | null.
+ */
+export function heredocOperator(s, i) {
+  const m = /^<<(-?)[ \t]*/.exec(s.slice(i, i + 64));
+  if (!m) return null;
+  let j = i + m[0].length;
+  let delim = '';
+  let quoted = false;
+  while (j < s.length && !/[\s;&|<>()]/.test(s[j])) {
+    const ch = s[j];
+    if (ch === '$' || ch === '`') return null;
+    if (ch === "'") {
+      const e = s.indexOf("'", j + 1);
+      if (e < 0) return null;
+      delim += s.slice(j + 1, e);
+      quoted = true;
+      j = e + 1;
+    } else if (ch === '"') {
+      const e = s.indexOf('"', j + 1);
+      if (e < 0) return null;
+      const part = s.slice(j + 1, e);
+      if (/[$`\\]/.test(part)) return null;
+      delim += part;
+      quoted = true;
+      j = e + 1;
+    } else if (ch === '\\') {
+      if (j + 1 >= s.length || s[j + 1] === '\n') return null;
+      delim += s[j + 1];
+      quoted = true;
+      j += 2;
+    } else {
+      delim += ch;
+      j += 1;
+    }
+  }
+  if (!delim || delim.includes('\n')) return null;
+  return { raw: s.slice(i, j), delim, strip: m[1] === '-', quoted };
+}
+
+/**
  * Take heredoc bodies out of `cmd` (#85 F1). A body fed to cat, tee or gh is data and is never
  * lexed (an escalation comment may mention node, git push or .claude/settings.json). A body fed to
  * a shell is commands and stays in; one fed to an interpreter is code for interpreterFindings.
  * Quote-aware, so `echo "<<X"` opens nothing. An UNQUOTED delimiter makes the shell expand the
  * body whatever reads it, so its substitutions are commands (shellCode) and any expansion sets
- * `subst` (#92 NF1); a quoted delimiter (<<'EOF', <<"EOF", <<\EOF) keeps the body inert.
- * -> { text, shellCode, interpCode, subst }.
+ * `subst` (#92 NF1); a quoted delimiter (<<'EOF', <<"EOF", <<\EOF) keeps the body inert. The
+ * delimiter is read as bash reads it (heredocOperator, #110). `ops` lists each operator with its
+ * offset in `text`. `ok` is false when a delimiter can't be read, or a `<<` follows an arithmetic
+ * `((` (a shift, not a heredoc): the body then stays in `text`, read as commands, and the caller
+ * fails closed. -> { text, shellCode, interpCode, subst, ops, ok }.
  */
 export function splitHeredocs(cmd) {
   const s = String(cmd ?? '');
-  if (!s.includes('<<')) return { text: s, shellCode: '', interpCode: '', subst: false };
+  if (!s.includes('<<')) return { text: s, shellCode: '', interpCode: '', subst: false, ops: [], ok: true };
+  let ok = true;
+  let arith = false;
+  const ops = [];
   let subst = false;
   let out = '';
   const shell = [];
@@ -539,13 +590,16 @@ export function splitHeredocs(cmd) {
     }
     if (ch === '\\') { out += ch + (s[i + 1] ?? ''); i += 1; continue; }
     if (ch === "'" || ch === '"') { quote = ch; out += ch; continue; }
+    if (ch === '(' && s[i + 1] === '(') arith = true;
     if (ch === '<' && s[i + 1] === '<' && s[i + 2] !== '<' && s[i - 1] !== '<') {
-      const m = /^<<(-?)[ \t]*(?:'([^'\n]+)'|"([^"\n]+)"|\\?([A-Za-z_][\w-]*))/.exec(s.slice(i));
-      if (m) {
-        const quoted = m[4] === undefined || m[0].includes('\\');
-        pending.push({ delim: m[2] ?? m[3] ?? m[4], strip: m[1] === '-', quoted, sink: heredocSink(s, lineStart, i, i + m[0].length) });
-        out += m[0];
-        i += m[0].length - 1;
+      const op = arith ? null : heredocOperator(s, i);
+      if (!op) {
+        ok = false; // unreadable: leave it, and the lines after it, in the text
+      } else {
+        pending.push({ delim: op.delim, strip: op.strip, quoted: op.quoted, sink: heredocSink(s, lineStart, i, i + op.raw.length) });
+        ops.push({ ...op, at: out.length });
+        out += op.raw;
+        i += op.raw.length - 1;
         continue;
       }
     }
@@ -577,7 +631,7 @@ export function splitHeredocs(cmd) {
     }
     out += ch;
   }
-  return { text: out, shellCode: shell.join('\n'), interpCode: interp.join('\n'), subst };
+  return { text: out, shellCode: shell.join('\n'), interpCode: interp.join('\n'), subst, ops, ok };
 }
 
 /** A script inside the installed plugin (cache or CLAUDE_PLUGIN_ROOT): the kit's own code, not the agent's. */
@@ -678,14 +732,15 @@ export function wrapperInvocation(cmd, pluginRoot, env = process.env) {
   if (!pluginRoot) return null;
   // A heredoc of data on its stdin is fine (`… -- gh issue comment N --body-file - <<'EOF'`); one a
   // shell or interpreter reads is not.
-  const { text, shellCode, interpCode, subst } = splitHeredocs(cmd);
-  if (shellCode || interpCode || subst) return null;
-  const ops = text.match(/<<-?[ \t]*(?:'[^'\n]+'|"[^"\n]+"|\\?[A-Za-z_][\w-]*)/g) ?? [];
+  const { text, shellCode, interpCode, subst, ops, ok } = splitHeredocs(cmd);
+  if (!ok || shellCode || interpCode || subst) return null;
   if (ops.length > 1) return null;
   // #106: an UNQUOTED delimiter makes the shell expand $VAR, ${…} and $[…] in the body, so a fenced
   // post could carry any secret in the session env. Only <<'EOF', <<"EOF" or <<\EOF passes.
-  if (ops[0] && /^<<-?[ \t]*[A-Za-z_]/.test(ops[0])) return null;
-  const l = lex(text.replace(ops[0] ?? '\0', ' ').trim().replace(WRAPPER_TAIL, ''));
+  if (ops[0] && !ops[0].quoted) return null;
+  // The operator, cut out where splitHeredocs placed it (#110: the same parse bash makes).
+  const bare = ops[0] ? text.slice(0, ops[0].at) + ' ' + text.slice(ops[0].at + ops[0].raw.length) : text;
+  const l = lex(bare.trim().replace(WRAPPER_TAIL, ''));
   if (!l.ok || l.subst || l.ops || l.words.length !== 1) return null;
   const words = [...l.words[0]];
   if (words[0] === 'bash') words.shift();
@@ -721,6 +776,8 @@ export function decide({ tool_name: tool = 'Bash', tool_input: input = {}, comma
   if (tool === 'Bash' || typeof cmd === 'string') {
     if (wrapperInvocation(cmd, pluginRoot, env)) return null;
     let found = bashFindings(cmd, ctx);
+    // #110: a heredoc delimiter we can't read the way bash does could hide the commands after it.
+    if (!splitHeredocs(cmd).ok && /\b(gh|git|curl|wget|hub)\b|github\.com|\.claude/i.test(String(cmd)) && !found.length) found = ['a heredoc delimiter the guard cannot read the way the shell does (quote it plainly: <<\'EOF\')'];
     if (!lex(cmd).ok && /\b(gh|git|curl|wget|hub)\b|github\.com|\.claude/i.test(String(cmd))) found = found.length ? found : ['an unparseable command that mentions gh, git, GitHub or .claude'];
     return found.length ? { deny: denyMessage(role, found) } : null;
   }

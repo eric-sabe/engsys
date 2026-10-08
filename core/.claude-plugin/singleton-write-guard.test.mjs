@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { WRAPPERS, decide, githubWrites, lex, wrapperInvocation } from './singleton-write-guard.mjs';
+import { WRAPPERS, decide, githubWrites, heredocOperator, lex, splitHeredocs, wrapperInvocation } from './singleton-write-guard.mjs';
 
 const HOOK = path.join(path.dirname(fileURLToPath(import.meta.url)), 'singleton-write-guard.mjs');
 
@@ -793,4 +793,87 @@ test('#92 NF1: a heredoc feeding eval, a read loop that evals, or xargs … sh -
     "{ cat; } <<'EOF'\ngh pr merge 5\nEOF",
     "echo start; cat <<'EOF'\ngh pr merge 5\nEOF",
   ]) assert.equal(deniedIn(c), false, `should allow: ${JSON.stringify(c)}`);
+});
+
+// ----------------------------- #110: the heredoc delimiter is the whole word, as bash reads it --
+
+// Real bash, hermetic: an empty env but a fixed PATH and HOME, no git, no network, no rc files.
+function bashRun(script) {
+  const r = spawnSync('bash', ['--noprofile', '--norc', '-c', script], { env: { PATH: '/usr/bin:/bin', HOME: '/h' }, encoding: 'utf8', timeout: 10_000 });
+  return r.stdout;
+}
+
+const DELIMS = [
+  // [operator, the terminator bash uses, quoted]
+  ["<<'EOF'X", 'EOFX', true],
+  ['<<"EOF"X', 'EOFX', true],
+  ['<<\\EOF\\X', 'EOFX', true],
+  ["<<'EO''F'", 'EOF', true],
+  ['<<E"O"F', 'EOF', true],
+  ["<<X'EOF'", 'XEOF', true],
+  ['<<E\\OF', 'EOF', true],
+  ["<<'E'\"O\"F", 'EOF', true],
+  ["<<-'EOF'Y", 'EOFY', true],
+  ["<<'EOF'", 'EOF', true],
+  ['<<"EOF"', 'EOF', true],
+  ['<<\\EOF', 'EOF', true],
+  ["<< 'EOF'", 'EOF', true],
+  ['<<EOF', 'EOF', false],
+  ['<<EOF.x', 'EOF.x', false],
+  ['<<-EOF', 'EOF', false],
+];
+
+test('#110: heredocOperator reads the terminator and its quoting exactly as bash does (checked in real bash)', () => {
+  for (const [op, term, quoted] of DELIMS) {
+    const parsed = heredocOperator(op, 0);
+    assert.ok(parsed, `parses: ${op}`);
+    assert.deepEqual([parsed.delim, parsed.quoted, parsed.raw], [term, quoted, op], op);
+    // bash ends the body at `term` (then runs the echo), and expands $HOME only when unquoted
+    const tab = op.startsWith('<<-') ? '\t' : '';
+    const out = bashRun(`cat ${op}\nbody $HOME\n${tab}${term}\necho AFTER\n`);
+    assert.equal(out, `body ${quoted ? '$HOME' : '/h'}\nAFTER\n`, `bash agrees for ${op}`);
+  }
+  // not read (the caller fails closed): an expansion, an unclosed quote, a backslash in double quotes, nothing
+  for (const op of ["<<$'EOF'", '<<`x`', '<<E$X', "<<'EOF", '<<"EOF', '<<"E\\OF"', '<<', '<< ;', '<<\\']) {
+    assert.equal(heredocOperator(op, 0), null, op);
+  }
+});
+
+test('#110: a delimiter that continues after its quoted part cannot hide commands after the real terminator', () => {
+  const env = { ...MERGE, HOME: '/Users/x', CLAUDE_PLUGIN_ROOT: ROOT };
+  const deniedIn = (command) => decide({ command, env, pluginRoot: ROOT, cwd: '/repo' }) !== null;
+  for (const [op, term] of DELIMS.filter(([, , q]) => q).filter(([op]) => !["<<'EOF'", '<<"EOF"', '<<\\EOF', "<< 'EOF'"].includes(op))) {
+    const tab = op.startsWith('<<-') ? '\t' : '';
+    for (const head of [
+      `${ACT} guard --repo a/b --state-dir /tmp/s -- gh issue comment 1 --body-file -`,
+      `${MNT_ACT} guard --repo a/b --state-dir /tmp/s -- fleet msg send --to bob:x --re a/b#1 --body-file -`,
+      'cat',
+      'tee /tmp/x',
+    ]) {
+      const c = `${head} ${op}\nhi\n${tab}${term}\ngh pr merge 5 --admin\nEOF`;
+      assert.ok(deniedIn(c), `should deny: ${JSON.stringify(c)}`);
+      // and bash really does run the line after the terminator
+      if (head === 'cat') assert.match(bashRun(`cat ${op}\nhi\n${tab}${term}\necho SMUGGLED-RAN\nEOF\n`), /SMUGGLED-RAN/, op);
+    }
+  }
+  // unreadable delimiters are denied when the command mentions gh, git or GitHub
+  for (const c of [
+    `cat <<$'EOF'\nhi\nEOF\ngh pr merge 5\nEOF`,
+    `cat <<"EOF\nhi\nEOF\ngh pr merge 5`,
+    `${ACT} guard --repo a/b --state-dir /tmp/s -- gh issue comment 1 --body-file - <<E$X\nhi\nE\nEOF`,
+  ]) assert.ok(deniedIn(c), `should deny: ${JSON.stringify(c)}`);
+  // an arithmetic shift is not a heredoc: the lines after it are commands
+  assert.ok(deniedIn('echo $((1 <<b))\ngh pr merge 5\nb'), 'a shift in $(( )) opens no heredoc');
+  assert.ok(deniedIn('(( x = 1 << y ))\ngh pr merge 5\ny'), 'nor in (( ))');
+  assert.equal(splitHeredocs('echo $((1 << 2))').ok, false);
+  // the plain quoted forms stay data, on the wrapper and on cat
+  for (const op of ["<<'EOF'", '<<"EOF"', '<<\\EOF', "<<-'EOF'", "<< 'EOF'"]) {
+    const tab = op.startsWith('<<-') ? '\t' : '';
+    for (const head of [`${ACT} guard --repo a/b --state-dir /tmp/s -- gh issue comment 1 --body-file -`, 'cat']) {
+      const c = `${head} ${op}\nnode 22 failed; next the guarded git push. gh pr merge is the merge step.\n${tab}EOF`;
+      assert.equal(deniedIn(c), false, `should allow: ${JSON.stringify(c)}`);
+    }
+  }
+  // the wrapper still passes a concatenated quoted delimiter used correctly (bash agrees it's data)
+  assert.equal(deniedIn(`${ACT} guard --repo a/b --state-dir /tmp/s -- gh issue comment 1 --body-file - <<'EO''F'\nbounced\nEOF`), false);
 });
