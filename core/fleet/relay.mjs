@@ -228,9 +228,14 @@ export function poll(ctx, { now = () => Date.now(), log = (l) => process.stdout.
       try { pruneInbox(ctx.stateDir, session, { now: t0 }); } catch (e) { say(`error pruning the ${session} inbox: ${e.message}`); }
     }
     // prune: seen and accepted ids past their TTL (the inbox drops undelivered entries at the same age),
-    // cap timestamps older than an hour, retry counters of comments that are settled
+    // cap timestamps older than an hour, retry counters of comments that are settled, and (engsys#78) retry
+    // counters older than the TTL: a comment deleted mid-retry is never listed again, so it never settles
     for (const k of ['seen', 'accepted']) for (const [id, at] of Object.entries(state[k])) if (!(t0 - at < DEFAULTS.seenTtlMs)) delete state[k][id];
-    for (const id of Object.keys(state.retries)) if (state.seen[id]) delete state.retries[id];
+    for (const [id, v] of Object.entries(state.retries)) {
+      const r = retryEntry(v, t0);
+      if (state.seen[id] || !(t0 - r.at < DEFAULTS.seenTtlMs)) delete state.retries[id];
+      else state.retries[id] = r;
+    }
     for (const c of Object.values(state.cap)) c.times = (c.times ?? []).filter((t) => t0 - t < HOUR);
     writeFileAtomic(stateFile, `${JSON.stringify(state)}\n`);
     sum.ok = sum.errors === 0;
@@ -243,6 +248,15 @@ export function poll(ctx, { now = () => Date.now(), log = (l) => process.stdout.
   }, { waitMs: 0, staleMs: 10 * 60_000 });
 }
 
+/**
+ * A retry counter: { n, at } (at = the first attempt, ms). An older state.json kept a bare count; it is
+ * read as starting now, so it ages out one TTL after this upgrade.
+ */
+function retryEntry(v, now) {
+  if (v && typeof v === 'object' && Number.isSafeInteger(v.n) && v.n >= 0 && Number.isFinite(v.at)) return { n: v.n, at: v.at };
+  return { n: Number.isSafeInteger(Number(v)) && Number(v) > 0 ? Number(v) : 0, at: now };
+}
+
 /** Process one candidate comment. Returns 'done' or 'retry' (a transient failure; not marked seen). */
 function handleComment(ctx, state, repo, c, { now, say, sum }) {
   if (!parse(c.body)) return 'done';
@@ -252,7 +266,9 @@ function handleComment(ctx, state, repo, c, { now, say, sum }) {
   if (!loc) { sum.rejected++; say(`reject bad-comment: the comment's issue_url does not match ${repo} ${where}`); settle(); return 'done'; }
   const v = checkComment(repo, c, loc, { reg: ctx.reg, selfFleet: ctx.fleetId, instanceRepo: ctx.instanceRepo, roster: ctx.roster });
   if (!v.ok && v.transient) {
-    const n = (state.retries[c.id] = (Number(state.retries[c.id]) || 0) + 1);
+    const prev = retryEntry(state.retries[c.id], now());
+    const n = prev.n + 1;
+    state.retries[c.id] = { n, at: prev.at };
     if (n < DEFAULTS.maxRetries) { sum.retrying++; say(`retry ${n}/${DEFAULTS.maxRetries} confirming ${v.msg.re.ref} for ${where}: ${v.reason}`); return 'retry'; }
     sum.rejected++; say(`reject re-unconfirmed: gave up after ${n} attempts (${v.reason}) ${where}`); settle(); return 'done';
   }

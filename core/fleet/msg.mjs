@@ -3,11 +3,16 @@
 // after re-checking it (engsys#76, #77). Format and sender check: lib/fleet-msg.mjs. Relay: relay.mjs.
 // Design: docs/multi-fleet.md § 4.
 //
-//   fleet msg send --to <fleet>:<session> [--re owner/repo#n] --body-file <file> [--from <session>]
+//   fleet msg route <address> [--repo owner/repo --role merge|maintain]
+//       Where a nudge to <address> goes (lib/route.mjs, engsys#78): prints `same fleet: use SendMessage to
+//       <session>` and exits 3, or `other fleet: fleet msg send --to <fleet>:<session>` and exits 0. With
+//       --repo/--role a bare address is qualified with that role's home fleet in federation.yml. Read-only.
+//   fleet msg send --to <fleet>:<session> [--re owner/repo#n] --body-file <file|-> [--from <session>]
 //       Posts a comment whose first line is the generated fleet-msg header, on the `re` PR or issue,
 //       or on the target fleet's status issue (federation.yml fleets.<fleet>.status_issue, in the
 //       instance repo) when there is no --re. The sender is <FLEET_ID>:<--from or ENGSYS_SESSION>.
-//       The body is plain text; a body carrying a fleet-msg header of its own is refused.
+//       The body is plain text (`--body-file -` reads stdin); a body carrying a fleet-msg header of its own
+//       is refused. Same-fleet addresses follow lib/route.mjs: exit 3, nothing posted.
 //       Prints the comment URL. In a merge or maintain monster session this is a GitHub write, so it
 //       runs only through the fence: mm-act.sh / mnt-act.sh guard -- fleet msg send …
 //   fleet msg inbox [<session>] [--mark-read]
@@ -29,14 +34,16 @@
 import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { loadFederation, checkFleetId, instanceRepo as resolveInstanceRepo, SESSION_RE } from './lib/federation.mjs';
-import { render, ADDRESS_RE, RE_RE, FleetMsgError } from './lib/fleet-msg.mjs';
+import { loadFederation, checkFleetId, instanceRepo as resolveInstanceRepo, roleHome, ROLES, FederationError } from './lib/federation.mjs';
+import { render, RE_RE, FleetMsgError } from './lib/fleet-msg.mjs';
+import { route, routeLine, VIA } from './lib/route.mjs';
 import { readInbox, inboxSessions, markDelivered, trustedEntries, inboxLine, COMMENT_URL_RE, SESSION_NAME_RE } from './lib/inbox.mjs';
 import { loadContext, ghApi, commentLocation, checkComment, sha256 } from './relay.mjs';
 import { wrapUntrusted } from '../lib/untrusted.mjs';
 
 export const EXIT = Object.freeze({ OK: 0, ERROR: 1, USAGE: 2, SAME_FLEET: 3 });
-const USAGE = `usage: fleet msg send --to <fleet>:<session> [--re owner/repo#n] --body-file <file> [--from <session>]
+const USAGE = `usage: fleet msg route <address> [--repo owner/repo --role merge|maintain]
+       fleet msg send --to <fleet>:<session> [--re owner/repo#n] --body-file <file|-> [--from <session>]
        fleet msg inbox [<session>] [--mark-read]
        fleet msg read <comment-url>`;
 const MAX_BODY = 60_000; // GitHub caps a comment at 65536 characters; leave room for the header
@@ -68,20 +75,50 @@ function postComment(repo, number, body) {
   return JSON.parse(out);
 }
 
+/** `fleet msg route`: where a nudge to <address> goes (lib/route.mjs). Returns an exit code. */
+export function routeCmd(argv, { env = process.env, out, err } = {}) {
+  const { flags, positional } = parseFlags(argv, ['repo', 'role']);
+  if (positional.length !== 1) throw new UsageError('fleet msg route takes one address');
+  if (Boolean(flags.repo) !== Boolean(flags.role)) throw new UsageError('--repo and --role go together');
+  const fleetId = checkFleetId(env.FLEET_ID);
+  let homeFleet = null;
+  if (flags.repo && fleetId) {
+    if (!ROLES.includes(flags.role)) throw new UsageError(`--role must be one of ${ROLES.join(', ')}`);
+    const file = env.FEDERATION_FILE;
+    const reg = file ? loadFederation(file) : null;
+    const key = reg ? Object.keys(reg.repos).find((k) => k.toLowerCase() === flags.repo.toLowerCase()) : null;
+    homeFleet = key ? roleHome(reg, key, flags.role) : null;
+  }
+  let r;
+  try {
+    r = route(positional[0], { fleetId, homeFleet });
+  } catch (e) {
+    if (!(e instanceof FederationError)) throw e;
+    err.write(`fleet msg: ${e.message}\n`);
+    return EXIT.USAGE;
+  }
+  out.write(`${routeLine(r)}\n`);
+  return r.via === VIA.SEND_MESSAGE ? EXIT.SAME_FLEET : EXIT.OK;
+}
+
 /** `fleet msg send`. Returns an exit code. */
-export function send(argv, { env = process.env, out, err, post = postComment } = {}) {
+export function send(argv, { env = process.env, out, err, post = postComment, readStdin = () => fs.readFileSync(0, 'utf8') } = {}) {
   const { flags, positional } = parseFlags(argv, ['to', 're', 'body-file', 'from']);
   if (positional.length) throw new UsageError(`unexpected argument ${JSON.stringify(positional[0])}`);
   if (!flags.to) throw new UsageError('--to <fleet>:<session> is required');
-  if (!flags['body-file']) throw new UsageError('--body-file <file> is required');
+  if (!flags['body-file']) throw new UsageError('--body-file <file|-> is required');
 
   const fleetId = checkFleetId(env.FLEET_ID);
-  const bare = SESSION_RE.test(flags.to) && !flags.to.includes(':');
-  const to = ADDRESS_RE.exec(flags.to);
-  if (!to && !bare) { err.write(`fleet msg: --to must be <fleet>:<session>, got ${JSON.stringify(flags.to)}\n`); return EXIT.USAGE; }
-  const toSession = to ? to[2] : flags.to;
-  if (bare || !fleetId || to[1] === fleetId) {
-    out.write(`same fleet: use SendMessage to ${toSession}\n`);
+  let r;
+  try {
+    r = route(flags.to, { fleetId });
+  } catch (e) {
+    if (!(e instanceof FederationError)) throw e;
+    err.write(`fleet msg: --to must be <fleet>:<session>, got ${JSON.stringify(flags.to)}\n`);
+    return EXIT.USAGE;
+  }
+  if (r.via === VIA.SEND_MESSAGE) {
+    out.write(`${routeLine(r)}\n`);
     return EXIT.SAME_FLEET;
   }
   if (flags.re !== undefined && !RE_RE.test(flags.re)) { err.write(`fleet msg: --re must be owner/repo#n, got ${JSON.stringify(flags.re)}\n`); return EXIT.USAGE; }
@@ -93,7 +130,7 @@ export function send(argv, { env = process.env, out, err, post = postComment } =
 
   let body;
   try {
-    body = fs.readFileSync(flags['body-file'], 'utf8');
+    body = flags['body-file'] === '-' ? readStdin() : fs.readFileSync(flags['body-file'], 'utf8');
   } catch (e) {
     err.write(`fleet msg: cannot read ${flags['body-file']}: ${e.message}\n`);
     return EXIT.ERROR;
@@ -103,9 +140,9 @@ export function send(argv, { env = process.env, out, err, post = postComment } =
   const file = env.FEDERATION_FILE;
   const reg = file ? loadFederation(file) : null;
   if (!reg) { err.write(`fleet msg: no federation file (${file || 'FEDERATION_FILE unset'}); cross-fleet messages need the registry\n`); return EXIT.ERROR; }
-  const target = reg.fleets[to[1]];
-  if (!target) { err.write(`fleet msg: fleet ${to[1]} is not declared in ${file}\n`); return EXIT.ERROR; }
-  if (!target.enabled) { err.write(`fleet msg: fleet ${to[1]} is disabled in ${file}; its relay would not act on the message\n`); return EXIT.ERROR; }
+  const target = reg.fleets[r.fleet];
+  if (!target) { err.write(`fleet msg: fleet ${r.fleet} is not declared in ${file}\n`); return EXIT.ERROR; }
+  if (!target.enabled) { err.write(`fleet msg: fleet ${r.fleet} is disabled in ${file}; its relay would not act on the message\n`); return EXIT.ERROR; }
   if (!reg.fleets[fleetId]) { err.write(`fleet msg: FLEET_ID ${fleetId} is not declared in ${file}\n`); return EXIT.ERROR; }
   let instance = null;
   try { instance = resolveInstanceRepo(file, env); } catch { instance = null; }
@@ -121,14 +158,14 @@ export function send(argv, { env = process.env, out, err, post = postComment } =
       return EXIT.ERROR;
     }
   } else {
-    if (!target.status_issue) { err.write(`fleet msg: fleets.${to[1]}.status_issue is not declared in ${file}; pass --re owner/repo#n\n`); return EXIT.ERROR; }
+    if (!target.status_issue) { err.write(`fleet msg: fleets.${r.fleet}.status_issue is not declared in ${file}; pass --re owner/repo#n\n`); return EXIT.ERROR; }
     if (!instance) { err.write('fleet msg: cannot tell the instance repo (set FLEET_INSTANCE_REPO=owner/name); pass --re owner/repo#n\n'); return EXIT.ERROR; }
     [repo, number] = [instance, target.status_issue];
   }
 
   let comment;
   try {
-    comment = render({ to: flags.to, from: `${fleetId}:${fromSession}`, re: flags.re ?? null, body });
+    comment = render({ to: r.to, from: `${fleetId}:${fromSession}`, re: flags.re ?? null, body });
   } catch (e) {
     if (e instanceof FleetMsgError) { err.write(`fleet msg: ${e.message}\n`); return EXIT.ERROR; }
     throw e;
@@ -231,6 +268,7 @@ export function read(argv, { env = process.env, out, err, api = ghApi } = {}) {
 export function main(argv, { env = process.env, out = process.stdout, err = process.stderr } = {}) {
   const [cmd, ...rest] = argv;
   try {
+    if (cmd === 'route') return routeCmd(rest, { env, out, err });
     if (cmd === 'send') return send(rest, { env, out, err });
     if (cmd === 'inbox') return inbox(rest, { env, out, err });
     if (cmd === 'read') return read(rest, { env, out, err });

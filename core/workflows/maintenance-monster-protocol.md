@@ -38,7 +38,8 @@ the fleet config dir's copy) — check it, not this doc.
   fix PRs** in this phase.
 - **Phase 2+ (once armed via `phase: auto_drive`):** it opens fix PRs for the
   auto-fix and expert-assisted classes, labels them **`mm:ready`** (with an
-  `mm-handoff` `session: <ns>-maintain`), and hands them to the merge orchestrator
+  `mm-handoff` `session: <ns>-maintain`, or `<fleet>:<ns>-maintain` when its
+  fleet has a `FLEET_ID`), and hands them to the merge orchestrator
   — it **never merges**. The `<ns>-mm` session pilots those PRs through ready → CI →
   merge exactly like any other hand-off.
 
@@ -73,7 +74,11 @@ Phase 2+) + a message to the configured escalation Slack channel (empty config �
 same channel Merge Monster escalates to, so it's one place to watch. Nudges
 back to the finding's driving session use the same `<ns>-*`-prefixed
 cross-session messaging Merge Monster uses (see `docs/agent-messaging.md` in
-[engsys](https://github.com/eric-sabe/engsys/blob/main/docs/agent-messaging.md)).
+[engsys](https://github.com/eric-sabe/engsys/blob/main/docs/agent-messaging.md)),
+routed the same way: `msg.mjs route` sends a nudge to a session in its own
+fleet with `SendMessage` and one in another fleet as a `fleet-msg` comment on
+the PR or issue (engsys#78). The same goes for its hand-off nudge to the merge
+orchestrator, whose home can be another fleet.
 
 ## Watching progress
 

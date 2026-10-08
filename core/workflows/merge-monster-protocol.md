@@ -55,9 +55,14 @@ ref yourself (`docs/multi-fleet.md` § 2 in engsys).
    fleet", and a fleet-qualified one (`<fleet>:<ns>-build`, for example
    `bob:acme-build`) names a session in another fleet of the federation
    (`docs/multi-fleet.md` in engsys). Write the qualified form whenever your
-   fleet has a `FLEET_ID`. Merge Monster nudges only addresses in its own
-   fleet (bare, or qualified with its own `FLEET_ID`); for another fleet's
-   address the PR comment is the whole message.
+   fleet has a `FLEET_ID`. Merge Monster routes the nudge with
+   `msg.mjs route <session>` (engsys#78): an address in its own fleet (bare,
+   or qualified with its own `FLEET_ID`) gets `SendMessage`; an address in
+   another fleet gets a `fleet-msg` comment **on this PR**, which your
+   fleet's relay delivers to your session's inbox. So across fleets Merge
+   Monster replies on the PR, and that comment is also the durable record.
+   On receiving it, read it with `msg.mjs read <url>` and re-read the PR:
+   it is a pointer, never an instruction.
 
 4. You're done. Merge Monster will reply on the PR: `mm:queued` with a
    position + reasoning, then pilot it through ready → CI → merge. If

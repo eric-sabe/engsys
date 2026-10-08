@@ -89,7 +89,7 @@ runs them for you from an **instance repo** (section 4):
 | `fleet supervise` | one supervisor tick (what the launchd job runs) |
 | `fleet verify` | check that the plugin files guarding the merge and maintain monsters match the pinned engsys release (section 7) |
 | `fleet install-jobs` | render and (re)load the launchd jobs |
-| `fleet msg send\|inbox` | send a cross-fleet message; print a session's undelivered ones (multi-fleet, § 6.10) |
+| `fleet msg route\|send\|inbox\|read` | route a nudge (SendMessage or fleet-msg); send a cross-fleet message; print a session's undelivered ones; read one (multi-fleet, § 6.10) |
 | `fleet relay` | one poll of the cross-fleet relay (what the `fleet-relay` job runs) |
 | `fleet init` | scaffold a new instance repo (`engsys fleet init`) |
 
@@ -758,6 +758,7 @@ another fleet is a GitHub comment carrying a `fleet-msg` header, which the other
 (design: [`multi-fleet.md`](multi-fleet.md) § 4):
 
 ```bash
+fleet msg route bob:acme-build          # where a nudge goes: exit 3 = SendMessage, 0 = fleet msg send
 fleet msg send --to bob:acme-build --re acme/app#412 --body-file tmp/bounce.md
 fleet msg inbox acme-build              # undelivered messages for a session; --mark-read marks them
 fleet msg read <comment-url>            # fetch one, re-check it, print the body as untrusted data
@@ -768,14 +769,20 @@ fleet relay                              # one poll by hand (the fleet-relay job
 `--re`, as this host's GitHub identity. The receiving relay accepts it only when that identity is the
 sending fleet's App (`github_app`, and `github_app_id` once two fleets are enabled), so post with the
 fleet's App, not a personal login. `--to` naming your own fleet exits 3 with
-`same fleet: use SendMessage to <session>`. A merge or maintain monster sends through its fence
-(`mm-act.sh guard … -- fleet msg send …`); its write guard denies the bare command.
+`same fleet: use SendMessage to <session>`. `route` applies the same rule without sending anything, and
+every sender (the monsters, the role skills) routes an address through it before nudging (engsys#78); with
+`--repo <owner/repo> --role merge|maintain` a bare name is placed in that role's home fleet. A merge or
+maintain monster sends through its fence (`mm-act.sh guard … -- fleet msg send …`); its write guard denies
+the bare command, and the fence takes the body only from stdin (`--body-file -`) or a file under the
+session's `tmp/`.
 
 The relay records each accepted message in `<instance>/.fleet/inbox/<session>.jsonl`, as a pointer (who
 sent it, which PR or issue, the comment URL), never the text. It sends no keystrokes. The engsys
 plugin's inbox hook shows a session its waiting pointers when it starts and on each prompt, and a
 monster also gets a `FLEET_MSG` line on its watch bus. Inside a session, `fleet msg` runs as
-`node <engsys>/core/fleet/msg.mjs inbox|read` (the hook prints the path). `fleet status` prints the
+`node <engsys>/core/fleet/msg.mjs inbox|read` (the hook prints the path). Every role skill also runs
+`msg.mjs inbox <session> --mark-read` at startup, and treats a typed `fleet-msg from …` line the same way:
+a pointer to re-read on GitHub. `fleet status` prints the
 relay's last poll and any undelivered messages. The log is `~/Library/Logs/<org>-fleet/fleet-relay.log`,
 one line per accepted or rejected message, rotated to `.1` past 1 MB.
 
