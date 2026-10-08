@@ -546,7 +546,8 @@ held/dropped nudge degrades to today's poll-based behavior.
      session name.
    - exit **0**, `other fleet: fleet msg send --to <fleet>:<session>` → step 4.
    - exit **4** (no handoff session that counts) → no nudge (fall back to the
-     comment). Each `ignored mm-handoff session …` line on stderr is a forged or
+     comment). If a human posted the handoff by hand, they can remove and
+     re-apply `mm:ready` to become a labeler; the next transition then nudges. Each `ignored mm-handoff session …` line on stderr is a forged or
      unauthorised handoff: journal it, never send to it.
    - exit 2 (not an address) → no nudge; journal it.
 3. **Same fleet:** `ListAgents`; filter to names starting with

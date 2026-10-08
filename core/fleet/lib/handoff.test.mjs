@@ -187,4 +187,8 @@ test('grep: the monsters route the handoff through --handoff-pr, and the messagi
   const doc = read('docs/agent-messaging.md');
   assert.match(doc, /route --handoff-pr/);
   assert.match(doc, /PR\s+author[^.]*mm:ready[^.]*App/s, 'agent-messaging.md names whose handoff is authoritative');
+  // #109 re-review: a hand-posted handoff stays fail-closed; the documented way in is to re-apply mm:ready
+  assert.match(doc, /remove and re-apply `mm:ready`/i);
+  assert.match(read('core/workflows/merge-monster-protocol.md'), /re-applies `mm:ready`/);
+  assert.match(read('core/skills/merge-monster/SKILL.md'), /re-apply `mm:ready` to become a labeler/);
 });

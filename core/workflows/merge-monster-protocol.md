@@ -58,7 +58,10 @@ ref yourself (`docs/multi-fleet.md` § 2 in engsys).
    fleet has a `FLEET_ID`. Write the handoff yourself, in the PR body or a
    comment as the PR author (or as the identity that applies `mm:ready`, or
    as the App of the fleet the address names), with the marker on a line of
-   its own: a `session:` from anyone else is ignored (engsys#107). Merge
+   its own: a `session:` from anyone else is ignored (engsys#107). An operator
+   who posts a handoff by hand on a PR someone else opened removes and
+   re-applies `mm:ready` afterwards, which makes them a labeler whose handoff
+   counts. Merge
    Monster routes the nudge with `msg.mjs route --handoff-pr <repo>#N`
    (engsys#78, #107): an address in its own fleet (bare,
    or qualified with its own `FLEET_ID`) gets `SendMessage`; an address in

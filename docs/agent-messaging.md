@@ -167,7 +167,14 @@ a Bot comment with that App's `<github_app>[bot]` login and
 `federation.yml`. Any other handoff, local or cross-fleet, is ignored and
 journaled, and never displaces one that counts; the newest handoff that counts
 wins. The `<!-- mm-handoff -->` marker counts only on a line of its own, outside a
-code fence or `>` quote, and never inside a `fleet-msg` comment. The rule lives in
+code fence or `>` quote, and never inside a `fleet-msg` comment.
+
+**An operator posting a handoff by hand** on a PR they didn't open (the fleet's
+bot opened it) is not trusted on that alone: `author_association` is not a
+permission (it covers read-only collaborators), so the rule stays fail-closed.
+After posting the handoff, **remove and re-apply `mm:ready`**. That makes the
+operator an `mm:ready` labeler, so their handoff counts, and the label events
+leave the audit trail. The rule lives in
 [`core/fleet/lib/handoff.mjs`](../core/fleet/lib/handoff.mjs); monsters reach it
 through `fleet msg route --handoff-pr <repo>#N` and never parse the block
 themselves.
