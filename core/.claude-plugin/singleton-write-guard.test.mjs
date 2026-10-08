@@ -797,13 +797,25 @@ test('#92 NF1: a heredoc feeding eval, a read loop that evals, or xargs … sh -
 
 // ----------------------------- #110: the heredoc delimiter is the whole word, as bash reads it --
 
-// Real shells, hermetic: an empty env but a fixed PATH and HOME, no git, no network, no rc files. bash
-// always; zsh too when installed (the fleet's Bash tool runs zsh), skipped otherwise.
-const SHELL_RUNNERS = [['bash', ['--noprofile', '--norc', '-c']], ['zsh', ['-f', '-c']]]
-  .filter(([sh]) => sh === 'bash' || !spawnSync(sh, ['-f', '-c', 'true']).error);
+// Real shells, hermetic: an empty env but a fixed PATH and HOME, no git, no network, no rc files. The
+// system bash always; a bash 5+ too when one is installed beside it (macOS ships 3.2, which parses some
+// substitutions differently); zsh when installed (the fleet's Bash tool runs zsh). Missing ones are skipped.
+const BASH_ARGS = ['--noprofile', '--norc', '-c'];
+const bashMajor = (exe) => {
+  const r = spawnSync(exe, [...BASH_ARGS, 'echo ${BASH_VERSINFO[0]}'], { env: { PATH: '/usr/bin:/bin' }, encoding: 'utf8' });
+  return r.error ? 0 : Number(r.stdout.trim()) || 0;
+};
+const SYSTEM_BASH = ['/bin/bash', '/usr/bin/bash'].find((b) => bashMajor(b) > 0) ?? 'bash';
+const BASH5 = [SYSTEM_BASH, '/opt/homebrew/bin/bash', '/usr/local/bin/bash', '/usr/bin/bash'].find((b) => bashMajor(b) >= 5) ?? null;
+const SHELL_RUNNERS = [
+  ['bash', SYSTEM_BASH, BASH_ARGS],
+  ...(BASH5 && BASH5 !== SYSTEM_BASH ? [['bash5', BASH5, BASH_ARGS]] : []),
+  ['zsh', 'zsh', ['-f', '-c']],
+].filter(([name, exe, args]) => name !== 'zsh' || !spawnSync(exe, [...args, 'true']).error);
 function shellRun(sh, script) {
-  const args = SHELL_RUNNERS.find(([name]) => name === sh)[1];
-  const r = spawnSync(sh, [...args, script], { env: { PATH: '/usr/bin:/bin', HOME: '/h' }, encoding: 'utf8', timeout: 10_000 });
+  const [, exe, args] = SHELL_RUNNERS.find(([name]) => name === sh) ?? (sh === 'bash5' && BASH5 ? ['bash5', BASH5, BASH_ARGS] : []);
+  if (!exe) throw new Error(`no ${sh} here`);
+  const r = spawnSync(exe, [...args, script], { env: { PATH: '/usr/bin:/bin', HOME: '/h' }, encoding: 'utf8', timeout: 10_000 });
   if (r.error) throw new Error(`${sh} could not run: ${r.error.message}`);
   return r.stdout;
 }
@@ -930,4 +942,41 @@ test('#109 N1/N2: $[ ], ${ }, a comment or a CRLF delimiter cannot hide the next
   assert.equal(deniedIn('echo $((1<<2))'), false, 'a shift alone is fine');
   assert.equal(deniedIn('echo a#b'), false);
   assert.equal(deniedIn('echo ${x:-default}'), false);
+});
+
+// ---------- #109 re-review N3: a substitution inside ${ }, $[ ] or (( )) can't end the context early --
+
+test('#109 N3: $( ) or a backtick inside ${ }, $[ ] or (( )) makes the command unreadable (bash runs the hidden line)', () => {
+  const env = { ...MERGE, HOME: '/Users/x', CLAUDE_PLUGIN_ROOT: ROOT };
+  const deniedIn = (command) => decide({ command, env, pluginRoot: ROOT, cwd: '/repo' }) !== null;
+  const repros = [
+    'echo ${x:-$(echo })<<EOF}',
+    'echo ${x:-`echo }`<<EOF}',
+    'echo $[ `echo ]` 1 <<EOF ]',
+    'echo $[ $(echo ]) 1 <<EOF ]',
+    '(( `echo ))` <<EOF ))',
+    'echo ${x:-"$(echo })"<<EOF}',
+  ];
+  for (const first of repros) {
+    const c = `${first}\ngh pr merge 5 --admin\nEOF`;
+    assert.equal(splitHeredocs(c).ok, false, `unreadable: ${first}`);
+    assert.equal(splitHeredocs(c).text, c, 'nothing is split: every line is read as commands');
+    assert.ok(deniedIn(c), `should deny: ${JSON.stringify(c)}`);
+    assert.ok(deniedIn(`${ACT} guard --repo a/b --state-dir /tmp/s -- gh issue comment 1 --body-file - <<'X'\nok\nX\n${c}`), `after a wrapper: ${first}`);
+  }
+  // bash 5 runs the line the old scan hid (bash 3.2 rejects two of them as syntax errors and zsh parses
+  // them differently: asserted on bash 5 when one is installed, the 3.2-runnable ones on the system bash)
+  for (const [k, first] of repros.slice(0, 5).entries()) {
+    const script = `${first}\necho SMUGGLED-RAN\nEOF\n`;
+    if (BASH5) assert.match(shellRun('bash5', script), /SMUGGLED-RAN/, `bash 5: ${first}`);
+    if (bashMajor(SYSTEM_BASH) < 5 && [1, 2, 4].includes(k)) assert.match(shellRun('bash', script), /SMUGGLED-RAN/, `bash 3.2: ${first}`);
+  }
+  // a substitution outside any context, or a context without one, is unchanged
+  for (const c of [
+    "echo $(date) ${x:-y}; cat <<'EOF'\ngh pr merge is prose here\nEOF",
+    "echo `date` $[1+1]; cat <<'EOF'\ngh pr merge is prose here\nEOF",
+  ]) {
+    assert.equal(splitHeredocs(c).ok, true, c);
+    assert.equal(deniedIn(c), false, `should allow: ${JSON.stringify(c)}`);
+  }
 });
