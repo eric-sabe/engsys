@@ -566,8 +566,9 @@ export function heredocOperator(s, i) {
  * or a parameter expansion `${ … }`, opens none here either (#109 re-review N1, N2): it and the lines
  * after it stay in `text` and are read as commands. So does an unquoted `#` comment (a `#` at the
  * start of a word, to the end of the line). `ok` is false, and the caller fails closed, when a
- * delimiter can't be read, a `$(` or backtick sits inside one of those contexts (its `)`, `]` or `}`
- * would end the context early: #109 re-review N3), or the command holds both a carriage return and
+ * delimiter can't be read, a substitution sits inside one of those contexts (its `)`, `]` or `}`
+ * would end the context early: a backtick, `$(`, `<(` or `>(`, and inside `${ }` or `$[ ]` any `(`:
+ * #109 re-review N3, N4), or the command holds both a carriage return and
  * `<<` (the shell keeps the \r in a delimiter). Then nothing is split: the whole command is `text`. -> { text, shellCode, interpCode, subst, ops, ok }.
  */
 export function splitHeredocs(cmd) {
@@ -597,9 +598,16 @@ export function splitHeredocs(cmd) {
     }
     if (ch === '\\') { out += ch + (s[i + 1] ?? ''); i += 1; continue; }
     if (ch === "'" || ch === '"') { quote = ch; out += ch; continue; }
-    // #109 re-review N3: a $( ) or backtick substitution inside (( )), $[ ] or ${ } can hold a ) ] or }
-    // that bash does not count, so the context's end can't be told: unreadable, fail closed.
-    if (ctx.length && (ch === '`' || (ch === '$' && s[i + 1] === '('))) ok = false;
+    // #109 re-review N3, N4: a substitution inside (( )), $[ ] or ${ } can hold a ) ] or } that bash
+    // does not count, so the context's end can't be told: unreadable, fail closed. A backtick anywhere
+    // in one; inside ${ } or $[ ] any ( at all ($( <( >( $(( and extglob @( !( +( *( ?( alike); inside
+    // (( )) only $( <( >( (a bare ( there is arithmetic grouping).
+    if (ctx.length) {
+      if (ch === '`') ok = false;
+      else if (ch === '(') {
+        if (ctx.some((c) => c[0] !== '(') || /[$<>]/.test(s[i - 1] ?? '')) ok = false;
+      } else if (ch === '$' && s[i + 1] === '(') ok = false;
+    }
     if (ch === '(' && s[i + 1] === '(') {
       ctx.push(['(', ')', 2]);
       out += '((';

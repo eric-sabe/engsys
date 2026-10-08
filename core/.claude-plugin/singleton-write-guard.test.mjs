@@ -980,3 +980,38 @@ test('#109 N3: $( ) or a backtick inside ${ }, $[ ] or (( )) makes the command u
     assert.equal(deniedIn(c), false, `should allow: ${JSON.stringify(c)}`);
   }
 });
+
+// -------- #109 re-review N4: a process substitution or any ( inside ${ } / $[ ] is unreadable too --
+
+test('#109 N4: <( >( and any ( inside ${ } or $[ ] make the command unreadable; (( )) keeps plain grouping', () => {
+  const env = { ...MERGE, HOME: '/Users/x', CLAUDE_PLUGIN_ROOT: ROOT };
+  const deniedIn = (command) => decide({ command, env, pluginRoot: ROOT, cwd: '/repo' }) !== null;
+  const runs = [ // bash 5 runs the line after these (checked below)
+    'echo ${x:-<(echo })<<EOF}',
+    'echo ${x:->(echo })<<EOF}',
+    'echo ${x:-x<(echo })<<EOF}',
+  ];
+  const others = [ // fail closed the same way, whatever the shell makes of them
+    'echo ${x/@(a|b)/c}<<EOF',
+    'echo ${x/!(a)/c} <<EOF',
+    'echo $[ (1) <(echo ]) <<EOF ]',
+    '(( <(echo ))) <<EOF ))',
+    '(( 1 >(echo ))) <<EOF ))',
+  ];
+  for (const first of [...runs, ...others]) {
+    const c = `${first}\ngh pr merge 5 --admin\nEOF`;
+    assert.deepEqual([splitHeredocs(c).ok, splitHeredocs(c).text], [false, c], `unreadable, nothing split: ${first}`);
+    assert.ok(deniedIn(c), `should deny: ${JSON.stringify(c)}`);
+    assert.ok(deniedIn(`${ACT} guard --repo a/b --state-dir /tmp/s -- gh issue comment 1 --body-file - <<'X'\nok\nX\n${c}`), `after a wrapper: ${first}`);
+  }
+  if (BASH5) for (const first of runs) assert.match(shellRun('bash5', `${first}\necho SMUGGLED-RAN\nEOF\n`), /SMUGGLED-RAN/, `bash 5: ${first}`);
+  // plain grouping in (( )) stays readable, and the quoted heredoc after it is data
+  for (const c of [
+    "(( (1+2)*3 )); cat <<'EOF'\ngh pr merge is prose here\nEOF",
+    "echo $(( ((1+2)) * (3) )); cat <<'EOF'\ngh pr merge is prose here\nEOF",
+  ]) {
+    assert.equal(splitHeredocs(c).ok, true, c);
+    assert.equal(deniedIn(c), false, `should allow: ${JSON.stringify(c)}`);
+    for (const [sh, out] of everyShell(c)) assert.match(out, /prose/, `${sh} reads a heredoc there too: ${c}`);
+  }
+});
