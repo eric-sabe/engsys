@@ -562,15 +562,15 @@ export function heredocOperator(s, i) {
  * body whatever reads it, so its substitutions are commands (shellCode) and any expansion sets
  * `subst` (#92 NF1); a quoted delimiter (<<'EOF', <<"EOF", <<\EOF) keeps the body inert. The
  * delimiter is read as bash reads it (heredocOperator, #110). `ops` lists each operator with its
- * offset in `text`. `ok` is false when a delimiter can't be read, or a `<<` follows an arithmetic
- * `((` (a shift, not a heredoc): the body then stays in `text`, read as commands, and the caller
+ * offset in `text`. `ok` is false when a delimiter can't be read, or a `<<` sits inside an arithmetic
+ * `(( … ))` (a shift, not a heredoc): the body then stays in `text`, read as commands, and the caller
  * fails closed. -> { text, shellCode, interpCode, subst, ops, ok }.
  */
 export function splitHeredocs(cmd) {
   const s = String(cmd ?? '');
   if (!s.includes('<<')) return { text: s, shellCode: '', interpCode: '', subst: false, ops: [], ok: true };
   let ok = true;
-  let arith = false;
+  let arith = 0; // open parens of an arithmetic (( … )) we are inside; 0 outside
   const ops = [];
   let subst = false;
   let out = '';
@@ -590,7 +590,15 @@ export function splitHeredocs(cmd) {
     }
     if (ch === '\\') { out += ch + (s[i + 1] ?? ''); i += 1; continue; }
     if (ch === "'" || ch === '"') { quote = ch; out += ch; continue; }
-    if (ch === '(' && s[i + 1] === '(') arith = true;
+    if (arith) {
+      if (ch === '(') arith += 1;
+      else if (ch === ')') arith -= 1;
+    } else if (ch === '(' && s[i + 1] === '(') {
+      arith = 2;
+      out += '((';
+      i += 1;
+      continue;
+    }
     if (ch === '<' && s[i + 1] === '<' && s[i + 2] !== '<' && s[i - 1] !== '<') {
       const op = arith ? null : heredocOperator(s, i);
       if (!op) {

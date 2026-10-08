@@ -800,6 +800,7 @@ test('#92 NF1: a heredoc feeding eval, a read loop that evals, or xargs … sh -
 // Real bash, hermetic: an empty env but a fixed PATH and HOME, no git, no network, no rc files.
 function bashRun(script) {
   const r = spawnSync('bash', ['--noprofile', '--norc', '-c', script], { env: { PATH: '/usr/bin:/bin', HOME: '/h' }, encoding: 'utf8', timeout: 10_000 });
+  if (r.error) throw new Error(`bash could not run: ${r.error.message}`);
   return r.stdout;
 }
 
@@ -866,6 +867,13 @@ test('#110: a delimiter that continues after its quoted part cannot hide command
   assert.ok(deniedIn('echo $((1 <<b))\ngh pr merge 5\nb'), 'a shift in $(( )) opens no heredoc');
   assert.ok(deniedIn('(( x = 1 << y ))\ngh pr merge 5\ny'), 'nor in (( ))');
   assert.equal(splitHeredocs('echo $((1 << 2))').ok, false);
+  // after the arithmetic closes, a heredoc is a heredoc again (nested parens included)
+  for (const c of ["echo $(( (1+2) * 3 )); cat <<'EOF'\ngh pr merge is prose here\nEOF", "(( n = 1 )); cat <<'EOF'\ngh pr merge is prose\nEOF"]) {
+    assert.equal(splitHeredocs(c).ok, true, c);
+    assert.equal(deniedIn(c), false, `should allow: ${JSON.stringify(c)}`);
+    assert.match(bashRun(c), /prose/, `bash reads it as a heredoc too: ${c}`);
+  }
+  assert.ok(deniedIn('echo $(( (1) << (b) ))\ngh pr merge 5\nb'), 'a shift after nested parens is still inside');
   // the plain quoted forms stay data, on the wrapper and on cat
   for (const op of ["<<'EOF'", '<<"EOF"', '<<\\EOF', "<<-'EOF'", "<< 'EOF'"]) {
     const tab = op.startsWith('<<-') ? '\t' : '';
