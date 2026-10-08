@@ -28,6 +28,10 @@
 # fleet.conf, else the instance checkout's origin, names its repo). If it can't be resolved, the line
 # is commented out with a warning rather than left on the shared ledger another fleet's broker may use.
 #
+# An expired Claude Code login holds every relaunch (fleet-supervisor.sh header, engsys#103); the one
+# `fleet notify --level action --incident claude-auth-expired` links STATUS_URL, set here to this fleet's
+# status issue in multi-fleet mode (single-fleet mode: the first session's ledger issue).
+#
 # It also gets INTEGRITY_CMD (`fleet verify --alert --max-age $VERIFY_MAX_AGE_MIN`, default 15): once
 # per tick the supervisor checks that the plugin files guarding the merge and maintain monsters match
 # the pinned engsys release on GitHub (engsys#70). GitHub is asked at most once per VERIFY_MAX_AGE_MIN
@@ -93,6 +97,10 @@ grep -q '^HOST_HEALTH_INCIDENT=' "$conf" || printf 'HOST_HEALTH_INCIDENT=fleet-r
 grep -q '^NOTIFY_CMD=' "$conf" || printf 'NOTIFY_CMD=bash %s/bin/fleet --instance %s notify\n' "$FLEET_KIT_DIR" "$FLEET_REPO" >>"$conf"
 grep -q '^INTEGRITY_CMD=' "$conf" || printf 'INTEGRITY_CMD=bash %s/bin/fleet --instance %s verify --alert --max-age %s\n' "$FLEET_KIT_DIR" "$FLEET_REPO" "$VERIFY_MAX_AGE_MIN" >>"$conf"
 grep -q '^HEARTBEAT_CMD=' "$conf" || printf 'HEARTBEAT_CMD=bash %s/bin/fleet --instance %s heartbeat\n' "$FLEET_KIT_DIR" "$FLEET_REPO" >>"$conf"
+# The expired-login alert (engsys#103) links the fleet's status issue, where the heartbeat says the same.
+if [ -n "$status_target" ] && ! grep -q '^STATUS_URL=' "$conf"; then
+  printf 'STATUS_URL=https://github.com/%s/issues/%s\n' "${status_target%%#*}" "${status_target##*#}" >>"$conf"
+fi
 # Nothing to supervise, but an unreadable registry is what paused the monsters (or an open alert needs
 # resolving): run the tick anyway, for the alert.
 if [ "$kept" = 0 ] && { fleet_host_registry_alert >/dev/null || [ -f "$FLEET_REPO/logs/fleet-supervisor/host-health.alerted" ]; }; then

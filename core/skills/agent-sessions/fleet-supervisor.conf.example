@@ -31,6 +31,13 @@ REPO=owner/name
 # Optional: the lease check for singleton monsters (6th field below). Default:
 # node <engsys>/core/lib/lease/baton.mjs supervise.
 # BATON_CMD=node <path-to-engsys>/core/lib/lease/baton.mjs supervise
+# An expired Claude Code login holds every relaunch (fleet-supervisor.sh header). The
+# test request that tells an old error from a live one: on (default) or off.
+# AUTH_PROBE=on
+# Seconds to watch a relaunched pane for its first reply (0 = don't). Default 45.
+# AUTH_CHECK_WAIT_SEC=45
+# The link the login alert carries. Default: the first session's ledger issue.
+# STATUS_URL=https://github.com/owner/name/issues/1
 # <session>|<ledger issue>|<stale minutes>[|<owner/name>[|<marker>[|<role>]]]
 #   stale = heartbeat older than this; mirror the monster's stale_lock_minutes
 #   + grace. The optional 4th field overrides REPO= (multi-repo fleets). The

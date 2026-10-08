@@ -1,0 +1,18 @@
+ ▐▛███▛█   Claude Code v2.1.285
+▝▜██████▀  Sonnet 5.5 · Claude API
+ ▝▝   ▝▝   /Users/acme/git/acme
+
+
+❯ You are the merge monster for acme. Read your ledger and start the loop.
+
+⏺ Login expired · Please run /login
+
+✻ Churned for 1s · done 9:07 AM
+
+
+
+                                                          tmux focus-events off · add 'set -g focus-events on' to ~/.tmux.conf and reattach for focus tracking
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← 1 agent

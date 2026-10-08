@@ -136,6 +136,29 @@ N_BROKER_BLOCKS="$(grep -c '<!-- broker-heartbeat -->' "$BODY_FILE")"
 eq "still exactly one fleet-heartbeat block" "$N_FLEET_BLOCKS" 1
 eq "still exactly one broker-heartbeat block" "$N_BROKER_BLOCKS" 1
 
+# --- a note for people (engsys#103): inside the block, after last:, gone with the next plain heartbeat ---
+heartbeat_note() { ( cd "$I" && bash "$KIT/bin/fleet" --instance "$I" heartbeat "$1" "$2" ); }
+block_of() { awk '/<!-- fleet-heartbeat -->/{on=1; next} /<!-- \/fleet-heartbeat -->/{on=0} on' "$BODY_FILE"; }
+sleep 1.1
+run heartbeat_note "sessions: 0 up, 0 rotating, 2 down; auth: expired since 2026-10-06T12:44:25Z, relaunches held" \
+  "Claude Code login expired on mini since Oct 6, 8:44 AM EDT. Run \`/login\` in any session. <!-- x -->"
+rc_is "heartbeat with a note exits 0" 0
+matches "last: is still the first line of the block" "$(block_of | head -n 1)" '^last: [0-9TZ:-]+ — status: sessions: 0 up, 0 rotating, 2 down; auth: expired since 2026-10-06T12:44:25Z, relaunches held$'
+has "the note follows it" "$(block_of | sed -n 2p)" "Claude Code login expired on mini since Oct 6, 8:44 AM EDT."
+eq "a marker inside the note can't open a second block" "$(grep -c '<!-- fleet-heartbeat -->' "$BODY_FILE")" 1
+hasnt "  …the note's own <!-- is defanged" "$(block_of | sed -n 2p)" "<!-- x -->"
+has "the broker's block is still untouched" "$(cat "$BODY_FILE")" "status: broker working"
+BODY_JSON="$(node -e 'process.stdout.write(JSON.stringify(require("fs").readFileSync(process.argv[1], "utf8")))' "$BODY_FILE")"
+FRESH="$(node --input-type=module -e "
+import { parseHeartbeat } from '$ROOT/core/lib/claim.mjs';
+process.stdout.write(String(parseHeartbeat($BODY_JSON)));
+")"
+eq "claim.mjs still reads the heartbeat as fresh with a note under it" "$FRESH" "true"
+sleep 1.1
+run heartbeat "sessions: 2 up, 0 rotating, 0 down"
+hasnt "the next heartbeat without a note drops it" "$(cat "$BODY_FILE")" "Claude Code login expired"
+eq "  …the block is back to one line" "$(block_of | wc -l | tr -d ' ')" 1
+
 # --- no-op modes: never call gh at all -------------------------------------------------------
 : >"$FAKE/gh.log"
 sed -i.bak 's/^FLEET_ID=acme$//' "$I/fleet/fleet.conf" # single-fleet mode: no FLEET_ID

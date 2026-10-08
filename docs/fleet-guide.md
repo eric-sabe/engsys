@@ -209,6 +209,15 @@ baton-read-<name>`, resolved on the next clean read. It also relaunches such a s
 home has handed the role over (a `handover` heartbeat, process gone) and when the session sits idle at
 its prompt with a stale heartbeat and a forfeited baton. Design: [`multi-fleet.md` § 10 P1](multi-fleet.md#p1-real-batons).
 
+When Claude Code's login on the host stops working, every session the supervisor relaunches answers
+its first prompt with `Login expired · Please run /login` and waits. The supervisor reads that line in
+the panes and holds every relaunch until the login works again; it kills nothing in the meantime. You
+get one `fleet notify --level action --incident claude-auth-expired` asking you to run `/login` in any
+session (or `claude /login` in a terminal), the status issue's heartbeat and `fleet status` show
+`auth: expired since <time>`, and the first tick after the login works resolves the alert and
+relaunches each held session once. Details: the agent-sessions skill and the header of
+`fleet-supervisor.sh` (engsys#103).
+
 ### Where the pins live
 
 **One place: the pin repo's `.claude/settings.json`**, at `extraKnownMarketplaces.<name>.source.ref`
@@ -1267,6 +1276,7 @@ major Claude Code upgrade.
 | `still at … after switching` | a checkout did not land on the pinned ref. Check the tag exists on the remote (`git ls-remote --tags origin`) |
 | `engsys … has no fleet kit` | the pinned engsys release predates the kit; pin one that includes `core/fleet/` |
 | Supervisor log: `RELAUNCH FAILED` with `claude not found on PATH` | the supervisor's launchd PATH can't see `claude`. The default job PATH covers `~/.local/bin` (native installer) and Homebrew; for anywhere else, override the PATH in `<instance>/jobs/launchd/fleet-supervisor.plist.tmpl`. Then `fleet install-jobs` (it warns until every tool resolves) and `fleet launch` for anything missing. The supervisor escalates a failed relaunch once on the ledger and comments again when it recovers |
+| Alert `claude-auth-expired`, or `fleet status` shows `auth: expired since …` | Claude Code's login on the host no longer works, and the supervisor holds every relaunch so it doesn't relaunch sessions that can't answer. Run `/login` in any session's window (or `claude /login` in a terminal). The next supervisor tick sees a working login (a short test request, or the session answering), resolves the alert and relaunches each held session once. Nothing was killed while it waited |
 | Launchd job runs but `node: command not found` | node is not in `/opt/homebrew/bin` (nvm/fnm install). Install Homebrew node; launchd does not read your shell profile |
 | The fleet stopped after a reboot | the fleet user is not logged in (FileVault disables auto-login). Log in over Screen Sharing (section 6.2) |
 | `not launching acme-mm: its engsys plugin does not match vX.Y.Z` | `fleet verify` found protected plugin files, or an install, that don't match the pinned release. See "Plugin integrity" in section 7 |

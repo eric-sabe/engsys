@@ -32,7 +32,8 @@ for a in "$@"; do
   prev="$a"
 done
 w="${t#*:}"
-add_window() { grep -Fxq "$1" "$F/windows" || echo "$1" >>"$F/windows"; echo node >"$F/cmd-$1"; }
+# a launched session shows its first reply; the supervisor reads it for a login error (engsys#103)
+add_window() { grep -Fxq "$1" "$F/windows" || echo "$1" >>"$F/windows"; echo node >"$F/cmd-$1"; echo "⏺ Reading the ledger." >"$F/cap-$1"; }
 case "$sub" in
   list-windows) cat "$F/windows" ;;
   list-panes) case "$fmt" in *pane_pid*) exit 1 ;; *) cat "$F/cmd-$w" 2>/dev/null || exit 1 ;; esac ;;
@@ -370,12 +371,14 @@ run fleet supervise
 rc_is "supervise with a status issue exits 0" 0
 SUP="$(cat "$STATE/supervisor.conf")"
 has "conf: the broker line is rewritten to the fleet's status issue and the broker block" "$SUP" "acme-broker|22|60|acme/acme-fleet|broker-heartbeat"
+has "conf: the expired-login alert links the status issue (engsys#103)" "$SUP" "STATUS_URL=https://github.com/acme/acme-fleet/issues/22"
 has "the status issue is read in the instance repo" "$(cat "$FAKE/gh.log")" "issue view 22 -R acme/acme-fleet"
 hasnt "the shared ledger 13 is never read" "$(cat "$FAKE/gh.log")" "issue view 13"
 has "a stale broker block is relaunched, the fresh fleet-heartbeat beside it notwithstanding" "$(windows)" "acme-broker"
 conf; no_registry; reset_tmux; stale_ledgers
 run fleet supervise
 has "single-fleet: the broker stays on its ledger" "$(cat "$STATE/supervisor.conf")" "acme-broker|13|60"
+hasnt "single-fleet: no status issue, so no STATUS_URL" "$(cat "$STATE/supervisor.conf")" "STATUS_URL="
 conf FLEET_ID=bob; registry alice alice
 local_conf ROLES=build,design; : >"$FAKE/gh.log"
 run fleet supervise

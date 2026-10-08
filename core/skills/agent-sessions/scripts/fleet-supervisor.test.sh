@@ -18,10 +18,16 @@ esac
 SH
 cat >"$T/bin/tmux" <<'SH'
 #!/usr/bin/env bash
-t=""; for a in "$@"; do [ "${prev:-}" = -t ] && t="$a"; prev="$a"; done
-w="${t#*:}"
+# one pane per window; the pane id is "%<window>", and a target is "<session>:<window>" or a pane id
+t=""; all=0; for a in "$@"; do [ "${prev:-}" = -t ] && t="$a"; [ "$a" = -s ] && all=1; prev="$a"; done
+w="${t#*:}"; w="${w#%}"
 case "$1" in
-  list-panes) [ -f "$FAKE/pane-$w" ] && cat "$FAKE/pane-$w" || exit 1 ;;
+  list-panes)
+    if [ "$all" = 1 ]; then # list-panes -s -t <session> -F '#{window_name}|#{pane_id}|#{pane_current_command}'
+      for f in "$FAKE"/pane-*; do [ -f "$f" ] && printf '%s|%%%s|%s\n' "${f##*/pane-}" "${f##*/pane-}" "$(cat "$f")"; done; exit 0
+    fi
+    [ -f "$FAKE/pane-$w" ] || exit 1
+    case "$*" in *pane_id*) echo "%$w" ;; *) cat "$FAKE/pane-$w" ;; esac ;;
   capture-pane) cat "$FAKE/capture-$w" 2>/dev/null || true ;;
   kill-window) echo "kill $w" >>"$FAKE/actions"; rm -f "$FAKE/pane-$w" ;;
 esac
@@ -30,9 +36,18 @@ cat >"$T/launch.sh" <<'SH'
 #!/usr/bin/env bash
 # $FAKE/launch-fail present = the launcher fails the way a missing binary does
 if [ -f "$FAKE/launch-fail" ]; then echo "attempt $1" >>"$FAKE/actions"; echo "error: claude not found on PATH" >&2; exit 1; fi
-echo "launch $1" >>"$FAKE/actions"; echo "2.1.300" >"$FAKE/pane-$1"; : >"$FAKE/capture-$1"
+# $FAKE/auth-expired present = the new session answers its first prompt the way it did on 2026-10-06
+echo "launch $1" >>"$FAKE/actions"; echo "2.1.300" >"$FAKE/pane-$1"
+if [ -f "$FAKE/auth-expired" ]; then cp "$FAKE/fixture-login-expired" "$FAKE/capture-$1"; else printf '⏺ Reading the ledger first.\n' >"$FAKE/capture-$1"; fi
 SH
-chmod +x "$T/bin/gh" "$T/bin/tmux" "$T/launch.sh"
+# the test request (`claude -p`, AUTH_PROBE): $FAKE/probe-ok present = the login works
+cat >"$T/bin/claude" <<'SH'
+#!/usr/bin/env bash
+echo "probe $*" >>"$FAKE/actions"
+if [ -f "$FAKE/probe-ok" ]; then echo OK; exit 0; fi
+echo "Login expired · Please run /login"; exit 1
+SH
+chmod +x "$T/bin/gh" "$T/bin/tmux" "$T/bin/claude" "$T/launch.sh"
 export PATH="$T/bin:$PATH" FAKE="$T"
 printf 'TMUX_SESSION=acme\nLAUNCH_CMD=bash %s/launch.sh\nREPO=o/r\nacme-mm|1|60\n' "$T" >"$T/w/sup.conf"
 
@@ -369,6 +384,160 @@ else fail=$((fail + 1)); echo "  FAIL the supervisor log lost its ISO timestamps
 reset; ledger 90 "ok — merging #12"; pane exited
 : >"$T/actions"; (cd "$T/w" && OPERATOR_TIMEZONE=Europe/Berlin OPERATOR_CLOCK=24h bash "$SUP" sup.conf >/dev/null 2>&1)
 expect "24h Berlin: the relaunch comment shows the time as 24h CET/CEST" "comment 1: .*relaunched .acme-mm.*[0-9]:[0-9][0-9] CES\?T)"
+
+
+# --- an expired Claude Code login (engsys#103) ----------------------------------------------------
+# 2026-10-06: the login expired, every relaunched session answered "Login expired · Please run /login"
+# and sat idle, the launcher still exited 0, and the supervisor relaunched merge + maintain every tick
+# for ~24 h without telling anyone. The fixtures are real Claude Code 2.1.285 panes:
+# fixtures/pane-auth-401.txt is a verbatim capture (a session with a rejected OAuth token; paths
+# changed), and fixtures/pane-login-expired.txt is the same frame with the incident's reply, taken
+# word for word from the transcripts of 2026-10-06 ("Login expired · Please run /login",
+# error: authentication_failed).
+cp "$HERE/fixtures/pane-login-expired.txt" "$T/fixture-login-expired"
+rm -f "$T"/pane-* "$T"/capture-* "$T/probe-ok" "$T/auth-expired" "$T/notify-fail" "$T/heartbeat-fail"
+authconf() { # authconf [extra conf line]
+  printf 'TMUX_SESSION=acme\nLAUNCH_CMD=bash %s/launch.sh\nBATON_CMD=bash %s/baton.sh\nNOTIFY_CMD=bash %s/notify.sh\nHEARTBEAT_CMD=bash %s/heartbeat.sh\nAUTH_CHECK_WAIT_SEC=4\nREPO=o/r\n%s\nacme-mm|1|60|||merge\nacme-rel|2|60\n' "$T" "$T" "$T" "$T" "${1:-}" >"$T/w/sup.conf"
+}
+wpane() { # wpane <window> <capture text> — a live, idle pane (a worker, or any window in the session)
+  echo "2.1.285" >"$T/pane-$1"; printf '%s\n' "$2" >"$T/capture-$1"
+}
+count() { grep -c -- "$1" "$T/actions" || true; }
+expect_n() { # expect_n <name> <pattern> <count>
+  local n; n="$(count "$2")"
+  if [ "$n" = "$3" ]; then pass=$((pass + 1)); echo "  ok  $1"; else fail=$((fail + 1)); echo "  FAIL $1 (saw $n, want $3)"; sed 's/^/       /' "$T/actions"; fi
+}
+SLOG="$T/w/logs/fleet-supervisor"
+
+# The incident replayed: the merge monster was relaunched, answered with the login error and idles; its
+# heartbeat is stale and its baton forfeited, so the table would relaunch it. acme-rel crashed.
+authconf; reset; baton expired; ledger 90 "ok — merging #12"; ledger2 90 "ok"; rpane
+cp "$T/fixture-login-expired" "$T/capture-acme-mm"; echo "2.1.285" >"$T/pane-acme-mm"
+run
+expect "auth: login error in a pane → the test request is made" "^probe -p"
+expect "  …one action-level alert" "^notify --level action --re https://github.com/o/r/issues/1 --incident claude-auth-expired Claude Code login expired on"
+expect "  …it tells the operator what to do" "^notify .*Run \`/login\` in any session (or \`claude /login\`); the fleet resumes on the next supervisor tick"
+expect "  …the idle monster is not relaunched" "!^launch acme-mm"
+expect "  …and not killed" "!^kill"
+expect "  …the crashed session is held too (every session, not only monsters)" "!^launch acme-rel"
+expect "  …the lease is not even asked" "!^baton"
+expect "  …no ledger comments (one calm alert)" "!comment"
+expect "  …the status-issue heartbeat says so, in UTC" "^heartbeat sessions: .*; auth: expired since [0-9]\{4\}-[0-9][0-9]-[0-9][0-9]T[0-9:]*Z, relaunches held"
+expect "  …with a line for people" "^heartbeat .*Claude Code login expired on .* Relaunches held: acme-mm, acme-rel\."
+grep -q "^[0-9-]*T[0-9:]*Z$" "$SLOG/auth.expired" && echo state-ok >>"$T/actions"
+expect "  …the hold is on disk for \`fleet status\` (first line ISO UTC)" "^state-ok"
+run; run
+expect "next ticks: no second alert" "!^notify"
+expect "  …still no relaunch (no loop)" "!^launch"
+expect "  …still nothing killed" "!^kill"
+grep -q "acme-mm: heartbeat stale.*but held: Claude Code login expired since" "$SLOG/supervisor.log" && echo logged >>"$T/actions"
+expect "  …each held relaunch is logged" "^logged"
+touch "$T/probe-ok"; run
+expect "login works again → the alert is resolved" "^notify --level info --incident claude-auth-expired --resolve Resolved: Claude Code login works again on .*Relaunching the held sessions once each: acme-mm, acme-rel\."
+expect_n "  …the held monster is relaunched once" "^launch acme-mm" 1
+expect_n "  …the held crashed session is relaunched once" "^launch acme-rel" 1
+expect "  …through the normal path (the lease is asked)" "^baton --repo o/r --role merge --session acme-mm"
+expect "  …and the ledger comment says why it waited" "comment 1: .*held while Claude Code.s login was expired"
+[ ! -f "$SLOG/auth.expired" ] && [ ! -f "$SLOG/auth.alerted" ] && echo cleared >>"$T/actions"
+expect "  …the hold state is cleared" "^cleared"
+baton held_self; ledger 1 "ok — merging #12"; ledger2 1 "ok"; run
+expect "the relaunched sessions heartbeat → nothing more to do" "!^launch"
+expect "  …no alert, no test request" "!^notify\|^probe"
+
+# A relaunch reveals it (no pane showed the error before): the first relaunched session answers with the
+# login error, so the rest of the tick is held and the alert goes out once.
+authconf; reset; rm -f "$T"/pane-* "$T"/capture-* "$T/probe-ok"; baton free; ledger 90 "ok — merging #12"; ledger2 90 "ok"; pane exited; rpane
+touch "$T/auth-expired"; run
+expect_n "relaunch shows the login error → that one relaunch happened" "^launch acme-mm" 1
+expect "  …the next session in the same tick is held" "!^launch acme-rel"
+expect_n "  …one alert" "^notify --level action .*--incident claude-auth-expired" 1
+expect "  …no test request needed: the reply is the evidence" "!^probe"
+run
+expect "next tick: the error pane is not relaunched" "!^launch"
+expect "  …no second alert" "!^notify"
+expect "  …the test request now runs (to notice a login)" "^probe -p"
+
+# Recovery seen in a pane, with the test request off: the operator runs /login in the monster's window.
+authconf "AUTH_PROBE=off"; rm -f "$T/auth-expired"; run
+expect "AUTH_PROBE=off → never a test request" "!^probe"
+expect "  …still held" "!^launch"
+printf '❯ /login\n  ⎿  Login successful\n' >>"$T/capture-acme-mm"; baton expired; run
+expect "/login in a held pane (Login successful) → resolved" "^notify --level info --incident claude-auth-expired --resolve"
+expect_n "  …the held crashed session is relaunched once" "^launch acme-rel" 1
+rm -f "$T"/pane-* "$T"/capture-*
+
+# Only Claude Code's own error line counts. The canary: acme-rel, crashed, is relaunched unless a pane holds it.
+authcase() { # authcase <name> <hold|none> <pane text>
+  authconf; reset; rm -f "$T"/pane-* "$T"/capture-* "$T/probe-ok"; ledger 1 "ok"; ledger2 90 "ok"; rpane
+  wpane acme-w "$3"; run
+  if [ "$2" = hold ]; then expect "$1 → held" "!^launch acme-rel"; expect "  …alerted" "^notify --level action"
+  else expect "$1 → not a login error" "^launch acme-rel"; expect "  …no alert, no test request" "!^notify\|^probe"; fi
+}
+authcase "the incident's line" hold "$(cat "$T/fixture-login-expired")"
+authcase "the generic 401 reply (verbatim 2.1.285 pane)" hold "$(cat "$HERE/fixtures/pane-auth-401.txt")"
+authcase "OAuth token revoked" hold "⏺ OAuth token revoked · Please run /login"
+authcase "not logged in" hold "⏺ Not logged in · Please run /login"
+authcase "invalid API key" hold "⏺ API Error: 401 Invalid API key · Please run /login"
+authcase "Anthropic-profile variant" hold "⏺ Login expired · Run /login to sign in again, or re-authenticate your Anthropic profile"
+authcase "the ● marker" hold "● Login expired · Please run /login"
+authcase "a model reply quoting the line" none "⏺ The monster printed \"Login expired · Please run /login\", so run /login on the host."
+authcase "a reply that starts with the words but goes on" none "⏺ Login expired · Please run /login when you are back, then reply go."
+authcase "tool output carrying the line" none "  ⎿  Login expired · Please run /login"
+authcase "the line without a message marker" none "    Login expired · Please run /login"
+authcase "an error followed by a normal reply" none "⏺ Login expired · Please run /login
+❯ go on
+⏺ Reading the ledger."
+authconf; reset; rm -f "$T"/pane-* "$T"/capture-*; ledger 1 "ok"; ledger2 90 "ok"; rpane
+wpane acme-w "⏺ Login expired · Please run /login"; printf '✻ Working… (esc to interrupt)\n' >>"$T/capture-acme-w"; run
+expect "a pane mid-turn is not read → no hold" "^launch acme-rel"
+authconf; reset; rm -f "$T"/pane-* "$T"/capture-*; ledger 1 "ok"; ledger2 90 "ok"; rpane
+wpane acme-w "⏺ Login expired · Please run /login"; echo zsh >"$T/pane-acme-w"; run
+expect "an exited pane (shell in front) is not read → no hold" "^launch acme-rel"
+
+# An old error on screen while the login works: the test request passes, so no hold, and that pane is
+# acknowledged (not tested again) until it shows something else.
+authconf; reset; rm -f "$T"/pane-* "$T"/capture-*; touch "$T/probe-ok"; ledger 1 "ok"; ledger2 90 "ok"; rpane
+wpane acme-w "⏺ Login expired · Please run /login"; run
+expect "old error + working login → not held" "^launch acme-rel"
+expect "  …no alert" "!^notify"
+ledger2 90 "ok"; rpane; run
+expect "  …next tick: the acknowledged pane is not tested again" "!^probe"
+wpane acme-w "⏺ Back on the ledger."; run
+[ ! -f "$SLOG/auth.acked" ] && echo pruned >>"$T/actions"
+expect "  …the pane answers normally → no longer acknowledged" "^pruned"
+rm -f "$T/probe-ok"; wpane acme-w "⏺ Login expired · Please run /login"; run
+expect "  …a new error in it later counts again" "^notify --level action"
+rm -f "$T"/pane-* "$T"/capture-*
+
+# A rotation request while held waits, and is honoured once the login works.
+authconf; reset; baton free; ledger 10 "rotation requested"; ledger2 1 "ok"; echo 2.1.285 >"$T/pane-acme-mm"; : >"$T/capture-acme-mm"
+wpane acme-w "⏺ Login expired · Please run /login"; run
+expect "held + rotation requested + idle → not relaunched" "!^launch acme-mm"
+expect "  …not killed" "!^kill"
+touch "$T/probe-ok"; run
+expect_n "login works → the rotation relaunch happens once" "^launch acme-mm" 1
+rm -f "$T"/pane-* "$T"/capture-* "$T/probe-ok"
+
+# The alert is retried until it goes out, and the resolve too.
+authconf; reset; ledger 1 "ok"; ledger2 90 "ok"; rpane; wpane acme-w "⏺ Login expired · Please run /login"; touch "$T/notify-fail"; run
+expect "notify fails → still held" "!^launch"
+rm -f "$T/notify-fail"; run
+expect_n "  …the alert is posted on the next tick" "^notify --level action" 1
+touch "$T/probe-ok" "$T/notify-fail"; run
+expect "  …login works but the resolve fails → relaunches resume anyway" "^launch acme-rel"
+rm -f "$T/notify-fail"; ledger2 1 "ok"; run
+expect_n "  …the resolve is posted on the next tick" "^notify --level info --incident claude-auth-expired --resolve" 1
+run
+expect "  …once" "!^notify"
+rm -f "$T"/pane-* "$T"/capture-* "$T/probe-ok"
+
+# STATUS_URL is the alert's link; the time in the heartbeat's people line follows the operator's format.
+authconf "STATUS_URL=https://github.com/o/fleet/issues/30"; reset; ledger 1 "ok"; ledger2 90 "ok"; rpane; wpane acme-w "⏺ Login expired · Please run /login"
+: >"$T/actions"; (cd "$T/w" && OPERATOR_TIMEZONE=America/New_York OPERATOR_CLOCK=12h bash "$SUP" sup.conf >/dev/null 2>&1)
+expect "STATUS_URL → the alert links the status issue" "^notify --level action --re https://github.com/o/fleet/issues/30 --incident claude-auth-expired"
+expect "  …the heartbeat's machine field stays ISO UTC" "^heartbeat .*auth: expired since [0-9]\{4\}-[0-9][0-9]-[0-9][0-9]T"
+expect "  …its people line shows the operator's clock" "^heartbeat .*since [A-Z][a-z][a-z] [0-9]*, [0-9]*:[0-9][0-9] [AP]M E[SD]T\. Run"
+rm -f "$T"/pane-* "$T"/capture-*
 
 echo "$pass passed, $fail failed."
 [ "$fail" = 0 ]

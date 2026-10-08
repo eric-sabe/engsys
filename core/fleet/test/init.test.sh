@@ -75,7 +75,8 @@ for a in "$@"; do
   prev="$a"
 done
 w="${t#*:}"
-add_window() { grep -Fxq "$1" "$F/windows" || echo "$1" >>"$F/windows"; echo node >"$F/cmd-$1"; }
+# a launched session shows its first reply; the supervisor reads it for a login error (engsys#103)
+add_window() { grep -Fxq "$1" "$F/windows" || echo "$1" >>"$F/windows"; echo node >"$F/cmd-$1"; echo "⏺ Reading the ledger." >"$F/cap-$1"; }
 case "$sub" in
   list-windows) cat "$F/windows" ;;
   list-panes) cat "$F/cmd-$w" 2>/dev/null || exit 1 ;;

@@ -3,7 +3,8 @@
 #
 #   fleet [--instance <dir>] <command> [args]
 #
-#   status                        fleet id + registry homes, pins vs host, and which sessions are behind
+#   status                        fleet id + registry homes, pins vs host, which sessions are behind, and
+#                                 whether the supervisor holds relaunches for an expired Claude Code login
 #   status --federation [--json]  every fleet (heartbeat ages) and every baton (holder, expiry,
 #                                 holder != home flag), read-only
 #   pin ...                       release the instance + open the pin PR (see `fleet pin --help`)

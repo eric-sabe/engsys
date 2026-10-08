@@ -5,7 +5,13 @@
 # Design: docs/multi-fleet.md § 3 "Fleet and host roles" (follow-up to #40, #57); the supervisor
 # calls this once per tick as its HEARTBEAT_CMD (core/skills/agent-sessions/scripts/fleet-supervisor.sh).
 #
-#   fleet heartbeat "<one-line summary>"
+#   fleet heartbeat "<one-line summary>" ["<note for people>"]
+#
+# The note (optional) is written on the lines after `last:`, inside the block, and is gone again from the
+# next heartbeat that has none. The supervisor uses it while it holds relaunches for an expired Claude
+# Code login (engsys#103): the summary keeps machine fields in ISO 8601 UTC, the note shows times the
+# way the operator reads them (#89). `last:` stays the line right after the open marker, which is where
+# claim.mjs and the supervisor read it.
 #
 # No-op (exit 0, nothing written) when: FLEET_ID is unset (single-fleet mode), no federation file,
 # this fleet has no status_issue declared, or the instance repo can't be resolved. Every gh/node
@@ -33,6 +39,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 . "$HERE/lib/fleet-env.sh"
 
 STATUS_TEXT="${1:-ok}"
+# A note may not carry block markers of its own: they would break the one-block check below.
+NOTE_TEXT="$(printf '%s' "${2:-}" | sed 's/<!--/<! --/g; s/-->/-- >/g')"
 
 # Single-fleet mode, or no registry at all: nothing to write.
 [ -n "$FLEET_ID" ] || exit 0
@@ -58,15 +66,16 @@ while :; do
   attempt=$((attempt + 1))
   BODY="$(gh issue view "$ISSUE" -R "$REPO" --json body --jq .body 2>/dev/null)" || exit 0
 
-  printf '%s\n' "$BODY" | FLEET_LINE="$LINE" awk '
-    /<!-- fleet-heartbeat -->/   { print; print ENVIRON["FLEET_LINE"]; found=1; skip=1; next }
+  printf '%s\n' "$BODY" | FLEET_LINE="$LINE" FLEET_NOTE="$NOTE_TEXT" awk '
+    function block() { print ENVIRON["FLEET_LINE"]; if (ENVIRON["FLEET_NOTE"] != "") print ENVIRON["FLEET_NOTE"] }
+    /<!-- fleet-heartbeat -->/   { print; block(); found=1; skip=1; next }
     /<!-- \/fleet-heartbeat -->/ { skip=0 }
     skip != 1                    { print }
     END {
       if (!found) {
         print ""
         print "<!-- fleet-heartbeat -->"
-        print ENVIRON["FLEET_LINE"]
+        block()
         print "<!-- /fleet-heartbeat -->"
       }
     }
