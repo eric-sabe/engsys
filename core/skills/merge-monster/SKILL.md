@@ -552,7 +552,8 @@ held/dropped nudge degrades to today's poll-based behavior.
    (dead / renamed / other machine) → skip silently.
 4. **Another fleet:** reply on the PR, through the fence, with the same one line
    as the body (stdin, or a file under the session's `tmp/`; the guard refuses
-   any other path):
+   any other path, a hardlink, and a heredoc whose delimiter is unquoted, since
+   that expands `$VAR` into the post):
 
    ```bash
    <skill-dir>/scripts/mm-act.sh guard --repo <repo> --state-dir <state_dir> -- fleet msg send --to <fleet>:<session> --re <repo>#N --body-file - <<'EOF'

@@ -425,6 +425,8 @@ has "roster: design" "$R" "acme-design|$P||--add-dir $HOME/git/worktrees --model
 eq "five windows launched" "$(grep -c . "$FAKE/tmux/windows")" 5
 has "mm runs in the session env" "$(launched acme-mm)" "set -a && . $STATE/env/session.env && set +a && claude --name acme-mm"
 has "mm gets its session name and a launch id (the baton's holder, engsys#62)" "$(launched acme-mm)" "export ENGSYS_SESSION=acme-mm ENGSYS_SESSION_RUN="
+has "mm records its launch directory for the guarded body file (engsys#108)" "$(launched acme-mm)" "ENGSYS_SESSION_ROOT=$(cd "$P" && pwd -P) ENGSYS_SINGLETON_ROLE=merge && "
+has "a non-monster records it too" "$(launched acme-build)" "ENGSYS_SESSION_ROOT=$(cd "$P" && pwd -P) && unset ENGSYS_SINGLETON_ROLE"
 has "mm arms the singleton-write guard" "$(launched acme-mm)" "ENGSYS_SINGLETON_ROLE=merge && "
 has "maintain arms it for its role" "$(launched acme-maintain)" "ENGSYS_SINGLETON_ROLE=maintain && "
 has "the prompt precedes the flags" "$(launched acme-mm)" "/engsys:merge-monster --model claude-opus-5-5"

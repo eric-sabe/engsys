@@ -7,7 +7,7 @@
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, realpathSync, statSync, symlinkSync, writeFileSync, existsSync, readdirSync } from "node:fs";
+import { appendFileSync, closeSync, fstatSync, linkSync, mkdtempSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, symlinkSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chmodSync } from "node:fs";
@@ -25,6 +25,8 @@ import {
   defaultSpawn,
   guardCommand,
   holderFor,
+  readBounded,
+  sessionRoot,
   homeCheck,
   hostSlug,
   defaultNotify,
@@ -68,7 +70,7 @@ function world() {
   };
 }
 
-function session(w, { holder = "alice:acme-mm", run = "run-1", home = HOME, role = "merge", dir, mergeReply, remoteUrl, cwd } = {}) {
+function session(w, { holder = "alice:acme-mm", run = "run-1", home = HOME, role = "merge", dir, mergeReply, remoteUrl, cwd, sessionDir } = {}) {
   const stateDir = dir ?? mkdtempSync(join(tmpdir(), "baton-"));
   const lease = createGithubLease({ repo: REPO, api: w.api, sleep: noSleep, random: () => 0.5, now: () => w.local.t });
   const notes = [];
@@ -98,6 +100,7 @@ function session(w, { holder = "alice:acme-mm", run = "run-1", home = HOME, role
     sleep: async (ms) => w.advance(ms),
     ...(remoteUrl ? { remoteUrl } : {}),
     ...(cwd ? { cwd } : {}),
+    ...(sessionDir ? { sessionDir } : {}),
   });
   return { baton, store, stateDir, notes, merges, spawned, lease, holder, setHome: (h) => { homeInfo = h; } };
 }
@@ -547,6 +550,7 @@ test("guard: fences, then runs the command; refuses everything but gh and this e
 function sessionDir() {
   const cwd = realpathSync(mkdtempSync(join(tmpdir(), "baton-guard-msg-")));
   mkdirSync(join(cwd, "tmp"));
+  chmodSync(join(cwd, "tmp"), 0o755); // whatever the umask: a private tmp/ (engsys#108 refuses a shared one)
   writeFileSync(join(cwd, "tmp", "b.txt"), "bounced #12\n");
   writeFileSync(join(cwd, "secret.txt"), "not for posting\n");
   return cwd;
@@ -618,6 +622,87 @@ test("guard: `fleet msg send --body-file` is confined to stdin or the session's 
   const bare = realpathSync(mkdtempSync(join(tmpdir(), "baton-guard-msg-")));
   assert.throws(() => guardCommand(["fleet", "msg", "send", "--to", "bob:x", "--body-file", "tmp/b.txt"], { cwd: bare }), /does not exist/);
   assert.equal(guardCommand(["fleet", "msg", "send", "--to", "bob:x", "--body-file", "-"], { cwd: bare }).args.at(-1), "-", "stdin needs no tmp/");
+});
+
+test("guard: --body-file refuses a hardlink in tmp/ (engsys#108 L3a)", () => {
+  const cwd = sessionDir();
+  linkSync(join(cwd, "secret.txt"), join(cwd, "tmp", "hl"));
+  assert.throws(() => guardCommand(["fleet", "msg", "send", "--to", "bob:x", "--body-file", "tmp/hl"], { cwd }), /hardlinked file/);
+  // the original file, still linked twice, is refused too; a plain file next to it is not
+  assert.equal(guardCommand(["fleet", "msg", "send", "--to", "bob:x", "--body-file", "tmp/b.txt"], { cwd }).input, "bounced #12\n");
+});
+
+test("guard: --body-file is anchored to the session's launch directory, not the Bash cwd (engsys#108 L3b)", () => {
+  const root = sessionDir();
+  // another directory with its own private tmp/ (a `cd` elsewhere): its tmp/ is not the session's
+  const other = sessionDir();
+  writeFileSync(join(other, "tmp", "probe.txt"), "hi\n");
+  const send = (body, opts) => guardCommand(["fleet", "msg", "send", "--to", "bob:x", "--body-file", body], opts);
+  assert.throws(() => send("tmp/probe.txt", { cwd: other, root }), /outside/);
+  assert.throws(() => send(join(other, "tmp", "probe.txt"), { cwd: other, root }), /outside/);
+  // the session's own tmp/ still works from a cd'd cwd, by absolute path or relative to that cwd
+  assert.equal(send(join(root, "tmp", "b.txt"), { cwd: other, root }).input, "bounced #12\n");
+  mkdirSync(join(root, "sub"));
+  assert.equal(send("../tmp/b.txt", { cwd: join(root, "sub"), root }).input, "bounced #12\n");
+
+  // a shared temp dir (the /private -> /private/tmp repro): world-writable or sticky tmp/ is refused,
+  // even when it is the root's own tmp/
+  for (const mode of [0o1777, 0o777, 0o1755]) {
+    const shared = sessionDir();
+    chmodSync(join(shared, "tmp"), mode);
+    assert.throws(() => send("tmp/b.txt", { cwd: shared }), /world-writable or sticky/, mode.toString(8));
+    assert.throws(() => send("tmp/b.txt", { cwd: shared, root }), /outside/, `${mode.toString(8)} from the session root`);
+  }
+  // a tmp/ owned by another user is refused
+  const realUid = process.getuid;
+  process.getuid = () => realUid.call(process) + 1;
+  try {
+    assert.throws(() => send("tmp/b.txt", { cwd: root }), /not owned by this user/);
+  } finally {
+    process.getuid = realUid;
+  }
+});
+
+test("sessionRoot: ENGSYS_SESSION_ROOT, then CLAUDE_PROJECT_DIR, then the cwd; only absolute paths count (engsys#108)", () => {
+  assert.equal(sessionRoot({ ENGSYS_SESSION_ROOT: "/fleet/wt", CLAUDE_PROJECT_DIR: "/proj" }, "/private"), "/fleet/wt");
+  assert.equal(sessionRoot({ CLAUDE_PROJECT_DIR: "/proj" }, "/private"), "/proj");
+  assert.equal(sessionRoot({}, "/private"), "/private");
+  assert.equal(sessionRoot({ ENGSYS_SESSION_ROOT: "", CLAUDE_PROJECT_DIR: "rel/dir" }, "/private"), "/private");
+});
+
+test("guard (baton): the body file comes from the session root's tmp/, whatever the cwd (engsys#108)", async () => {
+  const w = world();
+  const root = sessionDir();
+  const other = sessionDir();
+  const s = session(w, { cwd: other, sessionDir: root });
+  await s.baton.startup();
+  await assert.rejects(s.baton.guard(["fleet", "msg", "send", "--to", "bob:x", "--body-file", "tmp/b.txt"]), /outside/);
+  assert.equal(s.spawned.length, 0);
+  const r = await s.baton.guard(["fleet", "msg", "send", "--to", "bob:x", "--body-file", join(root, "tmp", "b.txt")]);
+  assert.equal(r.exit, 0);
+  assert.equal(s.spawned[0].opts.input, "bounced #12\n");
+});
+
+test("readBounded: reads at most cap bytes; a file that grew past the cap after its size check is refused (engsys#108 I1)", () => {
+  const dir = sessionDir();
+  const f = join(dir, "tmp", "grow.txt");
+  writeFileSync(f, "small\n");
+  const fd = openSync(f, "r");
+  try {
+    assert.equal(fstatSync(fd).size, 6, "the size check sees a small file");
+    appendFileSync(f, "x".repeat(64)); // then it grows
+    assert.equal(readBounded(fd, 16), null);
+  } finally {
+    closeSync(fd);
+  }
+  const exact = join(dir, "tmp", "exact.txt");
+  writeFileSync(exact, "y".repeat(16));
+  const fd2 = openSync(exact, "r");
+  try { assert.equal(readBounded(fd2, 16), "y".repeat(16)); } finally { closeSync(fd2); }
+  const empty = join(dir, "tmp", "empty.txt");
+  writeFileSync(empty, "");
+  const fd3 = openSync(empty, "r");
+  try { assert.equal(readBounded(fd3, 16), ""); } finally { closeSync(fd3); }
 });
 
 test("guard: a guarded fleet msg send hands the child the body checked before the fence, not the path (engsys#78 review)", async () => {
