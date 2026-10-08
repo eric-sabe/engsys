@@ -511,7 +511,7 @@ function bodyExpansions(body) {
 
 /**
  * The delimiter word of a heredoc operator at s[i] (`<<` or `<<-`), read the way bash reads it (#110):
- * the WHOLE word up to the next unquoted blank or metacharacter, with single-quoted, double-quoted,
+ * the WHOLE word up to the next unquoted blank (space, tab, newline) or metacharacter (a \r stays in it), with single-quoted, double-quoted,
  * backslash-escaped and bare parts concatenated after quote removal, so `<<'EOF'X` ends at `EOFX` and
  * `<<'EO''F'` at `EOF`. Any quoting makes it quoted (the body is not expanded). A `$` or backtick, a
  * backslash inside double quotes, a quote that does not close, or an empty word is not parsed: null
@@ -523,7 +523,7 @@ export function heredocOperator(s, i) {
   let j = i + m[0].length;
   let delim = '';
   let quoted = false;
-  while (j < s.length && !/[\s;&|<>()]/.test(s[j])) {
+  while (j < s.length && !/[ \t\n;&|<>()]/.test(s[j])) {
     const ch = s[j];
     if (ch === '$' || ch === '`') return null;
     if (ch === "'") {
@@ -562,15 +562,20 @@ export function heredocOperator(s, i) {
  * body whatever reads it, so its substitutions are commands (shellCode) and any expansion sets
  * `subst` (#92 NF1); a quoted delimiter (<<'EOF', <<"EOF", <<\EOF) keeps the body inert. The
  * delimiter is read as bash reads it (heredocOperator, #110). `ops` lists each operator with its
- * offset in `text`. `ok` is false when a delimiter can't be read, or a `<<` sits inside an arithmetic
- * `(( … ))` (a shift, not a heredoc): the body then stays in `text`, read as commands, and the caller
- * fails closed. -> { text, shellCode, interpCode, subst, ops, ok }.
+ * offset in `text`. A `<<` where the shell opens no heredoc, inside arithmetic `(( … ))` or `$[ … ]`
+ * or a parameter expansion `${ … }`, opens none here either (#109 re-review N1, N2): it and the lines
+ * after it stay in `text` and are read as commands. So does an unquoted `#` comment (a `#` at the
+ * start of a word, to the end of the line). `ok` is false, and the caller fails closed, when a
+ * delimiter can't be read, or the command holds both a carriage return and `<<` (the shell keeps the
+ * \r in a delimiter; nothing is split). -> { text, shellCode, interpCode, subst, ops, ok }.
  */
 export function splitHeredocs(cmd) {
   const s = String(cmd ?? '');
   if (!s.includes('<<')) return { text: s, shellCode: '', interpCode: '', subst: false, ops: [], ok: true };
+  if (s.includes('\r')) return { text: s, shellCode: '', interpCode: '', subst: false, ops: [], ok: false };
   let ok = true;
-  let arith = 0; // open parens of an arithmetic (( … )) we are inside; 0 outside
+  // Open (( … )), $[ … ] and ${ … } contexts, innermost last: [open char, close char, depth].
+  const ctx = [];
   const ops = [];
   let subst = false;
   let out = '';
@@ -590,19 +595,37 @@ export function splitHeredocs(cmd) {
     }
     if (ch === '\\') { out += ch + (s[i + 1] ?? ''); i += 1; continue; }
     if (ch === "'" || ch === '"') { quote = ch; out += ch; continue; }
-    if (arith) {
-      if (ch === '(') arith += 1;
-      else if (ch === ')') arith -= 1;
-    } else if (ch === '(' && s[i + 1] === '(') {
-      arith = 2;
+    if (ch === '(' && s[i + 1] === '(') {
+      ctx.push(['(', ')', 2]);
       out += '((';
       i += 1;
       continue;
     }
+    if (ch === '$' && (s[i + 1] === '{' || s[i + 1] === '[')) {
+      ctx.push(s[i + 1] === '{' ? ['{', '}', 1] : ['[', ']', 1]);
+      out += ch + s[i + 1];
+      i += 1;
+      continue;
+    }
+    if (ctx.length) {
+      const top = ctx.at(-1);
+      if (ch === top[0]) top[2] += 1;
+      else if (ch === top[1] && --top[2] === 0) ctx.pop();
+    }
+    // A comment: an unquoted # at the start of a word, to the end of the line (`a#b` is no comment).
+    if (ch === '#' && !ctx.length && (i === 0 || /[ \t\n;&|()]/.test(s[i - 1]))) {
+      const e = s.indexOf('\n', i);
+      const end = e < 0 ? s.length : e;
+      out += s.slice(i, end);
+      i = end - 1;
+      continue;
+    }
     if (ch === '<' && s[i + 1] === '<' && s[i + 2] !== '<' && s[i - 1] !== '<') {
-      const op = arith ? null : heredocOperator(s, i);
+      // Inside (( )), $[ ] or ${ } it is a shift or literal text, not a heredoc: it stays in the text
+      // with every line after it, all read as commands. Opening nothing can only over-check.
+      const op = ctx.length ? null : heredocOperator(s, i);
       if (!op) {
-        ok = false; // unreadable: leave it, and the lines after it, in the text
+        if (!ctx.length) ok = false; // unreadable: leave it, and the lines after it, in the text
       } else {
         pending.push({ delim: op.delim, strip: op.strip, quoted: op.quoted, sink: heredocSink(s, lineStart, i, i + op.raw.length) });
         ops.push({ ...op, at: out.length });
