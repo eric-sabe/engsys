@@ -727,6 +727,7 @@ test('#92 NF1: an unquoted heredoc runs its substitutions whatever reads it; a q
     `${ACT} guard --repo o/r --state-dir d -- gh issue comment 5 --body-file - <<EOF\n$(gh pr merge 5)\nEOF`,
     'python3 <<EOF\n$(gh pr merge 5)\nEOF',
     'gh api graphql -F query=x <<EOF\n$QUERY\nEOF',
+    'gh api graphql -F query=x <<EOF\n$[1+1]\nEOF',
   ]) assert.ok(deniedIn(c), `should deny: ${JSON.stringify(c)}`);
   for (const c of [
     "cat <<'EOF'\n$(gh pr merge 5)\nEOF",
@@ -734,8 +735,39 @@ test('#92 NF1: an unquoted heredoc runs its substitutions whatever reads it; a q
     'cat <<\\EOF\n$(gh pr merge 5)\nEOF',
     'cat <<EOF\nescaped \\$(gh pr merge 5) and \\`gh pr merge 5\\`\nEOF',
     'cat > /tmp/b.md <<EOF\nPR $N: node 22 failed; next the guarded git push. Built $(date).\nEOF',
-    `${ACT} guard --repo o/r --state-dir d -- gh issue comment 5 --body-file - <<EOF\nPR $N failed on node 22\nEOF`,
   ]) assert.equal(deniedIn(c), false, `should allow: ${JSON.stringify(c)}`);
+});
+
+// ------------------------------------- #106: a fenced wrapper's heredoc must not expand the env --
+
+test('#106: a fenced wrapper fed an UNQUOTED heredoc is denied; $VAR, ${VAR} and $[…] would post the env', () => {
+  const env = { ...MERGE, HOME: '/Users/x', CLAUDE_PLUGIN_ROOT: ROOT };
+  const deniedIn = (command, e = env) => decide({ command, env: e, pluginRoot: ROOT, cwd: '/repo' }) !== null;
+  const MNT = { ...env, ENGSYS_SINGLETON_ROLE: 'maintain' };
+  const tails = [
+    '-- fleet msg send --to bob:x --re a/b#1 --body-file -',
+    '-- gh issue comment 1 --body-file -',
+    '-- gh pr comment 1 --body-file -',
+  ];
+  for (const [wrapper, e] of [[ACT, env], [MNT_ACT, MNT]]) {
+    for (const tail of tails) {
+      const head = `${wrapper} guard --repo a/b --state-dir /tmp/s ${tail}`;
+      for (const body of ['$GH_TOKEN', '${HOME}', '$[1+1]', 'token: ${SLACK_BOT_TOKEN:-x}', 'plain text, no expansion']) {
+        for (const op of ['<<EOF', '<<-EOF', '<< EOF']) {
+          const c = `${head} ${op}\n${body}\nEOF`;
+          assert.ok(deniedIn(c, e), `should deny: ${JSON.stringify(c)}`);
+          assert.equal(wrapperInvocation(c, ROOT, e), null, `not a plain wrapper invocation: ${JSON.stringify(c)}`);
+        }
+        for (const op of ["<<'EOF'", '<<"EOF"', '<<\\EOF', "<<-'EOF'"]) {
+          const c = `${head} ${op}\n${body}\nEOF`;
+          assert.equal(deniedIn(c, e), false, `should allow the quoted form: ${JSON.stringify(c)}`);
+        }
+      }
+    }
+  }
+  // the deny message says why
+  const d = decide({ command: `${ACT} guard --repo a/b --state-dir /tmp/s -- gh issue comment 1 --body-file - <<EOF\n$GH_TOKEN\nEOF`, env, pluginRoot: ROOT });
+  assert.match(d.deny, /quoted delimiter/);
 });
 
 test('#92 NF1: a heredoc feeding eval, a read loop that evals, or xargs … sh -c is code', () => {

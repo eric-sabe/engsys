@@ -14,7 +14,8 @@
 //          a command that is one plain invocation of a fenced wrapper passes (mm-act/mnt-act,
 //          mm-baton/mnt-baton, and mm-heartbeat/mnt-heartbeat with --state-dir), with no chaining,
 //          redirects or substitution; only 2>&1, `| jq …` / `| cat`, `; echo $?` and a heredoc of
-//          data on its stdin may follow (#85 F2). Otherwise every gh, git and HTTP client invocation
+//          data on its stdin may follow (#85 F2), the heredoc with a quoted delimiter so its body
+//          expands nothing (#106). Otherwise every gh, git and HTTP client invocation
 //          in it (nested quoted commands too; names compared case-insensitively, $'…' decoded) must
 //          be a known read:
 //            gh     pr|issue|run|workflow|repo|release|label|cache view|list|status|diff|checks|
@@ -467,8 +468,8 @@ function heredocSink(s, lineStart, at, after) {
 
 /**
  * What an UNQUOTED heredoc body makes the shell run or expand (#92 NF1): the text of every live
- * `$( … )` and backtick substitution (an escaped \\$ or \\` is literal), and whether a $VAR or ${…}
- * is expanded. -> { code: [command text…], expands }.
+ * `$( … )` and backtick substitution (an escaped \\$ or \\` is literal), and whether a $VAR, ${…}
+ * or $[…] is expanded. -> { code: [command text…], expands }.
  */
 function bodyExpansions(body) {
   const code = [];
@@ -503,7 +504,7 @@ function bodyExpansions(body) {
       i = j;
       continue;
     }
-    if (ch === '$' && /[A-Za-z0-9_{@*#?$!-]/.test(body[i + 1] ?? '')) expands = true;
+    if (ch === '$' && /[A-Za-z0-9_{[@*#?$!-]/.test(body[i + 1] ?? '')) expands = true;
   }
   return { code, expands };
 }
@@ -654,7 +655,7 @@ export function bashFindings(cmd, ctx = {}, depth = 0, outerSubst = false, opts 
       if (!opts.skipInterpreters && !reading && at.includes(i) && INTERPRETER.test(b)) found.push(...interpreterFindings(simple, i, text, interpCode, ctx, depth, subst));
       if (/(^|[/@.])(api|uploads)\.github\.com/i.test(w)) found.push('a command that names the GitHub API host');
       if (FENCED_SCRIPTS.has(b) && !reading) {
-        found.push(`${b} not run as one plain command (the heartbeat needs --state-dir; gate-request.sh only under guard; only 2>&1, | jq, | cat or ; echo $? may follow)`);
+        found.push(`${b} not run as one plain command (the heartbeat needs --state-dir; gate-request.sh only under guard; a heredoc on it needs a quoted delimiter, <<'EOF'; only 2>&1, | jq, | cat or ; echo $? may follow)`);
       }
       if (!reading && i !== ran) {
         // A plugin path handed to a kit script is a read (its --config); settings and git config never are.
@@ -677,10 +678,13 @@ export function wrapperInvocation(cmd, pluginRoot, env = process.env) {
   if (!pluginRoot) return null;
   // A heredoc of data on its stdin is fine (`… -- gh issue comment N --body-file - <<'EOF'`); one a
   // shell or interpreter reads is not.
-  const { text, shellCode, interpCode } = splitHeredocs(cmd);
-  if (shellCode || interpCode) return null;
+  const { text, shellCode, interpCode, subst } = splitHeredocs(cmd);
+  if (shellCode || interpCode || subst) return null;
   const ops = text.match(/<<-?[ \t]*(?:'[^'\n]+'|"[^"\n]+"|\\?[A-Za-z_][\w-]*)/g) ?? [];
   if (ops.length > 1) return null;
+  // #106: an UNQUOTED delimiter makes the shell expand $VAR, ${…} and $[…] in the body, so a fenced
+  // post could carry any secret in the session env. Only <<'EOF', <<"EOF" or <<\EOF passes.
+  if (ops[0] && /^<<-?[ \t]*[A-Za-z_]/.test(ops[0])) return null;
   const l = lex(text.replace(ops[0] ?? '\0', ' ').trim().replace(WRAPPER_TAIL, ''));
   if (!l.ok || l.subst || l.ops || l.words.length !== 1) return null;
   const words = [...l.words[0]];
@@ -703,7 +707,7 @@ function denyMessage(role, found) {
     + `Writes go through ONE plain command: <engsys-root>/skills/${wrapper} guard --repo <repo> --state-dir <state_dir> -- gh <args…>`
     + `${role === 'merge' ? '; merges as mm-act.sh merge --pr N --sha <validated head> --method merge|squash' : ''}`
     + '; a push as … guard --pr N -- git -C <worktree> push --force-with-lease origin HEAD:refs/heads/<PR head branch>. '
-    + 'No ;, &&, redirects, $( ) or backticks around it (2>&1, | jq, | cat and ; echo $? may follow). If the fence refuses, do not act (SKILL.md § The baton). '
+    + 'No ;, &&, redirects, $( ) or backticks around it (2>&1, | jq, | cat and ; echo $? may follow); a heredoc body needs a quoted delimiter (<<\'EOF\'), since an unquoted one expands $VAR into the post. If the fence refuses, do not act (SKILL.md § The baton). '
     + 'Dispatched agents never write to GitHub themselves: they hand the act back to the monster. Settings, git config and plugin files are read-only here.';
 }
 
