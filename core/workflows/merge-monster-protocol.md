@@ -55,8 +55,11 @@ ref yourself (`docs/multi-fleet.md` § 2 in engsys).
    fleet", and a fleet-qualified one (`<fleet>:<ns>-build`, for example
    `bob:acme-build`) names a session in another fleet of the federation
    (`docs/multi-fleet.md` in engsys). Write the qualified form whenever your
-   fleet has a `FLEET_ID`. Merge Monster routes the nudge with
-   `msg.mjs route <session>` (engsys#78): an address in its own fleet (bare,
+   fleet has a `FLEET_ID`. Write the handoff yourself, in the PR body or a
+   comment as the PR author (or as the identity that applies `mm:ready`): a
+   cross-fleet `session:` from anyone else is ignored (engsys#107). Merge
+   Monster routes the nudge with `msg.mjs route --handoff-pr <repo>#N`
+   (engsys#78, #107): an address in its own fleet (bare,
    or qualified with its own `FLEET_ID`) gets `SendMessage`; an address in
    another fleet gets a `fleet-msg` comment **on this PR**, which your
    fleet's relay delivers to your session's inbox. So across fleets Merge

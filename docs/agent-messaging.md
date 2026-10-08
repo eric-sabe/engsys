@@ -156,6 +156,19 @@ migration: false
 Only `session` is essential. It is authoritative for authorship: the session
 that wrote the handoff is the one that wants nudges about this PR.
 
+**Whose handoff counts (engsys#107).** Anyone who can comment on a PR can post a
+handoff block, and a cross-fleet address turns into an App-signed `fleet-msg`
+the other fleet's relay delivers. So a `<fleet>:<session>` naming **another
+fleet** is honoured only from a handoff written by the **PR author** (the PR
+body or their comment), by an actor who applied **`mm:ready`**, or by **that
+fleet's App** (`performed_via_github_app.id` equal to `fleets.<fleet>.github_app_id`
+in `federation.yml`). Any other cross-fleet handoff is ignored and journaled; the
+newest handoff that counts wins. A bare or same-fleet address stays a local
+`SendMessage`, as before. The rule lives in
+[`core/fleet/lib/handoff.mjs`](../core/fleet/lib/handoff.mjs); monsters reach it
+through `fleet msg route --handoff-pr <repo>#N` and never parse the block
+themselves.
+
 `session` is an address: a bare name means "my fleet", and `<fleet>:<session>`
 (`bob:acme-p70`) names a session in another fleet of the federation
 ([`multi-fleet.md`](multi-fleet.md)). Write the qualified form whenever your
@@ -167,12 +180,13 @@ PR, as a `fleet-msg` comment (below).
 On a state change the author would act on — **bounced**, **escalated**,
 **merged**, **blocked-needs-you** — after the GitHub action (label + comment):
 
-1. Read `session` from the handoff.
-2. **Route it** with the one routing helper (engsys#78,
+1. Take `session` from the authoritative handoff (above).
+2. **Route it** with the one routing helper (engsys#78, #107,
    [`core/fleet/lib/route.mjs`](../core/fleet/lib/route.mjs)):
-   `node <engsys>/core/fleet/msg.mjs route <session>`. Exit 3 (`same fleet: use
-   SendMessage to <name>`) → steps 3–5 with that name. Exit 0 (`other fleet:
-   fleet msg send --to <fleet>:<session>`) → step 6.
+   `node <engsys>/core/fleet/msg.mjs route --handoff-pr <repo>#N`. Exit 3 (`same
+   fleet: use SendMessage to <name>`) → steps 3–5 with that name. Exit 0 (`other
+   fleet: fleet msg send --to <fleet>:<session>`) → step 6. Exit 4 (no handoff
+   that counts) → no nudge; journal any `ignored mm-handoff session …` line.
 3. Filter `ListAgents` to `acme-*` (the namespace fence); match the name
    (disambiguate by cwd if needed).
 4. **Match + reachable** → `SendMessage` a one-line nudge referencing the PR and
@@ -182,8 +196,8 @@ On a state change the author would act on — **bounced**, **escalated**,
    today's poll-based behavior.
 6. **Another fleet** → the same line as a `fleet-msg` comment on the PR, sent
    through the monster's fence (`mm-act.sh guard … -- fleet msg send --to
-   <fleet>:<session> --re <repo>#N --body-file -`, body on stdin or in a file
-   under the session's `tmp/`). That fleet's relay delivers it to the session's
+   <fleet>:<session> --re <repo>#N --body-file - <<'EOF'`, body on stdin, from a
+   heredoc with a quoted delimiter, or in a file under the session's `tmp/`). That fleet's relay delivers it to the session's
    inbox. If the send exits 3 (same fleet after all), go to step 3.
 
 The same routing applies to every sender: Maintenance Monster's hand-off nudge

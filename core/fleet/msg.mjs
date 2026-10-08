@@ -7,6 +7,11 @@
 //       Where a nudge to <address> goes (lib/route.mjs, engsys#78): prints `same fleet: use SendMessage to
 //       <session>` and exits 3, or `other fleet: fleet msg send --to <fleet>:<session>` and exits 0. With
 //       --repo/--role a bare address is qualified with that role's home fleet in federation.yml. Read-only.
+//   fleet msg route --handoff-pr owner/repo#n
+//       The same, for the `session:` of that PR's `<!-- mm-handoff -->` block (lib/handoff.mjs, engsys#107):
+//       the newest handoff counts, and one naming another fleet only when the PR author, an mm:ready
+//       labeler or that fleet's App wrote it; ignored handoffs are listed on stderr. Exit 4 when there
+//       is no handoff session to route (no nudge). Read-only (GitHub reads through gh).
 //   fleet msg send --to <fleet>:<session> [--re owner/repo#n] --body-file <file|-> [--from <session>]
 //       Posts a comment whose first line is the generated fleet-msg header, on the `re` PR or issue,
 //       or on the target fleet's status issue (federation.yml fleets.<fleet>.status_issue, in the
@@ -25,7 +30,7 @@
 //       any check fails.
 //
 // Exit codes: 0 ok, 1 error or a failed check, 2 usage, 3 same fleet (send: `--to` names this fleet,
-// or there is no FLEET_ID; the caller uses SendMessage instead).
+// or there is no FLEET_ID; the caller uses SendMessage instead), 4 no handoff session (route --handoff-pr).
 //
 // Environment: FLEET_ID, FEDERATION_FILE, FLEET_INSTANCE_REPO (optional), FLEET_STATE (msg.sh sets it
 // from fleet-env.sh; inside a fleet session FLEET_INBOX_DIR stands in for it), ENGSYS_SESSION. A fleet
@@ -37,12 +42,14 @@ import { fileURLToPath } from 'node:url';
 import { loadFederation, checkFleetId, instanceRepo as resolveInstanceRepo, roleHome, ROLES, FederationError } from './lib/federation.mjs';
 import { render, RE_RE, FleetMsgError } from './lib/fleet-msg.mjs';
 import { route, routeLine, VIA } from './lib/route.mjs';
+import { authoritativeHandoff } from './lib/handoff.mjs';
 import { readInbox, inboxSessions, markDelivered, trustedEntries, inboxLine, COMMENT_URL_RE, SESSION_NAME_RE } from './lib/inbox.mjs';
 import { loadContext, ghApi, commentLocation, checkComment, sha256 } from './relay.mjs';
 import { wrapUntrusted } from '../lib/untrusted.mjs';
 
-export const EXIT = Object.freeze({ OK: 0, ERROR: 1, USAGE: 2, SAME_FLEET: 3 });
+export const EXIT = Object.freeze({ OK: 0, ERROR: 1, USAGE: 2, SAME_FLEET: 3, NO_HANDOFF: 4 });
 const USAGE = `usage: fleet msg route <address> [--repo owner/repo --role merge|maintain]
+       fleet msg route --handoff-pr owner/repo#n
        fleet msg send --to <fleet>:<session> [--re owner/repo#n] --body-file <file|-> [--from <session>]
        fleet msg inbox [<session>] [--mark-read]
        fleet msg read <comment-url>`;
@@ -75,9 +82,45 @@ function postComment(repo, number, body) {
   return JSON.parse(out);
 }
 
+const MAX_PAGES = 20;
+
+/** Every item of a paginated REST list (100 a page, at most MAX_PAGES pages). Throws on a non-200. */
+function listAll(api, apiPath) {
+  const all = [];
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    const res = api(`${apiPath}?per_page=100&page=${page}`);
+    if (res.status !== 200 || !Array.isArray(res.json)) throw new Error(`GitHub answered ${res.status} for ${apiPath}`);
+    all.push(...res.json);
+    if (res.json.length < 100) return all;
+  }
+  throw new Error(`${apiPath} has more than ${MAX_PAGES * 100} items`);
+}
+
+/** `fleet msg route --handoff-pr`: the authoritative handoff session of a PR (lib/handoff.mjs, engsys#107). */
+function handoffAddress(ref, { env, err, api }) {
+  const m = RE_RE.exec(ref);
+  if (!m) throw new UsageError(`--handoff-pr must be owner/repo#n, got ${JSON.stringify(ref)}`);
+  const [, repo, n] = m;
+  const issue = api(`/repos/${repo}/issues/${n}`);
+  if (issue.status !== 200 || !issue.json || typeof issue.json !== 'object') throw new Error(`GitHub answered ${issue.status} for ${ref}`);
+  const comments = listAll(api, `/repos/${repo}/issues/${n}/comments`);
+  const events = listAll(api, `/repos/${repo}/issues/${n}/events`);
+  const file = env.FEDERATION_FILE;
+  const reg = file ? loadFederation(file) : null;
+  const h = authoritativeHandoff({ issue: issue.json, comments, events, reg, fleetId: checkFleetId(env.FLEET_ID) });
+  for (const x of h.ignored) err.write(`ignored mm-handoff session ${x.session} by ${x.author ?? 'unknown'} (${x.url ?? ref}): ${x.why}\n`);
+  return h.session;
+}
+
 /** `fleet msg route`: where a nudge to <address> goes (lib/route.mjs). Returns an exit code. */
-export function routeCmd(argv, { env = process.env, out, err } = {}) {
-  const { flags, positional } = parseFlags(argv, ['repo', 'role']);
+export function routeCmd(argv, { env = process.env, out, err, api = ghApi } = {}) {
+  const { flags, positional } = parseFlags(argv, ['repo', 'role', 'handoff-pr']);
+  if (flags['handoff-pr'] !== undefined) {
+    if (positional.length || flags.repo || flags.role) throw new UsageError('--handoff-pr takes no address, --repo or --role');
+    const session = handoffAddress(flags['handoff-pr'], { env, err, api });
+    if (!session) { out.write(`no handoff session on ${flags['handoff-pr']}: no nudge\n`); return EXIT.NO_HANDOFF; }
+    positional.push(session);
+  }
   if (positional.length !== 1) throw new UsageError('fleet msg route takes one address');
   if (Boolean(flags.repo) !== Boolean(flags.role)) throw new UsageError('--repo and --role go together');
   const fleetId = checkFleetId(env.FLEET_ID);
@@ -265,10 +308,10 @@ export function read(argv, { env = process.env, out, err, api = ghApi } = {}) {
   return EXIT.OK;
 }
 
-export function main(argv, { env = process.env, out = process.stdout, err = process.stderr } = {}) {
+export function main(argv, { env = process.env, out = process.stdout, err = process.stderr, api = ghApi } = {}) {
   const [cmd, ...rest] = argv;
   try {
-    if (cmd === 'route') return routeCmd(rest, { env, out, err });
+    if (cmd === 'route') return routeCmd(rest, { env, out, err, api });
     if (cmd === 'send') return send(rest, { env, out, err });
     if (cmd === 'inbox') return inbox(rest, { env, out, err });
     if (cmd === 'read') return read(rest, { env, out, err });
