@@ -638,12 +638,15 @@ test("guard: --body-file is anchored to the session's launch directory, not the 
   const other = sessionDir();
   writeFileSync(join(other, "tmp", "probe.txt"), "hi\n");
   const send = (body, opts) => guardCommand(["fleet", "msg", "send", "--to", "bob:x", "--body-file", body], opts);
-  assert.throws(() => send("tmp/probe.txt", { cwd: other, root }), /outside/);
+  assert.throws(() => send("tmp/probe.txt", { cwd: other, root }), /cannot resolve/, "a relative path is the session root's, not the cwd's");
   assert.throws(() => send(join(other, "tmp", "probe.txt"), { cwd: other, root }), /outside/);
-  // the session's own tmp/ still works from a cd'd cwd, by absolute path or relative to that cwd
+  // the session's own tmp/ still works from a cd'd cwd, by absolute path or relative to the session
+  // root (#109 review I3), never relative to the cwd
   assert.equal(send(join(root, "tmp", "b.txt"), { cwd: other, root }).input, "bounced #12\n");
+  assert.equal(send("tmp/b.txt", { cwd: other, root }).input, "bounced #12\n");
   mkdirSync(join(root, "sub"));
-  assert.equal(send("../tmp/b.txt", { cwd: join(root, "sub"), root }).input, "bounced #12\n");
+  assert.equal(send("tmp/b.txt", { cwd: join(root, "sub"), root }).input, "bounced #12\n");
+  assert.throws(() => send("../tmp/b.txt", { cwd: join(root, "sub"), root }), /cannot resolve|outside/);
 
   // a shared temp dir (the /private -> /private/tmp repro): world-writable or sticky tmp/ is refused,
   // even when it is the root's own tmp/
@@ -651,13 +654,22 @@ test("guard: --body-file is anchored to the session's launch directory, not the 
     const shared = sessionDir();
     chmodSync(join(shared, "tmp"), mode);
     assert.throws(() => send("tmp/b.txt", { cwd: shared }), /world-writable or sticky/, mode.toString(8));
-    assert.throws(() => send("tmp/b.txt", { cwd: shared, root }), /outside/, `${mode.toString(8)} from the session root`);
+    assert.throws(() => send(join(shared, "tmp", "b.txt"), { cwd: shared, root }), /outside/, `${mode.toString(8)} from the session root`);
   }
   // a tmp/ owned by another user is refused
   const realUid = process.getuid;
   process.getuid = () => realUid.call(process) + 1;
   try {
-    assert.throws(() => send("tmp/b.txt", { cwd: root }), /not owned by this user/);
+    assert.throws(() => send("tmp/b.txt", { cwd: root }), /tmp is not owned by this user/);
+  } finally {
+    process.getuid = realUid;
+  }
+  // a body file another user owns, in the session's own tmp/, is refused (#109 review I2): the first
+  // uid read (tmp/'s owner check) is ours, the second (the file's) is not
+  let calls = 0;
+  process.getuid = () => realUid.call(process) + (calls++ === 0 ? 0 : 1);
+  try {
+    assert.throws(() => send("tmp/b.txt", { cwd: root }), /b\.txt is not owned by this user/);
   } finally {
     process.getuid = realUid;
   }
@@ -676,11 +688,14 @@ test("guard (baton): the body file comes from the session root's tmp/, whatever 
   const other = sessionDir();
   const s = session(w, { cwd: other, sessionDir: root });
   await s.baton.startup();
-  await assert.rejects(s.baton.guard(["fleet", "msg", "send", "--to", "bob:x", "--body-file", "tmp/b.txt"]), /outside/);
+  writeFileSync(join(other, "tmp", "other.txt"), "the cwd's\n");
+  await assert.rejects(s.baton.guard(["fleet", "msg", "send", "--to", "bob:x", "--body-file", join(other, "tmp", "other.txt")]), /outside/);
   assert.equal(s.spawned.length, 0);
   const r = await s.baton.guard(["fleet", "msg", "send", "--to", "bob:x", "--body-file", join(root, "tmp", "b.txt")]);
   assert.equal(r.exit, 0);
   assert.equal(s.spawned[0].opts.input, "bounced #12\n");
+  await s.baton.guard(["fleet", "msg", "send", "--to", "bob:x", "--body-file", "tmp/b.txt"]);
+  assert.equal(s.spawned[1].opts.input, "bounced #12\n", "a relative path resolves against the session root");
 });
 
 test("readBounded: reads at most cap bytes; a file that grew past the cap after its size check is refused (engsys#108 I1)", () => {

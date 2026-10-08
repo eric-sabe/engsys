@@ -1077,8 +1077,9 @@ export function guardCommand(argv, { cwd = process.cwd(), root = cwd } = {}) {
  * msg.mjs on stdin (`--body-file -`), so nothing can swap the file between the check and the send.
  * Fail-closed: anything that can't be resolved, a second --body-file, or a body over MAX_GUARDED_BODY is
  * refused. engsys#108: `root` is the session's launch directory (sessionRoot), not the Bash tool's cwd,
- * so a `cd /private` does not make the shared /private/tmp count; a tmp/ that is world-writable, sticky
- * or not the session user's is refused; so is a hardlinked file (realpath can't see where it came from);
+ * so a `cd /private` does not make the shared /private/tmp count, and a relative path resolves against
+ * it; a tmp/ that is world-writable, sticky or not the session user's is refused; so is a hardlinked
+ * file (realpath can't see where it came from) or a file another user owns;
  * and the read stops at MAX_GUARDED_BODY + 1 bytes whatever the file grew to after the size check.
  * -> { args, input } (input undefined: stdin passes through, for `--body-file - <<'EOF'`).
  */
@@ -1150,7 +1151,8 @@ function guardedBody(value, cwd, sessionDir = cwd) {
   if (st.mode & 0o1002) throw refuse(`${tmp} is world-writable or sticky (a shared temp directory)`);
   if (typeof process.getuid === "function" && st.uid !== process.getuid()) throw refuse(`${tmp} is not owned by this user`);
   let real;
-  try { real = realpathSync(resolve(cwd, value)); } catch { throw refuse(`cannot resolve ${value}`); }
+  // A relative path is the session's, wherever the Bash tool has cd'd since (#109 review I3).
+  try { real = realpathSync(resolve(root, value)); } catch { throw refuse(`cannot resolve ${value}`); }
   if (!real.startsWith(tmp + sep)) throw refuse(`${value} resolves to ${real}, outside ${tmp}/`);
   let fd;
   try { fd = openSync(real, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK); } catch { throw refuse(`cannot open ${real}`); }
@@ -1159,6 +1161,8 @@ function guardedBody(value, cwd, sessionDir = cwd) {
     if (!fst.isFile()) throw refuse(`${real} is not a regular file`);
     // A hardlink resolves to itself, so realpath can't tell it was made from a file outside tmp/.
     if (fst.nlink !== 1) throw refuse(`${real} is a hardlinked file`);
+    // Another local user's file (#109 review I2): the session posts only what it wrote itself.
+    if (typeof process.getuid === "function" && fst.uid !== process.getuid()) throw refuse(`${real} is not owned by this user`);
     if (fst.size > MAX_GUARDED_BODY) throw refuse(`${real} is over ${MAX_GUARDED_BODY} bytes`);
     // The path must still name the file that was opened: a directory swapped for a symlink in between is refused.
     let again;

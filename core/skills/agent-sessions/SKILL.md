@@ -199,8 +199,9 @@ The launcher exports `ENGSYS_SESSION` (the session name),
 directory it launched the session in) into every session: the baton's holder
 is `<FLEET_ID or hostname>:<ENGSYS_SESSION>`, a fencing token on disk is
 honored only by the launch that took it, and a guarded `fleet msg send` takes
-its `--body-file` only from `<ENGSYS_SESSION_ROOT>/tmp/`, wherever the session
-has `cd`'d since. A session whose prompt runs the merge
+its `--body-file` only from `<ENGSYS_SESSION_ROOT>/tmp/` (a relative path
+resolves against that root), wherever the session has `cd`'d since, and only a
+file the session user owns. A session whose prompt runs the merge
 or maintenance monster also gets `ENGSYS_SINGLETON_ROLE=merge|maintain`, which
 arms the engsys plugin's singleton-write guard hook: raw GitHub writes are
 denied unless they go through the monster's fenced wrappers (merge-monster
