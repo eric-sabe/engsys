@@ -156,15 +156,18 @@ migration: false
 Only `session` is essential. It is authoritative for authorship: the session
 that wrote the handoff is the one that wants nudges about this PR.
 
-**Whose handoff counts (engsys#107).** Anyone who can comment on a PR can post a
-handoff block, and a cross-fleet address turns into an App-signed `fleet-msg`
-the other fleet's relay delivers. So a `<fleet>:<session>` naming **another
-fleet** is honoured only from a handoff written by the **PR author** (the PR
-body or their comment), by an actor who applied **`mm:ready`**, or by **that
-fleet's App** (`performed_via_github_app.id` equal to `fleets.<fleet>.github_app_id`
-in `federation.yml`). Any other cross-fleet handoff is ignored and journaled; the
-newest handoff that counts wins. A bare or same-fleet address stays a local
-`SendMessage`, as before. The rule lives in
+**Whose handoff counts (engsys#107, #109 review).** Anyone who can comment on a
+PR can post a handoff block, a cross-fleet address turns into an App-signed
+`fleet-msg` the other fleet's relay delivers, and a later block could redirect or
+mute the real one. So a handoff is honoured only when written by the **PR
+author** (the PR body or their comment), by an actor who applied **`mm:ready`**,
+or by **the App of the fleet the address names** (a bare address: this fleet's):
+a Bot comment with that App's `<github_app>[bot]` login and
+`performed_via_github_app.id` equal to `fleets.<fleet>.github_app_id` in
+`federation.yml`. Any other handoff, local or cross-fleet, is ignored and
+journaled, and never displaces one that counts; the newest handoff that counts
+wins. The `<!-- mm-handoff -->` marker counts only on a line of its own, outside a
+code fence or `>` quote, and never inside a `fleet-msg` comment. The rule lives in
 [`core/fleet/lib/handoff.mjs`](../core/fleet/lib/handoff.mjs); monsters reach it
 through `fleet msg route --handoff-pr <repo>#N` and never parse the block
 themselves.

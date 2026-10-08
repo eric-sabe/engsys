@@ -470,9 +470,9 @@ is already the durable signal Merge Monster's own watch loop will pick up.
 session handed you, or need the session driving a finding: route the `session:`
 of that PR's `<!-- mm-handoff -->` block with
 `node <engsys-root>/fleet/msg.mjs route --handoff-pr <repo>#N` (or the address it
-advertised on its ledger), then send as above. A cross-fleet address counts only
-from a handoff by the PR author, an actor who applied `mm:ready`, or that fleet's
-App (engsys#107); the helper drops any other and lists it on stderr (journal it).
+advertised on its ledger), then send as above. A handoff counts only when the PR
+author, an actor who applied `mm:ready`, or the App of the fleet it names wrote it
+(engsys#107); the helper drops any other and lists it on stderr (journal it).
 Exit 4 or no address → no nudge; the comment is the message.
 
 **Receive an inbound message** (e.g. the merge orchestrator bouncing a fix PR you

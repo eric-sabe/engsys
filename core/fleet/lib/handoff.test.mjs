@@ -43,9 +43,9 @@ function fixture() {
 const handoff = (session) => `Queued.\n\n<!-- mm-handoff -->\n\nproject: 70\nsession: ${session} # the nudge target\nmigration: false\n`;
 const issue = (login = 'carol', body = 'A fix.') => ({ user: { login }, body, html_url: 'https://github.com/acme/app/pull/7' });
 let nextId = 1;
-const comment = (login, body, appId = null) => {
+const comment = (login, body, appId = null, type = login.endsWith('[bot]') ? 'Bot' : 'User') => {
   const id = nextId++;
-  return { id, user: { login }, body, html_url: `https://github.com/acme/app/pull/7#issuecomment-${id}`, ...(appId ? { performed_via_github_app: { id: appId } } : {}) };
+  return { id, user: { login, type }, body, html_url: `https://github.com/acme/app/pull/7#issuecomment-${id}`, ...(appId ? { performed_via_github_app: { id: appId } } : {}) };
 };
 const labeled = (login, name = 'mm:ready') => ({ event: 'labeled', label: { name }, actor: { login } });
 
@@ -59,6 +59,11 @@ test('parseHandoff: the session of the block after the marker; nothing without a
   assert.equal(parseHandoff('<!-- mm-handoff -->\nproject: 70\n\nLater prose.\nsession: bob:x'), null, 'the block ends at a blank line');
   assert.equal(parseHandoff('<!-- mm-handoff -->\nSome prose first\nsession: bob:x'), null, 'the block is key: value lines only');
   assert.equal(parseHandoff(null), null);
+  // #109 review I1: the marker counts only as a line of its own, outside a fence or a quote
+  assert.equal(parseHandoff('> <!-- mm-handoff -->\n> session: bob:x'), null, 'a blockquote');
+  assert.equal(parseHandoff('see <!-- mm-handoff -->\nsession: bob:x'), null, 'mid-line');
+  assert.equal(parseHandoff('```\n<!-- mm-handoff -->\nsession: bob:x\n```'), null, 'inside a code fence');
+  assert.equal(parseHandoff('```\nquoted\n```\n<!-- mm-handoff -->\nsession: bob:x'), 'bob:x', 'after a closed fence');
 });
 
 // --- the authorship rule -------------------------------------------------------------------------
@@ -72,7 +77,7 @@ test('authoritativeHandoff: a cross-fleet session counts from the PR author, an 
   assert.equal(authoritativeHandoff({ ...base, issue: issue('Carol'), comments: [comment('carol', handoff('bob:acme-build'))] }).session, 'bob:acme-build');
   // a comment by whoever applied mm:ready
   assert.equal(authoritativeHandoff({ ...base, issue: issue(), comments: [comment('dave', handoff('bob:acme-build'))], events: [labeled('dave')] }).session, 'bob:acme-build');
-  // a comment made through bob's pinned App
+  // a comment made by bob's App: its bot login, type Bot and pinned id
   assert.equal(authoritativeHandoff({ ...base, issue: issue(), comments: [comment('acme-fleet-bob[bot]', handoff('bob:acme-build'), 102)] }).session, 'bob:acme-build');
 });
 
@@ -85,6 +90,9 @@ test('authoritativeHandoff: a cross-fleet session from anyone else, or another A
     ['alice\'s own App naming bob', comment('acme-fleet-alice[bot]', handoff('bob:bob-mm'), 101), []],
     ['an App spoofing bob\'s login but not its id', comment('acme-fleet-bob[bot]', handoff('bob:bob-mm'), 999), []],
     ['bob\'s login with no App id at all', comment('acme-fleet-bob[bot]', handoff('bob:bob-mm')), []],
+    // #109 review L2: a human acting through bob's App (user-to-server) is not bob's App
+    ['a human comment made through bob\'s App', comment('mallory', handoff('bob:bob-mm'), 102, 'User'), []],
+    ['a User type wearing the bot login', comment('acme-fleet-bob[bot]', handoff('bob:bob-mm'), 102, 'User'), []],
   ]) {
     const h = authoritativeHandoff({ ...base, comments: [c], events });
     assert.equal(h.session, null, what);
@@ -92,12 +100,23 @@ test('authoritativeHandoff: a cross-fleet session from anyone else, or another A
     assert.equal(h.ignored[0].session, 'bob:bob-mm');
     assert.match(h.ignored[0].why, /not the PR author/);
   }
+  // #109 review L1: a stranger's later handoff never displaces a trusted one, bare or invalid
+  for (const later of ['alice-x', 'alice:alice-x', '!!!', 'bob:Not_An_Address']) {
+    const h = authoritativeHandoff({ ...base, comments: [comment('carol', handoff('bob:bob-build')), comment('mallory', handoff(later))] });
+    assert.equal(h.session, 'bob:bob-build', `a stranger's ${later} after the author's handoff`);
+    assert.deepEqual(h.ignored.map((x) => [x.session, x.author]), [[later, 'mallory']], 'and is reported');
+  }
+  // our own App's handoff for a local session counts (it opened the PR for one of our sessions)
+  assert.equal(authoritativeHandoff({ ...base, comments: [comment('acme-fleet-alice[bot]', handoff('acme-build'), 101)] }).session, 'acme-build');
+  // a fleet-msg comment quoting a handoff is never one, even from the PR author
+  assert.equal(authoritativeHandoff({ ...base, comments: [comment('carol', `<!-- fleet-msg to="alice:acme-mm" from="bob:x" protocol="1" -->\n${handoff('bob:y')}`)] }).session, null);
   // a forged later handoff does not displace the author's
   const h = authoritativeHandoff({ ...base, comments: [comment('carol', handoff('bob:acme-build')), comment('mallory', handoff('bob:bob-mm'))] });
   assert.deepEqual([h.session, h.ignored.map((x) => x.session)], ['bob:acme-build', ['bob:bob-mm']]);
-  // a same-fleet or bare address is unchanged: it is a local SendMessage, whoever wrote it
-  assert.equal(authoritativeHandoff({ ...base, comments: [comment('mallory', handoff('acme-build'))] }).session, 'acme-build');
-  assert.equal(authoritativeHandoff({ ...base, comments: [comment('mallory', handoff('alice:acme-build'))] }).session, 'alice:acme-build');
+  // a same-fleet or bare address follows the same rule (#109 review L1): a stranger's is ignored
+  assert.equal(authoritativeHandoff({ ...base, comments: [comment('mallory', handoff('acme-build'))] }).session, null);
+  assert.equal(authoritativeHandoff({ ...base, comments: [comment('mallory', handoff('alice:acme-build'))] }).session, null);
+  assert.equal(authoritativeHandoff({ ...base, comments: [comment('carol', handoff('acme-build'))] }).session, 'acme-build');
   // the newest handoff that counts wins
   assert.equal(authoritativeHandoff({ ...base, issue: issue('carol', handoff('bob:old')), comments: [comment('carol', handoff('bob:new'))] }).session, 'bob:new');
   // no registry: only the PR author and the labelers count (no App to check)
@@ -167,5 +186,5 @@ test('grep: the monsters route the handoff through --handoff-pr, and the messagi
   }
   const doc = read('docs/agent-messaging.md');
   assert.match(doc, /route --handoff-pr/);
-  assert.match(doc, /PR author[^.]*mm:ready[^.]*App/s, 'agent-messaging.md names whose handoff is authoritative');
+  assert.match(doc, /PR\s+author[^.]*mm:ready[^.]*App/s, 'agent-messaging.md names whose handoff is authoritative');
 });
