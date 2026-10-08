@@ -76,7 +76,7 @@
 // github-backend's: 0 ok, 1 refused, 2 usage, 3 error, 4 newer protocol, 5 not started (no token in
 // this session).
 
-import { appendFileSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { appendFileSync, closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { execFile, execFileSync, spawn as spawnProcess, spawn as spawnChild } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { hostname as osHostname } from "node:os";
@@ -783,7 +783,7 @@ export function createBaton({ lease, repo, role, holder, run = null, store, home
         cmd.args = again.args;
       }
       // #85 L3: the push runs with a cleaned environment (no GIT_SSH_COMMAND, askpass, proxies, NODE_OPTIONS; a fixed PATH).
-      const r = await spawn(cmd.exe, cmd.args, { timeout: ACTION_TIMEOUT_MS, ...(cmd.push ? { env: pushEnv() } : {}) });
+      const r = await spawn(cmd.exe, cmd.args, { timeout: ACTION_TIMEOUT_MS, ...(cmd.push ? { env: pushEnv() } : {}), ...(cmd.input !== undefined ? { input: cmd.input } : {}) });
       return {
         exit: r.timedOut ? EXIT.ERROR : r.code,
         result: { sent: true, code: r.timedOut ? "timeout" : "ran", exitCode: r.code, sentAfterFenceMs: elapsedMs, ...(r.timedOut ? { reason: "killed after 30 s: its effect is unknown; re-snapshot before acting again" } : {}) },
@@ -1053,7 +1053,8 @@ export function guardCommand(argv, { cwd = process.cwd() } = {}) {
       if (real !== ownReal) throw new LeaseUsageError(`guard runs only this engsys's msg.mjs (${ownMsg})`);
     }
     if (sub[0] !== "send") throw new LeaseUsageError("guard runs `fleet msg send …` only (inbox and read need no fence)");
-    return { exe: process.execPath, args: [ownMsg, ...guardedMsgArgs(sub, cwd)] };
+    const { args: msgArgs, input } = guardedMsgArgs(sub, cwd);
+    return { exe: process.execPath, args: [ownMsg, ...msgArgs], ...(input !== undefined ? { input } : {}) };
   }
   if (basename(exe) === "gate-request.sh") {
     const own = resolve(HERE, "..", "..", "skills", "merge-monster", "scripts", "gate-request.sh");
@@ -1071,29 +1072,40 @@ export function guardCommand(argv, { cwd = process.cwd() } = {}) {
  * engsys#78 (Nyx's #84 review, Info): a guarded `fleet msg send` posts whatever its --body-file names, so
  * the body comes from stdin (`-`) or a regular file under the session's own tmp/ (`<cwd>/tmp`, a real
  * directory, not a symlink). The path is resolved through every symlink before the check, so a link out
- * of tmp/ or a `..` walk is refused, and the argument is rewritten to the resolved path, so msg.mjs reads
- * the file that was checked. Every `--body-file` token is checked, wherever it sits (msg.mjs refuses a
- * repeated flag anyway). Fail-closed: anything that can't be resolved is refused.
+ * of tmp/ or a `..` walk is refused. The checked file is read here, before the fence, and handed to
+ * msg.mjs on stdin (`--body-file -`), so nothing can swap the file between the check and the send.
+ * Fail-closed: anything that can't be resolved, a second --body-file, or a body over MAX_GUARDED_BODY is
+ * refused. -> { args, input } (input undefined: stdin passes through, for `--body-file - <<'EOF'`).
  */
+export const MAX_GUARDED_BODY = 256 * 1024;
+
 export function guardedMsgArgs(sub, cwd) {
-  const out = [];
+  const args = [];
+  let input;
+  let seen = false;
+  const take = (value) => {
+    if (seen) throw new LeaseUsageError("guard: fleet msg send takes one --body-file");
+    seen = true;
+    if (value === "-") return value;
+    input = guardedBody(value, cwd);
+    return "-";
+  };
   for (let i = 0; i < sub.length; i++) {
     const a = sub[i];
     if (a === "--body-file") {
-      out.push(a, guardedBodyFile(sub[i + 1], cwd));
+      args.push(a, take(sub[i + 1]));
       i++;
     } else if (a.startsWith("--body-file=")) {
-      out.push(`--body-file=${guardedBodyFile(a.slice("--body-file=".length), cwd)}`);
+      args.push(`--body-file=${take(a.slice("--body-file=".length))}`);
     } else {
-      out.push(a);
+      args.push(a);
     }
   }
-  return out;
+  return { args, input };
 }
 
-function guardedBodyFile(value, cwd) {
+function guardedBody(value, cwd) {
   const refuse = (why) => new LeaseUsageError(`guard: fleet msg send --body-file must be - (stdin) or a file under the session's tmp/ (${why})`);
-  if (value === "-") return value;
   if (typeof value !== "string" || value === "") throw refuse("no file named");
   let root;
   try { root = realpathSync(cwd); } catch { throw refuse(`cannot resolve the working directory ${cwd}`); }
@@ -1104,8 +1116,23 @@ function guardedBodyFile(value, cwd) {
   let real;
   try { real = realpathSync(resolve(cwd, value)); } catch { throw refuse(`cannot resolve ${value}`); }
   if (!real.startsWith(tmp + sep)) throw refuse(`${value} resolves to ${real}, outside ${tmp}/`);
-  if (!statSync(real).isFile()) throw refuse(`${real} is not a regular file`);
-  return real;
+  let fd;
+  try { fd = openSync(real, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK); } catch { throw refuse(`cannot open ${real}`); }
+  try {
+    const fst = fstatSync(fd);
+    if (!fst.isFile()) throw refuse(`${real} is not a regular file`);
+    if (fst.size > MAX_GUARDED_BODY) throw refuse(`${real} is over ${MAX_GUARDED_BODY} bytes`);
+    // The path must still name the file that was opened: a directory swapped for a symlink in between is refused.
+    let again;
+    try {
+      if (realpathSync(real) !== real) throw new Error("moved");
+      again = statSync(real);
+    } catch { throw refuse(`${real} changed while it was checked`); }
+    if (again.ino !== fst.ino || again.dev !== fst.dev) throw refuse(`${real} changed while it was checked`);
+    return readFileSync(fd, "utf8");
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /** owner/repo from a GitHub remote URL (https, ssh, scp-like), or null. */
@@ -1321,10 +1348,15 @@ export function newBranchPrefixesFrom(env = process.env) {
   return list.every((p) => /^[A-Za-z0-9][A-Za-z0-9._\/-]{0,100}$/.test(p) && !p.includes("..")) ? list : [];
 }
 
-function defaultSpawn(cmd, args, { timeout, env = process.env }) {
-  // stdin passes through, so `guard -- gh issue comment N --body-file - <<'EOF'` sends its body.
+export function defaultSpawn(cmd, args, { timeout, env = process.env, input }) {
+  // stdin passes through, so `guard -- gh issue comment N --body-file - <<'EOF'` sends its body; `input`
+  // (a guarded fleet msg send's checked body file, engsys#78) replaces it.
   return new Promise((done) => {
-    const child = spawnChild(cmd, args, { env, stdio: ["inherit", "pipe", "pipe"] });
+    const child = spawnChild(cmd, args, { env, stdio: [input !== undefined ? "pipe" : "inherit", "pipe", "pipe"] });
+    if (input !== undefined) {
+      child.stdin.on("error", () => {}); // a child that exits without reading: its exit code tells
+      child.stdin.end(input);
+    }
     const out = [];
     const err = [];
     let timedOut = false;
