@@ -1140,7 +1140,7 @@ Laptops do not follow the pins automatically: the marketplaces are pinned by tag
 After a pin PR merges, on each machine that works in the pin repo:
 
 ```bash
-jq -r '.enabledPlugins | keys[]' .claude/settings.json      # note the list first, from the pin repo
+jq -r '.enabledPlugins | to_entries[] | select(.value == true) | .key' .claude/settings.json   # note the enabled list first, from the pin repo
 cd ~                                                        # then leave the repo: see below
 claude plugin marketplace remove engsys --scope user && claude plugin marketplace add https://github.com/eric-sabe/engsys.git#<engsys tag> --scope user
 claude plugin marketplace remove acme --scope user   && claude plugin marketplace add https://github.com/acme/acme-fleet.git#<instance tag> --scope user
