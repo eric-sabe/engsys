@@ -9,7 +9,9 @@
 #      no INSTANCE_MARKETPLACE)
 #   3. checks out ENGSYS_DIR at the engsys pin, then re-execs — the kit's own code lives there
 #   4. reinstalls the user-level plugins when a marketplace ref moved (remove -> add #ref -> install
-#      each enabled plugin), and installs any enabled plugin that's missing
+#      each enabled plugin), installs any enabled plugin that's missing, and checks each one is at the
+#      pinned version. Every `claude plugin` call is user-scope and runs outside any project; if the
+#      pin repo's settings change anyway, sync restores them and fails (engsys#112)
 #   5. re-installs the launchd jobs if their templates changed, or the files that decide which sessions
 #      run on this host (roster, supervisor conf, registry); and, whatever changed, unloads a supervisor
 #      job left installed on a host where no supervised session runs (lib/host-roles.sh)
@@ -111,33 +113,66 @@ main() {
   fi
 
   # --- 4. user-level plugins ---------------------------------------------------------------------
-  local markets=("$ENGSYS_MARKETPLACE") m ref repo cur installed p
+  # Everything this step needs from PIN_SETTINGS is read into memory first and never re-read: a
+  # `claude plugin` mutation can rewrite project settings (engsys#112). Every `claude plugin` call runs
+  # through plugin_cli (user scope, cwd outside any project), and the settings files are guarded.
+  local markets=("$ENGSYS_MARKETPLACE") m_refs=() m_repos=() m_plugins=() i m ref repo cur installed p
   [ -z "$INSTANCE_MARKETPLACE" ] || markets+=("$INSTANCE_MARKETPLACE")
-  installed="$(claude plugin list --json | jq -r '.[].id')"
-  for m in "${markets[@]}"; do
-    if [ "$m" = "$ENGSYS_MARKETPLACE" ]; then ref="$want_engsys"; else ref="$want_instance"; fi
-    repo="$(fleet_pin_repo "$m")"
-    [ -n "$repo" ] || fleet_die "no repo for marketplace '$m' in $PIN_SETTINGS"
-    cur="$(claude plugin marketplace list --json | jq -r --arg m "$m" '.[] | select(.name == $m) | .ref // ""')"
+  for i in "${!markets[@]}"; do
+    m="${markets[$i]}"
+    if [ "$m" = "$ENGSYS_MARKETPLACE" ]; then m_refs[i]="$want_engsys"; else m_refs[i]="$want_instance"; fi
+    m_repos[i]="$(fleet_pin_repo "$m")"
+    [ -n "${m_repos[$i]}" ] || fleet_die "no repo for marketplace '$m' in $PIN_SETTINGS"
+    m_plugins[i]="$(fleet_enabled_plugins "$m")"
+  done
+  sync_tmp
+  [ "$check" = 1 ] || settings_guard_begin
+  installed="$(user_plugins)"
+  for i in "${!markets[@]}"; do
+    m="${markets[$i]}" ref="${m_refs[$i]}" repo="${m_repos[$i]}"
+    cur="$(plugin_cli marketplace list --json | jq -r --arg m "$m" '.[] | select(.name == $m) | .ref // ""')"
     if [ "$cur" != "$ref" ]; then
       if [ "$check" = 1 ]; then
         say "marketplace $m is at '${cur:-absent}' (pin $ref)"; drift=1; continue
       fi
       # remove uninstalls every plugin from this marketplace; running sessions keep their cache dirs.
-      [ -z "$cur" ] || claude plugin marketplace remove "$m" >/dev/null
-      claude plugin marketplace add "https://github.com/$repo.git#$ref" >/dev/null \
+      if [ -n "$cur" ]; then plugin_cli marketplace remove "$m" --scope user >/dev/null; settings_guard_check "marketplace remove $m"; fi
+      plugin_cli marketplace add "https://github.com/$repo.git#$ref" --scope user >/dev/null \
         || fleet_die "marketplace add $m#$ref failed — $m plugins are UNINSTALLED on this host. Re-run: fleet sync (running sessions are unaffected)."
+      settings_guard_check "marketplace add $m"
       say "marketplace $m: ${cur:-absent} → $ref"; changed=1
-      installed="$(claude plugin list --json | jq -r '.[].id')"
+      installed="$(user_plugins)"
     fi
     while IFS= read -r p; do
       [ -n "$p" ] || continue
-      grep -Fxq "$p@$m" <<<"$installed" && continue
+      installed_version "$p@$m" "$installed" >/dev/null && continue
       if [ "$check" = 1 ]; then say "plugin $p@$m not installed"; drift=1; continue; fi
-      claude plugin install "$p@$m" >/dev/null || fleet_die "plugin install $p@$m failed — re-run: fleet sync"
+      plugin_cli install "$p@$m" --scope user >/dev/null || fleet_die "plugin install $p@$m failed — re-run: fleet sync"
+      settings_guard_check "plugin install $p@$m"
       say "installed $p@$m"; changed=1
-    done < <(fleet_enabled_plugins "$m")
+    done <<<"${m_plugins[$i]}"
   done
+  [ "$check" = 1 ] || settings_guard_check "the plugin step"
+  # Every enabled plugin must now be installed at user scope, at the pinned version (a vX.Y.Z pin
+  # stamps X.Y.Z into every plugin — fleet pin).
+  installed="$(user_plugins)"
+  local have want bad=""
+  for i in "${!markets[@]}"; do
+    m="${markets[$i]}" ref="${m_refs[$i]}"
+    want=""; [[ "$ref" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([-+].*)?$ ]] && want="${ref#v}"
+    while IFS= read -r p; do
+      [ -n "$p" ] || continue
+      if ! have="$(installed_version "$p@$m" "$installed")"; then
+        [ "$check" = 1 ] || bad+=" $p@$m (not installed)"
+        continue
+      fi
+      [ -n "$want" ] && [ "$have" != "$want" ] || continue
+      if [ -z "$have" ]; then warn "plugin $p@$m reports no version; can't check it against the pin $ref"; continue; fi
+      if [ "$check" = 1 ]; then say "plugin $p@$m is at $have (pin $want)"; drift=1; else bad+=" $p@$m (at $have, pin $want)"; fi
+    done <<<"${m_plugins[$i]}"
+  done
+  [ -z "$bad" ] || fleet_die "after the plugin step these enabled plugins are not installed at the pin:$bad. NOT synced. Re-run: fleet sync. If a plugin stays at the wrong version: claude plugin uninstall --scope user <plugin@marketplace> (from a directory outside any project), then fleet sync."
+  GUARDED=(); sync_cleanup; trap - EXIT
 
   # --- report ------------------------------------------------------------------------------------
   if [ "$check" = 1 ]; then
@@ -180,6 +215,54 @@ main() {
 
 say() { echo "fleet-sync: $*"; }
 warn() { echo "fleet-sync: WARNING $*" >&2; }
+
+# --- the plugin CLI, kept away from project settings (engsys#112) -----------------------------------
+# Claude Code applies `claude plugin` changes to the project settings of its cwd too: a `marketplace
+# remove` without --scope removes the marketplace and its plugins "from every scope", so run from the pin
+# checkout it emptied that repo's .claude/settings.json. So every call passes --scope user where the
+# subcommand takes one, and runs from an empty temp dir outside any project.
+SYNC_TMP=""
+sync_tmp() { # call in the main shell (not in $(…)) so later calls share it; removed on exit
+  [ -n "$SYNC_TMP" ] && return
+  SYNC_TMP="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/fleet-sync.XXXXXX")" && pwd -P)"
+  mkdir -p "$SYNC_TMP/cwd" "$SYNC_TMP/snap"
+  trap 'settings_guard_restore >/dev/null || true; sync_cleanup' EXIT
+}
+plugin_cli() { (cd "$SYNC_TMP/cwd" && claude plugin "$@"); }
+user_plugins() { # "<id>\t<version>" for each user-scope install (the list also shows per-project installs)
+  plugin_cli list --json | jq -r '.[] | select((.scope // "user") == "user") | [.id, (.version // "")] | @tsv'
+}
+installed_version() { # installed_version <id> <user_plugins output> → its version; exit 1 if not installed
+  awk -F'\t' -v id="$1" '$1 == id { print $2; found = 1; exit } END { exit !found }' <<<"$2"
+}
+
+# The project settings files a stray plugin mutation could rewrite: PIN_SETTINGS (which may be a copy) and
+# the pin checkout's own files. Snapshot before the plugin step; on any change, put them back and stop.
+GUARDED=()
+settings_guard_begin() {
+  local f g seen i=0
+  for f in "$PIN_SETTINGS" "$PIN_DIR/.claude/settings.json" "$PIN_DIR/.claude/settings.local.json"; do
+    [ -f "$f" ] || continue
+    seen=0; for g in ${GUARDED[@]+"${GUARDED[@]}"}; do [ "$g" != "$f" ] || seen=1; done
+    [ "$seen" = 0 ] || continue
+    cp -p "$f" "$SYNC_TMP/snap/$i"; GUARDED+=("$f"); i=$((i + 1))
+  done
+}
+settings_guard_restore() { # puts back every guarded file that changed, printing each; exit 1 if none did
+  local i restored=0
+  for i in ${GUARDED[@]+"${!GUARDED[@]}"}; do
+    cmp -s "$SYNC_TMP/snap/$i" "${GUARDED[$i]}" && continue
+    cp -p "$SYNC_TMP/snap/$i" "${GUARDED[$i]}"; echo "${GUARDED[$i]}"; restored=1
+  done
+  [ "$restored" = 1 ]
+}
+settings_guard_check() { # settings_guard_check <what just ran>
+  local touched
+  touched="$(settings_guard_restore)" || return 0
+  fleet_die "$1 changed project settings (${touched//$'\n'/, }); restored them from the snapshot. NOT synced: plugins on this host may be missing or half-installed. Re-run: fleet sync. If this repeats, the claude CLI is ignoring --scope user — report it (engsys#112)."
+}
+sync_cleanup() { [ -z "$SYNC_TMP" ] || rm -rf "$SYNC_TMP"; SYNC_TMP=""; }
+
 require_clean() { # tracked changes would block (or be carried across) a checkout
   git -C "$1" diff --quiet && git -C "$1" diff --cached --quiet \
     || fleet_die "$1 has uncommitted changes to tracked files — inspect with: git -C $1 status (discard only if it's noise)"
