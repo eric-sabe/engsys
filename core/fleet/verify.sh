@@ -108,7 +108,7 @@ if [ "$alert" = 1 ]; then
       fp="$(sed -n 's/^fingerprint: //p' <<<"$out" | tail -1)"
       if [ "$(cat "$LATCH" 2>/dev/null)" != "$fp" ]; then
         lines="$(sed -n 's/^  \(.*\)$/\1/p' <<<"$out" | head -n 8)"
-        notify --level alert --incident wrapper-integrity "Plugin check on $host: the engsys plugin that the merge and maintain monsters load does not match $repo@$ref, so it may have been changed on this host. Merge and maintain sessions will not be launched or relaunched here until it matches. Running sessions were left as they are: please check them and stop any you don't trust, then reinstall the plugin (claude plugin uninstall engsys@$ENGSYS_MARKETPLACE, delete its cache directory, then fleet sync). What differs:
+        notify --level alert --incident wrapper-integrity "Plugin check on $host: the engsys plugin that the merge and maintain monsters load does not match $repo@$ref, so it may have been changed on this host. Merge and maintain sessions will not be launched or relaunched here until it matches. Running sessions were left as they are: please check them and stop any you don't trust, then reinstall the plugin (from a directory outside any project: claude plugin uninstall --scope user engsys@$ENGSYS_MARKETPLACE, delete its cache directory, then fleet sync). What differs:
 $lines
 Details: fleet verify" && printf '%s\n' "$fp" >"$LATCH"
       fi ;;

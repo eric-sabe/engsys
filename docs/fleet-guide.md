@@ -1114,8 +1114,8 @@ never uses it and always asks GitHub. `fleet verify` exits 0 on a match, 1 on a 
 could not check.
 
 On an alert: look at the running merge and maintain sessions and stop any you don't trust. Then
-reinstall the plugin: `claude plugin uninstall engsys@<marketplace>`, delete its cache directory, and run
-`fleet sync`. `fleet verify` should then exit 0, and the next check resolves the alert.
+reinstall the plugin: from a directory outside any project, `claude plugin uninstall --scope user engsys@<marketplace>`,
+delete its cache directory, and run `fleet sync`. `fleet verify` should then exit 0, and the next check resolves the alert.
 
 Two settings make the check stronger:
 
@@ -1140,10 +1140,16 @@ Laptops do not follow the pins automatically: the marketplaces are pinned by tag
 After a pin PR merges, on each machine that works in the pin repo:
 
 ```bash
-claude plugin marketplace remove engsys && claude plugin marketplace add https://github.com/eric-sabe/engsys.git#<engsys tag>
-claude plugin marketplace remove acme   && claude plugin marketplace add https://github.com/acme/acme-fleet.git#<instance tag>
-jq -r '.enabledPlugins | keys[]' .claude/settings.json      # then: claude plugin install <name> for each
+jq -r '.enabledPlugins | to_entries[] | select(.value == true) | .key' .claude/settings.json   # note the enabled list first, from the pin repo
+cd ~                                                        # then leave the repo: see below
+claude plugin marketplace remove engsys --scope user && claude plugin marketplace add https://github.com/eric-sabe/engsys.git#<engsys tag> --scope user
+claude plugin marketplace remove acme --scope user   && claude plugin marketplace add https://github.com/acme/acme-fleet.git#<instance tag> --scope user
+# then: claude plugin install <name> --scope user, for each name in the list
 ```
+
+Run the `claude plugin` commands from outside the pin repo, with `--scope user`. A `marketplace remove`
+without `--scope` also deletes the marketplace and its plugins from the project's `.claude/settings.json`
+(engsys#112). If it does, `git checkout -- .claude/settings.json` restores it.
 
 Then restart open sessions.
 
@@ -1259,6 +1265,15 @@ major Claude Code upgrade.
   checkout instead.
 - If `marketplace add` fails midway (network, auth), the marketplace's plugins are **uninstalled on this
   host** until you re-run `fleet sync`. Running sessions are unaffected.
+- `claude plugin marketplace remove <m>` without `--scope` removes the marketplace "from every scope",
+  **including the `.claude/settings.json` of the project you run it in**: its `extraKnownMarketplaces`
+  entry and the `enabledPlugins` that belong to it (engsys#112, Claude Code 2.1.28x). `fleet sync` therefore
+  passes `--scope user` to every `claude plugin` mutation and runs them from an empty temp directory. It
+  snapshots the pin repo's settings files first; if one changes anyway, it restores it and fails without
+  printing "synced".
+- `claude plugin list --json` also lists per-project installs (`scope: "project"`, with a `projectPath`).
+  `fleet sync` counts only `scope: "user"` installs, and checks each enabled plugin's version against a
+  `vX.Y.Z` pin.
 
 ---
 
@@ -1273,6 +1288,8 @@ major Claude Code upgrade.
 | `… has uncommitted changes to tracked files` | sync will not clobber a checkout. Inspect with `git -C <dir> status` and `git diff --stat`; mode-bit or line-ending noise (`git diff` shows no content change) can be discarded with `git checkout -- .`, then re-run |
 | `pin checkout … can't fast-forward` | the sessions' checkout is not on a clean default branch. Sync proceeds from `origin/<default>`'s pins, but sessions read the working tree; put it back on the default branch |
 | `marketplace add … failed — plugins are UNINSTALLED` | a network or auth hiccup mid-swap. Running sessions are unaffected; re-run `fleet sync` |
+| `… changed project settings (…); restored them from the snapshot. NOT synced` | a `claude plugin` call edited the pin repo's settings despite `--scope user` and the neutral cwd. Sync put the file back. Re-run `fleet sync`; if it repeats, the CLI changed behavior: report it on engsys#112 |
+| `… not installed at the pin: <plugin> (at X, pin Y)` | an enabled plugin is missing or at another version after the plugin step. Re-run `fleet sync`; if the version stays wrong, `claude plugin uninstall --scope user <plugin@marketplace>` from outside any project, then `fleet sync` |
 | `still at … after switching` | a checkout did not land on the pinned ref. Check the tag exists on the remote (`git ls-remote --tags origin`) |
 | `engsys … has no fleet kit` | the pinned engsys release predates the kit; pin one that includes `core/fleet/` |
 | Supervisor log: `RELAUNCH FAILED` with `claude not found on PATH` | the supervisor's launchd PATH can't see `claude`. The default job PATH covers `~/.local/bin` (native installer) and Homebrew; for anywhere else, override the PATH in `<instance>/jobs/launchd/fleet-supervisor.plist.tmpl`. Then `fleet install-jobs` (it warns until every tool resolves) and `fleet launch` for anything missing. The supervisor escalates a failed relaunch once on the ledger and comments again when it recovers |

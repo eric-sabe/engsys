@@ -13,7 +13,7 @@ CORE_SRC="$(cd "$KIT_SRC/.." && pwd -P)"  # core
 # shellcheck source=sandbox.sh
 . "$HERE/sandbox.sh"
 
-: >"$FAKE/shim.log"; : >"$FAKE/claude.log"; : >"$FAKE/tmux.log"; : >"$FAKE/gh.log"; : >"$FAKE/cr.log"; : >"$FAKE/launchctl.log"
+: >"$FAKE/shim.log"; : >"$FAKE/claude.log"; : >"$FAKE/claude.cwd"; : >"$FAKE/tmux.log"; : >"$FAKE/gh.log"; : >"$FAKE/cr.log"; : >"$FAKE/launchctl.log"
 
 # --- stubs -----------------------------------------------------------------------------------
 cat >"$T/bin/claude" <<'SH'
@@ -24,16 +24,32 @@ S="$FAKE/claude"; mkdir -p "$S"
 [ -f "$S/marketplaces.json" ] || echo '[]' >"$S/marketplaces.json"
 [ -f "$S/plugins.json" ] || echo '[]' >"$S/plugins.json"
 printf '%s\tPATH0=%s\n' "$*" "${PATH%%:*}" >>"$FAKE/claude.log"
+printf '%s\t%s\n' "$(pwd -P)" "$*" >>"$FAKE/claude.cwd"
 [ "${1:-}" = plugin ] || { echo "stub claude: unsupported: $*" >&2; exit 2; }
 shift
 save() { local f="$1"; shift; jq "$@" "$f" >"$f.new" && mv "$f.new" "$f"; }
+# The real CLI also edits the project settings of its cwd: a `marketplace remove` drops the marketplace and
+# its plugins from them (engsys#112). The stub does that whatever --scope says, so only a cwd outside every
+# project is safe; FAKE_CLAUDE_WIPE=<file> forces it. Only files inside the sandbox are ever touched.
+proj_settings() {
+  local d; d="$(pwd -P)"
+  while [ "$d" != / ]; do
+    if [ "$d" != "$HOME" ] && [ -f "$d/.claude/settings.json" ]; then echo "$d/.claude/settings.json"; return; fi
+    d="$(dirname "$d")"
+  done
+}
+wipe_project() { # wipe_project <settings file> <marketplace>
+  case "$1" in "${FAKE%/fake}"/*) ;; *) return 0 ;; esac
+  save "$1" --arg n "$2" 'del(.extraKnownMarketplaces[$n]) | .enabledPlugins |= with_entries(select(.key | endswith("@" + $n) | not))'
+}
 case "${1:-}" in
   list) cat "$S/plugins.json" ;;
   validate) echo "Validation passed" ;;
   install)
     id="$2"; m="${id#*@}"
     jq -e --arg m "$m" 'any(.[]; .name == $m)' "$S/marketplaces.json" >/dev/null || { echo "marketplace not found: $m" >&2; exit 1; }
-    save "$S/plugins.json" --arg id "$id" '. + [{id: $id, version: "1.0.0", scope: "user", enabled: true}]' ;;
+    ver="$(jq -r --arg m "$m" '.[] | select(.name == $m) | .ref' "$S/marketplaces.json")"; ver="${ver#v}"
+    save "$S/plugins.json" --arg id "$id" --arg v "${ver:-1.0.0}" '. + [{id: $id, version: $v, scope: "user", enabled: true}]' ;;
   marketplace)
     case "${2:-}" in
       list) cat "$S/marketplaces.json" ;;
@@ -49,6 +65,7 @@ case "${1:-}" in
         rm -rf "$tmp" ;;
       remove)
         name="$3"
+        f="${FAKE_CLAUDE_WIPE:-$(proj_settings)}"; [ -z "$f" ] || wipe_project "$f" "$name"
         save "$S/marketplaces.json" --arg n "$name" 'map(select(.name != $n))'
         save "$S/plugins.json" --arg n "$name" 'map(select(.id | endswith("@" + $n) | not))' ;;
       *) echo "stub claude: unsupported marketplace subcommand: $*" >&2; exit 2 ;;
@@ -389,6 +406,62 @@ has "engsys moved forward" "$OUT" "engsys: v1.0.0 → v1.1.0"
 has "engsys-side job template change reinstalls jobs" "$OUT" "launchd templates changed — reinstalling jobs"
 has "marketplace repaired" "$OUT" "marketplace acme: v0.1.0 → v0.2.0"
 eq "plugins back" "$(json_names plugins '.[].id')" "core@engsys ctx@acme extra@acme"
+run fleet sync --check; rc_is "in sync again" 0
+
+echo "== D2. the plugin step never touches project settings (engsys#112)"
+APP_SETTINGS="$HOME/git/app/.claude/settings.json"
+cp -p "$APP_SETTINGS" "$T/app-settings.orig"
+cwd_mark() { wc -l <"$FAKE/claude.cwd" | tr -d ' '; }
+cwd_since() { tail -n +"$(($1 + 1))" "$FAKE/claude.cwd"; }
+stale_engsys() { jq 'map(if .name == "engsys" then .ref = "v1.0.0" else . end)' "$FAKE/claude/marketplaces.json" >"$FAKE/m.json" && mv "$FAKE/m.json" "$FAKE/claude/marketplaces.json"; }
+# Like the incident: run from the pin checkout, with the engsys marketplace off its pin (remove → add → install).
+stale_engsys; c="$(cwd_mark)"; b="$(mark)"
+run bash -c "cd '$HOME/git/app' && bash '$ENGSYS_HOST/core/fleet/bin/fleet' --instance '$INST' sync"
+rc_is "sync from the pin checkout exits 0" 0
+has "engsys marketplace swapped" "$OUT" "marketplace engsys: v1.0.0 → v1.1.0"
+if cmp -s "$T/app-settings.orig" "$APP_SETTINGS"; then ok "pin checkout settings byte-identical after sync"; else bad "pin checkout settings byte-identical after sync" "$(diff "$T/app-settings.orig" "$APP_SETTINGS" || true)"; fi
+seg="$(since "$b")"
+has "remove is user-scoped" "$seg" "plugin marketplace remove engsys --scope user"
+has "add is user-scoped" "$seg" "plugin marketplace add https://github.com/vendor/engsys.git#v1.1.0 --scope user"
+has "every enabled plugin of the swapped marketplace gets an install call" "$seg" "plugin install core@engsys --scope user"
+eq "plugins all back" "$(json_names plugins '.[].id')" "core@engsys ctx@acme extra@acme"
+cwds="$(cwd_since "$c" | cut -f1 | sort -u)"
+[ -n "$cwds" ] && ok "plugin calls were recorded" || bad "plugin calls were recorded"
+eq "no plugin call ran inside a project (the pin checkout, the instance, the engsys checkout)" \
+  "$(grep -E "^($HOME/git|$INST)(/|\$)" <<<"$cwds" || true)" ""
+eq "every plugin call ran from sync's own empty dir" "$(grep -cvE '/fleet-sync\.[^/]+/cwd$' <<<"$cwds" || true)" 0
+d="$(sed -n 's#/cwd$##p' <<<"$cwds" | head -1)"
+[ -n "$d" ] && [ ! -e "$d" ] && ok "sync removed its temp dir" || bad "sync removed its temp dir" "${d:-none} still exists"
+
+# A CLI that rewrites the project settings anyway: sync restores them and fails loudly, never "synced".
+stale_engsys
+run env FAKE_CLAUDE_WIPE="$APP_SETTINGS" bash -c "cd '$HOME/git/app' && bash '$ENGSYS_HOST/core/fleet/bin/fleet' --instance '$INST' sync"
+rc_is "a settings rewrite fails the sync" 1
+has "…saying which call and which file" "$OUT" "marketplace remove engsys changed project settings ($APP_SETTINGS)"
+has "…and that it restored them" "$OUT" "restored them from the snapshot"
+hasnt "…never claims synced" "$OUT" "fleet-sync: synced."
+if cmp -s "$T/app-settings.orig" "$APP_SETTINGS"; then ok "the rewritten settings were restored byte-identical"; else bad "the rewritten settings were restored byte-identical" "$(diff "$T/app-settings.orig" "$APP_SETTINGS" || true)"; fi
+run fleet sync
+rc_is "a plain re-run heals the host" 0
+eq "plugins back after the re-run" "$(json_names plugins '.[].id')" "core@engsys ctx@acme extra@acme"
+
+# An enabled plugin installed at the wrong version: --check names it, sync refuses to say synced.
+jq 'map(if .id == "core@engsys" then .version = "0.9.0" else . end)' "$FAKE/claude/plugins.json" >"$FAKE/p.json" && mv "$FAKE/p.json" "$FAKE/claude/plugins.json"
+run fleet sync --check
+rc_is "a plugin off its pinned version is drift" 1; has "…named" "$OUT" "plugin core@engsys is at 0.9.0 (pin 1.1.0)"
+run fleet sync
+rc_is "sync fails on a plugin off its pinned version" 1
+has "…naming it" "$OUT" "core@engsys (at 0.9.0, pin 1.1.0)"
+has "…with the re-run instruction" "$OUT" "claude plugin uninstall --scope user <plugin@marketplace>"
+hasnt "…never claims synced" "$OUT" "fleet-sync: synced."
+jq 'map(if .id == "core@engsys" then .version = "1.1.0" else . end)' "$FAKE/claude/plugins.json" >"$FAKE/p.json" && mv "$FAKE/p.json" "$FAKE/claude/plugins.json"
+# A project-scope install (`claude plugin list` shows those too) doesn't count as installed.
+jq 'map(if .id == "ctx@acme" then .scope = "project" else . end)' "$FAKE/claude/plugins.json" >"$FAKE/p.json" && mv "$FAKE/p.json" "$FAKE/claude/plugins.json"
+run fleet sync --check
+rc_is "a project-scope install alone is drift" 1; has "…named" "$OUT" "plugin ctx@acme not installed"
+jq 'map(select(.id != "ctx@acme" or .scope == "user"))' "$FAKE/claude/plugins.json" >"$FAKE/p.json" && mv "$FAKE/p.json" "$FAKE/claude/plugins.json"
+run fleet sync
+rc_is "sync installs it at user scope" 0; has "…" "$OUT" "installed ctx@acme"
 run fleet sync --check; rc_is "in sync again" 0
 
 echo "== E. launch: rendering, the 5th roster field, the launcher command lines"
