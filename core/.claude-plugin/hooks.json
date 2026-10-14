@@ -20,7 +20,18 @@
         ]
       },
       {
-        "matcher": "Write|Edit|MultiEdit|NotebookEdit|mcp__.*",
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit|CronCreate|mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/singleton-write-guard.mjs\""
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|MultiEdit",
         "hooks": [
           {
             "type": "command",

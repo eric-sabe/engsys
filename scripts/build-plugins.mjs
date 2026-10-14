@@ -88,8 +88,14 @@ out.set('core/.claude-plugin/hooks.json', json({
       // --dangerously-skip-permissions; a deny here wins over the allow above.
       // Monitor runs a shell command too (#85 M1).
       { matcher: 'Bash|Monitor', hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/singleton-write-guard.mjs"' }] },
-      // …and its settings/plugin-file and GitHub-MCP checks (#69 review N1, L-c).
-      { matcher: 'Write|Edit|MultiEdit|NotebookEdit|mcp__.*', hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/singleton-write-guard.mjs"' }] },
+      // …and its settings/plugin-file and GitHub-MCP checks (#69 review N1, L-c), and CronCreate: a
+      // singleton paces itself with ScheduleWakeup, never a cron job that outlives it (#119).
+      { matcher: 'Write|Edit|MultiEdit|NotebookEdit|CronCreate|mcp__.*', hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/singleton-write-guard.mjs"' }] },
+    ],
+    // …and feedback when an Edit leaves a monster's state.md over its 4 KB limit (#120; a Write over it is
+    // denied above).
+    PostToolUse: [
+      { matcher: 'Edit|MultiEdit', hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/singleton-write-guard.mjs"' }] },
     ],
     // Hand-back guard: a subagent can't hand back "still running, I'll continue once…" (nothing would
     // wake it), and a session can't end its turn on an unhandled INCOMPLETE hand-back.

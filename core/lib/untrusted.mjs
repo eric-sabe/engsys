@@ -59,13 +59,18 @@ export function createMarkerRe(label = DEFAULT_LABEL) {
 export const MARKER_RE = createMarkerRe(DEFAULT_LABEL);
 
 /**
- * Invisible-formatting characters an attacker can splice INTO a marker word (`UN<ZWSP>TRUSTED`).
- * The Unicode `Cf` (format) class is exactly that set: zero-width space/non-joiner/joiner
- * (U+200B-U+200D), BOM (U+FEFF), soft hyphen (U+00AD), word joiner (U+2060), the bidi controls
- * (U+200E/200F, U+202A-202E, U+2066-2069) and the Mongolian vowel separator (U+180E). Ordinary
- * whitespace is deliberately NOT stripped: it is meaningful in code and prose.
+ * Invisible characters an attacker can splice INTO a marker word (`UN<ZWSP>TRUSTED`). The Unicode
+ * Default_Ignorable_Code_Point property is the set a renderer shows as nothing (#121): the zero-width
+ * space/non-joiner/joiner (U+200B-U+200D), BOM (U+FEFF), soft hyphen (U+00AD), word joiner (U+2060),
+ * the bidi controls, the combining grapheme joiner (U+034F), the Hangul fillers (U+115F, U+1160,
+ * U+3164, U+FFA0), the variation selectors (U+FE00-U+FE0F, U+E0100-U+E01EF) and the tag characters
+ * (U+E0000-U+E0FFF). It leaves out a few format (`Cf`) characters the old `\p{Cf}` strip caught: the
+ * interlinear annotation anchors (U+FFF9-U+FFFB), the Egyptian hieroglyph format controls
+ * (U+13430-U+1343F) and the prepended concatenation marks. The union keeps them, so the strip only
+ * grows. Ordinary whitespace is in neither set: it is meaningful in code and prose. Used with `.test`
+ * only, so no `g` flag.
  */
-const INVISIBLE_RE = /\p{Cf}/u;
+const INVISIBLE_RE = /[\p{Default_Ignorable_Code_Point}\p{Cf}]/u;
 
 /**
  * Scoped homoglyph fold. NFKC collapses fullwidth/compatibility forms to ASCII but not cross-script
