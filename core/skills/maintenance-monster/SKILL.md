@@ -85,9 +85,9 @@ how confident a disposition looks.
    name** in that digest — a line like `session: <ns>-maintain` (e.g. `acme-maintain`) — so
    the merge orchestrator (and anyone else) reads the nudge target from your ledger
    rather than guessing (§ Cross-session messaging).
-5. Arm the event bus as a **Monitor with `timeout_ms: 1800000`** (the
-   maximum: every Monitor ends at its timeout, 30 minutes at most) and
-   **re-arm it as soon as its expiry notice arrives**, running:
+5. Arm the event bus, **one Monitor for the whole session**, with
+   `timeout_ms: 1800000` (the maximum: every Monitor ends at its timeout, 30
+   minutes at most), running:
 
    ```bash
    bash <skill-dir>/scripts/mnt-watch.sh --repo <repo> \
@@ -95,17 +95,18 @@ how confident a disposition looks.
      --default-branch <default_branch> --ledger <ledger_issue>
    ```
 
-   If `liveness:` is configured, arm a **second Monitor** (same timeout, same
-   re-arm) for the subagent watchdog, shared with Merge Monster (one
-   substrate, two monsters; your `state_dir` keeps the registries separate):
+   The bus also runs the subagent watchdog's scan every cycle (the substrate
+   Merge Monster uses; your `state_dir` keeps the registries separate), so
+   there is no second Monitor. If `liveness:` is configured, add
+   `--stale-min <liveness.stale_minutes>`, and `--no-stale` when
+   `liveness.stale_probe` is `false` (OVERDUE still fires).
 
-   ```bash
-   bash <engsys-root>/skills/merge-monster/scripts/mm-agent-watch.sh \
-     --state-dir <state_dir> --stale-min <liveness.stale_minutes>
-   ```
-
-   Add `--no-stale` when `liveness.stale_probe` is `false` (OVERDUE still
-   fires).
+   **Re-arm on expiry, and do nothing else.** When the Monitor's expiry
+   notice arrives with no event lines since your last wake, that wake is
+   **exactly one tool call**: the Monitor, re-armed with the same command.
+   No snapshot, no heartbeat, no `state.md` write, no journal line, no
+   ScheduleWakeup change (the pending tick still stands). An expiry that
+   carried event lines is an ordinary wake (§ The loop) that also re-arms.
 
    `mnt-watch.sh` also keeps the baton renewed every 2.5 minutes while
    `<state_dir>/baton-maintain.json` holds this session's token (session name:
@@ -118,14 +119,14 @@ how confident a disposition looks.
 
 6. Schedule the fallback tick: **ScheduleWakeup** at `heartbeat_minutes`
    (repeat every cycle), never more than 10 minutes while you hold the baton
-   (§ The baton). The Monitors are the primary wake signal; this tick
+   (§ The baton). The Monitor is the primary wake signal; this tick
    refreshes the heartbeat, rewrites `state.md`, sweeps the slow-moving
    surfaces that aren't on the event bus (the package manager's audit,
    base-image staleness, and — when `watch.entra_app_credentials` or a
    similar cloud app-credential block is configured — credential expiry: any
    cert/secret on a listed app ending within `warn_days` → **escalate** with
-   the rotation runbook, never rotate it yourself), and restarts either
-   Monitor if it died or expired, and runs
+   the rotation runbook, never rotate it yourself), restarts the Monitor if
+   it died, and runs
    `mm-agent-watch.sh --once` as a synchronous backstop scan for overdue
    subagents. When `fp_policies:` is configured it also runs
    `mnt-fp-candidates.sh` (§ Standing false-positive policies), so a tripped
@@ -243,7 +244,7 @@ minutes without one). **Lost**: first stop every agent you dispatched that is
 still running (`TaskStop`, then `mm-agent-reg.sh fence` for its row), then stop
 at once, no further writes of any kind (no heartbeat either: someone else
 may hold the role now); the script already sent the one
-`--incident baton-lost-maintain` alert; stop the Monitors, schedule nothing,
+`--incident baton-lost-maintain` alert; stop the Monitor, schedule nothing,
 idle. The renewer stops by itself. The fleet supervisor relaunches the role
 where it is home once the lease is free: within a tick when the lease ran
 out still naming this session (engsys#87). **Release** (`mnt-baton.sh release … --reason rotation|exit|handover`)

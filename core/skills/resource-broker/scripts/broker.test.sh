@@ -420,6 +420,17 @@ eq "…and the queue is empty" "$(pc status | jq '.queue | length')" 0
 run $W
 has "a released slot is announced" "$(pc release --slot "$(slot_of "$C")" --owner acme-cache --token "$(tok_of "$C")" >/dev/null; $W 2>&1)" "SLOT_RELEASED $(slot_of "$C")"
 
+echo "== D2. one bus per monster: the watch runs the subagent scan (engsys#122)"
+printf 'rev\t1\trunning\t-\t-\trebase\tslot#1\t%s\t%s\t0\t-\n' "$(( $(date +%s) - 120 ))" "$(( $(date +%s) - 60 ))" >"$STATE/agents.tsv"
+run $W
+has "an overdue running subagent is reported by the broker bus itself" "$OUT" "AGENT_OVERDUE rev gen=1 task=slot#1"
+run $W
+hasnt "…once per deadline" "$OUT" "AGENT_OVERDUE"
+printf 'rev2\t1\trunning\t-\t-\trebase\tslot#2\t%s\t%s\t0\t-\n' "$(( $(date +%s) - 120 ))" "$(( $(date +%s) - 60 ))" >>"$STATE/agents.tsv"
+run $W --no-agents
+hasnt "--no-agents skips the scan" "$OUT" "AGENT_OVERDUE"
+rm -f "$STATE/agents.tsv"
+
 echo "== E. a grant nudge reaches a waiting session"
 C="$(pc acquire --owner acme-cache --no-wait)"
 $W >/dev/null 2>&1

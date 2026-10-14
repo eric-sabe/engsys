@@ -21,6 +21,8 @@
 #   FLEET_MSG              a cross-fleet message is waiting in this session's inbox (engsys#77; multi-fleet only):
 #                          run the command the line names (msg.mjs inbox --mark-read), then msg.mjs read <url>
 #   STOP                   ledger issue closed (kill switch) — script exits
+#   AGENT_OVERDUE / AGENT_STALE …  the subagent watchdog (mm-agent-watch.sh --once, run every cycle
+#                          while <state-dir>/agents.tsv exists): one bus per monster (engsys#122)
 #
 # The active PR number is read each cycle from <state-dir>/active, so one
 # persistent monitor serves the whole session.
@@ -28,6 +30,9 @@
 # Usage: mm-watch.sh --repo owner/name --state-dir DIR [--interval 30]
 #                    [--default-branch main] [--ledger N]
 #                    [--session NAME] [--pulse-max 20m]
+#                    [--stale-min 10] [--no-stale] [--no-agents]
+#   --stale-min / --no-stale  passed to the subagent scan (liveness.stale_minutes / stale_probe: false)
+#   --no-agents               skip the subagent scan (it is a no-op anyway without a spawn registry)
 #
 # Baton keepalive (engsys#62, #87): while <state-dir>/baton-merge.json carries this session's token,
 # a `baton.mjs keepalive` renews the lease every 2.5 min (the caller rule: TTL 10 min, renew <= 3m20s;
@@ -48,6 +53,7 @@ set -u
 fleet_gh_resolve
 
 REPO="" DIR="" INTERVAL=30 DEFBRANCH=main LEDGER="" SESSION="${ENGSYS_SESSION:-}" PULSE_MAX=20m
+STALE_MIN=10 NOSTALE="" AGENTS=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) REPO="$2"; shift 2 ;;
@@ -57,6 +63,9 @@ while [ $# -gt 0 ]; do
     --ledger) LEDGER="$2"; shift 2 ;;
     --session) SESSION="$2"; shift 2 ;;
     --pulse-max) PULSE_MAX="$2"; shift 2 ;;
+    --stale-min) STALE_MIN="$2"; shift 2 ;;
+    --no-stale) NOSTALE=1; shift ;;
+    --no-agents) AGENTS=0; shift ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -173,8 +182,19 @@ inbox_event() {
   mv "$W/inbox.new" "$W/inbox.seen"
 }
 
+# --- subagent liveness (engsys#122) ---------------------------------------------
+# The watchdog's scan runs inside this bus, once per cycle, so a monster keeps ONE Monitor. The scan's
+# latches and lock live in <state-dir>/.watch, shared with a tick's `mm-agent-watch.sh --once` backstop,
+# so the two never emit the same transition twice.
+AGENT_WATCH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/mm-agent-watch.sh"
+agents_event() {
+  [ "$AGENTS" = 1 ] && [ -f "$DIR/agents.tsv" ] || return 0
+  bash "$AGENT_WATCH" --state-dir "$DIR" --once --stale-min "$STALE_MIN" ${NOSTALE:+--no-stale} 2>>"$W/agent-watch.err" || true
+}
+
 while true; do
   baton_tick || exit 0
+  agents_event
   # Once, after the baton check (a lost baton exits quietly first): an unauthenticated gh must
   # surface as an event, never as a bus that sees nothing (engsys#90).
   if [ -z "${GH_AUTH_CHECKED:-}" ]; then assert_gh_auth mm-watch event || exit 1; GH_AUTH_CHECKED=1; fi

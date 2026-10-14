@@ -24,6 +24,9 @@
 #                                     blind until PUMP_OK; reconcile before trusting any picture
 #   PUMP_OK                           the pump recovered
 #   STOP                              ledger issue closed (kill switch); the script exits
+#   AGENT_OVERDUE / AGENT_STALE …     the subagent watchdog (merge-monster's mm-agent-watch.sh --once, run
+#                                     every tick while <state-dir>/agents.tsv exists): one bus per monster
+#                                     (engsys#122)
 #
 # --once runs a single tick and exits (the synchronous backstop for the fallback tick, and the test
 # hook). State lives under <state-dir>/.watch: the last slot picture and a nudge cursor, so a restart
@@ -33,6 +36,9 @@
 # Usage: broker-watch.sh [--repo owner/name] [--state-dir DIR] [--interval 30] [--ledger N]
 #                        [--owner OWNER] [--pool FILE] [--store DIR] [--owner-pattern REGEX]
 #                        [--config FILE | --config-dir DIR] [--once]
+#                        [--stale-min 10] [--no-stale] [--no-agents]
+# --stale-min / --no-stale go to the subagent scan (liveness.stale_minutes / stale_probe: false);
+# --no-agents skips it (a no-op anyway without a spawn registry).
 # Every value defaults to resource-broker.yml (repo, state_dir, poll_interval, ledger_issue,
 # lease.owner, lease.pool_file, lease.store, lease.owner_pattern). In multi-fleet mode the ledger is the
 # fleet's status issue and the owner and fence are fleet-qualified (broker-config.sh).
@@ -47,7 +53,8 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$here/broker-config.sh"
 
 REPO="" DIR="" INTERVAL="" LEDGER="" OWNER="" POOL_FILE="" STORE="" OWNER_PATTERN="" CONFIG="" CONFIG_DIR="" ONCE=0
-usage() { echo "usage: broker-watch.sh [--repo owner/name] [--state-dir DIR] [--interval N] [--ledger N] [--owner OWNER] [--pool FILE] [--store DIR] [--config FILE | --config-dir DIR] [--once]" >&2; exit 2; }
+STALE_MIN=10 NOSTALE="" AGENTS=1
+usage() { echo "usage: broker-watch.sh [--repo owner/name] [--state-dir DIR] [--interval N] [--ledger N] [--owner OWNER] [--pool FILE] [--store DIR] [--config FILE | --config-dir DIR] [--once] [--stale-min N] [--no-stale] [--no-agents]" >&2; exit 2; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) [ $# -ge 2 ] || usage; REPO="$2"; shift 2 ;;
@@ -61,6 +68,9 @@ while [ $# -gt 0 ]; do
     --config) [ $# -ge 2 ] || usage; CONFIG="$2"; shift 2 ;;
     --config-dir) [ $# -ge 2 ] || usage; CONFIG_DIR="$2"; shift 2 ;;
     --once) ONCE=1; shift ;;
+    --stale-min) [ $# -ge 2 ] || usage; STALE_MIN="$2"; shift 2 ;;
+    --no-stale) NOSTALE=1; shift ;;
+    --no-agents) AGENTS=0; shift ;;
     *) echo "unknown arg: $1" >&2; usage ;;
   esac
 done
@@ -97,6 +107,14 @@ mkdir -p "$W"
 PUMP_BAD=0
 POOL_DIR=""
 
+# The subagent watchdog's scan, once per tick, so the broker keeps ONE Monitor (engsys#122). Its latches
+# and lock live in <state-dir>/.watch, shared with a fallback tick's backstop scan.
+AGENT_WATCH="$here/../../merge-monster/scripts/mm-agent-watch.sh"
+agents_event() {
+  [ "$AGENTS" = 1 ] && [ -f "$DIR/agents.tsv" ] || return 0
+  bash "$AGENT_WATCH" --state-dir "$DIR" --once --stale-min "$STALE_MIN" ${NOSTALE:+--no-stale} 2>>"$W/agent-watch.err" || true
+}
+
 tick() {
   # Kill switch: ledger issue closed.
   STATE=$(gh issue view "$LEDGER" -R "$REPO" --json state --jq .state 2>/dev/null || echo "")
@@ -104,6 +122,7 @@ tick() {
     echo "STOP"
     return 1
   fi
+  agents_event
 
   # Active reaping pass (dead-man's-switch sweep + stale-queue-entry drop).
   PUMP_ERR=$(mktemp)

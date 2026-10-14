@@ -128,27 +128,27 @@ its holder resets it with `reset`. No pool-file change is needed.
    nothing-to-do-until-an-event posture. **Advertise your addressable name** in that digest, a line like
    `session: <ns>-broker`, so the decider and every waiting agent read the target from your ledger rather
    than guessing (see Cross-session messaging).
-4. Arm the event bus, a **persistent Monitor** running:
+4. Arm the event bus, **one Monitor for the whole session**, with `timeout_ms: 1800000` (the maximum: every
+   Monitor ends at its timeout, 30 minutes at most), running:
 
    ```bash
    bash <skill-dir>/scripts/broker-watch.sh --config <config>
    ```
 
    It turns the pool's lazy reaping (which only runs inside another caller's acquire, request or release)
-   into **active** reaping by pumping on `poll_interval`, and drains the async-grant nudge channel.
+   into **active** reaping by pumping on `poll_interval`, and drains the async-grant nudge channel. It also
+   runs the subagent watchdog's scan every tick (shared with the other monsters; your `state_dir` keeps the
+   registry separate), so there is no second Monitor. If `liveness:` is configured, add
+   `--stale-min <liveness.stale_minutes>`, and `--no-stale` when `liveness.stale_probe` is `false`.
 
-   If `liveness:` is configured, arm a **second persistent Monitor**, the subagent watchdog shared with
-   the other monsters (your `state_dir` keeps the registry separate):
-
-   ```bash
-   bash <engsys-root>/skills/merge-monster/scripts/mm-agent-watch.sh --state-dir <state_dir> --stale-min <liveness.stale_minutes>
-   ```
-
-   Add `--no-stale` when `liveness.stale_probe` is `false`.
-5. Schedule the fallback tick: **ScheduleWakeup** at `heartbeat_minutes` (repeat every cycle). The Monitors
-   are the primary wake signal; this tick refreshes the heartbeat, rewrites `state.md`, restarts either
-   Monitor if it died, and runs `broker-watch.sh --config <config> --once` plus
-   `mm-agent-watch.sh --once` as synchronous backstops.
+   **Re-arm on expiry, and do nothing else.** When the Monitor's expiry notice arrives with no event lines
+   since your last wake, that wake is **exactly one tool call**: the Monitor, re-armed with the same
+   command. No reconcile, no heartbeat, no `state.md` write, no journal line, no ScheduleWakeup change (the
+   pending tick still stands). An expiry that carried event lines is an ordinary wake that also re-arms.
+5. Schedule the fallback tick: **ScheduleWakeup** at `heartbeat_minutes` (repeat every cycle). The Monitor
+   is the primary wake signal; this tick refreshes the heartbeat, rewrites `state.md`, restarts the
+   Monitor if it died, and runs `broker-watch.sh --config <config> --once` (which includes the subagent
+   scan) as a synchronous backstop.
 
 ## The loop: on every wake (event or tick)
 
@@ -370,7 +370,7 @@ Resolve the incident (`fleet notify ... --resolve`) once it clears.
 Never shut down mid-actuation of a directed env mutation or a host window: finish it or let the script
 abort safely (an abandoned drain is worse than a slow one). Post a session-end digest to the ledger issue
 (grants seen, reaps, dropped entries, notable incidents), a final heartbeat with status "session end", and
-stop both Monitors.
+stop the Monitor.
 
 ## Hard rules
 

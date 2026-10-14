@@ -192,7 +192,11 @@ reconciliation, tick-based re-arm, and `claude -p` wrapping.
 
 ## 6. Wiring into MM / Maintenance Monster
 
-Skill startup arms `mm-agent-watch.sh` beside `mm-watch.sh` (tick re-arms both);
+Each monster keeps one Monitor (engsys#122): its watch bus (`mm-watch.sh`,
+`mnt-watch.sh`, `broker-watch.sh`) runs `mm-agent-watch.sh --once` every cycle,
+and the fallback tick runs it once more as a backstop. A clean Monitor expiry is
+one tool call, the re-arm. Other sessions may still arm `mm-agent-watch.sh` as
+its own Monitor;
 the wake loop gains `AGENT_OVERDUE`/`AGENT_STALE` → §3 probe-classify-recover,
 journalled like any decision; spawn discipline = named agents, registry write,
 per-class deadline, resume-reconcile instruction in every spawn prompt.

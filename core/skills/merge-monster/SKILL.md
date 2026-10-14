@@ -83,9 +83,9 @@ engsys (spec travels with the skill; the config travels with the repo).
    `session: <ns>-mm` (e.g. `acme-mm`, or `alice:acme-mm` when the session env sets
    `FLEET_ID=alice`), so enqueuers read the nudge target from the ledger
    rather than guessing (§ Cross-session messaging).
-5. Arm the event bus as a **Monitor with `timeout_ms: 1800000`** (the
-   maximum: every Monitor ends at its timeout, 30 minutes at most) and
-   **re-arm it as soon as its expiry notice arrives**, running:
+5. Arm the event bus, **one Monitor for the whole session**, with
+   `timeout_ms: 1800000` (the maximum: every Monitor ends at its timeout, 30
+   minutes at most), running:
 
    ```bash
    bash <skill-dir>/scripts/mm-watch.sh --repo <repo> \
@@ -93,16 +93,17 @@ engsys (spec travels with the skill; the config travels with the repo).
      --default-branch <default_branch> --ledger <ledger_issue>
    ```
 
-   If `liveness:` is configured, arm a **second Monitor** (same timeout, same
-   re-arm) for the subagent watchdog (§ Subagent liveness):
+   The bus also runs the subagent watchdog's scan every cycle
+   (§ Subagent liveness), so there is no second Monitor. If `liveness:` is
+   configured, add `--stale-min <liveness.stale_minutes>`, and `--no-stale`
+   when `liveness.stale_probe` is `false` (OVERDUE still fires).
 
-   ```bash
-   bash <skill-dir>/scripts/mm-agent-watch.sh \
-     --state-dir <state_dir> --stale-min <liveness.stale_minutes>
-   ```
-
-   Add `--no-stale` when `liveness.stale_probe` is `false` — don't wake
-   yourself with events you're configured to ignore (OVERDUE still fires).
+   **Re-arm on expiry, and do nothing else.** When the Monitor's expiry
+   notice arrives with no event lines since your last wake, that wake is
+   **exactly one tool call**: the Monitor, re-armed with the same command.
+   No snapshot, no heartbeat, no `state.md` write, no journal line, no
+   ScheduleWakeup change (the pending tick still stands). An expiry that
+   carried event lines is an ordinary wake (§ The loop) that also re-arms.
 
    `mm-watch.sh` also keeps the baton renewed every 2.5 minutes (a
    background keepalive; the tick alone is far too slow for a 10-minute
@@ -118,11 +119,11 @@ engsys (spec travels with the skill; the config travels with the repo).
 6. Schedule the fallback tick: **ScheduleWakeup** at `heartbeat_minutes`
    (repeat every cycle), but **never more than 10 minutes while you hold the
    baton**: each tick's heartbeat renews it, and the watch bus's keepalive
-   stops renewing after 20 minutes without a renew from you. The Monitors are the primary wake signal; this tick
+   stops renewing after 20 minutes without a renew from you. The Monitor is the primary wake signal; this tick
    refreshes the heartbeat, rewrites `state.md`, picks up Dependabot idle
-   work, and restarts either Monitor if it died or expired, and runs
-   `mm-agent-watch.sh --once` as a synchronous backstop scan, so the liveness
-   wake guarantee ultimately rests on the tick, not on any Monitor surviving.
+   work, restarts the Monitor if it died, and runs `mm-agent-watch.sh --once`
+   as a synchronous backstop scan, so the liveness wake guarantee ultimately
+   rests on the tick, not on the Monitor surviving.
 
 ## The loop — on every wake (event or tick)
 
@@ -294,7 +295,7 @@ for each running row), so none of them acts for a role you no longer hold.
 Then no further mutations of any kind, not even label cleanup, a heartbeat
 or a digest: someone else may hold the role now. The script has already sent
 the one `fleet notify --level alert --incident baton-lost-merge`. Journal it
-locally, stop both Monitors, schedule no tick, and idle at the prompt (the
+locally, stop the Monitor, schedule no tick, and idle at the prompt (the
 keepalive stops by itself). The fleet supervisor relaunches the role where
 its fleet is home once the lease is free: within a tick when the lease ran
 out still naming this session (an idle session + a forfeited baton,

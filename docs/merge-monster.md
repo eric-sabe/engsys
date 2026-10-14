@@ -83,10 +83,17 @@ Events emitted by `mm-watch.sh` (one line each):
 | `DEPENDABOT #N <title>` | new Dependabot PR opened |
 | `MAIN_RED <workflow>` | newest non-scheduled default-branch run concluded failure (merge-gating only; each failing run fires once) |
 | `STOP` | the ledger issue was closed (kill switch) |
+| `AGENT_OVERDUE` / `AGENT_STALE` | the subagent watchdog's scan (`mm-agent-watch.sh --once`), run by the bus every cycle |
 
 The script reads the currently active PR number from a state file
 (`<state-dir>/active`) so one persistent Monitor serves the whole session even
 as the in-flight PR changes.
+
+**One watcher per monster** (engsys#122). The bus also runs the subagent
+watchdog's scan, so a monster arms exactly one Monitor. A Monitor ends at its
+30-minute timeout; a clean expiry (no event lines) costs exactly one tool call,
+the re-arm, with no snapshot, heartbeat or `state.md` write. An exit-on-event
+watcher was rejected: it goes deaf the first time the model forgets to re-arm.
 
 ## 4. Communication protocol — GitHub is the bus
 

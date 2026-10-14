@@ -66,6 +66,7 @@ const SUITES = [
   ["bash core/scripts/worker-package.test.sh"],
   ["bash core/skills/maintenance-monster/scripts/mnt-fp.test.sh"],
   ["bash core/skills/merge-monster/scripts/mm-baton.test.sh"],
+  ["bash core/skills/merge-monster/scripts/monster-bus.test.sh"],
 ];
 
 // Variables the kit reads from a fleet session's environment.
