@@ -8,7 +8,8 @@
 # whether the session is fresh, asked to rotate ("rotation requested") or ended ("session end").
 #
 # Usage: broker-heartbeat.sh [--repo owner/name] [--issue N] [--status "text"]
-#                            [--config FILE | --config-dir DIR]
+#                            [--config FILE | --config-dir DIR] [--state-dir DIR]
+# --state-dir (default: the config's state_dir) is where the heartbeat records its time for broker-tick.sh.
 # --repo / --issue default to `repo` / `ledger_issue` of resource-broker.yml, or in multi-fleet mode to
 # the fleet's status issue (broker-config.sh). The status issue also carries other writers' blocks (the
 # supervisor's `<!-- fleet-heartbeat -->`), so this rewrites only its own block, then reads the body back
@@ -23,9 +24,11 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=broker-config.sh
 . "$here/broker-config.sh"
+# shellcheck source=../../../lib/monster.sh
+. "$here/../../../lib/monster.sh"
 
-REPO="" ISSUE="" STATUS="running" CONFIG="" CONFIG_DIR=""
-usage() { echo "usage: broker-heartbeat.sh [--repo owner/name] [--issue N] [--status text] [--config FILE | --config-dir DIR]" >&2; exit 2; }
+REPO="" ISSUE="" STATUS="running" CONFIG="" CONFIG_DIR="" STATE_DIR=""
+usage() { echo "usage: broker-heartbeat.sh [--repo owner/name] [--issue N] [--status text] [--config FILE | --config-dir DIR] [--state-dir DIR]" >&2; exit 2; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) [ $# -ge 2 ] || usage; REPO="$2"; shift 2 ;;
@@ -33,11 +36,13 @@ while [ $# -gt 0 ]; do
     --status) [ $# -ge 2 ] || usage; STATUS="$2"; shift 2 ;;
     --config) [ $# -ge 2 ] || usage; CONFIG="$2"; shift 2 ;;
     --config-dir) [ $# -ge 2 ] || usage; CONFIG_DIR="$2"; shift 2 ;;
+    --state-dir) [ $# -ge 2 ] || usage; STATE_DIR="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; usage ;;
   esac
 done
 broker_find_config "$CONFIG" "$CONFIG_DIR" || exit 1
 broker_fill_ledger REPO ISSUE || exit 1
+broker_fill_var STATE_DIR state_dir
 { [ -n "$REPO" ] && [ -n "$ISSUE" ] && [ "$ISSUE" != 0 ]; } || { echo "broker-heartbeat: need --repo and --issue (or a resource-broker.yml with repo and a real ledger_issue)" >&2; exit 2; }
 
 command -v gh >/dev/null || { echo "gh not found" >&2; exit 1; }
@@ -80,4 +85,5 @@ while :; do
   echo "heartbeat: lost to a concurrent edit of $REPO#$ISSUE, retrying" >&2
   sleep "${BROKER_HEARTBEAT_RETRY_SECS:-2}"
 done
+[ -z "$STATE_DIR" ] || monster_heartbeat_mark "$STATE_DIR" # broker-tick.sh writes the next one only when due
 echo "heartbeat: $NOW ($STATUS)"

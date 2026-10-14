@@ -12,7 +12,8 @@
 // In a singleton session it is an ALLOWLIST:
 //   Bash | Monitor (any tool input with a `command` string, #85 M1)
 //          a command that is one plain invocation of a fenced wrapper passes (mm-act/mnt-act,
-//          mm-baton/mnt-baton, and mm-heartbeat/mnt-heartbeat with --state-dir), with no chaining,
+//          mm-baton/mnt-baton, and mm-heartbeat/mnt-heartbeat and the mm-tick/mnt-tick/broker-tick
+//          ticks with --state-dir), with no chaining,
 //          redirects or substitution; only 2>&1, `| jq …` / `| cat`, `; echo $?` and a heredoc of
 //          data on its stdin may follow (#85 F2), the heredoc with a quoted delimiter so its body
 //          expands nothing (#106). Otherwise every gh, git and HTTP client invocation
@@ -73,8 +74,15 @@ export const WRAPPERS = new Set([
   'maintenance-monster/scripts/mnt-act.sh',
   'maintenance-monster/scripts/mnt-heartbeat.sh',
   'maintenance-monster/scripts/mnt-baton.sh',
+  // The single-call ticks (engsys#123): they renew, heartbeat and scan, so they run only as one plain
+  // invocation, and only with --state-dir (the renew needs it, and the broker's names its state dir).
+  'merge-monster/scripts/mm-tick.sh',
+  'maintenance-monster/scripts/mnt-tick.sh',
+  'resource-broker/scripts/broker-tick.sh',
 ]);
-const HEARTBEATS = new Set(['merge-monster/scripts/mm-heartbeat.sh', 'maintenance-monster/scripts/mnt-heartbeat.sh']);
+/** Wrappers that are no fence without --state-dir: the heartbeats renew through it (L-a), the ticks too. */
+const NEEDS_STATE_DIR = new Set(['merge-monster/scripts/mm-heartbeat.sh', 'maintenance-monster/scripts/mnt-heartbeat.sh',
+  'merge-monster/scripts/mm-tick.sh', 'maintenance-monster/scripts/mnt-tick.sh', 'resource-broker/scripts/broker-tick.sh']);
 
 const GH_READ_GROUPS = new Set(['pr', 'issue', 'run', 'workflow', 'repo', 'release', 'label', 'cache']);
 const GH_READ_VERBS = new Set(['view', 'list', 'status', 'diff', 'checks', 'download', 'watch']);
@@ -801,8 +809,8 @@ export function wrapperInvocation(cmd, pluginRoot, env = process.env) {
   try { root = fs.realpathSync(pluginRoot); real = fs.realpathSync(exe); } catch { return null; }
   const rel = path.relative(path.join(root, 'skills'), real).split(path.sep).join('/');
   if (!WRAPPERS.has(rel)) return null;
-  // L-a: the heartbeat without a renew is no fence.
-  if (HEARTBEATS.has(rel) && !words.some((w) => w === '--state-dir' || w.startsWith('--state-dir='))) return null;
+  // L-a: the heartbeat (or a tick) without a renew is no fence.
+  if (NEEDS_STATE_DIR.has(rel) && !words.some((w) => w === '--state-dir' || w.startsWith('--state-dir='))) return null;
   return rel;
 }
 

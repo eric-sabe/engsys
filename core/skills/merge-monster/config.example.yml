@@ -1,7 +1,8 @@
 # Merge Monster per-repo config — copy to .claude/merge-monster.yml (or to
 # merge-monster.yml in a fleet config dir outside the repo — see SKILL.md
 # § Prerequisites) and edit.
-# Read by the model at session start; scripts take flags, never parse YAML.
+# Read by the model at session start. Scripts take flags; the ones given --config read only the
+# keys they name (mm-watch.sh: pulse_max, heartbeat_minutes; mm-tick.sh: heartbeat_minutes).
 # Design spec: docs/merge-monster.md in engsys.
 
 repo: owner/name
@@ -10,7 +11,10 @@ ledger_issue: 0              # printed by scripts/mm-setup.sh --repo owner/name
 
 state_dir: logs/merge-monster # working memory: state.md, journal, .watch/ (keep gitignored)
 poll_interval: 30            # seconds — mm-watch.sh cadence (2-4 gh calls/cycle)
-heartbeat_minutes: 10        # ScheduleWakeup fallback tick; at most 10 while holding the baton (it renews it)
+heartbeat_minutes: 10        # ScheduleWakeup fallback tick (mm-tick.sh); each tick renews the baton
+# pulse_max: 45m             # the keepalive stops renewing after this long with no renew from the model
+                             # (a wedged model never keeps the role). Default: 2.25 x heartbeat_minutes.
+                             # Minutes, or a duration like 45m / 1350s. Keep it above heartbeat_minutes.
 stale_lock_minutes: 45       # heartbeat older than this ⇒ baton is stale, manual merging allowed
 
 merge_method:
@@ -19,7 +23,7 @@ merge_method:
 
 ready_requirements:
   review_marker: ""          # evidence comment preflight requires on the PR,
-                             # e.g. "<!-- cr-cli-findings -->" — empty to skip
+                             # e.g. "<!-- review-findings -->" — empty to skip
 
 # Globs (against changed files) whose PRs merge early to minimize queue-wide
 # rebase churn — lockfiles, CI workflow files, schemas, shared-package APIs.

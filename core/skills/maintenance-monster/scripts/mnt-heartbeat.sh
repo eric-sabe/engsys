@@ -15,6 +15,8 @@ set -euo pipefail
 # shellcheck source=../../../lib/fleet-gh.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/fleet-gh.sh"
 fleet_gh_resolve
+# shellcheck source=../../../lib/monster.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/monster.sh"
 
 REPO="" ISSUE="" STATUS="running" STATE_DIR="" SESSION=""
 while [ $# -gt 0 ]; do
@@ -72,4 +74,5 @@ if [ "$OPEN_COUNT" != 1 ] || [ "$CLOSE_COUNT" != 1 ]; then
 fi
 
 "$FLEET_GH" issue edit "$ISSUE" -R "$REPO" --body-file "$TMP" >/dev/null
+[ -z "$STATE_DIR" ] || monster_heartbeat_mark "$STATE_DIR" # the tick writes the next one only when due
 echo "heartbeat: $NOW ($STATUS)"

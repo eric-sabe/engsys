@@ -90,7 +90,8 @@ engsys (spec travels with the skill; the config travels with the repo).
    ```bash
    bash <skill-dir>/scripts/mm-watch.sh --repo <repo> \
      --state-dir <state_dir> --interval <poll_interval> \
-     --default-branch <default_branch> --ledger <ledger_issue>
+     --default-branch <default_branch> --ledger <ledger_issue> \
+     --config <config>
    ```
 
    The bus also runs the subagent watchdog's scan every cycle
@@ -114,16 +115,33 @@ engsys (spec travels with the skill; the config travels with the repo).
    expires or dies, renewal goes on, and the next bus adopts the running
    keepalive and relays the `BATON_*` lines it wrote in the meantime
    (engsys#87). A Monitor gap costs only event latency, never the role;
-   re-arm promptly anyway.
+   re-arm promptly anyway. The keepalive stops renewing after `pulse_max`
+   without a renew from you (the config's `pulse_max`, default 2.25 ×
+   `heartbeat_minutes`; `--config` is how the bus reads it), so a wedged
+   model never keeps the role.
 
 6. Schedule the fallback tick: **ScheduleWakeup** at `heartbeat_minutes`
-   (repeat every cycle), but **never more than 10 minutes while you hold the
-   baton**: each tick's heartbeat renews it, and the watch bus's keepalive
-   stops renewing after 20 minutes without a renew from you. The Monitor is the primary wake signal; this tick
-   refreshes the heartbeat, rewrites `state.md`, picks up Dependabot idle
-   work, restarts the Monitor if it died, and runs `mm-agent-watch.sh --once`
-   as a synchronous backstop scan, so the liveness wake guarantee ultimately
-   rests on the tick, not on the Monitor surviving.
+   (repeat every cycle; it must stay under `pulse_max`, since each tick is
+   your renew). **A tick is one call:**
+
+   ```bash
+   <skill-dir>/scripts/mm-tick.sh --repo <repo> --state-dir <state_dir> --issue <ledger_issue> --config <config>
+   ```
+
+   (plus `--stale-min` / `--no-stale` as for the bus). It renews the baton
+   when due, snapshots the open PRs and compares the snapshot's SHA-256 with
+   the last one, runs the subagent backstop scan (the liveness wake
+   guarantee rests on the tick, not on the Monitor surviving), writes the
+   heartbeat only when one is due, and prints **`NOOP`** or the delta.
+   - `NOOP` → re-arm the ScheduleWakeup and stop. No `state.md` rewrite, no
+     journal line, no other call; open gates wait for their PR's next event
+     or the next delta.
+   - Delta lines (`+`/`-` snapshot lines, `AGENT_*`, `BATON_HANDOVER`,
+     `*_ERROR`) → an ordinary wake (§ The loop) with those as its events,
+     then Dependabot idle work and a gate re-check for each open gate.
+   - Exit 1 (`BATON_LOST`) → § Lost baton. Exit 5 (`STANDBY`) → you hold no
+     baton: run `mm-baton.sh startup` as in step 2.
+   Restart the Monitor too if it died (its end notice is its own wake).
 
 ## The loop — on every wake (event or tick)
 
@@ -180,11 +198,14 @@ engsys (spec travels with the skill; the config travels with the repo).
    (remove the label, clear the active file, back to draft if needed),
    journal it, and take the next PR — never leave `mm:active` state pointing
    at a PR you aren't actually piloting.
-4. **Write the ledger** (every wake): rewrite `<state_dir>/state.md` whole, to
-   the schema in § state.md (queue: position, PR, state, one-line reason;
-   active PR; last five decisions); append decisions to `journal-YYYY-MM.md` **and** `.jsonl`
-   (`{ts, event, pr, decision, reasoning}`); refresh the heartbeat
-   (`mm-heartbeat.sh … --state-dir <state_dir>`, which renews the baton).
+4. **Write the ledger** (every wake that acted or saw a change; a `NOOP`
+   tick and a clean Monitor expiry write nothing): rewrite
+   `<state_dir>/state.md` whole, to the schema in § state.md (queue: position,
+   PR, state, one-line reason; active PR; last five decisions); append
+   decisions to `journal-YYYY-MM.md` **and** `.jsonl`
+   (`{ts, event, pr, decision, reasoning}`). The tick writes the periodic
+   heartbeat; call `mm-heartbeat.sh … --state-dir <state_dir>` (which renews
+   the baton) yourself only to change the status.
 
 ## state.md (working memory, overwrite-only)
 
@@ -257,7 +278,7 @@ covered by the fence you took before dispatching them.
 **The guard hook.** In this session (`ENGSYS_SINGLETON_ROLE=merge`, set by the
 launcher), the engsys plugin's PreToolUse hook is an allowlist for Bash and
 Monitor commands. A command passes if it is one plain invocation of `mm-act.sh`,
-`mm-baton.sh` or `mm-heartbeat.sh --state-dir …` (no `;`, `&&`, redirects,
+`mm-baton.sh`, or `mm-heartbeat.sh` or `mm-tick.sh` with `--state-dir …` (no `;`, `&&`, redirects,
 `$( )` or backticks around it; `2>&1`, `| jq …`, `| cat`, `; echo $?` and a
 heredoc body for `--body-file -` may follow), or if every `gh`, `git` and HTTP client in it is a known
 read: `gh pr|issue|run|workflow|repo|release view|list|status|diff|checks`,

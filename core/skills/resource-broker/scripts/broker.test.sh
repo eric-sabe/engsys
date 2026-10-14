@@ -431,6 +431,19 @@ run $W --no-agents
 hasnt "--no-agents skips the scan" "$OUT" "AGENT_OVERDUE"
 rm -f "$STATE/agents.tsv"
 
+echo "== D3. the single-call tick (engsys#123)"
+TK="bash $S/broker-tick.sh --config-dir $CFG --state-dir $STATE"
+rm -f "$STATE/.watch/last-heartbeat" "$STATE/.watch/last-snapshot.sha" "$STATE/.watch/last-snapshot.lines"
+run $TK
+rc_is "the first tick exits 0" 0
+has "…and reports the occupancy picture as + lines" "$OUT" '+ {"k":"slots"'
+has "…a due heartbeat was written to the ledger" "$(cat "$FAKE/gh/issues/101/body")" "status: running"
+[ -s "$STATE/.watch/last-heartbeat" ] && ok "…and recorded for the next tick" || bad "…and recorded for the next tick"
+run $TK
+eq "an unchanged pool with no heartbeat due → exactly NOOP" "$OUT" "NOOP"
+run bash "$S/broker-tick.sh" --config-dir "$CFG"
+rc_is "--state-dir is required" 2
+
 echo "== E. a grant nudge reaches a waiting session"
 C="$(pc acquire --owner acme-cache --no-wait)"
 $W >/dev/null 2>&1

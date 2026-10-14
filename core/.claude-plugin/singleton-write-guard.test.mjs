@@ -300,6 +300,22 @@ test('L-a: the heartbeat exception needs --state-dir (a heartbeat with no renew 
   assert.ok(wrapperInvocation(`${HB} --repo o/r --issue 7 --status x`, ROOT) === null);
 });
 
+test('#123: the ticks are fenced wrappers that need --state-dir; anything else around them is denied', () => {
+  for (const rel of ['merge-monster/scripts/mm-tick.sh', 'maintenance-monster/scripts/mnt-tick.sh', 'resource-broker/scripts/broker-tick.sh']) {
+    assert.ok(WRAPPERS.has(rel), rel);
+    const p = path.join(ROOT, 'skills', rel);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, '#!/usr/bin/env bash\n', { mode: 0o755 });
+    for (const env of [MERGE, { ENGSYS_SINGLETON_ROLE: 'maintain' }]) {
+      assert.equal(decide({ command: `${p} --repo o/r --state-dir logs/m --issue 7`, env, pluginRoot: ROOT }), null, `plain ${rel}`);
+      assert.equal(decide({ command: `bash ${p} --state-dir=logs/m --config c.yml 2>&1`, env, pluginRoot: ROOT }), null, `bash ${rel}`);
+      assert.ok(denied(`${p} --repo o/r --issue 7`, env), `${rel} without --state-dir`);
+      assert.ok(denied(`${p} --repo o/r --state-dir d --issue 7 && gh pr merge 1`, env), `${rel} chained`);
+    }
+    assert.equal(wrapperInvocation(`${p} --repo o/r --issue 7`, ROOT), null);
+  }
+});
+
 test('the guard is registered for Bash, the edit tools and MCP tools', () => {
   const hooks = JSON.parse(fs.readFileSync(path.join(path.dirname(HOOK), 'hooks.json'), 'utf8'));
   const matchers = hooks.hooks.PreToolUse.filter((h) => h.hooks.some((x) => x.command.includes('singleton-write-guard.mjs'))).map((h) => new RegExp(`^(?:${h.matcher})$`));

@@ -56,8 +56,8 @@ GitHub is the bus and the durable store; local files are the working memory.
 │  persistent Monitor ──► mm-watch.sh: shell poll loop (~30s), diffs GitHub state,  │
 │      (event bus)        emits one line per EVENT → wakes the model instantly      │
 │                                                                                   │
-│  ScheduleWakeup ──► heartbeat tick (~30 min): refresh baton, rewrite state.md,    │
-│    (fallback)       Dependabot idle work, self-heal if the Monitor died           │
+│  ScheduleWakeup ──► mm-tick.sh, one call: renew if due, snapshot delta, agent     │
+│    (fallback)       scan, heartbeat if due → NOOP, or the delta to act on         │
 │                                                                                   │
 │  model loop ──► on each wake: rebuild queue, decide, act (label / rebase-agent /  │
 │                 mark-ready / merge / fix-agent / escalate), log, sleep            │
@@ -171,10 +171,17 @@ review):
   in-flight act has finished or failed.
 - **Renew.** TTL 10 minutes. `mm-watch.sh` renews every 2.5 minutes in the
   background; `mm-heartbeat.sh --state-dir` renews on every heartbeat and
-  writes the heartbeat only while MM holds the lease. MM ticks at most every
-  10 minutes while holding. The background renewer stops when its session
-  process (claude) is gone, or when the model has not touched the baton for
-  20 minutes, so a live watch bus never keeps a dead or wedged session's role.
+  writes the heartbeat only while MM holds the lease. Each tick
+  (`mm-tick.sh`, every `heartbeat_minutes`) renews when due, which is the
+  model's pulse. The background renewer stops when its session process
+  (claude) is gone, or when the model has not touched the baton for
+  `pulse_max` (default 2.25 × `heartbeat_minutes`), so a live watch bus never
+  keeps a dead or wedged session's role.
+- **Ticks** (engsys#123). A tick is one call: `mm-tick.sh` renews when due,
+  compares the open-PR snapshot's SHA-256 with the last one, runs the subagent
+  backstop scan, writes the heartbeat only when one is due (none in the last
+  0.75 × `heartbeat_minutes`), and prints `NOOP` or the delta (`+`/`-` lines).
+  A `NOOP` tick writes no `state.md` and no journal line.
 - **Fence.** Every write to GitHub goes through `mm-act.sh`: it checks the
   lease has at least 60 s left by GitHub's clock, that the local deadline
   (`Date.now()` at the start of the last good renew or check, plus the time it
@@ -355,8 +362,8 @@ substrate for the v2 metrics dashboard.
 ## 11. Configuration
 
 One YAML per repo — `.claude/merge-monster.yml` — read by the model at session
-start. Scripts take everything as flags/env so nothing shells out to parse
-YAML. Reference (see `config.example.yml` in the skill for the annotated
+start. Scripts take everything as flags/env; the bus and the tick, given
+`--config`, read only the few keys they name (`pulse_max`, `heartbeat_minutes`). Reference (see `config.example.yml` in the skill for the annotated
 version):
 
 ```yaml
@@ -365,13 +372,14 @@ default_branch: main
 ledger_issue: 0              # written by mm-setup.sh
 state_dir: logs/merge-monster
 poll_interval: 30            # seconds, watch-script cadence
-heartbeat_minutes: 10        # ScheduleWakeup fallback tick; at most 10 while holding the baton
+heartbeat_minutes: 10        # ScheduleWakeup fallback tick (mm-tick.sh); each tick renews the baton
+pulse_max: 45m               # optional; keepalive idle bound, default 2.25 x heartbeat_minutes
 stale_lock_minutes: 45       # baton freshness contract
 merge_method:
   multi_commit: merge        # preserve per-issue commits in batches
   single_commit: squash
 ready_requirements:
-  review_marker: ""          # e.g. "<!-- cr-cli-findings -->" — evidence comment MM requires
+  review_marker: ""          # e.g. "<!-- review-findings -->" — evidence comment MM requires
 conflict_magnets: []         # globs whose PRs merge early (churn minimization)
 migration_globs: []          # globs marking migration-bearing PRs (operator window)
 local_gate: ""               # full local validation command (Dependabot gate)

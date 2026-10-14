@@ -30,9 +30,13 @@
 # Usage: mm-watch.sh --repo owner/name --state-dir DIR [--interval 30]
 #                    [--default-branch main] [--ledger N]
 #                    [--session NAME] [--pulse-max 20m]
+#                    [--config FILE] [--heartbeat-minutes 10]
 #                    [--stale-min 10] [--no-stale] [--no-agents]
 #   --stale-min / --no-stale  passed to the subagent scan (liveness.stale_minutes / stale_probe: false)
 #   --no-agents               skip the subagent scan (it is a no-op anyway without a spawn registry)
+#   --pulse-max               the keepalive's idle bound. Default (engsys#123): the config's pulse_max, else
+#                             2.25 x heartbeat_minutes (--heartbeat-minutes, else the config's), else 20m
+#   --config                  the monster's yml, read for pulse_max and heartbeat_minutes only
 #
 # Baton keepalive (engsys#62, #87): while <state-dir>/baton-merge.json carries this session's token,
 # a `baton.mjs keepalive` renews the lease every 2.5 min (the caller rule: TTL 10 min, renew <= 3m20s;
@@ -41,7 +45,7 @@
 # to adopt the session's running renewer (pidfile <state-dir>/baton-merge.keepalive.pid, checked by
 # pid and process start time) or start one, and never kills it on exit. The renewer stops when its
 # session process (the claude process found by walking up past the shells) is gone, when the token is
-# released or lost, and when the model has not touched the baton for --pulse-max (default 20m, so a
+# released or lost, and when the model has not touched the baton for --pulse-max (2.25 x the tick, so a
 # wedged or dead model never keeps the role). Its BATON_* lines go to <state-dir>/baton-merge.events,
 # which this bus relays (offset in <state-dir>/.watch/baton-events.off, so a new bus also reports what
 # happened while no bus ran; only `BATON_<NAME> merge …` lines, capped at 300 characters). When the
@@ -51,8 +55,10 @@ set -u
 # shellcheck source=../../../lib/fleet-gh.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/fleet-gh.sh"
 fleet_gh_resolve
+# shellcheck source=../../../lib/monster.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/monster.sh"
 
-REPO="" DIR="" INTERVAL=30 DEFBRANCH=main LEDGER="" SESSION="${ENGSYS_SESSION:-}" PULSE_MAX=20m
+REPO="" DIR="" INTERVAL=30 DEFBRANCH=main LEDGER="" SESSION="${ENGSYS_SESSION:-}" PULSE_MAX="" CONFIG="" HB_MIN=""
 STALE_MIN=10 NOSTALE="" AGENTS=1
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -63,6 +69,8 @@ while [ $# -gt 0 ]; do
     --ledger) LEDGER="$2"; shift 2 ;;
     --session) SESSION="$2"; shift 2 ;;
     --pulse-max) PULSE_MAX="$2"; shift 2 ;;
+    --config) CONFIG="$2"; shift 2 ;;
+    --heartbeat-minutes) HB_MIN="$2"; shift 2 ;;
     --stale-min) STALE_MIN="$2"; shift 2 ;;
     --no-stale) NOSTALE=1; shift ;;
     --no-agents) AGENTS=0; shift ;;
@@ -70,6 +78,8 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "$REPO" ] && [ -n "$DIR" ] || { echo "usage: mm-watch.sh --repo owner/name --state-dir DIR" >&2; exit 2; }
+[ -n "$HB_MIN" ] || HB_MIN="$(monster_cfg_scalar "$CONFIG" heartbeat_minutes)"
+[ -n "$PULSE_MAX" ] || PULSE_MAX="$(monster_pulse_max "$(monster_cfg_scalar "$CONFIG" pulse_max)" "$HB_MIN")"
 
 W="$DIR/.watch"
 mkdir -p "$W"

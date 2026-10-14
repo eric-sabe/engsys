@@ -92,7 +92,8 @@ how confident a disposition looks.
    ```bash
    bash <skill-dir>/scripts/mnt-watch.sh --repo <repo> \
      --state-dir <state_dir> --interval <poll_interval> \
-     --default-branch <default_branch> --ledger <ledger_issue>
+     --default-branch <default_branch> --ledger <ledger_issue> \
+     --config <config>
    ```
 
    The bus also runs the subagent watchdog's scan every cycle (the substrate
@@ -115,20 +116,35 @@ how confident a disposition looks.
    bus: when a Monitor expires or dies, renewal goes on, and the next bus
    adopts the running renewer and relays the `BATON_*` lines it wrote in
    the meantime. So a Monitor gap costs only event latency, never the
-   role; re-arm promptly anyway.
+   role; re-arm promptly anyway. The keepalive stops renewing after
+   `pulse_max` without a renew from you (the config's `pulse_max`, default
+   2.25 × `heartbeat_minutes`; `--config` is how the bus reads it).
 
 6. Schedule the fallback tick: **ScheduleWakeup** at `heartbeat_minutes`
-   (repeat every cycle), never more than 10 minutes while you hold the baton
-   (§ The baton). The Monitor is the primary wake signal; this tick
-   refreshes the heartbeat, rewrites `state.md`, sweeps the slow-moving
-   surfaces that aren't on the event bus (the package manager's audit,
-   base-image staleness, and — when `watch.entra_app_credentials` or a
-   similar cloud app-credential block is configured — credential expiry: any
-   cert/secret on a listed app ending within `warn_days` → **escalate** with
-   the rotation runbook, never rotate it yourself), restarts the Monitor if
-   it died, and runs
-   `mm-agent-watch.sh --once` as a synchronous backstop scan for overdue
-   subagents. When `fp_policies:` is configured it also runs
+   (repeat every cycle; it must stay under `pulse_max`, since each tick is
+   your renew). **A tick is one call:**
+
+   ```bash
+   <skill-dir>/scripts/mnt-tick.sh --repo <repo> --state-dir <state_dir> --issue <ledger_issue> --default-branch <default_branch> --config <config>
+   ```
+
+   (plus `--stale-min` / `--no-stale` as for the bus). It renews the baton
+   when due, snapshots the watch surface and compares the snapshot's SHA-256
+   with the last one, runs the subagent backstop scan, writes the heartbeat
+   only when one is due, and prints **`NOOP`** or the delta. `NOOP` → re-arm
+   the ScheduleWakeup and stop: no `state.md` rewrite, no journal line. Delta
+   lines → an ordinary wake (§ The loop) with those as its events. Exit 1
+   (`BATON_LOST`) → § The baton, lost. Exit 5 (`STANDBY`) → run
+   `mnt-baton.sh startup` as in step 2. Restart the Monitor too if it died.
+
+   The slow-moving surfaces that aren't on the event bus run on their own
+   cadence (`watch.<surface>.poll`), not every tick: when one is due (its
+   last run is in the journal), sweep it on that tick even after a `NOOP`.
+   They are the package manager's audit, base-image staleness, and (when
+   `watch.entra_app_credentials` or a similar cloud app-credential block is
+   configured) credential expiry: any cert/secret on a listed app ending
+   within `warn_days` → **escalate** with the rotation runbook, never rotate
+   it yourself. When `fp_policies:` is configured it also runs
    `mnt-fp-candidates.sh` (§ Standing false-positive policies), so a tripped
    tripwire surfaces even when no new alert fired, and posts the weekly
    policy-disposition digest when one is due.
@@ -164,8 +180,9 @@ how confident a disposition looks.
    the four classes (below) and **write the ledger** (state.md rewritten whole
    to the schema in § state.md, queue line: finding, class, disposition,
    one-line reasoning; journal-YYYY-MM.{md,jsonl}
-   entry `{ts, event, finding, class, disposition, reasoning}`; refresh the
-   heartbeat with `--state-dir`, which renews the baton).
+   entry `{ts, event, finding, class, disposition, reasoning}`. The tick
+   writes the periodic heartbeat; call `mnt-heartbeat.sh … --state-dir`,
+   which renews the baton, yourself only to change the status).
 4. **Drive** — gated on `phase`:
    - **`phase: read_only` (Phase 1 — current default):** classify and
      **report only**. Write the disposition to the ledger/journal and, for
@@ -236,11 +253,12 @@ Phase 1 writes too (escalation comments, ledger digests, tracking issues): they
 go through `mnt-act.sh guard` like everything else. A refused fence sends
 nothing; read its `code` as Merge Monster's § The baton lists. The same guard
 hook applies (`ENGSYS_SINGLETON_ROLE=maintain`): raw GitHub writes are denied
-unless the whole command is one plain `mnt-act.sh`, `mnt-heartbeat.sh` or
-`mnt-baton.sh` invocation, for you and every agent you dispatch, and
-`CronCreate` is denied (the tick is one **ScheduleWakeup**). **Tick at most
-every 10 minutes** while holding (each tick renews; the keepalive stops after 20
-minutes without one). **Lost**: first stop every agent you dispatched that is
+unless the whole command is one plain `mnt-act.sh`, `mnt-baton.sh`, or
+`mnt-heartbeat.sh` or `mnt-tick.sh` with `--state-dir`, invocation, for you
+and every agent you dispatch, and `CronCreate` is denied (the tick is one
+**ScheduleWakeup**). **Tick under `pulse_max`** while holding (each tick
+renews; the keepalive stops after `pulse_max`, default 2.25 ×
+`heartbeat_minutes`, without one). **Lost**: first stop every agent you dispatched that is
 still running (`TaskStop`, then `mm-agent-reg.sh fence` for its row), then stop
 at once, no further writes of any kind (no heartbeat either: someone else
 may hold the role now); the script already sent the one
