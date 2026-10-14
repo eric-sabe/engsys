@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { WRAPPERS, decide, githubWrites, heredocOperator, lex, splitHeredocs, wrapperInvocation } from './singleton-write-guard.mjs';
+import { STATE_MAX_BYTES, WRAPPERS, decide, githubWrites, heredocOperator, lex, monsterStatePath, postDecide, splitHeredocs, wrapperInvocation } from './singleton-write-guard.mjs';
 
 const HOOK = path.join(path.dirname(fileURLToPath(import.meta.url)), 'singleton-write-guard.mjs');
 
@@ -504,7 +504,7 @@ test('#71: every command the monster skills document, and every monster script, 
   const commands = [];
   for (const monster of ['merge-monster', 'maintenance-monster']) {
     const md = fs.readFileSync(path.join(core, 'skills', monster, 'SKILL.md'), 'utf8');
-    const snippets = [...md.matchAll(/```(?:bash|sh)?\n([\s\S]*?)```/g)].map((m) => m[1]);
+    const snippets = [...md.matchAll(/```[\w-]*\n([\s\S]*?)```/g)].map((m) => m[1]);
     const prose = md.replace(/```[\s\S]*?```/g, '');
     snippets.push(...[...prose.matchAll(/`([^`]+)`/g)].map((m) => m[1].replace(/\s*\n\s*/g, ' '))); // a code span may wrap
     for (const raw of snippets) {
@@ -1045,4 +1045,81 @@ test('#119: hooks.json routes CronCreate to the guard, and the hook emits the de
   assert.equal(out.hookSpecificOutput.permissionDecision, 'deny');
   assert.match(out.hookSpecificOutput.permissionDecisionReason, /ScheduleWakeup/);
   assert.equal(run({ ENGSYS_SINGLETON_ROLE: '' }).stdout, '', 'non-singleton: no output, so the call proceeds');
+});
+
+// ------------------------------------------------------------ #120: state.md stays overwrite-only --
+
+const stateDir = (marker) => {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'engsys-state-')));
+  if (marker === '.watch') fs.mkdirSync(path.join(dir, '.watch'));
+  else if (marker) fs.writeFileSync(path.join(dir, marker), '{}');
+  return dir;
+};
+
+test('#120: a monster state dir is known by its baton file, watch bus or monthly journal', () => {
+  for (const marker of ['baton-merge.json', 'baton-maintain.json', '.watch', 'journal-2026-10.md', 'journal-2026-10.jsonl']) {
+    assert.equal(monsterStatePath(path.join(stateDir(marker), 'state.md')), true, marker);
+  }
+  const bare = stateDir(null);
+  assert.equal(monsterStatePath(path.join(bare, 'state.md')), false, 'a state.md with no monster files beside it (a repo doc)');
+  assert.equal(monsterStatePath(path.join(stateDir('baton-merge.json'), 'notes.md')), false, 'only state.md');
+  assert.equal(monsterStatePath('state.md', { cwd: stateDir('.watch') }), true, 'relative to the hook cwd');
+  assert.equal(monsterStatePath('/nonexistent/dir/state.md'), false);
+});
+
+test('#120: in a singleton session a Write over 4096 bytes to state.md is denied; at or under the limit passes', () => {
+  const file = path.join(stateDir('baton-merge.json'), 'state.md');
+  const write = (content, env = MERGE) => decide({ tool_name: 'Write', tool_input: { file_path: file, content }, env, pluginRoot: ROOT });
+  for (const role of ['merge', 'maintain']) {
+    const d = write('x'.repeat(STATE_MAX_BYTES + 1), { ENGSYS_SINGLETON_ROLE: role });
+    assert.ok(d, `${role}: denied`);
+    assert.match(d.deny, /4096/);
+    assert.match(d.deny, /journal-YYYY-MM/);
+  }
+  assert.equal(write('x'.repeat(STATE_MAX_BYTES)), null, 'exactly 4096 bytes passes');
+  assert.equal(write('# merge state\n'), null);
+  assert.ok(write('é'.repeat(2049)), 'the limit is in bytes, not characters (4098 bytes)');
+  assert.equal(write('x'.repeat(10000), {}), null, 'non-singleton: no opinion');
+  assert.equal(decide({ tool_name: 'Write', tool_input: { file_path: path.join(stateDir(null), 'state.md'), content: 'x'.repeat(10000) }, env: MERGE, pluginRoot: ROOT }), null,
+    'a state.md outside a monster state dir is not limited');
+  assert.equal(decide({ tool_name: 'Edit', tool_input: { file_path: file, old_string: 'a', new_string: 'x'.repeat(10000) }, env: MERGE, pluginRoot: ROOT }), null,
+    'an Edit is not denied up front (it gets feedback after)');
+});
+
+test('#120: an Edit that leaves state.md over 4 KB gets feedback (PostToolUse); under the limit, none', () => {
+  const dir = stateDir('journal-2026-10.md');
+  const file = path.join(dir, 'state.md');
+  const post = (tool_name = 'Edit', env = MERGE) => postDecide({ tool_name, tool_input: { file_path: file }, env });
+  fs.writeFileSync(file, 'x'.repeat(STATE_MAX_BYTES + 100));
+  for (const tool of ['Edit', 'MultiEdit']) {
+    const f = post(tool);
+    assert.ok(f, `${tool}: feedback`);
+    assert.match(f.feedback, /4196 bytes/);
+    assert.match(f.feedback, /rewrite state\.md whole with Write/);
+  }
+  assert.equal(post('Edit', {}), null, 'non-singleton: no feedback');
+  assert.equal(post('Write'), null, 'a Write is handled before it runs');
+  fs.writeFileSync(file, 'x'.repeat(STATE_MAX_BYTES));
+  assert.equal(post(), null, 'at the limit: no feedback');
+  const doc = path.join(stateDir(null), 'state.md');
+  fs.writeFileSync(doc, 'x'.repeat(10000));
+  assert.equal(postDecide({ tool_name: 'Edit', tool_input: { file_path: doc }, env: MERGE }), null, 'not a monster state dir');
+});
+
+test('#120: the hook emits the Write deny and the PostToolUse feedback; hooks.json routes both', () => {
+  const dir = stateDir('baton-maintain.json');
+  const file = path.join(dir, 'state.md');
+  const run = (payload, extra = { ENGSYS_SINGLETON_ROLE: 'maintain' }) => spawnSync(process.execPath, [HOOK], {
+    input: JSON.stringify(payload), env: { ...process.env, CLAUDE_PLUGIN_ROOT: ROOT, ...extra }, encoding: 'utf8',
+  });
+  const pre = JSON.parse(run({ hook_event_name: 'PreToolUse', tool_name: 'Write', tool_input: { file_path: file, content: 'x'.repeat(5000) } }).stdout);
+  assert.equal(pre.hookSpecificOutput.permissionDecision, 'deny');
+  fs.writeFileSync(file, 'x'.repeat(5000));
+  const postOut = JSON.parse(run({ hook_event_name: 'PostToolUse', tool_name: 'Edit', tool_input: { file_path: file }, tool_response: {} }).stdout);
+  assert.equal(postOut.hookSpecificOutput.hookEventName, 'PostToolUse');
+  assert.match(postOut.hookSpecificOutput.additionalContext, /over the 4096-byte limit/);
+  assert.equal(run({ hook_event_name: 'PostToolUse', tool_name: 'Edit', tool_input: { file_path: file } }, { ENGSYS_SINGLETON_ROLE: '' }).stdout, '');
+  const hooks = JSON.parse(fs.readFileSync(path.join(path.dirname(HOOK), 'hooks.json'), 'utf8'));
+  const postMatchers = (hooks.hooks.PostToolUse ?? []).filter((h) => h.hooks.some((x) => x.command.includes('singleton-write-guard.mjs'))).map((h) => new RegExp(`^(?:${h.matcher})$`));
+  for (const t of ['Edit', 'MultiEdit']) assert.ok(postMatchers.some((m) => m.test(t)), `PostToolUse routes ${t}`);
 });

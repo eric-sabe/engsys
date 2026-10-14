@@ -160,8 +160,9 @@ how confident a disposition looks.
      the write guard denies it unwrapped).
    - `STOP` → shutdown (below).
 3. **Triage** each new/changed finding (below), then **dispose** into one of
-   the four classes (below) and **write the ledger** (state.md queue table:
-   finding, class, disposition, one-line reasoning; journal-YYYY-MM.{md,jsonl}
+   the four classes (below) and **write the ledger** (state.md rewritten whole
+   to the schema in § state.md, queue line: finding, class, disposition,
+   one-line reasoning; journal-YYYY-MM.{md,jsonl}
    entry `{ts, event, finding, class, disposition, reasoning}`; refresh the
    heartbeat with `--state-dir`, which renews the baton).
 4. **Drive** — gated on `phase`:
@@ -183,6 +184,36 @@ how confident a disposition looks.
      **Escalate** class → `mnt:escalated` + diagnosis + operator ping, no PR
      driven; if the operator wants a never-auto update handed off anyway,
      that handoff waits on a `dependency` gate.
+
+## state.md (working memory, overwrite-only)
+
+`<state_dir>/state.md` is a snapshot, not a log: **rewrite it whole with Write
+every wake**, never append to it and never grow it with Edit. Hard limits:
+**at most 4096 bytes and 60 lines**, one line per item. Everything else is
+history and goes to `journal-YYYY-MM.md` **and** `journal-YYYY-MM.jsonl` in the
+same dir (append-only, one file pair per month). The engsys guard hook denies a
+Write that would leave `state.md` over 4096 bytes and flags an Edit that does
+(it knows the state dir by the baton file, `.watch/` or journal beside it).
+
+```markdown
+# maintenance-monster state · <ISO time, UTC>
+config: <abs config path> · skill: <abs SKILL.md path> · baton: <holding|standby> · heartbeat: <time>
+## Active
+<the one thing in flight, or "none">
+## Queue (≤10)
+<finding id> <class> <disposition> <one-line reasoning>
+## Holds (≤5)
+<finding or PR> <why held> <what clears it (gate, operator, upstream fix)>
+## Operator carry-forwards (≤5)
+<one line each: what the operator asked to carry across wakes, with its link>
+## Last 5 decisions
+<ts> <decision, one line> → journal-YYYY-MM.md @ <ts>
+```
+
+Past 10 queue items, write the first 10 and a `+N more` line; past 5 holds or
+carry-forwards, keep the newest and journal the rest. A decision older than the
+last five lives only in the journal. Detail (CI output, reasoning, timelines)
+never goes in `state.md`: one line pointing at the journal entry is enough.
 
 ## The baton (lease, fence, handover)
 

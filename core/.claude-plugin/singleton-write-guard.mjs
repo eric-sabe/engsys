@@ -48,6 +48,8 @@
 //          script (its --config) is a read.
 //   Write | Edit | MultiEdit | NotebookEdit   denied on those same settings, git config and plugin paths.
 //   mcp__*github*   only tools whose name starts with get_/list_/search_/read_/fetch_/download_/view_.
+//   Write           also denied when it would leave a monster's state.md over 4096 bytes (#120); an
+//                   Edit or MultiEdit that leaves it over gets feedback after the fact (PostToolUse).
 //   CronCreate      denied (#119): a monster paces itself with ScheduleWakeup, one wake at a time; a
 //                   cron job fires on its own schedule, piles up wakes and outlives a lost baton.
 //
@@ -814,6 +816,41 @@ function denyMessage(role, found) {
     + 'Dispatched agents never write to GitHub themselves: they hand the act back to the monster. Settings, git config and plugin files are read-only here.';
 }
 
+/** The overwrite-only working memory a monster rewrites every wake (SKILL.md § state.md, #120). */
+export const STATE_MAX_BYTES = 4096;
+/** Files only a monster's state dir holds: the baton's files, the watch bus and the monthly journal. */
+const STATE_DIR_MARKER = /^(baton-[\w-]+\.json|\.watch|journal-\d{4}-\d{2}\.(md|jsonl))$/;
+
+/**
+ * True when `p` is a monster's `<state_dir>/state.md`. The hook does not see the monster's config, so
+ * the state dir is known by what it holds: a `state.md` beside a baton file, the `.watch/` bus or a
+ * `journal-YYYY-MM.*` file. A repo's own docs/state.md is left alone.
+ */
+export function monsterStatePath(p, { cwd = process.cwd() } = {}) {
+  if (typeof p !== 'string' || !p || path.basename(p) !== 'state.md') return false;
+  const dir = path.dirname(path.resolve(cwd, p));
+  try { return fs.readdirSync(dir).some((f) => STATE_DIR_MARKER.test(f)); } catch { return false; }
+}
+
+const stateRule = `state.md is overwrite-only working memory: at most ${STATE_MAX_BYTES} bytes and 60 lines (header, active, queue ≤10, holds ≤5, `
+  + 'operator carry-forwards ≤5, last 5 decisions as one-line journal pointers). History goes to journal-YYYY-MM.md and .jsonl, never state.md '
+  + '(SKILL.md § state.md).';
+
+/**
+ * PostToolUse (#120): an Edit or MultiEdit that left a monster's state.md over STATE_MAX_BYTES. The edit
+ * has happened; this is feedback, so the next wake rewrites the file to the schema. -> null or { feedback }.
+ */
+export function postDecide({ tool_name: tool, tool_input: input = {}, env = process.env, cwd = process.cwd() }) {
+  if (!ROLES.has(env.ENGSYS_SINGLETON_ROLE) || !['Edit', 'MultiEdit'].includes(tool)) return null;
+  const p = input.file_path;
+  if (!monsterStatePath(p, { cwd })) return null;
+  let size;
+  try { size = fs.statSync(path.resolve(cwd, p)).size; } catch { return null; }
+  if (size <= STATE_MAX_BYTES) return null;
+  return { feedback: `engsys singleton-write guard: ${p} is now ${size} bytes, over the ${STATE_MAX_BYTES}-byte limit. ${stateRule} `
+    + 'Move the history to the journal and rewrite state.md whole with Write, under the limit, before the next wake ends.' };
+}
+
 /** -> null (no opinion) or { deny: reason }. */
 export function decide({ tool_name: tool = 'Bash', tool_input: input = {}, command, env = process.env, pluginRoot = env.CLAUDE_PLUGIN_ROOT, cwd = process.cwd() }) {
   const role = env.ENGSYS_SINGLETON_ROLE;
@@ -835,7 +872,12 @@ export function decide({ tool_name: tool = 'Bash', tool_input: input = {}, comma
   }
   if (['Write', 'Edit', 'MultiEdit', 'NotebookEdit'].includes(tool)) {
     const p = input.file_path ?? input.notebook_path ?? input.path;
-    return protectedPath(p, ctx) ? { deny: `engsys singleton-write guard: settings, git config and plugin files are read-only in a ${role} monster session (${p}): changing them could switch off the hooks that fence its GitHub writes, or plant a program in its push.` } : null;
+    if (protectedPath(p, ctx)) return { deny: `engsys singleton-write guard: settings, git config and plugin files are read-only in a ${role} monster session (${p}): changing them could switch off the hooks that fence its GitHub writes, or plant a program in its push.` };
+    if (tool === 'Write' && monsterStatePath(p, { cwd })) {
+      const bytes = Buffer.byteLength(String(input.content ?? ''), 'utf8');
+      if (bytes > STATE_MAX_BYTES) return { deny: `engsys singleton-write guard: this Write would make ${p} ${bytes} bytes, over the ${STATE_MAX_BYTES}-byte limit. ${stateRule} Trim it to the schema and write it again.` };
+    }
+    return null;
   }
   if (/^mcp__/.test(tool) && /github/i.test(tool)) {
     const name = tool.split('__').pop();
@@ -851,6 +893,12 @@ async function main() {
   let input;
   try { input = JSON.parse(raw); } catch { input = null; }
   if (!input || typeof input.tool_name !== 'string') return;
+  if (input.hook_event_name === 'PostToolUse') {
+    let f = null;
+    try { f = postDecide({ tool_name: input.tool_name, tool_input: input.tool_input || {}, cwd: input.cwd || process.cwd() }); } catch { f = null; }
+    if (f) process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: f.feedback } }));
+    return;
+  }
   let d;
   try {
     d = decide({ tool_name: input.tool_name, tool_input: input.tool_input || {}, cwd: input.cwd || process.cwd() });

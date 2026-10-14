@@ -92,6 +92,11 @@ out.set('core/.claude-plugin/hooks.json', json({
       // singleton paces itself with ScheduleWakeup, never a cron job that outlives it (#119).
       { matcher: 'Write|Edit|MultiEdit|NotebookEdit|CronCreate|mcp__.*', hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/singleton-write-guard.mjs"' }] },
     ],
+    // …and feedback when an Edit leaves a monster's state.md over its 4 KB limit (#120; a Write over it is
+    // denied above).
+    PostToolUse: [
+      { matcher: 'Edit|MultiEdit', hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/singleton-write-guard.mjs"' }] },
+    ],
     // Hand-back guard: a subagent can't hand back "still running, I'll continue once…" (nothing would
     // wake it), and a session can't end its turn on an unhandled INCOMPLETE hand-back.
     SubagentStop: [
