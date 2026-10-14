@@ -20,7 +20,7 @@
         ]
       },
       {
-        "matcher": "Write|Edit|MultiEdit|NotebookEdit|mcp__.*",
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit|CronCreate|mcp__.*",
         "hooks": [
           {
             "type": "command",

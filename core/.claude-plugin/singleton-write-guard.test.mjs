@@ -1015,3 +1015,34 @@ test('#109 N4: <( >( and any ( inside ${ } or $[ ] make the command unreadable; 
     for (const [sh, out] of everyShell(c)) assert.match(out, /prose/, `${sh} reads a heredoc there too: ${c}`);
   }
 });
+
+// ------------------------------------------------------------------- #119: CronCreate is denied --
+
+test('#119: CronCreate is denied in a singleton session, pointing at ScheduleWakeup; allowed elsewhere', () => {
+  const input = { cron: '*/5 * * * *', prompt: '/engsys:merge-monster tick', recurring: true };
+  for (const role of ['merge', 'maintain']) {
+    const d = decide({ tool_name: 'CronCreate', tool_input: input, env: { ENGSYS_SINGLETON_ROLE: role }, pluginRoot: ROOT });
+    assert.ok(d, `${role}: CronCreate denied`);
+    assert.match(d.deny, /ScheduleWakeup/, `${role}: the message points at ScheduleWakeup`);
+  }
+  // a command-like field in the input does not route it through the Bash checks (and so past the deny)
+  assert.ok(decide({ tool_name: 'CronCreate', tool_input: { ...input, command: 'ls' }, env: MERGE, pluginRoot: ROOT }));
+  for (const env of [{}, { ENGSYS_SINGLETON_ROLE: '' }, { ENGSYS_SINGLETON_ROLE: 'build' }]) {
+    assert.equal(decide({ tool_name: 'CronCreate', tool_input: input, env, pluginRoot: ROOT }), null, `non-singleton allows: ${JSON.stringify(env)}`);
+  }
+});
+
+test('#119: hooks.json routes CronCreate to the guard, and the hook emits the deny', () => {
+  const hooks = JSON.parse(fs.readFileSync(path.join(path.dirname(HOOK), 'hooks.json'), 'utf8'));
+  const matchers = hooks.hooks.PreToolUse.filter((h) => h.hooks.some((x) => x.command.includes('singleton-write-guard.mjs'))).map((h) => new RegExp(`^(?:${h.matcher})$`));
+  assert.ok(matchers.some((m) => m.test('CronCreate')), 'a PreToolUse matcher includes CronCreate');
+  const run = (extra) => spawnSync(process.execPath, [HOOK], {
+    input: JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'CronCreate', tool_input: { cron: '0 * * * *', prompt: 'x' } }),
+    env: { ...process.env, CLAUDE_PLUGIN_ROOT: ROOT, ...extra },
+    encoding: 'utf8',
+  });
+  const out = JSON.parse(run({ ENGSYS_SINGLETON_ROLE: 'maintain' }).stdout);
+  assert.equal(out.hookSpecificOutput.permissionDecision, 'deny');
+  assert.match(out.hookSpecificOutput.permissionDecisionReason, /ScheduleWakeup/);
+  assert.equal(run({ ENGSYS_SINGLETON_ROLE: '' }).stdout, '', 'non-singleton: no output, so the call proceeds');
+});

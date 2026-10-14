@@ -236,8 +236,9 @@ local `git` work (status, log, fetch, commit, rebase, worktree, …), never
 `git push`, git aliases, config writes, `hub`, an HTTP client towards GitHub,
 or `node`/`python`/`ruby`/`perl` code that names Octokit, PyGithub or a
 protected path (running the skill's own scripts is fine). Settings files, git
-config and the plugin cache are read-only (Bash and the Write/Edit tools), and
-GitHub MCP tools that may write are denied.
+config and the plugin cache are read-only (Bash and the Write/Edit tools),
+GitHub MCP tools that may write are denied, and so is `CronCreate`: the
+fallback tick is always one **ScheduleWakeup**, re-armed each cycle.
 Agents you dispatch run in this session and get the same hook. It runs even
 under `--dangerously-skip-permissions`. It is a guard rail against drift (a
 compacted model reaching for `gh pr merge`), not a boundary: the lease and the

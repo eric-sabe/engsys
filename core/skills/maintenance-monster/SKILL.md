@@ -205,7 +205,8 @@ go through `mnt-act.sh guard` like everything else. A refused fence sends
 nothing; read its `code` as Merge Monster's § The baton lists. The same guard
 hook applies (`ENGSYS_SINGLETON_ROLE=maintain`): raw GitHub writes are denied
 unless the whole command is one plain `mnt-act.sh`, `mnt-heartbeat.sh` or
-`mnt-baton.sh` invocation, for you and every agent you dispatch. **Tick at most
+`mnt-baton.sh` invocation, for you and every agent you dispatch, and
+`CronCreate` is denied (the tick is one **ScheduleWakeup**). **Tick at most
 every 10 minutes** while holding (each tick renews; the keepalive stops after 20
 minutes without one). **Lost**: first stop every agent you dispatched that is
 still running (`TaskStop`, then `mm-agent-reg.sh fence` for its row), then stop

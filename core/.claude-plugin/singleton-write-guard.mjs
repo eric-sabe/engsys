@@ -48,6 +48,8 @@
 //          script (its --config) is a read.
 //   Write | Edit | MultiEdit | NotebookEdit   denied on those same settings, git config and plugin paths.
 //   mcp__*github*   only tools whose name starts with get_/list_/search_/read_/fetch_/download_/view_.
+//   CronCreate      denied (#119): a monster paces itself with ScheduleWakeup, one wake at a time; a
+//                   cron job fires on its own schedule, piles up wakes and outlives a lost baton.
 //
 // It raises the bar; it is not a boundary. A determined obfuscation (a script file, an interpreter
 // assembling the verb, a variable holding it) gets past a lexical check. The controls are the lease
@@ -817,6 +819,10 @@ export function decide({ tool_name: tool = 'Bash', tool_input: input = {}, comma
   const role = env.ENGSYS_SINGLETON_ROLE;
   if (!ROLES.has(role)) return null;
   const ctx = { env, cwd };
+  if (tool === 'CronCreate') {
+    return { deny: `engsys singleton-write guard: CronCreate is denied in a ${role} monster session. Schedule the next wake with ScheduleWakeup `
+      + '(one wake at a time, re-armed every tick, as the SKILL.md loop does); a cron job keeps firing on its own schedule, stacks wakes and outlives a lost baton.' };
+  }
   // #85 M1: Monitor (and any tool that runs a shell command string) is Bash for this purpose.
   const cmd = command ?? input.command;
   if (tool === 'Bash' || typeof cmd === 'string') {
