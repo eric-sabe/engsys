@@ -6,6 +6,8 @@
 #   2. snapshot the watch surface (mnt-snapshot.sh) and compare its SHA-256 with <state-dir>/.watch/last-snapshot.sha;
 #   3. run the subagent watchdog's scan once (merge-monster's mm-agent-watch.sh --once), the backstop for a
 #      dead bus;
+#   3b. when the --config has fp_policies:, run mnt-fp-candidates.sh with its seen-latch (--state-dir), so
+#      only a CANDIDATE / TRIPWIRE_FAILED / OUT_OF_SCOPE line not printed before (and any ERROR) is a delta;
 #   4. write the ledger heartbeat only when one is due (none in the last 0.75 x heartbeat_minutes);
 #   5. print `NOOP` when nothing changed, else the delta, one line each:
 #        + <item> / - <item>          a finding appeared in / left the snapshot, or changed (one of each)
@@ -21,15 +23,16 @@
 #
 # Usage: mnt-tick.sh --repo owner/name --state-dir DIR --issue N [--default-branch main]
 #                    [--config FILE] [--heartbeat-minutes 10] [--status "running"] [--session NAME]
-#                    [--stale-min 10] [--no-stale] [--if-due 150s]
+#                    [--stale-min 10] [--no-stale] [--if-due 150s] [--repo-dir DIR]
 #   --config             the monster's yml: heartbeat_minutes from it when the flag is absent
 #   --heartbeat-minutes  the tick cadence; a heartbeat is due after 0.75 x this (default 10)
+#   --repo-dir           the local clone the false-positive candidates read git objects from (default: cwd)
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../../../lib/monster.sh
 . "$here/../../../lib/monster.sh"
 
-REPO="" DIR="" ISSUE="" DEFBRANCH=main CONFIG="" HB_MIN="" STATUS="running" SESSION="" STALE_MIN=10 NOSTALE="" IF_DUE=150s
+REPO="" DIR="" ISSUE="" DEFBRANCH=main REPO_DIR="" CONFIG="" HB_MIN="" STATUS="running" SESSION="" STALE_MIN=10 NOSTALE="" IF_DUE=150s
 usage() { echo "usage: mnt-tick.sh --repo owner/name --state-dir DIR --issue N [--default-branch main] [--config FILE] [--heartbeat-minutes M] [--status text] [--session NAME] [--stale-min N] [--no-stale] [--if-due 150s]" >&2; exit 2; }
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -45,6 +48,7 @@ while [ $# -gt 0 ]; do
     --stale-min) [ $# -ge 2 ] || usage; STALE_MIN="$2"; shift 2 ;;
     --no-stale) NOSTALE=1; shift ;;
     --if-due) [ $# -ge 2 ] || usage; IF_DUE="$2"; shift 2 ;;
+    --repo-dir) [ $# -ge 2 ] || usage; REPO_DIR="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; usage ;;
   esac
 done
@@ -79,6 +83,12 @@ fi
 if [ -f "$DIR/agents.tsv" ]; then
   while IFS= read -r l; do [ -n "$l" ] && DELTA+=("$l"); done < <(bash "$here/../../merge-monster/scripts/mm-agent-watch.sh" --state-dir "$DIR" --once \
     --stale-min "$STALE_MIN" ${NOSTALE:+--no-stale} 2>>"$W/agent-watch.err" || true)
+fi
+
+# 3b. standing false-positive candidates, latched (engsys#124) -----------------------------------
+if [ -n "$CONFIG" ] && [ -f "$CONFIG" ] && grep -q '^fp_policies:' "$CONFIG"; then
+  while IFS= read -r l; do case "$l" in '' | SEEN\ *) ;; *) DELTA+=("$l") ;; esac; done < <(bash "$here/mnt-fp-candidates.sh" \
+    --repo "$REPO" --config "$CONFIG" --state-dir "$DIR" --default-branch "$DEFBRANCH" ${REPO_DIR:+--repo-dir "$REPO_DIR"} 2>&1 || true)
 fi
 
 # 4. heartbeat when due ----------------------------------------------------------------------------

@@ -144,10 +144,11 @@ how confident a disposition looks.
    `watch.entra_app_credentials` or a similar cloud app-credential block is
    configured) credential expiry: any cert/secret on a listed app ending
    within `warn_days` → **escalate** with the rotation runbook, never rotate
-   it yourself. When `fp_policies:` is configured it also runs
-   `mnt-fp-candidates.sh` (§ Standing false-positive policies), so a tripped
-   tripwire surfaces even when no new alert fired, and posts the weekly
-   policy-disposition digest when one is due.
+   it yourself. When `fp_policies:` is configured the tick itself runs
+   `mnt-fp-candidates.sh` with its seen-latch (§ Standing false-positive
+   policies), so a tripped tripwire surfaces even when no new alert fired,
+   and a candidate you already judged does not come back every tick. Post
+   the weekly policy-disposition digest when one is due.
 
 ## The loop — on every wake (event or tick)
 
@@ -333,8 +334,16 @@ Run it on each CodeQL tick (a matching `CODEQL_ALERT` event, and the fallback
 tick), from the repo clone, as its own Bash call by literal path:
 
 ```bash
-<skill-dir>/scripts/mnt-fp-candidates.sh --repo <repo> --config <config-file>
+<skill-dir>/scripts/mnt-fp-candidates.sh --repo <repo> --config <config-file> --state-dir <state_dir>
 ```
+
+The tick runs it for you (`mnt-tick.sh … --config`); run it by hand on a
+matching `CODEQL_ALERT`. `--state-dir` arms the **seen-latch** (engsys#124):
+each `CANDIDATE` / `TRIPWIRE_FAILED` / `OUT_OF_SCOPE` line prints only the
+first run it appears, then a `SEEN <n>` count; one that leaves (dismissed,
+fixed) and later returns prints again; `ERROR` always prints. Judge each line
+the run it first appears and journal the judgment; that journal line, not a
+re-print, is the record. `--all` prints every line once more (to re-judge).
 
 `--prs all|none|<n,n>` narrows which PRs are scanned (default `all`, every open
 PR; `<n,n>` a comma list of PR numbers). Do not narrow it on the routine tick:

@@ -10,10 +10,15 @@
 #
 # Usage: mnt-fp-candidates.sh --repo owner/name --config FILE [--policy ID] [--json]
 #                             [--prs all|none|<n,n>] [--repo-dir DIR] [--default-branch NAME]
+#                             [--state-dir DIR [--all]]
 #   --prs             which PRs to scan: all open PRs (default), none, or a comma list of PR numbers
 #   --repo-dir        the local clone to read git objects from (default: the current directory);
 #                     its `origin` remote must be the repo
 #   --default-branch  overrides the config's default_branch (default: main)
+#   --state-dir       the monster's state_dir: a seen-latch (<state-dir>/.watch/fp-seen.txt) prints each
+#                     CANDIDATE / TRIPWIRE_FAILED / OUT_OF_SCOPE only the first run it appears, then a
+#                     `SEEN <n>` count; a record that leaves and returns prints again; ERROR always prints
+#   --all             with --state-dir: print every record anyway (the latch is still refreshed)
 #
 # Output, one line per alert (or one JSON array with --json); `pr=<n>` is appended when the alert
 # instance is on a PR ref:

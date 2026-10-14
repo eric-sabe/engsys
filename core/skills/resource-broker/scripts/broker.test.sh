@@ -398,15 +398,19 @@ has "…and health-checked" "$(cat "$FAKE/actions.log")" "health slot=$(slot_of 
 sleep 1.6
 run $W
 rc_is "the next tick exits 0" 0
-has "the stale grant is detected and reaped: SLOT_REAPED <slot> <previous owner>" "$OUT" "SLOT_REAPED $(slot_of "$B") acme-worker"
-has "a live grant is visible as SLOT_GRANTED" "$OUT" "SLOT_GRANTED $(slot_of "$A") acme-build"
+JM="$STATE/journal-$(date -u +%Y-%m)"
+has "the stale grant is detected and reaped, journaled in bash: slot_reaped <slot> <previous owner>" "$(cat "$JM.md")" "slot_reaped slot $(slot_of "$B") acme-worker"
+has "…in the jsonl twin too" "$(cat "$JM.jsonl")" '"event":"slot_reaped","slot":"'"$(slot_of "$B")"'","who":"acme-worker"'
+has "a live grant is journaled as slot_granted" "$(cat "$JM.md")" "slot_granted slot $(slot_of "$A") acme-build"
+hasnt "slot transitions never reach the Monitor (engsys#124)" "$OUT" "SLOT_"
+eq "…the counters keep the totals" "$(jq -c . "$STATE/.watch/slot-counters.json")" '{"slot_reaped":1,"slot_granted":1}' 
 eq "the reap freed the slot" "$(pc status | jq -r --arg s "$(slot_of "$B")" '.slots[] | select((.slot_id|tostring) == $s) | .state')" free
 eq "…and only the live grant is still held" "$(pc status | jq '[.slots[] | select(.state == "held")] | length')" 1
 run $W
 eq "an unchanged pool emits nothing" "$OUT" ""
 C="$(pc acquire --owner acme-cache --no-wait)"
 run $W
-has "a second grant is visible" "$OUT" "SLOT_GRANTED $(slot_of "$C") acme-cache"
+has "a second grant is journaled" "$(cat "$JM.md")" "slot_granted slot $(slot_of "$C") acme-cache"
 REQ="$(pc request --owner acme-agent --session acme-agent)"
 WAITERS+=("$(jq -r .waiter_pid <<<"$REQ")")
 eq "a saturated pool queues the request at position 1" "$(jq -r .position <<<"$REQ")" 1
@@ -418,7 +422,9 @@ run $W
 has "a waiter that went silent is dropped by the pump: QUEUE_DROPPED" "$OUT" "QUEUE_DROPPED 1"
 eq "…and the queue is empty" "$(pc status | jq '.queue | length')" 0
 run $W
-has "a released slot is announced" "$(pc release --slot "$(slot_of "$C")" --owner acme-cache --token "$(tok_of "$C")" >/dev/null; $W 2>&1)" "SLOT_RELEASED $(slot_of "$C")"
+pc release --slot "$(slot_of "$C")" --owner acme-cache --token "$(tok_of "$C")" >/dev/null; run $W
+has "a released slot is journaled" "$(cat "$JM.md")" "slot_released slot $(slot_of "$C")"
+eq "…silently" "$OUT" ""
 
 echo "== D2. one bus per monster: the watch runs the subagent scan (engsys#122)"
 printf 'rev\t1\trunning\t-\t-\trebase\tslot#1\t%s\t%s\t0\t-\n' "$(( $(date +%s) - 120 ))" "$(( $(date +%s) - 60 ))" >"$STATE/agents.tsv"

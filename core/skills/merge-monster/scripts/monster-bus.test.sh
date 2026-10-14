@@ -144,5 +144,54 @@ printf 'repo: acme/app\nheartbeat_minutes: 20 # tick\n# pulse_max: 99m\n' >"$T/c
 echo 'pulse_max: "45m"' >>"$T/cfg.yml"
 [ "$(monster_cfg_scalar "$T/cfg.yml" pulse_max)" = 45m ] && ok "a quoted pulse_max is read" || bad "quoted pulse_max"
 
+echo "coalesced watcher events (engsys#124)"
+SHA1=1111111111111111111111111111111111111111 SHA2=2222222222222222222222222222222222222222
+rollup() { # rollup <sha> <mergeStateStatus> <check json>…
+  local sha="$1" mss="$2"; shift 2
+  printf '{"headRefOid":"%s","mergeStateStatus":"%s","statusCheckRollup":[%s]}\n' "$sha" "$mss" "$(IFS=,; echo "$*")" >"$T/resp/pr-view"
+}
+run_() { printf '{"__typename":"CheckRun","name":"%s","status":"%s","conclusion":"%s"}' "$1" "$2" "${3:-}"; }
+ctx() { printf '{"__typename":"StatusContext","context":"%s","state":"%s"}' "$1" "$2"; }
+echo 12 >"$T/state/active"
+rollup "$SHA1" BLOCKED "$(run_ build COMPLETED SUCCESS)" "$(run_ e2e IN_PROGRESS)" "$(run_ lint COMPLETED FAILURE)" "$(ctx deploy/preview ERROR)"
+bus 3 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1
+has "a failed check → CHECK_FAIL #N <name>: <conclusion>" "CHECK_FAIL #12 lint: FAILURE"
+has "  …a status context's error too" "CHECK_FAIL #12 deploy/preview: ERROR"
+hasnt "  …a success wakes nobody" "build"
+[ "$(count_of 'CHECK_FAIL #12 lint')" = 1 ] && ok "  …once, across cycles" || bad "  …once, across cycles" "$OUT"
+hasnt "  …no CHECKS_READY while a check is pending and the PR is BLOCKED" "CHECKS_READY"
+rollup "$SHA1" BLOCKED "$(run_ build COMPLETED SUCCESS)" "$(run_ e2e COMPLETED SUCCESS)" "$(run_ lint COMPLETED FAILURE)" "$(ctx deploy/preview ERROR)"
+bus 3 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1
+has "pending reaches 0 → CHECKS_READY" "CHECKS_READY #12 head=111111111111 state=BLOCKED pending=0"
+[ "$(count_of CHECKS_READY)" = 1 ] && ok "  …exactly once per (PR, head sha)" || bad "  …exactly once per (PR, head sha)" "$OUT"
+hasnt "  …and the failures already reported are not repeated" "CHECK_FAIL"
+[ -e "$T/state/.watch/ready.12.$SHA1" ] && ok "  …latched in .watch/ready.<pr>.<sha>" || bad "  …latched in .watch/ready.<pr>.<sha>"
+bus 2 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1
+hasnt "a new bus on the same head stays quiet (the latch is on disk)" "CHECKS_READY"
+rollup "$SHA2" UNSTABLE "$(run_ build COMPLETED SUCCESS)" "$(run_ e2e IN_PROGRESS)" "$(run_ lint COMPLETED FAILURE)"
+bus 2 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1
+has "a new head: its checks are new (lint fails again)" "CHECK_FAIL #12 lint: FAILURE"
+has "  …and UNSTABLE is ready even with a check pending" "CHECKS_READY #12 head=222222222222 state=UNSTABLE pending=1"
+rollup "$SHA2" CLEAN
+rm -f "$T/state/active"; echo 13 >"$T/state/active"
+rollup "0000000000000000000000000000000000000013" BLOCKED
+bus 2 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1
+hasnt "no checks registered yet on a BLOCKED PR → not ready" "CHECKS_READY"
+rm -rf "$T/state/.watch" "$T/state/active" "$T/resp"/*
+
+printf '[{"number":40,"title":"Bump x"}]\n' >"$T/resp/pr-list"
+printf 'repo: acme/app\ndependabot:\n  auto_merge: [patch_dev]\n' >"$T/cfg-dep.yml"
+bus 2 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --config "$T/cfg-dep.yml"
+has "auto_merge has categories → DEPENDABOT events" "DEPENDABOT #40"
+rm -rf "$T/state/.watch"
+printf 'repo: acme/app\ndependabot:\n  auto_merge: [] # the maintenance watchdog owns them\n' >"$T/cfg-dep.yml"
+bus 2 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --config "$T/cfg-dep.yml"
+hasnt "auto_merge empty → --no-dependabot is on by itself" "DEPENDABOT"
+grep -q -- '--author app/dependabot' "$T/gh.log" && bad "  …and the poll is not even made" "$(cat "$T/gh.log")" || ok "  …and the poll is not even made"
+rm -rf "$T/state/.watch"
+bus 2 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-dependabot
+hasnt "--no-dependabot by hand" "DEPENDABOT"
+rm -rf "$T/state/.watch" "$T/resp"/*
+
 echo "monster-bus.test: $pass passed, $fail failed"
 [ "$fail" = 0 ]

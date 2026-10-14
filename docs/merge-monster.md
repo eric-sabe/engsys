@@ -78,9 +78,10 @@ Events emitted by `mm-watch.sh` (one line each):
 |---|---|
 | `READY #N <title>` | a PR gained the ready label — new enqueue |
 | `UNREADY #N` | ready label removed (session withdrew it) |
-| `CHECK #N <name>: <state>` | a required/watched check on the **active** PR reached a terminal state |
+| `CHECK_FAIL #N <name>: <conclusion>` | a check on the **active** PR ended in a non-success; once per (check, conclusion) per head. Successes are silent |
+| `CHECKS_READY #N head=<sha> state=<mss> pending=<n>` | once per (PR, head sha), latched in `.watch/ready.<pr>.<sha>`: the active PR is `CLEAN` / `HAS_HOOKS` / `UNSTABLE`, or no check is pending |
 | `CONFLICT #N` | a queued PR's `mergeStateStatus` turned `DIRTY` |
-| `DEPENDABOT #N <title>` | new Dependabot PR opened |
+| `DEPENDABOT #N <title>` | new Dependabot PR opened (not polled when `dependabot.auto_merge` is empty: `--no-dependabot` is on by itself) |
 | `MAIN_RED <workflow>` | newest non-scheduled default-branch run concluded failure (merge-gating only; each failing run fires once) |
 | `STOP` | the ledger issue was closed (kill switch) |
 | `AGENT_OVERDUE` / `AGENT_STALE` | the subagent watchdog's scan (`mm-agent-watch.sh --once`), run by the bus every cycle |
@@ -88,6 +89,10 @@ Events emitted by `mm-watch.sh` (one line each):
 The script reads the currently active PR number from a state file
 (`<state-dir>/active`) so one persistent Monitor serves the whole session even
 as the in-flight PR changes.
+
+**Coalesced events** (engsys#124). A check that passes wakes nobody; the
+model wakes once for each failure and once when the PR's head is ready to
+decide on, instead of once per check.
 
 **One watcher per monster** (engsys#122). The bus also runs the subagent
 watchdog's scan, so a monster arms exactly one Monitor. A Monitor ends at its
@@ -363,7 +368,8 @@ substrate for the v2 metrics dashboard.
 
 One YAML per repo — `.claude/merge-monster.yml` — read by the model at session
 start. Scripts take everything as flags/env; the bus and the tick, given
-`--config`, read only the few keys they name (`pulse_max`, `heartbeat_minutes`). Reference (see `config.example.yml` in the skill for the annotated
+`--config`, read only the few keys they name (`pulse_max`, `heartbeat_minutes`,
+`dependabot.auto_merge`). Reference (see `config.example.yml` in the skill for the annotated
 version):
 
 ```yaml

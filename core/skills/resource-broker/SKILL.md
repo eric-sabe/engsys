@@ -162,14 +162,16 @@ its holder resets it with `reset`. No pool-file change is needed.
 ## The loop: on every wake (event or tick)
 
 1. **Act on events from `broker-watch.sh`:**
-   - `SLOT_REAPED <slot> <prev-owner>`: journal it (the dead-man's switch caught a lessee that died
-     without releasing). Nothing more to do: the next grant re-provisions the slot, so it is clean.
+   - Slot transitions never reach you as events (engsys#124): the bus journals each one itself, in
+     bash, to `journal-YYYY-MM.{md,jsonl}` (`slot_reaped <slot> <prev-owner>`, `slot_granted <slot>
+     <holder>`, `slot_released <slot>`) and keeps running totals in `.watch/slot-counters.json`. A reap
+     needs nothing more from you (the next grant re-provisions the slot, so it is clean); the tick's
+     occupancy delta (`+`/`-` lines, counters included) is how `state.md` learns of all three. You did
+     not make any grant: the lessee's own `acquire` or `request` did.
    - `QUEUE_DROPPED <n>`: journal it (waiters that stopped polling were dropped from the FIFO).
    - `WAITER_QUEUED <session> <mode> <position>`: a session queued because the pool is saturated.
      Journal it; a queue that keeps growing while the same slots stay held is the saturation
      escalation (see Escalation), not something to fix by touching a lease.
-   - `SLOT_GRANTED <slot> <holder>` / `SLOT_RELEASED <slot>`: visibility only; refresh `state.md`'s
-     occupancy table. You did not make this grant: the lessee's own `acquire` or `request` did.
    - `NUDGE <session> <json>`: relay it. `ListAgents`, filter to `messaging.namespace_prefix`, and if
      `<session>` matches a live addressable session, `SendMessage` it one line: "your pool slot is granted;
      run `pool-cli claim --request <id> --owner <you>`". The nudge carries no token and no env on purpose; the durable

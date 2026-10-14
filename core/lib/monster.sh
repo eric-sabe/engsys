@@ -7,6 +7,9 @@
 #                                       comment stripped); empty when absent. The monsters' configs are
 #                                       flat enough for this; nested keys use the reader below.
 #   monster_cfg_child FILE PARENT KEY   `parent:\n  key: value` (one level down), same rules
+#   monster_cfg_list_empty FILE PARENT KEY
+#                                       exit 0 when PARENT.KEY is absent, null, empty or `[]`; exit 1 when it
+#                                       holds a flow list with items or a block list (`- item` lines)
 #   monster_pulse_max PULSE HB_MINUTES  the keepalive's --pulse-max: PULSE when set (a bare number means
 #                                       minutes; 45m, 1350s and ms values pass through), else 2.25 x
 #                                       HB_MINUTES, else 20m
@@ -41,6 +44,28 @@ monster_cfg_child() {
     index($0, p ":") == 1 { inp = 1; next }
     inp && /^[^[:space:]#]/ { inp = 0 }
     inp && $0 ~ "^[[:space:]]+" k ":" { sub("^[[:space:]]+" k ":", ""); print; exit }' "$1" | _monster_unquote
+}
+
+monster_cfg_list_empty() {
+  [ -f "$1" ] || return 0
+  local verdict
+  verdict=$(awk -v p="$2" -v k="$3" '
+    function strip(s) { sub(/[[:space:]]#.*$/, "", s); gsub(/^[[:space:]]+|[[:space:]]+$/, "", s); return s }
+    index($0, p ":") == 1 { inp = 1; next }
+    inp && /^[^[:space:]#]/ { inp = 0 }
+    inp && !ink && $0 ~ "^[[:space:]]+" k ":" {
+      v = $0; sub("^[[:space:]]+" k ":", "", v); v = strip(v)
+      if (v == "" ) { ink = 1; match($0, /^[[:space:]]+/); kind = RLENGTH; next }
+      if (v == "[]" || v == "~" || v == "null" || v ~ /^\[[[:space:]]*\]$/) { print "empty"; exit }
+      print "items"; exit
+    }
+    ink {
+      if ($0 ~ /^[[:space:]]*(#.*)?$/) next
+      match($0, /^[[:space:]]*/)
+      if (RLENGTH >= kind && $0 ~ /^[[:space:]]*-/) { print "items"; exit }
+      print "empty"; exit
+    }' "$1")
+  [ "$verdict" != items ]
 }
 
 monster_pulse_max() {

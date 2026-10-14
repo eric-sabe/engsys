@@ -250,7 +250,9 @@ the policy is invalid, the shape does not match, or a `git`/`gh` call fails.
 
 ### What the monster does with it
 
-On each CodeQL tick it runs the candidates script. For a `CANDIDATE` it reads the
+On each CodeQL tick it runs the candidates script, with a seen-latch in its state dir
+(engsys#124): a line it already printed is counted, not re-printed, until it leaves
+and comes back, so one judgment per alert, not one per tick. For a `CANDIDATE` it reads the
 flagged code at the alert's commit and dismisses **only** if the code clearly
 matches a known shape; unsure means the ordinary propose-with-`risk-accepted`
 path. On `TRIPWIRE_FAILED` it escalates once and dismisses nothing under that

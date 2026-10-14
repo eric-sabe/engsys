@@ -94,8 +94,11 @@ engsys (spec travels with the skill; the config travels with the repo).
      --config <config>
    ```
 
-   The bus also runs the subagent watchdog's scan every cycle
-   (§ Subagent liveness), so there is no second Monitor. If `liveness:` is
+   `--config` also tells the bus whether to watch Dependabot: with
+   `dependabot.auto_merge` empty or absent it polls no Dependabot PRs at all
+   (`--no-dependabot` is on by itself; § Dependabot). The bus also runs the
+   subagent watchdog's scan every cycle (§ Subagent liveness), so there is
+   no second Monitor. If `liveness:` is
    configured, add `--stale-min <liveness.stale_minutes>`, and `--no-stale`
    when `liveness.stale_probe` is `false` (OVERDUE still fires).
 
@@ -163,8 +166,15 @@ engsys (spec travels with the skill; the config travels with the repo).
      comment. Fail → remove `mm:ready`, comment exactly what's missing, then
      **nudge the author** (§ Cross-session messaging) — a bounce is the case
      where notification latency costs the most.
-   - `CHECK #N ...` → all required checks terminal? green → merge; red →
-     **failure handling** (below).
+   - `CHECK_FAIL #N <name>: <conclusion>` → a check on the active PR ended
+     in a non-success (successes never wake you). A required check →
+     **failure handling** (below); a non-required one → journal it and wait
+     for `CHECKS_READY`.
+   - `CHECKS_READY #N head=<sha> state=<mergeStateStatus> pending=<n>` → once
+     per (PR, head sha): GitHub calls it CLEAN / HAS_HOOKS / UNSTABLE, or no
+     check is pending. Confirm the required checks are green at that head
+     (`gh pr checks N --required`); green → merge pinned to that sha; red →
+     failure handling.
    - `CONFLICT #N` → dispatch a rebase agent (below) when it nears the front.
    - `DEPENDABOT #N` → classify per policy; queue for idle handling or
      escalate.

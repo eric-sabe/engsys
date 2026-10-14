@@ -6,9 +6,15 @@
 # Events:
 #   READY #N <title>       PR gained the mm:ready label
 #   UNREADY #N             PR lost the mm:ready label (before being queued)
-#   CHECK #N <name>: <s>   check on the ACTIVE PR reached a terminal state
+#   CHECK_FAIL #N <name>: <concl>  a check on the ACTIVE PR ended in a non-success (failure, cancelled,
+#                          timed out, …); once per (check, conclusion) per head. Successes are silent.
+#   CHECKS_READY #N head=<sha> state=<mergeStateStatus> pending=<n>
+#                          ONCE per (PR, head sha): the active PR is CLEAN / HAS_HOOKS / UNSTABLE, or
+#                          no check is pending any more (latched in .watch/ready.<pr>.<sha>)
 #   CONFLICT #N            a queued/ready PR turned DIRTY (needs rebase)
-#   DEPENDABOT #N <title>  new Dependabot PR opened
+#   DEPENDABOT #N <title>  new Dependabot PR opened (not with --no-dependabot, which is on by itself
+#                          when the --config's dependabot.auto_merge is empty or absent: a maintenance
+#                          watchdog owns Dependabot there)
 #   MAIN_RED <workflow>    latest default-branch run concluded failure
 #                          (merge-gating only: skips event=schedule; deduped
 #                          by run id so a persistent failure fires once)
@@ -31,12 +37,13 @@
 #                    [--default-branch main] [--ledger N]
 #                    [--session NAME] [--pulse-max 20m]
 #                    [--config FILE] [--heartbeat-minutes 10]
-#                    [--stale-min 10] [--no-stale] [--no-agents]
+#                    [--stale-min 10] [--no-stale] [--no-agents] [--no-dependabot]
 #   --stale-min / --no-stale  passed to the subagent scan (liveness.stale_minutes / stale_probe: false)
 #   --no-agents               skip the subagent scan (it is a no-op anyway without a spawn registry)
 #   --pulse-max               the keepalive's idle bound. Default (engsys#123): the config's pulse_max, else
 #                             2.25 x heartbeat_minutes (--heartbeat-minutes, else the config's), else 20m
-#   --config                  the monster's yml, read for pulse_max and heartbeat_minutes only
+#   --config                  the monster's yml, read for pulse_max, heartbeat_minutes and dependabot.auto_merge
+#   --no-dependabot           skip the Dependabot PR poll (no DEPENDABOT events)
 #
 # Baton keepalive (engsys#62, #87): while <state-dir>/baton-merge.json carries this session's token,
 # a `baton.mjs keepalive` renews the lease every 2.5 min (the caller rule: TTL 10 min, renew <= 3m20s;
@@ -59,7 +66,7 @@ fleet_gh_resolve
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/monster.sh"
 
 REPO="" DIR="" INTERVAL=30 DEFBRANCH=main LEDGER="" SESSION="${ENGSYS_SESSION:-}" PULSE_MAX="" CONFIG="" HB_MIN=""
-STALE_MIN=10 NOSTALE="" AGENTS=1
+STALE_MIN=10 NOSTALE="" AGENTS=1 NO_DEPENDABOT=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) REPO="$2"; shift 2 ;;
@@ -74,11 +81,15 @@ while [ $# -gt 0 ]; do
     --stale-min) STALE_MIN="$2"; shift 2 ;;
     --no-stale) NOSTALE=1; shift ;;
     --no-agents) AGENTS=0; shift ;;
+    --no-dependabot) NO_DEPENDABOT=1; shift ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
 [ -n "$REPO" ] && [ -n "$DIR" ] || { echo "usage: mm-watch.sh --repo owner/name --state-dir DIR" >&2; exit 2; }
 [ -n "$HB_MIN" ] || HB_MIN="$(monster_cfg_scalar "$CONFIG" heartbeat_minutes)"
+# engsys#124: with no auto-merge categories, Merge Monster never touches a raw Dependabot PR (the
+# maintenance watchdog owns them), so the poll would only wake it for nothing.
+if [ -n "$CONFIG" ] && [ -f "$CONFIG" ] && monster_cfg_list_empty "$CONFIG" dependabot auto_merge; then NO_DEPENDABOT=1; fi
 [ -n "$PULSE_MAX" ] || PULSE_MAX="$(monster_pulse_max "$(monster_cfg_scalar "$CONFIG" pulse_max)" "$HB_MIN")"
 
 W="$DIR/.watch"
@@ -222,7 +233,7 @@ while true; do
   fi
 
   # --- new Dependabot PRs ---------------------------------------------------
-  if OUT=$("$FLEET_GH" pr list -R "$REPO" --author "app/dependabot" --json number,title \
+  if [ "$NO_DEPENDABOT" = 0 ] && OUT=$("$FLEET_GH" pr list -R "$REPO" --author "app/dependabot" --json number,title \
       --jq '.[] | "#\(.number)\t\(.title)"' 2>/dev/null); then
     printf '%s\n' "$OUT" | sed '/^$/d' | sort > "$W/deps.new"
     emit_diff "$W/deps.tsv" "$W/deps.new" "DEPENDABOT"
@@ -236,30 +247,47 @@ while true; do
     emit_diff "$W/dirty.tsv" "$W/dirty.new" "CONFLICT"
   fi
 
-  # --- terminal check states on the ACTIVE PR -------------------------------
-  # checks.tsv is a session-cumulative union of seen (name,state) pairs, NOT a
-  # last-snapshot: the GitHub rollup set can flicker between polls (pagination /
-  # superseded runs), and snapshot-diffing re-emits every line that vanishes and
-  # returns. Reset only when the active PR changes.
+  # --- checks on the ACTIVE PR, coalesced (engsys#124) -----------------------
+  # A success wakes nobody. CHECK_FAIL fires once per (check, conclusion) on any terminal non-success;
+  # CHECKS_READY fires ONCE per (PR, head sha), latched in .watch/ready.<pr>.<sha>, when GitHub calls the
+  # PR mergeable-ish (CLEAN, HAS_HOOKS, UNSTABLE) or no check is pending any more. checks.tsv is a
+  # union of the terminal (name, conclusion) pairs seen for this PR at this head, NOT a last snapshot:
+  # the rollup can flicker between polls (pagination, superseded runs), and a snapshot diff re-emits
+  # whatever vanishes and returns. It resets when the active PR or its head changes.
   ACTIVE=$(cat "$DIR/active" 2>/dev/null || true)
-  LASTPR=$(cat "$W/checks.pr" 2>/dev/null || true)
-  if [ "$ACTIVE" != "$LASTPR" ]; then
-    : > "$W/checks.tsv"
-    printf '%s' "$ACTIVE" > "$W/checks.pr"
-  fi
+  case "$ACTIVE" in *[!0-9]*) ACTIVE="" ;; esac
   if [ -n "$ACTIVE" ]; then
-    if OUT=$("$FLEET_GH" pr view "$ACTIVE" -R "$REPO" --json statusCheckRollup --jq '
-        .statusCheckRollup[]?
-        | if .__typename == "CheckRun"
-          then select(.status == "COMPLETED") | "\(.name)\t\(.conclusion)"
-          else select(.state != "PENDING" and .state != "EXPECTED") | "\(.context)\t\(.state)"
-          end' 2>/dev/null); then
-      printf '%s\n' "$OUT" | sed '/^$/d' | sort -u > "$W/checks.new"
-      comm -13 "$W/checks.tsv" "$W/checks.new" | while IFS="$(printf '\t')" read -r name state; do
-        [ -n "$name" ] && echo "CHECK #$ACTIVE $name: $state"
-      done
-      sort -u "$W/checks.tsv" "$W/checks.new" > "$W/checks.union" && mv "$W/checks.union" "$W/checks.tsv"
-      rm -f "$W/checks.new"
+    if OUT=$("$FLEET_GH" pr view "$ACTIVE" -R "$REPO" --json headRefOid,mergeStateStatus,statusCheckRollup --jq '
+        "HEAD\t\(.headRefOid)\t\(.mergeStateStatus)",
+        (.statusCheckRollup[]?
+         | if .__typename == "CheckRun"
+           then (if .status == "COMPLETED" then "DONE\t\(.name)\t\(.conclusion)" else "PENDING\t\(.name)\t-" end)
+           else (if .state == "PENDING" or .state == "EXPECTED" then "PENDING\t\(.context)\t-" else "DONE\t\(.context)\t\(.state)" end)
+           end)' 2>/dev/null); then
+      SHA=$(printf '%s\n' "$OUT" | awk -F'\t' '$1 == "HEAD" { print $2; exit }')
+      MSS=$(printf '%s\n' "$OUT" | awk -F'\t' '$1 == "HEAD" { print $3; exit }')
+      case "$SHA" in '' | *[!0-9a-f]*) SHA="" ;; esac
+      if [ -n "$SHA" ]; then
+        if [ "$ACTIVE@$SHA" != "$(cat "$W/checks.pr" 2>/dev/null || true)" ]; then
+          : > "$W/checks.tsv"
+          printf '%s' "$ACTIVE@$SHA" > "$W/checks.pr"
+        fi
+        printf '%s\n' "$OUT" | awk -F'\t' '$1 == "DONE" && $2 != "" { print $2 "\t" $3 }' | sort -u > "$W/checks.new"
+        comm -13 "$W/checks.tsv" "$W/checks.new" | while IFS="$(printf '\t')" read -r name concl; do
+          case "$concl" in SUCCESS | NEUTRAL | SKIPPED | '') ;; *) echo "CHECK_FAIL #$ACTIVE $name: $concl" ;; esac
+        done
+        sort -u "$W/checks.tsv" "$W/checks.new" > "$W/checks.union" && mv "$W/checks.union" "$W/checks.tsv"
+        rm -f "$W/checks.new"
+        TOTAL=$(printf '%s\n' "$OUT" | awk -F'\t' '$1 == "DONE" || $1 == "PENDING"' | wc -l | tr -d ' ')
+        PENDING=$(printf '%s\n' "$OUT" | awk -F'\t' '$1 == "PENDING"' | wc -l | tr -d ' ')
+        READY=0
+        case "$MSS" in CLEAN | HAS_HOOKS | UNSTABLE) READY=1 ;; esac
+        [ "$TOTAL" -gt 0 ] && [ "$PENDING" = 0 ] && READY=1
+        if [ "$READY" = 1 ] && [ ! -e "$W/ready.$ACTIVE.$SHA" ]; then
+          : > "$W/ready.$ACTIVE.$SHA"
+          echo "CHECKS_READY #$ACTIVE head=${SHA:0:12} state=$MSS pending=$PENDING"
+        fi
+      fi
     fi
   fi
 

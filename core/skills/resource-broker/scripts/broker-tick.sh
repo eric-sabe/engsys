@@ -4,7 +4,7 @@
 #   1. (no renew: the broker holds no github baton; its heartbeat is its liveness signal)
 #   2. one pass of the event bus (broker-watch.sh --once: the pump's reaping, the nudge channel and the
 #      subagent scan), then compare the SHA-256 of the occupancy picture it leaves in <state-dir>/.watch
-#      (slots and queue) with <state-dir>/.watch/last-snapshot.sha;
+#      (slots, queue, and the slot counters the bus journals in bash) with <state-dir>/.watch/last-snapshot.sha;
 #   3. write the ledger heartbeat only when one is due (none in the last 0.75 x heartbeat_minutes);
 #   4. print `NOOP` when nothing changed, else the delta, one line each: the bus's event lines, then
 #      `+ <item>` / `- <item>` for occupancy that changed, and HEARTBEAT_ERROR <why> when a due heartbeat
@@ -56,8 +56,9 @@ EV=$(bash "$here/broker-watch.sh" ${CFG_ARGS[@]+"${CFG_ARGS[@]}"} --state-dir "$
 [ "$RC" = 0 ] || { printf '%s\n' "$EV"; exit 1; }
 while IFS= read -r l; do [ -n "$l" ] && DELTA+=("$l"); done <<<"$EV"
 while IFS= read -r l; do [ -n "$l" ] && DELTA+=("$l"); done < <(
-  jq -n --slurpfile s "$W/slots.json" --slurpfile q "$W/queue.json" \
-    '{slots: ($s[0] // []), queue: (($q[0] // []) | map(del(.position)))}' 2>/dev/null \
+  [ -s "$W/slot-counters.json" ] || echo '{}' >"$W/slot-counters.json"
+  jq -n --slurpfile s "$W/slots.json" --slurpfile q "$W/queue.json" --slurpfile c "$W/slot-counters.json" \
+    '{slots: ($s[0] // []), queue: (($q[0] // []) | map(del(.position))), counters: ($c[0] // {})}' 2>/dev/null \
     | monster_snapshot_lines | monster_delta "$W")
 
 # 3. heartbeat when due ----------------------------------------------------------------------------

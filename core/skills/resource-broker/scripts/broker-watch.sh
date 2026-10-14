@@ -9,14 +9,18 @@
 # boundary: this loop only ACTUATES (reap dead leases, relay grant nudges). It never decides
 # environment health or what a failure means.
 #
+# Slot transitions never wake the model (engsys#124): they are journaled here, in bash, to
+# <state-dir>/journal-YYYY-MM.{md,jsonl}, with running totals in <state-dir>/.watch/slot-counters.json
+# (the tick's occupancy delta carries them):
+#   slot_reaped <slot> <prev-owner>   the pump's dead-man's switch freed a slot
+#   slot_granted <slot> <holder>      a slot went free/queued -> held (the grant happened in the lessee's
+#                                     own process)
+#   slot_released <slot>              a held slot went to free/queued
+#
 # Events:
-#   SLOT_REAPED <slot> <prev-owner>   the pump's dead-man's switch freed a slot
 #   QUEUE_DROPPED <n>                 the pump dropped N silent (dead-waiter) queue entries
 #   WAITER_QUEUED <session> <mode> <position>
 #                                     a session joined the queue because the pool is saturated
-#   SLOT_GRANTED <slot> <holder>      a slot went free/queued -> held (visibility only: the grant
-#                                     itself happened in the lessee's own process)
-#   SLOT_RELEASED <slot>              a held slot went to free/queued
 #   NUDGE <session> <json>            a queued async-grant nudge to relay to <session> with
 #                                     SendMessage. The JSON is {event, session, request_id, slot_id}
 #                                     only: the fencing token and the grant env never leave the store
@@ -107,6 +111,19 @@ mkdir -p "$W"
 PUMP_BAD=0
 POOL_DIR=""
 
+# slot_journal <event> <slot> [who]: one line in each monthly journal, and the running counters.
+slot_journal() {
+  local ev="$1" slot="$2" who="${3:-}" ts month c
+  ts=$(date -u +%Y-%m-%dT%H:%M:%SZ); month=$(date -u +%Y-%m)
+  jq -cn --arg ts "$ts" --arg ev "$ev" --arg slot "$slot" --arg who "$who" \
+    '{ts: $ts, event: $ev, slot: $slot} + (if $who == "" then {} else {who: $who} end) + {by: "broker-watch"}' \
+    >>"$DIR/journal-$month.jsonl"
+  printf -- '- %s %s slot %s%s (broker-watch)\n' "$ts" "$ev" "$slot" "${who:+ $who}" >>"$DIR/journal-$month.md"
+  c="$W/slot-counters.json"
+  [ -s "$c" ] || echo '{}' >"$c"
+  jq -c --arg ev "$ev" '.[$ev] = ((.[$ev] // 0) + 1)' "$c" >"$c.tmp" 2>/dev/null && mv "$c.tmp" "$c"
+}
+
 # The subagent watchdog's scan, once per tick, so the broker keeps ONE Monitor (engsys#122). Its latches
 # and lock live in <state-dir>/.watch, shared with a fallback tick's backstop scan.
 AGENT_WATCH="$here/../../merge-monster/scripts/mm-agent-watch.sh"
@@ -141,7 +158,7 @@ tick() {
   jq -c '.reapedSlots // [] | .[]' <<<"$PUMP" 2>/dev/null | while IFS= read -r reaped; do
     id=$(jq -r '.slot_id' <<<"$reaped")
     prev=$(jq -r '.previousOwner // "unknown"' <<<"$reaped")
-    echo "SLOT_REAPED $id $prev"
+    slot_journal slot_reaped "$id" "$prev"
   done
 
   DROPPED=$(jq -r '.droppedEntries // 0 | if type == "array" then length else . end' <<<"$PUMP" 2>/dev/null || echo 0)
@@ -159,9 +176,9 @@ tick() {
       holder=$(jq -r '.holder // "none"' <<<"$slot")
       prev_state=$(jq -r --arg id "$id" '[.[] | select((.slot_id | tostring) == $id) | .state] | first // "unknown"' <<<"$OLD_SLOTS" 2>/dev/null)
       if [ "$state" = "held" ] && [ "$prev_state" != "held" ]; then
-        echo "SLOT_GRANTED $id $holder"
+        slot_journal slot_granted "$id" "$holder"
       elif [ "$state" != "held" ] && [ "$prev_state" = "held" ]; then
-        echo "SLOT_RELEASED $id"
+        slot_journal slot_released "$id"
       fi
     done
     echo "$NEW_SLOTS" >"$W/slots.json"
