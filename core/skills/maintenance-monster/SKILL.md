@@ -356,7 +356,9 @@ policy dismissals from that list; a week with none still gets a one-line
 
 Dispatch the routed agent to produce the triage read (or, in Phase 2+, the
 fix) — you stay the loop's owner and ledger-writer even when an expert agent
-does the analysis.
+does the analysis. Dispatch `nyx` **without** `model:`: its frontmatter pins
+the security model by full ID, and a per-call `model:` would replace that pin
+with a tier alias.
 
 ## Guardrails
 

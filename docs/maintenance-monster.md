@@ -282,6 +282,10 @@ prompt for it.
 | Code fixes, dep upgrades, lockfile overrides | `isabelle` |
 | Bug root-cause behind a CodeQL finding       | `bert`     |
 
+Dispatch `nyx` without `model:`: its frontmatter pins the security model by full ID
+(kept equal to the fleet scaffold's `SECURITY_MODEL`), and a per-call `model:` would
+replace that pin with a tier alias.
+
 ## Human gates (never auto)
 
 Mirrors the playbook's "never auto" set: major version bumps, runtime deps,

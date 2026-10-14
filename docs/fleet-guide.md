@@ -1222,6 +1222,13 @@ A missing per-session env file is an error for that session; it never silently f
 field present the extra flags must not contain a literal `|`. Dispatch any threat-modeling task in another
 session explicitly with the same model.
 
+**Nyx carries the pin itself.** `core/agents/nyx.md` sets `model:` to the same full model ID as the
+scaffold's `SECURITY_MODEL` (a test keeps the two equal). A subagent whose frontmatter says `opus` runs the
+parent session's own model, whatever `ANTHROPIC_DEFAULT_OPUS_MODEL` says, and a per-call `model:` on the
+Agent tool takes only a tier alias, so the frontmatter is the one pin that holds in every session.
+**Dispatch Nyx without `model:`**: any value you pass replaces the pin with an alias. If you change
+`SECURITY_MODEL`, change nyx's frontmatter in the same commit.
+
 ### Escalation: effort before tier
 
 When work needs more, **raise effort first** (medium, then high, then extra high). Switch to the top model
