@@ -71,8 +71,9 @@ What `defang()` does:
   anchored on the **words**, not on the `=====` decoration: bare, `---`, `###`, any case, extra
   whitespace and tabs are all caught. Words separated by real prose ("the END of the run. UNTRUSTED
   DATA arrives later") are left alone.
-- Detects on a **folded copy**: NFKC (full-width `ＥＮＤ` becomes `END`), zero-width and
-  invisible-format characters stripped (`UN<ZWSP>TRUSTED`), and Cyrillic/Greek look-alike letters
+- Detects on a **folded copy**: NFKC (full-width `ＥＮＤ` becomes `END`), every default-ignorable
+  and format character stripped (`UN<ZWSP>TRUSTED`; variation selectors, tag characters, the
+  combining grapheme joiner and the Hangul fillers too), and Cyrillic/Greek look-alike letters
   folded (`ЕND UNTRUSTED DАTА`). It also matches the original text, which catches a zero-width
   character used as the word *separator*.
 - Redacts only the matched spans **of the original text**. Legitimate Cyrillic, Greek, CJK and
