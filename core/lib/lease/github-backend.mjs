@@ -401,34 +401,17 @@ function errorResult(role, reason, extra = {}) {
 }
 
 /**
- * Create a github lease backend for one repo.
- *
- * @param {object} opts
- * @param {string} opts.repo `owner/repo`
- * @param {{request: Function}} [opts.api] API client (default: githubFetchClient over resolveToken()); tests inject a fake
- * @param {string} [opts.token] token for the default client (default: resolveToken())
- * @param {string} [opts.refPrefix] where batons live (default DEFAULT_REF_PREFIX; must be under refs/engsys/)
- * @param {string} [opts.fleet] fleet id written in `fleet:`; default: the holder's fleet
- * @param {number} [opts.maxRetries] attempts per HTTP call on 5xx/transport (default 3)
- * @param {number} [opts.maxRounds] read→decide→CAS rounds per operation (default 4)
- * @param {number} [opts.backoffMs] base backoff (default 400; jittered, doubling)
- * @param {number} [opts.maxFenceReadMs] a fence read slower than this is refused (default 5000)
- * @param {(ms:number)=>Promise<void>} [opts.sleep] injectable sleep for tests
- * @param {()=>number} [opts.random] injectable jitter source for tests
- * @param {()=>number} [opts.now] LOCAL wall clock, used only to measure elapsed time between a
- *   response and the moment a number is handed to the caller — never to decide expiry
- * @param {object} [opts.env] environment for token resolution
+ * Low-level GitHub Git Data API + compare-and-swap (CAS) client for one repo, shared by
+ * `createGithubLease` (which enforces `EMPTY_TREE_SHA` on baton commits) and
+ * `core/lib/memory/ref-store.mjs` (which writes a single `events.jsonl` blob tree on
+ * `refs/engsys/memory/*`, #130).
  */
-export function createGithubLease({
+export function createGitDataClient({
   repo,
   api: apiOpt,
   token: tokenOpt,
-  refPrefix = DEFAULT_REF_PREFIX,
-  fleet: fleetOpt,
   maxRetries = 3,
-  maxRounds = 4,
   backoffMs = 400,
-  maxFenceReadMs = DEFAULT_MAX_FENCE_READ_MS,
   sleep = sleepDefault,
   random = Math.random,
   now = Date.now,
@@ -436,12 +419,6 @@ export function createGithubLease({
 } = {}) {
   if (typeof repo !== "string" || !REPO_PATTERN.test(repo)) {
     throw new LeaseUsageError(`invalid repo ${JSON.stringify(repo)} — expected owner/repo`);
-  }
-  // Batons live under refs/engsys/ only. A prefix like refs/heads would let a takeover fast-forward a
-  // real branch to an empty-tree commit (every file deleted) — the ancestry CAS allows it, and a
-  // fleet App is often a ruleset bypass actor. Not configurable past this namespace, on purpose.
-  if (typeof refPrefix !== "string" || !/^refs\/engsys\/[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/.test(refPrefix)) {
-    throw new LeaseUsageError(`invalid refPrefix ${JSON.stringify(refPrefix)} — must be refs/engsys/<ns>[/<ns>...] (never refs/heads or refs/tags)`);
   }
   const owner = repo.split("/")[0];
   let apiPromise = null;
@@ -455,7 +432,6 @@ export function createGithubLease({
   };
 
   const base = `/repos/${repo}/git`;
-  const refOf = (role) => `${refPrefix}/${role}`;
   const shortRef = (ref) => ref.replace(/^refs\//, "");
 
   // -- one HTTP call with bounded retry on 5xx/transport. `beforeRetry` (for writes) is consulted
@@ -507,12 +483,154 @@ export function createGithubLease({
   async function readCommit(sha) {
     const res = await call("GET", `${base}/commits/${sha}`);
     if (res.status === 200 && typeof res.json?.message === "string") {
-      return { message: res.json.message, tree: res.json?.tree?.sha ?? null, serverNow: serverTimeOf(res), at: res.at };
+      return {
+        message: res.json.message,
+        tree: res.json?.tree?.sha ?? null,
+        parents: Array.isArray(res.json?.parents) ? res.json.parents.map((p) => p?.sha).filter(Boolean) : [],
+        serverNow: serverTimeOf(res),
+        at: res.at,
+      };
     }
     // `missing` is definitive: the API says there is no such commit (404/422). Anything else (5xx,
     // timeout, 401/403/429) is a transient or permission failure about a commit that may well exist.
     const missing = res.status === 404 || res.status === 422;
     return { failure: res.failure ?? { status: res.status, message: res.json?.message ?? null }, missing };
+  }
+
+  async function readTree(treeSha) {
+    const res = await call("GET", `${base}/trees/${treeSha}`);
+    if (res.status === 200 && Array.isArray(res.json?.tree)) {
+      return { tree: res.json.tree, serverNow: serverTimeOf(res), at: res.at };
+    }
+    return { failure: res.failure ?? { status: res.status, message: res.json?.message ?? null } };
+  }
+
+  async function readBlob(blobSha) {
+    const res = await call("GET", `${base}/blobs/${blobSha}`);
+    if (res.status === 200 && typeof res.json?.content === "string") {
+      const encoding = res.json.encoding ?? "base64";
+      const content = encoding === "base64"
+        ? Buffer.from(res.json.content.replace(/\s+/g, ""), "base64").toString("utf8")
+        : res.json.content;
+      return { content, serverNow: serverTimeOf(res), at: res.at };
+    }
+    return { failure: res.failure ?? { status: res.status, message: res.json?.message ?? null } };
+  }
+
+  async function createBlob(content) {
+    const res = await call("POST", `${base}/blobs`, { content: String(content), encoding: "utf-8" });
+    if (res.status === 201 && typeof res.json?.sha === "string") return { sha: res.json.sha };
+    return { failure: res.failure ?? { status: res.status, message: res.json?.message ?? null } };
+  }
+
+  async function createTree(entries) {
+    const res = await call("POST", `${base}/trees`, { tree: entries });
+    if (res.status === 201 && typeof res.json?.sha === "string") return { sha: res.json.sha };
+    return { failure: res.failure ?? { status: res.status, message: res.json?.message ?? null } };
+  }
+
+  async function createCommit(message, parents, tree = EMPTY_TREE_SHA) {
+    const res = await call("POST", `${base}/commits`, { message, tree, parents });
+    if (res.status === 201 && typeof res.json?.sha === "string") return { sha: res.json.sha };
+    return { failure: res.failure ?? { status: res.status, message: res.json?.message ?? null } };
+  }
+
+  /**
+   * Compare-and-swap the ref from `expectedTip` (null = must not exist) to `sha`.
+   * -> { outcome: "won" | "lost" | "error", clock?, failure? }
+   */
+  async function cas(ref, expectedTip, sha, { force = false } = {}) {
+    const settleFromRead = async () => {
+      const r = await readRef(ref);
+      if (r.failure) return null; // can't tell; let the retry loop continue
+      const clock = r.serverNow === null ? null : { serverNow: r.serverNow, at: r.at };
+      if (r.sha === sha) return { settled: "won", clock };
+      if (r.sha !== expectedTip) return { settled: "lost", clock }; // moved (or a lagging replica: a false "lost" is safe, a later round re-reads)
+      return null; // unchanged: safe to resend
+    };
+    const res = expectedTip === null
+      ? await call("POST", `${base}/refs`, { ref, sha }, { beforeRetry: settleFromRead })
+      : await call("PATCH", `${base}/refs/${shortRef(ref)}`, { sha, force: Boolean(force) }, { beforeRetry: settleFromRead });
+    if (res.settled) return { outcome: res.settled, clock: res.clock };
+    const okStatus = expectedTip === null ? 201 : 200;
+    if (res.status === okStatus) {
+      const got = res.json?.object?.sha;
+      if (typeof got === "string" && got !== sha) return { outcome: "error", failure: { message: `server accepted the update but the ref points at ${got}, not ${sha}` } };
+      const serverNow = serverTimeOf(res);
+      return { outcome: "won", clock: serverNow === null ? null : { serverNow, at: res.at } };
+    }
+    if (res.status === 422) return { outcome: "lost", message: res.json?.message ?? null };
+    return { outcome: "error", failure: res.failure ?? { status: res.status, message: res.json?.message ?? null } };
+  }
+
+  return {
+    base,
+    shortRef,
+    call,
+    readRef,
+    readCommit,
+    readTree,
+    readBlob,
+    createBlob,
+    createTree,
+    createCommit,
+    cas,
+  };
+}
+
+/**
+ * Create a github lease backend for one repo.
+ *
+ * @param {object} opts
+ * @param {string} opts.repo `owner/repo`
+ * @param {{request: Function}} [opts.api] API client (default: githubFetchClient over resolveToken()); tests inject a fake
+ * @param {string} [opts.token] token for the default client (default: resolveToken())
+ * @param {string} [opts.refPrefix] where batons live (default DEFAULT_REF_PREFIX; must be under refs/engsys/)
+ * @param {string} [opts.fleet] fleet id written in `fleet:`; default: the holder's fleet
+ * @param {number} [opts.maxRetries] attempts per HTTP call on 5xx/transport (default 3)
+ * @param {number} [opts.maxRounds] read→decide→CAS rounds per operation (default 4)
+ * @param {number} [opts.backoffMs] base backoff (default 400; jittered, doubling)
+ * @param {number} [opts.maxFenceReadMs] a fence read slower than this is refused (default 5000)
+ * @param {(ms:number)=>Promise<void>} [opts.sleep] injectable sleep for tests
+ * @param {()=>number} [opts.random] injectable jitter source for tests
+ * @param {()=>number} [opts.now] LOCAL wall clock, used only to measure elapsed time between a
+ *   response and the moment a number is handed to the caller — never to decide expiry
+ * @param {object} [opts.env] environment for token resolution
+ */
+export function createGithubLease({
+  repo,
+  api: apiOpt,
+  token: tokenOpt,
+  refPrefix = DEFAULT_REF_PREFIX,
+  fleet: fleetOpt,
+  maxRetries = 3,
+  maxRounds = 4,
+  backoffMs = 400,
+  maxFenceReadMs = DEFAULT_MAX_FENCE_READ_MS,
+  sleep = sleepDefault,
+  random = Math.random,
+  now = Date.now,
+  env = process.env,
+} = {}) {
+  const {
+    base,
+    shortRef,
+    call,
+    readRef,
+    readCommit,
+    createCommit: createRawCommit,
+    cas,
+  } = createGitDataClient({ repo, api: apiOpt, token: tokenOpt, maxRetries, backoffMs, sleep, random, now, env });
+  // Batons live under refs/engsys/ only. A prefix like refs/heads would let a takeover fast-forward a
+  // real branch to an empty-tree commit (every file deleted) — the ancestry CAS allows it, and a
+  // fleet App is often a ruleset bypass actor. Not configurable past this namespace, on purpose.
+  if (typeof refPrefix !== "string" || !/^refs\/engsys\/[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/.test(refPrefix)) {
+    throw new LeaseUsageError(`invalid refPrefix ${JSON.stringify(refPrefix)} — must be refs/engsys/<ns>[/<ns>...] (never refs/heads or refs/tags)`);
+  }
+  const refOf = (role) => `${refPrefix}/${role}`;
+
+  function createCommit(message, parents) {
+    return createRawCommit(message, parents, EMPTY_TREE_SHA);
   }
 
   /**
@@ -549,46 +667,6 @@ export function createGithubLease({
       return { kind: "malformed", sha: r.sha, reason: parsed.reason, ...(parsed.protocol !== undefined ? { protocol: parsed.protocol } : {}), serverNow: r.serverNow, clock };
     }
     return { kind: "baton", sha: r.sha, record: parsed.record, serverNow: r.serverNow, expired: parsed.record.expiresMs <= r.serverNow, clock };
-  }
-
-  async function createCommit(message, parents) {
-    const res = await call("POST", `${base}/commits`, { message, tree: EMPTY_TREE_SHA, parents });
-    if (res.status === 201 && typeof res.json?.sha === "string") return { sha: res.json.sha };
-    return { failure: res.failure ?? { status: res.status, message: res.json?.message ?? null } };
-  }
-
-  /**
-   * Compare-and-swap the ref from `expectedTip` (null = must not exist) to `sha`.
-   * -> { outcome: "won" | "lost" | "error", clock?, failure? }
-   * "lost" means the server refused (422) OR a re-read after a failed attempt showed the ref moved
-   * elsewhere; "won" includes a re-read showing the ref already AT `sha` (the write landed but its
-   * response was lost). `clock` is the Date (and local arrival time) of the response that proved
-   * the win. Note: GitHub's check is ancestry, not equality — the PATCH also succeeds if the ref was
-   * rewound to an ancestor of `expectedTip` meanwhile. Only a force-push can do that (every writer
-   * here fast-forwards), and a force-pusher is inside the repo's own trust boundary.
-   */
-  async function cas(ref, expectedTip, sha) {
-    const settleFromRead = async () => {
-      const r = await readRef(ref);
-      if (r.failure) return null; // can't tell; let the retry loop continue
-      const clock = r.serverNow === null ? null : { serverNow: r.serverNow, at: r.at };
-      if (r.sha === sha) return { settled: "won", clock };
-      if (r.sha !== expectedTip) return { settled: "lost", clock }; // moved (or a lagging replica: a false "lost" is safe, a later round re-reads)
-      return null; // unchanged: safe to resend
-    };
-    const res = expectedTip === null
-      ? await call("POST", `${base}/refs`, { ref, sha }, { beforeRetry: settleFromRead })
-      : await call("PATCH", `${base}/refs/${shortRef(ref)}`, { sha, force: false }, { beforeRetry: settleFromRead });
-    if (res.settled) return { outcome: res.settled, clock: res.clock };
-    const okStatus = expectedTip === null ? 201 : 200;
-    if (res.status === okStatus) {
-      const got = res.json?.object?.sha;
-      if (typeof got === "string" && got !== sha) return { outcome: "error", failure: { message: `server accepted the update but the ref points at ${got}, not ${sha}` } };
-      const serverNow = serverTimeOf(res);
-      return { outcome: "won", clock: serverNow === null ? null : { serverNow, at: res.at } };
-    }
-    if (res.status === 422) return { outcome: "lost", message: res.json?.message ?? null };
-    return { outcome: "error", failure: res.failure ?? { status: res.status, message: res.json?.message ?? null } };
   }
 
   // -- shared presentation ---------------------------------------------------------------------
