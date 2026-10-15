@@ -10,10 +10,11 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { pathToFileURL } from 'node:url';
+import { detectHarness, emitSessionStartContext, resolvePluginRoot, writeHookResult } from '../lib/harness-io.mjs';
 
 try {
-  const root = process.env.CLAUDE_PLUGIN_ROOT || path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const root = resolvePluginRoot(process.env, import.meta.url);
   const tmpl = fs.readFileSync(path.join(root, 'templates', 'CLAUDE.md.tmpl'), 'utf8');
   const hasFleetPrime = fs.existsSync(path.join(root, 'commands', 'fleet-prime.md'));
 
@@ -57,14 +58,11 @@ try {
   t = t.replace(/\n<!--\s*\n\s*ENGSYS:PROJECT-FACTS region\.[\s\S]*$/, '\n'); // the project's CLAUDE.md is its facts
 
   if (/\{\{[A-Z_]+\}\}/.test(t)) throw new Error('unrendered template token'); // never inject a half-rendered template
-  // The fleet's operator time format (OPERATOR_TIMEZONE / OPERATOR_CLOCK, set by the fleet launcher).
-  // Absent setting = no line. A broken lib must never cost the conventions above, so it fails soft.
   let timeLine = '';
   try { timeLine = (await import(pathToFileURL(path.join(root, 'lib', 'operator-time.mjs')))).contextLine(process.env); } catch { /* conventions still go out */ }
   const out = timeLine ? `${t.trim()}\n\n${timeLine}\n` : t.trim() + '\n';
-  process.stdout.write(
-    JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: out } }),
-  );
+  const harness = detectHarness(process.env);
+  writeHookResult(emitSessionStartContext(harness, out, { jsonMode: true }));
 } catch {
   process.exit(0);
 }

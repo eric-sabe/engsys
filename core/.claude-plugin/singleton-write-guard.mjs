@@ -66,6 +66,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  emitPostToolContext,
+  emitPreToolDeny,
+  normalizeToolName,
+  parseHookInput,
+  resolvePluginRoot,
+  writeHookResult,
+} from '../lib/harness-io.mjs';
 
 export const ROLES = new Set(['merge', 'maintain']);
 
@@ -301,6 +309,9 @@ function gitVerdict(args) {
   const rest = args.slice(i + 1);
   if (sub === undefined) return null;
   if (sub === 'push') return 'git push';
+  if (rest.some((a) => /refs\/engsys\/(leases|batons)\b/.test(String(a)))) {
+    return `git ${sub} touching refs/engsys/leases or refs/engsys/batons`;
+  }
   if (!GIT_LOCAL.has(sub)) return `git ${sub} (not a known local or read subcommand; aliases are denied)`;
   if (sub === 'config') {
     const reads = ['--get', '--get-all', '--get-regexp', '--list', '-l', 'get', 'list'];
@@ -341,10 +352,9 @@ function expandHome(p, home) {
 }
 
 /**
- * What `p` is, if protected: 'settings' (settings files, the .claude dir itself, and the shell
- * snapshots and session-env files sourced before every Bash call), 'gitconfig' (.git/config,
- * config.worktree, ~/.gitconfig, the XDG git config) or 'plugin' (the plugin cache and
- * CLAUDE_PLUGIN_ROOT). false otherwise.
+ * What `p` is, if protected: 'settings' (settings files, the .claude/.github/copilot/.gemini/.agents dirs,
+ * and shell snapshots/session-env files), 'gitconfig' (.git/config, config.worktree, ~/.gitconfig) or
+ * 'plugin' (the plugin cache and CLAUDE_PLUGIN_ROOT/COPILOT_PLUGIN_ROOT/AGY_PLUGIN_ROOT). false otherwise.
  */
 export function protectedPath(p, { env = process.env, cwd = process.cwd() } = {}) {
   if (typeof p !== 'string' || !p) return false;
@@ -356,6 +366,10 @@ export function protectedPath(p, { env = process.env, cwd = process.cwd() } = {}
   // #85 L3: sourced before every Bash call, so an export planted there reaches the monster's push.
   if (/(^|\/)\.claude\/(shell-snapshots|session-env)(\/|$)/.test(abs)) return 'settings';
   if (/(^|\/)\.claude\/plugins(\/|$)/.test(abs)) return 'plugin';
+  // Tri-harness settings & hook surfaces (NA-1, NA-2): Copilot CLI (.github/copilot, .github/hooks) and Antigravity (.gemini, .agents)
+  if (/(^|\/)\.github\/(copilot|hooks)(\/|$)/.test(abs)) return 'settings';
+  if (/(^|\/)\.gemini(\/|$)/.test(abs)) return 'settings';
+  if (/(^|\/)\.agents(\/|$)/.test(abs)) return 'settings';
   // #71 L3: git config a planted credential helper, ssh command or proxy could live in.
   if (/(^|\/)\.git\/(config|config\.worktree|worktrees\/[^/]+\/config\.worktree)$/.test(abs)) return 'gitconfig';
   if (abs === path.join(home, '.gitconfig') || abs === path.join(env.XDG_CONFIG_HOME ? path.resolve(expandHome(env.XDG_CONFIG_HOME, home)) : path.join(home, '.config'), 'git', 'config')) return 'gitconfig';
@@ -365,10 +379,17 @@ export function protectedPath(p, { env = process.env, cwd = process.cwd() } = {}
     if (/^\/(shell-snapshots|session-env)(\/|$)/.test(abs.slice(cfg.length)) && abs.startsWith(cfg)) return 'settings';
     if (abs.startsWith(`${cfg}/plugins`)) return 'plugin';
   }
-  if (env.CLAUDE_PLUGIN_ROOT) {
-    let root = env.CLAUDE_PLUGIN_ROOT;
-    try { root = fs.realpathSync(root); } catch { /* keep as given */ }
-    if (abs === root || abs.startsWith(`${root}/`)) return 'plugin';
+  if (env.COPILOT_HOME) {
+    const copilotHome = path.resolve(expandHome(env.COPILOT_HOME, home));
+    if (abs.startsWith(`${copilotHome}/plugins`)) return 'plugin';
+    if (abs === copilotHome || abs.startsWith(`${copilotHome}/`)) return 'settings';
+  }
+  for (const rootVar of ['CLAUDE_PLUGIN_ROOT', 'COPILOT_PLUGIN_ROOT', 'AGY_PLUGIN_ROOT', 'ENGSYS_PLUGIN_ROOT']) {
+    if (env[rootVar]) {
+      let root = env[rootVar];
+      try { root = fs.realpathSync(root); } catch { /* keep as given */ }
+      if (abs === root || abs.startsWith(`${root}/`)) return 'plugin';
+    }
   }
   return false;
 }
@@ -454,7 +475,7 @@ const GITHUB_LIB = /octokit|PyGithub|from\s+github\s+import|import\s+github\b|Ne
 const GITHUB_WEB = /github\.com\//i;
 const WRITEISH = /\b(PUT|POST|PATCH|DELETE|method|urlopen|fetch|requests?|axios|got|Request|HTTPSConnection|Net::HTTP|LWP|HTTP::Tiny|merge|push|graphql|mutation|authorization|token)\b/i;
 /** Protected paths in code; a monster's own config (`.claude/merge-monster.yml`) is not one. */
-const SETTINGS_TEXT = /\.claude(?!\/[\w.-]+\.(?:ya?ml|md)\b)|managed-settings|\.gitconfig\b|\.git\/(config|worktrees)\b|CLAUDE_PLUGIN_ROOT|CLAUDE_CONFIG_DIR/;
+const SETTINGS_TEXT = /\.claude(?!\/[\w.-]+\.(?:ya?ml|md)\b)|\.github\/(copilot|hooks)\b|\.gemini\b|\.agents\b|managed-settings|\.gitconfig\b|\.git\/(config|worktrees)\b|refs\/engsys\/(leases|batons)\b|CLAUDE_PLUGIN_ROOT|CLAUDE_CONFIG_DIR|COPILOT_HOME|COPILOT_PLUGIN_ROOT|AGY_PLUGIN_ROOT|ENGSYS_PLUGIN_ROOT/;
 
 /**
  * What a heredoc opened at s[at] feeds: 'shell' (bash, sh, eval, … anywhere in its pipeline, or a
@@ -904,9 +925,11 @@ export function archiveOverLimit(p, { cwd = process.cwd(), now = () => new Date(
  * PostToolUse (#120): an Edit or MultiEdit that left a monster's state.md over STATE_MAX_BYTES. The edit
  * has happened; this is feedback, so the next wake rewrites the file to the schema. -> null or { feedback }.
  */
-export function postDecide({ tool_name: tool, tool_input: input = {}, env = process.env, cwd = process.cwd() }) {
+export function postDecide({ tool_name, toolName, tool_input, toolArgs, env = process.env, cwd = process.cwd() }) {
+  const tool = normalizeToolName(tool_name ?? toolName ?? '');
   if (!ROLES.has(env.ENGSYS_SINGLETON_ROLE) || !['Edit', 'MultiEdit'].includes(tool)) return null;
-  const p = input.file_path;
+  const parsed = parseHookInput({ tool_name: tool_name ?? toolName, tool_input, toolArgs, cwd }, env);
+  const p = parsed.filePath ?? tool_input?.file_path;
   if (!monsterStatePath(p, { cwd })) return null;
   let size;
   try { size = fs.statSync(path.resolve(cwd, p)).size; } catch { return null; }
@@ -916,30 +939,42 @@ export function postDecide({ tool_name: tool, tool_input: input = {}, env = proc
 }
 
 /** -> null (no opinion) or { deny: reason }. */
-export function decide({ tool_name: tool = 'Bash', tool_input: input = {}, command, env = process.env, pluginRoot = env.CLAUDE_PLUGIN_ROOT, cwd = process.cwd() }) {
+export function decide({
+  tool_name,
+  toolName,
+  tool_input = {},
+  toolArgs,
+  command,
+  env = process.env,
+  pluginRoot = env.CLAUDE_PLUGIN_ROOT || env.COPILOT_PLUGIN_ROOT || env.AGY_PLUGIN_ROOT || env.ENGSYS_PLUGIN_ROOT,
+  cwd = process.cwd(),
+}) {
   const role = env.ENGSYS_SINGLETON_ROLE;
   if (!ROLES.has(role)) return null;
   const ctx = { env, cwd };
+  const parsed = parseHookInput({ tool_name: tool_name ?? toolName ?? 'Bash', tool_input, toolArgs, command, cwd }, env);
+  const tool = parsed.toolName || 'Bash';
+  const input = parsed.toolInput || {};
   if (tool === 'CronCreate') {
     return { deny: `engsys singleton-write guard: CronCreate is denied in a ${role} monster session. Schedule the next wake with ScheduleWakeup `
       + '(one wake at a time, re-armed every tick, as the SKILL.md loop does); a cron job keeps firing on its own schedule, stacks wakes and outlives a lost baton.' };
   }
   // #85 M1: Monitor (and any tool that runs a shell command string) is Bash for this purpose.
-  const cmd = command ?? input.command;
+  const cmd = command ?? parsed.command ?? input.command;
   if (tool === 'Bash' || typeof cmd === 'string') {
     if (wrapperInvocation(cmd, pluginRoot, env)) return null;
     let found = bashFindings(cmd, ctx);
     // #110: a heredoc delimiter we can't read the way bash does could hide the commands after it.
-    if (!splitHeredocs(cmd).ok && /\b(gh|git|curl|wget|hub)\b|github\.com|\.claude/i.test(String(cmd)) && !found.length) found = ['a heredoc delimiter the guard cannot read the way the shell does (quote it plainly: <<\'EOF\')'];
-    if (!lex(cmd).ok && /\b(gh|git|curl|wget|hub)\b|github\.com|\.claude/i.test(String(cmd))) found = found.length ? found : ['an unparseable command that mentions gh, git, GitHub or .claude'];
+    if (!splitHeredocs(cmd).ok && /\b(gh|git|curl|wget|hub)\b|github\.com|\.claude|\.github|\.gemini|\.agents/i.test(String(cmd)) && !found.length) found = ['a heredoc delimiter the guard cannot read the way the shell does (quote it plainly: <<\'EOF\')'];
+    if (!lex(cmd).ok && /\b(gh|git|curl|wget|hub)\b|github\.com|\.claude|\.github|\.gemini|\.agents/i.test(String(cmd))) found = found.length ? found : ['an unparseable command that mentions gh, git, GitHub or .claude'];
     return found.length ? { deny: denyMessage(role, found) } : null;
   }
   if (['Write', 'Edit', 'MultiEdit', 'NotebookEdit'].includes(tool)) {
-    const p = input.file_path ?? input.notebook_path ?? input.path;
+    const p = parsed.filePath ?? input.file_path ?? input.notebook_path ?? input.path;
     if (protectedPath(p, ctx)) return { deny: `engsys singleton-write guard: settings, git config and plugin files are read-only in a ${role} monster session (${p}): changing them could switch off the hooks that fence its GitHub writes, or plant a program in its push.` };
     if (['Write', 'Edit', 'MultiEdit'].includes(tool) && monsterStatePath(p, { cwd })) {
       if (tool === 'Write') {
-        const bytes = Buffer.byteLength(String(input.content ?? ''), 'utf8');
+        const bytes = Buffer.byteLength(String(parsed.content ?? input.content ?? ''), 'utf8');
         if (bytes > STATE_MAX_BYTES) return { deny: `engsys singleton-write guard: this Write would make ${p} ${bytes} bytes, over the ${STATE_MAX_BYTES}-byte limit. ${stateRule} Trim it to the schema and write it again.` };
       }
       try {
@@ -961,30 +996,40 @@ export function decide({ tool_name: tool = 'Bash', tool_input: input = {}, comma
 async function main() {
   let raw = '';
   for await (const chunk of process.stdin) raw += chunk;
-  let input;
-  try { input = JSON.parse(raw); } catch { input = null; }
-  if (!input || typeof input.tool_name !== 'string') return;
-  if (input.hook_event_name === 'PostToolUse') {
+  const parsed = parseHookInput(raw, process.env);
+  if (!parsed.rawToolName && !parsed.toolName) return 0;
+  if (parsed.event === 'PostToolUse') {
     let f = null;
-    try { f = postDecide({ tool_name: input.tool_name, tool_input: input.tool_input || {}, cwd: input.cwd || process.cwd() }); } catch { f = null; }
-    if (f) process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: f.feedback } }));
-    return;
+    try {
+      f = postDecide({
+        tool_name: parsed.toolName,
+        tool_input: parsed.toolInput,
+        cwd: parsed.cwd,
+      });
+    } catch { f = null; }
+    if (f) return writeHookResult(emitPostToolContext(parsed.harness, f.feedback));
+    return 0;
   }
   let d;
   try {
-    d = decide({ tool_name: input.tool_name, tool_input: input.tool_input || {}, cwd: input.cwd || process.cwd() });
+    d = decide({
+      tool_name: parsed.toolName,
+      tool_input: parsed.toolInput,
+      cwd: parsed.cwd,
+      pluginRoot: resolvePluginRoot(process.env, import.meta.url),
+    });
   } catch (e) {
     d = ROLES.has(process.env.ENGSYS_SINGLETON_ROLE) ? { deny: `engsys singleton-write guard failed (${String(e && e.message)}): denied, fail closed` } : null;
   }
-  if (!d) return;
-  process.stdout.write(JSON.stringify({
-    hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: d.deny },
-  }));
+  if (!d) return 0;
+  return writeHookResult(emitPreToolDeny(parsed.harness, d.deny));
 }
 
 const isMain = (() => {
   try { return fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url)); } catch { return false; }
 })();
 if (isMain) {
-  main().catch(() => {}).finally(() => process.exit(0));
+  main()
+    .then((code) => process.exit(code ?? 0))
+    .catch(() => process.exit(0));
 }

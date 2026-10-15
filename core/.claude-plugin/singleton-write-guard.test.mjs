@@ -1201,3 +1201,66 @@ test('#134: when the archive copy cannot be written, the change is denied (fail 
     fs.chmodSync(dir, 0o700);
   }
 });
+
+test('CT-02 (NA-1): Copilot bash PreToolUse payload is denied with both top-level and hookSpecificOutput permissionDecision', () => {
+  const r = spawnSync(
+    process.execPath,
+    [HOOK],
+    {
+      input: JSON.stringify({
+        hookEventName: 'preToolUse',
+        toolName: 'bash',
+        toolArgs: JSON.stringify({ command: 'gh pr merge 42' }),
+      }),
+      env: { ...process.env, ...MERGE, CLAUDE_PLUGIN_ROOT: ROOT },
+      encoding: 'utf8',
+    },
+  );
+  assert.equal(r.status, 0);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.permissionDecision, 'deny');
+  assert.equal(out.hookSpecificOutput.permissionDecision, 'deny');
+});
+
+test('CT-03 (NA-2): Copilot edit or Bash targeting .github/copilot, .github/hooks, or ~/.copilot settings is denied', () => {
+  const env = { ...MERGE, HOME: '/Users/x', COPILOT_HOME: '/Users/x/.copilot', CLAUDE_PLUGIN_ROOT: ROOT };
+  for (const file of [
+    '/repo/.github/copilot/settings.json',
+    '/repo/.github/hooks/hooks.json',
+    '/Users/x/.copilot/settings.json',
+    '/Users/x/.copilot/config.json',
+    '/repo/.gemini/settings.json',
+    '/repo/.agents/plugins/engsys/plugin.json',
+  ]) {
+    assert.ok(
+      decide({ toolName: 'edit', toolArgs: { path: file }, env, pluginRoot: ROOT, cwd: '/repo' }),
+      `should deny edit on ${file}`,
+    );
+  }
+  for (const cmd of [
+    'echo "{}" > .github/copilot/settings.json',
+    'echo "{}" > .github/hooks/x.json',
+    'echo "{}" > ~/.copilot/settings.json',
+    'echo "{}" > .gemini/settings.json',
+  ]) {
+    assert.ok(decide({ command: cmd, env, pluginRoot: ROOT, cwd: '/repo' }), `should deny cmd: ${cmd}`);
+  }
+});
+
+test('CT-04 (NA-1, NA-2): Antigravity replace_file_content targeting .gemini/settings.json exits 2 with denial on stderr', () => {
+  const r = spawnSync(
+    process.execPath,
+    [HOOK],
+    {
+      input: JSON.stringify({
+        tool_name: 'replace_file_content',
+        tool_input: { TargetFile: '/repo/.gemini/settings.json', ReplacementContent: '{}' },
+      }),
+      env: { ...process.env, ENGSYS_SINGLETON_ROLE: 'maintain', AGY_PLUGIN_ROOT: ROOT },
+      encoding: 'utf8',
+    },
+  );
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /singleton-write guard/);
+});
+

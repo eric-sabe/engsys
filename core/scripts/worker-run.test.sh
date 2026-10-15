@@ -233,6 +233,23 @@ printf 'WORKER_TEST_MSG=%s\n' "$T/envmsg.txt" > "$T/repo/.env"
 run_case 0 "adapter env supplied by repo .env (loader path)" --package "$PKG"
 rm -f "$T/repo/.env"
 
+# 20. CT-15: worker-run.mjs --check --provider copilot and --provider agy
+cp "$HERE/workers/_copilot-cli.mjs" "$HERE/workers/_agy-cli.mjs" "$HERE/workers/copilot.mjs" "$HERE/workers/agy.mjs" "$T/scripts/workers/"
+mkdir -p "$T/bin"
+printf '#!/usr/bin/env bash\necho "1.0.0"\n' > "$T/bin/copilot"
+printf '#!/usr/bin/env bash\necho "2.0.0"\n' > "$T/bin/agy"
+chmod +x "$T/bin/copilot" "$T/bin/agy"
+set +e
+OUT_COPILOT="$(PATH="$T/bin:$PATH" node "$T/scripts/worker-run.mjs" --check --provider copilot 2>&1)"; GOT_COPILOT=$?
+OUT_AGY="$(PATH="$T/bin:$PATH" node "$T/scripts/worker-run.mjs" --check --provider agy 2>&1)"; GOT_AGY=$?
+set -e
+N=$((N+1))
+if [ "$GOT_COPILOT" -eq 0 ] && [ "$GOT_AGY" -eq 0 ] && echo "$OUT_COPILOT" | grep -q "READY" && echo "$OUT_AGY" | grep -q "READY"; then
+  PASS=$((PASS+1)); echo "  ok  (0) CT-15: --check --provider copilot and --provider agy report READY"
+else
+  FAIL=$((FAIL+1)); echo "  FAIL CT-15: got copilot=$GOT_COPILOT agy=$GOT_AGY"
+fi
+
 echo
 echo "$PASS/$N passed."
 [ "$FAIL" -eq 0 ] || exit 1

@@ -1435,3 +1435,22 @@ test("W1 worked case (hb 20, stale 55, pulse_max 29m): a fenced merge at 34m can
   assert.ok(lastRenew + 10 < HB_STALE_AT, `the lease lapses by ${lastRenew + 10}m, before the heartbeat reads stale at ${HB_STALE_AT}m`);
   assert.ok(lines.some((l) => /^BATON_IDLE merge/.test(l)), "the keepalive says it stopped");
 });
+
+test("CT-08 (NA-5): isClaudeCommand / isSupportedHarnessCommand accepts claude, copilot, agy, antigravity, and language_server, and resolveSessionOwnerPid binds keepalive to the harness PID", async () => {
+  const { isClaudeCommand, isSupportedHarnessCommand, resolveSessionOwnerPid } = await import("./baton.mjs");
+  for (const cmd of ["claude", "copilot", "agy", "antigravity", "language_server", "language_server_macos_arm", "2.1.233"]) {
+    assert.equal(isClaudeCommand(cmd), true, cmd);
+    assert.equal(isSupportedHarnessCommand(cmd), true, cmd);
+  }
+  for (const cmd of ["bash", "node", "tmux", ""]) {
+    assert.equal(isClaudeCommand(cmd), false, cmd);
+  }
+  const fakePs = (pid) => {
+    if (pid === 300) return { ppid: 200, start: "Mon Oct 15 12:00:01 2026", comm: "/bin/bash" };
+    if (pid === 200) return { ppid: 1, start: "Mon Oct 15 12:00:00 2026", comm: "/usr/local/bin/copilot" };
+    return null;
+  };
+  const owner = resolveSessionOwnerPid({ startPid: 300, ps: fakePs });
+  assert.deepEqual(owner, { pid: 200, start: "Mon Oct 15 12:00:00 2026" });
+});
+

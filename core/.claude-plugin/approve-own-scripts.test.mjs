@@ -140,3 +140,26 @@ test('copy-mode settings template allows exactly the same scripts (lockstep)', a
   const listed = [...tmpl.matchAll(/"Bash\((?:bash )?\.claude\/skills\/([^ ]+\.sh) \*\)"/g)].map((m) => m[1]);
   for (const rel of listed) assert.ok(ALLOWED.has(rel), `template allows ${rel}, which the hook does not`);
 });
+
+test('CT-05: Copilot PreToolUse invoking COPILOT_PLUGIN_ROOT/skills/merge-monster/scripts/mm-watch.sh emits top-level and hookSpecificOutput allow', () => {
+  const mmWatch = path.join(P.root, 'skills/merge-monster/scripts/mm-watch.sh');
+  fs.writeFileSync(mmWatch, '#!/usr/bin/env bash\n', { mode: 0o755 });
+  const r = spawnSync(
+    process.execPath,
+    [HOOK],
+    {
+      input: JSON.stringify({
+        hookEventName: 'preToolUse',
+        toolName: 'bash',
+        toolArgs: JSON.stringify({ command: `${mmWatch} --state-dir logs/m` }),
+      }),
+      env: { PATH: process.env.PATH, COPILOT_PLUGIN_ROOT: P.root },
+      encoding: 'utf8',
+    },
+  );
+  assert.equal(r.status, 0);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.permissionDecision, 'allow');
+  assert.equal(out.hookSpecificOutput.permissionDecision, 'allow');
+});
+

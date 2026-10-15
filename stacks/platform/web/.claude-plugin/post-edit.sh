@@ -3,8 +3,8 @@
 # PostToolUse Edit|Write|MultiEdit (plugin mode): run this pack's hooks/post-edit-reminders.*.sh
 # with the edited path and return any reminder as additionalContext (plain PostToolUse stdout
 # never reaches the model). Fail-open.
-root="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
-file="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const t=JSON.parse(s).tool_input||{};process.stdout.write(t.file_path||t.path||"")}catch{}})' 2>/dev/null)"
+root="${CLAUDE_PLUGIN_ROOT:-${COPILOT_PLUGIN_ROOT:-${AGY_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}}}"
+file="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s)||{};let a=j.tool_input||j.toolArgs||(j.toolCall&&j.toolCall.arguments)||{};if(typeof a==="string"){try{a=JSON.parse(a)}catch{a={}}}process.stdout.write(a.file_path||a.path||a.TargetFile||"")}catch{}})' 2>/dev/null)"
 [ -n "$file" ] || exit 0
 msg=""
 for h in "$root"/hooks/post-edit-reminders.*.sh; do
@@ -14,5 +14,5 @@ for h in "$root"/hooks/post-edit-reminders.*.sh; do
 }$r"
 done
 [ -n "$msg" ] || exit 0
-node -e 'process.stdout.write(JSON.stringify({hookSpecificOutput:{hookEventName:"PostToolUse",additionalContext:process.argv[1]}}))' "$msg" 2>/dev/null || printf '%s\n' "$msg"
+node -e 'const m=process.argv[1];process.stdout.write(JSON.stringify({additionalContext:m,hookSpecificOutput:{hookEventName:"PostToolUse",additionalContext:m}}))' "$msg" 2>/dev/null || printf '%s\n' "$msg"
 exit 0

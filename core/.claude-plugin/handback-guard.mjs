@@ -34,6 +34,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { detectHarness, emitStopBlock, writeHookResult } from '../lib/harness-io.mjs';
 import { sessionsDir } from './session-transcript.mjs';
 
 // Strong: a promise to act later. Overrides even an explicit `STATUS: COMPLETE`.
@@ -180,7 +181,15 @@ async function main() {
   const mode = process.argv[2];
   let raw = '';
   for await (const chunk of process.stdin) raw += chunk;
-  const input = JSON.parse(raw);
+  const rawInput = JSON.parse(raw);
+  const input = {
+    ...rawInput,
+    session_id: rawInput.session_id ?? rawInput.sessionId,
+    agent_id: rawInput.agent_id ?? rawInput.agentId,
+    agent_type: rawInput.agent_type ?? rawInput.agentType,
+    last_assistant_message: rawInput.last_assistant_message ?? rawInput.lastAssistantMessage,
+    stop_hook_active: rawInput.stop_hook_active ?? rawInput.stopHookActive,
+  };
   if (process.env.ENGSYS_HANDBACK_DEBUG) { // opt-in: what the hook actually receives
     const { last_assistant_message: m, ...rest } = input;
     fs.appendFileSync(process.env.ENGSYS_HANDBACK_DEBUG, `${JSON.stringify({ mode, ...rest, last_assistant_message: String(m || '').slice(0, 160) })}\n`);
@@ -193,8 +202,13 @@ async function main() {
     reason = stopDecision(input);
   }
   if (reason) {
-    process.stderr.write(`${reason}\n`);
-    process.exitCode = 2; // block: the reason goes back to the model, which keeps working
+    const harness = detectHarness(process.env, rawInput);
+    if (harness === 'copilot') {
+      process.exitCode = writeHookResult(emitStopBlock('copilot', reason));
+    } else {
+      process.stderr.write(`${reason}\n`);
+      process.exitCode = 2; // block: the reason goes back to the model, which keeps working
+    }
   }
 }
 

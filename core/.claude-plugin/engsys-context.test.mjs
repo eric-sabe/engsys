@@ -38,3 +38,15 @@ test('compaction and clear re-ground hooks carry the same line, and only with a 
     assert.doesNotMatch(reground(t, {}), /Show dates and times/, t);
   }
 });
+
+test('CT-07: engsys-context.mjs and re-ground templates emit valid single-object JSON with both top-level and hookSpecificOutput additionalContext', () => {
+  const raw = JSON.parse(execFileSync(process.execPath, [HOOK], { env: { ...base, ...ET }, encoding: 'utf8' }));
+  assert.equal(typeof raw.additionalContext, 'string');
+  assert.equal(raw.additionalContext, raw.hookSpecificOutput.additionalContext);
+  for (const t of ['post-compact-reground.sh.tmpl', 'post-clear-reground.sh.tmpl']) {
+    const obj = JSON.parse(reground(t, ET));
+    assert.equal(typeof obj.additionalContext, 'string');
+    assert.equal(obj.additionalContext, obj.hookSpecificOutput.additionalContext);
+  }
+});
+

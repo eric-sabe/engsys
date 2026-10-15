@@ -34,16 +34,17 @@ export function record(input, env = process.env, now = () => new Date()) {
   const session = env.ENGSYS_SESSION;
   const fleet = env.FLEET_ID || '';
   if (!session || !NAME.test(session) || (fleet && !NAME.test(fleet))) return null;
-  const t = input && input.transcript_path;
+  const t = input && (input.transcript_path || input.transcriptPath);
   if (typeof t !== 'string' || !path.isAbsolute(t) || t.includes('\n')) return null;
   const dir = sessionsDir(env);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const file = path.join(dir, `${fleet ? `${fleet}.` : ''}${session}.json`);
+  const sid = input.session_id ?? input.sessionId;
   const rec = {
     session,
     fleet: fleet || null,
     run: env.ENGSYS_SESSION_RUN || null,
-    session_id: typeof input.session_id === 'string' ? input.session_id : null,
+    session_id: typeof sid === 'string' ? sid : null,
     transcript_path: t,
     source: typeof input.source === 'string' ? input.source : null,
     at: now().toISOString(),

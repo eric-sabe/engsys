@@ -38,9 +38,9 @@ const out = new Map(); // relPath -> content
 const packContextSh = `#!/usr/bin/env bash
 ${GEN}
 # SessionStart (plugin mode): inject this stack pack's CLAUDE.md fragment. Fail-open.
-f="\${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}/claude.fragment.md"
+f="\${CLAUDE_PLUGIN_ROOT:-\${COPILOT_PLUGIN_ROOT:-\${AGY_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}}}/claude.fragment.md"
 [ -f "$f" ] || exit 0
-node -e 'const fs=require("fs");process.stdout.write(JSON.stringify({hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:fs.readFileSync(process.argv[1],"utf8")}}))' "$f" 2>/dev/null || cat "$f"
+node -e 'const fs=require("fs");const c=fs.readFileSync(process.argv[1],"utf8");process.stdout.write(JSON.stringify({additionalContext:c,hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:c}}))' "$f" 2>/dev/null || cat "$f"
 exit 0
 `;
 
@@ -49,8 +49,8 @@ ${GEN}
 # PostToolUse Edit|Write|MultiEdit (plugin mode): run this pack's hooks/post-edit-reminders.*.sh
 # with the edited path and return any reminder as additionalContext (plain PostToolUse stdout
 # never reaches the model). Fail-open.
-root="\${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
-file="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const t=JSON.parse(s).tool_input||{};process.stdout.write(t.file_path||t.path||"")}catch{}})' 2>/dev/null)"
+root="\${CLAUDE_PLUGIN_ROOT:-\${COPILOT_PLUGIN_ROOT:-\${AGY_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}}}"
+file="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s)||{};let a=j.tool_input||j.toolArgs||(j.toolCall&&j.toolCall.arguments)||{};if(typeof a==="string"){try{a=JSON.parse(a)}catch{a={}}}process.stdout.write(a.file_path||a.path||a.TargetFile||"")}catch{}})' 2>/dev/null)"
 [ -n "$file" ] || exit 0
 msg=""
 for h in "$root"/hooks/post-edit-reminders.*.sh; do
@@ -60,7 +60,7 @@ for h in "$root"/hooks/post-edit-reminders.*.sh; do
 }$r"
 done
 [ -n "$msg" ] || exit 0
-node -e 'process.stdout.write(JSON.stringify({hookSpecificOutput:{hookEventName:"PostToolUse",additionalContext:process.argv[1]}}))' "$msg" 2>/dev/null || printf '%s\\n' "$msg"
+node -e 'const m=process.argv[1];process.stdout.write(JSON.stringify({additionalContext:m,hookSpecificOutput:{hookEventName:"PostToolUse",additionalContext:m}}))' "$msg" 2>/dev/null || printf '%s\\n' "$msg"
 exit 0
 `;
 
@@ -68,17 +68,17 @@ exit 0
 const INBOX_HOOK = (event) => `grep -qs '"delivered_at":null' "\${FLEET_INBOX_DIR:-/nonexistent}/\${ENGSYS_SESSION:-none}.jsonl" && node "\${CLAUDE_PLUGIN_ROOT}/.claude-plugin/fleet-inbox.mjs" ${event}; exit 0`;
 
 // ---- core plugin -------------------------------------------------------------
-out.set('core/.claude-plugin/plugin.json', json({
+const corePluginManifest = {
   $schema: SCHEMA,
   name: 'engsys',
   version: VERSION,
-  description: 'engsys core — a stack-agnostic engineering team for Claude Code: personas, merge/maintenance orchestrators with subagent liveness, dev commands, and workflows. Pair with engsys-<stack> pack plugins.',
+  description: 'engsys core — a stack-agnostic engineering team for Claude Code, GitHub Copilot CLI, and Antigravity: personas, merge/maintenance orchestrators with subagent liveness, dev commands, and workflows. Pair with engsys-<stack> pack plugins.',
   author: AUTHOR,
   homepage: HOMEPAGE,
   license: 'MIT',
   hooks: './.claude-plugin/hooks.json',
-}));
-out.set('core/.claude-plugin/hooks.json', json({
+};
+const coreHooksManifest = {
   hooks: {
     // Auto-approve engsys's own bookkeeping scripts when invoked as a single literal-path command
     // (their plugin-cache path can't be pre-approved by a portable permission rule).
@@ -92,11 +92,14 @@ out.set('core/.claude-plugin/hooks.json', json({
       // …and its settings/plugin-file and GitHub-MCP checks (#69 review N1, L-c), and CronCreate: a
       // singleton paces itself with ScheduleWakeup, never a cron job that outlives it (#119).
       { matcher: 'Write|Edit|MultiEdit|NotebookEdit|CronCreate|mcp__.*', hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/singleton-write-guard.mjs"' }] },
+      // Subagent memory brief fallback for harnesses without SubagentStart (Copilot CLI; no-op on Claude).
+      { matcher: 'Agent|Task', hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/subagent-memory-inject.mjs" pre-agent', timeout: 5 }] },
     ],
     // …and feedback when an Edit leaves a monster's state.md over its 4 KB limit (#120; a Write over it is
-    // denied above).
+    // denied above), plus cross-fleet inbox relay on PostToolUse for harnesses without MidTurn UserPromptSubmit.
     PostToolUse: [
       { matcher: 'Edit|MultiEdit', hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/singleton-write-guard.mjs"' }] },
+      { hooks: [{ type: 'command', command: INBOX_HOOK('post-tool-use') }] },
     ],
     // Memory brief (engsys#128, docs/memory-spec.md §6): push Class A lessons + Class B pointers
     // into a subagent's context before it starts. Fails open to {} on any error/timeout — kept
@@ -130,7 +133,11 @@ out.set('core/.claude-plugin/hooks.json', json({
       { matcher: 'clear|resume', hooks: [{ type: 'command', command: 'bash "${CLAUDE_PLUGIN_ROOT}/templates/post-clear-reground.sh.tmpl"' }] },
     ],
   },
-}));
+};
+out.set('core/.claude-plugin/plugin.json', json(corePluginManifest));
+out.set('core/.claude-plugin/hooks.json', json(coreHooksManifest));
+out.set('core/plugin.json', json({ ...corePluginManifest, hooks: './hooks.json' }));
+out.set('core/hooks.json', json(coreHooksManifest));
 
 // ---- stack-pack plugins --------------------------------------------------------
 const marketplacePlugins = [{
