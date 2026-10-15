@@ -52,7 +52,7 @@ try {
   );
   t = t.replace(
     '{{LESSONS_NOTE}}',
-    "Durable lessons live in the project's `docs/agent-lessons/` (plugin mode doesn't seed the engsys lessons-library).",
+    "Durable lessons live in the project's `docs/agent-lessons/`; the engsys `lessons-library` is read in place from the plugin root (no copy) by the memory brief (SubagentStart injection — docs/memory-spec.md §5-§6) in both copy and plugin mode.",
   );
   t = t.replace(/\n<!--\s*\n\s*ENGSYS:PROJECT-FACTS region\.[\s\S]*$/, '\n'); // the project's CLAUDE.md is its facts
 

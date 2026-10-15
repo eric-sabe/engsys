@@ -18,6 +18,8 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SUITES = [
   ["node lib/selftest.js"],
   ["node scripts/build-plugins.mjs --check"],
+  ["node core/scripts/validate-lessons.mjs"],
+  ["node --test core/scripts/validate-lessons.test.mjs"],
   ["node --test scripts/security-model.test.mjs"],
   ["node --test core/.claude-plugin/approve-own-scripts.test.mjs"],
   ["node --test core/.claude-plugin/handback-guard.test.mjs"],

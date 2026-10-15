@@ -18,6 +18,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { validateDir } from '../core/scripts/validate-lessons.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CHECK = process.argv.includes('--check');
@@ -192,6 +193,31 @@ out.set('.claude-plugin/marketplace.json', json({
   plugins: marketplacePlugins,
 }));
 
+// ---- lessons-library bundling (docs/memory-spec.md §2, engsys#127) --------------------------
+// lessons-library lives at core/lessons-library — inside the core plugin's own source tree — so
+// plugin mode reads it IN PLACE from `${CLAUDE_PLUGIN_ROOT}/lessons-library` with no copy step:
+// whatever the marketplace checks out for the `core` plugin already contains it. This generator
+// has no files to write for that; it only guards that the bundle is present, non-empty and
+// schema-valid, so a future move/rename or a malformed lesson fails `--check` instead of shipping
+// a plugin with a missing or broken lessons-library.
+const lessonsDir = path.join(REPO, 'core', 'lessons-library');
+let lessonsCount = 0;
+if (!fs.existsSync(lessonsDir)) {
+  console.error('build-plugins: core/lessons-library is missing — lessons-library must live inside core/ to bundle into the core plugin');
+  process.exit(1);
+}
+lessonsCount = fs.readdirSync(lessonsDir).filter((f) => f.endsWith('.md') && f !== 'README.md').length;
+if (lessonsCount === 0) {
+  console.error('build-plugins: core/lessons-library has no lesson files');
+  process.exit(1);
+}
+const lessonsInvalid = validateDir(lessonsDir);
+if (lessonsInvalid.length) {
+  for (const { file, errors } of lessonsInvalid) for (const e of errors) console.error(`-- ${file}: ${e}`);
+  console.error(`build-plugins: ${lessonsInvalid.length} lesson(s) in core/lessons-library fail frontmatter validation (run: node core/scripts/validate-lessons.mjs)`);
+  process.exit(1);
+}
+
 // ---- write / check ---------------------------------------------------------------
 let stale = 0;
 for (const [rel, content] of out) {
@@ -205,7 +231,7 @@ for (const [rel, content] of out) {
 }
 if (CHECK) {
   if (stale) { console.error(`build-plugins: ${stale} generated file(s) stale — run: node scripts/build-plugins.mjs`); process.exit(1); }
-  console.log(`build-plugins: OK — ${out.size} generated files current (${marketplacePlugins.length} plugins, v${VERSION})`);
+  console.log(`build-plugins: OK — ${out.size} generated files current (${marketplacePlugins.length} plugins, v${VERSION}, ${lessonsCount} lessons bundled)`);
 } else {
-  console.log(`build-plugins: ${marketplacePlugins.length} plugins, v${VERSION}`);
+  console.log(`build-plugins: ${marketplacePlugins.length} plugins, v${VERSION}, ${lessonsCount} lessons bundled`);
 }

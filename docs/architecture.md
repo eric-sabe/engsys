@@ -130,7 +130,8 @@ engsys/
     jos.md      # monetization / business strategy
     steve.md    # the scapegoat (morale)
 
-  lessons-library/        # curated, generalized cross-project lessons
+  core/
+    lessons-library/      # curated, generalized cross-project lessons (plugin mode reads it in place)
 ```
 
 ### The pack contract
@@ -279,12 +280,15 @@ Two tiers, kept distinct:
 
 1. **Project-local** — each project's `docs/agent-lessons/`, written during
    `/project-closeout` by mining that project's local-review findings.
-2. **Generalized** — `lessons-library/` here: curated, stack-agnostic lessons that
-   recur across projects (verification & review, concurrency & safety, data &
+2. **Generalized** — `core/lessons-library/` here: curated, stack-agnostic lessons
+   that recur across projects (verification & review, concurrency & safety, data &
    identity, workflow & git, ops & deploy, tooling). The installer seeds these
-   into a project (managed, so `verify`/`update` keep them current). Stack-specific
-   lessons instead live inside the relevant pack's skill, so they install with the
-   capability.
+   into a project (managed, so `verify`/`update` keep them current); plugin mode
+   reads the same directory in place, from the plugin root, with no copy. Every
+   lesson carries YAML frontmatter (`globs`, `stacks`, `roles`, `keywords`,
+   `security`, `supersedes` — docs/memory-spec.md §2) validated by
+   `core/scripts/validate-lessons.mjs`. Stack-specific lessons instead live inside
+   the relevant pack's skill, so they install with the capability.
 
 `project-closeout` ends by promoting any generalizable lesson back to
 `lessons-library/` via PR — the feedback loop that keeps this the source of truth
