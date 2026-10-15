@@ -254,8 +254,8 @@ while true; do
   # union of the terminal (name, conclusion) pairs seen for this PR at this head, NOT a last snapshot:
   # the rollup can flicker between polls (pagination, superseded runs), and a snapshot diff re-emits
   # whatever vanishes and returns. It resets when the active PR or its head changes.
-  ACTIVE=$(cat "$DIR/active" 2>/dev/null || true)
-  case "$ACTIVE" in *[!0-9]*) ACTIVE="" ;; esac
+  # The PR number from <state-dir>/active ("12", "#12" and a trailing note all read as 12).
+  ACTIVE=$(sed -n '1s/^[#[:space:]]*\([0-9][0-9]*\).*/\1/p' "$DIR/active" 2>/dev/null || true)
   if [ -n "$ACTIVE" ]; then
     if OUT=$("$FLEET_GH" pr view "$ACTIVE" -R "$REPO" --json headRefOid,mergeStateStatus,statusCheckRollup --jq '
         "HEAD\t\(.headRefOid)\t\(.mergeStateStatus)",

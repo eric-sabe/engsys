@@ -99,7 +99,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -z \"${ENGSYS_SESSION:-}\" ] || node \"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/session-transcript.mjs\"; exit 0"
+            "command": "[ -z \"${ENGSYS_SESSION:-}\" ] || node \"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/session-transcript.mjs\" ; exit 0"
           }
         ]
       },

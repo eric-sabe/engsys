@@ -172,7 +172,9 @@ rollup "$SHA2" UNSTABLE "$(run_ build COMPLETED SUCCESS)" "$(run_ e2e IN_PROGRES
 bus 2 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1
 has "a new head: its checks are new (lint fails again)" "CHECK_FAIL #12 lint: FAILURE"
 has "  …and UNSTABLE is ready even with a check pending" "CHECKS_READY #12 head=222222222222 state=UNSTABLE pending=1"
-rollup "$SHA2" CLEAN
+rm -rf "$T/state/.watch"; echo "#12 (piloting)" >"$T/state/active"
+bus 2 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1
+has "an active file written as '#12 (note)' still names PR 12" "CHECKS_READY #12 head=222222222222"
 rm -f "$T/state/active"; echo 13 >"$T/state/active"
 rollup "0000000000000000000000000000000000000013" BLOCKED
 bus 2 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1

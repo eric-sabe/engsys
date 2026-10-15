@@ -118,7 +118,7 @@ out.set('core/.claude-plugin/hooks.json', json({
       { hooks: [{ type: 'command', command: INBOX_HOOK('session-start') }] },
       // Context-aware rotation (engsys#125): record a fleet-launched session's transcript path for its
       // heartbeat. The test keeps node from starting outside a fleet session (needs ENGSYS_SESSION).
-      { hooks: [{ type: 'command', command: '[ -z "${ENGSYS_SESSION:-}" ] || node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/session-transcript.mjs"; exit 0' }] },
+      { hooks: [{ type: 'command', command: '[ -z "${ENGSYS_SESSION:-}" ] || node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/session-transcript.mjs" ; exit 0' }] },
       { matcher: 'compact', hooks: [{ type: 'command', command: 'bash "${CLAUDE_PLUGIN_ROOT}/templates/post-compact-reground.sh.tmpl"' }] },
       { matcher: 'clear|resume', hooks: [{ type: 'command', command: 'bash "${CLAUDE_PLUGIN_ROOT}/templates/post-clear-reground.sh.tmpl"' }] },
     ],
