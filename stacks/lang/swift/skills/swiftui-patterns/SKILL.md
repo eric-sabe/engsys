@@ -23,7 +23,7 @@ Modern SwiftUI patterns targeting iOS 26+ with Swift 6.3. Covers architecture, s
 - [Review Checklist](#review-checklist)
 - [References](#references)
 
-**Scope boundary:** This skill covers architecture, state ownership, composition, environment wiring, async loading, and related SwiftUI app structure patterns. Detailed navigation patterns are covered in the `swiftui-navigation` skill, including `NavigationStack`, `NavigationSplitView`, sheets, tabs, and deep-linking patterns. Detailed layout, container, and component patterns are covered in the `swiftui-layout-components` skill, including stacks, grids, lists, scroll view patterns, forms, controls, search UI with `.searchable`, overlays, and related layout components.
+**Scope boundary:** This skill covers architecture, state ownership, composition, environment wiring, async loading, navigation (`NavigationStack`, `NavigationSplitView`, sheets, tabs, deep-linking in [references/architecture-patterns.md](references/architecture-patterns.md)), and layout/design polish (`LazyVStack`, grids, lists, forms, `.searchable`, haptics, and transitions in [references/design-polish.md](references/design-polish.md)).
 
 ## Architecture: Model-View (MV) Pattern
 
@@ -286,7 +286,7 @@ Never create manual `Task` in `onAppear` unless you need to store a reference fo
 
 - **`.scrollEdgeEffectStyle(.soft, for: .top)`** -- fading edge effect on scroll edges
 - **`.backgroundExtensionEffect()`** -- mirror/blur at safe area edges
-- **`@Animatable`** macro -- synthesizes `AnimatableData` conformance automatically (see `swiftui-animation` skill)
+- **`@Animatable`** macro -- synthesizes `AnimatableData` conformance automatically (see [references/design-polish.md](references/design-polish.md))
 - **`TextEditor`** -- now accepts `AttributedString` for rich text
 
 ## Performance Guidelines
@@ -328,7 +328,7 @@ TextField("Search…", text: $query)
 
 **Detecting active sessions:** Read `isWritingToolsActive` on `UITextView` (UIKit) to defer validation or suspend undo grouping until a rewrite finishes.
 
-> **Docs:** [WritingToolsBehavior](https://sosumi.ai/documentation/swiftui/writingtoolsbehavior) · [writingToolsBehavior(_:)](https://sosumi.ai/documentation/swiftui/view/writingtoolsbehavior(_:))
+> **Docs:** [WritingToolsBehavior](https://developer.apple.com/documentation/swiftui/writingtoolsbehavior) · [writingToolsBehavior(_:)](https://developer.apple.com/documentation/swiftui/view/writingtoolsbehavior(_:))
 
 ## Common Mistakes
 

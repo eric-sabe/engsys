@@ -2,6 +2,7 @@ import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -178,6 +179,7 @@ describe('Personas & Skills Contract Suite (CT-PS-01..CT-PS-09)', () => {
     const allMd = [
       ...personaFiles,
       ...listMarkdownFiles(CORE_SKILLS_DIR),
+      ...listMarkdownFiles(STACKS_DIR),
     ];
     for (const file of allMd) {
       const lines = fs.readFileSync(file, 'utf8').split('\n');
@@ -193,16 +195,23 @@ describe('Personas & Skills Contract Suite (CT-PS-01..CT-PS-09)', () => {
     }
   });
 
-  test('CT-PS-05: Zero nonexistent skill references or broken reference links in core/skills and core/commands', () => {
+  test('CT-PS-05: Zero nonexistent skill references or broken reference links across personas, core/skills, core/commands, and stacks/', () => {
     const forbiddenSkillPatterns = [
       /\bclaude-api\b/,
       /\brepo-rebuilder\b/,
       /\bdesign-review\b(?!er)/,
+      /\bswiftui-navigation\b/,
+      /\bswiftui-layout-components\b/,
+      /\bswiftui-animation\b/,
+      /\bsosumi\.ai\b/,
+      /\bgithub-issues\b/,
+      /\bterraform-conventions\b/,
     ];
     const filesToCheck = [
       ...personaFiles,
       ...listMarkdownFiles(CORE_SKILLS_DIR),
       ...listMarkdownFiles(path.join(ROOT, 'core/commands')),
+      ...listMarkdownFiles(STACKS_DIR),
     ];
     for (const file of filesToCheck) {
       const content = fs.readFileSync(file, 'utf8');
@@ -210,7 +219,7 @@ describe('Personas & Skills Contract Suite (CT-PS-01..CT-PS-09)', () => {
         assert.doesNotMatch(
           content,
           bad,
-          `${path.relative(ROOT, file)} references nonexistent skill matching ${bad}`
+          `${path.relative(ROOT, file)} references nonexistent skill or URL matching ${bad}`
         );
       }
       if (file.endsWith('design-critique.md') || file.endsWith('design-audit.md')) {
@@ -238,6 +247,63 @@ describe('Personas & Skills Contract Suite (CT-PS-01..CT-PS-09)', () => {
     }
     assert.ok(!fs.existsSync(path.join(CORE_SKILLS_DIR, 'git-commit')), 'git-commit must be retired');
     assert.ok(!fs.existsSync(path.join(CORE_SKILLS_DIR, 'github-issues')), 'github-issues must be retired');
+    assert.ok(!fs.existsSync(path.join(STACKS_DIR, 'iac/terraform/skills/terraform-conventions')), 'terraform-conventions must be retired');
+  });
+
+  test('CT-PS-07: Zero Keystone monorepo leakage across stacks/**/*.md', () => {
+    const forbiddenLeakage = [
+      /@keystone\//,
+      /feedfrwd/i,
+      /backend-api/,
+      /apps\/web\/Dockerfile/,
+      /packages\/database\/generated\/prisma/,
+      /app\.feedfrwd\.com/,
+      /keystone-prod/,
+      /keystone-staging/,
+    ];
+    for (const file of listMarkdownFiles(STACKS_DIR)) {
+      const content = fs.readFileSync(file, 'utf8');
+      for (const pattern of forbiddenLeakage) {
+        assert.doesNotMatch(
+          content,
+          pattern,
+          `Monorepo leakage in ${path.relative(ROOT, file)} matching ${pattern}`
+        );
+      }
+    }
+  });
+
+  test('CT-PS-08: All 24 stack packs have claude.fragment.md, list their skills, and pass build-plugins.mjs --check', () => {
+    let packCount = 0;
+    for (const cat of fs.readdirSync(STACKS_DIR).sort()) {
+      const catDir = path.join(STACKS_DIR, cat);
+      if (!fs.statSync(catDir).isDirectory()) continue;
+      for (const val of fs.readdirSync(catDir).sort()) {
+        const packDir = path.join(catDir, val);
+        if (!fs.statSync(packDir).isDirectory()) continue;
+        packCount++;
+        const fragPath = path.join(packDir, 'claude.fragment.md');
+        assert.ok(fs.existsSync(fragPath), `Missing claude.fragment.md in stacks/${cat}/${val}`);
+        const fragContent = fs.readFileSync(fragPath, 'utf8');
+        const skillsDir = path.join(packDir, 'skills');
+        if (fs.existsSync(skillsDir)) {
+          for (const skillEntry of fs.readdirSync(skillsDir, { withFileTypes: true })) {
+            if (skillEntry.isDirectory() && fs.existsSync(path.join(skillsDir, skillEntry.name, 'SKILL.md'))) {
+              assert.ok(
+                fragContent.includes(skillEntry.name),
+                `stacks/${cat}/${val}/claude.fragment.md must reference its skill '${skillEntry.name}'`
+              );
+            }
+          }
+        }
+      }
+    }
+    assert.equal(packCount, 24, `Expected 24 stack packs, found ${packCount}`);
+
+    execFileSync(process.execPath, [path.join(ROOT, 'scripts/build-plugins.mjs'), '--check'], {
+      cwd: ROOT,
+      stdio: 'pipe',
+    });
   });
 
   test('CT-PS-09: llm-structured-outputs includes October 2026 model catalog and output_config.format', () => {
@@ -255,3 +321,4 @@ describe('Personas & Skills Contract Suite (CT-PS-01..CT-PS-09)', () => {
     assert.doesNotMatch(providerDetails, /output_format:\s*zodOutputFormat/);
   });
 });
+

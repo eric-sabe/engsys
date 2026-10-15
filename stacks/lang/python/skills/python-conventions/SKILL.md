@@ -1,61 +1,57 @@
 ---
 name: python-conventions
-description: Python coding conventions for this repo (Python 3.12+, type hints, PEP 257/8). Use when writing, reviewing, or editing any *.py file. Covers type hints, docstrings, formatting, exception handling, async I/O, virtualenv discipline, and test expectations.
+description: Python 3.12+ coding conventions (uv, ruff, pyright/ty strict typing, Pydantic v2, async I/O, and pytest). Use when writing, reviewing, or editing any *.py file or pyproject.toml.
 ---
 
-# Python Coding Conventions
+# Python Coding Conventions (Python 3.12+ / 2026 Tooling)
 
-Applies to: any `*.py` file in this repo. Target: Python 3.12+.
+Applies to: any `*.py` file and `pyproject.toml` in this repository. Target runtime: **Python 3.12+**.
 
-> Naturalize: confirm the venv location, package manager (uv / pip / poetry), and test runner in `CLAUDE.md`. The defaults below assume a `uv`-managed `.venv/` and `pytest`.
+> Naturalize: confirm the virtualenv location (`.venv/`), package manager (`uv`), type checker (`pyright` / `ty` / `mypy`), and test runner (`pytest`) in `CLAUDE.md`.
 
-## Function-level expectations
+## Tooling & Environment (`uv` + `ruff` + Typecheck)
 
-- Descriptive function names; type hints on parameters and returns (use builtin generics on modern targets, e.g. `list[str]`, `dict[str, int]`; fall back to `typing.List` / `typing.Dict` only on older runtimes).
-- PEP 257 docstrings placed immediately after `def` / `class`.
-- Break complex functions into smaller, single-purpose helpers.
-- Handle edge cases explicitly; raise or return meaningful errors rather than silently swallowing.
+- **Environment & dependency management**: Use `uv` (`uv sync`, `uv run pytest`, `uv lock`) with the project's `.venv/`. Never install packages into the system Python.
+- **Formatting & linting**: Run `ruff check` and `ruff format --check` (4-space indentation, PEP 8 top-level imports — never place `import` statements inside function bodies unless breaking a documented circular import).
+- **Static type checking**: Run `pyright` or `ty` (or `mypy --strict`) before committing.
 
-## General
+## Type Annotations & Data Validation
 
-- Readability and clarity over cleverness.
-- For non-obvious algorithms, include a short comment explaining the approach.
-- Mention third-party library usage and purpose at the import site if non-obvious.
-- Consistent naming; follow language idioms.
-
-## Style
-
-- **PEP 8.** 4-space indents. Keep lines reasonable (the classic guideline is 79; many repos tolerate longer for clarity — match surrounding code and any configured formatter, e.g. `ruff`/`black`).
-- Blank lines to separate functions, classes, and logical blocks.
-
-## Async I/O
-
-- For async code, use `async def` / `await` end-to-end; don't block the event loop with sync I/O.
-- Prefer async-native drivers (e.g. an async DB/HTTP client) over wrapping sync calls in threads.
-- Use `asyncio.Lock` / structured task management for shared mutable state; guard caches against concurrent rebuilds.
-
-## Environment & dependencies
-
-- Use the project venv (commonly `.venv/`, often `uv`-managed). If a stale top-level `venv/` exists, prefer the project-documented one — check `CLAUDE.md`.
-- Load config from the environment (e.g. `python-dotenv`); quote `.env` values containing spaces so `source .env` doesn't break in zsh.
-
-## Edge cases and testing
-
-- Cover critical paths with tests; include empty inputs, invalid types, and large-input cases where relevant.
-- Prefer `pytest`. Run from the project venv.
-
-## Example
+- **Modern builtin generics (PEP 585 / PEP 604 / PEP 695)**: Use `list[str]`, `dict[str, Any]`, `int | None`, and `type Alias = ...` — never legacy `typing.List`, `typing.Dict`, or `typing.Optional`.
+- **Boundary validation with Pydantic v2**: Validate external payloads, config, and LLM/API schemas with `pydantic.BaseModel` (`model_validate`, `model_dump`, `ConfigDict(extra="forbid", frozen=True)`).
 
 ```python
-def calculate_area(radius: float) -> float:
-    """Calculate the area of a circle given the radius.
+import math
+from pydantic import BaseModel, ConfigDict, Field
 
-    Parameters:
-        radius: The radius of the circle.
 
-    Returns:
-        The area, computed as pi * radius**2.
-    """
-    import math
-    return math.pi * radius ** 2
+class CircleSpec(BaseModel):
+    """Validated input specification for circle geometry."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    radius: float = Field(gt=0, description="Circle radius in meters.")
+
+
+def calculate_area(spec: CircleSpec) -> float:
+    """Return the area of a circle in square meters."""
+    return math.pi * (spec.radius ** 2)
 ```
+
+## Async I/O & Concurrency
+
+- Use `async def` / `await` end-to-end on async request paths; never block the event loop with synchronous file, network (`requests`), or database calls.
+- Use async-native clients: `httpx.AsyncClient` for HTTP, `pymongo.AsyncMongoClient` for MongoDB (never EOL `motor`), and `asyncpg` / `sqlalchemy.ext.asyncio` for Postgres.
+- Use `asyncio.TaskGroup` for structured fan-out and `asyncio.Lock` to guard shared in-memory caches against stampedes.
+
+## Testing (`pytest`)
+
+- Write deterministic unit and integration tests using `pytest` and `pytest-asyncio` (`uv run pytest`).
+- Cover nominal paths, boundary values (`0`, negative, empty collections, `None`), and validation rejection (`pytest.raises(ValidationError)`).
+
+## Review Checklist
+
+- [ ] All imports at module top level (PEP 8) and sorted by `ruff`
+- [ ] Parameter and return types annotated using Python 3.12+ builtin syntax (`list[T]`, `X | None`)
+- [ ] External inputs validated via Pydantic v2 models (`model_validate`, `ConfigDict`)
+- [ ] Async paths use non-blocking drivers (`httpx.AsyncClient`, `pymongo.AsyncMongoClient`)
+- [ ] `uv run ruff check`, typecheck, and `uv run pytest` pass cleanly

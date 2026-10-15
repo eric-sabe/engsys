@@ -15,8 +15,8 @@ migration guidance for transitioning from Core Data to SwiftData.
 For teams that haven't adopted SwiftData, Core Data remains a fully supported
 persistence framework.
 
-Docs: [NSPersistentContainer](https://sosumi.ai/documentation/coredata/nspersistentcontainer),
-[Setting up a Core Data stack](https://sosumi.ai/documentation/coredata/setting-up-a-core-data-stack)
+Docs: [NSPersistentContainer](https://developer.apple.com/documentation/coredata/nspersistentcontainer),
+[Setting up a Core Data stack](https://developer.apple.com/documentation/coredata/setting-up-a-core-data-stack)
 
 ### NSPersistentContainer Setup
 
@@ -194,7 +194,7 @@ Core Data and SwiftData can share the same underlying SQLite store. This
 enables gradual migration: keep existing Core Data code running while
 introducing SwiftData for new features.
 
-Docs: [Adopting SwiftData for a Core Data app](https://sosumi.ai/documentation/coredata/adopting_swiftdata_for_a_core_data_app)
+Docs: [Adopting SwiftData for a Core Data app](https://developer.apple.com/documentation/coredata/adopting_swiftdata_for_a_core_data_app)
 
 ### Using the Same Underlying Store
 

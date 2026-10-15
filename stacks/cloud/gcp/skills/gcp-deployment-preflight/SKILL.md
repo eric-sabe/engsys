@@ -1,137 +1,97 @@
 ---
 name: gcp-deployment-preflight
-description: Preflight validation for GCP infrastructure deployments (Terraform / gcloud / Deployment Manager / Config Connector). Run before any deploy. Validates templates (terraform validate/plan or gcloud deployment preview), cleans up stale/failed deployments and stuck resources, catches globally-unique naming conflicts (GCS bucket, project IDs, Artifact Registry), and checks quota/capacity limits. Activate when the active cloud is GCP and the user mentions deploying, validating, previewing infra changes, gcloud deploy, terraform plan/apply on GCP, or deploy failures.
+description: Preflight validation for GCP infrastructure deployments (Terraform / OpenTofu / gcloud / Infrastructure Manager / Cloud Run / Config Connector). Run before any deploy. Validates templates, cleans up stuck operations and revisions, catches globally-unique naming conflicts (GCS buckets, project IDs, Artifact Registry), and checks quota/API enablement.
 ---
 
 # GCP Deployment Preflight
 
-Validate GCP infrastructure changes locally and clear blocking state *before* you
-deploy, so CI doesn't discover what you could have caught. Continue through all steps
-even if one fails — capture every issue, then fix them in a batch.
+Validate GCP infrastructure changes locally and clear blocking state *before* you deploy, so CI doesn't discover what you could have caught locally. Continue through all steps even if one fails — capture every issue, then fix them in a single batch.
 
-> Discipline: **batch your fixes.** Each deploy/CI run costs real minutes. Read the
-> whole failing config, reason about every issue, fix them all, push once. One run per
-> problem cluster, not one per error message.
+> **2026 Tooling Note:** Do NOT use sunset `gcloud deployment-manager` (sunset March 2026) or legacy `gsutil` commands. Use **Terraform / OpenTofu**, **GCP Infrastructure Manager (`gcloud infra-manager`)**, **Cloud Run (`gcloud run`)**, and **`gcloud storage`**.
 
-## When to use
+## Step 1 — Detect Project Type & Confirm Context
 
-- Before `terraform apply`, `gcloud run deploy`, `gcloud deployment-manager deployments
-  create/update`, or Config Connector / KCC applies.
-- When preparing or reviewing GCP IaC (Terraform google provider, Deployment Manager,
-  Config Connector manifests).
-- To preview what a deploy will change.
-- After a failed deploy left a deployment or resource stuck.
-
-## Step 1 — Detect project type & confirm context
-
-- **Terraform (most common for GCP IaC):** `*.tf` with the `google`/`google-beta`
-  provider, backend in GCS. → use the Terraform flow (Step 2a).
-- **gcloud / Deployment Manager:** `*.yaml`/`*.jinja` DM configs, or imperative
-  `gcloud` deploys. → Step 2b.
-- **Config Connector / KCC:** Kubernetes-style GCP-resource manifests applied to a
-  cluster.
-- Confirm context — wrong project is the expensive mistake:
+- **Terraform / OpenTofu (standard GCP IaC):** `*.tf` with `google` / `google-beta` providers and GCS backend → Step 2a.
+- **GCP Infrastructure Manager / Cloud Run:** `gcloud infra-manager` deployments or `gcloud run` services → Step 2b.
+- **Config Connector (KCC):** Kubernetes-style GCP resource manifests → validate with `kubectl diff` / `nomos vet`.
+- Confirm active project, account, and region first:
 
 ```bash
 gcloud config get-value project
-gcloud auth list                       # active account
+gcloud auth list
 gcloud config get-value compute/region
 ```
 
-## Step 2 — Validate & preview
+## Step 2 — Validate & Preview
 
-### 2a — Terraform
+### 2a — Terraform / OpenTofu
 
 ```bash
 terraform fmt -check
 terraform validate
-terraform plan -out=tfplan             # the what-if; review creates/changes/destroys
-terraform show -no-color tfplan        # inspect details
+terraform plan -out=tfplan
+terraform show -no-color tfplan
 ```
 
-Review the plan for **destroys / replacements of stateful resources** (Cloud SQL,
-Spanner, GCS buckets, persistent disks) and any IAM-binding changes. Never rubber-stamp
-a replacement of a data store.
+Inspect the plan for **destroys or `-/+` replacements of stateful resources** (Cloud SQL, Spanner, GCS buckets, persistent disks) and IAM policy bindings. Never rubber-stamp a stateful resource replacement.
 
-### 2b — gcloud / Deployment Manager
+### 2b — Cloud Run & Infrastructure Manager
 
 ```bash
-# Deployment Manager dry-run preview
-gcloud deployment-manager deployments update <name> --config config.yaml --preview
-gcloud deployment-manager deployments describe <name>     # inspect the preview
+# Infrastructure Manager preview deployment
+gcloud infra-manager previews create <preview-id> \
+  --location=<region> \
+  --deployment=<deployment-id> \
+  --local-source="."
 
-# Cloud Run: validate the service spec without serving traffic
-gcloud run deploy <svc> --image <img> --no-traffic --tag preflight  # revision w/o traffic
+# Cloud Run: deploy a non-serving revision first to validate image & startup probes
+gcloud run deploy <service> --image <image-digest> --no-traffic --tag preflight
 ```
 
-## Step 3 — Clean up stale / failed deployments & stuck resources
+## Step 3 — Inspect Stuck Operations & Blocking Resources
 
 ```bash
-# Deployment Manager: failed deployments block re-create
-gcloud deployment-manager deployments list \
-  --filter="operation.status!=DONE OR operation.error:*"
-gcloud deployment-manager deployments delete <name>        # if stuck/failed
-
-# Recent failed operations (root cause — read the first error, not the cascade)
+# Check recent errors in Cloud Logging (read the root cause, not the cascade)
 gcloud logging read 'severity>=ERROR' --limit 20 --freshness=1h
+
+# Inspect active Infrastructure Manager or Cloud Run operations
+gcloud infra-manager deployments list --location=<region>
+gcloud run revisions list --service=<service> --region=<region>
 ```
 
-Terraform: a partial apply leaves real resources with no/partial state. Use
-`terraform state list` + `terraform import` to reconcile, or `-target` a clean re-apply.
-Watch for **resources that block deletion** — non-empty GCS buckets, Artifact Registry
-repos with images, resources with `deletion_protection = true` (Cloud SQL, Spanner),
-in-use IPs/networks. Clear them first.
+Watch for resources that block deletion or replacement: non-empty GCS buckets, Artifact Registry repositories containing images, Cloud SQL / Spanner instances with `deletion_protection = true`, and attached VPC serverless connectors.
 
-## Step 4 — Globally-unique naming conflicts
+## Step 4 — Globally-Unique Naming & Storage Checks
 
-| Resource | Namespace | Conflict mode |
+| Resource | Namespace | Verification Command |
 | --- | --- | --- |
-| **GCS bucket** | Global (all of GCP) | name taken / recently-deleted names reserved |
-| **Project ID** | Global, **immutable**, not reusable | must be unique forever |
-| **Artifact Registry repo** | Per project+location | already-exists |
-| Cloud Run service, Pub/Sub topic, etc. | Per project (+region) | recreate collisions after partial deploys |
+| **GCS Bucket** | Global across all of GCP | `gcloud storage buckets describe gs://<bucket-name>` |
+| **Project ID** | Global, immutable forever | `gcloud projects describe <project-id>` |
+| **Artifact Registry** | Per project + region | `gcloud artifacts repositories describe <repo> --location=<region>` |
 
-**Pattern:** never hard-code a globally-unique name — add a short unique suffix
-(project-id fragment / random) via a Terraform variable or `random_id`, and check
-availability before deploy (`gsutil ls -b gs://<name>` / `gcloud artifacts repositories
-describe`). Project IDs especially are permanent — pick deliberately.
+Never hardcode bare global bucket names without a project/environment suffix. Always use `gcloud storage` (never legacy `gsutil`).
 
-## Step 5 — Quota & capacity check
-
-Deploys fail late when a quota is hit. Pre-check what the change will consume:
+## Step 5 — API Enablement & Quota Headroom
 
 ```bash
+# Verify required GCP APIs are enabled
+gcloud services list --enabled
+
+# Check regional and project quota usage vs. limits
 gcloud compute regions describe <region> \
   --format="table(quotas.metric, quotas.limit, quotas.usage)"
 gcloud compute project-info describe \
   --format="table(quotas.metric, quotas.limit, quotas.usage)"
 ```
 
-Common deploy-blocking quotas: Compute CPUs / in-use external IPs per region, GPUs/TPUs,
-Cloud Run CPU + max-instances quota, Cloud SQL instances, Spanner nodes, VPC networks/
-subnets, and **API enablement** — a deploy fails if the required API isn't enabled
-(`gcloud services list --enabled`; enable with `gcloud services enable`). Soft quotas
-need an IAM & Admin → Quotas request with lead time — raise them before the deploy.
-
-## Step 6 — Check for an in-flight deploy before triggering
-
-If CI auto-deploys on push, don't fire a manual deploy on top — the runs race.
+## Step 6 — Check for In-Flight CI Deploys
 
 ```bash
-gh run list --workflow="<deploy workflow>" --limit 3
-gcloud deployment-manager operations list --filter="status!=DONE"
+gh run list --workflow="<deploy-workflow>" --limit 3
 ```
 
-If a deploy is in progress, wait.
+If a deploy run is already in progress, wait for it to finish before triggering another apply.
 
-## Step 7 — Report
+## Step 7 — Preflight Report
 
-Summarize: validate/plan results (creates / modifies / **destroys** / replacements),
-deployments cleaned up, naming overrides applied, required-API + quota headroom, and
-whether it's safe to deploy. Flag any replacement of a stateful resource and any IAM
-change.
-
-## Tool requirements
-
-`gcloud` CLI, `terraform` (for TF projects), `gsutil`, `gh` (if CI-driven). Verify auth:
-`gcloud auth list` / `gcloud config get-value project`.
+Summarize: validation/plan diff (`create` / `modify` / `destroy` / `replace`), stuck revisions cleared, global naming checks, enabled APIs + quota headroom, and whether it is safe to proceed with the operator-gated deploy.

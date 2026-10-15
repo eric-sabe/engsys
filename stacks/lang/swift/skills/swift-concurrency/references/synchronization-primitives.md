@@ -20,7 +20,7 @@ state via mutual exclusion. It blocks threads attempting to acquire the lock,
 ensuring only one execution context accesses the protected value at a time.
 
 **Documentation:**
-[sosumi.ai/documentation/synchronization/mutex](https://sosumi.ai/documentation/synchronization/mutex)
+[developer.apple.com/documentation/synchronization/mutex](https://developer.apple.com/documentation/synchronization/mutex)
 
 ### Basic Usage
 
@@ -81,7 +81,7 @@ It heap-allocates the underlying lock, avoiding the unsound address-of
 problem that makes raw `os_unfair_lock` unusable from Swift.
 
 **Documentation:**
-[sosumi.ai/documentation/os/osallocatedunfairlock](https://sosumi.ai/documentation/os/osallocatedunfairlock)
+[developer.apple.com/documentation/os/osallocatedunfairlock](https://developer.apple.com/documentation/os/osallocatedunfairlock)
 
 ### State-Protecting Lock
 
@@ -161,7 +161,7 @@ ownership assertions for debugging.
 compare-and-swap patterns where a full lock would be overkill.
 
 **Documentation:**
-[sosumi.ai/documentation/synchronization/atomic](https://sosumi.ai/documentation/synchronization/atomic)
+[developer.apple.com/documentation/synchronization/atomic](https://developer.apple.com/documentation/synchronization/atomic)
 
 ### Counter Example
 

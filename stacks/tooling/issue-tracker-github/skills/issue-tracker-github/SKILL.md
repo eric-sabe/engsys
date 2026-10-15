@@ -10,9 +10,12 @@ contract**. Commands and agents call these operations *by name* without knowing 
 backend; the Linear pack (`issue-tracker-linear`) implements the same names so the two
 are swappable. Keep the operation names below stable.
 
-Builds on the knowledge already in the core `gh-cli` and `github-issues` skills — read
-those for full `gh` flag coverage and issue-body templates. This skill does not repeat
-them; it maps the **contract operations** onto concrete commands.
+Builds on the knowledge in the core `gh-cli` skill — read that for full `gh` flag coverage.
+Issue-body templates live in `<engsys-root>/templates/gh-issue-templates/` (`bug.md`,
+`feature.md`, `refactor.md`). When filing SDD-backed issues (via Jody or `/design-change`),
+always include the machine-readable `<!-- engsys:issue-meta -->` footer block (`spec`,
+`spec_sections`, `requirements`, `contracts`, `neg_assertions`, `phase`, `depends_on`,
+`touches`).
 
 **Identifiers:** GitHub issues are referenced as `#123`. Boards are GitHub ProjectV2
 ("Projects"). The repo (`<owner>/<repo>`) and the Project number/owner are project facts —
@@ -37,7 +40,8 @@ bodies may use `--body "..."`.
 ### create-issue(title, body-from-tmp-file, type/label, [project, phase]) -> id + URL
 
 ```bash
-# 1. Write the body to tmp/issue-body-<slug>.md (see github-issues for templates).
+# 1. Write the body to tmp/issue-body-<slug>.md (see <engsys-root>/templates/gh-issue-templates/
+#    and append <!-- engsys:issue-meta --> when filing SDD-backed work items).
 # 2. Create. --type/--label carries the contract "type/label". Prints the issue URL.
 gh issue create \
   --repo <owner>/<repo> \
@@ -253,18 +257,17 @@ Symptom / Cause / Fix.
   `--limit 400` (or higher) to `item-list`, and never verify a fresh add against it. Only
   on an actual `INSUFFICIENT_SCOPES` error: `gh auth refresh -h github.com --scopes project`.
 
-### ProjectV2 single-select fields are GraphQL-only
+### Editing existing ProjectV2 single-select options is GraphQL-only
 
-- **Symptom:** A fresh `gh project create` board has only built-in fields (`Title`,
-  `Assignees`, `Status`, `Labels`, …). There's no `gh` shortcut to add a single-select field
-  with options (Phase / Priority / Owner), so operators end up configuring them by hand in the
-  UI for every issue.
-- **Cause:** The `gh` CLI has no subcommand to create or edit a single-select field's option
-  list — `field-create` makes a field, `field-delete` removes one, `item-edit` sets a value on
-  an item; none append/rename options on an existing single-select field.
-- **Fix:** Create and edit single-select fields with `gh api graphql` (`createProjectV2Field`
-  with `dataType: SINGLE_SELECT` and `singleSelectOptions`). Verify with
-  `gh project field-list <num> --owner <owner>` before assuming `Status` is the only field.
+- **Symptom:** You need to add or rename an option on an existing single-select field
+  (Phase / Priority / Owner), and `gh project` has no subcommand to mutate options without
+  deleting and recreating the whole field.
+- **Cause:** `gh project field-create --data-type SINGLE_SELECT --single-select-options ...`
+  creates a **new** field, `field-delete` removes one, and `item-edit` sets a value on an
+  item — none append or rename options on an existing single-select field.
+- **Fix:** Edit existing single-select field options with `gh api graphql`
+  (`updateProjectV2Field` with `singleSelectOptions`). Verify existing fields with
+  `gh project field-list <num> --owner <owner>` before creating duplicates.
 
 ### updateProjectV2Field preserves option IDs verbatim — pass the full set
 
@@ -285,6 +288,6 @@ Symptom / Cause / Fix.
 
 ## See also
 
-- core `gh-cli` — full `gh` command/flag reference.
-- core `github-issues` — issue-body templates, labels, MCP fallback.
+- core `gh-cli` — full `gh` command/flag reference (`references/pr-and-issue-recipes.md`, `references/projects-and-graphql.md`).
+- `<engsys-root>/templates/gh-issue-templates/` — issue-body templates (`bug.md`, `feature.md`, `refactor.md`).
 - core `github-actions` — workflow expression/injection/draft-gate/rate-limit lessons.

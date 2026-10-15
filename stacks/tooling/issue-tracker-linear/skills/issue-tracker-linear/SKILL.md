@@ -10,7 +10,8 @@ contract**. Commands and agents call these operations *by name* without knowing 
 backend; the GitHub pack (`issue-tracker-github`) implements the same names, so the two
 are swappable. Keep the operation names below stable.
 
-Linear is reached through the **Linear MCP** (tools prefixed `mcp__claude_ai_Linear__`).
+Linear is reached through the **Linear MCP** (tools prefixed `mcp__linear__*` for standalone
+Linear MCP servers or `mcp__claude_ai_Linear__*` for the Claude.ai Linear connector).
 There is no Linear CLI — every operation is an MCP tool call, so this pack adds no Bash
 permissions. If the tools are not visible in the session, discover them via tool search;
 the MCP connector must be enabled (see the pack's `claude.fragment.md`).
@@ -57,7 +58,10 @@ native Linear concepts — there are no ad-hoc custom fields:
 `save_issue` with no id creates. Set `team` (the team key), `title`, `description`
 (the body), `labels` (the contract type/label), and optionally `assignee`, `project`,
 `priority`. Read the long markdown body from `tmp/issue-body-<slug>.md` and pass its
-contents as `description` (real newlines, not `\n`).
+contents as `description` (real newlines, not `\n`). When filing SDD-backed issues
+(via Jody or `/design-change`), include the machine-readable `<!-- engsys:issue-meta -->`
+footer block (`spec`, `spec_sections`, `requirements`, `contracts`, `neg_assertions`,
+`phase`, `depends_on`, `touches`) at the bottom of `description`.
 
 ```text
 save_issue(team: "ABC", title: "<title>", description: <contents of tmp/issue-body-<slug>.md>,
@@ -103,7 +107,7 @@ save_issue(id: "ABC-123", state: "Done")   # or "Canceled"
 
 ### create-board(name, fields: Phase, Priority, Owner)
 
-`save_project(name: "<name>", teamId: <team>)` creates the project (board). Then create
+`save_project(name: "<name>", teams: ["ABC"])` creates the project (board). Then create
 one **milestone per Phase** (these are the Phase field's values):
 
 ```text
