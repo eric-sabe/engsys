@@ -120,7 +120,11 @@ export async function main({ stdin = process.stdin, now = () => Date.now(), writ
 	try {
 		const prompt = extractPrompt(input);
 		const touchedPaths = resolveTouchedPaths(input, { cwd });
-		const result = runMemoryBrief({ agentType, prompt, touchedPaths, cwd });
+		// Give memory-brief only what's LEFT of the 2s total budget after resolveTouchedPaths' own
+		// (separately timed) git calls, so the two stages together can never exceed TIMEOUT_MS plus
+		// node startup — not TIMEOUT_MS on top of whatever resolveTouchedPaths already spent.
+		const remainingMs = Math.max(100, TIMEOUT_MS - (now() - t0));
+		const result = runMemoryBrief({ agentType, prompt, touchedPaths, cwd, timeoutMs: remainingMs });
 		if (result) {
 			briefText = result.text ?? '';
 			logKeys = { lesson_keys: result.lessonKeys ?? [], pointer_keys: result.pointerKeys ?? [], bytes: result.bytes ?? Buffer.byteLength(briefText, 'utf8') };

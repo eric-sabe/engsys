@@ -336,7 +336,7 @@ describe('buildBrief — end to end, fail-open, and the agent exclusion boundary
 			assert.deepEqual(forNyx.pointerKeys, [], 'excluded agent must get zero Class B pointers');
 
 			const forIsabelle = buildBrief({ repoRoot: dir, agentType: 'isabelle', prompt: 'widget', touchedPaths: ['docs/agent-lessons/one.md'] });
-			assert.ok(forIsabelle.pointerKeys.length >= 0); // not excluded: pointer path is reachable (score may still be 0; no assertion on content)
+			assert.ok(forIsabelle.pointerKeys.includes('ev1'), 'a non-excluded agent should actually receive the seeded pointer, not just an empty-or-not array');
 			assert.ok(!forNyx.text.includes('secret-ish free text'));
 			assert.ok(!forIsabelle.text.includes('secret-ish free text'), 'free text must never reach rendered output regardless of agent');
 		} finally {

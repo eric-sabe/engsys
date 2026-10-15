@@ -388,7 +388,10 @@ export function buildBrief(opts = {}) {
 				touchedPaths: opts.touchedPaths ?? [],
 				agentType: opts.agentType ?? null,
 				stacks: opts.stacks ?? [],
-				isReviewed: (doc) => isReviewedOnDefaultBranch(doc, { repoRoot, ref: opts.reviewedRef ?? 'HEAD' }),
+				// origin/main, NOT HEAD — see isReviewedOnDefaultBranch's own comment: HEAD would let a
+				// feature branch's own unreviewed commit rubber-stamp itself as "reviewed", which is
+				// exactly the case this check exists to catch (a security:true supersede exception).
+				isReviewed: (doc) => isReviewedOnDefaultBranch(doc, { repoRoot, ref: opts.reviewedRef ?? 'origin/main' }),
 			},
 			5,
 		);

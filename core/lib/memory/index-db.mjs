@@ -36,6 +36,8 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { splitFrontmatter } from '../../scripts/validate-lessons.mjs';
+import { parseYaml } from '../../../lib/yaml.js';
 
 const require = createRequire(import.meta.url);
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -122,27 +124,15 @@ function* walkMd(dir) {
  * every lesson/agent frontmatter in this repo uses). Exported for reuse by memory-brief.mjs (agent
  * `security: true` exclusion) and subagent-memory-inject.mjs tests. Never throws. */
 export function readFrontmatter(text) {
-	if (!text.startsWith('---\n')) return { fm: {}, body: text };
-	const end = text.indexOf('\n---', 4);
-	if (end === -1) return { fm: {}, body: text };
-	const raw = text.slice(4, end);
-	const fm = {};
-	// Deliberately tiny: only the flat scalar/list shapes the lesson schema uses. A full YAML
-	// parser is overkill here and this file has no CJS/ESM interop to a sibling lib dependency.
-	for (const line of raw.split('\n')) {
-		const m = /^(\w+):\s*(.*)$/.exec(line);
-		if (!m) continue;
-		const [, key, val] = m;
-		if (val.startsWith('[')) {
-			const inner = val.slice(1, val.lastIndexOf(']'));
-			fm[key] = inner.trim() ? inner.split(',').map((s) => s.trim().replace(/^["']|["']$/g, '')) : [];
-		} else if (val === 'true' || val === 'false') {
-			fm[key] = val === 'true';
-		} else {
-			fm[key] = val.replace(/^["']|["']$/g, '');
-		}
-	}
-	return { fm, body: text.slice(text.indexOf('\n', end + 1) + 1) };
+	const { frontmatter, body } = splitFrontmatter(text);
+	if (frontmatter === null) return { fm: {}, body: text };
+	// Delegates to the SAME parser validate-lessons.mjs validates frontmatter with (lib/yaml.js's
+	// parseYaml) — a hand-rolled `split(',')` here previously broke on a quoted list element that
+	// itself contains a comma (e.g. a brace glob `"**/*.{ts,tsx}"`), silently storing a value the
+	// validator would have accepted as-is. A malformed block degrades to {} rather than throwing.
+	let fm;
+	try { fm = parseYaml(frontmatter) ?? {}; } catch { fm = {}; }
+	return { fm, body };
 }
 
 /** Load every `.md` file under `dir` (recursively) as a Class A Doc, keyed `<kind>:<slug>` (slug =

@@ -3,9 +3,10 @@
 // consistent index; the index fails open when node:sqlite is missing.
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import fs, { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import path, { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { hermeticGit } from '../git-env.mjs';
 import {
 	closeIndex,
@@ -14,6 +15,7 @@ import {
 	loadClassADocs,
 	loadClassBEvents,
 	queryIndex,
+	readFrontmatter,
 	resolveCacheDir,
 	resolveClassARoots,
 } from './index-db.mjs';
@@ -55,6 +57,26 @@ describe('resolveCacheDir', () => {
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
+	});
+});
+
+describe('readFrontmatter', () => {
+	test('a quoted list element containing a comma (a brace glob) survives intact', () => {
+		const { fm } = readFrontmatter('---\nglobs: ["**/*.{ts,tsx}", "plain.md"]\nstacks: []\nroles: []\nkeywords: ["x"]\nsecurity: false\nsupersedes: []\n---\n\nbody\n');
+		assert.deepEqual(fm.globs, ['**/*.{ts,tsx}', 'plain.md']);
+	});
+
+	test('matches lib/yaml.js (the same parser validate-lessons.mjs validates with) on every real bundled lesson', () => {
+		const dir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'lessons-library');
+		for (const f of fs.readdirSync(dir)) {
+			if (!f.endsWith('.md') || f === 'README.md') continue;
+			const { fm } = readFrontmatter(fs.readFileSync(path.join(dir, f), 'utf8'));
+			assert.ok(Array.isArray(fm.keywords) && fm.keywords.length > 0, `${f}: keywords should parse non-empty`);
+		}
+	});
+
+	test('malformed frontmatter degrades to {} instead of throwing', () => {
+		assert.doesNotThrow(() => readFrontmatter('---\nglobs: [unterminated\n---\n\nbody\n'));
 	});
 });
 
