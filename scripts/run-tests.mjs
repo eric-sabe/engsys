@@ -21,6 +21,7 @@ const SUITES = [
   ["node --test scripts/security-model.test.mjs"],
   ["node --test core/.claude-plugin/approve-own-scripts.test.mjs"],
   ["node --test core/.claude-plugin/handback-guard.test.mjs"],
+  ["node --test core/.claude-plugin/session-transcript.test.mjs"],
   ["node --test core/.claude-plugin/singleton-write-guard.test.mjs"],
   ["node --test core/fleet/identity/gh-app-token.test.mjs"],
   ["node --test core/fleet/notify.test.mjs"],

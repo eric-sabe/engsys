@@ -187,6 +187,13 @@ review):
   backstop scan, writes the heartbeat only when one is due (none in the last
   0.75 × `heartbeat_minutes`), and prints `NOOP` or the delta (`+`/`-` lines).
   A `NOOP` tick writes no `state.md` and no journal line.
+- **Context-aware rotation** (engsys#125). A SessionStart hook records each
+  fleet-launched session's transcript path (under
+  `$XDG_STATE_HOME/engsys/sessions/`). Each heartbeat reads the last
+  main-thread usage from the transcript's last 64 KB; past
+  `rotate_context_tokens` (default 300000) with nothing active it writes the
+  sticky status `rotation requested — ctx <N>k`, which the fleet supervisor
+  already acts on. It is a backstop under the model's own rotation rule.
 - **Fence.** Every write to GitHub goes through `mm-act.sh`: it checks the
   lease has at least 60 s left by GitHub's clock, that the local deadline
   (`Date.now()` at the start of the last good renew or check, plus the time it

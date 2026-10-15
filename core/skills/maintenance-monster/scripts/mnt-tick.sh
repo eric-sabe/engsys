@@ -15,6 +15,8 @@
 #        BATON_HANDOVER maintain <fleet>   federation.yml moved the role's home (§ Handover)
 #        SNAPSHOT_ERROR <why>              the snapshot failed: GitHub state is unknown this tick
 #        HEARTBEAT_ERROR <why>             the heartbeat was due and failed
+#        ROTATION_REQUESTED …              context is past rotate_context_tokens with nothing active:
+#                                          rotate (§ Context discipline)
 #        BATON_RENEW_ERROR maintain <why>  the renew failed (the fences refuse once the deadline passes)
 # NOOP means: nothing to act on, so no state.md rewrite and no journal line this wake.
 #
@@ -24,7 +26,10 @@
 # Usage: mnt-tick.sh --repo owner/name --state-dir DIR --issue N [--default-branch main]
 #                    [--config FILE] [--heartbeat-minutes 10] [--status "running"] [--session NAME]
 #                    [--stale-min 10] [--no-stale] [--if-due 150s] [--repo-dir DIR]
-#   --config             the monster's yml: heartbeat_minutes from it when the flag is absent
+#   --config             the monster's yml: heartbeat_minutes and rotate_context_tokens from it when the
+#                        flags are absent
+#   --rotate-context-tokens  passed to the heartbeat (engsys#125): over it with nothing active, the heartbeat
+#                        status becomes `rotation requested — ctx <N>k` and ROTATION_REQUESTED is a delta line
 #   --heartbeat-minutes  the tick cadence; a heartbeat is due after 0.75 x this (default 10)
 #   --repo-dir           the local clone the false-positive candidates read git objects from (default: cwd)
 set -euo pipefail
@@ -32,7 +37,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../../../lib/monster.sh
 . "$here/../../../lib/monster.sh"
 
-REPO="" DIR="" ISSUE="" DEFBRANCH=main REPO_DIR="" CONFIG="" HB_MIN="" STATUS="running" SESSION="" STALE_MIN=10 NOSTALE="" IF_DUE=150s
+REPO="" DIR="" ISSUE="" DEFBRANCH=main REPO_DIR="" CONFIG="" HB_MIN="" STATUS="running" SESSION="" STALE_MIN=10 NOSTALE="" IF_DUE=150s ROTATE=""
 usage() { echo "usage: mnt-tick.sh --repo owner/name --state-dir DIR --issue N [--default-branch main] [--config FILE] [--heartbeat-minutes M] [--status text] [--session NAME] [--stale-min N] [--no-stale] [--if-due 150s]" >&2; exit 2; }
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -48,6 +53,7 @@ while [ $# -gt 0 ]; do
     --stale-min) [ $# -ge 2 ] || usage; STALE_MIN="$2"; shift 2 ;;
     --no-stale) NOSTALE=1; shift ;;
     --if-due) [ $# -ge 2 ] || usage; IF_DUE="$2"; shift 2 ;;
+    --rotate-context-tokens) [ $# -ge 2 ] || usage; ROTATE="$2"; shift 2 ;;
     --repo-dir) [ $# -ge 2 ] || usage; REPO_DIR="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; usage ;;
   esac
@@ -55,6 +61,8 @@ done
 [ -n "$REPO" ] && [ -n "$DIR" ] && [ -n "$ISSUE" ] || usage
 [ -n "$HB_MIN" ] || HB_MIN="$(monster_cfg_scalar "$CONFIG" heartbeat_minutes)"
 case "$HB_MIN" in '' | 0 | *[!0-9]*) HB_MIN=10 ;; esac
+[ -n "$ROTATE" ] || ROTATE="$(monster_cfg_scalar "$CONFIG" rotate_context_tokens)"
+case "$ROTATE" in '' | *[!0-9]*) ROTATE=300000 ;; esac
 W="$DIR/.watch"
 mkdir -p "$W"
 DELTA=()
@@ -95,7 +103,7 @@ fi
 if monster_heartbeat_due "$DIR" "$HB_MIN"; then
   RC=0
   HB=$(bash "$here/mnt-heartbeat.sh" --repo "$REPO" --issue "$ISSUE" --state-dir "$DIR" --status "$STATUS" \
-    ${SESSION:+--session "$SESSION"} 2>&1) || RC=$?
+    --rotate-context-tokens "$ROTATE" ${SESSION:+--session "$SESSION"} 2>&1) || RC=$?
   case "$RC" in
     0) while IFS= read -r l; do case "$l" in heartbeat:* | '') ;; *) DELTA+=("$l") ;; esac; done <<<"$HB" ;;
     1) printf '%s\n' "$HB"; exit 1 ;;

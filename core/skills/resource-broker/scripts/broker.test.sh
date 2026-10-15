@@ -450,6 +450,27 @@ eq "an unchanged pool with no heartbeat due → exactly NOOP" "$OUT" "NOOP"
 run bash "$S/broker-tick.sh" --config-dir "$CFG"
 rc_is "--state-dir is required" 2
 
+echo "== D4. the heartbeat asks for rotation past rotate_context_tokens (engsys#125)"
+mkdir -p "$T/sessions"
+TRX="$T/broker-transcript.jsonl"
+printf '{"type":"assistant","message":{"usage":{"input_tokens":5000,"cache_creation_input_tokens":0,"cache_read_input_tokens":345000}}}\n' >"$TRX"
+printf '{"transcript_path":"%s"}\n' "$TRX" >"$T/sessions/acme-broker.json"
+HBR=(env ENGSYS_SESSION=acme-broker ENGSYS_SESSIONS_DIR="$T/sessions" bash "$S/broker-heartbeat.sh" --config-dir "$CFG")
+echo 3 >"$STATE/active"
+run "${HBR[@]}" --status running
+hasnt "a directed action in flight (<state-dir>/active) holds it off" "$OUT" "ROTATION_REQUESTED"
+: >"$STATE/active"
+run "${HBR[@]}" --status running
+has "nothing active, 350k > 300k → the ledger says rotation requested — ctx 350k" "$(cat "$FAKE/gh/issues/101/body")" "status: rotation requested — ctx 350k"
+has "…and the heartbeat says what to do" "$OUT" "ROTATION_REQUESTED broker (rotation requested — ctx 350k)"
+run "${HBR[@]}" --status running
+has "…sticky: the next heartbeat repeats it" "$(cat "$FAKE/gh/issues/101/body")" "status: rotation requested — ctx 350k"
+run "${HBR[@]}" --status "session end"
+has "…but a session end goes through" "$(cat "$FAKE/gh/issues/101/body")" "status: session end"
+rm -f "$STATE/.watch/rotation-requested" "$STATE/active"
+run "${HBR[@]}" --status running --rotate-context-tokens 0
+has "--rotate-context-tokens 0 turns it off" "$(cat "$FAKE/gh/issues/101/body")" "status: running"
+
 echo "== E. a grant nudge reaches a waiting session"
 C="$(pc acquire --owner acme-cache --no-wait)"
 $W >/dev/null 2>&1

@@ -562,6 +562,11 @@ Under context pressure with no in-flight triage: session-end digest, final
 heartbeat **"rotation requested"** (exact phrase — the fleet supervisor keys
 on it), `mnt-baton.sh release … --reason rotation`, stop. The fleet supervisor ([agent-sessions](../agent-sessions/SKILL.md))
 relaunches you within minutes; startup reconcile recovers from durable state.
+The heartbeat's context-aware backstop applies here too (Merge Monster
+§ Context discipline; `rotate_context_tokens`, default 300000): write the
+finding you are triaging to `<state_dir>/active` while it is in flight and
+empty the file when it is disposed, since an active finding is what holds a
+rotation off. On `ROTATION_REQUESTED`, rotate as above.
 
 ## Escalation
 

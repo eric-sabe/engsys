@@ -691,6 +691,17 @@ haven't written down:
   minutes, and startup reconcile recovers everything from durable state.
   The operator only appears when a relaunch fails or a stale-but-alive
   session needs a probe.
+- **The backstop: context-aware rotation** (engsys#125). Every heartbeat
+  reads your last main-thread usage (input + cache creation + cache read)
+  from the tail of your transcript (the SessionStart hook records its path
+  for every fleet-launched session). Over `rotate_context_tokens` (default
+  300000) with nothing active (`<state_dir>/active` empty, no running
+  subagent in `agents.tsv`), it writes **`rotation requested — ctx <N>k`**
+  itself, and every later heartbeat of this session repeats it (sticky), so
+  the supervisor sees the request even if you never act on it. It prints
+  `ROTATION_REQUESTED …` (the tick passes it on as a delta line): treat it
+  as the rotation above, now: digest, `mm-baton.sh release … --reason
+  rotation`, stop. The supervisor relaunches only once the baton is free.
 
 ## Shutdown (`STOP` event, user interrupt, or pause request)
 

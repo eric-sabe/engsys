@@ -303,6 +303,10 @@ SKILL.md, the config and `state.md`, then **re-run `broker-reconcile.sh`** befor
 pressure with no in-flight directed action or open window: a session-end digest, then a final heartbeat
 with status **"rotation requested"** (exact phrase; the fleet supervisor keys on it), and stop. The
 supervisor relaunches you within minutes and startup reconcile recovers from durable state.
+The heartbeat's context-aware backstop applies here too (merge-monster § Context discipline;
+`rotate_context_tokens`, default 300000): write the directed action or host window in flight to
+`<state_dir>/active` and empty it when done, since that is what holds a rotation off. On
+`ROTATION_REQUESTED`, rotate as above.
 
 ## The ledger and the heartbeat (the monster contract)
 
