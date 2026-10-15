@@ -102,7 +102,7 @@ out.set('core/.claude-plugin/hooks.json', json({
     // into a subagent's context before it starts. Fails open to {} on any error/timeout — kept
     // separate from every enforcement hook below, which fails closed on purpose.
     SubagentStart: [
-      { hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/subagent-memory-inject.mjs"' }] },
+      { hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/subagent-memory-inject.mjs"', timeout: 5 }] },
     ],
     // Hand-back guard: a subagent can't hand back "still running, I'll continue once…" (nothing would
     // wake it), and a session can't end its turn on an unhandled INCOMPLETE hand-back.

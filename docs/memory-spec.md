@@ -104,6 +104,12 @@ directory is shared by every worktree, is never committed, and survives `git wor
 
 - **Input:** `agent_type`, the task prompt, the issue number if present, and touched paths (from the
   prompt, or from `git diff --name-only <base>` when a worktree is known).
+  **At SubagentStart specifically (§12), there is no task-prompt field** — `memory-brief` still
+  accepts `--prompt` for callers that DO have task text (a future PreToolUse-based alternative,
+  the CLI used directly, tests), but the hook itself can only supply `agent_type` and touched
+  paths (from `git diff`). Targeting at SubagentStart is therefore **path-based plus role-based**,
+  not prompt-text BM25 — the BM25 blend in point 2 below still runs, it just has no prompt terms
+  to score against unless one is supplied some other way.
 - **Output:** at most `brief_bytes` (default 2048).
   1. The overlay, if any.
   2. The top 3–5 Class A lessons, by frontmatter match (`globs` against touched paths, `roles`
@@ -237,6 +243,13 @@ publish_role: maintain                  # which singleton publishes refs/engsys/
 ## 12. Verified runtime facts (Claude Code 2.1.285)
 
 - SubagentStart `additionalContext` is delivered to every subagent as a system-role reminder.
+- A SubagentStart hook's stdin payload is `{...base, hook_event_name, agent_id, agent_type}` —
+  `base` carries `cwd` (and the usual session fields), and `agent_type` is the matcher field (the
+  subagent's type, e.g. `engsys:isabelle`). There is **no task-prompt field** at this event — a
+  hook cannot read the dispatching task's text. Earlier revisions of
+  `subagent-memory-inject.mjs` guessed through `subagent_type`/`tool_input.prompt`/
+  `tool_input.description`/etc.; none of those ever matched a real payload and the guessing was
+  removed (engsys#140 W1).
 - `node:sqlite` with FTS5 and `bm25()` works on Node 22.22.3 (SQLite 3.51.3).
 - A naive in-place SQLite rebuild by concurrent processes fails (`database is locked`) and duplicates
   rows. Temp file + rename is safe.

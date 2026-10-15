@@ -28,7 +28,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isMainEntry } from '../lib/is-main.mjs';
-import { resolveCacheDir } from '../lib/memory/index-db.mjs';
+import { isValidPointerKey, resolveCacheDir } from '../lib/memory/index-db.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const MEMORY_BRIEF = path.resolve(HERE, '..', 'scripts', 'memory-brief.mjs');
@@ -104,7 +104,11 @@ export function runMemoryBrief({ agentType, prompt, touchedPaths, cwd, timeoutMs
 	if (prompt) args.push(`--prompt=${prompt.slice(0, 8192)}`);
 	if (touchedPaths?.length) args.push(`--paths=${touchedPaths.join(',')}`);
 	try {
-		const out = exec('node', args, {
+		// process.execPath, not a bare 'node' resolved off PATH: a hook's PATH is whatever the
+		// harness/shell gave it, which may not have the SAME node this hook itself is running
+		// under (a different version, or none at all on a minimal PATH) — execPath is always
+		// exactly the interpreter currently executing this file.
+		const out = exec(process.execPath, args, {
 			encoding: 'utf8',
 			timeout: timeoutMs,
 			killSignal: 'SIGKILL',
@@ -166,7 +170,11 @@ export async function main({ stdin = process.stdin, now = () => Date.now(), writ
 		spawnFailed = !skippedBudget && !result;
 		if (result) {
 			briefText = result.text ?? '';
-			logKeys = { lesson_keys: result.lessonKeys ?? [], pointer_keys: result.pointerKeys ?? [], bytes: result.bytes ?? Buffer.byteLength(briefText, 'utf8') };
+			// engsys#140 Nyx F8: pointer_keys are re-validated against the same key allowlist
+			// `validatePointerEvent` enforces before they're even logged — defense in depth; a key
+			// that somehow reached here invalid is dropped from the log line, not just from the brief.
+			const safePointerKeys = (result.pointerKeys ?? []).filter(isValidPointerKey);
+			logKeys = { lesson_keys: result.lessonKeys ?? [], pointer_keys: safePointerKeys, bytes: result.bytes ?? Buffer.byteLength(briefText, 'utf8') };
 		}
 	} catch {
 		briefText = '';

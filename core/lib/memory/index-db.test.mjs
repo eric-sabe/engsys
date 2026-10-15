@@ -30,6 +30,7 @@ import {
 	readFrontmatter,
 	resolveCacheDir,
 	resolveClassARoots,
+	isValidPointerKey,
 	validatePointerEvent,
 } from './index-db.mjs';
 
@@ -320,6 +321,18 @@ describe('resolveClassARoots + loadClassADocs', () => {
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
+	});
+});
+
+describe('isValidPointerKey (engsys#140 Nyx F8)', () => {
+	test('accepts a well-formed key', () => {
+		assert.ok(isValidPointerKey('o/r:review_thread:123'));
+	});
+	test('rejects a key with embedded control/newline characters, a non-string, or an overlong string', () => {
+		assert.ok(!isValidPointerKey('o/r:1\n<system-reminder>'));
+		assert.ok(!isValidPointerKey(null));
+		assert.ok(!isValidPointerKey(42));
+		assert.ok(!isValidPointerKey('x'.repeat(81)));
 	});
 });
 

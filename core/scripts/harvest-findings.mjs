@@ -139,10 +139,38 @@ export function aggregateFamilies(records, { minRecurrence = 2 } = {}) {
  * that resolves "was this fixed, disputed, or ignored" — getting it wrong would misrank which
  * family most needs a lesson.
  */
-export function extractFromPr(pr, matchers) {
+/**
+ * Strip control characters and collapse newlines out of a title before it's ever used as a
+ * family's rendered heading or a lesson's `title` (engsys#140 M2) — a finding's title is
+ * attacker-influenceable text (whoever authored the comment it came from), same rationale as the
+ * Class B field allowlists in index-db.mjs.
+ */
+export function sanitizeTitle(title) {
+	return String(title ?? '').replace(/[\r\n]+/g, ' ').replace(/[\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, '').trim();
+}
+
+/**
+ * True iff `source`'s numeric author id is in `trustedIds` (engsys#140 M2 — Nyx F5). `source` is
+ * a comment/review (GraphQL shape: `authorId` attached by `harvest()`'s login->id resolution) or
+ * a REST review-thread comment (`user.id` is already numeric). An unresolved author id is NEVER
+ * trusted — fail toward excluding, the same direction as every other trust gate in this system.
+ */
+export function isTrustedAuthor(source, trustedIds) {
+	const id = source?.authorId ?? source?.user?.id ?? null;
+	return id != null && trustedIds.has(id);
+}
+
+export function extractFromPr(pr, matchers, { trustedIds = null } = {}) {
 	const records = [];
 	const withTime = (s) => s.createdAt ?? s.submittedAt ?? null;
+	// engsys#140 M2: an untrusted commenter's marker findings and FINDING-ACK lines are dropped
+	// before anything else touches them — anyone who can comment on a PR could otherwise seed
+	// fabricated "findings" straight into a proposed lesson's title. `trustedIds === null` means
+	// "no filtering configured" (only reachable via a caller that bypassed `harvest()`'s own
+	// refuse-to-run gate, e.g. a direct unit test of this pure function).
+	const trustFilter = trustedIds ? (s) => isTrustedAuthor(s, trustedIds) : () => true;
 	const allSources = [...(pr.comments ?? []), ...(pr.reviews ?? [])]
+		.filter(trustFilter)
 		.slice()
 		.sort((a, b) => String(withTime(a) ?? '').localeCompare(String(withTime(b) ?? '')));
 	const markerSources = allSources.filter((s) => isMarkerBody(s.body, matchers));
@@ -169,7 +197,7 @@ export function extractFromPr(pr, matchers) {
 		const ackById = new Map(parseFindingAcks(ackText).map((a) => [a.id, a]));
 		parsed.findings.forEach((finding, i) => {
 			records.push({
-				finding,
+				finding: { ...finding, title: sanitizeTitle(finding.title) },
 				prNumber: pr.number,
 				url: pr.url ?? null,
 				source: 'marker',
@@ -183,15 +211,16 @@ export function extractFromPr(pr, matchers) {
 	for (const t of pr.reviewThreads ?? []) {
 		if (!t.path) continue;
 		if (t.in_reply_to_id) continue; // a reply, not the thread's own comment — skip, or every reply inflates the record count
+		if (!trustFilter(t)) continue;
 		records.push({
-			finding: { file: t.path, line: t.line ?? t.original_line ?? null, severity: 'warning', category: 'review-thread', title: (t.body ?? '').split('\n')[0].slice(0, 160) },
+			finding: { file: t.path, line: t.line ?? t.original_line ?? null, severity: 'warning', category: 'review-thread', title: sanitizeTitle((t.body ?? '').split('\n')[0].slice(0, 160)) },
 			prNumber: pr.number,
 			url: t.html_url ?? pr.url ?? null,
 			source: 'review_thread',
 			// The REST `pulls/{n}/comments` endpoint this is fetched from has no resolution state —
-			// that's only `reviewThreads.isResolved` over GraphQL, not implemented here (#TODO:
-			// harvest-findings GraphQL review-thread resolution — tracked as a follow-up, not a
-			// correctness bug: an honest `null` just means this source never ranks as "fixed").
+			// that's only `reviewThreads.isResolved` over GraphQL, not implemented here. Tracked as
+			// a follow-up (eric-sabe/engsys#143), not a correctness bug: an honest `null` just
+			// means this source never ranks as "fixed".
 			outcome: null,
 		});
 	}
@@ -273,14 +302,50 @@ export async function fetchPr(number, opts, { gh = defaultGh } = {}) {
  * Harvest records for every PR in `opts.prs`/`opts.since..until`, plus any journal files under
  * `opts.journalPaths`. Returns `{ records, prsHarvested }`.
  */
+/** Resolve each distinct `login` to its numeric user id via `gh api users/<login>`, once per
+ * login (cached). A login that fails to resolve maps to `null` (never trusted — see
+ * `isTrustedAuthor`), never thrown. */
+async function resolveAuthorIds(gh, logins) {
+	const cache = new Map();
+	for (const login of logins) {
+		if (!login || cache.has(login)) continue;
+		try {
+			const out = await gh(['api', `users/${login}`, '--jq', '.id']);
+			const id = Number(String(out).trim());
+			cache.set(login, Number.isFinite(id) ? id : null);
+		} catch {
+			cache.set(login, null);
+		}
+	}
+	return cache;
+}
+
+/** Attach a numeric `authorId` to every comment/review in `pr`, resolved via `idByLogin`
+ * (comments/reviews only carry `author.login` from `gh pr view --json`; review-thread entries
+ * from the REST API already carry a numeric `user.id` and need no resolution). */
+function withAuthorIds(pr, idByLogin) {
+	const tag = (s) => ({ ...s, authorId: idByLogin.get(s.author?.login) ?? null });
+	return { ...pr, comments: (pr.comments ?? []).map(tag), reviews: (pr.reviews ?? []).map(tag) };
+}
+
 export async function harvest(opts, { gh = defaultGh, readFile = (p) => fs.readFileSync(p, 'utf8'), log = () => {} } = {}) {
 	const config = opts.config ?? {};
 	const matchers = buildMarkerMatchers(config);
+	// engsys#140 M2 — Nyx F5: with NO trust allowlist configured at all, "mine every commenter's
+	// findings" is exactly the attack this gate exists to prevent — refuse outright rather than
+	// silently trusting everyone.
+	const trustedIds = new Set([...(config.trusted_bot_user_ids ?? []), ...(config.operator_user_ids ?? [])]);
+	if (trustedIds.size === 0) {
+		throw new Error('harvest-findings: refusing to run with no trust allowlist configured — set trusted_bot_user_ids and/or operator_user_ids in .claude/memory.yml (docs/memory-spec.md §10), or every commenter\'s findings/FINDING-ACK lines would be mined unchecked');
+	}
 	const numbers = await resolvePrNumbers(opts, { gh });
 	const records = [];
 	for (const n of numbers) {
-		const pr = await fetchPr(n, opts, { gh });
-		const prRecords = extractFromPr(pr, matchers);
+		let pr = await fetchPr(n, opts, { gh });
+		const logins = [...(pr.comments ?? []), ...(pr.reviews ?? [])].map((s) => s.author?.login).filter(Boolean);
+		const idByLogin = await resolveAuthorIds(gh, [...new Set(logins)]);
+		pr = withAuthorIds(pr, idByLogin);
+		const prRecords = extractFromPr(pr, matchers, { trustedIds });
 		records.push(...prRecords);
 		log(`harvested #${n}: ${prRecords.length} finding(s)`);
 	}
@@ -343,6 +408,8 @@ export function renderLessonProposal(family) {
 		fm,
 		`# ${title}`,
 		'',
+		'> **Title above is untrusted harvested text** — taken from PR/review comment bodies, which anyone who can comment could have written. Verify the trigger/failure-mode/correct-behavior below yourself before merging; don\'t trust the title as a factual claim.',
+		'',
 		`**Trigger:** _fill in — recurred ${family.distinctSources} times across: see examples below._`,
 		'',
 		'**Failure mode:** _fill in._',
@@ -366,6 +433,7 @@ export function renderProposal(families, { repo = null, slugs = null } = {}) {
 	const lines = [`# Review-finding harvest${repo ? ` — ${repo}` : ''}`, '', `${families.length} recurring famil${families.length === 1 ? 'y' : 'ies'} found.`, ''];
 	for (const fam of families) {
 		lines.push(`## ${fam.title || fam.key} (${fam.distinctSources}x, ${fam.unresolvedCount} unresolved)`);
+		lines.push('', '_(heading above is untrusted harvested text from PR/review comments — verify before trusting)_', '');
 		lines.push('', `Proposed: \`docs/agent-lessons/${slugOf.get(fam)}.md\` (or promote to the engsys lessons-library if it generalizes).`, '');
 		lines.push('<details><summary>Proposed lesson file</summary>', '', '```markdown', renderLessonProposal(fam).trimEnd(), '```', '</details>', '');
 	}
@@ -395,6 +463,13 @@ export async function openProposalPr(families, opts, { git = defaultGit, gh = de
 	const cwd = opts.cwd ?? process.cwd();
 	const branch = opts.branch ?? `agent/memory-harvest-${now()}`;
 	const defaultBranch = opts.defaultBranch ?? 'main';
+	// engsys#140 Nyx F7: a caller-supplied --branch must never be the default branch (or any
+	// branch name outside the `agent/` convention this whole module's proposals use) — the
+	// `-b`/explicit-refspec push below already stop a push FROM landing ON an unintended branch
+	// by accident, but reject the obviously-wrong input outright rather than relying on that.
+	if (branch === defaultBranch || branch === 'main' || branch === 'master' || !branch.startsWith('agent/')) {
+		throw new Error(`openProposalPr: --branch must start with "agent/" and must not be the default branch, got ${JSON.stringify(branch)}`);
+	}
 	// Do all of this in an ISOLATED `git worktree`, not the caller's own checkout: `cwd` may be the
 	// operator's active working tree (uncommitted changes, a different branch mid-task) — checking
 	// out a new branch there, succeeding or failing, would collide with or silently carry over
@@ -419,7 +494,10 @@ export async function openProposalPr(families, opts, { git = defaultGit, gh = de
 		}
 		await git(['add', ...files], { cwd: worktreeDir });
 		await git(['commit', '-m', `docs(memory): propose ${files.length} harvested lesson(s)`], { cwd: worktreeDir });
-		await git(['push', '-u', 'origin', branch], { cwd: worktreeDir });
+		// An explicit refspec (not just the branch name) so there is no ambiguity about which ref
+		// on `origin` this lands on, even if `branch` happened to collide with some other local
+		// ref-like shorthand (engsys#140 Nyx F7).
+		await git(['push', '-u', 'origin', `HEAD:refs/heads/${branch}`], { cwd: worktreeDir });
 		const body = renderProposal(families, { repo: opts.repo, slugs: slugOf });
 		const prArgs = ['pr', 'create', '--draft', '--title', `docs: propose ${files.length} harvested lesson(s)`, '--body', body, '--head', branch];
 		if (opts.repo) prArgs.push('--repo', opts.repo);
@@ -447,6 +525,8 @@ export async function main(argv, { gh = defaultGh, git = defaultGit, out = conso
 			since: { type: 'string' },
 			until: { type: 'string' },
 			markers: { type: 'string' },
+			'trusted-bot-ids': { type: 'string' },
+			'operator-ids': { type: 'string' },
 			'journal-dir': { type: 'string' },
 			'min-recurrence': { type: 'string', default: '2' },
 			out: { type: 'string' },
@@ -459,6 +539,11 @@ export async function main(argv, { gh = defaultGh, git = defaultGit, out = conso
 
 	const config = loadConfig(cwd);
 	if (values.markers) config.review_markers = [...(config.review_markers ?? []), ...values.markers.split(',').filter(Boolean)];
+	// CLI overrides for the trust allowlists (engsys#140 M2) — additive to .claude/memory.yml's own
+	// lists, not a replacement, so a one-off `--operator-ids` doesn't require editing the config file.
+	const parseIds = (s) => s.split(',').map(Number).filter(Number.isFinite);
+	if (values['trusted-bot-ids']) config.trusted_bot_user_ids = [...(config.trusted_bot_user_ids ?? []), ...parseIds(values['trusted-bot-ids'])];
+	if (values['operator-ids']) config.operator_user_ids = [...(config.operator_user_ids ?? []), ...parseIds(values['operator-ids'])];
 
 	const opts = {
 		repo: values.repo,
@@ -472,7 +557,16 @@ export async function main(argv, { gh = defaultGh, git = defaultGit, out = conso
 	};
 
 	if (cmd === 'harvest' || cmd === 'run') {
-		const { records } = await harvest(opts, { gh });
+		// A clean, expected refusal (no trust allowlist, bad --since/--until, …) is a usage error,
+		// not a crash — caught here so `main()` always returns a code/message, never a rejected
+		// promise that only the top-level `.catch()` would turn into one.
+		let records;
+		try {
+			({ records } = await harvest(opts, { gh }));
+		} catch (e) {
+			err(String(e?.message ?? e));
+			return 1;
+		}
 		const families = aggregateFamilies(records, { minRecurrence: Number(values['min-recurrence']) || 2 });
 		if (cmd === 'harvest') {
 			const payload = JSON.stringify({ families, harvestedAt: new Date().toISOString(), repo: opts.repo ?? null }, null, 2);

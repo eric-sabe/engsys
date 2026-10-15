@@ -21,6 +21,7 @@ import {
 	bm25Terms,
 	buildBrief,
 	isClassBExcluded,
+	detectStacks,
 	isReviewedOnDefaultBranch,
 	lessonMatchScore,
 	loadConfig,
@@ -87,6 +88,27 @@ describe('bm25Terms', () => {
 	test('empty/whitespace prompt yields no terms', () => {
 		assert.deepEqual(bm25Terms(''), []);
 		assert.deepEqual(bm25Terms('   '), []);
+	});
+});
+
+describe('detectStacks (engsys#140 W2)', () => {
+	test('empty when no engsys.config.yaml exists', () => {
+		const dir = mktmp();
+		try {
+			assert.deepEqual(detectStacks(dir), []);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('flattens the stack block into pack ids matching lesson frontmatter\'s stacks field', () => {
+		const dir = mktmp();
+		try {
+			writeFileSync(join(dir, 'engsys.config.yaml'), 'stack:\n  lang: [typescript]\n  platform: web\n  db: none\n');
+			assert.deepEqual(detectStacks(dir), ['lang/typescript', 'platform/web']);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });
 

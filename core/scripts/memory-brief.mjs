@@ -524,6 +524,31 @@ function parseArgs(argv) {
 	return out;
 }
 
+/**
+ * The project's selected stack packs (e.g. `["lang/typescript", "platform/web"]`), matching the
+ * same ids lesson frontmatter's `stacks:` field uses — read from `engsys.config.{yaml,yml,json}`'s
+ * `stack` block, the same file the installer itself resolves packs from. Empty (never throws) if
+ * no config file exists or it doesn't parse; engsys#140 W2 — this was previously never computed,
+ * so the `stacks` term in `lessonMatchScore` always scored 0 for every caller.
+ */
+export function detectStacks(repoRoot) {
+	for (const name of ['engsys.config.yaml', 'engsys.config.yml', 'engsys.config.json']) {
+		let raw;
+		try { raw = fs.readFileSync(path.join(repoRoot, name), 'utf8'); } catch { continue; }
+		let config;
+		try { config = name.endsWith('.json') ? JSON.parse(raw) : parseYaml(raw); } catch { continue; }
+		const stack = config?.stack ?? {};
+		const packs = [];
+		for (const cat of ['cloud', 'iac', 'db', 'lang', 'platform', 'domain']) {
+			for (const val of [].concat(stack[cat] ?? [])) {
+				if (val && val !== 'none') packs.push(`${cat}/${val}`);
+			}
+		}
+		return packs;
+	}
+	return [];
+}
+
 export function main(argv, { out = console.log, err = console.error, cwd = process.cwd() } = {}) {
 	const args = parseArgs(argv);
 	const repoRoot = args['repo-root'] ? path.resolve(cwd, args['repo-root']) : cwd;
@@ -536,12 +561,14 @@ export function main(argv, { out = console.log, err = console.error, cwd = proce
 	}
 
 	const touchedPaths = typeof args.paths === 'string' ? args.paths.split(',').filter(Boolean) : [];
+	const stacks = typeof args.stacks === 'string' ? args.stacks.split(',').filter(Boolean) : detectStacks(repoRoot);
 	const result = buildBrief({
 		repoRoot,
 		agentType: typeof args['agent-type'] === 'string' ? args['agent-type'] : null,
 		prompt: typeof args.prompt === 'string' ? args.prompt : '',
 		issue: args.issue,
 		touchedPaths,
+		stacks,
 		budgetBytes: args.budget ? Number(args.budget) : undefined,
 	});
 	// --json: the structured result (text + the key lists the injection log needs), for callers

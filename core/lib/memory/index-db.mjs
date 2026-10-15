@@ -68,6 +68,12 @@ export const MARKER_SHAPE_RE = /^[a-z0-9-]{1,40}$/;
 const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const UPDATED_AT_RE = /^\d{4}-\d{2}-\d{2}/;
 const KEY_RE = /^[A-Za-z0-9:_./-]{1,80}$/;
+
+/** The `key` allowlist alone, for a caller that only has a bare key string (e.g. the injection
+ * log — engsys#140 Nyx F8), not a full event object to pass to `validatePointerEvent`. */
+export function isValidPointerKey(key) {
+	return typeof key === 'string' && KEY_RE.test(key);
+}
 // Deliberately an ALLOWLIST (not a denylist of control/bidi/zero-width/`<`/`>`/backtick): an
 // allowlisted charset structurally excludes every one of those by construction, including
 // obfuscations a denylist might miss (e.g. a right-to-left override hiding mid-path).

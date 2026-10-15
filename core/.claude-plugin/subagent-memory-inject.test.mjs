@@ -109,6 +109,13 @@ describe('runMemoryBrief', () => {
 		const result = runMemoryBrief({ cwd: '.', exec: fakeExec });
 		assert.equal(result.text, 'hi');
 	});
+
+	test('spawns with process.execPath, not a bare "node" resolved off PATH', () => {
+		let capturedCmd = null;
+		const fakeExec = (cmd) => { capturedCmd = cmd; return JSON.stringify({ text: '', lessonKeys: [], pointerKeys: [], bytes: 0 }); };
+		runMemoryBrief({ cwd: '.', exec: fakeExec });
+		assert.equal(capturedCmd, process.execPath);
+	});
 });
 
 describe('main — fail-open contract', () => {

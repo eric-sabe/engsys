@@ -46,6 +46,15 @@ node <engsys-root>/scripts/harvest-findings.mjs run --repo <owner>/<repo> \
   --prs <all-project-PR-numbers, comma-separated> --apply
 ```
 
+**Copy mode:** `<engsys-root>/scripts/harvest-findings.mjs` only exists in **plugin mode** — copy
+mode's installer seeds lesson *content* (`docs/agent-lessons/library/`) but does not install the
+harvester or its `core/lib/` dependencies (engsys#140 W3). If this project is on copy mode, run
+the harvester from an engsys checkout directly instead:
+`node <path-to-engsys-checkout>/core/scripts/harvest-findings.mjs run --repo <owner>/<repo> --prs …`
+(same flags). Check which mode applies with `[ -f .claude/engsys.lock ] && echo copy || echo plugin`
+(copy mode writes that lockfile; plugin mode never materializes anything under `.claude/engsys*`),
+or just try the `<engsys-root>` path first and fall back if it's missing.
+
 (If a PR is missing its findings comment, note the gap — that PR went out without a recorded review, which is itself a process finding worth a lesson. `--journal-dir <dir>` additionally mines a monster's bounce journals.)
 
 The tool already ranks by recurrence (≥2 distinct PRs = a real pattern) and surfaces unresolved occurrences first. For each proposed family, still ask:

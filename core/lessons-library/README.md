@@ -14,8 +14,8 @@ Two tiers, kept distinct:
 ## Promotion
 
 `/project-closeout` ends with: *if a mined lesson generalizes, open a PR against
-`engsys/lessons-library/`*. That's the feedback loop that keeps engsys the source
-of truth instead of a fork point.
+`engsys/core/lessons-library/`*. That's the feedback loop that keeps engsys the
+source of truth instead of a fork point.
 
 ## Format
 
