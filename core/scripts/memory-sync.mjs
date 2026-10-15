@@ -361,6 +361,12 @@ export function isEventTrustedByConfig(event, config = {}) {
 
   if (!checkKindAndId(authorKind, authorId)) return false;
 
+  const wasEdited =
+    event.last_edited_at != null ||
+    event.was_edited === true ||
+    Boolean(event.created_at && event.updated_at && event.created_at !== event.updated_at);
+  if (wasEdited && event.editor_id == null) return false;
+
   if (event.editor_kind || event.editor_id != null) {
     const editorKind = String(event.editor_kind || '');
     const editorId = event.editor_id != null ? Number(event.editor_id) : null;
@@ -921,6 +927,217 @@ export function writeDeltaEvents(cacheDir, incomingEvents) {
 // §7.6 Sync Modes: --init, --delta, --publish
 // ---------------------------------------------------------------------------
 
+async function defaultGh(args) {
+  const { stdout } = await execFileP('gh', args, { maxBuffer: 64 * 1024 * 1024 });
+  return stdout;
+}
+
+const SYNC_REPO_GQL_QUERY = `
+query($owner: String!, $name: String!, $prCount: Int!, $issueCount: Int!, $prAfter: String, $issueAfter: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(first: $prCount, after: $prAfter, orderBy: { field: UPDATED_AT, direction: DESC }) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        number
+        title
+        body
+        url
+        createdAt
+        updatedAt
+        mergedAt
+        lastEditedAt
+        authorAssociation
+        author { __typename login ... on User { databaseId } ... on Bot { databaseId } }
+        editor { __typename login ... on User { databaseId } ... on Bot { databaseId } }
+        files(first: 50) { pageInfo { hasNextPage } nodes { path } }
+        comments(first: 50) {
+          pageInfo { hasNextPage }
+          nodes {
+            id
+            databaseId
+            body
+            url
+            createdAt
+            updatedAt
+            lastEditedAt
+            isMinimized
+            authorAssociation
+            author { __typename login ... on User { databaseId } ... on Bot { databaseId } }
+            editor { __typename login ... on User { databaseId } ... on Bot { databaseId } }
+          }
+        }
+        reviews(first: 50) {
+          pageInfo { hasNextPage }
+          nodes {
+            id
+            databaseId
+            body
+            url
+            createdAt
+            updatedAt
+            lastEditedAt
+            isMinimized
+            authorAssociation
+            author { __typename login ... on User { databaseId } ... on Bot { databaseId } }
+            editor { __typename login ... on User { databaseId } ... on Bot { databaseId } }
+          }
+        }
+        reviewThreads(first: 50) {
+          pageInfo { hasNextPage }
+          nodes {
+            id
+            isResolved
+            path
+            line
+            comments(first: 30) {
+              pageInfo { hasNextPage }
+              nodes {
+                id
+                databaseId
+                body
+                url
+                createdAt
+                updatedAt
+                lastEditedAt
+                isMinimized
+                authorAssociation
+                author { __typename login ... on User { databaseId } ... on Bot { databaseId } }
+                editor { __typename login ... on User { databaseId } ... on Bot { databaseId } }
+              }
+            }
+          }
+        }
+      }
+    }
+    issues(first: $issueCount, after: $issueAfter, orderBy: { field: UPDATED_AT, direction: DESC }) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        number
+        title
+        body
+        state
+        url
+        createdAt
+        updatedAt
+        lastEditedAt
+        authorAssociation
+        author { __typename login ... on User { databaseId } ... on Bot { databaseId } }
+        editor { __typename login ... on User { databaseId } ... on Bot { databaseId } }
+        comments(first: 50) {
+          pageInfo { hasNextPage }
+          nodes {
+            id
+            databaseId
+            body
+            url
+            createdAt
+            updatedAt
+            lastEditedAt
+            isMinimized
+            authorAssociation
+            author { __typename login ... on User { databaseId } ... on Bot { databaseId } }
+            editor { __typename login ... on User { databaseId } ... on Bot { databaseId } }
+          }
+        }
+      }
+    }
+  }
+}`;
+
+/**
+ * Fetch recent PRs and Issues for `repo` (`owner/name`) via GitHub GraphQL (`gh api graphql`),
+ * paging until `sinceIso` is reached or `INIT_CAPS` (`prs: 250`, `issues: 250`) are met.
+ * Fails open (`{ prs: [], issues: [] }`) if `gh` fails or `repo` is not `owner/name`.
+ */
+export async function fetchRepoPrsAndIssues(
+  repo,
+  { gh = defaultGh, isInit = false, sinceIso = null } = {},
+) {
+  const normRepo = normalizeOptionalRepo(repo);
+  if (!normRepo || typeof gh !== 'function') return { prs: [], issues: [] };
+  const [owner, name] = normRepo.split('/');
+  const maxPrs = isInit ? INIT_CAPS.prs : 100;
+  const maxIssues = isInit ? INIT_CAPS.issues : 100;
+  const sinceMs = sinceIso ? Date.parse(sinceIso) : null;
+
+  const prs = [];
+  const issues = [];
+  let prAfter = null;
+  let issueAfter = null;
+  let fetchMorePrs = true;
+  let fetchMoreIssues = true;
+
+  while ((fetchMorePrs && prs.length < maxPrs) || (fetchMoreIssues && issues.length < maxIssues)) {
+    const prPageSize = fetchMorePrs ? Math.min(50, maxPrs - prs.length) : 0;
+    const issuePageSize = fetchMoreIssues ? Math.min(50, maxIssues - issues.length) : 0;
+    if (prPageSize <= 0 && issuePageSize <= 0) break;
+
+    const gqlArgs = [
+      'api',
+      'graphql',
+      '-f',
+      `query=${SYNC_REPO_GQL_QUERY}`,
+      '-F',
+      `owner=${owner}`,
+      '-F',
+      `name=${name}`,
+      '-F',
+      `prCount=${Math.max(1, prPageSize)}`,
+      '-F',
+      `issueCount=${Math.max(1, issuePageSize)}`,
+    ];
+    if (prAfter) gqlArgs.push('-F', `prAfter=${prAfter}`);
+    if (issueAfter) gqlArgs.push('-F', `issueAfter=${issueAfter}`);
+
+    let repoData = null;
+    try {
+      const raw = await gh(gqlArgs);
+      repoData = JSON.parse(raw)?.data?.repository ?? null;
+    } catch {
+      break;
+    }
+    if (!repoData) break;
+
+    if (fetchMorePrs) {
+      const prConn = repoData.pullRequests;
+      const nodes = Array.isArray(prConn?.nodes) ? prConn.nodes : [];
+      for (const n of nodes) {
+        if (!n) continue;
+        if (sinceMs != null && n.updatedAt && Date.parse(n.updatedAt) < sinceMs) {
+          fetchMorePrs = false;
+          break;
+        }
+        if (prs.length < maxPrs) prs.push(n);
+      }
+      if (!prConn?.pageInfo?.hasNextPage || !prConn?.pageInfo?.endCursor || nodes.length === 0) {
+        fetchMorePrs = false;
+      } else {
+        prAfter = prConn.pageInfo.endCursor;
+      }
+    }
+
+    if (fetchMoreIssues) {
+      const issueConn = repoData.issues;
+      const nodes = Array.isArray(issueConn?.nodes) ? issueConn.nodes : [];
+      for (const n of nodes) {
+        if (!n) continue;
+        if (sinceMs != null && n.updatedAt && Date.parse(n.updatedAt) < sinceMs) {
+          fetchMoreIssues = false;
+          break;
+        }
+        if (issues.length < maxIssues) issues.push(n);
+      }
+      if (!issueConn?.pageInfo?.hasNextPage || !issueConn?.pageInfo?.endCursor || nodes.length === 0) {
+        fetchMoreIssues = false;
+      } else {
+        issueAfter = issueConn.pageInfo.endCursor;
+      }
+    }
+  }
+
+  return { prs, issues };
+}
+
 /**
  * Run a sync pass (`init`, `delta`, or `publish`).
  */
@@ -960,15 +1177,33 @@ export async function runMemorySync({
   });
   collected.push(...commitEvents);
 
-  // 2. PRs & Issues (injected nodes or fetched via GraphQL if `gh` provided)
-  const prs = Array.isArray(prNodes) ? prNodes.slice(0, isInit ? INIT_CAPS.prs : prNodes.length) : [];
+  // 2. PRs & Issues (injected nodes or fetched via GraphQL when `repo` is provided on init/delta)
+  let resolvedPrNodes = prNodes;
+  let resolvedIssueNodes = issueNodes;
+  if (
+    mode !== 'publish' &&
+    (resolvedPrNodes === null || resolvedIssueNodes === null) &&
+    normalizeOptionalRepo(repo)
+  ) {
+    const fetched = await fetchRepoPrsAndIssues(repo, {
+      gh: gh || defaultGh,
+      isInit,
+      sinceIso,
+    });
+    if (resolvedPrNodes === null) resolvedPrNodes = fetched.prs;
+    if (resolvedIssueNodes === null) resolvedIssueNodes = fetched.issues;
+  }
+
+  const prs = Array.isArray(resolvedPrNodes)
+    ? resolvedPrNodes.slice(0, isInit ? INIT_CAPS.prs : resolvedPrNodes.length)
+    : [];
   for (const pr of prs) {
     if (sinceIso && pr.updatedAt && Date.parse(pr.updatedAt) < Date.parse(sinceIso)) continue;
     collected.push(...extractEventsFromPrNode(pr, { repo, config: cfg, cacheDir, now }));
   }
 
-  const issues = Array.isArray(issueNodes)
-    ? issueNodes.slice(0, isInit ? INIT_CAPS.issues : issueNodes.length)
+  const issues = Array.isArray(resolvedIssueNodes)
+    ? resolvedIssueNodes.slice(0, isInit ? INIT_CAPS.issues : resolvedIssueNodes.length)
     : [];
   for (const issue of issues) {
     if (sinceIso && issue.updatedAt && Date.parse(issue.updatedAt) < Date.parse(sinceIso)) continue;

@@ -440,6 +440,7 @@ describe('memory-sync (#131)', () => {
         exec: () => '',
         issueNodes: [issue1Updated],
         deletedKeys: ['owner/repo:issue:99'],
+        now: () => Date.parse('2026-07-10T20:00:00Z'),
         rebuildIndex: false,
       });
       assert.equal(deltaRes.ok, true);
@@ -455,6 +456,7 @@ describe('memory-sync (#131)', () => {
         config,
         exec: () => '',
         refStore,
+        now: () => Date.parse('2026-07-10T21:00:00Z'),
         rebuildIndex: false,
       });
       assert.equal(pubRes.ok, true);
@@ -480,8 +482,65 @@ describe('memory-sync (#131)', () => {
         false,
         'removing bot ID from trusted_bot_user_ids must immediately drop its events at brief time',
       );
+      assert.equal(
+        isEventTrustedByConfig(
+          { ...botEvent, last_edited_at: '2026-07-11T00:00:00Z', editor_id: null },
+          { trusted_bot_user_ids: [500] },
+        ),
+        false,
+        'edited event without editor_id must fail closed',
+      );
+
+      // 5. GraphQL fetch via gh when prNodes / issueNodes are not explicitly passed
+      let ghCalled = false;
+      const gqlSyncRes = await runMemorySync({
+        mode: 'delta',
+        repo: 'owner/repo',
+        repoRoot: tmpDir,
+        cacheDir: tmpDir,
+        config,
+        exec: () => '',
+        gh: async (args) => {
+          ghCalled = true;
+          assert.equal(args[0], 'api');
+          assert.equal(args[1], 'graphql');
+          return JSON.stringify({
+            data: {
+              repository: {
+                pullRequests: {
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                  nodes: [
+                    {
+                      number: 77,
+                      title: 'GraphQL fetched PR',
+                      body: 'Fetched via gh api graphql',
+                      updatedAt: '2026-07-11T12:00:00Z',
+                      mergedAt: '2026-07-11T12:00:00Z',
+                      authorAssociation: 'OWNER',
+                      author: { __typename: 'User', login: 'eric', databaseId: 900 },
+                      files: { pageInfo: { hasNextPage: false }, nodes: [{ path: 'src/gql.ts' }] },
+                      comments: { pageInfo: { hasNextPage: false }, nodes: [] },
+                      reviews: { pageInfo: { hasNextPage: false }, nodes: [] },
+                      reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [] },
+                    },
+                  ],
+                },
+                issues: {
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                  nodes: [],
+                },
+              },
+            },
+          });
+        },
+        rebuildIndex: false,
+      });
+      assert.equal(ghCalled, true);
+      assert.equal(gqlSyncRes.ok, true);
+      assert.equal(gqlSyncRes.collectedCount, 1);
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
 });
+

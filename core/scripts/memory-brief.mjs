@@ -366,7 +366,12 @@ export function isEventTrusted(event, config) {
 	const kind = String(event.author_kind || '');
 	const authorId = event.author_id != null ? Number(event.author_id) : null;
 	if (kind === 'bot' && (authorId === null || !trustedBots.has(authorId))) return false;
-	if (kind === 'operator' && authorId !== null && !operators.has(authorId)) return false;
+	if (kind === 'operator' && (authorId === null || !operators.has(authorId))) return false;
+	const wasEdited =
+		event.last_edited_at != null ||
+		event.was_edited === true ||
+		Boolean(event.created_at && event.updated_at && event.created_at !== event.updated_at);
+	if (wasEdited && event.editor_id == null) return false;
 	if (event.editor_id != null) {
 		const editorId = Number(event.editor_id);
 		if (authorId === null || editorId !== authorId) {

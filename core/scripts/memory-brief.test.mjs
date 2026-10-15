@@ -1093,9 +1093,20 @@ describe('Evidence retrieval & pointer scoring (#132)', () => {
 				selectPointers([ev], { touchedPaths: ['src/api/tenant.ts'], config: revokedConfig }),
 				[],
 			);
+
+			// Edited event without a verified editor_id fails closed
+			assert.equal(
+				isEventTrusted({ ...ev, last_edited_at: '2026-10-13T00:00:00Z', editor_id: null }, trustedConfig),
+				false,
+			);
+			assert.equal(
+				isEventTrusted({ ...ev, last_edited_at: '2026-10-13T00:00:00Z', editor_id: 500 }, trustedConfig),
+				true,
+			);
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
 });
+
 

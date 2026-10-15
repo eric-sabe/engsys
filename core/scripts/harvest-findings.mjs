@@ -158,7 +158,16 @@ export function sanitizeTitle(title) {
 export function isTrustedAuthor(source, trustedIds) {
 	const id = source?.authorId ?? source?.author?.databaseId ?? source?.user?.id ?? null;
 	if (id == null || !trustedIds.has(id)) return false;
-	const wasEdited = source?.lastEditedAt != null || source?.editorId != null || source?.editor_id != null || source?.editor != null;
+	if (source?.editProvenanceUnverified === true) return false;
+	const created = source?.createdAt ?? source?.created_at ?? source?.submittedAt ?? source?.submitted_at ?? null;
+	const updated = source?.updatedAt ?? source?.updated_at ?? null;
+	const restShowsEdited = Boolean(created && updated && created !== updated);
+	const wasEdited =
+		restShowsEdited ||
+		source?.lastEditedAt != null ||
+		source?.editorId != null ||
+		source?.editor_id != null ||
+		source?.editor != null;
 	if (wasEdited) {
 		const editorId = source?.editorId ?? source?.editor_id ?? source?.editor?.databaseId ?? null;
 		if (editorId == null || !trustedIds.has(editorId)) return false;
@@ -386,7 +395,8 @@ export async function fetchPr(number, opts, { gh = defaultGh, log = () => {} } =
 			comments = raw.flat().map((c) => ({
 				id: c.id ?? null,
 				body: c.body,
-				createdAt: c.created_at,
+				createdAt: c.created_at ?? null,
+				updatedAt: c.updated_at ?? null,
 				authorId: c.user?.id ?? null,
 				authorType: c.user?.type ?? null,
 				author: { login: c.user?.login ?? null },
@@ -399,7 +409,8 @@ export async function fetchPr(number, opts, { gh = defaultGh, log = () => {} } =
 			reviews = raw.flat().map((r) => ({
 				id: r.id ?? null,
 				body: r.body,
-				submittedAt: r.submitted_at,
+				submittedAt: r.submitted_at ?? null,
+				updatedAt: r.updated_at ?? null,
 				authorId: r.user?.id ?? null,
 				authorType: r.user?.type ?? null,
 				author: { login: r.user?.login ?? null },
@@ -419,22 +430,30 @@ export async function fetchPr(number, opts, { gh = defaultGh, log = () => {} } =
 				);
 				const prNode = gql?.data?.repository?.pullRequest;
 				if (prNode) {
-					const commentEdits = new Map();
-					for (const n of prNode.comments?.nodes ?? []) {
-						if (n && n.databaseId != null) commentEdits.set(n.databaseId, { lastEditedAt: n.lastEditedAt ?? null, editorId: n.editor?.databaseId ?? null });
+					if (Array.isArray(prNode.comments?.nodes)) {
+						const commentEdits = new Map();
+						for (const n of prNode.comments.nodes) {
+							if (n && n.databaseId != null) commentEdits.set(n.databaseId, { lastEditedAt: n.lastEditedAt ?? null, editorId: n.editor?.databaseId ?? null });
+						}
+						comments = comments.map((c) => {
+							if (c.id == null) return c;
+							const edit = commentEdits.get(c.id);
+							if (!edit) return { ...c, editProvenanceUnverified: true };
+							return { ...c, lastEditedAt: edit.lastEditedAt ?? c.lastEditedAt, editorId: edit.editorId ?? c.editorId };
+						});
 					}
-					comments = comments.map((c) => {
-						const edit = c.id != null ? commentEdits.get(c.id) : null;
-						return edit ? { ...c, lastEditedAt: edit.lastEditedAt ?? c.lastEditedAt, editorId: edit.editorId ?? c.editorId } : c;
-					});
-					const reviewEdits = new Map();
-					for (const n of prNode.reviews?.nodes ?? []) {
-						if (n && n.databaseId != null) reviewEdits.set(n.databaseId, { lastEditedAt: n.lastEditedAt ?? null, editorId: n.editor?.databaseId ?? null });
+					if (Array.isArray(prNode.reviews?.nodes)) {
+						const reviewEdits = new Map();
+						for (const n of prNode.reviews.nodes) {
+							if (n && n.databaseId != null) reviewEdits.set(n.databaseId, { lastEditedAt: n.lastEditedAt ?? null, editorId: n.editor?.databaseId ?? null });
+						}
+						reviews = reviews.map((r) => {
+							if (r.id == null) return r;
+							const edit = reviewEdits.get(r.id);
+							if (!edit) return { ...r, editProvenanceUnverified: true };
+							return { ...r, lastEditedAt: edit.lastEditedAt ?? r.lastEditedAt, editorId: edit.editorId ?? r.editorId };
+						});
 					}
-					reviews = reviews.map((r) => {
-						const edit = r.id != null ? reviewEdits.get(r.id) : null;
-						return edit ? { ...r, lastEditedAt: edit.lastEditedAt ?? r.lastEditedAt, editorId: edit.editorId ?? r.editorId } : r;
-					});
 					if (Array.isArray(prNode.reviewThreads?.nodes)) {
 						reviewThreads = prNode.reviewThreads.nodes;
 						graphqlThreadsLoaded = true;
@@ -448,7 +467,12 @@ export async function fetchPr(number, opts, { gh = defaultGh, log = () => {} } =
 		if (!graphqlThreadsLoaded) {
 			try {
 				const raw = await ghJson(gh, ['api', `repos/${repo}/pulls/${number}/comments?per_page=100`, '--paginate', '--slurp'], `reading PR #${number} review comments`);
-				reviewThreads = raw.flat().map((t) => ({ ...t, authorId: t.user?.id ?? null }));
+				reviewThreads = raw.flat().map((t) => ({
+					...t,
+					createdAt: t.created_at ?? t.createdAt ?? null,
+					updatedAt: t.updated_at ?? t.updatedAt ?? null,
+					authorId: t.user?.id ?? null,
+				}));
 			} catch (err) { log(`harvest-findings: PR #${number} review comments fetch failed, continuing without them: ${err?.message ?? err}`); }
 		}
 	} else {
