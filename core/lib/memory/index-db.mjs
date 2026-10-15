@@ -708,30 +708,92 @@ export function loadClassADocs(roots, manifest = {}, opts = {}) {
 // `<cacheDir>/delta.jsonl` and `refs/engsys/memory/events`, is a later phase; see docs/memory-spec.md §7)
 // ---------------------------------------------------------------------------------------------
 
-/** Parse `<cacheDir>/delta.jsonl` (one JSON event record per line, docs/memory-spec.md §3.2) into
- * Event[]. A missing file, an unreadable file, or a malformed line are all "no events" — never thrown. */
-export function loadClassBEvents(cacheDir) {
-	if (!cacheDir) return [];
-	const file = path.join(cacheDir, 'delta.jsonl');
-	let text;
-	try { text = fs.readFileSync(file, 'utf8'); } catch { return []; }
-	// `events.key` is a SQLite PRIMARY KEY (§4); an append-only delta.jsonl can carry the same `k`
-	// more than once (an update re-emits the record) — last write wins, same as loadClassADocs'
-	// dedup, and a tombstone (deleted: true) removes whatever came before it rather than being
-	// filtered out unconditionally (§3.2: "last writer wins by updated_at").
-	const byKey = new Map();
-	for (const line of text.split('\n')) {
+/**
+ * List local `refs/engsys/memory/*` refs and their tip SHAs in `repoRoot` (#132).
+ * Returns `Array<{ ref: string, sha: string }>` sorted by `ref`. Never throws.
+ */
+export function listMemoryRefShas(repoRoot) {
+	if (!repoRoot) return [];
+	try {
+		const out = execFileSync(
+			'git',
+			['-C', repoRoot, 'for-each-ref', '--format=%(refname) %(objectname)', 'refs/engsys/memory'],
+			{ encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] },
+		);
+		const refs = [];
+		for (const line of out.split('\n')) {
+			const m = /^(refs\/engsys\/memory\/\S+)\s+([0-9a-f]{40})$/.exec(line.trim());
+			if (m) refs.push({ ref: m[1], sha: m[2] });
+		}
+		return refs.sort((a, b) => a.ref.localeCompare(b.ref));
+	} catch {
+		return [];
+	}
+}
+
+function eventUpdatedMs(e) {
+	if (!e || typeof e !== 'object') return 0;
+	if (typeof e.updated_at === 'string' && e.updated_at) {
+		const t = Date.parse(e.updated_at);
+		if (!Number.isNaN(t)) return t;
+	}
+	return 0;
+}
+
+function applyJsonlLinesToMap(text, byKey) {
+	if (!text) return;
+	for (const line of String(text).split('\n')) {
 		if (!line.trim()) continue;
 		try {
 			const e = JSON.parse(line);
 			if (!e || typeof e.k !== 'string') continue;
-			if (e.deleted) byKey.delete(e.k);
-			else byKey.set(e.k, e);
+			const prev = byKey.get(e.k);
+			if (!prev || eventUpdatedMs(e) >= eventUpdatedMs(prev)) {
+				byKey.set(e.k, e);
+			}
 		} catch {
 			/* one bad line never kills the rest */
 		}
 	}
-	return [...byKey.values()];
+}
+
+/**
+ * Parse synced `refs/engsys/memory/*` (`events.jsonl` blobs) plus `<cacheDir>/delta.jsonl`
+ * (docs/memory-spec.md §3.2, #132) into Event[], merging by `k` (last-writer-wins by `updated_at`)
+ * and dropping tombstones (`deleted: true`). Never throws.
+ */
+export function loadClassBEvents(cacheDir, { repoRoot = null, refShas = null } = {}) {
+	const byKey = new Map();
+	if (repoRoot) {
+		const refs = Array.isArray(refShas) ? refShas : listMemoryRefShas(repoRoot);
+		for (const r of refs) {
+			try {
+				const blobText = execFileSync(
+					'git',
+					['-C', repoRoot, 'show', `${r.sha}:events.jsonl`],
+					{ encoding: 'utf8', timeout: 2000, maxBuffer: 32 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] },
+				);
+				applyJsonlLinesToMap(blobText, byKey);
+			} catch {
+				/* ref without events.jsonl or unreadable */
+			}
+		}
+	}
+	if (cacheDir) {
+		const file = path.join(cacheDir, 'delta.jsonl');
+		try {
+			const text = fs.readFileSync(file, 'utf8');
+			applyJsonlLinesToMap(text, byKey);
+		} catch {
+			/* missing or unreadable delta.jsonl */
+		}
+	}
+	const out = [];
+	for (const e of byKey.values()) {
+		if (e.deleted) continue;
+		out.push(e);
+	}
+	return out;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -844,13 +906,17 @@ export function ensureIndex(opts = {}) {
 	const roots = resolveClassARoots(repoRoot, { pluginRoot: opts.pluginRoot });
 	const manifest = {};
 	const { docs } = loadClassADocs(roots, manifest, { repoRoot, pluginRoot: opts.pluginRoot, allowedRepos: opts.allowedRepos, defaultBranch: opts.defaultBranch, reviewedSha: opts.reviewedSha });
-	const events = loadClassBEvents(cacheDir);
+	const refShas = listMemoryRefShas(repoRoot);
+	const events = loadClassBEvents(cacheDir, { repoRoot, refShas });
 	let eventsFingerprint = 0;
 	try {
 		const st = fs.statSync(path.join(cacheDir, 'delta.jsonl'));
 		eventsFingerprint = `${st.size}:${st.mtimeMs}`;
 	} catch {
 		eventsFingerprint = 0;
+	}
+	if (refShas.length > 0) {
+		eventsFingerprint = `${eventsFingerprint}|refs:${refShas.map((r) => `${r.ref}=${r.sha}`).join(',')}`;
 	}
 	const watermark = computeWatermark(manifest, eventsFingerprint, opts.version ?? 'dev');
 	const watermarkJson = stableStringify(watermark);

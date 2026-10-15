@@ -25,6 +25,7 @@ import {
 	computeWatermark,
 	ensureIndex,
 	isRepoAllowlisted,
+	listEvents,
 	loadClassADocs,
 	loadClassBEvents,
 	normalizeRepoUrl,
@@ -753,4 +754,69 @@ describe('queryIndex', () => {
 	test('returns [] instead of throwing for a null db handle', () => {
 		assert.deepEqual(queryIndex(null, { text: 'anything' }), []);
 	});
+
+	test('ensureIndex loads Class B events from synced refs/engsys/memory/events, merges with delta.jsonl, and rebuilds when the ref moves (#132)', { skip: !SQLITE_AVAILABLE }, () => {
+		const dir = makeRepo();
+		try {
+			// Write an events.jsonl blob and commit it onto refs/engsys/memory/events
+			const writeMemoryRef = (events) => {
+				const jsonl = events.map((e) => JSON.stringify(e)).join('\n') + '\n';
+				const tmpBlob = join(dir, '_events_tmp.jsonl');
+				writeFileSync(tmpBlob, jsonl);
+				const blobSha = hermeticGit(dir, ['hash-object', '-w', tmpBlob]).trim();
+				rmSync(tmpBlob, { force: true });
+				const treeSha = hermeticGit(dir, ['mktree'], { input: `100644 blob ${blobSha}\tevents.jsonl\n` }).trim();
+				const commitSha = hermeticGit(dir, [...GIT_OPTS, 'commit-tree', treeSha, '-m', 'memory-sync']).trim();
+				hermeticGit(dir, ['update-ref', 'refs/engsys/memory/events', commitSha]);
+			};
+
+			writeMemoryRef([
+				{
+					k: 'acme/app:review_thread:1',
+					kind: 'review_thread',
+					repo: 'acme/app',
+					number: 10,
+					path: 'src/a.ts',
+					line: 12,
+					outcome: 'unresolved',
+					updated_at: '2026-05-01T00:00:00Z',
+					text: 'from synced ref v1',
+				},
+			]);
+
+			const h1 = ensureIndex({ repoRoot: dir, version: 'v1' });
+			assert.ok(h1);
+			const ev1 = listEvents(h1.db);
+			assert.equal(ev1.length, 1);
+			assert.equal(ev1[0].outcome, 'unresolved');
+			assert.equal(ev1[0].text, 'from synced ref v1');
+			closeIndex(h1);
+
+			// Advance refs/engsys/memory/events to v2 -> watermark must detect the ref SHA move and rebuild
+			writeMemoryRef([
+				{
+					k: 'acme/app:review_thread:1',
+					kind: 'review_thread',
+					repo: 'acme/app',
+					number: 10,
+					path: 'src/a.ts',
+					line: 12,
+					outcome: 'fixed',
+					updated_at: '2026-05-02T00:00:00Z',
+					text: 'from synced ref v2',
+				},
+			]);
+
+			const h2 = ensureIndex({ repoRoot: dir, version: 'v1' });
+			assert.ok(h2);
+			const ev2 = listEvents(h2.db);
+			assert.equal(ev2.length, 1);
+			assert.equal(ev2[0].outcome, 'fixed');
+			assert.equal(ev2[0].text, 'from synced ref v2');
+			closeIndex(h2);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
 });
+

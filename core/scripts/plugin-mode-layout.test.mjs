@@ -100,4 +100,16 @@ describe('plugin-mode module resolution (engsys#140 C1)', () => {
 			rmSync(base, { recursive: true, force: true });
 		}
 	});
+
+	test('memory-sync.mjs runs from a plugin-cache-shaped layout without a module-resolution crash', () => {
+		const { base, pluginRoot } = makePluginRoot();
+		try {
+			const result = run('node', [join(pluginRoot, 'scripts', 'memory-sync.mjs'), '--delta', '--repo-root', pluginRoot]);
+			assertNoModuleResolutionCrash(result, 'memory-sync.mjs');
+			assert.equal(result.code, 0);
+		} finally {
+			rmSync(base, { recursive: true, force: true });
+		}
+	});
 });
+
