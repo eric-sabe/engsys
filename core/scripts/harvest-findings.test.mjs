@@ -271,6 +271,13 @@ describe('harvest (injected gh) and resolvePrNumbers', () => {
 		assert.ok(calls[0].includes('merged:>=2026-01-01'));
 	});
 
+	test('resolvePrNumbers rejects neither --prs nor --since/--until, instead of searching "merged:<=undefined"', async () => {
+		await assert.rejects(
+			() => resolvePrNumbers({}, { gh: async () => { throw new Error('must not be called'); } }),
+			/--prs.*--since.*--until|--since.*--until/,
+		);
+	});
+
 	test('fetchPr degrades gracefully when the inline-comments call fails', async () => {
 		const gh = async (args) => {
 			if (args[0] === 'pr') return JSON.stringify({ number: 1, title: 't', url: 'u', comments: [], reviews: [] });

@@ -236,7 +236,8 @@ function searchQuery(since, until) {
 	for (const d of [since, until]) if (d && !DATE_RE.test(d)) throw new Error(`invalid date "${d}" (expected YYYY-MM-DD)`);
 	if (since && until) return `merged:${since}..${until}`;
 	if (since) return `merged:>=${since}`;
-	return `merged:<=${until}`;
+	if (until) return `merged:<=${until}`;
+	throw new Error('resolvePrNumbers: pass --prs, or at least one of --since/--until');
 }
 
 /** Resolve the PR numbers to harvest: an explicit `opts.prs` list (covers a standalone
