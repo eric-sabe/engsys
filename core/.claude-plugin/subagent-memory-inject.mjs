@@ -109,7 +109,10 @@ export function runMemoryBrief({ agentType, prompt, touchedPaths, cwd, timeoutMs
 		let joined = '';
 		for (const p of touchedPaths) {
 			const next = joined ? `${joined},${p}` : p;
-			if (next.length > 65536) break;
+			// Buffer.byteLength, not .length — a non-ASCII filename's UTF-16 code-unit count
+			// undercounts the UTF-8 byte size that actually matters against MAX_ARG_STRLEN
+			// (round 4 nit).
+			if (Buffer.byteLength(next, 'utf8') > 65536) break;
 			joined = next;
 		}
 		if (joined) args.push(`--paths=${joined}`);

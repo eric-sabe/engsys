@@ -4,7 +4,7 @@
 import { after, test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,6 +16,7 @@ const require = createRequire(import.meta.url);
 let SQLITE_AVAILABLE = true;
 try { require('node:sqlite'); } catch { SQLITE_AVAILABLE = false; }
 import { fileURLToPath } from 'node:url';
+import { hermeticGit } from '../lib/git-env.mjs';
 import {
 	extractAgentType,
 	extractPrompt,
@@ -92,6 +93,18 @@ describe('runMemoryBrief', () => {
 		assert.ok(promptArg.length < 20000, `expected a truncated --prompt= argv element, got ${promptArg.length} chars`);
 	});
 
+	test('--paths= is capped by UTF-8 BYTE length, not UTF-16 string length — a multi-byte-heavy path list still gets capped under the real argv byte limit (round 4 nit)', () => {
+		let capturedArgs = null;
+		const fakeExec = (cmd, args) => { capturedArgs = args; return JSON.stringify({ text: '', lessonKeys: [], pointerKeys: [], bytes: 0 }); };
+		// Each segment is 3 UTF-16 code units but 9 UTF-8 bytes (U+6587, "文", repeated) — a
+		// length-based cap would let 3x too much through before tripping.
+		const touchedPaths = Array.from({ length: 20000 }, () => '文文文/x');
+		runMemoryBrief({ cwd: '.', touchedPaths, exec: fakeExec });
+		const pathsArg = capturedArgs.find((a) => a.startsWith('--paths='));
+		assert.ok(pathsArg, 'at least some paths must still get through');
+		assert.ok(Buffer.byteLength(pathsArg, 'utf8') <= 65536 + 9, `expected the joined --paths= value capped at ~65536 UTF-8 bytes, got ${Buffer.byteLength(pathsArg, 'utf8')}`);
+	});
+
 	test('returns null on a non-zero exit instead of throwing', () => {
 		const fakeExec = () => { throw Object.assign(new Error('boom'), { status: 1 }); };
 		assert.equal(runMemoryBrief({ cwd: '.', exec: fakeExec }), null);
@@ -156,11 +169,52 @@ describe('CLI end to end', () => {
 		// No `prompt` field — the real SubagentStart payload shape (docs/memory-spec.md §12) never
 		// carries one; a test fixture that adds one hides exactly the gap cr review's round-3 pass
 		// caught (most unscoped bundled lessons scoring 0 with no prompt to derive BM25 terms from).
-		const payload = JSON.stringify({ cwd: fileURLToPath(new URL('../..', import.meta.url)), agent_type: 'isabelle' });
+		//
+		// `touched_paths` IS given explicitly (round 4, independent review Warning): leaving it out
+		// let resolveTouchedPaths() fall back to this process's own `git diff`/merge-base against
+		// origin/main, which is empty once this branch is actually merged (HEAD == origin/main) —
+		// the test would then deterministically fail on `main` with no code regression at all.
+		// Explicit touched_paths short-circuits that git call entirely (hermetic regardless of the
+		// live branch/diff state), and its segments ("git", "core", "bare", "flip", "worktrees")
+		// deliberately match a real bundled lesson's keywords so the BM25 fallback has something to
+		// find.
+		const payload = JSON.stringify({
+			cwd: fileURLToPath(new URL('../..', import.meta.url)),
+			agent_type: 'isabelle',
+			touched_paths: ['scripts/git-core-bare-flip-worktrees-fixture.ts'],
+		});
 		const out = execFileSync('node', [SCRIPT], { input: payload, encoding: 'utf8', env: { ...process.env, NODE_NO_WARNINGS: '1' } });
 		const parsed = JSON.parse(out);
 		assert.equal(parsed.hookSpecificOutput.hookEventName, 'SubagentStart');
 		assert.match(parsed.hookSpecificOutput.additionalContext, /lesson:/);
+	});
+
+	test('…and the same payload still returns a non-empty brief with origin/main == HEAD (no diff at all), proving the test above does not depend on this branch\'s live diff', { skip: !SQLITE_AVAILABLE }, () => {
+		// Simulates exactly the post-merge state the independent review flagged: a repo whose
+		// working tree/HEAD has no uncommitted changes and no divergence from origin/main at all,
+		// so the OLD (pre-fix) test — which relied on resolveTouchedPaths' git-diff fallback —
+		// would have found touchedPaths == [] here and failed deterministically.
+		const dir = mkdtempSync(join(tmpdir(), 'subagent-inject-nodiff-'));
+		const origin = mkdtempSync(join(tmpdir(), 'subagent-inject-nodiff-origin-'));
+		try {
+			const GIT_OPTS = ['-c', 'user.name=a', '-c', 'user.email=a@b.c'];
+			hermeticGit(origin, [...GIT_OPTS, 'init', '-q', '--bare'], { isolateConfig: true });
+			hermeticGit(dir, [...GIT_OPTS, 'init', '-q'], { isolateConfig: true });
+			hermeticGit(dir, [...GIT_OPTS, 'remote', 'add', 'origin', origin], { isolateConfig: true });
+			mkdirSync(join(dir, 'docs', 'agent-lessons'), { recursive: true });
+			writeFileSync(join(dir, 'README.md'), 'fixture\n');
+			hermeticGit(dir, [...GIT_OPTS, 'add', '-A'], { isolateConfig: true });
+			hermeticGit(dir, [...GIT_OPTS, 'commit', '-q', '-m', 'init'], { isolateConfig: true });
+			hermeticGit(dir, [...GIT_OPTS, 'push', '-q', '-f', 'origin', 'HEAD:main'], { isolateConfig: true }); // origin/main == HEAD, no diff at all
+			const payload = JSON.stringify({ cwd: dir, agent_type: 'isabelle', touched_paths: ['scripts/git-core-bare-flip-worktrees-fixture.ts'] });
+			const out = execFileSync('node', [SCRIPT], { input: payload, encoding: 'utf8', env: { ...process.env, NODE_NO_WARNINGS: '1' } });
+			const parsed = JSON.parse(out);
+			assert.equal(parsed.hookSpecificOutput.hookEventName, 'SubagentStart');
+			assert.match(parsed.hookSpecificOutput.additionalContext, /lesson:/);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+			rmSync(origin, { recursive: true, force: true });
+		}
 	});
 
 	test('garbage stdin never crashes the process (exit 0, {})', () => {
