@@ -400,10 +400,10 @@ export async function openProposalPr(families, opts, { git = defaultGit, gh = de
 	// out a new branch there, succeeding or failing, would collide with or silently carry over
 	// whatever the operator is doing, and leave them stranded on the harvest branch afterward.
 	const worktreeDir = opts.worktreeDir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'harvest-proposal-'));
-	await git(['fetch', 'origin', defaultBranch], { cwd });
-	// `-b` (not `-B`): refuses outright on an existing branch name instead of silently resetting it.
-	await git(['worktree', 'add', worktreeDir, '-b', branch, `origin/${defaultBranch}`], { cwd });
 	try {
+		await git(['fetch', 'origin', defaultBranch], { cwd });
+		// `-b` (not `-B`): refuses outright on an existing branch name instead of silently resetting it.
+		await git(['worktree', 'add', worktreeDir, '-b', branch, `origin/${defaultBranch}`], { cwd });
 		const files = [];
 		const dir = path.join(worktreeDir, 'docs', 'agent-lessons');
 		fs.mkdirSync(dir, { recursive: true });

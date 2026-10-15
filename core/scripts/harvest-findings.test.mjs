@@ -4,7 +4,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import fs, { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import fs, { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -378,6 +378,23 @@ describe('openProposalPr — an isolated worktree, never the caller\'s own check
 				{ git: async (args) => { gitCalls.push(args); return ''; }, gh: async () => { throw new Error('gh pr create failed'); } },
 			));
 			assert.ok(gitCalls.some((c) => c[0] === 'worktree' && c[1] === 'remove'), 'cleanup must still run after a downstream failure');
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+			rmSync(worktreeDir, { recursive: true, force: true });
+		}
+	});
+
+	test('the temp directory is still removed even when `git fetch` itself fails', async () => {
+		const dir = mkdtempSync(join(tmpdir(), 'harvest-pr-fetchfail-'));
+		const worktreeDir = mkdtempSync(join(tmpdir(), 'harvest-pr-fetchfail-worktree-'));
+		try {
+			const family = { key: 'a.ts::x', title: 'x', distinctSources: 2, unresolvedCount: 0, outcomes: {}, examples: [] };
+			await assert.rejects(() => openProposalPr(
+				[family],
+				{ cwd: dir, worktreeDir, branch: 'agent/memory-harvest-fetchfail' },
+				{ git: async (args) => { if (args[0] === 'fetch') throw new Error('network down'); return ''; }, gh: async () => 'url' },
+			));
+			assert.ok(!existsSync(worktreeDir), 'the leftover mkdtempSync directory must be removed even when fetch (the very first call) throws');
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 			rmSync(worktreeDir, { recursive: true, force: true });
