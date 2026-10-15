@@ -44,8 +44,8 @@ globs: ["**/*.prisma"]        # file globs this lesson is relevant to; [] = not 
 stacks: ["db/prisma"]         # stack pack ids (stacks/<category>/<value>) this lesson applies to; [] = every stack
 roles: ["isabelle"]           # agent types this lesson is pushed to (engsys:<agent> without the namespace)
 keywords: ["prisma", "upsert", "unique"]   # terms blended into the BM25 match over the task prompt
-security: false                # true suppresses this lesson from exclude_class_b_agents' companions
-                                # and makes it resistant to an unreviewed `supersedes` (see below)
+security: false                # true protects this lesson: an unreviewed `supersedes` cannot suppress it,
+                                # and a same-slug project file cannot replace the bundled/seeded copy (see below)
 supersedes: []                 # slugs (filenames without .md) of older lessons this one replaces
 ---
 ```

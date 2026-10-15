@@ -208,7 +208,7 @@ function parseYaml(text) {
       if (!m) break;
       const key = m[1];
       const val = m[2];
-      if (val !== '' && bracketDepth(val) > 0) {
+      if (/^[[{]/.test(val) && bracketDepth(val) > 0) {
         // The OTHER prettier house style: the opening bracket stays on the KEY's own line
         // (`roles: [` then items indented below, closing `]` on its own line) rather than being
         // pushed to its own line. `val` here is `[` (or `{`), still open — seed the multi-line

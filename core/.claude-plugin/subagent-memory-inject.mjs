@@ -102,7 +102,18 @@ export function runMemoryBrief({ agentType, prompt, touchedPaths, cwd, timeoutMs
 	// with E2BIG — fails open to {} either way, but silently, for exactly the long, detailed task
 	// prompts where a targeted brief would matter most. BM25 only needs a prefix of the prompt.
 	if (prompt) args.push(`--prompt=${prompt.slice(0, 8192)}`);
-	if (touchedPaths?.length) args.push(`--paths=${touchedPaths.join(',')}`);
+	// Capped the same way as --prompt= above and for the same reason: a large refactor/rename
+	// can list thousands of touched paths, and an uncapped join can itself blow past argv's
+	// MAX_ARG_STRLEN (E2BIG) -- exactly the large-change case where a brief matters most.
+	if (touchedPaths?.length) {
+		let joined = '';
+		for (const p of touchedPaths) {
+			const next = joined ? `${joined},${p}` : p;
+			if (next.length > 65536) break;
+			joined = next;
+		}
+		if (joined) args.push(`--paths=${joined}`);
+	}
 	try {
 		// process.execPath, not a bare 'node' resolved off PATH: a hook's PATH is whatever the
 		// harness/shell gave it, which may not have the SAME node this hook itself is running
@@ -144,7 +155,17 @@ export async function main({ stdin = process.stdin, now = () => Date.now(), writ
 	} catch {
 		input = null;
 	}
-	const cwd = (typeof input?.cwd === 'string' && input.cwd) || defaultCwd;
+	// Claude Code reports the session directory as `cwd`, which in a monorepo can be a
+	// subdirectory (e.g. packages/api) rather than the work-tree root. memory-brief.mjs's
+	// Class A reads (git ls-tree/cat-file against docs/agent-lessons, the overlay, ADRs) and
+	// resolveTouchedPaths' own top-level-relative paths both assume repoRoot IS the top level
+	// — resolve it once here so every downstream git call agrees on the same root.
+	const rawCwd = (typeof input?.cwd === 'string' && input.cwd) || defaultCwd;
+	let cwd = rawCwd;
+	try {
+		const top = execFileSync('git', ['-C', rawCwd, 'rev-parse', '--show-toplevel'], GIT_CALL_OPTS).trim();
+		if (top) cwd = top;
+	} catch { /* not a repo, or git unavailable — keep rawCwd; memory-brief fails open from there */ }
 	const agentType = extractAgentType(input);
 
 	let briefText = '';
