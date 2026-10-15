@@ -261,21 +261,21 @@ export interface PersonaFrontmatterContract {
 
 | Persona | File | `model` | `tools` | `skills` |
 |---|---|---|---|---|
-| **Gary** | `core/agents/gary.md` | `opus` | `Read, Grep, Glob, Write` | `issue-decomposition, documentation` |
-| **Melvin** | `core/agents/melvin.md` | `opus` | `Read, Grep, Glob, Write` | `system-architecture, api-design, database-migrations, observability` |
-| **Nyx** | `core/agents/nyx.md` | `opus` | `Read, Grep, Glob, Write` | `security-review, api-design, llm-structured-outputs` |
-| **Leith** | `core/agents/leith.md` | `sonnet` | `Read, Grep, Glob, Write` | `code-review, refactor, git-workflow-agents` |
-| **Isabelle** | `core/agents/isabelle.md` | `sonnet` | `Read, Grep, Glob, Edit, Write, Bash` | `git-workflow-agents, testing-strategy, database-migrations, refactor, documentation` |
-| **Marcelo** | `core/agents/marcelo.md` | `sonnet` | `Read, Grep, Glob, Edit, Write, Bash` | `testing-strategy, agentic-eval` |
-| **Aaron** | `core/agents/aaron.md` | `sonnet` | `Read, Grep, Glob, Edit, Write, Bash` | `ci-cd-pipelines, observability, system-architecture` |
-| **Patricia** | `core/agents/patricia.md` | `sonnet` | `Read, Grep, Glob, Edit, Write, Bash` | `performance-profiling, observability, database-migrations` |
-| **Bert** | `core/agents/bert.md` | `sonnet` | `Read, Grep, Glob, Edit, Write, Bash` | `debugging, observability, testing-strategy` |
-| **Jody** | `core/agents/jody.md` | `sonnet` | `Read, Grep, Glob, Edit, Write, Bash` | `issue-decomposition, git-workflow-agents, documentation` |
-| **Steve** | `core/agents/steve.md` | `haiku` | `Read` | `[]` |
-| **Otto** | `optional-agents/otto.md` | `opus` | `Read, Grep, Glob, Write` | `llm-structured-outputs, agentic-eval, observability` |
-| **Jos** | `optional-agents/jos.md` | `sonnet` | `Read, Grep, Glob, Write` | `web-design-reviewer` |
-| **Sandy** | `optional-agents/sandy.md` | `sonnet` | `Read, Grep, Glob, Write` | `web-design-reviewer` |
-| **DeAndre** | `optional-agents/deandre.md` | `opus` | `Read, Grep, Glob, Write` | `observability, documentation` |
+| **Gary** | `core/agents/gary.md` | `opus` | `Read, Grep, Glob, Write` | `web-design-reviewer, interactive-explainer, chrome-devtools` |
+| **Melvin** | `core/agents/melvin.md` | `opus` | `Read, Grep, Glob, Write` | `durable-lease, resource-broker` |
+| **Nyx** | `core/agents/nyx.md` | `claude-opus-4-8` (`security: true`) | `Read, Grep, Glob, Write` | `untrusted-input, github-actions, code-review` |
+| **Leith** | `core/agents/leith.md` | `opus` | `Read, Grep, Glob, Write` | `web-design-reviewer, interactive-explainer` |
+| **Isabelle** | `core/agents/isabelle.md` | `sonnet` | `Read, Grep, Glob, Edit, Write, Bash` | `code-review, pre-push, git-workflow-agents, refactor` |
+| **Marcelo** | `core/agents/marcelo.md` | `opus` | `Read, Grep, Glob, Write` | `agentic-eval, webapp-testing, hermetic-git-tests, untrusted-input` |
+| **Aaron** | `core/agents/aaron.md` | `sonnet` | `Read, Grep, Glob, Edit, Write, Bash` | `github-actions, pre-push, code-review` |
+| **Patricia** | `core/agents/patricia.md` | `sonnet` | `Read, Grep, Glob, Edit, Write, Bash` | `interactive-explainer, git-workflow-agents` |
+| **Bert** | `core/agents/bert.md` | `sonnet` | `Read, Grep, Glob, Edit, Write, Bash` | `untrusted-input` |
+| **Jody** | `core/agents/jody.md` | `opus` | `Read, Grep, Glob, Edit, Write, Bash` | `git-workflow-agents` |
+| **Otto** | `core/agents/otto.md` | `opus` | `Read, Grep, Glob, Write` | `llm-structured-outputs, agentic-eval, untrusted-input` |
+| **DeAndre** | `optional-agents/deandre.md` | `opus` | `Read, Grep, Glob, Write` | `interactive-explainer` |
+| **Jos** | `optional-agents/jos.md` | `sonnet` | `Read, Grep, Glob, Write` | `web-design-reviewer, apple-ads, google-play-growth` |
+| **Sandy** | `optional-agents/sandy.md` | `sonnet` | `Read, Grep, Glob, Write` | `interactive-explainer, web-design-reviewer` |
+| **Steve** | `optional-agents/steve.md` | `haiku` | `Read` | `[]` |
 
 Every persona file MUST end with the canonical `## Handback Protocol` section:
 
