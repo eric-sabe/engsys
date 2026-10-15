@@ -46,7 +46,9 @@ import { fileURLToPath } from 'node:url';
 import { createEnvelope } from '../lib/untrusted.mjs';
 import { isMainEntry } from '../lib/is-main.mjs';
 import {
+	coerceListField,
 	ensureIndex,
+	isRepoAllowlisted,
 	listEvents,
 	MARKER_SHAPE_RE,
 	queryIndex,
@@ -76,46 +78,68 @@ export const DEFAULTS = {
 // config
 // ---------------------------------------------------------------------------------------------
 
-/** Load `.claude/memory.yml` (or `memory.yml` directly, if `repoRoot` IS a fleet config dir)
- * merged over DEFAULTS. A missing/unreadable/malformed file is just "use the defaults" — never
- * throws. */
 /**
  * Load `.claude/memory.yml` — the trust allowlists and markers (docs/memory-spec.md §10) — from
- * the REVIEWED SHA, never the working tree (engsys#140 N5 — Nyx re-review): an attacker who could
- * edit an uncommitted/unreviewed `.claude/memory.yml` could otherwise hand themselves a trusted
- * author id or a marker to mine. Falls back to `memory.yml` in the FLEET config dir
- * (`CLAUDE_CONFIG_DIR`, a path genuinely outside the project's working tree — reading it from
- * disk is not a trust violation the way the working tree copy would be), then to defaults.
+ * the REVIEWED SHA, never the working tree (engsys#140 N5 — Nyx re-review), and ONLY when
+ * `repoRoot`'s `origin` remote is in the `repos` allowlist (#145). Merges with `memory.yml` in the
+ * fleet config dir (`CLAUDE_CONFIG_DIR`) and plugin config dir (`CLAUDE_PLUGIN_ROOT`), then
+ * defaults. Scalar list fields are coerced to one-item lists (#155).
  */
-// These fields are UNIONED across the repo config and the fleet config (docs/memory-spec.md §10)
-// rather than one replacing the other — a fleet-wide trust allowlist and a repo's own are both
-// meant to apply, not compete (round 4, Nyx L4). Every other field is a plain override, fleet wins.
-const UNION_FIELDS = ['exclude_class_b_agents', 'trusted_bot_user_ids', 'operator_user_ids', 'review_markers'];
+const UNION_FIELDS = ['exclude_class_b_agents', 'trusted_bot_user_ids', 'operator_user_ids', 'review_markers', 'high_fanout_globs'];
 
-export function loadConfig(repoRoot, { sha } = {}) {
-	const reviewedSha = sha ?? (repoRoot ? resolveReviewedSha(repoRoot) : null);
-	let repoConfig = null;
-	if (reviewedSha) {
+function isPlainObject(v) {
+	return Boolean(v) && typeof v === 'object' && !Array.isArray(v);
+}
+
+export function loadConfig(repoRoot, { sha, pluginRoot, allowedRepos, log = null } = {}) {
+	let pluginConfig = null;
+	const pRoot = pluginRoot ?? process.env.CLAUDE_PLUGIN_ROOT ?? null;
+	if (pRoot) {
 		try {
-			const out = execFileSync('git', ['-C', repoRoot, 'show', `${reviewedSha}:.claude/memory.yml`], { encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] });
-			repoConfig = parseYaml(out);
-		} catch { /* not committed there */ }
+			const raw = fs.readFileSync(path.join(pRoot, 'memory.yml'), 'utf8');
+			const parsed = parseYaml(raw);
+			if (isPlainObject(parsed)) pluginConfig = parsed;
+		} catch { /* no plugin config dir copy */ }
 	}
 	let fleetConfig = null;
 	if (process.env.CLAUDE_CONFIG_DIR) {
 		try {
 			const raw = fs.readFileSync(path.join(process.env.CLAUDE_CONFIG_DIR, 'memory.yml'), 'utf8');
-			fleetConfig = parseYaml(raw);
+			const parsed = parseYaml(raw);
+			if (isPlainObject(parsed)) fleetConfig = parsed;
 		} catch { /* no fleet config dir copy either */ }
 	}
-	// Scalars: the fleet value wins when both are present (last spread wins); UNION_FIELDS are
-	// re-merged below instead of just overwritten.
-	const merged = { ...DEFAULTS, ...(repoConfig ?? {}), ...(fleetConfig ?? {}) };
-	for (const field of UNION_FIELDS) {
-		const repoArr = Array.isArray(repoConfig?.[field]) ? repoConfig[field] : [];
-		const fleetArr = Array.isArray(fleetConfig?.[field]) ? fleetConfig[field] : [];
-		merged[field] = [...new Set([...repoArr, ...fleetArr])];
+	const allowlisted = repoRoot ? isRepoAllowlisted(repoRoot, { pluginRoot: pRoot, allowedRepos }) : false;
+	const reviewedSha = allowlisted ? (sha ?? resolveReviewedSha(repoRoot)) : null;
+	let repoConfig = null;
+	if (reviewedSha) {
+		try {
+			const out = execFileSync('git', ['-C', repoRoot, 'show', `${reviewedSha}:.claude/memory.yml`], { encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] });
+			const parsed = parseYaml(out);
+			if (isPlainObject(parsed)) repoConfig = parsed;
+		} catch { /* not committed there */ }
 	}
+	// Scalars: the fleet value wins when both are present (last spread wins); UNION_FIELDS are
+	// re-merged below instead of just overwritten, with scalar list values coerced (#155).
+	const merged = { ...DEFAULTS };
+	for (const src of [pluginConfig, repoConfig, fleetConfig]) {
+		if (!src) continue;
+		for (const [k, v] of Object.entries(src)) {
+			if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue;
+			if (k in DEFAULTS) merged[k] = v;
+		}
+	}
+	for (const field of UNION_FIELDS) {
+		const pluginArr = coerceListField(pluginConfig?.[field], { field, log });
+		const repoArr = coerceListField(repoConfig?.[field], { field, log });
+		const fleetArr = coerceListField(fleetConfig?.[field], { field, log });
+		merged[field] = [...new Set([...pluginArr, ...repoArr, ...fleetArr])];
+	}
+	// `repos` comes ONLY from fleet/plugin config (never repoConfig, so an unlisted repo cannot allowlist itself, #145).
+	merged.repos = [...new Set([
+		...coerceListField(pluginConfig?.repos, { field: 'repos', log }),
+		...coerceListField(fleetConfig?.repos, { field: 'repos', log }),
+	])];
 	return merged;
 }
 
@@ -464,12 +488,16 @@ export function renderBrief({ overlay = '', lessons = [], pointers = [] } = {}, 
  * line made it fall through to matching the heading itself as "first content line".
  */
 function firstLine(body, title) {
-	const trigger = /^[\s\S]*?\*\*Trigger:\*\*\s*(.+)$/m.exec(body);
-	if (trigger) return trigger[1].split('\n')[0];
+	const triggerInline = /^(?:\*\*Trigger:\*\*|Trigger:)[ \t]*([^\r\n]+)$/m.exec(body);
+	if (triggerInline && triggerInline[1].trim()) return triggerInline[1].trim().slice(0, 160);
+	const triggerBare = /^(?:\*\*Trigger:\*\*|Trigger:)[ \t]*\r?\n+(?:[ \t]*\r?\n)*[ \t]*([^\r\n]+)/m.exec(body);
+	if (triggerBare && triggerBare[1].trim()) {
+		return triggerBare[1].trim().replace(/^[-*#]+\s*/, '').trim().slice(0, 160);
+	}
 	const normalizedTitle = title ? String(title).trim().toLowerCase() : null;
 	for (const raw of body.split('\n')) {
 		const line = raw.trim();
-		if (line === '') continue; // leading/interstitial blank lines
+		if (line === '' || /^(?:\*\*Trigger:\*\*|Trigger:)$/i.test(line)) continue; // leading/interstitial blank lines or bare Trigger: header
 		const stripped = line.replace(/^#+\s*/, '').trim(); // a Markdown heading, with or without blanks before it
 		if (normalizedTitle && stripped.toLowerCase() === normalizedTitle) continue; // the title itself — never the excerpt
 		return stripped.slice(0, 160);
@@ -512,12 +540,12 @@ export function buildBrief(opts = {}) {
 	const repoRoot = opts.repoRoot ?? process.cwd();
 	const empty = { text: '', lessonKeys: [], pointerKeys: [], bytes: 0 };
 	try {
-		const config = loadConfig(repoRoot);
+		const config = loadConfig(repoRoot, { pluginRoot: opts.pluginRoot, allowedRepos: opts.allowedRepos });
 		const budgetBytes = opts.budgetBytes ?? config.brief_bytes ?? DEFAULTS.brief_bytes;
 		const excluded = resolveExcludedAgents(config);
 		const classBAllowed = !isClassBExcluded(opts.agentType, excluded);
 
-		const handle = ensureIndex({ repoRoot, pluginRoot: opts.pluginRoot, cacheDir: opts.cacheDir, version: opts.version ?? 'dev', sqlite: opts.sqlite });
+		const handle = ensureIndex({ repoRoot, pluginRoot: opts.pluginRoot, allowedRepos: opts.allowedRepos, cacheDir: opts.cacheDir, version: opts.version ?? 'dev', sqlite: opts.sqlite });
 		if (!handle) return empty;
 
 		// Reviewed-ref content only, via `handle.docs` (loadClassADocs -> loadProjectClassADocs) — NOT

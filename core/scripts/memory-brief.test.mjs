@@ -40,11 +40,12 @@ import {
 // under a pre-push hook (core/lessons-library/git-core-bare-flip-breaks-all-worktrees.md); identity
 // goes in via -c rather than a `git config` write.
 const GIT_OPTS = ['-c', 'user.name=a', '-c', 'user.email=a@b.c'];
-// engsys#140 H3: project Class A (docs/agent-lessons/**) is read from `origin/<default>`, not
-// the working tree — buildBrief's lesson fixtures need a real `origin` remote with the content
-// actually pushed, or they're invisible to loadClassADocs.
+process.env.ENGSYS_MEMORY_REPOS = 'fixture/repo';
+// engsys#140 H3 + #145: project Class A (docs/agent-lessons/**) is read from `origin/<default>`,
+// not the working tree, and only when `origin` normalizes to an allowlisted `owner/repo`.
 function pushOrigin(dir) {
 	hermeticGit(dir, [...GIT_OPTS, 'push', '-q', '-f', 'origin', 'HEAD:main'], { isolateConfig: true });
+	hermeticGit(dir, [...GIT_OPTS, 'update-ref', 'refs/remotes/origin/main', 'HEAD'], { isolateConfig: true });
 }
 
 function commitAndPush(dir, message = 'update') {
@@ -53,12 +54,13 @@ function commitAndPush(dir, message = 'update') {
 	pushOrigin(dir);
 }
 
-function makeRepo({ lessons = [], agentsSecurityTrue = [] } = {}) {
+function makeRepo({ lessons = [], agentsSecurityTrue = [], remoteUrl = 'https://github.com/fixture/repo.git' } = {}) {
 	const dir = mktmp();
 	const origin = mkdtempSync(join(tmpdir(), 'memory-brief-origin-'));
 	hermeticGit(origin, [...GIT_OPTS, 'init', '-q', '--bare'], { isolateConfig: true });
 	hermeticGit(dir, [...GIT_OPTS, 'init', '-q'], { isolateConfig: true });
-	hermeticGit(dir, [...GIT_OPTS, 'remote', 'add', 'origin', origin], { isolateConfig: true });
+	hermeticGit(dir, [...GIT_OPTS, 'remote', 'add', 'origin', remoteUrl], { isolateConfig: true });
+	hermeticGit(dir, [...GIT_OPTS, 'remote', 'set-url', '--push', 'origin', origin], { isolateConfig: true });
 	mkdirSync(join(dir, 'docs', 'agent-lessons'), { recursive: true });
 	writeFileSync(join(dir, 'README.md'), 'fixture repo\n'); // ensures `git commit` always has something, even with zero lessons/agents
 	for (const [slug, fm] of lessons) {
@@ -256,6 +258,52 @@ describe('loadConfig', () => {
 		} finally {
 			if (prevConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prevConfigDir;
 			rmSync(dir, { recursive: true, force: true });
+			rmSync(fleetConfigDir, { recursive: true, force: true });
+		}
+	});
+
+	test('coerces a scalar list field (e.g. exclude_class_b_agents: isabelle) to a one-item list and logs a warning (#155)', () => {
+		const dir = makeRepo({});
+		const logs = [];
+		try {
+			mkdirSync(join(dir, '.claude'), { recursive: true });
+			writeFileSync(
+				join(dir, '.claude', 'memory.yml'),
+				'exclude_class_b_agents: isabelle\ntrusted_bot_user_ids: 331745698\n',
+			);
+			commitAndPush(dir, 'scalar list fields');
+			const cfg = loadConfig(dir, { log: (m) => logs.push(m) });
+			assert.deepEqual(cfg.exclude_class_b_agents, ['isabelle']);
+			assert.deepEqual(cfg.trusted_bot_user_ids, [331745698]);
+			assert.ok(logs.some((m) => m.includes('exclude_class_b_agents')));
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('ignores repo .claude/memory.yml (and cannot self-allowlist) when origin is not in the fleet/plugin repos allowlist (#145)', () => {
+		const unlisted = makeRepo({ remoteUrl: 'https://github.com/third-party/evil.git' });
+		const fleetConfigDir = mktmp();
+		const prevConfigDir = process.env.CLAUDE_CONFIG_DIR;
+		const prevEnvRepos = process.env.ENGSYS_MEMORY_REPOS;
+		try {
+			delete process.env.ENGSYS_MEMORY_REPOS;
+			process.env.CLAUDE_CONFIG_DIR = fleetConfigDir;
+			writeFileSync(join(fleetConfigDir, 'memory.yml'), 'repos: [acme/trusted]\n');
+			mkdirSync(join(unlisted, '.claude'), { recursive: true });
+			writeFileSync(
+				join(unlisted, '.claude', 'memory.yml'),
+				'repos: [third-party/evil]\ntrusted_bot_user_ids: [666]\nbrief_bytes: 128\n',
+			);
+			commitAndPush(unlisted, 'try to self-allowlist');
+			const cfg = loadConfig(unlisted);
+			assert.deepEqual(cfg.trusted_bot_user_ids, [], 'unlisted repo .claude/memory.yml must be ignored');
+			assert.equal(cfg.brief_bytes, 2048);
+			assert.deepEqual(cfg.repos, ['acme/trusted'], 'repo config must never widen repos allowlist');
+		} finally {
+			if (prevConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prevConfigDir;
+			if (prevEnvRepos === undefined) delete process.env.ENGSYS_MEMORY_REPOS; else process.env.ENGSYS_MEMORY_REPOS = prevEnvRepos;
+			rmSync(unlisted, { recursive: true, force: true });
 			rmSync(fleetConfigDir, { recursive: true, force: true });
 		}
 	});
@@ -621,6 +669,25 @@ describe('renderBrief — byte cap + Class B boundary', () => {
 		const lessons = [{ key: 'lesson:y', title: 'Only A Heading', body: '# Only A Heading\n' }];
 		const { text } = renderBrief({ lessons }, 2048);
 		assert.equal(text, '[lesson lesson:y] **Only A Heading**');
+	});
+
+	test('bare Trigger: lessons (keystone shape: "Trigger:\\n<next line>" or "Trigger: <same line>") get a real excerpt, never the literal word "Trigger:" (#155)', () => {
+		const lessons = [
+			{
+				key: 'lesson:ks-multiline',
+				title: 'Scope tenant queries by organizationId',
+				body: '# Scope tenant queries by organizationId\n\nTrigger:\nEditing a Prisma query on a multi-tenant model.\n\nFailure mode:\nCross-tenant leak.\n',
+			},
+			{
+				key: 'lesson:ks-inline',
+				title: 'Pin GitHub Action SHAs',
+				body: '# Pin GitHub Action SHAs\n\nTrigger: Adding or updating a workflow step under .github/workflows/.\n',
+			},
+		];
+		const { text } = renderBrief({ lessons }, 2048);
+		assert.match(text, /\[lesson lesson:ks-multiline\] \*\*Scope tenant queries by organizationId\*\* — Editing a Prisma query on a multi-tenant model\./);
+		assert.match(text, /\[lesson lesson:ks-inline\] \*\*Pin GitHub Action SHAs\*\* — Adding or updating a workflow step under \.github\/workflows\/\./);
+		assert.ok(!text.includes('— Trigger:'), 'must never render the literal word "Trigger:" as the excerpt');
 	});
 
 	test('never exceeds the byte budget even with many sections', () => {

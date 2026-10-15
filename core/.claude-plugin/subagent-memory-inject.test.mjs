@@ -230,4 +230,68 @@ describe('CLI end to end', () => {
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
+
+	test('PreToolUse pre-agent stashes prompt, prompt paths, and isolated worktree so SubagentStart resolves the subagent worktree diff and prompt even when parent cwd is clean (#142)', { skip: !SQLITE_AVAILABLE }, () => {
+		const parent = mkdtempSync(join(tmpdir(), 'inject-parent-'));
+		const origin = mkdtempSync(join(tmpdir(), 'inject-origin-'));
+		const wt = mkdtempSync(join(tmpdir(), 'inject-wt-'));
+		rmSync(wt, { recursive: true, force: true }); // git worktree add creates it
+		try {
+			const GIT_OPTS = ['-c', 'user.name=a', '-c', 'user.email=a@b.c'];
+			hermeticGit(origin, [...GIT_OPTS, 'init', '-q', '--bare'], { isolateConfig: true });
+			hermeticGit(parent, [...GIT_OPTS, 'init', '-q'], { isolateConfig: true });
+			hermeticGit(parent, [...GIT_OPTS, 'remote', 'add', 'origin', 'https://github.com/fixture/repo.git'], { isolateConfig: true });
+			hermeticGit(parent, [...GIT_OPTS, 'remote', 'set-url', '--push', 'origin', origin], { isolateConfig: true });
+			mkdirSync(join(parent, 'docs', 'agent-lessons'), { recursive: true });
+			writeFileSync(
+				join(parent, 'docs', 'agent-lessons', 'wt-lesson.md'),
+				'---\nglobs: ["services/payments/**"]\nstacks: []\nroles: []\nkeywords: ["idempotency"]\nsecurity: false\nsupersedes: []\n---\n\n# Payments idempotency lesson\n\n**Trigger:** Touching services/payments/charge.ts.\n',
+			);
+			writeFileSync(join(parent, 'README.md'), 'init\n');
+			hermeticGit(parent, [...GIT_OPTS, 'add', '-A'], { isolateConfig: true });
+			hermeticGit(parent, [...GIT_OPTS, 'commit', '-q', '-m', 'init'], { isolateConfig: true });
+			hermeticGit(parent, [...GIT_OPTS, 'push', '-q', '-f', 'origin', 'HEAD:main'], { isolateConfig: true });
+			hermeticGit(parent, [...GIT_OPTS, 'update-ref', 'refs/remotes/origin/main', 'HEAD'], { isolateConfig: true });
+
+			// Create an isolated subagent worktree where `services/payments/charge.ts` is modified,
+			// while `parent` itself stays completely clean on main.
+			hermeticGit(parent, [...GIT_OPTS, 'worktree', 'add', '-q', '-b', 'agent/sub-wt', wt, 'HEAD'], { isolateConfig: true });
+			mkdirSync(join(wt, 'services', 'payments'), { recursive: true });
+			writeFileSync(join(wt, 'services', 'payments', 'charge.ts'), 'export const charge = 1;\n');
+			hermeticGit(wt, [...GIT_OPTS, 'add', '-A'], { isolateConfig: true });
+			hermeticGit(wt, [...GIT_OPTS, 'commit', '-q', '-m', 'touch charge.ts in subagent worktree'], { isolateConfig: true });
+
+			const env = { ...process.env, NODE_NO_WARNINGS: '1', ENGSYS_MEMORY_REPOS: 'fixture/repo' };
+			const prePayload = JSON.stringify({
+				session_id: 'sess-142',
+				cwd: parent,
+				hook_event_name: 'PreToolUse',
+				tool_name: 'Agent',
+				tool_input: {
+					subagent_type: 'engsys:isabelle',
+					description: 'Review subagent worktree changes',
+					prompt: `Review the changes in worktree ${wt} carefully.`,
+				},
+			});
+			const preOut = execFileSync('node', [SCRIPT, 'pre-agent'], { input: prePayload, encoding: 'utf8', env });
+			assert.equal(preOut, '{}');
+
+			// Now SubagentStart fires with parent `cwd` (clean!) and NO `prompt` or `touched_paths`.
+			const startPayload = JSON.stringify({
+				session_id: 'sess-142',
+				cwd: parent,
+				hook_event_name: 'SubagentStart',
+				agent_id: 'a-1',
+				agent_type: 'engsys:isabelle',
+			});
+			const startOut = execFileSync('node', [SCRIPT], { input: startPayload, encoding: 'utf8', env });
+			const parsed = JSON.parse(startOut);
+			assert.equal(parsed.hookSpecificOutput?.hookEventName, 'SubagentStart');
+			assert.match(parsed.hookSpecificOutput?.additionalContext ?? '', /lesson:wt-lesson/, 'SubagentStart must resolve the subagent worktree diff via the PreToolUse pending-dispatch record');
+		} finally {
+			rmSync(wt, { recursive: true, force: true });
+			rmSync(parent, { recursive: true, force: true });
+			rmSync(origin, { recursive: true, force: true });
+		}
+	});
 });

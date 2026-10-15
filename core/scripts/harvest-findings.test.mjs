@@ -225,6 +225,46 @@ describe('extractFromPr', () => {
 		const records = extractFromPr(pr, matchers);
 		assert.equal(records.length, 1);
 	});
+
+	test('GraphQL reviewThreads nodes map isResolved: true -> "fixed" and isResolved: false -> "unresolved", taking only the thread-opening comment (#143)', () => {
+		const pr = {
+			number: 9,
+			comments: [],
+			reviews: [],
+			reviewThreads: [
+				{
+					isResolved: true,
+					path: 'src/resolved.ts',
+					line: 20,
+					comments: {
+						nodes: [
+							{ databaseId: 102, body: 'reply: fixed now', createdAt: '2026-01-01T02:00:00Z', replyTo: { id: 'T1' }, author: { databaseId: 42 } },
+							{ databaseId: 101, body: 'missing tenant guard on query\ndetails', createdAt: '2026-01-01T01:00:00Z', replyTo: null, url: 'https://example/pr/9#r101', author: { databaseId: 42 } },
+						],
+					},
+				},
+				{
+					isResolved: false,
+					path: 'src/unresolved.ts',
+					line: 44,
+					comments: {
+						nodes: [
+							{ databaseId: 201, body: 'unbounded pagination limit', createdAt: '2026-01-01T01:00:00Z', replyTo: null, url: 'https://example/pr/9#r201', author: { databaseId: 42 } },
+						],
+					},
+				},
+			],
+		};
+		const records = extractFromPr(pr, matchers, { trustedIds: new Set([42]) });
+		assert.equal(records.length, 2, 'each thread yields at most one record from its opening comment');
+		const resolved = records.find((r) => r.finding.file === 'src/resolved.ts');
+		const unresolved = records.find((r) => r.finding.file === 'src/unresolved.ts');
+		assert.equal(resolved.outcome, 'fixed');
+		assert.equal(resolved.finding.title, 'missing tenant guard on query');
+		assert.equal(resolved.finding.line, 20);
+		assert.equal(unresolved.outcome, 'unresolved');
+		assert.equal(unresolved.finding.title, 'unbounded pagination limit');
+	});
 });
 
 describe('extractFromJournalText', () => {
@@ -409,6 +449,69 @@ describe('harvest (injected gh) and resolvePrNumbers', () => {
 		const userGh = mockGhFor(sameLoginDifferentId);
 		const userResult = await harvest({ repo: 'o/r', prs: [2], config: { trusted_bot_user_ids: [BOT_ID] } }, { gh: userGh });
 		assert.deepEqual(userResult.records, [], 'a different numeric id behind the SAME login string must never be trusted just because the login matches');
+	});
+
+	test('a trusted-author comment edited by an untrusted user (or deleted editor) is distrusted; edited by an allowlisted operator is kept (#146)', async () => {
+		const BOT_ID = 331745698;
+		const OP_ID = 77;
+		const ATTACKER_ID = 666;
+		const gh = async (args) => {
+			if (args[0] === 'pr' && args[1] === 'view') return JSON.stringify({ number: 1, title: 't', url: 'u' });
+			if (args[0] === 'api' && args[1].startsWith('repos/o/r/issues/1/comments')) {
+				return JSON.stringify([[
+					{ id: 10, body: markerComment([{ file: 'a.ts', title: 'attacker-edited finding' }]), created_at: '2026-01-01T00:00:00Z', user: { id: BOT_ID, login: 'bot', type: 'Bot' } },
+					{ id: 11, body: markerComment([{ file: 'b.ts', title: 'deleted-editor finding' }]), created_at: '2026-01-01T01:00:00Z', user: { id: BOT_ID, login: 'bot', type: 'Bot' } },
+					{ id: 12, body: markerComment([{ file: 'c.ts', title: 'operator-edited finding' }]), created_at: '2026-01-01T02:00:00Z', user: { id: BOT_ID, login: 'bot', type: 'Bot' } },
+					{ id: 13, body: markerComment([{ file: 'd.ts', title: 'unedited bot finding' }]), created_at: '2026-01-01T03:00:00Z', user: { id: BOT_ID, login: 'bot', type: 'Bot' } },
+				]]);
+			}
+			if (args[0] === 'api' && args[1] === 'graphql') {
+				return JSON.stringify({
+					data: {
+						repository: {
+							pullRequest: {
+								comments: {
+									nodes: [
+										{ databaseId: 10, lastEditedAt: '2026-01-02T00:00:00Z', editor: { databaseId: ATTACKER_ID } },
+										{ databaseId: 11, lastEditedAt: '2026-01-02T00:00:00Z', editor: null },
+										{ databaseId: 12, lastEditedAt: '2026-01-02T00:00:00Z', editor: { databaseId: OP_ID } },
+										{ databaseId: 13, lastEditedAt: null, editor: null },
+									],
+								},
+								reviews: { nodes: [] },
+								reviewThreads: {
+									nodes: [
+										{
+											isResolved: false,
+											path: 'src/thread.ts',
+											line: 9,
+											comments: {
+												nodes: [
+													{ databaseId: 500, body: 'unresolved thread finding', createdAt: '2026-01-01T04:00:00Z', lastEditedAt: null, replyTo: null, author: { databaseId: BOT_ID }, editor: null },
+												],
+											},
+										},
+									],
+								},
+							},
+						},
+					},
+				});
+			}
+			return JSON.stringify([]);
+		};
+		const { records } = await harvest(
+			{ repo: 'o/r', prs: [1], config: { trusted_bot_user_ids: [BOT_ID], operator_user_ids: [OP_ID] } },
+			{ gh },
+		);
+		const files = records.map((r) => r.finding.file);
+		assert.ok(!files.includes('a.ts'), 'comment edited by non-allowlisted user must be dropped');
+		assert.ok(!files.includes('b.ts'), 'comment with lastEditedAt set but null editor must be dropped');
+		assert.ok(files.includes('c.ts'), 'comment edited by allowlisted operator must be kept');
+		assert.ok(files.includes('d.ts'), 'unedited comment by allowlisted bot must be kept');
+		const threadRec = records.find((r) => r.finding.file === 'src/thread.ts');
+		assert.ok(threadRec, 'GraphQL reviewThread must be harvested');
+		assert.equal(threadRec.outcome, 'unresolved');
 	});
 });
 

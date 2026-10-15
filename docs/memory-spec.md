@@ -110,12 +110,12 @@ directory is shared by every worktree, is never committed, and survives `git wor
 
 - **Input:** `agent_type`, the task prompt, the issue number if present, and touched paths (from the
   prompt, or from `git diff --name-only <base>` when a worktree is known).
-  **At SubagentStart specifically (§12), there is no task-prompt field** — `memory-brief` still
-  accepts `--prompt` for callers that DO have task text (a future PreToolUse-based alternative,
-  the CLI used directly, tests), but the hook itself can only supply `agent_type` and touched
-  paths (from `git diff`). Targeting at SubagentStart is therefore **path-based plus role-based**,
-  not prompt-text BM25 — the BM25 blend in point 2 below still runs, it just has no prompt terms
-  to score against unless one is supplied some other way.
+  **At SubagentStart specifically (§12), the raw payload carries no task-prompt field** — instead,
+  `subagent-memory-inject.mjs pre-agent` (registered on `PreToolUse` for `Agent|Task`) stashes a
+  short-lived (30 s TTL) pending-dispatch record under `<cacheDir>/pending-dispatch/` containing the
+  task prompt, path hints extracted from the prompt, and any target worktree path, which
+  `SubagentStart` consumes and forwards to `memory-brief` (#142). When no pending record is present,
+  targeting degrades gracefully to `git diff` in `cwd` plus `agent_type`.
 - **Output:** at most `brief_bytes` (default 2048).
   1. The overlay, if any.
   2. The top 3–5 Class A lessons, by frontmatter match (`globs` against touched paths, `roles`
@@ -137,9 +137,14 @@ directory is shared by every worktree, is never committed, and survives `git wor
   `createEnvelope({label:'HISTORICAL REPO EVIDENCE'})`, with provenance (author kind, URL, date).
   Agents call it with Bash, so the text arrives as a tool result.
 
-## 6. Injection: `core/.claude-plugin/subagent-memory-inject.mjs` (SubagentStart)
+## 6. Injection: `core/.claude-plugin/subagent-memory-inject.mjs` (PreToolUse + SubagentStart)
 
-- Runs `memory-brief` with a 2 s budget and returns
+- At `PreToolUse` (`matcher: "Agent|Task"`, invoked as `subagent-memory-inject.mjs pre-agent`),
+  stashes a mode-`0600` pending-dispatch record (30 s TTL) under `<cacheDir>/pending-dispatch/`
+  keyed by `(session_id, bareAgentType)` with the task prompt, prompt-extracted file paths, and any
+  target worktree path, then returns `{}`.
+- At `SubagentStart`, consumes the matching pending-dispatch record (verifying any candidate
+  worktree shares `--git-common-dir` with `cwd`), runs `memory-brief` with a 2 s budget, and returns
   `{"hookSpecificOutput":{"hookEventName":"SubagentStart","additionalContext":…}}`.
 - **Fail-open:** any error, timeout or empty brief returns `{}`. It never blocks a dispatch.
   Keep it separate from any enforcement hook, which must fail closed.
