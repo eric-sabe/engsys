@@ -5,9 +5,16 @@ import { after, test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
+
+const require = createRequire(import.meta.url);
+// node:sqlite needs Node >= 22.5 (see index-db.test.mjs). On a Node without it the hook still
+// fails open correctly — the one test that asserts a REAL non-empty brief is skipped, not failed.
+let SQLITE_AVAILABLE = true;
+try { require('node:sqlite'); } catch { SQLITE_AVAILABLE = false; }
 import { fileURLToPath } from 'node:url';
 import {
 	extractAgentType,
@@ -77,6 +84,15 @@ describe('resolveTouchedPaths', () => {
 });
 
 describe('runMemoryBrief', () => {
+	test('a very long prompt is truncated before it becomes an argv element (avoids E2BIG)', () => {
+		let capturedArgs = null;
+		const fakeExec = (cmd, args) => { capturedArgs = args; return JSON.stringify({ text: '', lessonKeys: [], pointerKeys: [], bytes: 0 }); };
+		const longPrompt = 'x'.repeat(200000);
+		runMemoryBrief({ cwd: '.', prompt: longPrompt, exec: fakeExec });
+		const promptArg = capturedArgs.find((a) => a.startsWith('--prompt='));
+		assert.ok(promptArg.length < 20000, `expected a truncated --prompt= argv element, got ${promptArg.length} chars`);
+	});
+
 	test('returns null on a non-zero exit instead of throwing', () => {
 		const fakeExec = () => { throw Object.assign(new Error('boom'), { status: 1 }); };
 		assert.equal(runMemoryBrief({ cwd: '.', exec: fakeExec }), null);
@@ -130,7 +146,7 @@ describe('main — fail-open contract', () => {
 });
 
 describe('CLI end to end', () => {
-	test('a well-formed SubagentStart payload against this real checkout returns a non-empty brief', () => {
+	test('a well-formed SubagentStart payload against this real checkout returns a non-empty brief', { skip: !SQLITE_AVAILABLE }, () => {
 		const payload = JSON.stringify({ cwd: fileURLToPath(new URL('../..', import.meta.url)), agent_type: 'isabelle', prompt: 'worktree bootstrap pnpm install' });
 		const out = execFileSync('node', [SCRIPT], { input: payload, encoding: 'utf8', env: { ...process.env, NODE_NO_WARNINGS: '1' } });
 		const parsed = JSON.parse(out);

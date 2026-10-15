@@ -90,7 +90,10 @@ export function runMemoryBrief({ agentType, prompt, touchedPaths, cwd, timeoutMs
 	// silently drop it (memory-brief.mjs's parseArgs doc comment has the full rationale).
 	const args = [scriptPath, '--json', `--repo-root=${cwd}`];
 	if (agentType) args.push(`--agent-type=${agentType}`);
-	if (prompt) args.push(`--prompt=${prompt}`);
+	// Truncated: one argv element over Linux's MAX_ARG_STRLEN (128 KiB) makes the spawn itself fail
+	// with E2BIG — fails open to {} either way, but silently, for exactly the long, detailed task
+	// prompts where a targeted brief would matter most. BM25 only needs a prefix of the prompt.
+	if (prompt) args.push(`--prompt=${prompt.slice(0, 8192)}`);
 	if (touchedPaths?.length) args.push(`--paths=${touchedPaths.join(',')}`);
 	try {
 		const out = exec('node', args, {

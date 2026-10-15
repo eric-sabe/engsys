@@ -13,6 +13,13 @@ import { promisify } from 'node:util';
 import { hermeticGit } from '../git-env.mjs';
 
 const require = createRequire(import.meta.url);
+
+// node:sqlite needs Node >= 22.5; this repo's package.json engines allows Node >= 20.11 (the
+// index itself fails open without it — that's exactly what the "fails open" tests below check).
+// Any test that builds a REAL index and asserts non-empty content, rather than the fail-open path
+// itself, is skipped (not failed) on a Node that lacks the module.
+let SQLITE_AVAILABLE = true;
+try { require('node:sqlite'); } catch { SQLITE_AVAILABLE = false; }
 import {
 	closeIndex,
 	computeWatermark,
@@ -154,6 +161,30 @@ describe('resolveClassARoots + loadClassADocs', () => {
 		}
 	});
 
+	test('copy mode (no bundled lessonsDir at all): a seeded docs/agent-lessons/library/ security doc still beats a colliding top-level project file, regardless of filesystem iteration order', () => {
+		const dir = mkdtempSync(join(tmpdir(), 'memory-idx-copy-mode-'));
+		try {
+			mkdirSync(join(dir, 'docs', 'agent-lessons', 'library'), { recursive: true });
+			// The project's own top-level file — unreviewed, sets security: true on neutered content.
+			writeFileSync(
+				join(dir, 'docs', 'agent-lessons', 'collision.md'),
+				'---\nglobs: []\nstacks: []\nroles: []\nkeywords: ["x"]\nsecurity: true\nsupersedes: []\n---\n\n# Project override\n\nneutered content\n',
+			);
+			// The engsys-seeded copy of the same lesson, under the conventional `library/` subdir.
+			writeFileSync(
+				join(dir, 'docs', 'agent-lessons', 'library', 'collision.md'),
+				'---\nglobs: []\nstacks: []\nroles: []\nkeywords: ["x"]\nsecurity: true\nsupersedes: []\n---\n\n# Seeded security lesson\n\nreal content\n',
+			);
+			const roots = { lessonsDir: null, agentLessonsDir: join(dir, 'docs', 'agent-lessons'), adrDir: join(dir, 'docs', 'architecture', 'adr'), overlayFile: join(dir, 'nonexistent.md') };
+			const { docs } = loadClassADocs(roots);
+			const matches = docs.filter((d) => d.key === 'lesson:collision');
+			assert.equal(matches.length, 1);
+			assert.match(matches[0].body, /real content/, 'the seeded (higher-provenance) copy must win, never the top-level project file');
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	test('a missing overlay/ADR dir is silently skipped, not an error', () => {
 		const dir = makeRepo();
 		try {
@@ -230,7 +261,7 @@ describe('computeWatermark', () => {
 });
 
 describe('ensureIndex', () => {
-	test('a same-slug lesson collision never crashes the build (regression for the frontmatter PRIMARY KEY)', () => {
+	test('a same-slug lesson collision never crashes the build (regression for the frontmatter PRIMARY KEY)', { skip: !SQLITE_AVAILABLE }, () => {
 		const dir = makeRepo();
 		try {
 			writeFileSync(
@@ -265,7 +296,7 @@ describe('ensureIndex', () => {
 		}
 	});
 
-	test('a rebuild failure is logged to rebuild-failures.jsonl instead of vanishing silently', () => {
+	test('a rebuild failure is logged to rebuild-failures.jsonl instead of vanishing silently', { skip: !SQLITE_AVAILABLE }, () => {
 		const dir = makeRepo();
 		try {
 			const real = require('node:sqlite');
@@ -287,7 +318,7 @@ describe('ensureIndex', () => {
 		}
 	});
 
-	test('builds an index, finds the project-local lesson by BM25, and does not rebuild unnecessarily', () => {
+	test('builds an index, finds the project-local lesson by BM25, and does not rebuild unnecessarily', { skip: !SQLITE_AVAILABLE }, () => {
 		const dir = makeRepo();
 		try {
 			const h1 = ensureIndex({ repoRoot: dir, version: 'v1' });
@@ -304,7 +335,7 @@ describe('ensureIndex', () => {
 		}
 	});
 
-	test('watermark detects an in-place content edit (no mtime dependency assumed)', () => {
+	test('watermark detects an in-place content edit (no mtime dependency assumed)', { skip: !SQLITE_AVAILABLE }, () => {
 		const dir = makeRepo();
 		try {
 			const lessonPath = join(dir, 'docs', 'agent-lessons', 'one.md');
@@ -327,7 +358,7 @@ describe('ensureIndex', () => {
 		}
 	});
 
-	test('6 concurrent ensureIndex calls (real OS processes) leave one consistent, queryable index', async () => {
+	test('6 concurrent ensureIndex calls (real OS processes) leave one consistent, queryable index', { skip: !SQLITE_AVAILABLE }, async () => {
 		// `Promise.all` of synchronous calls on one thread would not exercise the actual race this
 		// test is for (§13) — the temp-file-then-rename handoff under truly concurrent writers. Spawn
 		// 6 real child processes instead, each building/opening the SAME repoRoot's index at once.
@@ -360,7 +391,7 @@ describe('ensureIndex', () => {
 });
 
 describe('queryIndex', () => {
-	test('returns [] for an empty query string instead of matching everything', () => {
+	test('returns [] for an empty query string instead of matching everything', { skip: !SQLITE_AVAILABLE }, () => {
 		const dir = makeRepo();
 		try {
 			const h = ensureIndex({ repoRoot: dir, version: 'v1' });

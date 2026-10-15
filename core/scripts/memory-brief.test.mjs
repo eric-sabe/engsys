@@ -5,9 +5,16 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { hermeticGit } from '../lib/git-env.mjs';
+
+const require = createRequire(import.meta.url);
+// node:sqlite needs Node >= 22.5 (see index-db.test.mjs for the full rationale); tests that build a
+// REAL index through buildBrief are skipped, not failed, when it's unavailable.
+let SQLITE_AVAILABLE = true;
+try { require('node:sqlite'); } catch { SQLITE_AVAILABLE = false; }
 import {
 	bm25Terms,
 	buildBrief,
@@ -332,7 +339,7 @@ describe('buildBrief — end to end, fail-open, and the agent exclusion boundary
 		}
 	});
 
-	test('an excluded (security:true) agent type gets Class A content only — pointers are never computed for it', () => {
+	test('an excluded (security:true) agent type gets Class A content only — pointers are never computed for it', { skip: !SQLITE_AVAILABLE }, () => {
 		const dir = makeRepo({ agentsSecurityTrue: ['nyx'], lessons: [['one', { keywords: ['widget'] }]] });
 		try {
 			// Seed a Class B event directly via delta.jsonl so, if the exclusion were broken, a
@@ -355,7 +362,7 @@ describe('buildBrief — end to end, fail-open, and the agent exclusion boundary
 		}
 	});
 
-	test('the byte cap holds end to end', () => {
+	test('the byte cap holds end to end', { skip: !SQLITE_AVAILABLE }, () => {
 		const lessons = Array.from({ length: 20 }, (_, i) => ['l' + i, { keywords: ['widget', `term${i}`], body: 'x'.repeat(300) }]);
 		const dir = makeRepo({ lessons });
 		try {
@@ -370,7 +377,7 @@ describe('buildBrief — end to end, fail-open, and the agent exclusion boundary
 describe('CLI', () => {
 	const SCRIPT = new URL('./memory-brief.mjs', import.meta.url).pathname;
 
-	test('prints the brief to stdout and exits 0', () => {
+	test('prints the brief to stdout and exits 0', { skip: !SQLITE_AVAILABLE }, () => {
 		const dir = makeRepo({ lessons: [['one', { keywords: ['widget'] }]] });
 		try {
 			const out = execFileSync('node', [SCRIPT, '--repo-root', dir, '--agent-type', 'isabelle', '--prompt', 'widget'], {

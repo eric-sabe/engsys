@@ -139,7 +139,19 @@ export function readFrontmatter(text) {
  * basename without `.md` — stable across the bundled lessons-library, a project's
  * `docs/agent-lessons/`, and `docs/architecture/adr/`, so `supersedes` references resolve the same
  * way regardless of which root a lesson lives under). Skips README.md. Never throws. */
-function loadMdDir(dir, kind, docs, manifest) {
+/**
+ * How "official" a loaded doc's root is — used ONLY to decide which doc wins a KEY COLLISION when
+ * one of the colliding docs is `security: true` (see loadClassADocs). Higher wins.
+ *   bundled (3)       — the engsys lessons-library itself (plugin mode: read in place; dev/dogfood:
+ *                        resolved relative to this module)
+ *   seeded (2)         — a copy-mode project's seeded copy of that same library, conventionally
+ *                        under `docs/agent-lessons/<seedSubdir>/` (default `library`, matching
+ *                        `lessons.into` in engsys.config.yaml / lib/commands.js)
+ *   project-local (1)  — anything else the project itself wrote under docs/agent-lessons/
+ */
+export const PROVENANCE_RANK = { bundled: 3, seeded: 2, 'project-local': 1, adr: 1, overlay: 1 };
+
+function loadMdDir(dir, kind, docs, manifest, { provenanceFor = () => 'project-local' } = {}) {
 	if (!dir) return;
 	for (const file of walkMd(dir)) {
 		if (path.basename(file) === 'README.md') continue;
@@ -162,6 +174,7 @@ function loadMdDir(dir, kind, docs, manifest) {
 			supersedes: fm.supersedes ?? [],
 			title: titleMatch ? titleMatch[1] : path.basename(file, '.md'),
 			body,
+			provenance: provenanceFor(file),
 		});
 	}
 }
@@ -190,29 +203,46 @@ function loadSingle(file, kind, docs, manifest) {
 
 /** Load every Class A doc from `roots` (as returned by resolveClassARoots). Also fills `manifest`
  * (path -> sha1) in place for the watermark. Never throws. */
-export function loadClassADocs(roots, manifest = {}) {
+export function loadClassADocs(roots, manifest = {}, opts = {}) {
+	const seedSubdir = opts.seedSubdir ?? 'library'; // matches lessons.into: docs/agent-lessons/library
+	const seededPrefix = `${seedSubdir}${path.sep}`;
 	const raw = [];
-	loadMdDir(roots.lessonsDir, SOURCE_KIND.LESSON, raw, manifest);
-	loadMdDir(roots.agentLessonsDir, SOURCE_KIND.LESSON, raw, manifest);
-	loadMdDir(roots.adrDir, SOURCE_KIND.ADR, raw, manifest);
+	loadMdDir(roots.lessonsDir, SOURCE_KIND.LESSON, raw, manifest, { provenanceFor: () => 'bundled' });
+	loadMdDir(roots.agentLessonsDir, SOURCE_KIND.LESSON, raw, manifest, {
+		provenanceFor: (file) => (path.relative(roots.agentLessonsDir, file).startsWith(seededPrefix) ? 'seeded' : 'project-local'),
+	});
+	loadMdDir(roots.adrDir, SOURCE_KIND.ADR, raw, manifest, { provenanceFor: () => 'adr' });
 	loadSingle(roots.overlayFile, SOURCE_KIND.OVERLAY, raw, manifest);
 	// A same-named lesson can exist under BOTH the bundled lessons-library and a project's
 	// docs/agent-lessons/ (dogfooding this checkout, or a copy-mode project with a same-slug local
-	// lesson) — `frontmatter.key` is a SQLite PRIMARY KEY, so a duplicate would throw mid-build and
-	// take the whole index down with it (every brief then comes back empty). Dedupe by key here,
-	// LAST write wins — agentLessonsDir is loaded after lessonsDir, so the project-local copy wins —
-	// EXCEPT once the FIRST (bundled) doc for a key is `security: true`, it is never replaced by
-	// ANY later doc at the same key, regardless of what the later doc itself claims about its own
-	// `security` value: an unreviewed project/feature-branch file could otherwise neutralize a
-	// bundled security lesson by colliding on its exact filename AND setting `security: true` on
-	// its own neutered content, which would have passed the earlier (incoming-flag-only) check.
-	// This bypasses the whole `supersedes` review-gate this module exists to enforce, so the only
-	// safe rule is: the bundled security doc, once loaded, is immutable for that key.
+	// lesson, or — in copy mode specifically — the project's OWN top-level docs/agent-lessons/ file
+	// colliding with the engsys-seeded docs/agent-lessons/library/ copy of the same lesson)
+	// — `frontmatter.key` is a SQLite PRIMARY KEY, so a duplicate would throw mid-build and take
+	// the whole index down with it (every brief then comes back empty).
+	//
+	// Dedupe by key here. For an ORDINARY collision (neither candidate is a protected security
+	// doc) it's plain last-write-wins, same as always. But once ANY candidate for a key is BOTH
+	// `security: true` AND loaded from an "official" root (bundled or seeded — see
+	// PROVENANCE_RANK), that doc wins NO MATTER what order `walkMd`'s readdirSync happened to
+	// return (filesystem order is not something to trust for a security decision), and no matter
+	// what a lower-provenance challenger claims about its OWN `security` flag. Without this, an
+	// unreviewed `docs/agent-lessons/<slug>.md` could neutralize the engsys-seeded
+	// `docs/agent-lessons/library/<slug>.md` copy of a bundled security lesson — exactly the
+	// bypass this whole mechanism exists to close.
+	const isProtected = (d) => d?.security && PROVENANCE_RANK[d.provenance] >= 2;
 	const byKey = new Map();
 	for (const d of raw) {
 		const prev = byKey.get(d.key);
-		if (prev?.security) continue; // the first (bundled) security doc for this key always wins
-		byKey.set(d.key, d);
+		if (!prev) { byKey.set(d.key, d); continue; }
+		const prevProtected = isProtected(prev);
+		const dProtected = isProtected(d);
+		if (prevProtected && !dProtected) continue; // protected incumbent resists an unprotected challenger
+		if (dProtected && !prevProtected) { byKey.set(d.key, d); continue; } // a protected challenger always displaces an unprotected incumbent
+		if (prevProtected && dProtected) { // both protected: the more "official" root wins; tie keeps the incumbent
+			if (PROVENANCE_RANK[d.provenance] > PROVENANCE_RANK[prev.provenance]) byKey.set(d.key, d);
+			continue;
+		}
+		byKey.set(d.key, d); // neither protected: ordinary last-write-wins
 	}
 	return { docs: [...byKey.values()], manifest };
 }
