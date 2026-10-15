@@ -235,6 +235,16 @@ max_events: 20000
 publish_role: maintain                  # which singleton publishes refs/engsys/memory/events
 ```
 
+`loadConfig()` reads BOTH the repo's own `.claude/memory.yml` (from the reviewed SHA, never the
+working tree — §2 rule 4) and the fleet config dir's `memory.yml` (`CLAUDE_CONFIG_DIR`), and
+**merges** them rather than one replacing the other (round 4, Nyx L4): `exclude_class_b_agents`,
+`trusted_bot_user_ids`, `operator_user_ids`, and `review_markers` are **unioned** (deduplicated) —
+a fleet-wide allowlist/marker set and a repo's own are both meant to apply, not compete. Every
+other field is a plain override, with the fleet value winning when both configs set it. A
+working-tree-only `.claude/memory.yml` (uncommitted, or committed but not yet pushed to the
+reviewed ref) is never read at all — it contributes nothing to either source, so the merged result
+is just the fleet config (if any) over the defaults.
+
 ## 11. Onboarding
 
 `engsys install` and `/naturalize` take these steps:

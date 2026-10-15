@@ -31,7 +31,9 @@
 //   pointerScore(event, { touchedPaths, prCountsByFile, totalPrs, now })  -> number (§5 formula)
 //   renderPointerLine(event)                               -> one STRUCTURED line, never event.text
 //   selectPointers(events, opts, limit)                    -> top Class B pointers, Event[]
-//   renderBrief({ overlay, lessons, pointers }, budgetBytes)  -> string, <= budgetBytes (UTF-8)
+//   renderBrief({ overlay, lessons, pointers }, budgetBytes)  -> { text, lessonKeys, pointerKeys }
+//                                                                 text <= budgetBytes (UTF-8); the
+//                                                                 keys are only those that survived
 //   buildBrief(opts)                                       -> { text, lessonKeys, pointerKeys, bytes }
 //                                                             fails open to the empty brief on ANY error
 //   evidenceText(key, { repoRoot, cacheDir, sqlite })       -> wrapped evidence string | null
@@ -85,21 +87,36 @@ export const DEFAULTS = {
  * (`CLAUDE_CONFIG_DIR`, a path genuinely outside the project's working tree — reading it from
  * disk is not a trust violation the way the working tree copy would be), then to defaults.
  */
+// These fields are UNIONED across the repo config and the fleet config (docs/memory-spec.md §10)
+// rather than one replacing the other — a fleet-wide trust allowlist and a repo's own are both
+// meant to apply, not compete (round 4, Nyx L4). Every other field is a plain override, fleet wins.
+const UNION_FIELDS = ['exclude_class_b_agents', 'trusted_bot_user_ids', 'operator_user_ids', 'review_markers'];
+
 export function loadConfig(repoRoot, { sha } = {}) {
 	const reviewedSha = sha ?? (repoRoot ? resolveReviewedSha(repoRoot) : null);
+	let repoConfig = null;
 	if (reviewedSha) {
 		try {
 			const out = execFileSync('git', ['-C', repoRoot, 'show', `${reviewedSha}:.claude/memory.yml`], { encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] });
-			return { ...DEFAULTS, ...parseYaml(out) };
-		} catch { /* not committed there — fall through to the fleet config dir */ }
+			repoConfig = parseYaml(out);
+		} catch { /* not committed there */ }
 	}
+	let fleetConfig = null;
 	if (process.env.CLAUDE_CONFIG_DIR) {
 		try {
 			const raw = fs.readFileSync(path.join(process.env.CLAUDE_CONFIG_DIR, 'memory.yml'), 'utf8');
-			return { ...DEFAULTS, ...parseYaml(raw) };
-		} catch { /* no fleet config dir copy either — defaults */ }
+			fleetConfig = parseYaml(raw);
+		} catch { /* no fleet config dir copy either */ }
 	}
-	return { ...DEFAULTS };
+	// Scalars: the fleet value wins when both are present (last spread wins); UNION_FIELDS are
+	// re-merged below instead of just overwritten.
+	const merged = { ...DEFAULTS, ...(repoConfig ?? {}), ...(fleetConfig ?? {}) };
+	for (const field of UNION_FIELDS) {
+		const repoArr = Array.isArray(repoConfig?.[field]) ? repoConfig[field] : [];
+		const fleetArr = Array.isArray(fleetConfig?.[field]) ? fleetConfig[field] : [];
+		merged[field] = [...new Set([...repoArr, ...fleetArr])];
+	}
+	return merged;
 }
 
 /**
@@ -398,31 +415,66 @@ function truncateToBytes(s, maxBytes) {
  * whole lines/sections.
  */
 export function renderBrief({ overlay = '', lessons = [], pointers = [] } = {}, budgetBytes = DEFAULTS.brief_bytes) {
+	// Each section carries the key(s) it represents (or `null` for the overlay, which has none) so
+	// the caller can report which lessons/pointers actually SURVIVED the byte cap below — not just
+	// which ones were selected before it (engsys#140, round 4 independent review: `injections.jsonl`
+	// and lessonKeys/pointerKeys were previously computed from the pre-truncation selection, so a
+	// tight budget could silently log/report a key whose content was never actually rendered).
 	const sections = [];
-	if (overlay) sections.push(overlay.trim());
+	if (overlay) sections.push({ line: overlay.trim(), kind: null, key: null });
 	for (const l of lessons) {
-		const excerpt = (l.title ? `**${l.title}**` : '') + (l.body ? ` — ${firstLine(l.body)}` : '');
-		sections.push(`[lesson ${l.key}] ${excerpt}`.trim());
+		const excerpt = l.body ? firstLine(l.body, l.title) : '';
+		const prefix = l.title ? `**${l.title}**` : '';
+		sections.push({ line: `[lesson ${l.key}] ${prefix}${excerpt ? ` — ${excerpt}` : ''}`.trim(), kind: 'lesson', key: l.key });
 	}
 	for (const p of pointers) {
 		const line = renderPointerLine(p);
-		if (line) sections.push(line);
+		if (line) sections.push({ line, kind: 'pointer', key: p.key });
 	}
 
-	let text = sections.join('\n');
+	let text = sections.map((s) => s.line).join('\n');
 	// Drop whole sections from the end until it fits — never emit a half-line.
 	while (byteLen(text) > budgetBytes && sections.length > 0) {
 		sections.pop();
-		text = sections.join('\n');
+		text = sections.map((s) => s.line).join('\n');
 	}
-	return truncateToBytes(text, budgetBytes);
+	text = truncateToBytes(text, budgetBytes);
+	// A trailing section can still survive the pop loop above but get byte-truncated mid-line by
+	// truncateToBytes (the whole joined text, not section-by-section) — if that cut inside this
+	// section's own line, the section's line is no longer actually present verbatim in `text`, so
+	// its key must not be reported as rendered either.
+	const renderedLessonKeys = [];
+	const renderedPointerKeys = [];
+	for (const s of sections) {
+		if (!s.key) continue;
+		if (!text.includes(s.line)) break; // this section (and everything after it) got cut
+		if (s.kind === 'lesson') renderedLessonKeys.push(s.key);
+		else if (s.kind === 'pointer') renderedPointerKeys.push(s.key);
+	}
+	return { text, lessonKeys: renderedLessonKeys, pointerKeys: renderedPointerKeys };
 }
 
-function firstLine(body) {
-	const m = /^[\s\S]*?\*\*Trigger:\*\*\s*(.+)$/m.exec(body);
-	if (m) return m[1].split('\n')[0];
-	const m2 = /\S.*/.exec(body.replace(/^#.*\n/, ''));
-	return m2 ? m2[0].slice(0, 160) : '';
+/**
+ * A one-line excerpt for a lesson's rendered brief entry: the `**Trigger:**` line if the lesson
+ * has one, else the first real content line of the body. `title` (the SAME title already shown
+ * right before this excerpt via `**${title}**`) is used to make sure the excerpt is never just
+ * that title again — a lesson with no `**Trigger:**` line whose body starts with a blank line
+ * before its own `# Heading` was otherwise producing `**Title** — # Title` (round 4 nit): the old
+ * heading-strip regex only matched a heading on the body's literal first line, so a leading blank
+ * line made it fall through to matching the heading itself as "first content line".
+ */
+function firstLine(body, title) {
+	const trigger = /^[\s\S]*?\*\*Trigger:\*\*\s*(.+)$/m.exec(body);
+	if (trigger) return trigger[1].split('\n')[0];
+	const normalizedTitle = title ? String(title).trim().toLowerCase() : null;
+	for (const raw of body.split('\n')) {
+		const line = raw.trim();
+		if (line === '') continue; // leading/interstitial blank lines
+		const stripped = line.replace(/^#+\s*/, '').trim(); // a Markdown heading, with or without blanks before it
+		if (normalizedTitle && stripped.toLowerCase() === normalizedTitle) continue; // the title itself — never the excerpt
+		return stripped.slice(0, 160);
+	}
+	return '';
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -534,8 +586,13 @@ export function buildBrief(opts = {}) {
 			return { key: fm.key, title: doc?.title ?? '(untitled)', body: doc?.body ?? '' };
 		});
 
-		const text = renderBrief({ overlay, lessons: renderLessons, pointers }, budgetBytes);
-		return { text, lessonKeys: lessons.map((l) => l.key), pointerKeys: pointers.map((p) => p.key), bytes: byteLen(text) };
+		// lessonKeys/pointerKeys come from renderBrief's own return, not from the pre-truncation
+		// `lessons`/`pointers` lists — a tight byte budget can drop a selected lesson/pointer's
+		// section entirely, and the caller (subagent-memory-inject.mjs's injections.jsonl log,
+		// among others) must report only what the subagent actually received (round 4, independent
+		// review Warning).
+		const { text, lessonKeys, pointerKeys } = renderBrief({ overlay, lessons: renderLessons, pointers }, budgetBytes);
+		return { text, lessonKeys, pointerKeys, bytes: byteLen(text) };
 	} catch {
 		return empty;
 	}
