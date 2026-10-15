@@ -316,6 +316,33 @@ describe('harvest (injected gh) and resolvePrNumbers', () => {
 		assert.deepEqual(pr.reviewThreads, []);
 	});
 
+	test('fetchPr resolves the repo via `gh repo view` when --repo is absent, instead of silently collecting nothing (cr review, round 3)', async () => {
+		const calls = [];
+		const gh = async (args) => {
+			calls.push(args);
+			if (args[0] === 'repo' && args[1] === 'view') return JSON.stringify({ nameWithOwner: 'o/resolved' });
+			if (args[0] === 'pr' && args[1] === 'view') return JSON.stringify({ number: 1, title: 't', url: 'u' });
+			if (args[0] === 'api' && args[1] === 'repos/o/resolved/issues/1/comments') {
+				return JSON.stringify([{ body: 'a finding', created_at: '2026-01-01T00:00:00Z', user: { id: 1, login: 'x', type: 'User' } }]);
+			}
+			return JSON.stringify([]);
+		};
+		const pr = await fetchPr(1, {}, { gh });
+		assert.equal(pr.comments.length, 1, 'comments must actually be collected once the repo is resolved from `gh repo view`, not left empty just because --repo was omitted');
+		assert.ok(calls.some((c) => c[0] === 'repo' && c[1] === 'view'), 'the repo must actually be resolved, not assumed');
+	});
+
+	test('fetchPr logs (does not silently swallow) a failed comments/reviews/threads fetch', async () => {
+		const logged = [];
+		const gh = async (args) => {
+			if (args[0] === 'pr' && args[1] === 'view') return JSON.stringify({ number: 1, title: 't', url: 'u' });
+			throw new Error('rate limited');
+		};
+		const pr = await fetchPr(1, { repo: 'o/r' }, { gh, log: (msg) => logged.push(msg) });
+		assert.deepEqual(pr.comments, []);
+		assert.ok(logged.some((m) => m.includes('comments fetch failed')), 'a failed fetch must be surfaced via log(), not just swallowed into an empty array with no trace');
+	});
+
 	test('harvest aggregates records across PRs and journal files without ever shelling out for real', async () => {
 		const gh = mockGhFor({ 1: { comments: [{ login: 'trusted-bot', id: 42, body: markerComment([{ file: 'a.ts', title: 'x' }]) }] } });
 		const dir = mkdtempSync(join(tmpdir(), 'harvest-'));

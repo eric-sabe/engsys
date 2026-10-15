@@ -153,7 +153,10 @@ describe('main — fail-open contract', () => {
 
 describe('CLI end to end', () => {
 	test('a well-formed SubagentStart payload against this real checkout returns a non-empty brief', { skip: !SQLITE_AVAILABLE }, () => {
-		const payload = JSON.stringify({ cwd: fileURLToPath(new URL('../..', import.meta.url)), agent_type: 'isabelle', prompt: 'worktree bootstrap pnpm install' });
+		// No `prompt` field — the real SubagentStart payload shape (docs/memory-spec.md §12) never
+		// carries one; a test fixture that adds one hides exactly the gap cr review's round-3 pass
+		// caught (most unscoped bundled lessons scoring 0 with no prompt to derive BM25 terms from).
+		const payload = JSON.stringify({ cwd: fileURLToPath(new URL('../..', import.meta.url)), agent_type: 'isabelle' });
 		const out = execFileSync('node', [SCRIPT], { input: payload, encoding: 'utf8', env: { ...process.env, NODE_NO_WARNINGS: '1' } });
 		const parsed = JSON.parse(out);
 		assert.equal(parsed.hookSpecificOutput.hookEventName, 'SubagentStart');

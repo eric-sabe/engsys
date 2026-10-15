@@ -474,7 +474,13 @@ export function buildBrief(opts = {}) {
 		// straight into every subagent's system-authority context (engsys#140, cr review).
 		const overlay = handle.docs.find((d) => d.kind === 'overlay')?.body ?? '';
 
-		const terms = bm25Terms(opts.prompt);
+		// SubagentStart carries no prompt field at all (docs/memory-spec.md §12) -- bm25Terms('')
+		// is always [], so without this fallback bm25ByKey is always empty in the real hook path
+		// and every unscoped lesson (globs/roles/stacks: [], the majority of the bundled library)
+		// scores 0 in lessonMatchScore and is never selected (cr review, round 3). Touched-path
+		// segments give BM25 something real to match against keywords/body even with no prompt.
+		const pathText = (opts.touchedPaths ?? []).map((p) => p.replace(/[/._-]+/g, ' ')).join(' ');
+		const terms = bm25Terms(`${opts.prompt ?? ''} ${pathText}`);
 		const bm25Rows = terms.length ? queryIndex(handle.db, { text: terms.join(' '), limit: 50 }) : [];
 		// queryIndex already flips sqlite's bm25() sign so higher `r.score` = more relevant.
 		// engsys#140 N2 (Nyx re-review): the DB is index.sqlite — writable, and its watermark is

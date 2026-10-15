@@ -602,6 +602,27 @@ describe('buildBrief — end to end, fail-open, and the agent exclusion boundary
 		}
 	});
 
+	test('with NO prompt at all (the real SubagentStart shape, docs/memory-spec.md §12), touched-path segments still give BM25 something to match an unscoped lesson\'s keywords (cr review, round 3)', { skip: !SQLITE_AVAILABLE }, () => {
+		const dir = makeRepo({ lessons: [['one', { keywords: ['widget'], title: 'Widget lesson' }]] }); // globs/roles/stacks all [] — scores 0 on glob/role/stack match alone
+		try {
+			const result = buildBrief({ repoRoot: dir, agentType: 'isabelle', prompt: '', touchedPaths: ['docs/widget-feature/handler.ts'] });
+			assert.ok(result.lessonKeys.includes('lesson:one'), 'an unscoped lesson must still be reachable via BM25 over touched-path segments when there is no prompt at all');
+			assert.match(result.text, /Widget lesson/);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('with neither a prompt nor any touched paths, an unscoped lesson with no glob/role/stack match legitimately scores 0 and is not selected', { skip: !SQLITE_AVAILABLE }, () => {
+		const dir = makeRepo({ lessons: [['one', { keywords: ['widget'], title: 'Widget lesson' }]] });
+		try {
+			const result = buildBrief({ repoRoot: dir, agentType: 'isabelle', prompt: '', touchedPaths: [] });
+			assert.ok(!result.lessonKeys.includes('lesson:one'), 'sanity: this is the genuinely-no-signal case, not a bug — contrast with the touched-paths test above');
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	test('an excluded (security:true) agent type gets Class A content only — pointers are never computed for it', { skip: !SQLITE_AVAILABLE }, () => {
 		const dir = makeRepo({ agentsSecurityTrue: ['nyx'], lessons: [['one', { keywords: ['widget'] }]] });
 		try {

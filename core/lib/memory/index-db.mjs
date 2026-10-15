@@ -746,6 +746,17 @@ export function ensureIndex(opts = {}) {
 	}
 
 	if (needsBuild) {
+		// A dispatch killed mid-build (subagent-memory-inject.mjs's hard SIGKILL timeout) skips the
+		// catch block below entirely, so its tmp file is never cleaned up — sweep stale siblings
+		// (older than a build could plausibly still be running) before starting a new one, rather
+		// than letting them accumulate unbounded (cr review, round 3).
+		try {
+			for (const f of fs.readdirSync(cacheDir)) {
+				if (!f.startsWith('index.sqlite.tmp-')) continue;
+				const p = path.join(cacheDir, f);
+				try { if (Date.now() - fs.statSync(p).mtimeMs > 60_000) fs.rmSync(p, { force: true }); } catch { /* best effort */ }
+			}
+		} catch { /* best effort */ }
 		const tmpPath = `${dbPath}.tmp-${process.pid}-${Date.now()}`;
 		try {
 			buildInto(tmpPath, { sqlite, docs, events, manifest: watermark });

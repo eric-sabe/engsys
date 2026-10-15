@@ -294,25 +294,38 @@ export async function resolvePrNumbers(opts, { gh = defaultGh } = {}) {
  * a login-based lookup can silently resolve to the WRONG account's id. Reading the id straight off
  * the comment/review object sidesteps both problems entirely.
  */
-export async function fetchPr(number, opts, { gh = defaultGh } = {}) {
-	const repoArgs = opts.repo ? ['--repo', opts.repo] : [];
+export async function fetchPr(number, opts, { gh = defaultGh, log = () => {} } = {}) {
+	// `opts.repo` not given doesn't mean "skip REST collection" -- it means "resolve it from the
+	// current directory's repo", same as `gh pr view` itself already does implicitly. Silently
+	// collecting zero comments/reviews/threads here was producing a silent false-clean harvest
+	// (cr review, round 3): `run` would print "nothing recurred" with exit 0 even though the real
+	// problem was simply never asking the API for anything.
+	let repo = opts.repo;
+	if (!repo) {
+		try {
+			repo = (await ghJson(gh, ['repo', 'view', '--json', 'nameWithOwner'], 'resolving the current repo'))?.nameWithOwner ?? null;
+		} catch { repo = null; }
+	}
+	const repoArgs = repo ? ['--repo', repo] : [];
 	const v = await ghJson(gh, ['pr', 'view', String(number), ...repoArgs, '--json', 'number,title,url'], `reading PR #${number}`);
 	let comments = [];
 	let reviews = [];
 	let reviewThreads = [];
-	if (opts.repo) {
+	if (repo) {
 		try {
-			const raw = await ghJson(gh, ['api', `repos/${opts.repo}/issues/${number}/comments`, '--paginate'], `reading PR #${number} comments`);
+			const raw = await ghJson(gh, ['api', `repos/${repo}/issues/${number}/comments`, '--paginate'], `reading PR #${number} comments`);
 			comments = raw.map((c) => ({ body: c.body, createdAt: c.created_at, authorId: c.user?.id ?? null, authorType: c.user?.type ?? null, author: { login: c.user?.login ?? null } }));
-		} catch { /* optional; a failure here must not sink the whole harvest */ }
+		} catch (err) { log(`harvest-findings: PR #${number} comments fetch failed, continuing without them: ${err?.message ?? err}`); }
 		try {
-			const raw = await ghJson(gh, ['api', `repos/${opts.repo}/pulls/${number}/reviews`, '--paginate'], `reading PR #${number} reviews`);
+			const raw = await ghJson(gh, ['api', `repos/${repo}/pulls/${number}/reviews`, '--paginate'], `reading PR #${number} reviews`);
 			reviews = raw.map((r) => ({ body: r.body, submittedAt: r.submitted_at, authorId: r.user?.id ?? null, authorType: r.user?.type ?? null, author: { login: r.user?.login ?? null } }));
-		} catch { /* optional */ }
+		} catch (err) { log(`harvest-findings: PR #${number} reviews fetch failed, continuing without them: ${err?.message ?? err}`); }
 		try {
-			const raw = await ghJson(gh, ['api', `repos/${opts.repo}/pulls/${number}/comments`, '--paginate'], `reading PR #${number} review comments`);
+			const raw = await ghJson(gh, ['api', `repos/${repo}/pulls/${number}/comments`, '--paginate'], `reading PR #${number} review comments`);
 			reviewThreads = raw.map((t) => ({ ...t, authorId: t.user?.id ?? null }));
-		} catch { /* optional */ }
+		} catch (err) { log(`harvest-findings: PR #${number} review comments fetch failed, continuing without them: ${err?.message ?? err}`); }
+	} else {
+		log(`harvest-findings: PR #${number} -- could not resolve a repo (no --repo and \`gh repo view\` failed); comments/reviews/threads will be empty`);
 	}
 	return { ...v, comments, reviews, reviewThreads };
 }
@@ -334,7 +347,7 @@ export async function harvest(opts, { gh = defaultGh, readFile = (p) => fs.readF
 	const numbers = await resolvePrNumbers(opts, { gh });
 	const records = [];
 	for (const n of numbers) {
-		const pr = await fetchPr(n, opts, { gh }); // fetchPr already attaches a real numeric authorId per source (engsys#140 P5)
+		const pr = await fetchPr(n, opts, { gh, log }); // fetchPr already attaches a real numeric authorId per source (engsys#140 P5)
 		const prRecords = extractFromPr(pr, matchers, { trustedIds });
 		records.push(...prRecords);
 		log(`harvested #${n}: ${prRecords.length} finding(s)`);
