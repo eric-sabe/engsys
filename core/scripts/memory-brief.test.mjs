@@ -12,6 +12,7 @@ import {
 	bm25Terms,
 	buildBrief,
 	isReviewedOnDefaultBranch,
+	lessonMatchScore,
 	loadConfig,
 	pointerScore,
 	renderBrief,
@@ -227,6 +228,16 @@ describe('resolveSupersession', () => {
 			{ key: 'lesson:new', security: false, supersedes: ['old-security'] },
 		];
 		assert.ok(!resolveSupersession(rows).has('lesson:old-security'));
+	});
+});
+
+describe('lessonMatchScore / globMatchesAny (via lessonMatchScore)', () => {
+	test('a brace-alternation glob (**/*.{ts,tsx}) matches a touched .tsx file', () => {
+		const fm = { globs: ['**/*.{ts,tsx}'], roles: [], stacks: [] };
+		const withMatch = lessonMatchScore(fm, { touchedPaths: ['services/dashboard/foo.tsx'], bm25Score: 0 });
+		const withoutMatch = lessonMatchScore(fm, { touchedPaths: ['services/dashboard/foo.css'], bm25Score: 0 });
+		assert.ok(withMatch > withoutMatch);
+		assert.ok(withMatch > 0, 'the brace glob must actually contribute its bonus, not treat { } as literal characters');
 	});
 });
 

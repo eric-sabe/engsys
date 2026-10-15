@@ -120,13 +120,12 @@ export function bm25Terms(prompt) {
 	return [...new Set(words.filter((w) => !STOPWORDS.has(w)))];
 }
 
+// `path.matchesGlob` (Node >= 20.17) handles `*`, `**`, `?` and `{a,b}` brace alternation
+// correctly — the hand-rolled regex this replaces escaped `{`/`}` as LITERAL characters, so a
+// brace glob like `**/*.{ts,tsx}` (the exact example the index-db.mjs docs use) never matched.
 function globMatchesAny(globs, touchedPaths) {
 	if (!globs?.length || !touchedPaths?.length) return false;
-	const toRe = (g) => new RegExp(`^${g.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*\*/g, '\u0000').replace(/\*/g, '[^/]*').replace(/\u0000/g, '.*')}$`);
-	return globs.some((g) => {
-		const re = toRe(g);
-		return touchedPaths.some((p) => re.test(p) || re.test(path.basename(p)));
-	});
+	return globs.some((g) => touchedPaths.some((p) => path.matchesGlob(p, g) || path.matchesGlob(path.basename(p), g)));
 }
 
 /** docs/memory-spec.md §5's lesson match score: frontmatter overlap (globs/roles/stacks) blended

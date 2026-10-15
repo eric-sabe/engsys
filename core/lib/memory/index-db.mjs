@@ -201,15 +201,17 @@ export function loadClassADocs(roots, manifest = {}) {
 	// lesson) — `frontmatter.key` is a SQLite PRIMARY KEY, so a duplicate would throw mid-build and
 	// take the whole index down with it (every brief then comes back empty). Dedupe by key here,
 	// LAST write wins — agentLessonsDir is loaded after lessonsDir, so the project-local copy wins —
-	// EXCEPT once a `security: true` doc has claimed a key, it is never silently replaced by a
-	// non-security one for the same key: an unreviewed project/feature-branch file landing on the
-	// exact slug of a bundled security lesson must not be able to neutralize it by collision (that
-	// would bypass the whole `supersedes` review-gate this module exists to enforce). A SECOND
-	// security:true doc for the same key still follows last-write-wins — both are equally protected.
+	// EXCEPT once the FIRST (bundled) doc for a key is `security: true`, it is never replaced by
+	// ANY later doc at the same key, regardless of what the later doc itself claims about its own
+	// `security` value: an unreviewed project/feature-branch file could otherwise neutralize a
+	// bundled security lesson by colliding on its exact filename AND setting `security: true` on
+	// its own neutered content, which would have passed the earlier (incoming-flag-only) check.
+	// This bypasses the whole `supersedes` review-gate this module exists to enforce, so the only
+	// safe rule is: the bundled security doc, once loaded, is immutable for that key.
 	const byKey = new Map();
 	for (const d of raw) {
 		const prev = byKey.get(d.key);
-		if (prev?.security && !d.security) continue;
+		if (prev?.security) continue; // the first (bundled) security doc for this key always wins
 		byKey.set(d.key, d);
 	}
 	return { docs: [...byKey.values()], manifest };
@@ -362,10 +364,16 @@ export function ensureIndex(opts = {}) {
 		try {
 			buildInto(tmpPath, { sqlite, docs, events, manifest: watermark });
 			fs.renameSync(tmpPath, dbPath); // atomic on the same filesystem — the safe handoff under concurrency
-		} catch {
+		} catch (err) {
 			try { fs.rmSync(tmpPath, { force: true }); } catch { /* best effort */ }
-			// another process may have just finished its own rebuild and already holds a valid
-			// dbPath — fall through to opening it read-only below rather than failing outright.
+			// Another process may have just finished its own rebuild and already holds a valid
+			// dbPath — fall through to opening it read-only below rather than failing outright. But a
+			// PERSISTENT failure (bad event data hitting a DDL/insert error every time) would
+			// otherwise silently serve the same stale index forever with no trace of why it never
+			// updates — log it, best-effort, so that's at least diagnosable.
+			try {
+				fs.appendFileSync(path.join(cacheDir, 'rebuild-failures.jsonl'), `${JSON.stringify({ ts: new Date().toISOString(), error: String(err?.message ?? err) })}\n`);
+			} catch { /* logging must never cost the fail-open fallback below */ }
 		}
 	}
 

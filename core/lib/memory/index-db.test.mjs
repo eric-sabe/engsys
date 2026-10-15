@@ -3,11 +3,16 @@
 // consistent index; the index fails open when node:sqlite is missing.
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import fs, { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import fs, { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path, { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import { hermeticGit } from '../git-env.mjs';
+
+const require = createRequire(import.meta.url);
 import {
 	closeIndex,
 	computeWatermark,
@@ -132,6 +137,23 @@ describe('resolveClassARoots + loadClassADocs', () => {
 		}
 	});
 
+	test('setting security: true on the colliding override does not reopen the loophole either', () => {
+		const dir = makeRepo();
+		try {
+			const roots = resolveClassARoots(dir);
+			writeFileSync(
+				join(dir, 'docs', 'agent-lessons', 'public-route-flip-hardening-checklist.md'),
+				'---\nglobs: []\nstacks: []\nroles: []\nkeywords: ["override"]\nsecurity: true\nsupersedes: []\n---\n\n# Neutered override, now also claiming security:true\n\nbody\n',
+			);
+			const { docs } = loadClassADocs(roots);
+			const matches = docs.filter((d) => d.key === 'lesson:public-route-flip-hardening-checklist');
+			assert.equal(matches.length, 1);
+			assert.ok(!matches[0].body.includes('Neutered override'), 'the FIRST (bundled) security doc for a key always wins — a later doc cannot win just by also setting security: true');
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	test('a missing overlay/ADR dir is silently skipped, not an error', () => {
 		const dir = makeRepo();
 		try {
@@ -243,6 +265,28 @@ describe('ensureIndex', () => {
 		}
 	});
 
+	test('a rebuild failure is logged to rebuild-failures.jsonl instead of vanishing silently', () => {
+		const dir = makeRepo();
+		try {
+			const real = require('node:sqlite');
+			let threw = false;
+			class ThrowingOnce extends real.DatabaseSync {
+				exec(sql) {
+					if (!threw && sql.includes('CREATE VIRTUAL TABLE')) { threw = true; throw new Error('simulated ddl failure'); }
+					return super.exec(sql);
+				}
+			}
+			const h = ensureIndex({ repoRoot: dir, version: 'v1', sqlite: { DatabaseSync: ThrowingOnce } });
+			// No prior index existed, so the failed build leaves nothing to open — null, not a throw.
+			assert.equal(h, null);
+			const cacheDir = resolveCacheDir(dir);
+			const log = readFileSync(join(cacheDir, 'rebuild-failures.jsonl'), 'utf8');
+			assert.match(log, /simulated ddl failure/);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	test('builds an index, finds the project-local lesson by BM25, and does not rebuild unnecessarily', () => {
 		const dir = makeRepo();
 		try {
@@ -283,18 +327,32 @@ describe('ensureIndex', () => {
 		}
 	});
 
-	test('6 concurrent ensureIndex calls leave one consistent, queryable index', async () => {
+	test('6 concurrent ensureIndex calls (real OS processes) leave one consistent, queryable index', async () => {
+		// `Promise.all` of synchronous calls on one thread would not exercise the actual race this
+		// test is for (§13) — the temp-file-then-rename handoff under truly concurrent writers. Spawn
+		// 6 real child processes instead, each building/opening the SAME repoRoot's index at once.
 		const dir = makeRepo();
+		const script = [
+			'const { ensureIndex, queryIndex, closeIndex } = await import(process.argv[1]);',
+			'const h = ensureIndex({ repoRoot: process.argv[2], version: "v1" });',
+			'if (!h) { console.log("FAIL:null"); process.exit(1); }',
+			'const rows = queryIndex(h.db, { text: "widgets" });',
+			'console.log(rows.some((r) => r.key === "lesson:one") ? "OK" : "FAIL:no-match");',
+			'closeIndex(h);',
+		].join('\n');
+		const modulePath = fileURLToPath(new URL('./index-db.mjs', import.meta.url));
 		try {
+			const execFileP = promisify(execFile);
 			const results = await Promise.all(
-				Array.from({ length: 6 }, () => Promise.resolve().then(() => ensureIndex({ repoRoot: dir, version: 'v1' }))),
+				Array.from({ length: 6 }, () =>
+					execFileP('node', ['--input-type=module', '-e', script, '--', modulePath, dir], { env: { ...process.env, NODE_NO_WARNINGS: '1' } })),
 			);
-			for (const h of results) assert.ok(h, 'every concurrent call should succeed, not throw or silently fail');
-			for (const h of results) {
-				const rows = queryIndex(h.db, { text: 'widgets' });
-				assert.ok(rows.some((r) => r.key === 'lesson:one'));
-				closeIndex(h);
-			}
+			for (const { stdout } of results) assert.match(stdout, /^OK/, `every concurrent process should succeed: ${stdout}`);
+			// And the main process can still open and query the result afterward.
+			const h = ensureIndex({ repoRoot: dir, version: 'v1' });
+			assert.ok(h);
+			assert.ok(queryIndex(h.db, { text: 'widgets' }).some((r) => r.key === 'lesson:one'));
+			closeIndex(h);
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
