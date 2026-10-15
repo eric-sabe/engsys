@@ -427,11 +427,11 @@ export function buildBrief(opts = {}) {
 		const handle = ensureIndex({ repoRoot, pluginRoot: opts.pluginRoot, cacheDir: opts.cacheDir, version: opts.version ?? 'dev', sqlite: opts.sqlite });
 		if (!handle) return empty;
 
-		let overlay = '';
-		try {
-			const overlayPath = path.join(repoRoot, '.claude', 'workflows', 'briefs', 'project-brief-overlay.md');
-			overlay = fs.readFileSync(overlayPath, 'utf8');
-		} catch { /* no overlay installed — fine */ }
+		// Reviewed-ref content only, via `handle.docs` (loadClassADocs -> loadSingleFromRef) — NOT
+		// a direct fs.readFileSync here, which would re-introduce exactly what H3 closed: an
+		// uncommitted/unpushed overlay injected before review, and a symlinked overlay followed
+		// straight into every subagent's system-authority context (engsys#140, cr review).
+		const overlay = handle.docs.find((d) => d.kind === 'overlay')?.body ?? '';
 
 		const terms = bm25Terms(opts.prompt);
 		const bm25Rows = terms.length ? queryIndex(handle.db, { text: terms.join(' '), limit: 50 }) : [];

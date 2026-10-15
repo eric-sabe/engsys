@@ -35,15 +35,22 @@ The concrete commands live in the tracker skill's `close-board` (GitHub closes t
 
 Don't rely on memory of what you fixed inline. The durable record is the marked review-findings comment each PR/work item posts after its local review (plus any static-analysis / security-scanning alerts CI still produces, FINDING-ACK lines from fix rounds, PR reviews, inline review threads, and monster journals). Run `<engsys-root>/scripts/harvest-findings.mjs` instead of a hand-rolled single-marker loop — it already reads every configured marker (default: any leading `<!-- *-(findings|review) -->`, plus `.claude/memory.yml`'s `review_markers`), correlates `FINDING-ACK` outcomes, and groups by mistake **family** (docs/memory-spec.md §8):
 
+`harvest-findings.mjs` refuses to run at all unless a trust allowlist is configured (`.claude/memory.yml`'s
+`trusted_bot_user_ids`/`operator_user_ids`, docs/memory-spec.md §10) — pass numeric user ids via
+`--trusted-bot-ids`/`--operator-ids` if the project hasn't set them: `gh api users/<login>[bot] --jq .id`
+for a review bot, `gh api user --jq .id` for your own operator id.
+
 ```bash
 # Dry run: print the proposal (recurring families + draft lesson files), write nothing.
 node <engsys-root>/scripts/harvest-findings.mjs run --repo <owner>/<repo> \
-  --prs <all-project-PR-numbers, comma-separated>
+  --prs <all-project-PR-numbers, comma-separated> \
+  --trusted-bot-ids <review-bot user ids, comma-separated> --operator-ids <your user id>
 
 # Once the proposal looks right, open it as a reviewable docs PR (never a direct edit of
 # docs/agent-lessons/** or the engsys lessons-library on the default branch):
 node <engsys-root>/scripts/harvest-findings.mjs run --repo <owner>/<repo> \
-  --prs <all-project-PR-numbers, comma-separated> --apply
+  --prs <all-project-PR-numbers, comma-separated> \
+  --trusted-bot-ids <review-bot user ids, comma-separated> --operator-ids <your user id> --apply
 ```
 
 **Copy mode:** `<engsys-root>/scripts/harvest-findings.mjs` only exists in **plugin mode** — copy

@@ -506,6 +506,18 @@ describe('buildBrief — end to end, fail-open, and the agent exclusion boundary
 		}
 	});
 
+	test('an uncommitted overlay (never pushed to origin/main) is NOT injected into the brief (engsys#140 H3, cr review)', { skip: !SQLITE_AVAILABLE }, () => {
+		const dir = makeRepo({ lessons: [['one', { keywords: ['widget'] }]] });
+		try {
+			mkdirSync(join(dir, '.claude', 'workflows', 'briefs'), { recursive: true });
+			writeFileSync(join(dir, '.claude', 'workflows', 'briefs', 'project-brief-overlay.md'), 'UNREVIEWED OVERLAY TEXT — must never be injected\n');
+			const result = buildBrief({ repoRoot: dir, agentType: 'isabelle', prompt: 'widget' });
+			assert.ok(!result.text.includes('UNREVIEWED OVERLAY TEXT'), 'buildBrief must read the overlay from origin/main (via handle.docs), never the working tree directly');
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	test('a forged title written directly into index.sqlite never reaches the rendered brief (engsys#140 M1)', { skip: !SQLITE_AVAILABLE }, () => {
 		const dir = makeRepo({ lessons: [['one', { keywords: ['widget'], title: 'Real title' }]] });
 		try {
