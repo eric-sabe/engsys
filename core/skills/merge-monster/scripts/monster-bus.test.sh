@@ -317,6 +317,13 @@ printf '{"run":"r1","agent_type":"engsys:nyx","agent_id":"a2","remains":"verdict
 held merge; date +%s >"$T/state/.watch/last-heartbeat"
 run env FLEET_ID=alice "${TICK[@]}"
 has "the tick relays one the bus has not (the backstop)" "HANDBACK_INCOMPLETE engsys:nyx (a2): verdict not posted"
+PL="$T/hb-sessions/acme-mm.handbacks.jsonl"; : >"$PL"; rm -rf "$T/state/.watch"
+printf '{"run":"r1","agent_type":"x","agent_id":"p1","remains":"half' >>"$PL"
+OUT="$(monster_handback_events "$T/state")"
+[ -z "$OUT" ] && ok "a line still being written is not read yet" || bad "partial line read" "$OUT"
+printf ' written"}\n' >>"$PL"
+OUT="$(monster_handback_events "$T/state")"
+has "  …and is relayed whole once complete" "HANDBACK_INCOMPLETE x (p1): half written"
 unset ENGSYS_SESSIONS_DIR
 rm -rf "$T/state"/baton-* "$T/state/.watch"
 

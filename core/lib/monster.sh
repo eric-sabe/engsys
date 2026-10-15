@@ -210,9 +210,17 @@ monster_handback_events() {
   case "$off" in '' | *[!0-9]*) off=0 ;; esac
   [ "$off" -le "$size" ] || off=0 # the log was replaced
   if [ "$size" -gt "$off" ]; then
-    tail -c +"$((off + 1))" "$f" | head -c "$((size - off))" | jq -R -r --arg run "${ENGSYS_SESSION_RUN:-}" '
+    # Complete lines only: a line still being appended stays for the next read (the offset stops before it).
+    tail -c +"$((off + 1))" "$f" | head -c "$((size - off))" >"$1/.watch/handbacks.chunk"
+    if [ "$(tail -c 1 "$1/.watch/handbacks.chunk" | od -An -tx1 | tr -d ' \n')" != 0a ]; then
+      sed '$d' "$1/.watch/handbacks.chunk" >"$1/.watch/handbacks.chunk.done"
+      mv "$1/.watch/handbacks.chunk.done" "$1/.watch/handbacks.chunk"
+    fi
+    jq -R -r --arg run "${ENGSYS_SESSION_RUN:-}" '
       fromjson? | select($run == "" or .run == $run)
-      | "HANDBACK_INCOMPLETE \(.agent_type) (\(.agent_id)): \(.remains)" | .[0:300]' 2>/dev/null
+      | "HANDBACK_INCOMPLETE \(.agent_type) (\(.agent_id)): \(.remains)" | .[0:300]' <"$1/.watch/handbacks.chunk" 2>/dev/null
+    size=$((off + $(wc -c <"$1/.watch/handbacks.chunk" | tr -d ' ')))
+    rm -f "$1/.watch/handbacks.chunk"
   fi
   printf '%s\n' "$size" >"$1/.watch/handbacks.off"
 }
