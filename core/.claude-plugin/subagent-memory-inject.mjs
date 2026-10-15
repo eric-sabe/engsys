@@ -137,6 +137,13 @@ export async function main({ stdin = process.stdin, now = () => Date.now(), writ
 
 	let briefText = '';
 	let logKeys = { lesson_keys: [], pointer_keys: [], bytes: 0 };
+	// Diagnostics for "the brief disappeared with no clear reason" (resolveTouchedPaths' own git
+	// calls, and memory-brief's per-superseder `git show` calls inside buildBrief, both eat into
+	// the same 2s budget `runMemoryBrief`'s timeout enforces) — distinguishes "never even tried"
+	// from "tried and got nothing back" (almost always a timeout, since every other memory-brief
+	// failure path is caught and logged there, not silently swallowed).
+	let skippedBudget = false;
+	let spawnFailed = false;
 	try {
 		const prompt = extractPrompt(input);
 		const touchedPaths = resolveTouchedPaths(input, { cwd });
@@ -146,7 +153,9 @@ export async function main({ stdin = process.stdin, now = () => Date.now(), writ
 		// MIN_SPAWN_MS there isn't even enough budget left for node's own startup, so the spawn is
 		// SKIPPED outright (saves that startup cost too) rather than launched to a guaranteed timeout.
 		const remainingMs = TIMEOUT_MS - (now() - t0);
-		const result = remainingMs >= MIN_SPAWN_MS ? runMemoryBrief({ agentType, prompt, touchedPaths, cwd, timeoutMs: remainingMs }) : null;
+		skippedBudget = remainingMs < MIN_SPAWN_MS;
+		const result = skippedBudget ? null : runMemoryBrief({ agentType, prompt, touchedPaths, cwd, timeoutMs: remainingMs });
+		spawnFailed = !skippedBudget && !result;
 		if (result) {
 			briefText = result.text ?? '';
 			logKeys = { lesson_keys: result.lessonKeys ?? [], pointer_keys: result.pointerKeys ?? [], bytes: result.bytes ?? Buffer.byteLength(briefText, 'utf8') };
@@ -155,7 +164,7 @@ export async function main({ stdin = process.stdin, now = () => Date.now(), writ
 		briefText = '';
 	}
 
-	logInjection(cwd, { ts: new Date(now()).toISOString(), agent_type: agentType, ...logKeys, ms: now() - t0 });
+	logInjection(cwd, { ts: new Date(now()).toISOString(), agent_type: agentType, ...logKeys, ms: now() - t0, skipped_budget: skippedBudget, spawn_failed: spawnFailed });
 
 	if (!briefText) {
 		write('{}');

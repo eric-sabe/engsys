@@ -8,6 +8,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { hermeticGit } from '../lib/git-env.mjs';
 
 const require = createRequire(import.meta.url);
@@ -375,7 +376,7 @@ describe('buildBrief — end to end, fail-open, and the agent exclusion boundary
 });
 
 describe('CLI', () => {
-	const SCRIPT = new URL('./memory-brief.mjs', import.meta.url).pathname;
+	const SCRIPT = fileURLToPath(new URL('./memory-brief.mjs', import.meta.url));
 
 	test('prints the brief to stdout and exits 0', { skip: !SQLITE_AVAILABLE }, () => {
 		const dir = makeRepo({ lessons: [['one', { keywords: ['widget'] }]] });
