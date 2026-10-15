@@ -28,7 +28,7 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { isMainEntry } from '../lib/is-main.mjs';
 import { parseArgs, promisify } from 'node:util';
 import { parseReviewComment, titleTokens } from './review-bakeoff.mjs';
 import { loadConfig } from './memory-brief.mjs';
@@ -503,7 +503,7 @@ export async function main(argv, { gh = defaultGh, git = defaultGit, out = conso
 	return 1;
 }
 
-if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+if (isMainEntry(import.meta.url)) {
 	main(process.argv.slice(2))
 		.then((code) => process.exit(code ?? 0))
 		.catch((e) => { console.error(String(e?.message ?? e)); process.exit(1); });
