@@ -555,6 +555,18 @@ describe('CLI', () => {
 		assert.ok(lines.join('\n').includes('repeat offender'));
 	});
 
+	test('`run` surfaces a failed comments/reviews/threads fetch via `err`, instead of a silent "nothing recurred" exit 0 (round 4, cr review major)', async () => {
+		const gh = async (args) => {
+			if (args[0] === 'pr' && args[1] === 'view') return JSON.stringify({ number: Number(args[2]), title: 't', url: 'u' });
+			if (args[0] === 'api') throw new Error('API rate limited');
+			return JSON.stringify([]);
+		};
+		const errLines = [];
+		const outLines = [];
+		await main(['run', '--repo', 'o/r', '--prs', '1', '--trusted-bot-ids', '42'], { gh, out: (s) => outLines.push(s), err: (s) => errLines.push(s), cwd: process.cwd() });
+		assert.ok(errLines.some((l) => l.includes('fetch failed')), 'main() must pass a real logger into harvest() so a failed fetch is surfaced, not just a cheerful "nothing recurred"');
+	});
+
 	test('`harvest` with no trust ids configured anywhere refuses with a clear message, not a silent empty result', async () => {
 		const err = [];
 		const code = await main(['harvest', '--prs', '1'], { gh: async () => { throw new Error('must not be called'); }, out: () => {}, err: (s) => err.push(s), cwd: process.cwd() });

@@ -589,7 +589,12 @@ export async function main(argv, { gh = defaultGh, git = defaultGit, out = conso
 		// promise that only the top-level `.catch()` would turn into one.
 		let records;
 		try {
-			({ records } = await harvest(opts, { gh }));
+			// `log: err` — without it, every failed comments/reviews/threads fetch inside fetchPr
+			// (rate limiting, an older `gh` that doesn't support --slurp, an unresolved repo) was
+			// swallowed into "() => {}" and never surfaced to the CLI at all: `run` would print
+			// "No family recurred… nothing proposed" with exit 0, exactly the silent false-clean
+			// result fetchPr's own comments say this was built to prevent (round 4, cr review).
+			({ records } = await harvest(opts, { gh, log: err }));
 		} catch (e) {
 			err(String(e?.message ?? e));
 			return 1;
