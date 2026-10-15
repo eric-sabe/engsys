@@ -181,12 +181,17 @@ export function extractFromPr(pr, matchers) {
 	// directly, so it is itself a one-finding record (no marker/ack correlation needed or expected).
 	for (const t of pr.reviewThreads ?? []) {
 		if (!t.path) continue;
+		if (t.in_reply_to_id) continue; // a reply, not the thread's own comment — skip, or every reply inflates the record count
 		records.push({
 			finding: { file: t.path, line: t.line ?? t.original_line ?? null, severity: 'warning', category: 'review-thread', title: (t.body ?? '').split('\n')[0].slice(0, 160) },
 			prNumber: pr.number,
 			url: t.html_url ?? pr.url ?? null,
 			source: 'review_thread',
-			outcome: t.resolved === true ? 'fixed' : null,
+			// The REST `pulls/{n}/comments` endpoint this is fetched from has no resolution state —
+			// that's only `reviewThreads.isResolved` over GraphQL, not implemented here (#TODO:
+			// harvest-findings GraphQL review-thread resolution — tracked as a follow-up, not a
+			// correctness bug: an honest `null` just means this source never ranks as "fixed").
+			outcome: null,
 		});
 	}
 	return records;
@@ -295,6 +300,27 @@ function slugify(s) {
 	return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'finding';
 }
 
+/**
+ * One disambiguated slug per family, in order, as a `Map<family, slug>`. Two families can
+ * slugify to the same base (e.g. the same finding title recurring in two different files) — a
+ * collision gets a `-2`, `-3`, … suffix so the second family's write never silently overwrites
+ * the first. `existingSlugs` (optional) additionally avoids colliding with a file already on
+ * disk/branch (e.g. a previous harvest's proposal that hasn't merged yet).
+ */
+export function uniqueSlugs(families, existingSlugs = new Set()) {
+	const used = new Set(existingSlugs);
+	const bySlug = new Map();
+	for (const fam of families) {
+		const base = slugify(fam.title || fam.key);
+		let slug = base;
+		let n = 2;
+		while (used.has(slug)) { slug = `${base}-${n}`; n++; }
+		used.add(slug);
+		bySlug.set(fam, slug);
+	}
+	return bySlug;
+}
+
 /** Render ONE proposed lesson file's content, schema-conformant with E10's frontmatter (docs/memory-spec.md §2). */
 export function renderLessonProposal(family) {
 	const title = family.title || family.key;
@@ -332,12 +358,13 @@ export function renderLessonProposal(family) {
 }
 
 /** Render the full proposal markdown (what a human reviews before merging the docs PR). */
-export function renderProposal(families, { repo = null } = {}) {
+export function renderProposal(families, { repo = null, slugs = null } = {}) {
 	if (families.length === 0) return '# Review-finding harvest\n\nNo family recurred at least `--min-recurrence` times — nothing proposed.\n';
+	const slugOf = slugs ?? uniqueSlugs(families);
 	const lines = [`# Review-finding harvest${repo ? ` — ${repo}` : ''}`, '', `${families.length} recurring famil${families.length === 1 ? 'y' : 'ies'} found.`, ''];
 	for (const fam of families) {
 		lines.push(`## ${fam.title || fam.key} (${fam.distinctSources}x, ${fam.unresolvedCount} unresolved)`);
-		lines.push('', `Proposed: \`docs/agent-lessons/${slugify(fam.title || fam.key)}.md\` (or promote to the engsys lessons-library if it generalizes).`, '');
+		lines.push('', `Proposed: \`docs/agent-lessons/${slugOf.get(fam)}.md\` (or promote to the engsys lessons-library if it generalizes).`, '');
 		lines.push('<details><summary>Proposed lesson file</summary>', '', '```markdown', renderLessonProposal(fam).trimEnd(), '```', '</details>', '');
 	}
 	return lines.join('\n');
@@ -375,15 +402,20 @@ export async function openProposalPr(families, opts, { git = defaultGit, gh = de
 	const files = [];
 	const dir = path.join(cwd, 'docs', 'agent-lessons');
 	fs.mkdirSync(dir, { recursive: true });
+	// Disambiguate up front (two families can slugify to the same base — same finding title in two
+	// different files, say) and seed it with whatever's already on disk/branch, so a collision gets
+	// a -2/-3 suffix instead of the second family's write silently overwriting the first.
+	const existing = new Set(fs.readdirSync(dir).filter((f) => f.endsWith('.md')).map((f) => f.replace(/\.md$/, '')));
+	const slugOf = uniqueSlugs(families, existing);
 	for (const fam of families) {
-		const file = path.join(dir, `${slugify(fam.title || fam.key)}.md`);
+		const file = path.join(dir, `${slugOf.get(fam)}.md`);
 		fs.writeFileSync(file, renderLessonProposal(fam));
 		files.push(path.relative(cwd, file));
 	}
 	await git(['add', ...files], { cwd });
 	await git(['commit', '-m', `docs(memory): propose ${files.length} harvested lesson(s)`], { cwd });
 	await git(['push', '-u', 'origin', branch], { cwd });
-	const body = renderProposal(families, { repo: opts.repo });
+	const body = renderProposal(families, { repo: opts.repo, slugs: slugOf });
 	const prArgs = ['pr', 'create', '--draft', '--title', `docs: propose ${files.length} harvested lesson(s)`, '--body', body, '--head', branch];
 	if (opts.repo) prArgs.push('--repo', opts.repo);
 	const prUrl = (await gh(prArgs)).trim();

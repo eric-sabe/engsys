@@ -4,7 +4,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import fs, { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,6 +15,7 @@ import {
 	extractFromJournalText,
 	extractFromPr,
 	familyKey,
+	uniqueSlugs,
 	fetchPr,
 	harvest,
 	isMarkerBody,
@@ -179,6 +180,21 @@ describe('extractFromPr', () => {
 		assert.equal(records[0].finding.file, 'src/y.ts');
 		assert.equal(records[0].finding.line, 12);
 		assert.equal(records[0].source, 'review_thread');
+		assert.equal(records[0].outcome, null, 'the REST endpoint has no resolution state — this must be an honest null, never a guessed "fixed"');
+	});
+
+	test('a reply to a review-thread comment is skipped, so it never inflates the record count', () => {
+		const pr = {
+			number: 8,
+			comments: [],
+			reviews: [],
+			reviewThreads: [
+				{ path: 'src/z.ts', line: 5, body: 'original finding' },
+				{ path: 'src/z.ts', line: 5, body: 'thanks, fixed', in_reply_to_id: 1 },
+			],
+		};
+		const records = extractFromPr(pr, matchers);
+		assert.equal(records.length, 1);
 	});
 });
 
@@ -195,6 +211,22 @@ describe('extractFromJournalText', () => {
 	test('narrative text with no marker paragraph yields []', () => {
 		const matchers = buildMarkerMatchers({});
 		assert.deepEqual(extractFromJournalText('just narrative, no markers anywhere', matchers), []);
+	});
+});
+
+describe('uniqueSlugs', () => {
+	test('two families with the same title get distinct, suffixed slugs', () => {
+		const famA = { key: 'a.ts::missing-null-check', title: 'missing null check' };
+		const famB = { key: 'b.ts::missing-null-check', title: 'missing null check' };
+		const slugs = uniqueSlugs([famA, famB]);
+		assert.equal(slugs.get(famA), 'missing-null-check');
+		assert.equal(slugs.get(famB), 'missing-null-check-2');
+	});
+
+	test('a base slug already present in existingSlugs is also avoided', () => {
+		const fam = { key: 'a.ts::x', title: 'x' };
+		const slugs = uniqueSlugs([fam], new Set(['x']));
+		assert.equal(slugs.get(fam), 'x-2');
 	});
 });
 
@@ -296,6 +328,24 @@ describe('openProposalPr — never touches the default branch, everything inject
 			// to forbid; what's actually forbidden is a plain `checkout main` / `checkout -B main`.
 			assert.ok(!gitCalls.some((c) => c[0] === 'checkout' && (c.includes('main') || c.includes('master')) && c[1] !== '-b'), 'must never check out onto the default branch itself');
 			assert.ok(ghCalls.some((c) => c[0] === 'pr' && c.includes('--draft')), 'the PR must be opened as a draft');
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('two families that slugify to the same name each get their own file, not a silent overwrite', async () => {
+		const dir = mkdtempSync(join(tmpdir(), 'harvest-pr-collide-'));
+		try {
+			const famA = { key: 'a.ts::x', title: 'same title', distinctSources: 2, unresolvedCount: 0, outcomes: {}, examples: [] };
+			const famB = { key: 'b.ts::x', title: 'same title', distinctSources: 2, unresolvedCount: 0, outcomes: {}, examples: [] };
+			const result = await openProposalPr(
+				[famA, famB],
+				{ cwd: dir, branch: 'agent/memory-harvest-collide' },
+				{ git: async () => '', gh: async () => 'https://github.com/o/r/pull/1\n' },
+			);
+			assert.equal(result.files.length, 2);
+			assert.notEqual(result.files[0], result.files[1], 'each family must land in its own file');
+			for (const f of result.files) assert.ok(fs.existsSync(join(dir, f)));
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
