@@ -16,7 +16,9 @@ heartbeat_minutes: 10 # ScheduleWakeup fallback tick (mnt-tick.sh); each tick re
 # pulse_max: 22m # keepalive idle bound: no model renew for this long → stop renewing. Default 2.25 x heartbeat_minutes,
 #                 clamped to heartbeat_minutes + 2 < pulse_max <= stale_lock_minutes - 11 - 0.75 x heartbeat_minutes
 stale_lock_minutes: 45 # continuous watchdog: own Monitor + heartbeat, mirrors Merge Monster
-rotate_context_tokens: 300000 # heartbeat asks for rotation past this context size with nothing active (0 = off)
+# rotate_context_tokens: 175000 # heartbeat asks for rotation past this context size with nothing active (0 = off).
+#                               Default: 70% of CLAUDE_CODE_AUTO_COMPACT_WINDOW when set (250k → 175k), else 140k (700k on [1m]);
+#                               a value >= CLAUDE_CODE_AUTO_COMPACT_WINDOW is clamped to 70% with a CONFIG_WARNING.
 
 # Phase gate. Phase 1 = watch + triage + REPORT only, no auto-PRs. Flip to
 # auto_drive only once triage quality is proven against real findings — no

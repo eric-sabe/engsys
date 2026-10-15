@@ -140,4 +140,13 @@ test('block C net for monsters: an INCOMPLETE hand-back in a fleet session is lo
   assert.equal(lines[0].remains, 'push  pending', 'control characters are stripped');
   recordHandback({ session_id: 'sess-net2', agent_id: 'n3', last_assistant_message: 'STATUS: INCOMPLETE — x' }, { ENGSYS_SESSIONS_DIR: sdir });
   assert.deepEqual(fs.readdirSync(sdir), ['acme-mm.handbacks.jsonl'], 'nothing logged outside a fleet session');
+  // Stale lock recovery (#138): a crashed holder's >30s `.lock` dir is stolen and cleaned up.
+  const staleLock = path.join(sdir, 'acme-mm.handbacks.jsonl.lock');
+  fs.mkdirSync(staleLock);
+  const past = new Date(Date.now() - 60_000);
+  fs.utimesSync(staleLock, past, past);
+  recordHandback({ session_id: 'sess-net', agent_id: 'n4', agent_type: 'engsys:isabelle', last_assistant_message: 'STATUS: INCOMPLETE — after stale lock' }, env);
+  assert.equal(fs.existsSync(staleLock), false, 'stale lock stolen and cleaned up');
+  const afterLines = fs.readFileSync(path.join(sdir, 'acme-mm.handbacks.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  assert.equal(afterLines.length, 2);
 });

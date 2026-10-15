@@ -587,7 +587,9 @@ heartbeat **"rotation requested"** (exact phrase — the fleet supervisor keys
 on it), `mnt-baton.sh release … --reason rotation`, stop. The fleet supervisor ([agent-sessions](../agent-sessions/SKILL.md))
 relaunches you within minutes; startup reconcile recovers from durable state.
 The heartbeat's context-aware backstop applies here too (Merge Monster
-§ Context discipline; `rotate_context_tokens`, default 300000): write the
+§ Context discipline; `rotate_context_tokens`, default 70% of
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW` when set, e.g. `175000` for a 250k window,
+else `140000` / `700000` for `[1m]`): write the
 finding you are triaging to `<state_dir>/active` while it is in flight and
 empty the file when it is disposed, since an active finding is what holds a
 rotation off. On `ROTATION_REQUESTED`, rotate as above.

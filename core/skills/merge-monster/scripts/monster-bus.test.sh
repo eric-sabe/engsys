@@ -31,7 +31,7 @@ if [ -n "$jq_expr" ]; then jq -r "$jq_expr" "$f"; else cat "$f"; fi
 SH
 chmod +x "$T/bin/gh"
 export PATH="$T/bin:$PATH" FAKE="$T" FLEET_GH="$T/bin/gh" ENGSYS_SESSION=acme-mm ENGSYS_SESSION_RUN=r1
-unset FLEET_ID FEDERATION_FILE GH_TOKEN GITHUB_TOKEN GH_APP_ENV_FILE FLEET_INBOX_DIR
+unset FLEET_ID FEDERATION_FILE GH_TOKEN GITHUB_TOKEN GH_APP_ENV_FILE FLEET_INBOX_DIR CLAUDE_CODE_AUTO_COMPACT_WINDOW ANTHROPIC_MODEL CLAUDE_MODEL
 
 ok() { pass=$((pass + 1)); echo "  ok   $1"; }
 bad() { fail=$((fail + 1)); echo "  FAIL $1"; [ -z "${2:-}" ] || printf '%s\n' "$2" | sed 's/^/       /'; }
@@ -104,12 +104,23 @@ has "the tick runs the subagent backstop scan" "AGENT_OVERDUE fix-13 gen=1 task=
 hasnt "  …with no NOOP beside it" "NOOP"
 rm -f "$T/state/agents.tsv"
 echo $(( $(date +%s) - 3600 )) >"$T/state/.watch/last-heartbeat"
+jq '.pulseMs = 1000' "$T/state/baton-merge.json" >"$T/state/baton-merge.new" && mv "$T/state/baton-merge.new" "$T/state/baton-merge.json"
 run env FLEET_ID=alice "${TICK[@]}" --heartbeat-minutes 10
-# Offline, the heartbeat's own full renew cannot reach GitHub, so a due heartbeat shows as its error.
+# Offline, the heartbeat's own full renew cannot reach GitHub, so a due heartbeat shows as its error and never pulses (engsys#138).
 has "a due heartbeat is attempted by the tick (offline it fails, and says so)" "HEARTBEAT_ERROR"
+[ "$(jq -r .pulseMs "$T/state/baton-merge.json")" = 1000 ] && ok "  …and a failed heartbeat in the tick never records a pulse (engsys#138)" || bad "  …pulse recorded on failed tick heartbeat" "$(cat "$T/state/baton-merge.json")"
+echo '{"body":"no heartbeat markers"}' >"$T/resp/issue-view"
+run env FLEET_ID=alice bash "$HERE/mm-heartbeat.sh" --repo acme/app --issue 7 --state-dir "$T/state" --if-due 60m
+[ "$(jq -r .pulseMs "$T/state/baton-merge.json")" = 1000 ] && ok "  …nor does mm-heartbeat.sh when the ledger edit fails" || bad "  …pulse recorded before ledger edit" "$(cat "$T/state/baton-merge.json")"
+printf '%s\n' '{"body":"<!-- mm-heartbeat -->\nlast: old\n<!-- /mm-heartbeat -->\n"}' >"$T/resp/issue-view"
+run env FLEET_ID=alice bash "$HERE/mm-heartbeat.sh" --repo acme/app --issue 7 --state-dir "$T/state" --if-due 60m
+[ "$(jq -r .pulseMs "$T/state/baton-merge.json")" -gt 1000 ] && ok "  …once the heartbeat write succeeds, the pulse is recorded" || bad "  …pulse not recorded after heartbeat edit" "$(cat "$T/state/baton-merge.json")"
+rm -f "$T/resp/issue-view"
 date +%s >"$T/state/.watch/last-heartbeat"
+jq '.pulseMs = 2000' "$T/state/baton-merge.json" >"$T/state/baton-merge.new" && mv "$T/state/baton-merge.new" "$T/state/baton-merge.json"
 run env FLEET_ID=alice "${TICK[@]}" --heartbeat-minutes 10
 [ "$OUT" = NOOP ] && ok "  …a recent heartbeat is not due: NOOP" || bad "  …a recent heartbeat is not due: NOOP" "$OUT"
+[ "$(jq -r .pulseMs "$T/state/baton-merge.json")" -gt 2000 ] && ok "  …and step 1 pulses when the heartbeat is already fresh" || bad "  …step 1 did not pulse on fresh heartbeat" "$(cat "$T/state/baton-merge.json")"
 . "$HERE/../../../lib/monster.sh"
 echo $(( $(date +%s) - 14 * 60 )) >"$T/state/.watch/last-heartbeat"
 monster_heartbeat_due "$T/state" 20 && bad "  …due only after 0.75 x heartbeat_minutes (14m of 20 is not)" || ok "  …due only after 0.75 x heartbeat_minutes (14m of 20 is not)"
@@ -307,6 +318,26 @@ printf '{"run":"r1","transcript_path":"%s"}\n' "$TR" >"$T/sessions/acme-mm.json"
 [ "$(ENGSYS_SESSIONS_DIR="$T/sessions" ENGSYS_SESSION_RUN=r1 monster_transcript)" = "$TR" ] && ok "  …this launch's record is used" || bad "  …this launch's record"
 printf '{"transcript_path":"relative.jsonl"}\n' >"$T/sessions/acme-mm.json"
 [ -z "$(ENGSYS_SESSIONS_DIR="$T/sessions" ENGSYS_SESSION_RUN= monster_transcript)" ] && ok "  …a relative path is refused" || bad "  …relative refused"
+rt() { monster_rotate_tokens "$@" | cut -f1; }
+rw() { monster_rotate_tokens "$@" | cut -f2; }
+[ "$(rt "" 250000)" = 175000 ] && [ -z "$(rw "" 250000)" ] && ok "rotate_context_tokens unset + 250k window → 175000 (engsys#144)" || bad "unset 250k" "$(monster_rotate_tokens "" 250000)"
+[ "$(rt "" "")" = 140000 ] && [ -z "$(rw "" "")" ] && ok "  …unset with no window → 140000 (70% of 200k)" || bad "unset 200k" "$(monster_rotate_tokens "" "")"
+[ "$(ANTHROPIC_MODEL="claude-opus-4-6[1m]" rt "" "")" = 700000 ] && ok "  …unset with [1m] model → 700000" || bad "unset 1m" "$(ANTHROPIC_MODEL="claude-opus-4-6[1m]" monster_rotate_tokens "" "")"
+[ "$(rt 300000 250000)" = 175000 ] && case "$(rw 300000 250000)" in *"clamped to 175000"*) true ;; *) false ;; esac \
+  && ok "configured 300000 with a 250k window → warning + clamped to 175000" || bad "300k/250k clamp" "$(monster_rotate_tokens 300000 250000)"
+TR200="$T/transcript-200k.jsonl"
+usage_line 1000 2000 197000 >"$TR200"
+rm -rf "$SD/.watch"
+CLAUDE_CODE_AUTO_COMPACT_WINDOW=250000 monster_rotation_status "$SD" running "" "$TR200"
+[ "$MONSTER_STATUS" = "rotation requested — ctx 200k" ] && ok "  …unset threshold with 250k window rotates at 200k (> 175k)" || bad "unset 250k rotation" "$MONSTER_STATUS"
+rm -rf "$SD/.watch"
+CLAUDE_CODE_AUTO_COMPACT_WINDOW=250000 monster_rotation_status "$SD" running 300000 "$TR200"
+[ "$MONSTER_STATUS" = "rotation requested — ctx 200k" ] && ok "  …configured 300k clamped under 250k window rotates at 200k" || bad "clamped 250k rotation" "$MONSTER_STATUS"
+printf 'repo: acme/app\nrotate_context_tokens: 300000\n' >"$T/cfg-rot.yml"
+rm -rf "$T/state/.watch"
+CLAUDE_CODE_AUTO_COMPACT_WINDOW=250000 bus 2 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --config "$T/cfg-rot.yml"
+has "  …and the bus emits CONFIG_WARNING when rotate_context_tokens >= CLAUDE_CODE_AUTO_COMPACT_WINDOW" "CONFIG_WARNING rotate_context_tokens 300000 >= CLAUDE_CODE_AUTO_COMPACT_WINDOW 250000"
+rm -rf "$T/state/.watch"
 
 echo "INCOMPLETE hand-backs reach the monster through its bus (engsys#126 review)"
 mkdir -p "$T/hb-sessions"; HBL="$T/hb-sessions/acme-mm.handbacks.jsonl"
@@ -333,7 +364,7 @@ hb_line() { printf '{"run":"%s","agent_type":"t","agent_id":"%s","remains":"r"}\
 for i in 1 2 3 4 5 6 7 8; do hb_line r1 "c$i" >>"$PL"; done
 for i in $(seq 1 12); do monster_handback_events "$T/state" >"$T/par.$i" & done; wait
 [ "$(cat "$T"/par.* | grep -c HANDBACK_INCOMPLETE)" = 8 ] && ok "bus and tick reading at once (12 readers): every line relayed exactly once" || bad "concurrent relay" "$(cat "$T"/par.* | sort | uniq -c)"
-ls "$T/state/.watch" | grep -q 'handbacks.chunk\|handbacks.lock' && bad "  …no chunk or lock left behind" "$(ls "$T/state/.watch")" || ok "  …no chunk or lock left behind"
+{ ls "$T/state/.watch" "$T/hb-sessions"; } | grep -q 'handbacks.chunk\|\.lock' && bad "  …no chunk or lock left behind" "$(ls "$T/state/.watch" "$T/hb-sessions")" || ok "  …no chunk or lock left behind"
 rm -f "$T"/par.*
 : >"$PL"; rm -rf "$T/state/.watch"
 { hb_line r0 old1; hb_line r1 a; hb_line r0 old2; hb_line r1 b; } >>"$PL"

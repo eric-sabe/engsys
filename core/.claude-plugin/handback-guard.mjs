@@ -133,7 +133,8 @@ const NAME = /^[A-Za-z0-9._-]{1,128}$/;
 /**
  * The monsters' net for block C (engsys#126 review): append an INCOMPLETE hand-back to the session's
  * hand-back log, which the watch bus and tick relay as an event. Only in a fleet-launched session; the run
- * id lets a relaunch ignore its predecessor's lines. Never throws (the guard fails open).
+ * id lets a relaunch ignore its predecessor's lines. Coordinates with monster_handback_prune /
+ * monster_handback_events via `<file>.lock` (engsys#138). Never throws (the guard fails open).
  */
 export function relayHandback(input, remains, env = process.env) {
   try {
@@ -143,8 +144,35 @@ export function relayHandback(input, remains, env = process.env) {
     const dir = sessionsDir(env);
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     const file = path.join(dir, `${fleet ? `${fleet}.` : ''}${session}.handbacks.jsonl`);
+    const lock = `${file}.lock`;
+    let locked = false;
+    const deadline = Date.now() + 5000;
+    while (!locked) {
+      try {
+        fs.mkdirSync(lock, { mode: 0o700 });
+        locked = true;
+      } catch {
+        try {
+          const st = fs.statSync(lock);
+          if (Date.now() - st.mtimeMs > 30_000) {
+            const stale = `${lock}.stale.${process.pid}`;
+            fs.renameSync(lock, stale);
+            fs.rmdirSync(stale);
+            continue;
+          }
+        } catch { /* released or raced */ }
+        if (Date.now() >= deadline) break;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+      }
+    }
     const clean = (v, n) => String(v ?? '').replace(/[\u0000-\u001f\u007f]+/g, ' ').slice(0, n);
-    fs.appendFileSync(file, `${JSON.stringify({ at: new Date().toISOString(), run: env.ENGSYS_SESSION_RUN || null, agent_id: clean(input.agent_id, 80), agent_type: clean(input.agent_type || 'agent', 80), remains: clean(remains, 200) })}\n`, { mode: 0o600 });
+    try {
+      fs.appendFileSync(file, `${JSON.stringify({ at: new Date().toISOString(), run: env.ENGSYS_SESSION_RUN || null, agent_id: clean(input.agent_id, 80), agent_type: clean(input.agent_type || 'agent', 80), remains: clean(remains, 200) })}\n`, { mode: 0o600 });
+    } finally {
+      if (locked) {
+        try { fs.rmdirSync(lock); } catch { /* ignore */ }
+      }
+    }
     return file;
   } catch {
     return null;

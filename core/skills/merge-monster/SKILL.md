@@ -345,7 +345,7 @@ wrapper, or don't.
 
 - `lost` / `not_held` / `lost_earlier` (exit 1, `lost: true`) → § Lost baton.
 - `takeover_wait` → wait until `waitMs` has passed, then retry.
-- `local_deadline` / `low_remaining` / `expired` → run `mm-baton.sh renew`
+- `local_deadline` / `low_remaining` / `expired` → run the tick (`mm-tick.sh`)
   (exit 0: retry the act; exit 1: § Lost baton).
 - `send_window` → nothing was sent; retry.
 - `error` (exit 3) → nothing was sent; retry on the next wake. An error is
@@ -741,11 +741,14 @@ haven't written down:
   minutes, and startup reconcile recovers everything from durable state.
   The operator only appears when a relaunch fails or a stale-but-alive
   session needs a probe.
-- **The backstop: context-aware rotation** (engsys#125). Every heartbeat
+- **The backstop: context-aware rotation** (engsys#125, #144). Every heartbeat
   reads your last main-thread usage (input + cache creation + cache read)
   from the tail of your transcript (the SessionStart hook records its path
-  for every fleet-launched session). Over `rotate_context_tokens` (default
-  300000) with nothing active (`<state_dir>/active` empty, no running
+  for every fleet-launched session). Over `rotate_context_tokens` (default:
+  70% of `CLAUDE_CODE_AUTO_COMPACT_WINDOW` when set, e.g. `175000` for a 250k
+  window, else `140000` for 200k / `700000` for `[1m]`; clamped with a
+  `CONFIG_WARNING` when configured `>= CLAUDE_CODE_AUTO_COMPACT_WINDOW`) with
+  nothing active (`<state_dir>/active` empty, no running
   subagent in `agents.tsv`), it writes **`rotation requested — ctx <N>k`**
   itself, and every later heartbeat of this session repeats it (sticky), so
   the supervisor sees the request even if you never act on it. It prints
