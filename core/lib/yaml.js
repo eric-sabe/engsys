@@ -98,6 +98,56 @@ function readBlockScalar(lines, idx, blockIndent, indentOf, style, chomp) {
   return { text, idx };
 }
 
+// Collect a MULTI-LINE flow collection (prettier's house style for a long array/map) starting at
+// `lines[idx]` (which opens with `[` or `{`), joining lines until bracket depth returns to zero.
+// Depth-tracking skips brackets inside quoted strings (the same minimal quote-awareness
+// stripTrailingComment/splitTopLevel already use), so a value like `"[not a list]"` doesn't end
+// the scan early. Returns `{ text, idx }` with `text` the single joined flow literal and `idx`
+// positioned at the first line after the closing bracket.
+function bracketDelta(s) {
+  let depth = 0;
+  let inS = false, inD = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === "'" && !inD) inS = !inS;
+    else if (c === '"' && !inS) inD = !inD;
+    else if (!inS && !inD) {
+      if (c === '[' || c === '{') depth++;
+      else if (c === ']' || c === '}') depth--;
+    }
+  }
+  return depth;
+}
+
+// Net bracket depth of a single value fragment (quote-aware) — positive means it opened more
+// brackets than it closed, i.e. a multi-line flow collection continues on the following lines.
+function bracketDepth(s) {
+  return bracketDelta(s);
+}
+
+function readMultilineFlow(lines, idx, indentOf, seed) {
+  let text = '';
+  let depth = 0;
+  let started = false;
+  if (seed !== undefined) {
+    text = seed;
+    depth = bracketDelta(seed);
+    started = depth > 0;
+    idx++; // the seed came from the key's own line (`roles: [`), already positioned at idx
+  }
+  while (idx < lines.length) {
+    if (started && depth <= 0) break;
+    const line = stripTrailingComment(lines[idx]).trim();
+    depth += bracketDelta(line);
+    started = started || depth !== 0 || /^[[{]/.test(line);
+    text += (text ? ' ' : '') + line;
+    idx++;
+    if (started && depth <= 0) break;
+  }
+  void indentOf; // kept in the signature for symmetry with the other block-consumers; unused here
+  return { text, idx };
+}
+
 function parseYaml(text) {
   const lines = [];
   for (const raw of text.split(/\r?\n/)) {
@@ -158,9 +208,34 @@ function parseYaml(text) {
       if (!m) break;
       const key = m[1];
       const val = m[2];
-      if (val === '') {
+      if (val !== '' && bracketDepth(val) > 0) {
+        // The OTHER prettier house style: the opening bracket stays on the KEY's own line
+        // (`roles: [` then items indented below, closing `]` on its own line) rather than being
+        // pushed to its own line. `val` here is `[` (or `{`), still open — seed the multi-line
+        // flow scan with it instead of starting fresh at the next line.
+        const res = readMultilineFlow(lines, idx, indentOf, val);
+        obj[key] = parseScalar(res.text);
+        idx = res.idx;
+      } else if (val === '') {
         idx++;
-        if (idx < lines.length && indentOf(lines[idx]) > blockIndent) {
+        const nextTrimmed = idx < lines.length ? stripTrailingComment(lines[idx]).trim() : '';
+        if (idx < lines.length && indentOf(lines[idx]) > blockIndent && /^[[{]/.test(nextTrimmed)) {
+          // A MULTI-LINE flow collection: the key's value is empty, but the next (more-indented)
+          // line opens a `[` or `{` — e.g. prettier's house style for a long array:
+          //   keywords:
+          //     [
+          //       "a",
+          //       "b",
+          //     ]
+          // Collect lines (bracket-depth balanced, so a value containing its own `[`/`]`/`{`/`}`
+          // inside a quoted string doesn't end the scan early — quotes are tracked the same way
+          // stripTrailingComment/splitTopLevel already do) until the opening bracket closes, join
+          // them into one single-line flow literal, and hand that to parseScalar — the exact same
+          // code path a one-line `keywords: ["a", "b"]` already goes through.
+          const res = readMultilineFlow(lines, idx, indentOf);
+          obj[key] = parseScalar(res.text);
+          idx = res.idx;
+        } else if (idx < lines.length && indentOf(lines[idx]) > blockIndent) {
           obj[key] = parseNode(indentOf(lines[idx]));
         } else if (idx < lines.length && /^\s*-(\s|$)/.test(lines[idx] || '') &&
                    indentOf(lines[idx]) === blockIndent) {

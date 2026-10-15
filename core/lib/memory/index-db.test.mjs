@@ -32,6 +32,7 @@ import {
 	resolveClassARoots,
 	isValidPointerKey,
 	validatePointerEvent,
+	resolveReviewedSha,
 } from './index-db.mjs';
 
 // A plain `git init`/`git config` here would inherit any GIT_DIR exported by a pre-push hook and
@@ -214,6 +215,46 @@ describe('loadClassADocs({ repoRoot }) reads project Class A from origin/<defaul
 			const { docs } = loadClassADocs(roots, {}, { repoRoot: dir });
 			assert.ok(!docs.some((d) => d.key === 'lesson:x'), 'no project lesson without a resolvable origin/<default>');
 			assert.ok(docs.some((d) => d.kind === 'lesson' && d.key !== 'lesson:x'), 'bundled lessons still load');
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe('resolveReviewedSha ref resolution is not shadowable by a same-named tag/branch (engsys#140 P1, Nyx N1)', () => {
+	// Out of scope: a local attacker who can write directly into refs/remotes/origin/* themselves
+	// (docs/memory-spec.md's own trust boundary is the git transport, not the local refs database).
+	// What IS in scope: `origin/main` the SHORT form is genuinely ambiguous — git's ref
+	// disambiguation order tries refs/heads/origin/main and refs/tags/origin/main before
+	// refs/remotes/origin/main — so a repo that happens to ALSO have a branch or tag literally
+	// named "origin/main" (e.g. from a hostile branch push, or just an unlucky local branch name)
+	// could silently shadow the real remote-tracking ref if any caller ever used the short form.
+	// `resolveReviewedSha` must never be fooled by this: it always resolves the fully-qualified
+	// `refs/remotes/origin/<name>` path, which is NOT subject to that search order at all.
+	test('a tag AND a branch both literally named "origin/main", pointing at an unreviewed hostile commit, do not shadow the real refs/remotes/origin/main', () => {
+		const dir = makeRepo(); // "one.md" is the real, reviewed (pushed-to-origin) content
+		try {
+			const realSha = resolveReviewedSha(dir);
+			assert.ok(/^[0-9a-f]{40}$/.test(realSha), 'sanity: resolves the real remote-tracking ref first');
+
+			// Plant a hostile lesson on an unreviewed local commit, then create a branch AND a tag
+			// both named literally "origin/main" pointing at it — the exact shadowing shape N1 flags.
+			writeFileSync(
+				join(dir, 'docs', 'agent-lessons', 'hostile.md'),
+				'---\nglobs: []\nstacks: []\nroles: []\nkeywords: ["x"]\nsecurity: false\nsupersedes: []\n---\n\n# Hostile\n\nHOSTILE CONTENT — must never be injected\n',
+			);
+			hermeticGit(dir, [...GIT_OPTS, 'add', '-A'], { isolateConfig: true });
+			hermeticGit(dir, [...GIT_OPTS, 'commit', '-q', '-m', 'hostile, never pushed to the real origin/main'], { isolateConfig: true });
+			hermeticGit(dir, [...GIT_OPTS, 'branch', 'origin/main'], { isolateConfig: true }); // refs/heads/origin/main
+			hermeticGit(dir, [...GIT_OPTS, 'tag', 'origin/main'], { isolateConfig: true }); // refs/tags/origin/main
+
+			const shaAfterShadow = resolveReviewedSha(dir);
+			assert.equal(shaAfterShadow, realSha, 'the real refs/remotes/origin/main SHA must be unaffected by same-named local branch/tag');
+
+			const roots = resolveClassARoots(dir);
+			const { docs } = loadClassADocs(roots, {}, { repoRoot: dir });
+			assert.ok(!docs.some((d) => d.key === 'lesson:hostile'), 'the hostile lesson on the shadow branch/tag must NOT be injected');
+			assert.ok(docs.some((d) => d.key === 'lesson:one' && d.body.includes('widgets')), 'positive control: the real reviewed lesson IS still injected');
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}

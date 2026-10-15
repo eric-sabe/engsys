@@ -220,125 +220,182 @@ function stripControlAndBidi(s) {
 // point at, and a git symlink entry (mode 120000) is detected and skipped explicitly below.
 // ---------------------------------------------------------------------------------------------
 
-/** The repo's default branch as `origin/<name>`, or `null` if it can't be resolved (a shallow
- * clone with no remote HEAD symref, no network, not a git repo at all, …). Never throws. */
-export function resolveDefaultRef(repoRoot) {
+/**
+ * Resolve the project's reviewed-content commit ONCE, as a full SHA — never a short name like
+ * `origin/main` anywhere downstream (engsys#140 N1 — Nyx re-review): a local tag or branch
+ * literally named `origin/main` shadows the real remote-tracking ref, and `git fetch` of a fork
+ * remote can auto-follow such a tag. `isReviewedOnDefaultBranch` and every git-tree/cat-file call
+ * below take this SHA, never a ref name.
+ *
+ * Resolution order: `git symbolic-ref refs/remotes/origin/HEAD` (must itself resolve under
+ * `refs/remotes/origin/`, or it's discarded) → `opts.defaultBranch` → `main`/`master` — each
+ * candidate name is then pinned with `git rev-parse --verify --end-of-options
+ * refs/remotes/origin/<name>^{commit}`, which refuses an ambiguous or non-remote-tracking name
+ * outright rather than guessing. Returns `null` if nothing resolves. Never throws.
+ *
+ * SECURITY NOTE: a local attacker who can write `refs/remotes/origin/*` directly (not through a
+ * normal `git fetch`) is out of scope — at that point they could fabricate the "reviewed" ref
+ * itself. This function's job is only to stop a `tag`/`heads` namesake from shadowing it.
+ */
+export function resolveReviewedSha(repoRoot, { defaultBranch } = {}) {
+	const names = [];
 	try {
-		const out = execFileSync('git', ['-C', repoRoot, 'symbolic-ref', 'refs/remotes/origin/HEAD'], { encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-		const m = /^refs\/remotes\/origin\/(.+)$/.exec(out);
-		if (m) return `origin/${m[1]}`;
-	} catch { /* fall through to the common-name probe below */ }
-	for (const candidate of ['origin/main', 'origin/master']) {
+		const symref = execFileSync('git', ['-C', repoRoot, 'symbolic-ref', 'refs/remotes/origin/HEAD'], { encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+		const m = /^refs\/remotes\/origin\/(.+)$/.exec(symref);
+		if (m) names.push(m[1]);
+	} catch { /* fall through to the named candidates below */ }
+	if (defaultBranch) names.push(defaultBranch);
+	names.push('main', 'master');
+	for (const name of [...new Set(names)]) {
 		try {
-			execFileSync('git', ['-C', repoRoot, 'rev-parse', '--verify', '--quiet', candidate], { timeout: 1000, stdio: 'ignore' });
-			return candidate;
+			const sha = execFileSync(
+				'git',
+				['-C', repoRoot, 'rev-parse', '--verify', '--end-of-options', `refs/remotes/origin/${name}^{commit}`],
+				{ encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] },
+			).trim();
+			if (/^[0-9a-f]{40}$/.test(sha)) return sha;
 		} catch { /* try the next candidate */ }
 	}
 	return null;
 }
 
-/** `.md` blob paths (relative to `repoRoot`) under `relDir` as of `ref`, via `git ls-tree`.
- * Excludes README.md and any mode-120000 (symlink) tree entry. Never throws; an unresolvable
- * ref/dir is simply zero entries. */
-function listGitTreeMd(repoRoot, ref, relDir) {
+/**
+ * ONE `git ls-tree -r -z <sha> -- <relPaths...>` call covering every project Class A root at once
+ * (engsys#140 P2/P3 — the per-file-read design this replaces took 2.25s on a 211-lesson corpus
+ * and always blew the hook's 2s budget). `-z` NUL-delimits records so a path containing a literal
+ * tab/newline can't desynchronize parsing. Returns every blob entry (type `blob`, ANY mode,
+ * including 120000 symlinks — callers filter) as `{mode, blobSha, relPath}`. Never throws; an
+ * unresolvable sha/path is simply zero entries.
+ */
+function listGitTree(repoRoot, sha, relPaths) {
+	if (!sha || relPaths.length === 0) return [];
 	let out;
 	try {
-		out = execFileSync('git', ['-C', repoRoot, 'ls-tree', '-r', ref, '--', relDir], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] });
+		out = execFileSync('git', ['-C', repoRoot, 'ls-tree', '-r', '-z', sha, '--', ...relPaths], { encoding: 'utf8', timeout: 3000, maxBuffer: 16 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] });
 	} catch {
 		return [];
 	}
 	const entries = [];
-	for (const line of out.split('\n')) {
-		if (!line.trim()) continue;
-		const m = /^(\d+)\s+(\w+)\s+[0-9a-f]+\t(.+)$/.exec(line);
+	for (const rec of out.split('\0')) {
+		if (!rec) continue;
+		const m = /^(\d+)\s+(\w+)\s+([0-9a-f]+)\t(.+)$/.exec(rec);
 		if (!m) continue;
-		const [, mode, type, relPath] = m;
-		if (type !== 'blob' || mode === '120000') continue; // not a plain file, or a symlink entry
-		if (!relPath.endsWith('.md') || path.basename(relPath) === 'README.md') continue;
-		entries.push(relPath);
+		const [, mode, type, blobSha, relPath] = m;
+		if (type !== 'blob') continue;
+		entries.push({ mode, blobSha, relPath });
 	}
 	return entries;
 }
 
-/** True iff `relPath` as of `ref` is a git symlink entry (mode 120000) — `git show` on one
- * returns the symlink's TARGET STRING, not the target's content, but that string is still
- * attacker-influenceable text standing in for real content, so it's rejected outright rather
- * than injected as if it were the file's body (engsys#140 H3). Never throws; an unresolvable
- * ref/path is "not a symlink" (the subsequent `readGitBlob` call will itself return null). */
-function isGitSymlinkEntry(repoRoot, ref, relPath) {
+/**
+ * Read every blob in `blobShas` through ONE `git cat-file --batch` process (engsys#140 P3) —
+ * streams every sha to its stdin, then parses the length-prefixed `<sha> <type> <size>\n<content>\n`
+ * (or `<sha> missing\n`) records out of stdout. Returns `Map<blobSha, string>`; a missing/unreadable
+ * object is simply absent from the map. Never throws.
+ */
+function readBlobsBatch(repoRoot, blobShas) {
+	const result = new Map();
+	if (blobShas.length === 0) return result;
+	let buf;
 	try {
-		const out = execFileSync('git', ['-C', repoRoot, 'ls-tree', ref, '--', relPath], { encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] });
-		return /^120000\s/.test(out);
+		// No `encoding` option at all — execFileSync's `encoding` must be a real Buffer encoding
+		// name (there is no 'buffer' encoding; omitting it is how you get a raw Buffer back).
+		buf = execFileSync('git', ['-C', repoRoot, 'cat-file', '--batch'], {
+			input: blobShas.map((s) => `${s}\n`).join(''),
+			timeout: 5000,
+			maxBuffer: 64 * 1024 * 1024,
+			stdio: ['pipe', 'pipe', 'ignore'],
+		});
 	} catch {
-		return false;
+		return result;
 	}
+	let offset = 0;
+	while (offset < buf.length) {
+		const nl = buf.indexOf(0x0a, offset);
+		if (nl === -1) break;
+		const header = buf.slice(offset, nl).toString('utf8');
+		const missing = /^([0-9a-f]+)\s+missing$/.exec(header);
+		if (missing) { offset = nl + 1; continue; }
+		const m = /^([0-9a-f]+)\s+(\S+)\s+(\d+)$/.exec(header);
+		if (!m) break; // unparseable — stop rather than risk misreading the rest as content
+		const [, sha, , sizeStr] = m;
+		const size = Number(sizeStr);
+		const contentStart = nl + 1;
+		result.set(sha, buf.slice(contentStart, contentStart + size).toString('utf8'));
+		offset = contentStart + size + 1; // +1 skips the single trailing \n git appends after content
+	}
+	return result;
 }
 
-/** The content of `relPath` (relative to `repoRoot`) as of `ref`, via `git show`. `null` if the
- * ref/path can't be resolved. Never throws. */
-function readGitBlob(repoRoot, ref, relPath) {
-	try {
-		return execFileSync('git', ['-C', repoRoot, 'show', `${ref}:${relPath}`], { encoding: 'utf8', timeout: 2000, maxBuffer: 16 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] });
-	} catch {
-		return null;
+/**
+ * Load every project Class A doc (lessons, ADRs, the overlay) as of `sha` in ONE `ls-tree` call
+ * (engsys#140 P3) plus ONE `cat-file --batch` read of every surviving blob — never a per-file
+ * `git show`. `dirSpecs` is `[{relDir, kind, provenanceFor}]` for recursively-scanned directories;
+ * `fileSpecs` is `[{relPath, kind}]` for single files (the overlay). A mode-120000 (symlink) tree
+ * entry is dropped before its blob is ever read (engsys#140 H3) — the content it WOULD return is
+ * the symlink's target string, not real content, and is never worth reading at all. Never throws.
+ */
+function loadProjectClassADocs(repoRoot, sha, dirSpecs, fileSpecs, docs, manifest) {
+	if (!sha) return;
+	const allPaths = [...dirSpecs.map((d) => d.relDir), ...fileSpecs.map((f) => f.relPath)];
+	const entries = listGitTree(repoRoot, sha, allPaths);
+	const wanted = [];
+	for (const e of entries) {
+		if (e.mode === '120000') continue; // never read a symlink's target string as content
+		const dirSpec = dirSpecs.find((d) => e.relPath === d.relDir || e.relPath.startsWith(`${d.relDir}/`));
+		if (dirSpec) {
+			if (!e.relPath.endsWith('.md') || path.basename(e.relPath) === 'README.md') continue;
+			wanted.push({ ...e, kind: dirSpec.kind, provenanceFor: dirSpec.provenanceFor, isSingle: false });
+			continue;
+		}
+		const fileSpec = fileSpecs.find((f) => e.relPath === f.relPath);
+		if (fileSpec) wanted.push({ ...e, kind: fileSpec.kind, provenanceFor: () => 'project-local', isSingle: true });
 	}
-}
-
-/** Load every `.md` blob under `relDir` as of `ref` as a Class A Doc — the reviewed-content
- * counterpart to `loadMdDir` (which reads the working tree, used only for the bundled library).
- * Never throws. */
-function loadMdDirFromRef(repoRoot, ref, relDir, kind, docs, manifest, { provenanceFor = () => 'project-local' } = {}) {
-	if (!ref) return;
-	for (const relPath of listGitTreeMd(repoRoot, ref, relDir)) {
-		const text = readGitBlob(repoRoot, ref, relPath);
-		if (text === null) continue;
-		const absPath = path.join(repoRoot, relPath);
-		manifest[absPath] = sha1(text);
-		const { fm, body } = readFrontmatter(text);
+	const blobs = readBlobsBatch(repoRoot, [...new Set(wanted.map((w) => w.blobSha))]);
+	for (const w of wanted) {
+		const text = blobs.get(w.blobSha);
+		if (text === undefined) continue;
+		const absPath = path.join(repoRoot, w.relPath);
+		manifest[absPath] = w.blobSha; // the blob sha IS the content hash — no need to sha1() it again
+		if (w.isSingle) {
+			docs.push({
+				key: `${w.kind}:${absPath}`,
+				class: 'A',
+				kind: w.kind,
+				path: absPath,
+				symbol: null,
+				roles: [],
+				globs: [],
+				stacks: [],
+				keywords: [],
+				security: false,
+				supersedes: [],
+				title: stripControlAndBidi(path.basename(w.relPath, '.md')),
+				body: text,
+			});
+			continue;
+		}
+		const { fm, body } = readFrontmatterSafe(text, w.relPath);
+		if (fm === null) continue; // malformed frontmatter — skipped and logged, never fatal (engsys#140 P4)
 		const titleMatch = /^#\s+(.+)$/m.exec(body);
-		const slug = stripControlAndBidi(path.basename(relPath, '.md'));
+		const slug = stripControlAndBidi(path.basename(w.relPath, '.md'));
 		docs.push({
-			key: `${kind}:${slug}`,
+			key: `${w.kind}:${slug}`,
 			class: 'A',
-			kind,
+			kind: w.kind,
 			path: absPath,
 			symbol: null,
-			roles: fm.roles ?? [],
-			globs: fm.globs ?? [],
-			stacks: fm.stacks ?? [],
-			keywords: fm.keywords ?? [],
+			roles: fm.roles,
+			globs: fm.globs,
+			stacks: fm.stacks,
+			keywords: fm.keywords,
 			security: fm.security === true,
-			supersedes: fm.supersedes ?? [],
+			supersedes: fm.supersedes,
 			title: stripControlAndBidi(titleMatch ? titleMatch[1] : slug),
 			body,
-			provenance: provenanceFor(relPath),
+			provenance: w.provenanceFor(w.relPath),
 		});
 	}
-}
-
-/** Load one file (the overlay) as of `ref`, via `git show`. Never throws. */
-function loadSingleFromRef(repoRoot, ref, relPath, kind, docs, manifest) {
-	if (!ref) return;
-	if (isGitSymlinkEntry(repoRoot, ref, relPath)) return; // engsys#140 H3 — never inject a symlink's target string as content
-	const text = readGitBlob(repoRoot, ref, relPath);
-	if (text === null) return;
-	const absPath = path.join(repoRoot, relPath);
-	manifest[absPath] = sha1(text);
-	docs.push({
-		key: `${kind}:${absPath}`,
-		class: 'A',
-		kind,
-		path: absPath,
-		symbol: null,
-		roles: [],
-		globs: [],
-		stacks: [],
-		keywords: [],
-		security: false,
-		supersedes: [],
-		title: stripControlAndBidi(path.basename(relPath, '.md')),
-		body: text,
-	});
 }
 
 /** Parse a leading `---`-delimited YAML frontmatter block (flat scalars/lists only — the subset
@@ -354,6 +411,33 @@ export function readFrontmatter(text) {
 	let fm;
 	try { fm = parseYaml(frontmatter) ?? {}; } catch { fm = {}; }
 	return { fm, body };
+}
+
+const ARRAY_FM_FIELDS = ['globs', 'stacks', 'roles', 'keywords', 'supersedes'];
+
+/**
+ * `readFrontmatter`, with every list field COERCED to an array (engsys#140 P4): a parser quirk
+ * (a prettier-formatted multi-line flow sequence, or any other YAML shape this subset parser
+ * doesn't fully handle) can still make a field come back as `{}` or a string instead of `[]` —
+ * downstream code calls `.length`/`.includes`/`.some`/`.join` on these fields unconditionally,
+ * and one malformed lesson among hundreds must degrade that ONE document, never abort the whole
+ * index build (`rebuild-failures.jsonl` showing a `.join is not a function` crash on a real
+ * 211-lesson corpus was the actual failure this fixes). `onSkipped(relPath, reason)` is called,
+ * never thrown, if parsing the frontmatter block itself raises — the document is then skipped
+ * entirely (not rendered with defaults, since its OTHER fields can't be trusted either).
+ */
+function readFrontmatterSafe(text, relPath, onSkipped = () => {}) {
+	let fm;
+	let body;
+	try {
+		({ fm, body } = readFrontmatter(text));
+	} catch (e) {
+		onSkipped(relPath, String(e?.message ?? e));
+		return { fm: null, body: '' };
+	}
+	const coerced = { security: fm.security === true };
+	for (const field of ARRAY_FM_FIELDS) coerced[field] = Array.isArray(fm[field]) ? fm[field] : [];
+	return { fm: coerced, body };
 }
 
 /** Load every `.md` file under `dir` (recursively) as a Class A Doc, keyed `<kind>:<slug>` (slug =
@@ -379,7 +463,8 @@ function loadMdDir(dir, kind, docs, manifest, { provenanceFor = () => 'project-l
 		let text;
 		try { text = fs.readFileSync(file, 'utf8'); } catch { continue; }
 		manifest[file] = sha1(text);
-		const { fm, body } = readFrontmatter(text);
+		const { fm, body } = readFrontmatterSafe(text, file);
+		if (fm === null) continue; // malformed — skipped, not fatal to the whole build (engsys#140 P4)
 		const titleMatch = /^#\s+(.+)$/m.exec(body);
 		docs.push({
 			key: `${kind}:${path.basename(file, '.md')}`,
@@ -387,12 +472,12 @@ function loadMdDir(dir, kind, docs, manifest, { provenanceFor = () => 'project-l
 			kind,
 			path: file,
 			symbol: null,
-			roles: fm.roles ?? [],
-			globs: fm.globs ?? [],
-			stacks: fm.stacks ?? [],
-			keywords: fm.keywords ?? [],
-			security: fm.security === true,
-			supersedes: fm.supersedes ?? [],
+			roles: fm.roles,
+			globs: fm.globs,
+			stacks: fm.stacks,
+			keywords: fm.keywords,
+			security: fm.security,
+			supersedes: fm.supersedes,
 			title: stripControlAndBidi(titleMatch ? titleMatch[1] : path.basename(file, '.md')),
 			body,
 			provenance: provenanceFor(file),
@@ -429,7 +514,7 @@ export function loadClassADocs(roots, manifest = {}, opts = {}) {
 	const seededPrefix = `${seedSubdir}/`; // relDir below is always `/`-joined (git path convention), not path.sep
 	const raw = [];
 	// Bundled lessons-library: the plugin's OWN content, read from disk (never the project's
-	// working tree) — see the module-level comment above loadMdDirFromRef for why this is the one
+	// working tree) — see the module-level comment above loadProjectClassADocs for why this is the one
 	// exception to "project Class A comes from the reviewed default branch" (engsys#140 H3).
 	loadMdDir(roots.lessonsDir, SOURCE_KIND.LESSON, raw, manifest, { provenanceFor: () => 'bundled' });
 
@@ -448,16 +533,24 @@ export function loadClassADocs(roots, manifest = {}, opts = {}) {
 		loadMdDir(roots.adrDir, SOURCE_KIND.ADR, raw, manifest, { provenanceFor: () => 'adr' });
 		loadSingle(roots.overlayFile, SOURCE_KIND.OVERLAY, raw, manifest);
 	} else {
-		const ref = resolveDefaultRef(repoRoot);
-		if (ref) {
+		// engsys#140 N1: resolve the reviewed commit ONCE, as a SHA — never a short ref name —
+		// and reuse it for every subsequent git call this function makes.
+		const sha = opts.reviewedSha ?? resolveReviewedSha(repoRoot, { defaultBranch: opts.defaultBranch });
+		if (sha) {
 			const relAgentLessons = path.relative(repoRoot, roots.agentLessonsDir).split(path.sep).join('/');
 			const relAdr = path.relative(repoRoot, roots.adrDir).split(path.sep).join('/');
 			const relOverlay = path.relative(repoRoot, roots.overlayFile).split(path.sep).join('/');
-			loadMdDirFromRef(repoRoot, ref, relAgentLessons, SOURCE_KIND.LESSON, raw, manifest, {
-				provenanceFor: (relPath) => (relPath.startsWith(`${relAgentLessons}/${seededPrefix}`) ? 'seeded' : 'project-local'),
-			});
-			loadMdDirFromRef(repoRoot, ref, relAdr, SOURCE_KIND.ADR, raw, manifest, { provenanceFor: () => 'adr' });
-			loadSingleFromRef(repoRoot, ref, relOverlay, SOURCE_KIND.OVERLAY, raw, manifest);
+			loadProjectClassADocs(
+				repoRoot,
+				sha,
+				[
+					{ relDir: relAgentLessons, kind: SOURCE_KIND.LESSON, provenanceFor: (relPath) => (relPath.startsWith(`${relAgentLessons}/${seededPrefix}`) ? 'seeded' : 'project-local') },
+					{ relDir: relAdr, kind: SOURCE_KIND.ADR, provenanceFor: () => 'adr' },
+				],
+				[{ relPath: relOverlay, kind: SOURCE_KIND.OVERLAY }],
+				raw,
+				manifest,
+			);
 		}
 	}
 	// A same-named lesson can exist under BOTH the bundled lessons-library and a project's
