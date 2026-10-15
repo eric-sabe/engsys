@@ -1,7 +1,7 @@
 ---
 globs: []
 stacks: []
-roles: ["isabelle"]
+roles: []
 keywords: ["enforce", "guarantee", "boundary"]
 security: false
 supersedes: []

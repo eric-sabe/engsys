@@ -1,7 +1,7 @@
 ---
 globs: []
 stacks: []
-roles: ["isabelle"]
+roles: []
 keywords: ["deterministic", "tiebreak", "every", "row", "pick", "give", "one", "total"]
 security: false
 supersedes: []

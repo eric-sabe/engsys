@@ -1,7 +1,7 @@
 ---
 globs: []
 stacks: []
-roles: ["isabelle"]
+roles: []
 keywords: ["emit", "commit", "isolate", "publish", "failure", "only", "every", "write"]
 security: false
 supersedes: []

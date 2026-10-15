@@ -1,7 +1,7 @@
 ---
 globs: []
 stacks: []
-roles: ["isabelle"]
+roles: []
 keywords: ["keep", "immutable", "source", "truth"]
 security: false
 supersedes: []

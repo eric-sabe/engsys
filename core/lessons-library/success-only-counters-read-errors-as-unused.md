@@ -1,7 +1,7 @@
 ---
 globs: []
 stacks: []
-roles: ["isabelle"]
+roles: []
 keywords: ["success", "only", "counters", "read", "errors", "unused", "counter", "makes"]
 security: false
 supersedes: []

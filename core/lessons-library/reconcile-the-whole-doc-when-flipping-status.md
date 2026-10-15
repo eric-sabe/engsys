@@ -1,7 +1,7 @@
 ---
 globs: []
 stacks: []
-roles: ["isabelle"]
+roles: []
 keywords: ["reconcile", "whole", "doc", "flipping", "status", "means", "reconciling", "body"]
 security: false
 supersedes: []

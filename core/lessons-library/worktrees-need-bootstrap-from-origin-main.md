@@ -1,7 +1,7 @@
 ---
 globs: []
 stacks: []
-roles: ["isabelle"]
+roles: []
 keywords: ["worktrees", "need", "bootstrap", "origin", "main"]
 security: false
 supersedes: []

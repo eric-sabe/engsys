@@ -1,7 +1,7 @@
 ---
 globs: ["**/*.tsx", "**/*.jsx"]
 stacks: ["platform/web"]
-roles: ["isabelle"]
+roles: []
 keywords: ["react", "lazy", "usestate", "init", "freezes", "async", "value", "initializer"]
 security: false
 supersedes: []

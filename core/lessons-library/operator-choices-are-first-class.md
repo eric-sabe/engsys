@@ -1,7 +1,7 @@
 ---
 globs: []
 stacks: []
-roles: ["isabelle"]
+roles: []
 keywords: ["operator", "choices", "are", "first", "class"]
 security: false
 supersedes: []

@@ -1,7 +1,7 @@
 ---
 globs: []
 stacks: []
-roles: ["isabelle"]
+roles: []
 keywords: ["long", "agent", "runs", "checkpoint", "poll", "don"]
 security: false
 supersedes: []

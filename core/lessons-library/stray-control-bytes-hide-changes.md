@@ -1,7 +1,7 @@
 ---
 globs: []
 stacks: []
-roles: ["isabelle"]
+roles: []
 keywords: ["stray", "control", "bytes", "hide", "changes"]
 security: false
 supersedes: []

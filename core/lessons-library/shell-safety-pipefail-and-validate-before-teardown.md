@@ -1,7 +1,7 @@
 ---
 globs: []
 stacks: []
-roles: ["isabelle"]
+roles: []
 keywords: ["shell", "safety", "pipefail", "validate", "teardown"]
 security: false
 supersedes: []

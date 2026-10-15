@@ -1,7 +1,7 @@
 ---
 globs: []
 stacks: []
-roles: ["isabelle"]
+roles: []
 keywords: ["husky", "hooks", "linked", "worktrees", "git", "hook", "shims", "are"]
 security: false
 supersedes: []

@@ -1,7 +1,7 @@
 ---
 globs: []
 stacks: []
-roles: ["isabelle"]
+roles: []
 keywords: ["normalize", "write", "must", "match", "read", "linear", "normalizers", "idempotent"]
 security: false
 supersedes: []

@@ -1,7 +1,7 @@
 ---
 globs: ["**/*.prisma"]
 stacks: ["db/prisma"]
-roles: ["isabelle"]
+roles: []
 keywords: ["prisma", "uniqueness", "upsert", "beyond", "schema", "lives", "outside", "only"]
 security: false
 supersedes: []

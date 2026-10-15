@@ -1,7 +1,7 @@
 ---
 globs: []
 stacks: []
-roles: ["isabelle"]
+roles: []
 keywords: ["read", "layer", "tolerates", "unbackfilled", "rows", "must", "tolerate", "backfilled"]
 security: false
 supersedes: []

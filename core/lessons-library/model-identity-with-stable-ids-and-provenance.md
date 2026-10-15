@@ -1,7 +1,7 @@
 ---
 globs: []
 stacks: []
-roles: ["isabelle"]
+roles: []
 keywords: ["model", "identity", "stable", "ids", "provenance"]
 security: false
 supersedes: []

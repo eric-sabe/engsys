@@ -1,7 +1,7 @@
 ---
 globs: []
 stacks: []
-roles: ["isabelle"]
+roles: []
 keywords: ["prefer", "tool", "enforced", "structured", "output"]
 security: false
 supersedes: []

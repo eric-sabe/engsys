@@ -1,7 +1,7 @@
 ---
 globs: []
 stacks: []
-roles: ["isabelle"]
+roles: []
 keywords: ["new", "convention", "applies", "introduces", "diff"]
 security: false
 supersedes: []

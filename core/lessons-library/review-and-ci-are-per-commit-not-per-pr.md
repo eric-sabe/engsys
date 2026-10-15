@@ -1,7 +1,7 @@
 ---
 globs: []
 stacks: []
-roles: ["isabelle"]
+roles: []
 keywords: ["review", "are", "per", "commit", "verdicts", "greens", "belong"]
 security: false
 supersedes: []

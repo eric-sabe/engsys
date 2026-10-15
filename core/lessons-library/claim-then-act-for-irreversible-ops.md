@@ -1,7 +1,7 @@
 ---
 globs: []
 stacks: []
-roles: ["isabelle"]
+roles: []
 keywords: ["claim", "then", "act", "irreversible", "ops", "operations"]
 security: false
 supersedes: []

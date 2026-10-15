@@ -1,7 +1,7 @@
 ---
 globs: []
 stacks: []
-roles: ["isabelle"]
+roles: []
 keywords: ["e2e", "passes", "vacuously", "against", "redirect", "target", "smoke", "pass"]
 security: false
 supersedes: []

@@ -98,6 +98,12 @@ out.set('core/.claude-plugin/hooks.json', json({
     PostToolUse: [
       { matcher: 'Edit|MultiEdit', hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/singleton-write-guard.mjs"' }] },
     ],
+    // Memory brief (engsys#128, docs/memory-spec.md §6): push Class A lessons + Class B pointers
+    // into a subagent's context before it starts. Fails open to {} on any error/timeout — kept
+    // separate from every enforcement hook below, which fails closed on purpose.
+    SubagentStart: [
+      { hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/subagent-memory-inject.mjs"' }] },
+    ],
     // Hand-back guard: a subagent can't hand back "still running, I'll continue once…" (nothing would
     // wake it), and a session can't end its turn on an unhandled INCOMPLETE hand-back.
     SubagentStop: [

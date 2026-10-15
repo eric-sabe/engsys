@@ -1,7 +1,7 @@
 ---
 globs: []
 stacks: []
-roles: ["isabelle"]
+roles: []
 keywords: ["commit", "entangled", "work"]
 security: false
 supersedes: []

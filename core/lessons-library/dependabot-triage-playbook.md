@@ -1,7 +1,7 @@
 ---
 globs: []
 stacks: []
-roles: ["isabelle"]
+roles: []
 keywords: ["dependabot", "triage", "playbook"]
 security: false
 supersedes: []

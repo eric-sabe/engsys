@@ -1,7 +1,7 @@
 ---
 globs: []
 stacks: []
-roles: ["isabelle"]
+roles: []
 keywords: ["git", "core", "bare", "flip", "breaks", "all", "worktrees"]
 security: false
 supersedes: []

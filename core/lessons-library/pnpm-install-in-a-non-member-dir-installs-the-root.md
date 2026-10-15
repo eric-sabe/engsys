@@ -1,7 +1,7 @@
 ---
 globs: ["**/pnpm-lock.yaml", "**/package.json"]
 stacks: ["lang/typescript"]
-roles: ["isabelle"]
+roles: []
 keywords: ["pnpm", "install", "non", "member", "dir", "installs", "root", "installing"]
 security: false
 supersedes: []

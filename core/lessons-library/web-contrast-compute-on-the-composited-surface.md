@@ -1,7 +1,7 @@
 ---
 globs: ["**/*.css", "**/*.tsx", "**/*.jsx"]
 stacks: ["platform/web"]
-roles: ["isabelle"]
+roles: []
 keywords: ["web", "contrast", "compute", "composited", "surface", "luminance", "formula", "text"]
 security: false
 supersedes: []

@@ -1,7 +1,7 @@
 ---
 globs: []
 stacks: []
-roles: ["isabelle"]
+roles: []
 keywords: ["async", "callbacks", "verify", "liveness", "must"]
 security: false
 supersedes: []

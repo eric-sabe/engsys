@@ -1,7 +1,7 @@
 ---
 globs: []
 stacks: []
-roles: ["isabelle"]
+roles: []
 keywords: ["shift", "correctness", "left", "distrust", "false", "greens"]
 security: false
 supersedes: []

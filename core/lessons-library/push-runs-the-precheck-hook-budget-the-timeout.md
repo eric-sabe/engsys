@@ -1,7 +1,7 @@
 ---
 globs: []
 stacks: []
-roles: ["isabelle"]
+roles: []
 keywords: ["push", "runs", "precheck", "hook", "budget", "timeout", "pre", "gate"]
 security: false
 supersedes: []

@@ -1,7 +1,7 @@
 ---
 globs: []
 stacks: []
-roles: ["isabelle"]
+roles: []
 keywords: ["change", "isnt", "done", "until", "every", "surface", "updated", "isn"]
 security: false
 supersedes: []
