@@ -74,7 +74,9 @@ how confident a disposition looks.
    `node <engsys-root>/fleet/msg.mjs inbox <your session> --mark-read`. Each
    line is a pointer: read each with `node <engsys-root>/fleet/msg.mjs read <url>`
    and re-read that PR or issue on GitHub (§ Cross-session messaging, receive).
-   Exit 1 with "single-fleet mode" means there is no inbox: go on.
+   Exit 1 with "single-fleet mode" means there is no inbox: go on. With
+   `fp_policies:` configured, run `mnt-fp-candidates.sh … --state-dir
+   <state_dir> --all` once (§ Standing false-positive policies, the latch).
 4. Heartbeat: `<skill-dir>/scripts/mnt-heartbeat.sh --repo <repo> --issue
 <ledger_issue> --state-dir <state_dir> --status "session start"`. Always pass
    `--state-dir`: it renews the baton first and writes the heartbeat only while
@@ -118,7 +120,9 @@ how confident a disposition looks.
    the meantime. So a Monitor gap costs only event latency, never the
    role; re-arm promptly anyway. The keepalive stops renewing after
    `pulse_max` without a renew from you (the config's `pulse_max`, default
-   2.25 × `heartbeat_minutes`; `--config` is how the bus reads it).
+   2.25 × `heartbeat_minutes`; `--config` is how the bus reads it), held
+   to the same invariant as Merge Monster's (step 5 there: the lease lapses
+   before the heartbeat reads stale; `CONFIG_WARNING` when clamped).
 
 6. Schedule the fallback tick: **ScheduleWakeup** at `heartbeat_minutes`
    (repeat every cycle; it must stay under `pulse_max`, since each tick is
@@ -163,6 +167,9 @@ how confident a disposition looks.
    - `SECRET_ALERT <run>` / `TRIVY_RED <run>` → these are urgent (they red
      the default branch's protections) — triage immediately, ahead of the
      queue.
+   - `HANDBACK_INCOMPLETE <agent> (<id>): <remains>` → a subagent handed
+     back unfinished work. Keep its registry row `running`; resume it
+     (`SendMessage`) or take the work over (as Merge Monster § Subagent liveness, step 4).
    - `AGENT_OVERDUE <name>` / `AGENT_STALE <name>` → probe-then-classify
      (§ Subagent liveness). Never respawn or escalate straight off the event.
    - `BATON_LOST maintain <code>` → § The baton, lost: at once, nothing first.
@@ -356,6 +363,9 @@ first run it appears, then a `SEEN <n>` count; one that leaves (dismissed,
 fixed) and later returns prints again; `ERROR` always prints. Judge each line
 the run it first appears and journal the judgment; that journal line, not a
 re-print, is the record. `--all` prints every line once more (to re-judge).
+**After any restart, rotation or compaction, run it once with `--all`** (and
+the same `--state-dir`): a line the previous context saw but never journaled
+is latched and would not print again. Judge what is not in the journal yet.
 
 `--prs all|none|<n,n>` narrows which PRs are scanned (default `all`, every open
 PR; `<n,n>` a comma list of PR numbers). Do not narrow it on the routine tick:

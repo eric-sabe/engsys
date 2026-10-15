@@ -1175,6 +1175,16 @@ test('#134: a Write or Edit over a pre-schema (over-limit) state.md first archiv
   decide({ tool_name: 'Write', tool_input: { file_path: other, content: 'y' }, env: {}, pluginRoot: ROOT });
   assert.deepEqual(fs.readdirSync(path.dirname(other)).filter((f) => f.startsWith('state.md.pre')), [], 'non-singleton: no opinion, no copy');
   assert.equal(archiveOverLimit(path.join(stateDir(null), 'missing.md')).archived, null);
+  // repeated trims of an over-limit file: the oldest copy (the true pre-schema history) plus the newest two
+  const first = copies()[0];
+  for (let i = 0; i < 4; i++) {
+    fs.writeFileSync(file, `${'z'.repeat(5000)}${i}`);
+    archiveOverLimit(file, { now: () => new Date(Date.UTC(2030, 0, 1, 0, 0, i)) });
+  }
+  assert.equal(copies().length, 3, 'at most three copies');
+  assert.equal(copies()[0], first, 'the oldest is always kept');
+  assert.ok(fs.readFileSync(path.join(dir, copies()[0])).equals(history), '…and it is still the full history');
+  assert.match(fs.readFileSync(path.join(dir, copies()[2]), 'utf8'), /3$/, 'the newest is the latest content');
 });
 
 test('#134: when the archive copy cannot be written, the change is denied (fail closed)', { skip: process.getuid?.() === 0 }, () => {

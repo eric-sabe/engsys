@@ -117,6 +117,21 @@ echo $(( $(date +%s) - 15 * 60 )) >"$T/state/.watch/last-heartbeat"
 monster_heartbeat_due "$T/state" 20 && ok "  …15m of 20 is" || bad "  …15m of 20 is"
 monster_heartbeat_mark "$T/state"
 monster_heartbeat_due "$T/state" 20 && bad "  …and a heartbeat resets it" || ok "  …and a heartbeat resets it"
+GSHA=abababababababababababababababababababab
+# an open operator gate: a /approve comment or an approving review must not be a NOOP tick
+printf '[%s]\n' "$(pr_json 14 BLOCKED | sed 's/"mm:ready"/"mm:blocked"/')" >"$T/resp/pr-list"
+printf '{"headRefOid":"%s","comments":[{"body":"gate request"}],"reviews":[]}\n' "$GSHA" >"$T/resp/pr-view"
+run env FLEET_ID=alice "${TICK[@]}"
+has "a PR parked mm:blocked carries its gate counts in the snapshot" '+ {"k":"gate","pr":14,"head":"'"$GSHA"'","comments":1,"reviews":0,"lastReview":null}'
+run env FLEET_ID=alice "${TICK[@]}"
+[ "$OUT" = NOOP ] && ok "  …an untouched gate is NOOP" || bad "  …an untouched gate is NOOP" "$OUT"
+printf '{"headRefOid":"%s","comments":[{"body":"gate request"},{"body":"/approve g1"}],"reviews":[]}\n' "$GSHA" >"$T/resp/pr-view"
+run env FLEET_ID=alice "${TICK[@]}"
+has "  …a new /approve comment is a delta (run gate-check)" '+ {"k":"gate","pr":14,"head":"'"$GSHA"'","comments":2'
+printf '{"headRefOid":"%s","comments":[{"body":"gate request"},{"body":"/approve g1"}],"reviews":[{"state":"APPROVED"}]}\n' "$GSHA" >"$T/resp/pr-view"
+run env FLEET_ID=alice "${TICK[@]}"
+has "  …so is an approving review" '"reviews":1,"lastReview":"APPROVED"}'
+rm -f "$T/resp/pr-view"
 printf '{"at":"2026-10-04T12:00:00.000Z","code":"lost"}\n' >"$T/state/baton-merge.lost"
 run env FLEET_ID=alice "${TICK[@]}"
 rc_is "a lost baton → exit 1" 1
@@ -134,10 +149,30 @@ run env FLEET_ID=alice "${MTICK[@]}"
 rm -rf "$T/state"/baton-* "$T/state/.watch" "$T/resp"/*
 
 echo "pulse_max (engsys#123)"
-[ "$(monster_pulse_max "" 20)" = 2700s ] && ok "default: 2.25 x heartbeat_minutes (20 → 45m)" || bad "default: 2.25 x heartbeat_minutes" "$(monster_pulse_max "" 20)"
-[ "$(monster_pulse_max 45 10)" = 45m ] && ok "a bare number is minutes" || bad "a bare number is minutes" "$(monster_pulse_max 45 10)"
-[ "$(monster_pulse_max 1350s 10)" = 1350s ] && ok "a duration passes through" || bad "a duration passes through"
-[ "$(monster_pulse_max "" "")" = 20m ] && ok "neither → 20m (the keepalive's own default)" || bad "neither → 20m"
+pm() { monster_pulse_max "$@" | cut -f1; }
+pw() { monster_pulse_max "$@" | cut -f2; }
+[ "$(pm "" 20)" = 2700s ] && ok "default: 2.25 x heartbeat_minutes (20 → 45m)" || bad "default 2.25 x hb" "$(pm "" 20)"
+[ "$(pm 45 10)" = 2700s ] && ok "a bare number is minutes" || bad "a bare number is minutes" "$(pm 45 10)"
+[ "$(pm 1350s 10)" = 1350s ] && [ "$(pm 1h 30)" = 3600s ] && [ "$(pm 90000ms 0)" = 90s ] && ok "s, h and ms units" || bad "units" "$(pm 1h 30) $(pm 90000ms 0)"
+[ "$(pm 2d 10)" = 1350s ] && case "$(pw 2d 10)" in *"not minutes or a duration"*) true ;; *) false ;; esac && ok "an unknown unit is refused loudly (default used, warning given)" || bad "unknown unit" "$(monster_pulse_max 2d 10)"
+[ "$(pm "" "")" = 1200s ] && ok "neither → 20m (the keepalive's own default)" || bad "neither → 20m" "$(pm "" "")"
+echo "  the lease must lapse before the heartbeat reads stale (engsys#125 review)"
+[ "$(pm "" 20 45)" = 1320s ] && case "$(pw "" 20 45)" in *"too short for heartbeat_minutes 20 (it needs >= 48)"*) true ;; *) false ;; esac \
+  && ok "hb 20 / stale 45 cannot both hold: pulse_max = the tick + 2m (22m), loudly" || bad "infeasible 20/45" "$(monster_pulse_max "" 20 45)"
+[ "$(pm "" 20 55)" = 1740s ] && [ -z "$(pw "" 20 55)" ] && ok "hb 20 / stale 55: the default is capped at 29m, quietly" || bad "20/55" "$(monster_pulse_max "" 20 55)"
+[ "$(pm 45m 20 55)" = 1740s ] && case "$(pw 45m 20 55)" in *"clamped to 29m"*) true ;; *) false ;; esac && ok "  …an explicit 45m is clamped to 29m, loudly" || bad "explicit clamp" "$(monster_pulse_max 45m 20 55)"
+[ "$(pm 15 20 55)" = 1320s ] && case "$(pw 15 20 55)" in *"must outlast the tick"*) true ;; *) false ;; esac && ok "  …one shorter than the tick is raised to it, loudly" || bad "raise to floor" "$(monster_pulse_max 15 20 55)"
+[ "$(pm "" 10 45)" = 1350s ] && ok "hb 10 / stale 45: 2.25 x 10 = 22.5m is already safe" || bad "10/45" "$(monster_pulse_max "" 10 45)"
+for hb in 5 10 15 20 30; do for st in 30 45 55 60 90; do
+  v=$(pm "" "$hb" "$st"); v=${v%s}; w=$(pw "" "$hb" "$st")
+  if [ -z "$w" ] && [ $(( v + 600 + hb * 45 )) -ge $(( st * 60 )) ]; then bad "invariant broken silently for hb $hb stale $st (pulse ${v}s)"; fi
+done; done
+ok "  …for every unwarned combination, pulse_max + 10m + 0.75 x hb < stale_lock_minutes"
+printf 'repo: acme/app\nheartbeat_minutes: 20\nstale_lock_minutes: 45\n' >"$T/cfg-pulse.yml"
+rm -rf "$T/state/.watch"
+bus 2 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --config "$T/cfg-pulse.yml"
+has "the bus says so once, as CONFIG_WARNING, at start" "CONFIG_WARNING stale_lock_minutes 45 is too short for heartbeat_minutes 20"
+rm -rf "$T/state/.watch"
 printf 'repo: acme/app\nheartbeat_minutes: 20 # tick\n# pulse_max: 99m\n' >"$T/cfg.yml"
 [ "$(monster_cfg_scalar "$T/cfg.yml" heartbeat_minutes)" = 20 ] && ok "the config's heartbeat_minutes is read, comment stripped" || bad "config heartbeat_minutes"
 [ -z "$(monster_cfg_scalar "$T/cfg.yml" pulse_max)" ] && ok "a commented-out pulse_max is absent" || bad "commented pulse_max"
@@ -172,6 +207,37 @@ rollup "$SHA2" UNSTABLE "$(run_ build COMPLETED SUCCESS)" "$(run_ e2e IN_PROGRES
 bus 2 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1
 has "a new head: its checks are new (lint fails again)" "CHECK_FAIL #12 lint: FAILURE"
 has "  …and UNSTABLE is ready even with a check pending" "CHECKS_READY #12 head=222222222222 state=UNSTABLE pending=1"
+echo "  re-run on the same head (gh run rerun --failed)"
+rm -rf "$T/state/.watch"
+rollup "$SHA1" BLOCKED "$(run_ build COMPLETED SUCCESS)" "$(run_ lint COMPLETED FAILURE)"
+bus 2 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1
+has "first run: lint fails" "CHECK_FAIL #12 lint: FAILURE"
+has "  …and the head is ready to decide on" "CHECKS_READY #12 head=111111111111"
+rollup "$SHA1" UNSTABLE "$(run_ build COMPLETED SUCCESS)" "$(run_ lint IN_PROGRESS)"
+bus 2 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1
+hasnt "while the re-run is in flight: no event, not even CHECKS_READY on UNSTABLE" "CHECK"
+rollup "$SHA1" BLOCKED "$(run_ build COMPLETED SUCCESS)" "$(run_ lint COMPLETED FAILURE)"
+bus 2 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1
+has "the re-run fails again with the same conclusion → CHECK_FAIL again" "CHECK_FAIL #12 lint: FAILURE"
+has "  …and CHECKS_READY again, so 'still red → escalate' runs" "CHECKS_READY #12 head=111111111111"
+[ "$(count_of CHECK_FAIL)" = 1 ] && ok "  …once" || bad "  …once" "$OUT"
+rollup "$SHA1" BLOCKED "$(run_ build COMPLETED SUCCESS)" "$(run_ lint QUEUED)"
+bus 2 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1
+rollup "$SHA1" CLEAN "$(run_ build COMPLETED SUCCESS)" "$(run_ lint COMPLETED SUCCESS)"
+bus 2 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1
+has "a second re-run that passes → CHECKS_READY at once (no wait for the tick)" "CHECKS_READY #12 head=111111111111 state=CLEAN pending=0"
+hasnt "  …and no CHECK_FAIL" "CHECK_FAIL"
+rollup "$SHA1" BLOCKED "$(run_ build COMPLETED SUCCESS)" "$(run_ lint COMPLETED FAILURE)" "$(run_ lint IN_PROGRESS)"
+rm -rf "$T/state/.watch"
+bus 3 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1
+hasnt "a superseded failure beside its running re-run is not reported, nor repeated per cycle" "CHECK_FAIL"
+echo 99 >"$T/state/active"; : >"$T/state/.watch/ready.12.$SHA1"
+rollup "$SHA1" BLOCKED
+bus 2 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1
+[ ! -e "$T/state/.watch/ready.12.$SHA1" ] && ok "a new active PR prunes the other PRs' ready latches" || bad "prune ready latches"
+[ -e "$T/state/.watch/ready.tsv" ] && ok "  …and leaves the READY label baseline (ready.tsv) alone" || bad "  …ready.tsv kept"
+echo 12 >"$T/state/active"
+rollup "$SHA2" UNSTABLE "$(run_ build COMPLETED SUCCESS)" "$(run_ e2e IN_PROGRESS)" "$(run_ lint COMPLETED FAILURE)"
 rm -rf "$T/state/.watch"; echo "#12 (piloting)" >"$T/state/active"
 bus 2 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1
 has "an active file written as '#12 (note)' still names PR 12" "CHECKS_READY #12 head=222222222222"
@@ -226,10 +292,33 @@ monster_rotation_status "$SD" running 500000 "$TR"
 [ "$MONSTER_STATUS" = running ] && ok "under the threshold → status unchanged" || bad "under threshold" "$MONSTER_STATUS"
 mkdir -p "$T/sessions"
 printf '{"transcript_path":"%s"}\n' "$TR" >"$T/sessions/acme-mm.json"
-[ "$(ENGSYS_SESSIONS_DIR="$T/sessions" monster_transcript)" = "$TR" ] && ok "the transcript the SessionStart hook recorded for ENGSYS_SESSION is found" || bad "transcript lookup"
-[ -z "$(ENGSYS_SESSIONS_DIR="$T/sessions" ENGSYS_SESSION=other monster_transcript)" ] && ok "  …and only for this session" || bad "  …only this session"
+[ "$(ENGSYS_SESSIONS_DIR="$T/sessions" ENGSYS_SESSION_RUN= monster_transcript)" = "$TR" ] && ok "the transcript the SessionStart hook recorded for ENGSYS_SESSION is found" || bad "transcript lookup"
+[ -z "$(ENGSYS_SESSIONS_DIR="$T/sessions" ENGSYS_SESSION_RUN= ENGSYS_SESSION=other monster_transcript)" ] && ok "  …and only for this session" || bad "  …only this session"
+printf '{"run":"r0","transcript_path":"%s"}\n' "$TR" >"$T/sessions/acme-mm.json"
+[ -z "$(ENGSYS_SESSIONS_DIR="$T/sessions" ENGSYS_SESSION_RUN=r1 monster_transcript)" ] && ok "  …a record from an earlier launch (the hook failed this time) is ignored" || bad "  …stale launch record ignored"
+rm -rf "$SD/.watch"
+ENGSYS_SESSIONS_DIR="$T/sessions" ENGSYS_SESSION_RUN=r1 monster_rotation_status "$SD" running 300000
+[ "$MONSTER_STATUS" = running ] && ok "  …so a relaunch is never asked to rotate off its predecessor's transcript (no loop)" || bad "rotation loop" "$MONSTER_STATUS"
+printf '{"run":"r1","transcript_path":"%s"}\n' "$TR" >"$T/sessions/acme-mm.json"
+[ "$(ENGSYS_SESSIONS_DIR="$T/sessions" ENGSYS_SESSION_RUN=r1 monster_transcript)" = "$TR" ] && ok "  …this launch's record is used" || bad "  …this launch's record"
 printf '{"transcript_path":"relative.jsonl"}\n' >"$T/sessions/acme-mm.json"
-[ -z "$(ENGSYS_SESSIONS_DIR="$T/sessions" monster_transcript)" ] && ok "  …a relative path is refused" || bad "  …relative refused"
+[ -z "$(ENGSYS_SESSIONS_DIR="$T/sessions" ENGSYS_SESSION_RUN= monster_transcript)" ] && ok "  …a relative path is refused" || bad "  …relative refused"
+
+echo "INCOMPLETE hand-backs reach the monster through its bus (engsys#126 review)"
+mkdir -p "$T/hb-sessions"; HBL="$T/hb-sessions/acme-mm.handbacks.jsonl"
+printf '{"run":"r0","agent_type":"engsys:isabelle","agent_id":"old","remains":"from the last launch"}\n{"run":"r1","agent_type":"engsys:isabelle","agent_id":"a1","remains":"push pending"}\n' >"$HBL"
+rm -rf "$T/state/.watch" "$T/state/active"
+export ENGSYS_SESSIONS_DIR="$T/hb-sessions"
+bus 3 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1
+has "the bus relays HANDBACK_INCOMPLETE" "HANDBACK_INCOMPLETE engsys:isabelle (a1): push pending"
+[ "$(count_of HANDBACK_INCOMPLETE)" = 1 ] && ok "  …once, and not the previous launch's line" || bad "  …once, this launch only" "$OUT"
+# the tick runs as fleet alice (its baton holder), so its log is the fleet-qualified one
+printf '{"run":"r1","agent_type":"engsys:nyx","agent_id":"a2","remains":"verdict not posted"}\n' >"$T/hb-sessions/alice.acme-mm.handbacks.jsonl"
+held merge; date +%s >"$T/state/.watch/last-heartbeat"
+run env FLEET_ID=alice "${TICK[@]}"
+has "the tick relays one the bus has not (the backstop)" "HANDBACK_INCOMPLETE engsys:nyx (a2): verdict not posted"
+unset ENGSYS_SESSIONS_DIR
+rm -rf "$T/state"/baton-* "$T/state/.watch"
 
 echo "preflight comment projection (engsys#126)"
 BIG="$(printf 'finding detail %.0s' $(seq 1 2000))"

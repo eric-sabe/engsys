@@ -179,6 +179,9 @@ its holder resets it with `reset`. No pool-file change is needed.
      another machine) means skip silently. Blocking waiters are never nudged.
    - `PUMP_FAILED <reason>`: the watcher is blind. Re-run `broker-reconcile.sh`; if it fails too, escalate.
      `PUMP_OK` means it recovered.
+   - `HANDBACK_INCOMPLETE <agent> (<id>): <remains>`: a subagent handed back unfinished work. Keep its
+     registry row `running`; resume it (`SendMessage`) or take the work over (merge-monster § Subagent
+     liveness, step 4).
    - `AGENT_OVERDUE <name>` / `AGENT_STALE <name>`: probe-then-classify (see Subagent liveness). Never
      respawn or escalate straight off the event.
    - `STOP`: shutdown (below).

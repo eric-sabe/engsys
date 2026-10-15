@@ -12,6 +12,7 @@
 #   5. print `NOOP` when nothing changed, else the delta, one line each:
 #        + <item> / - <item>          a finding appeared in / left the snapshot, or changed (one of each)
 #        AGENT_OVERDUE … / AGENT_STALE …   from the watchdog scan
+#        HANDBACK_INCOMPLETE …             a subagent handed back unfinished work: resume it or take it over
 #        BATON_HANDOVER maintain <fleet>   federation.yml moved the role's home (§ Handover)
 #        SNAPSHOT_ERROR <why>              the snapshot failed: GitHub state is unknown this tick
 #        HEARTBEAT_ERROR <why>             the heartbeat was due and failed
@@ -98,6 +99,9 @@ if [ -n "$CONFIG" ] && [ -f "$CONFIG" ] && grep -q '^fp_policies:' "$CONFIG"; th
   while IFS= read -r l; do case "$l" in '' | SEEN\ *) ;; *) DELTA+=("$l") ;; esac; done < <(bash "$here/mnt-fp-candidates.sh" \
     --repo "$REPO" --config "$CONFIG" --state-dir "$DIR" --default-branch "$DEFBRANCH" ${REPO_DIR:+--repo-dir "$REPO_DIR"} 2>&1 || true)
 fi
+
+# 3c. INCOMPLETE hand-backs the bus has not relayed (engsys#126 review) ----------------------------
+while IFS= read -r l; do [ -n "$l" ] && DELTA+=("$l"); done < <(monster_handback_events "$DIR")
 
 # 4. heartbeat when due ----------------------------------------------------------------------------
 if monster_heartbeat_due "$DIR" "$HB_MIN"; then

@@ -182,6 +182,18 @@ review):
   (claude) is gone, or when the model has not touched the baton for
   `pulse_max` (default 2.25 × `heartbeat_minutes`), so a live watch bus never
   keeps a dead or wedged session's role.
+- **Lease before heartbeat.** The lease must lapse before the heartbeat reads
+  stale, or a human who merges by hand on a stale heartbeat races a monster
+  still holding a live lease. The last model pulse comes with a heartbeat at
+  most 0.75 × `heartbeat_minutes` old, and the lease outlives the pulse by at
+  most `pulse_max` + 10 minutes, so:
+  `heartbeat_minutes + 2 < pulse_max ≤ stale_lock_minutes − 11 − 0.75 × heartbeat_minutes`,
+  which needs `stale_lock_minutes ≥ 1.75 × heartbeat_minutes + 13`. The bus
+  clamps `pulse_max` into that window from `--config` and prints a
+  `CONFIG_WARNING` line when it clamps or the window is empty. Example:
+  `heartbeat_minutes: 20` needs `stale_lock_minutes` ≥ 48; with 55 the default
+  `pulse_max` is 29m. The fleet supervisor's stale threshold for the session
+  should equal `stale_lock_minutes`.
 - **Ticks** (engsys#123). A tick is one call: `mm-tick.sh` renews when due,
   compares the open-PR snapshot's SHA-256 with the last one, runs the subagent
   backstop scan, writes the heartbeat only when one is due (none in the last
@@ -388,7 +400,7 @@ substrate for the v2 metrics dashboard.
 One YAML per repo — `.claude/merge-monster.yml` — read by the model at session
 start. Scripts take everything as flags/env; the bus and the tick, given
 `--config`, read only the few keys they name (`pulse_max`, `heartbeat_minutes`,
-`dependabot.auto_merge`). Reference (see `config.example.yml` in the skill for the annotated
+`stale_lock_minutes`, `dependabot.auto_merge`, `rotate_context_tokens`). Reference (see `config.example.yml` in the skill for the annotated
 version):
 
 ```yaml
@@ -398,8 +410,9 @@ ledger_issue: 0              # written by mm-setup.sh
 state_dir: logs/merge-monster
 poll_interval: 30            # seconds, watch-script cadence
 heartbeat_minutes: 10        # ScheduleWakeup fallback tick (mm-tick.sh); each tick renews the baton
-pulse_max: 45m               # optional; keepalive idle bound, default 2.25 x heartbeat_minutes
+pulse_max: 22m               # optional; keepalive idle bound, default 2.25 x heartbeat_minutes, clamped (§ 5)
 stale_lock_minutes: 45       # baton freshness contract
+rotate_context_tokens: 300000 # heartbeat asks for rotation past this context size with nothing active (0 = off)
 merge_method:
   multi_commit: merge        # preserve per-issue commits in batches
   single_commit: squash

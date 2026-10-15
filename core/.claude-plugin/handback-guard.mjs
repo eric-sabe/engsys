@@ -17,9 +17,12 @@
 //   Stop (mode `stop`) — the main session about to end its turn:
 //     C. recorded INCOMPLETE hand-backs it hasn't been told about → block once, listing them: resume
 //        the agent (SendMessage), take the work over, or arm a watchdog (subagent-liveness skill).
-//        Skipped in a singleton monster session (ENGSYS_SINGLETON_ROLE set; engsys#126): a monster
-//        ends a turn after every wake, and it already tracks each agent it dispatched in its spawn
-//        registry and watchdog, so the block cost a full-context turn per wake and added nothing.
+//        Skipped in a singleton monster session (ENGSYS_SINGLETON_ROLE set; engsys#126). A monster's
+//        net is its event bus instead: in any fleet-launched session (ENGSYS_SESSION set) an INCOMPLETE
+//        hand-back is also appended to <sessions dir>/[<fleet>.]<session>.handbacks.jsonl, which the
+//        watch bus and the tick relay as `HANDBACK_INCOMPLETE <agent>: <remains>` (core/lib/monster.sh),
+//        so the monster is woken about it by the same channel as every other event and never has to be
+//        held at Stop.
 //
 // Every block happens at most once per stop attempt (`stop_hook_active`) and per hand-back, so a
 // session is never trapped. Fail-open: any error → allow (exit 0, no output).
@@ -31,6 +34,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { sessionsDir } from './session-transcript.mjs';
 
 // Strong: a promise to act later. Overrides even an explicit `STATUS: COMPLETE`.
 const STRONG = [
@@ -41,9 +45,15 @@ const STRONG = [
 // Weak: suggests pending work; only counts when no explicit status was given.
 const WEAK = [/\b(?:waiting|wait)\s+(?:on|for)\b/i, /\bin[- ]progress\b/i];
 const STATUS = /^\s*[*_`]*STATUS[*_`]*\s*:\s*[*_`]*\s*(COMPLETE|INCOMPLETE)\b[*_`]*(.*)$/im;
-// A verdict line: `VERDICT: <WORD>`. Conclusive unless the word says the review did not conclude.
-const VERDICT = /^\s*[*_`]*VERDICT[*_`]*\s*:\s*[*_`]*\s*([A-Z][A-Z_-]*)\b/im;
-const INCONCLUSIVE = new Set(['PENDING', 'INCONCLUSIVE', 'UNKNOWN', 'TBD', 'NONE', 'INCOMPLETE', 'BLOCKED-ON', 'WAITING']);
+// A conclusive verdict line (engsys#126 review): `VERDICT:` (or `Verdict:`) followed by one word of the
+// conclusive vocabulary, in capitals, on one of the last five non-empty lines. Case-sensitive on purpose:
+// "Verdict: needs work" is prose, not a verdict.
+const VERDICT = /^\s*[*_`]*(?:VERDICT|Verdict)[*_`]*\s*:\s*[*_`]*\s*(CLEAN|FINDINGS|PASS(?:ED)?|FAIL(?:ED)?|APPROVED?|BLOCK(?:ED|ING)?|REJECT(?:ED)?|(?:REQUIRED|REQUEST(?:ED)?) CHANGES|CHANGES REQUIRED|CHANGES REQUESTED|SECURE|INSECURE|NO-GO|GO|SHIP|LGTM)(?![A-Za-z-])/m;
+function verdictOf(m) {
+  const tail = m.split('\n').filter((l) => l.trim()).slice(-5).join('\n');
+  const v = tail.match(VERDICT);
+  return v ? v[1] : null;
+}
 
 function pendingSentence(m) {
   for (const re of [...STRONG, ...WEAK]) {
@@ -72,8 +82,7 @@ export function classify(message) {
   const weak = WEAK.some((re) => re.test(m));
   const pending = strong || (!status && weak);
   const stated = s ? s[2].replace(/^[\s*_`—–:-]+/, '').replace(/[\s*_`]+$/, '').trim() : '';
-  const v = m.match(VERDICT);
-  const verdict = v && !INCONCLUSIVE.has(v[1].toUpperCase()) ? v[1].toUpperCase() : null;
+  const verdict = verdictOf(m);
   return { status, pending, remains: stated || (pending ? pendingSentence(m) : ''), verdict };
 }
 
@@ -106,15 +115,39 @@ function stateDir(sessionId) {
 }
 
 /** Record (INCOMPLETE) or clear (anything else) the hand-back of one subagent. */
-export function recordHandback(input) {
+export function recordHandback(input, env = process.env) {
   const dir = stateDir(input.session_id);
   const f = path.join(dir, `${String(input.agent_id || 'agent').replace(/[^\w.-]/g, '_')}.json`);
   const c = classify(input.last_assistant_message);
   // INCOMPLETE — declared, or inferred when an agent handed back pending work anyway (after its nudge)
   if (c.status === 'INCOMPLETE' || (c.status !== 'COMPLETE' && c.pending)) {
     fs.writeFileSync(f, JSON.stringify({ agent_id: input.agent_id, agent_type: input.agent_type, remains: c.remains || '(unspecified)', surfaced: false, at: new Date().toISOString() }), { mode: 0o600 });
+    relayHandback(input, c.remains || '(unspecified)', env);
   } else {
     fs.rmSync(f, { force: true });
+  }
+}
+
+const NAME = /^[A-Za-z0-9._-]{1,128}$/;
+
+/**
+ * The monsters' net for block C (engsys#126 review): append an INCOMPLETE hand-back to the session's
+ * hand-back log, which the watch bus and tick relay as an event. Only in a fleet-launched session; the run
+ * id lets a relaunch ignore its predecessor's lines. Never throws (the guard fails open).
+ */
+export function relayHandback(input, remains, env = process.env) {
+  try {
+    const session = env.ENGSYS_SESSION;
+    const fleet = env.FLEET_ID || '';
+    if (!session || !NAME.test(session) || (fleet && !NAME.test(fleet))) return null;
+    const dir = sessionsDir(env);
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const file = path.join(dir, `${fleet ? `${fleet}.` : ''}${session}.handbacks.jsonl`);
+    const clean = (v, n) => String(v ?? '').replace(/[\u0000-\u001f\u007f]+/g, ' ').slice(0, n);
+    fs.appendFileSync(file, `${JSON.stringify({ at: new Date().toISOString(), run: env.ENGSYS_SESSION_RUN || null, agent_id: clean(input.agent_id, 80), agent_type: clean(input.agent_type || 'agent', 80), remains: clean(remains, 200) })}\n`, { mode: 0o600 });
+    return file;
+  } catch {
+    return null;
   }
 }
 

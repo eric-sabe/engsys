@@ -857,7 +857,8 @@ const stateRule = `state.md is overwrite-only working memory: at most ${STATE_MA
  * 56 KB file at startup with no backup. The SKILL now says to append it verbatim to the month's journal
  * first, and the guard makes sure nothing is lost even when that step is skipped: before a Write, Edit or
  * MultiEdit changes an existing state.md that is over STATE_MAX_BYTES, it copies the file byte for byte to
- * `state.md.pre-schema-<UTC stamp>` beside it (skipped when the newest such copy is already identical), then
+ * `state.md.pre-schema-<UTC stamp>` beside it (skipped when the newest such copy is already identical; at most
+ * PRE_SCHEMA_KEEP are kept, always including the oldest), then
  * lets the tool run. A copy that fails denies the tool: fail closed, nothing is overwritten unarchived.
  *
  * Why a copy and not a deny-until-journaled: a deny keyed on a journal heading trusts the model's archive
@@ -871,6 +872,9 @@ const stateRule = `state.md is overwrite-only working memory: at most ${STATE_MA
  * lives at most until the next wake; the archive copy above catches the over-limit file that rewrite replaces.
  * -> { archived: path } | { archived: null } (nothing to do) | throws (the copy failed).
  */
+/** Pre-schema copies kept per state dir: the oldest plus the newest two. */
+export const PRE_SCHEMA_KEEP = 3;
+
 export function archiveOverLimit(p, { cwd = process.cwd(), now = () => new Date() } = {}) {
   const file = path.resolve(cwd, p);
   let st;
@@ -887,6 +891,12 @@ export function archiveOverLimit(p, { cwd = process.cwd(), now = () => new Date(
   let dest = path.join(dir, `state.md.pre-schema-${stamp}`);
   for (let i = 1; fs.existsSync(dest); i++) dest = path.join(dir, `state.md.pre-schema-${stamp}-${i}`);
   fs.writeFileSync(dest, cur, { flag: 'wx', mode: 0o600 });
+  // Keep at most PRE_SCHEMA_KEEP copies: the OLDEST (the real pre-schema history) and the newest others. A
+  // monster trimming an over-limit file with several Edits would otherwise leave one copy per Edit.
+  const all = [...prior, path.basename(dest)];
+  for (const f of all.slice(1, Math.max(1, all.length - (PRE_SCHEMA_KEEP - 1)))) {
+    try { fs.unlinkSync(path.join(dir, f)); } catch { /* best effort */ }
+  }
   return { archived: dest };
 }
 

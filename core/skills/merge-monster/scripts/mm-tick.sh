@@ -7,8 +7,11 @@
 #   3. run the subagent watchdog's scan once (mm-agent-watch.sh --once), the backstop for a dead bus;
 #   4. write the ledger heartbeat only when one is due (none in the last 0.75 x heartbeat_minutes);
 #   5. print `NOOP` when nothing changed, else the delta, one line each:
-#        + <item> / - <item>          a PR appeared in / left the snapshot, or changed (one of each)
+#        + <item> / - <item>          a PR appeared in / left the snapshot, or changed (one of each); for a
+#                                     PR parked mm:blocked, a {"k":"gate",…} line whose comment / review
+#                                     counts moved means: run gate-check for it
 #        AGENT_OVERDUE … / AGENT_STALE …   from the watchdog scan
+#        HANDBACK_INCOMPLETE …             a subagent handed back unfinished work: resume it or take it over
 #        BATON_HANDOVER merge <fleet>      federation.yml moved the role's home (§ Handover)
 #        SNAPSHOT_ERROR <why>              the snapshot failed: GitHub state is unknown this tick
 #        HEARTBEAT_ERROR <why>             the heartbeat was due and failed
@@ -30,6 +33,9 @@
 #   --heartbeat-minutes  the tick cadence; a heartbeat is due after 0.75 x this (default 10)
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../../../lib/fleet-gh.sh
+. "$here/../../../lib/fleet-gh.sh"
+fleet_gh_resolve
 # shellcheck source=../../../lib/monster.sh
 . "$here/../../../lib/monster.sh"
 
@@ -75,8 +81,21 @@ case "$RC" in
 esac
 
 # 2. snapshot delta --------------------------------------------------------------------------------
+# Open operator gates (engsys#126 review): an approval is a comment or a review, which neither the bus nor
+# the PR snapshot sees. For each PR parked `mm:blocked`, the snapshot also carries its comment and review
+# counts and newest review state, so a new /approve, review or reply on it is a delta line
+# ({"k":"gate","pr":N,…}) and the model runs gate-check on it; an untouched gate stays NOOP.
+gate_lines() {
+  local n
+  for n in $(printf '%s' "$SNAP" | jq -r '.[] | select((.mm // []) | index("mm:blocked")) | .number' 2>/dev/null); do
+    case "$n" in '' | *[!0-9]*) continue ;; esac
+    "$FLEET_GH" pr view "$n" -R "$REPO" --json headRefOid,comments,reviews --jq \
+      "{k: \"gate\", pr: $n, head: .headRefOid, comments: (.comments | length), reviews: (.reviews | length), lastReview: ((.reviews | last | .state) // null)}" 2>/dev/null \
+      || printf '{"k":"gate","pr":%s,"error":"unreadable"}\n' "$n"
+  done
+}
 if SNAP=$(bash "$here/mm-snapshot.sh" --repo "$REPO" 2>&1); then
-  while IFS= read -r l; do [ -n "$l" ] && DELTA+=("$l"); done < <(printf '%s' "$SNAP" | monster_snapshot_lines | monster_delta "$W")
+  while IFS= read -r l; do [ -n "$l" ] && DELTA+=("$l"); done < <({ printf '%s' "$SNAP" | monster_snapshot_lines; gate_lines | jq -c . 2>/dev/null; } | monster_delta "$W")
 else
   DELTA+=("SNAPSHOT_ERROR $(printf '%s' "$SNAP" | tr '\n' ' ' | head -c 200)")
 fi
@@ -86,6 +105,9 @@ if [ -f "$DIR/agents.tsv" ]; then
   while IFS= read -r l; do [ -n "$l" ] && DELTA+=("$l"); done < <(bash "$here/mm-agent-watch.sh" --state-dir "$DIR" --once \
     --stale-min "$STALE_MIN" ${NOSTALE:+--no-stale} 2>>"$W/agent-watch.err" || true)
 fi
+
+# 3c. INCOMPLETE hand-backs the bus has not relayed (engsys#126 review) ----------------------------
+while IFS= read -r l; do [ -n "$l" ] && DELTA+=("$l"); done < <(monster_handback_events "$DIR")
 
 # 4. heartbeat when due ----------------------------------------------------------------------------
 if monster_heartbeat_due "$DIR" "$HB_MIN"; then

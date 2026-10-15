@@ -338,7 +338,7 @@ session_name: acme-maintain # advertised in its own ledger (discovery)
 ledger_issue: <new pinned issue, distinct from MM — created by mnt-setup.sh>
 state_dir: logs/maintenance-monster
 heartbeat_minutes: 10 # the tick (mnt-tick.sh); each tick renews the baton
-pulse_max: 45m # optional; keepalive idle bound, default 2.25 x heartbeat_minutes
+pulse_max: 22m # optional; keepalive idle bound, default 2.25 x heartbeat_minutes, clamped as in merge-monster.md § 5
 stale_lock_minutes: 45 # continuous watchdog: own Monitor + heartbeat, mirrors MM
 phase: read_only # Phase 1: watch + triage + report; no auto-PRs (raise to auto_drive later)
 watch:

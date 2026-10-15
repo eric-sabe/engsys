@@ -27,6 +27,9 @@
 #   FLEET_MSG              a cross-fleet message is waiting in this session's inbox (engsys#77; multi-fleet only):
 #                          run the command the line names (msg.mjs inbox --mark-read), then msg.mjs read <url>
 #   STOP                   ledger issue closed (kill switch) — script exits
+#   HANDBACK_INCOMPLETE <agent> (<id>): <remains>
+#                         a subagent handed back unfinished work (the engsys hand-back hook's log
+#                         for this session and launch; engsys#126 review)
 #   AGENT_OVERDUE / AGENT_STALE …  the subagent watchdog (mm-agent-watch.sh --once, run every cycle
 #                          while <state-dir>/agents.tsv exists): one bus per monster (engsys#122)
 #
@@ -42,7 +45,9 @@
 #   --no-agents               skip the subagent scan (it is a no-op anyway without a spawn registry)
 #   --pulse-max               the keepalive's idle bound. Default (engsys#123): the config's pulse_max, else
 #                             2.25 x heartbeat_minutes (--heartbeat-minutes, else the config's), else 20m
-#   --config                  the monster's yml, read for pulse_max, heartbeat_minutes and dependabot.auto_merge
+#   --stale-lock-minutes      with heartbeat_minutes, bounds pulse_max so the lease always lapses before
+#                             the heartbeat reads stale (a CONFIG_WARNING line says when it clamps)
+#   --config                  the monster's yml, read for pulse_max, heartbeat_minutes, stale_lock_minutes and dependabot.auto_merge
 #   --no-dependabot           skip the Dependabot PR poll (no DEPENDABOT events)
 #
 # Baton keepalive (engsys#62, #87): while <state-dir>/baton-merge.json carries this session's token,
@@ -65,7 +70,7 @@ fleet_gh_resolve
 # shellcheck source=../../../lib/monster.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/monster.sh"
 
-REPO="" DIR="" INTERVAL=30 DEFBRANCH=main LEDGER="" SESSION="${ENGSYS_SESSION:-}" PULSE_MAX="" CONFIG="" HB_MIN=""
+REPO="" DIR="" INTERVAL=30 DEFBRANCH=main LEDGER="" SESSION="${ENGSYS_SESSION:-}" PULSE_MAX="" CONFIG="" HB_MIN="" STALE_LOCK=""
 STALE_MIN=10 NOSTALE="" AGENTS=1 NO_DEPENDABOT=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -78,6 +83,7 @@ while [ $# -gt 0 ]; do
     --pulse-max) PULSE_MAX="$2"; shift 2 ;;
     --config) CONFIG="$2"; shift 2 ;;
     --heartbeat-minutes) HB_MIN="$2"; shift 2 ;;
+    --stale-lock-minutes) STALE_LOCK="$2"; shift 2 ;;
     --stale-min) STALE_MIN="$2"; shift 2 ;;
     --no-stale) NOSTALE=1; shift ;;
     --no-agents) AGENTS=0; shift ;;
@@ -90,11 +96,14 @@ done
 # engsys#124: with no auto-merge categories, Merge Monster never touches a raw Dependabot PR (the
 # maintenance watchdog owns them), so the poll would only wake it for nothing.
 if [ -n "$CONFIG" ] && [ -f "$CONFIG" ] && monster_cfg_list_empty "$CONFIG" dependabot auto_merge; then NO_DEPENDABOT=1; fi
-[ -n "$PULSE_MAX" ] || PULSE_MAX="$(monster_pulse_max "$(monster_cfg_scalar "$CONFIG" pulse_max)" "$HB_MIN")"
+[ -n "$STALE_LOCK" ] || STALE_LOCK="$(monster_cfg_scalar "$CONFIG" stale_lock_minutes)"
+PULSE_OUT="$(monster_pulse_max "${PULSE_MAX:-$(monster_cfg_scalar "$CONFIG" pulse_max)}" "$HB_MIN" "$STALE_LOCK")"
+PULSE_MAX="${PULSE_OUT%%$'\t'*}" PULSE_WARN="${PULSE_OUT#*$'\t'}"
 
 W="$DIR/.watch"
 mkdir -p "$W"
 touch "$W/ready.tsv" "$W/deps.tsv" "$W/dirty.tsv" "$W/checks.tsv" "$W/mainrun.txt"
+[ -z "$PULSE_WARN" ] || echo "CONFIG_WARNING ${PULSE_WARN:0:280}"
 
 # --- baton keepalive (see the header) ----------------------------------------
 BATON_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/lease/baton.mjs"
@@ -216,6 +225,7 @@ agents_event() {
 while true; do
   baton_tick || exit 0
   agents_event
+  monster_handback_events "$DIR" # INCOMPLETE hand-backs (engsys#126 review)
   # Once, after the baton check (a lost baton exits quietly first): an unauthenticated gh must
   # surface as an event, never as a bus that sees nothing (engsys#90).
   if [ -z "${GH_AUTH_CHECKED:-}" ]; then assert_gh_auth mm-watch event || exit 1; GH_AUTH_CHECKED=1; fi
@@ -254,6 +264,10 @@ while true; do
   # union of the terminal (name, conclusion) pairs seen for this PR at this head, NOT a last snapshot:
   # the rollup can flicker between polls (pagination, superseded runs), and a snapshot diff re-emits
   # whatever vanishes and returns. It resets when the active PR or its head changes.
+  # A RE-RUN on the same head (`gh run rerun --failed`): a check seen terminal goes PENDING again. Its
+  # pairs leave checks.tsv and the ready latch is cleared, so the re-run's result fires CHECK_FAIL again
+  # (same conclusion or not) or CHECKS_READY again; until every re-run check is terminal, no CHECKS_READY
+  # (not even on UNSTABLE), so the event carries the re-run's outcome. Re-run names: .watch/rerun.<pr>.<sha>.
   # The PR number from <state-dir>/active ("12", "#12" and a trailing note all read as 12).
   ACTIVE=$(sed -n '1s/^[#[:space:]]*\([0-9][0-9]*\).*/\1/p' "$DIR/active" 2>/dev/null || true)
   if [ -n "$ACTIVE" ]; then
@@ -271,20 +285,36 @@ while true; do
         if [ "$ACTIVE@$SHA" != "$(cat "$W/checks.pr" 2>/dev/null || true)" ]; then
           : > "$W/checks.tsv"
           printf '%s' "$ACTIVE@$SHA" > "$W/checks.pr"
+          # latches of other PRs (merged, closed, parked) are done with: a re-activated PR re-fires once
+          find "$W" -maxdepth 1 \( -name 'ready.[0-9]*.*' -o -name 'rerun.[0-9]*.*' \) ! -name "ready.$ACTIVE.*" ! -name "rerun.$ACTIVE.*" -exec rm -f {} + 2>/dev/null || true
         fi
+        RERUN="$W/rerun.$ACTIVE.$SHA"
         # One collation (C) for every sort and comm here, and the persisted history re-sorted first.
-        printf '%s\n' "$OUT" | awk -F'\t' '$1 == "DONE" && $2 != "" { print $2 "\t" $3 }' | LC_ALL=C sort -u > "$W/checks.new"
+        printf '%s\n' "$OUT" | awk -F'\t' '$1 == "PENDING" && $2 != "" { print $2 }' | LC_ALL=C sort -u > "$W/checks.pending"
         LC_ALL=C sort -u -o "$W/checks.tsv" "$W/checks.tsv"
+        # pending names that were terminal before: a re-run
+        awk -F'\t' 'FILENAME == ARGV[1] { p[$1] = 1; next } ($1 in p) { print $1 }' "$W/checks.pending" "$W/checks.tsv" | LC_ALL=C sort -u > "$W/checks.rerun"
+        if [ -s "$W/checks.rerun" ]; then
+          awk -F'\t' 'FILENAME == ARGV[1] { r[$1] = 1; next } !($1 in r)' "$W/checks.rerun" "$W/checks.tsv" > "$W/checks.keep" && mv "$W/checks.keep" "$W/checks.tsv"
+          { cat "$W/checks.rerun"; cat "$RERUN" 2>/dev/null || true; } | LC_ALL=C sort -u > "$RERUN.new" && mv "$RERUN.new" "$RERUN"
+          rm -f "$W/ready.$ACTIVE.$SHA"
+        fi
+        # terminal pairs of a check that is also pending (a superseded run beside its re-run) wait for it
+        printf '%s\n' "$OUT" | awk -F'\t' '$1 == "DONE" && $2 != "" { print $2 "\t" $3 }' | LC_ALL=C sort -u \
+          | awk -F'\t' 'FILENAME == ARGV[1] { p[$1] = 1; next } !($1 in p)' "$W/checks.pending" - > "$W/checks.new"
         LC_ALL=C comm -13 "$W/checks.tsv" "$W/checks.new" | while IFS="$(printf '\t')" read -r name concl; do
           case "$concl" in SUCCESS | NEUTRAL | SKIPPED | '') ;; *) echo "CHECK_FAIL #$ACTIVE $name: $concl" ;; esac
         done
         LC_ALL=C sort -u "$W/checks.tsv" "$W/checks.new" > "$W/checks.union" && mv "$W/checks.union" "$W/checks.tsv"
-        rm -f "$W/checks.new"
+        rm -f "$W/checks.new" "$W/checks.rerun"
         TOTAL=$(printf '%s\n' "$OUT" | awk -F'\t' '$1 == "DONE" || $1 == "PENDING"' | wc -l | tr -d ' ')
         PENDING=$(printf '%s\n' "$OUT" | awk -F'\t' '$1 == "PENDING"' | wc -l | tr -d ' ')
         READY=0
         case "$MSS" in CLEAN | HAS_HOOKS | UNSTABLE) READY=1 ;; esac
         [ "$TOTAL" -gt 0 ] && [ "$PENDING" = 0 ] && READY=1
+        if [ -s "$RERUN" ]; then
+          if [ -n "$(LC_ALL=C comm -12 "$RERUN" "$W/checks.pending")" ]; then READY=0; else rm -f "$RERUN"; fi
+        fi
         if [ "$READY" = 1 ] && [ ! -e "$W/ready.$ACTIVE.$SHA" ]; then
           : > "$W/ready.$ACTIVE.$SHA"
           echo "CHECKS_READY #$ACTIVE head=${SHA:0:12} state=$MSS pending=$PENDING"

@@ -28,6 +28,9 @@
 #                                     blind until PUMP_OK; reconcile before trusting any picture
 #   PUMP_OK                           the pump recovered
 #   STOP                              ledger issue closed (kill switch); the script exits
+#   HANDBACK_INCOMPLETE <agent> (<id>): <remains>
+#                                    a subagent handed back unfinished work (the engsys hand-back hook's log
+#                                    for this session and launch; engsys#126 review)
 #   AGENT_OVERDUE / AGENT_STALE …     the subagent watchdog (merge-monster's mm-agent-watch.sh --once, run
 #                                     every tick while <state-dir>/agents.tsv exists): one bus per monster
 #                                     (engsys#122)
@@ -55,6 +58,8 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=broker-config.sh
 . "$here/broker-config.sh"
+# shellcheck source=../../../lib/monster.sh
+. "$here/../../../lib/monster.sh"
 
 REPO="" DIR="" INTERVAL="" LEDGER="" OWNER="" POOL_FILE="" STORE="" OWNER_PATTERN="" CONFIG="" CONFIG_DIR="" ONCE=0
 STALE_MIN=10 NOSTALE="" AGENTS=1
@@ -140,6 +145,7 @@ tick() {
     return 1
   fi
   agents_event
+  monster_handback_events "$DIR" # INCOMPLETE hand-backs (engsys#126 review)
 
   # Active reaping pass (dead-man's-switch sweep + stale-queue-entry drop).
   PUMP_ERR=$(mktemp)

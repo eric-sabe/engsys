@@ -122,6 +122,14 @@ engsys (spec travels with the skill; the config travels with the repo).
    without a renew from you (the config's `pulse_max`, default 2.25 ×
    `heartbeat_minutes`; `--config` is how the bus reads it), so a wedged
    model never keeps the role.
+   **The invariant:** the lease must lapse before the heartbeat reads stale,
+   or a human following "stale heartbeat ⇒ merge by hand" races a monster
+   whose lease is still live. So `pulse_max + 10 (lease TTL) + 0.75 ×
+   heartbeat_minutes < stale_lock_minutes`, and `pulse_max >
+   heartbeat_minutes + 2`. Both hold only when `stale_lock_minutes ≥ 1.75 ×
+   heartbeat_minutes + 13`. Given `stale_lock_minutes`, the bus clamps
+   `pulse_max` into that window and says so in a `CONFIG_WARNING` line;
+   escalate a `CONFIG_WARNING` once (the config needs fixing).
 
 6. Schedule the fallback tick: **ScheduleWakeup** at `heartbeat_minutes`
    (repeat every cycle; it must stay under `pulse_max`, since each tick is
@@ -137,11 +145,14 @@ engsys (spec travels with the skill; the config travels with the repo).
    guarantee rests on the tick, not on the Monitor surviving), writes the
    heartbeat only when one is due, and prints **`NOOP`** or the delta.
    - `NOOP` → re-arm the ScheduleWakeup and stop. No `state.md` rewrite, no
-     journal line, no other call; open gates wait for their PR's next event
-     or the next delta.
+     journal line, no other call. An open gate cannot hide behind a `NOOP`:
+     for every PR parked `mm:blocked` the tick tracks its comment and review
+     counts and newest review state, so a new `/approve`, review or reply
+     on it is a delta line.
    - Delta lines (`+`/`-` snapshot lines, `AGENT_*`, `BATON_HANDOVER`,
      `*_ERROR`) → an ordinary wake (§ The loop) with those as its events,
-     then Dependabot idle work and a gate re-check for each open gate.
+     then Dependabot idle work. A `{"k":"gate","pr":N,…}` line (or any
+     change to a gated PR) → run `gate-check.sh` for that PR's gate.
    - Exit 1 (`BATON_LOST`) → § Lost baton. Exit 5 (`STANDBY`) → you hold no
      baton: run `mm-baton.sh startup` as in step 2.
    Restart the Monitor too if it died (its end notice is its own wake).
@@ -179,11 +190,15 @@ engsys (spec travels with the skill; the config travels with the repo).
    - `DEPENDABOT #N` → classify per policy; queue for idle handling or
      escalate.
    - A PR or issue you hold a gate request on changed (new comment, review,
-     push) → run `gate-check.sh` for it (§ Operator gates). Also re-check
-     every open gate on the fallback tick.
+     push) → run `gate-check.sh` for it (§ Operator gates). The tick's
+     `{"k":"gate",…}` delta lines are how a new comment or review reaches
+     you between events; an untouched gate needs no re-check on a `NOOP`.
    - `MAIN_RED` (merge-gating runs only — scheduled runs are filtered out
      and each failing run fires once) → stop feeding the pipeline; diagnose (revert candidate?
      fix agent? escalate) — this outranks everything.
+   - `HANDBACK_INCOMPLETE <agent> (<id>): <remains>` → a subagent handed
+     back unfinished work. Keep its registry row `running`; resume it
+     (`SendMessage`) or take the work over (§ Subagent liveness).
    - `AGENT_OVERDUE <name>` / `AGENT_STALE <name>` → probe-then-classify
      (§ Subagent liveness). Never respawn or escalate straight off the event.
    - `BATON_LOST merge <code>` → § Lost baton, at once. Nothing else first.
@@ -445,7 +460,13 @@ dependabot_gate|default> --deadline-min <liveness.deadline_minutes.class>`.
 4. On any completion/failure notification:
    `mm-agent-reg.sh update --name <name> --gen <g> --status done|failed` —
    rows you close emit nothing; the watchdog only ever fires on `running`
-   rows.
+   rows. **`done` only for a `STATUS: COMPLETE` hand-back** (or work you
+   verified landed). An INCOMPLETE hand-back (its own `STATUS: INCOMPLETE`
+   line, or a `HANDBACK_INCOMPLETE` event, which the bus relays for every
+   one the engsys hook records) leaves the row `running`: resume the agent
+   (`SendMessage`) or take the work over yourself, then close the row. The
+   Stop-time hand-back block is off in a monster session; this event, and
+   the watchdog on the still-running row, are the net.
 
 **Probe-then-classify** — on `AGENT_OVERDUE` / `AGENT_STALE` (a deadline or a
 silent transcript is a _signal to investigate_, never a verdict):
@@ -574,8 +595,10 @@ Gated here:
    "approve <kind> for PR #N: <one line>"` (falls back to the ledger on its
    own if Slack isn't configured or reachable), and your session if the
    operator is in it. Say "approve on GitHub", never "reply here".
-3. **Verify** on every wake for that PR and on each tick (read-only,
-   auto-approved): `<skill-dir>/scripts/gate-check.sh --repo <repo> --pr N
+3. **Verify** on every wake for that PR, including each tick delta that
+   names it (`{"k":"gate","pr":N,…}`; the tick reports any new comment or
+   review on a PR parked `mm:blocked`), and once on the session's first
+   tick (read-only, auto-approved): `<skill-dir>/scripts/gate-check.sh --repo <repo> --pr N
    --gate <id> <operator flag> --requester <author>
    --target <repo>#N@<sha> --kind <kind>`.
    - exit **0** approved → record it (below), clear `mm:blocked`, continue

@@ -10,9 +10,13 @@
 #   monster_cfg_list_empty FILE PARENT KEY
 #                                       exit 0 when PARENT.KEY is absent, null, empty or `[]`; exit 1 when it
 #                                       holds a flow list with items or a block list (`- item` lines)
-#   monster_pulse_max PULSE HB_MINUTES  the keepalive's --pulse-max: PULSE when set (a bare number means
-#                                       minutes; 45m, 1350s and ms values pass through), else 2.25 x
-#                                       HB_MINUTES, else 20m
+#   monster_pulse_max PULSE HB_MINUTES [STALE_LOCK_MINUTES]
+#                                       prints `<seconds>s<TAB><warning>`: the keepalive's --pulse-max. PULSE
+#                                       when set (a bare number is minutes; ms, s, m and h units), else 2.25 x
+#                                       HB_MINUTES, else 20m; with STALE_LOCK_MINUTES, held between the tick
+#                                       (hb + 2m) and stale - 10m - 0.75 x hb - 1m, so the lease always lapses
+#                                       before the heartbeat reads stale. The warning (empty when none) says
+#                                       what was clamped, or that the two settings cannot both hold
 #   monster_snapshot_lines              stdin JSON -> one sorted compact line per item (an array's elements;
 #                                       an object's scalars, its arrays' elements and its `items` lists, each
 #                                       tagged with the key), so a delta names what changed
@@ -24,8 +28,14 @@
 #   monster_is_active STATE_DIR         exit 0 when something is in flight: a non-empty <state_dir>/active or a
 #                                       `running` row in <state_dir>/agents.tsv
 #   monster_sessions_dir                where the SessionStart hook records each launched session's transcript
-#   monster_transcript [PATH]           PATH when given, else the transcript recorded for ENGSYS_SESSION; empty
-#                                       when unknown or not a regular file
+#   monster_transcript [PATH]           PATH when given, else the transcript recorded for ENGSYS_SESSION by THIS
+#                                       launch (the record's run = ENGSYS_SESSION_RUN when that is set); empty
+#                                       when unknown, from another launch, or not a regular file
+#   monster_handback_events STATE_DIR   print `HANDBACK_INCOMPLETE <agent> (<id>): <remains>` once for each INCOMPLETE
+#                                       hand-back the handback-guard hook logged for this session and launch
+#                                       (<sessions dir>/[<fleet>.]<session>.handbacks.jsonl, filtered on
+#                                       ENGSYS_SESSION_RUN; offset in .watch/handbacks.off). The monsters' net
+#                                       in place of the Stop-time block (engsys#126 review)
 #   monster_context_tokens TRANSCRIPT   the main thread's last assistant usage (input + cache creation + cache
 #                                       read), read from the last 64 KB of the transcript; empty when none
 #   monster_rotation_status STATE_DIR STATUS THRESHOLD [TRANSCRIPT]
@@ -84,13 +94,43 @@ monster_cfg_list_empty() {
 }
 
 monster_pulse_max() {
-  local pulse="$1" hb="$2"
-  case "$pulse" in
-    '') ;;
-    *[!0-9]*) case "$pulse" in *[0-9]m | *[0-9]s | *[0-9]ms) printf '%s\n' "$pulse"; return 0 ;; esac ;;
-    *) printf '%sm\n' "$pulse"; return 0 ;;
-  esac
-  case "$hb" in '' | 0 | *[!0-9]*) printf '20m\n' ;; *) printf '%ss\n' "$((hb * 135))" ;; esac # 2.25 x hb minutes
+  local pulse="$1" hb="$2" stale="${3:-}" want="" n warn="" cap floor v
+  case "$hb" in '' | 0 | *[!0-9]*) hb="" ;; esac
+  case "$stale" in '' | 0 | *[!0-9]*) stale="" ;; esac
+  if [ -n "$pulse" ]; then
+    case "$pulse" in
+      *[!0-9a-z]* | '') ;;
+      *[0-9]) want=$((pulse * 60)) ;;
+      *[0-9]ms) n="${pulse%ms}"; case "$n" in *[!0-9]*) ;; *) want=$(((n + 999) / 1000)) ;; esac ;;
+      *[0-9]s) n="${pulse%s}"; case "$n" in *[!0-9]*) ;; *) want="$n" ;; esac ;;
+      *[0-9]m) n="${pulse%m}"; case "$n" in *[!0-9]*) ;; *) want=$((n * 60)) ;; esac ;;
+      *[0-9]h) n="${pulse%h}"; case "$n" in *[!0-9]*) ;; *) want=$((n * 3600)) ;; esac ;;
+    esac
+    [ -n "$want" ] || warn="pulse_max '$pulse' is not minutes or a duration (90, 45m, 1350s, 1h, 500ms); using the default"
+  fi
+  if [ -z "$want" ]; then
+    if [ -n "$hb" ]; then v=$((hb * 135)); else v=1200; fi # 2.25 x heartbeat_minutes, else the keepalive's 20m
+  else
+    v="$want"
+  fi
+  # The invariant (engsys#125 review): the lease must lapse before the heartbeat reads stale, or a human
+  # following "stale heartbeat => merge by hand" races a monster that still holds a live lease. The last
+  # model pulse P comes with a heartbeat no older than 0.75 x hb; the keepalive renews until P + pulse_max,
+  # and the lease (TTL 10m) lapses by P + pulse_max + 10m. So pulse_max <= stale - 10m - 0.75 x hb - 1m. And
+  # it must outlast the tick (hb + 2m), or the keepalive stops between two ticks.
+  if [ -n "$hb" ] && [ -n "$stale" ]; then
+    cap=$(((stale - 11) * 60 - hb * 45)); floor=$((hb * 60 + 120))
+    if [ "$cap" -lt "$floor" ]; then
+      warn="stale_lock_minutes $stale is too short for heartbeat_minutes $hb (it needs >= $(((175 * hb + 1300 + 99) / 100))): the lease can outlive a stale heartbeat; pulse_max set to $((floor / 60))m, just over the tick. Raise stale_lock_minutes or lower heartbeat_minutes"
+      v="$floor"
+    else
+      [ "$v" -le "$cap" ] || { [ -z "$want" ] || warn="pulse_max ${pulse} clamped to $((cap / 60))m: the lease must lapse before the heartbeat is stale (stale_lock_minutes $stale - 10m lease - 0.75 x heartbeat_minutes $hb - 1m)"; v="$cap"; }
+      [ "$v" -ge "$floor" ] || { warn="pulse_max ${pulse} raised to $((floor / 60))m: it must outlast the tick (heartbeat_minutes $hb + 2m)"; v="$floor"; }
+    fi
+  elif [ -n "$hb" ] && [ "$v" -lt $((hb * 60 + 120)) ]; then
+    warn="pulse_max ${pulse} does not outlast the tick (heartbeat_minutes $hb + 2m): the keepalive will stop between ticks"
+  fi
+  printf '%ss\t%s\n' "$v" "$warn"
 }
 
 monster_snapshot_lines() {
@@ -150,11 +190,31 @@ monster_transcript() {
     case "$s" in '' | *[!A-Za-z0-9._-]*) return 0 ;; esac
     f="$(monster_sessions_dir)/${FLEET_ID:+$FLEET_ID.}$s.json"
     [ -f "$f" ] || return 0
-    t=$(jq -r '.transcript_path // empty' "$f" 2>/dev/null || true)
+    # Only this launch's record (engsys#125 review): a record left by an earlier launch (the hook failed
+    # this time) names the old, full transcript, and would re-request rotation on every relaunch.
+    t=$(jq -r --arg run "${ENGSYS_SESSION_RUN:-}" 'select($run == "" or .run == $run) | .transcript_path // empty' "$f" 2>/dev/null || true)
   fi
   case "$t" in /*) ;; *) return 0 ;; esac
   [ -f "$t" ] && [ ! -L "$t" ] && printf '%s\n' "$t"
   return 0
+}
+
+monster_handback_events() {
+  local s="${ENGSYS_SESSION:-}" f size off
+  case "$s" in '' | *[!A-Za-z0-9._-]*) return 0 ;; esac
+  f="$(monster_sessions_dir)/${FLEET_ID:+$FLEET_ID.}$s.handbacks.jsonl"
+  [ -f "$f" ] || return 0
+  mkdir -p "$1/.watch" 2>/dev/null || return 0
+  size=$(wc -c <"$f" | tr -d ' ')
+  off=$(cat "$1/.watch/handbacks.off" 2>/dev/null || true)
+  case "$off" in '' | *[!0-9]*) off=0 ;; esac
+  [ "$off" -le "$size" ] || off=0 # the log was replaced
+  if [ "$size" -gt "$off" ]; then
+    tail -c +"$((off + 1))" "$f" | head -c "$((size - off))" | jq -R -r --arg run "${ENGSYS_SESSION_RUN:-}" '
+      fromjson? | select($run == "" or .run == $run)
+      | "HANDBACK_INCOMPLETE \(.agent_type) (\(.agent_id)): \(.remains)" | .[0:300]' 2>/dev/null
+  fi
+  printf '%s\n' "$size" >"$1/.watch/handbacks.off"
 }
 
 monster_context_tokens() {
