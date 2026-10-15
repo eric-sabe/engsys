@@ -93,6 +93,7 @@ W="$DIR/.watch"
 mkdir -p "$W"
 touch "$W/deps_pr.tsv" "$W/dep_alerts.tsv" "$W/codeql_alerts.tsv" "$W/secretrun.txt" "$W/trivyrun.txt"
 [ -z "$PULSE_WARN" ] || echo "CONFIG_WARNING ${PULSE_WARN:0:280}"
+monster_handback_prune "$DIR" # drop earlier launches' hand-back lines (engsys#137 review)
 
 # --- baton keepalive (see the header) ----------------------------------------
 BATON_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/lease/baton.mjs"

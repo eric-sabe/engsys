@@ -184,9 +184,12 @@ review):
   keeps a dead or wedged session's role.
 - **Lease before heartbeat.** The lease must lapse before the heartbeat reads
   stale, or a human who merges by hand on a stale heartbeat races a monster
-  still holding a live lease. The last model pulse comes with a heartbeat at
-  most 0.75 × `heartbeat_minutes` old, and the lease outlives the pulse by at
-  most `pulse_max` + 10 minutes, so:
+  still holding a live lease. Only the tick's and the heartbeat's renew
+  (`renew --pulse`) record the model's pulse; a fence (every `mm-act.sh`
+  act) and a bare `mm-baton.sh renew` do not, since a fenced act between
+  ticks comes with a heartbeat up to 1.75 × `heartbeat_minutes` old. So the
+  last pulse comes with a heartbeat at most 0.75 × `heartbeat_minutes` old,
+  and the lease outlives the pulse by at most `pulse_max` + 10 minutes, so:
   `heartbeat_minutes + 2 < pulse_max ≤ stale_lock_minutes − 11 − 0.75 × heartbeat_minutes`,
   which needs `stale_lock_minutes ≥ 1.75 × heartbeat_minutes + 13`. The bus
   clamps `pulse_max` into that window from `--config` and prints a

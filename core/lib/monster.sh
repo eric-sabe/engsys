@@ -36,6 +36,7 @@
 #                                       (<sessions dir>/[<fleet>.]<session>.handbacks.jsonl, filtered on
 #                                       ENGSYS_SESSION_RUN; offset in .watch/handbacks.off). The monsters' net
 #                                       in place of the Stop-time block (engsys#126 review)
+#   monster_handback_prune STATE_DIR    drop other launches' lines from that log (the buses, once at start)
 #   monster_context_tokens TRANSCRIPT   the main thread's last assistant usage (input + cache creation + cache
 #                                       read), read from the last 64 KB of the transcript; empty when none
 #   monster_rotation_status STATE_DIR STATUS THRESHOLD [TRANSCRIPT]
@@ -114,8 +115,11 @@ monster_pulse_max() {
     v="$want"
   fi
   # The invariant (engsys#125 review): the lease must lapse before the heartbeat reads stale, or a human
-  # following "stale heartbeat => merge by hand" races a monster that still holds a live lease. The last
-  # model pulse P comes with a heartbeat no older than 0.75 x hb; the keepalive renews until P + pulse_max,
+  # following "stale heartbeat => merge by hand" races a monster that still holds a live lease. Only the
+  # tick's and the heartbeat's renew record a pulse (`renew --pulse`; a fence or a bare renew never does,
+  # engsys#137 review W1: a fenced act between ticks would otherwise pulse with a heartbeat up to 1.75 x hb
+  # old). So the last pulse P comes with a heartbeat no older than 0.75 x hb (the tick writes one when the
+  # last is older); the keepalive renews until P + pulse_max,
   # and the lease (TTL 10m) lapses by P + pulse_max + 10m. So pulse_max <= stale - 10m - 0.75 x hb - 1m. And
   # it must outlast the tick (hb + 2m), or the keepalive stops between two ticks.
   if [ -n "$hb" ] && [ -n "$stale" ]; then
@@ -199,30 +203,78 @@ monster_transcript() {
   return 0
 }
 
+# _monster_lock DIR NAME / _monster_unlock DIR NAME: the scan.lock pattern (mm-agent-watch.sh): mkdir is the
+# mutex, a lock older than 30 s is a crashed holder and is stolen by an atomic mv. Gives up after ~5 s (exit 1):
+# the caller skips this pass and the next poll catches up.
+_monster_lock() {
+  local l="$1/.watch/$2.lock" tries=0 lm
+  until mkdir "$l" 2>/dev/null; do
+    tries=$((tries + 1)); [ "$tries" -le 25 ] || return 1
+    lm=$(stat -c %Y "$l" 2>/dev/null || stat -f %m "$l" 2>/dev/null || echo 0)
+    case "$lm" in '' | *[!0-9]*) lm=0 ;; esac
+    if [ "$lm" -gt 0 ] && [ $(($(date +%s) - lm)) -gt 30 ]; then
+      mv "$l" "$l.stale.$$" 2>/dev/null && rmdir "$l.stale.$$" 2>/dev/null
+      continue
+    fi
+    sleep 0.2
+  done
+}
+_monster_unlock() { rmdir "$1/.watch/$2.lock" 2>/dev/null || true; }
+
 monster_handback_events() {
-  local s="${ENGSYS_SESSION:-}" f size off
+  local s="${ENGSYS_SESSION:-}" f size off chunk
   case "$s" in '' | *[!A-Za-z0-9._-]*) return 0 ;; esac
   f="$(monster_sessions_dir)/${FLEET_ID:+$FLEET_ID.}$s.handbacks.jsonl"
   [ -f "$f" ] || return 0
   mkdir -p "$1/.watch" 2>/dev/null || return 0
+  # The bus and the tick both relay: one reader at a time, so no line is emitted twice (engsys#137 review).
+  _monster_lock "$1" handbacks || return 0
   size=$(wc -c <"$f" | tr -d ' ')
   off=$(cat "$1/.watch/handbacks.off" 2>/dev/null || true)
   case "$off" in '' | *[!0-9]*) off=0 ;; esac
   [ "$off" -le "$size" ] || off=0 # the log was replaced
   if [ "$size" -gt "$off" ]; then
+    chunk=$(mktemp "$1/.watch/handbacks.chunk.XXXXXX") || { _monster_unlock "$1" handbacks; return 0; }
     # Complete lines only: a line still being appended stays for the next read (the offset stops before it).
-    tail -c +"$((off + 1))" "$f" | head -c "$((size - off))" >"$1/.watch/handbacks.chunk"
-    if [ "$(tail -c 1 "$1/.watch/handbacks.chunk" | od -An -tx1 | tr -d ' \n')" != 0a ]; then
-      sed '$d' "$1/.watch/handbacks.chunk" >"$1/.watch/handbacks.chunk.done"
-      mv "$1/.watch/handbacks.chunk.done" "$1/.watch/handbacks.chunk"
+    tail -c +"$((off + 1))" "$f" | head -c "$((size - off))" >"$chunk"
+    if [ "$(tail -c 1 "$chunk" | od -An -tx1 | tr -d ' \n')" != 0a ]; then
+      sed '$d' "$chunk" >"$chunk.done" && mv "$chunk.done" "$chunk"
     fi
     jq -R -r --arg run "${ENGSYS_SESSION_RUN:-}" '
       fromjson? | select($run == "" or .run == $run)
-      | "HANDBACK_INCOMPLETE \(.agent_type) (\(.agent_id)): \(.remains)" | .[0:300]' <"$1/.watch/handbacks.chunk" 2>/dev/null
-    size=$((off + $(wc -c <"$1/.watch/handbacks.chunk" | tr -d ' ')))
-    rm -f "$1/.watch/handbacks.chunk"
+      | "HANDBACK_INCOMPLETE \(.agent_type) (\(.agent_id)): \(.remains)" | .[0:300]' <"$chunk" 2>/dev/null
+    size=$((off + $(wc -c <"$chunk" | tr -d ' ')))
+    rm -f "$chunk"
   fi
   printf '%s\n' "$size" >"$1/.watch/handbacks.off"
+  _monster_unlock "$1" handbacks
+}
+
+# monster_handback_prune: drop the hand-back log's lines from other launches (run != ENGSYS_SESSION_RUN), so
+# the log never grows across relaunches. The buses run it once at start, before their first read; the
+# offset file is reset with it, since the kept lines are renumbered.
+monster_handback_prune() {
+  local s="${ENGSYS_SESSION:-}" run="${ENGSYS_SESSION_RUN:-}" f tmp off
+  case "$s" in '' | *[!A-Za-z0-9._-]*) return 0 ;; esac
+  [ -n "$run" ] || return 0
+  f="$(monster_sessions_dir)/${FLEET_ID:+$FLEET_ID.}$s.handbacks.jsonl"
+  [ -f "$f" ] || return 0
+  mkdir -p "$1/.watch" 2>/dev/null || return 0
+  _monster_lock "$1" handbacks || return 0
+  tmp=$(mktemp "$f.XXXXXX") || { _monster_unlock "$1" handbacks; return 0; }
+  off=$(cat "$1/.watch/handbacks.off" 2>/dev/null || true)
+  case "$off" in '' | *[!0-9]*) off=0 ;; esac
+  # Keep this launch's complete lines. The new offset is the size of the kept lines that lay before the old
+  # offset (already relayed), so nothing this launch logged is lost or relayed twice.
+  jq -R -c --arg run "$run" 'fromjson? | select(.run == $run)' "$f" >"$tmp" 2>/dev/null
+  if [ "$(wc -c <"$tmp" | tr -d ' ')" -lt "$(wc -c <"$f" | tr -d ' ')" ]; then
+    head -c "$off" "$f" | jq -R -c --arg run "$run" 'fromjson? | select(.run == $run)' 2>/dev/null | wc -c | tr -d ' ' >"$1/.watch/handbacks.off"
+    chmod 600 "$tmp" 2>/dev/null
+    mv "$tmp" "$f"
+  else
+    rm -f "$tmp"
+  fi
+  _monster_unlock "$1" handbacks
 }
 
 monster_context_tokens() {

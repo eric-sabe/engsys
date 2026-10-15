@@ -69,7 +69,7 @@ DELTA=()
 
 # 1. renew when due -------------------------------------------------------------------------------
 RC=0
-OUT=$(node "$here/../../../lib/lease/baton.mjs" renew --role merge --repo "$REPO" --state-dir "$DIR" \
+OUT=$(node "$here/../../../lib/lease/baton.mjs" renew --pulse --role merge --repo "$REPO" --state-dir "$DIR" \
   --if-due "$IF_DUE" ${SESSION:+--session "$SESSION"} 2>&1) || RC=$?
 case "$RC" in
   0) if printf '%s' "$OUT" | jq -e '.handover' >/dev/null 2>&1; then
@@ -89,8 +89,14 @@ gate_lines() {
   local n
   for n in $(printf '%s' "$SNAP" | jq -r '.[] | select((.mm // []) | index("mm:blocked")) | .number' 2>/dev/null); do
     case "$n" in '' | *[!0-9]*) continue ;; esac
-    "$FLEET_GH" pr view "$n" -R "$REPO" --json headRefOid,comments,reviews --jq \
-      "{k: \"gate\", pr: $n, head: .headRefOid, comments: (.comments | length), reviews: (.reviews | length), lastReview: ((.reviews | last | .state) // null)}" 2>/dev/null \
+    # totalCount, not the length of a fetched list (gh caps that at 100), plus the newest comment's id
+    "$FLEET_GH" api graphql -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F number="$n" -f query='
+      query($owner: String!, $name: String!, $number: Int!) {
+        repository(owner: $owner, name: $name) { pullRequest(number: $number) {
+          headRefOid
+          comments(last: 1) { totalCount nodes { id } }
+          reviews(last: 1) { totalCount nodes { state } } } } }' \
+      --jq ".data.repository.pullRequest | {k: \"gate\", pr: $n, head: .headRefOid, comments: .comments.totalCount, lastComment: (.comments.nodes[0].id // null), reviews: .reviews.totalCount, lastReview: (.reviews.nodes[0].state // null)}" 2>/dev/null \
       || printf '{"k":"gate","pr":%s,"error":"unreadable"}\n' "$n"
   done
 }

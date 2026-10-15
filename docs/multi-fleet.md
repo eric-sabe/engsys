@@ -674,7 +674,7 @@ to; otherwise the bus runs the renewer attached, as before, and never beside a r
 one). The owner never comes from the command line: the starter writes it to a one-time nonce file in
 the state dir and passes the nonce in the child's environment, and the child consumes the file or
 refuses to run. The renewer stops when its owner is gone, when the token is released or lost, or when the model has not
-touched the baton for `pulse_max` (default 2.25 × `heartbeat_minutes`; every tick renews, and the
+pulsed (a tick's or heartbeat's `renew --pulse`; a fence does not count) for `pulse_max` (default 2.25 × `heartbeat_minutes`; every tick renews, and the
 bus clamps it so the lease lapses before the heartbeat reads stale, see merge-monster.md § 5), so a
 renewer can never keep a dead or wedged session's role alive. It writes its `BATON_*` lines to `baton-<role>.events`, which
 each bus relays to its Monitor from a saved offset, so a new bus also reports what happened while no

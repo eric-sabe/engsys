@@ -70,7 +70,7 @@ DELTA=()
 
 # 1. renew when due -------------------------------------------------------------------------------
 RC=0
-OUT=$(node "$here/../../../lib/lease/baton.mjs" renew --role maintain --repo "$REPO" --state-dir "$DIR" \
+OUT=$(node "$here/../../../lib/lease/baton.mjs" renew --pulse --role maintain --repo "$REPO" --state-dir "$DIR" \
   --if-due "$IF_DUE" ${SESSION:+--session "$SESSION"} 2>&1) || RC=$?
 case "$RC" in
   0) if printf '%s' "$OUT" | jq -e '.handover' >/dev/null 2>&1; then

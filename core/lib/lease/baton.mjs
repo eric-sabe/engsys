@@ -61,7 +61,8 @@
 // ## Ops (CLI: one JSON object on stdout; `guard` passes its command's own output through)
 //
 //   startup    home check, then acquire when free/expired and home        exit 0 act | 1 don't | 3 | 4
-//   renew      [--if-due 150s] renew with the session's token             exit 0 | 1 lost | 3 | 5
+//   renew      [--if-due 150s] [--pulse] renew with the session's token; --pulse records the model's
+//              pulse (the tick and the heartbeat pass it; a bare renew and a fence never pulse)  exit 0 | 1 lost | 3 | 5
 //   keepalive  [--pulse-max 20m] renew loop; prints BATON_* events (attached to its caller)
 //   keepalive --detach [--pulse-max 20m]   the watch bus's call: adopt this session's running
 //              renewer, or start one detached (see "The keepalive outlives its bus")  exit 0 | 1 | 3 | 5
@@ -105,9 +106,10 @@ export const RENEW_RETRY_BACKOFF_MS = Object.freeze([2_000, 6_000]);
  */
 export const TOKEN_REUSE_MS = 5 * 60_000;
 /**
- * keepalive stops renewing when the model has not touched the baton for this long (the SKILLs tick at
- * most every 10 minutes while holding, and every tick renews), so a wedged session forfeits its role
- * within ~30 minutes instead of an hour.
+ * keepalive stops renewing when the model has not pulsed for this long (only the tick's and the heartbeat's
+ * `renew --pulse` pulse; the monsters pass --pulse-max from the config's pulse_max, clamped so the lease
+ * lapses before the heartbeat reads stale), so a wedged session forfeits its role. This default applies
+ * when no --pulse-max is given.
  */
 export const DEFAULT_PULSE_MAX_MS = 20 * 60_000;
 /** A fence passes only with at least this much lease left (the act's 30 s timeout + slack). */
@@ -594,13 +596,19 @@ export function createBaton({ lease, repo, role, holder, run = null, store, home
    * RENEW_RETRY_BACKOFF_MS, up to this many times, while the local deadline holds. The keepalive
    * passes 0: it retries on its own 30 s cadence.
    */
-  async function renew({ source = "model", ifDueMs = 0, retries = 0 } = {}) {
+  /**
+   * `pulse` records the model's pulse (what the keepalive's --pulse-max counts from). Only the renews that
+   * come with a heartbeat at most 0.75 x heartbeat_minutes old pulse: the tick's and the heartbeat's
+   * (`renew --pulse`), and startup's resume. A bare `renew` and every fence do not (engsys#137 review W1):
+   * a pulse with no fresh heartbeat lets the lease outlive a heartbeat that already reads stale.
+   */
+  async function renew({ source = "model", ifDueMs = 0, retries = 0, pulse: wantPulse = source === "model" } = {}) {
     const lost = store.lost();
     if (lost) return { exit: EXIT.REFUSED, result: { ok: false, lost: true, code: "lost_earlier", role, holder, lostAt: lost.at } };
     const state = store.load();
     const u = usable(state, holder, run);
     if (!u.ok) return { exit: EXIT.NOT_STARTED, result: { ok: false, code: u.code, role, holder, reason: u.reason } };
-    const pulse = source === "model" ? { pulseMs: now() } : {};
+    const pulse = source === "model" && wantPulse ? { pulseMs: now() } : {};
     if (ifDueMs && now() - (state.lastRenewOkMs ?? 0) < ifDueMs) {
       if (pulse.pulseMs) store.update((s) => (s && s.token === state.token ? { ...s, ...pulse } : null));
       return { exit: EXIT.OK, result: { ok: true, code: "not_due", role, holder, ...localView(state) } };
@@ -643,7 +651,7 @@ export function createBaton({ lease, repo, role, holder, run = null, store, home
     const startMs = now();
     const r = await lease.assertHeld({ role, token: state.token, minRemainingMs: FENCE_MIN_REMAINING_MS });
     if (r.held) {
-      recordGood(state.token, startMs, r.expiresInMs, { pulseMs: now() });
+      recordGood(state.token, startMs, r.expiresInMs, {}); // no pulse: a fence comes with no heartbeat (W1)
       return { exit: EXIT.OK, result: { held: true, code: "held", role, holder, fenceStartedMs: startMs, expiresInMs: r.expiresInMs, ...localView(store.load()) } };
     }
     if (r.code === "lost" || r.code === "not_held" || r.code === "protocol_unsupported") {
@@ -858,7 +866,7 @@ export function createBaton({ lease, repo, role, holder, run = null, store, home
     if (!pulseMaxMs || !(now() - (state.pulseMs ?? 0) > pulseMaxMs)) return false;
     if (state.idleNotedFor !== (state.pulseMs ?? 0)) {
       store.update((s) => (s && s.token === state.token ? { ...s, idleNotedFor: state.pulseMs ?? 0 } : null));
-      out(`BATON_IDLE ${role} no model activity for ${Math.round((now() - (state.pulseMs ?? 0)) / 60_000)}m: keepalive stopped renewing (the next model renew restarts it, or the lease runs out)`);
+      out(`BATON_IDLE ${role} no model activity for ${Math.round((now() - (state.pulseMs ?? 0)) / 60_000)}m: keepalive stopped renewing (the next tick or heartbeat renew restarts it, or the lease runs out)`);
     }
     return true;
   }
@@ -1433,7 +1441,7 @@ function usage() {
   return [
     "usage: baton.mjs <op> --repo o/r --role merge|maintain --state-dir DIR [--session NAME] [flags]",
     "  startup                         home check + acquire; exit 0 = act, 1 = do not act",
-    "  renew      [--if-due 150s]      renew this session's baton",
+    "  renew      [--if-due 150s] [--pulse]  renew this session's baton (--pulse: the tick's and heartbeat's renew)",
     "  keepalive  [--detach] [--pulse-max 20m]   renew loop; --detach adopts or starts this session's detached one",
     "  fence                           exit 0 only while it is safe to mutate",
     "  guard -- gh <args…> | <engsys>/skills/merge-monster/scripts/gate-request.sh <args…> | fleet msg send <args…>",
@@ -1460,7 +1468,7 @@ function parseArgs(argv) {
     if (arg === "--") { command = rest.slice(i + 1); break; }
     if (!arg.startsWith("--")) throw new LeaseUsageError(`unexpected argument ${JSON.stringify(arg)}`);
     const name = arg.slice(2);
-    if (name === "pretty" || name === "new-branch" || name === "detach" || name === "detached-child") { flags[name] = true; continue; }
+    if (name === "pretty" || name === "new-branch" || name === "detach" || name === "detached-child" || name === "pulse") { flags[name] = true; continue; }
     const value = rest[i + 1];
     if (value === undefined || value.startsWith("--")) throw new LeaseUsageError(`--${name} requires a value`);
     flags[name] = value;
@@ -1558,7 +1566,7 @@ export async function main(argv, deps = {}) {
     let r;
     switch (op) {
       case "startup": r = await baton.startup(); break;
-      case "renew": r = await baton.renew({ source: "model", ifDueMs: flags["if-due"] ? durationMs(flags["if-due"], "if-due") : 0, retries: RENEW_RETRY_BACKOFF_MS.length }); break;
+      case "renew": r = await baton.renew({ source: "model", pulse: flags.pulse === true, ifDueMs: flags["if-due"] ? durationMs(flags["if-due"], "if-due") : 0, retries: RENEW_RETRY_BACKOFF_MS.length }); break;
       case "fence": r = await baton.fence(); break;
       case "merge": r = await baton.merge({ pr: flags.pr, sha: flags.sha, method: flags.method }); break;
       case "release": r = await baton.release({ reason: flags.reason ?? "exit" }); break;

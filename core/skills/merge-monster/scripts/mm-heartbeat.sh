@@ -42,7 +42,7 @@ done
 
 if [ -n "$STATE_DIR" ]; then
   BATON_RC=0
-  BATON_OUT=$(node "$(dirname "${BASH_SOURCE[0]}")/../../../lib/lease/baton.mjs" renew --role merge --repo "$REPO" \
+  BATON_OUT=$(node "$(dirname "${BASH_SOURCE[0]}")/../../../lib/lease/baton.mjs" renew --pulse --role merge --repo "$REPO" \
     --state-dir "$STATE_DIR" ${SESSION:+--session "$SESSION"}) || BATON_RC=$?
   case "$BATON_RC" in
     0) if printf '%s' "$BATON_OUT" | jq -e '.handover' >/dev/null 2>&1; then

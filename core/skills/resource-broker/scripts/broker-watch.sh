@@ -115,6 +115,7 @@ mkdir -p "$W"
 [ -s "$W/slots.json" ] || echo '[]' >"$W/slots.json"
 PUMP_BAD=0
 POOL_DIR=""
+monster_handback_prune "$DIR" # drop earlier launches' hand-back lines (engsys#137 review)
 
 # slot_journal <event> <slot> [who]: one line in each monthly journal, and the running counters.
 slot_journal() {

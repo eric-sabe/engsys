@@ -118,20 +118,24 @@ monster_heartbeat_due "$T/state" 20 && ok "  …15m of 20 is" || bad "  …15m o
 monster_heartbeat_mark "$T/state"
 monster_heartbeat_due "$T/state" 20 && bad "  …and a heartbeat resets it" || ok "  …and a heartbeat resets it"
 GSHA=abababababababababababababababababababab
-# an open operator gate: a /approve comment or an approving review must not be a NOOP tick
+gql() { # gql <comments> <lastCommentId> <reviews> <lastReviewState|null>
+  local st="$4"; [ "$st" = null ] || st="\"$st\""
+  printf '{"data":{"repository":{"pullRequest":{"headRefOid":"%s","comments":{"totalCount":%s,"nodes":[{"id":"%s"}]},"reviews":{"totalCount":%s,"nodes":[%s]}}}}}\n' \
+    "$GSHA" "$1" "$2" "$3" "$( [ "$4" = null ] || printf '{"state":%s}' "$st")" >"$T/resp/api-graphql"
+}
 printf '[%s]\n' "$(pr_json 14 BLOCKED | sed 's/"mm:ready"/"mm:blocked"/')" >"$T/resp/pr-list"
-printf '{"headRefOid":"%s","comments":[{"body":"gate request"}],"reviews":[]}\n' "$GSHA" >"$T/resp/pr-view"
+gql 150 IC_a 0 null
 run env FLEET_ID=alice "${TICK[@]}"
-has "a PR parked mm:blocked carries its gate counts in the snapshot" '+ {"k":"gate","pr":14,"head":"'"$GSHA"'","comments":1,"reviews":0,"lastReview":null}'
+has "a PR parked mm:blocked carries its gate counts in the snapshot (totalCount: 150, past gh's 100 cap)" '+ {"k":"gate","pr":14,"head":"'"$GSHA"'","comments":150,"lastComment":"IC_a","reviews":0,"lastReview":null}'
 run env FLEET_ID=alice "${TICK[@]}"
 [ "$OUT" = NOOP ] && ok "  …an untouched gate is NOOP" || bad "  …an untouched gate is NOOP" "$OUT"
-printf '{"headRefOid":"%s","comments":[{"body":"gate request"},{"body":"/approve g1"}],"reviews":[]}\n' "$GSHA" >"$T/resp/pr-view"
+gql 151 IC_b 0 null
 run env FLEET_ID=alice "${TICK[@]}"
-has "  …a new /approve comment is a delta (run gate-check)" '+ {"k":"gate","pr":14,"head":"'"$GSHA"'","comments":2'
-printf '{"headRefOid":"%s","comments":[{"body":"gate request"},{"body":"/approve g1"}],"reviews":[{"state":"APPROVED"}]}\n' "$GSHA" >"$T/resp/pr-view"
+has "  …a new /approve comment (comment 151) is a delta (run gate-check)" '"comments":151,"lastComment":"IC_b"'
+gql 151 IC_b 1 APPROVED
 run env FLEET_ID=alice "${TICK[@]}"
 has "  …so is an approving review" '"reviews":1,"lastReview":"APPROVED"}'
-rm -f "$T/resp/pr-view"
+rm -f "$T/resp/api-graphql"
 printf '{"at":"2026-10-04T12:00:00.000Z","code":"lost"}\n' >"$T/state/baton-merge.lost"
 run env FLEET_ID=alice "${TICK[@]}"
 rc_is "a lost baton → exit 1" 1
@@ -314,7 +318,7 @@ has "the bus relays HANDBACK_INCOMPLETE" "HANDBACK_INCOMPLETE engsys:isabelle (a
 [ "$(count_of HANDBACK_INCOMPLETE)" = 1 ] && ok "  …once, and not the previous launch's line" || bad "  …once, this launch only" "$OUT"
 # the tick runs as fleet alice (its baton holder), so its log is the fleet-qualified one
 printf '{"run":"r1","agent_type":"engsys:nyx","agent_id":"a2","remains":"verdict not posted"}\n' >"$T/hb-sessions/alice.acme-mm.handbacks.jsonl"
-held merge; date +%s >"$T/state/.watch/last-heartbeat"
+held merge; date +%s >"$T/state/.watch/last-heartbeat"; rm -f "$T/state/.watch/handbacks.off" # another log file (fleet alice)
 run env FLEET_ID=alice "${TICK[@]}"
 has "the tick relays one the bus has not (the backstop)" "HANDBACK_INCOMPLETE engsys:nyx (a2): verdict not posted"
 PL="$T/hb-sessions/acme-mm.handbacks.jsonl"; : >"$PL"; rm -rf "$T/state/.watch"
@@ -324,6 +328,23 @@ OUT="$(monster_handback_events "$T/state")"
 printf ' written"}\n' >>"$PL"
 OUT="$(monster_handback_events "$T/state")"
 has "  …and is relayed whole once complete" "HANDBACK_INCOMPLETE x (p1): half written"
+hb_line() { printf '{"run":"%s","agent_type":"t","agent_id":"%s","remains":"r"}\n' "$1" "$2"; }
+: >"$PL"; rm -rf "$T/state/.watch"
+for i in 1 2 3 4 5 6 7 8; do hb_line r1 "c$i" >>"$PL"; done
+for i in $(seq 1 12); do monster_handback_events "$T/state" >"$T/par.$i" & done; wait
+[ "$(cat "$T"/par.* | grep -c HANDBACK_INCOMPLETE)" = 8 ] && ok "bus and tick reading at once (12 readers): every line relayed exactly once" || bad "concurrent relay" "$(cat "$T"/par.* | sort | uniq -c)"
+ls "$T/state/.watch" | grep -q 'handbacks.chunk\|handbacks.lock' && bad "  …no chunk or lock left behind" "$(ls "$T/state/.watch")" || ok "  …no chunk or lock left behind"
+rm -f "$T"/par.*
+: >"$PL"; rm -rf "$T/state/.watch"
+{ hb_line r0 old1; hb_line r1 a; hb_line r0 old2; hb_line r1 b; } >>"$PL"
+OUT="$(monster_handback_events "$T/state")"
+has "this launch's lines are relayed" "HANDBACK_INCOMPLETE t (b): r"
+hb_line r1 c >>"$PL"
+monster_handback_prune "$T/state"
+grep -q '"run":"r0"' "$PL" && bad "prune drops earlier launches' lines" "$(cat "$PL")" || ok "prune drops earlier launches' lines"
+[ "$(grep -c '"run":"r1"' "$PL")" = 3 ] && ok "  …and keeps this launch's" || bad "  …keeps this launch's" "$(cat "$PL")"
+OUT="$(monster_handback_events "$T/state")"
+[ "$OUT" = "HANDBACK_INCOMPLETE t (c): r" ] && ok "  …the offset follows: nothing relayed twice, nothing lost" || bad "  …offset after prune" "$OUT"
 unset ENGSYS_SESSIONS_DIR
 rm -rf "$T/state"/baton-* "$T/state/.watch"
 
