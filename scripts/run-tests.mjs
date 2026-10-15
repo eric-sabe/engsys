@@ -49,6 +49,8 @@ const SUITES = [
   ["node --test core/lib/lease/pool.test.mjs"],
   ["node --test core/scripts/review-bakeoff.test.mjs"],
   ["node --test core/scripts/harvest-findings.test.mjs"],
+  ["node --test core/lib/is-main.test.mjs"],
+  ["node --test core/scripts/plugin-mode-layout.test.mjs"],
   ["NODE_NO_WARNINGS=1 node --test core/lib/memory/index-db.test.mjs"],
   ["NODE_NO_WARNINGS=1 node --test core/scripts/memory-brief.test.mjs"],
   ["NODE_NO_WARNINGS=1 node --test core/.claude-plugin/subagent-memory-inject.test.mjs"],

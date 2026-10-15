@@ -37,7 +37,7 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { splitFrontmatter } from '../../scripts/validate-lessons.mjs';
-import { parseYaml } from '../../../lib/yaml.js';
+import { parseYaml } from '../yaml.js';
 
 const require = createRequire(import.meta.url);
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -46,6 +46,64 @@ const CORE_DIR = path.resolve(HERE, '..', '..');
 
 /** Sources an engine built from `docs()` carries, mirroring docs/memory-spec.md §3.3/§4. */
 export const SOURCE_KIND = { LESSON: 'lesson', OVERLAY: 'overlay', ADR: 'adr', EVENT: 'event' };
+
+// ---------------------------------------------------------------------------------------------
+// Class B field validation (engsys#140 H2 — Nyx F2): a Class B event is attacker-influenceable
+// text, whoever wrote it (docs/memory-spec.md §2), and SQLite's INTEGER/TEXT affinity does NOT
+// enforce a column's intended shape — a `number`/`line` column happily stores an arbitrary
+// string. Lives here (the lower-level module) rather than in memory-brief.mjs so BOTH choke
+// points can use the exact same check without a circular import: this module's own insert path
+// (`buildInto`, so a malformed row is never even written to the writable, M1-exploitable,
+// index.sqlite) and memory-brief.mjs's `selectPointers`/`renderPointerLine` (the last line of
+// defense before a value is interpolated into `additionalContext`). A field that fails
+// validation DROPS THE WHOLE POINTER — except `line`, which is merely omitted, since a missing
+// line number is a normal, harmless degradation `renderPointerLine` already handles.
+// ---------------------------------------------------------------------------------------------
+
+const KIND_ENUM = new Set(['pr', 'pr_review', 'review_thread', 'marker_finding', 'finding_ack', 'issue', 'issue_comment', 'commit', 'journal', 'event']);
+const OUTCOME_ENUM = new Set(['fixed', 'unresolved', 'disputed', 'bounced', 'merged', 'none']);
+/** Bare marker-name shape (no `<!-- -->`): exported so memory-brief.mjs's `allowedMarkerNames`
+ * validates a configured marker string against the exact same charset this module enforces. */
+export const MARKER_SHAPE_RE = /^[a-z0-9-]{1,40}$/;
+const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const UPDATED_AT_RE = /^\d{4}-\d{2}-\d{2}/;
+const KEY_RE = /^[A-Za-z0-9:_./-]{1,80}$/;
+// Deliberately an ALLOWLIST (not a denylist of control/bidi/zero-width/`<`/`>`/backtick): an
+// allowlisted charset structurally excludes every one of those by construction, including
+// obfuscations a denylist might miss (e.g. a right-to-left override hiding mid-path).
+const PATHISH_RE = /^[A-Za-z0-9_./@+-]{1,200}$/;
+
+function isSafePositiveInt(n) {
+	return Number.isSafeInteger(n) && n > 0;
+}
+
+/**
+ * Validate every field of a Class B event against its strict allowlist. Returns a (possibly
+ * `line`-stripped) copy on success, or `null` to mean "drop this pointer entirely" — `null` is
+ * the ONLY failure signal; this never throws, and never returns a partially-sanitized object for
+ * a field it rejected (the whole event is rejected instead, except for `line`'s documented
+ * omit-not-drop case). `opts.allowedMarkers` (a Set of bare marker names) is optional — when
+ * omitted (as at this module's own insert-time call), only the marker's CHARSET is checked, not
+ * instance-specific configured-marker membership (which needs config this module doesn't have).
+ */
+export function validatePointerEvent(event, { allowedMarkers } = {}) {
+	if (!event || typeof event !== 'object') return null;
+	const key = event.key ?? event.k;
+	if (typeof key !== 'string' || !KEY_RE.test(key)) return null;
+	if (event.kind != null && !KIND_ENUM.has(event.kind)) return null;
+	if (event.outcome != null && !OUTCOME_ENUM.has(event.outcome)) return null;
+	if (event.marker != null) {
+		if (!MARKER_SHAPE_RE.test(event.marker)) return null;
+		if (allowedMarkers && !allowedMarkers.has(event.marker)) return null;
+	}
+	if (event.repo != null && !REPO_RE.test(event.repo)) return null;
+	if (event.updated_at != null && !UPDATED_AT_RE.test(String(event.updated_at))) return null;
+	if (event.path != null && !PATHISH_RE.test(event.path)) return null;
+	if (event.symbol != null && !PATHISH_RE.test(event.symbol)) return null;
+	if (event.number != null && !isSafePositiveInt(event.number)) return null;
+	const line = event.line != null && isSafePositiveInt(event.line) ? event.line : null;
+	return { ...event, key, line };
+}
 
 // ---------------------------------------------------------------------------------------------
 // paths
@@ -83,15 +141,30 @@ export function resolveCacheDir(cwd = process.cwd()) {
  *     lives under `docs/agent-lessons/library/**`, covered by the first bullet — this bullet
  *     resolves to a non-existent directory there and is silently skipped.
  */
+/** True iff `p` exists and is (or resolves through) a symlink. Never throws — a path that
+ * doesn't exist, or that errors on lstat, is NOT reported as a symlink (callers already treat
+ * "doesn't exist" as absent via their own existsSync/readdir checks; this is only the extra
+ * "don't trust a symlink" gate, engsys#140 H3 — Nyx F3). */
+function isSymlink(p) {
+	try {
+		return fs.lstatSync(p).isSymbolicLink();
+	} catch {
+		return false;
+	}
+}
+
 export function resolveClassARoots(repoRoot, opts = {}) {
 	const pluginRoot = opts.pluginRoot ?? process.env.CLAUDE_PLUGIN_ROOT ?? null;
 	let lessonsDir = pluginRoot ? path.join(pluginRoot, 'lessons-library') : null;
-	if (!lessonsDir || !fs.existsSync(lessonsDir)) {
+	if (!lessonsDir || !fs.existsSync(lessonsDir) || isSymlink(lessonsDir)) {
 		const fallback = path.join(CORE_DIR, 'lessons-library');
-		if (fs.existsSync(fallback)) lessonsDir = fallback;
+		if (fs.existsSync(fallback) && !isSymlink(fallback)) lessonsDir = fallback;
+		else lessonsDir = null;
 	}
 	return {
-		lessonsDir: lessonsDir && fs.existsSync(lessonsDir) ? lessonsDir : null,
+		// The bundled library is read from disk (it's the plugin's OWN trusted content, never a
+		// project's working tree) — but NEVER if the resolved root itself is a symlink.
+		lessonsDir: lessonsDir && fs.existsSync(lessonsDir) && !isSymlink(lessonsDir) ? lessonsDir : null,
 		overlayFile: path.join(repoRoot, '.claude', 'workflows', 'briefs', 'project-brief-overlay.md'),
 		agentLessonsDir: path.join(repoRoot, 'docs', 'agent-lessons'),
 		adrDir: path.join(repoRoot, 'docs', 'architecture', 'adr'),
@@ -115,9 +188,151 @@ function* walkMd(dir) {
 	}
 	for (const e of entries) {
 		const p = path.join(dir, e.name);
+		if (isSymlink(p)) continue; // engsys#140 H3 — never follow a symlinked file OR directory
 		if (e.isDirectory()) yield* walkMd(p);
 		else if (e.isFile() && e.name.endsWith('.md')) yield p;
 	}
+}
+
+/** Strip control (C0/C1), bidi-override/formatting, and zero-width characters from `s` before it
+ * is ever used as a rendered title or a derived key (engsys#140 H3 — Nyx F3): a crafted filename
+ * or `# heading` committed to a branch is still attacker-influenceable text, even once it's read
+ * from a REVIEWED ref. Uses the same Unicode property this repo's untrusted-data envelope
+ * (core/lib/untrusted.mjs) strips for the identical reason. */
+function stripControlAndBidi(s) {
+	return String(s ?? '').replace(/[\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, '');
+}
+
+// ---------------------------------------------------------------------------------------------
+// Reading PROJECT Class A content from the REVIEWED default branch, not the working tree
+// (engsys#140 H3 — Nyx F3): an uncommitted or feature-branch-only lesson/overlay/ADR must never
+// be injected with system authority before a human has actually reviewed it on the repo's own
+// terms (a merge to its default branch). The bundled lessons-library is the one exception — it
+// is the plugin's OWN content, not the project's working tree, so it's still read from disk
+// (resolveClassARoots / loadMdDir above). `git ls-tree`/`git show` against a ref also sidesteps
+// symlink-following entirely: a tree listing is independent of what the WORKING TREE's symlinks
+// point at, and a git symlink entry (mode 120000) is detected and skipped explicitly below.
+// ---------------------------------------------------------------------------------------------
+
+/** The repo's default branch as `origin/<name>`, or `null` if it can't be resolved (a shallow
+ * clone with no remote HEAD symref, no network, not a git repo at all, …). Never throws. */
+export function resolveDefaultRef(repoRoot) {
+	try {
+		const out = execFileSync('git', ['-C', repoRoot, 'symbolic-ref', 'refs/remotes/origin/HEAD'], { encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+		const m = /^refs\/remotes\/origin\/(.+)$/.exec(out);
+		if (m) return `origin/${m[1]}`;
+	} catch { /* fall through to the common-name probe below */ }
+	for (const candidate of ['origin/main', 'origin/master']) {
+		try {
+			execFileSync('git', ['-C', repoRoot, 'rev-parse', '--verify', '--quiet', candidate], { timeout: 1000, stdio: 'ignore' });
+			return candidate;
+		} catch { /* try the next candidate */ }
+	}
+	return null;
+}
+
+/** `.md` blob paths (relative to `repoRoot`) under `relDir` as of `ref`, via `git ls-tree`.
+ * Excludes README.md and any mode-120000 (symlink) tree entry. Never throws; an unresolvable
+ * ref/dir is simply zero entries. */
+function listGitTreeMd(repoRoot, ref, relDir) {
+	let out;
+	try {
+		out = execFileSync('git', ['-C', repoRoot, 'ls-tree', '-r', ref, '--', relDir], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] });
+	} catch {
+		return [];
+	}
+	const entries = [];
+	for (const line of out.split('\n')) {
+		if (!line.trim()) continue;
+		const m = /^(\d+)\s+(\w+)\s+[0-9a-f]+\t(.+)$/.exec(line);
+		if (!m) continue;
+		const [, mode, type, relPath] = m;
+		if (type !== 'blob' || mode === '120000') continue; // not a plain file, or a symlink entry
+		if (!relPath.endsWith('.md') || path.basename(relPath) === 'README.md') continue;
+		entries.push(relPath);
+	}
+	return entries;
+}
+
+/** True iff `relPath` as of `ref` is a git symlink entry (mode 120000) — `git show` on one
+ * returns the symlink's TARGET STRING, not the target's content, but that string is still
+ * attacker-influenceable text standing in for real content, so it's rejected outright rather
+ * than injected as if it were the file's body (engsys#140 H3). Never throws; an unresolvable
+ * ref/path is "not a symlink" (the subsequent `readGitBlob` call will itself return null). */
+function isGitSymlinkEntry(repoRoot, ref, relPath) {
+	try {
+		const out = execFileSync('git', ['-C', repoRoot, 'ls-tree', ref, '--', relPath], { encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] });
+		return /^120000\s/.test(out);
+	} catch {
+		return false;
+	}
+}
+
+/** The content of `relPath` (relative to `repoRoot`) as of `ref`, via `git show`. `null` if the
+ * ref/path can't be resolved. Never throws. */
+function readGitBlob(repoRoot, ref, relPath) {
+	try {
+		return execFileSync('git', ['-C', repoRoot, 'show', `${ref}:${relPath}`], { encoding: 'utf8', timeout: 2000, maxBuffer: 16 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] });
+	} catch {
+		return null;
+	}
+}
+
+/** Load every `.md` blob under `relDir` as of `ref` as a Class A Doc — the reviewed-content
+ * counterpart to `loadMdDir` (which reads the working tree, used only for the bundled library).
+ * Never throws. */
+function loadMdDirFromRef(repoRoot, ref, relDir, kind, docs, manifest, { provenanceFor = () => 'project-local' } = {}) {
+	if (!ref) return;
+	for (const relPath of listGitTreeMd(repoRoot, ref, relDir)) {
+		const text = readGitBlob(repoRoot, ref, relPath);
+		if (text === null) continue;
+		const absPath = path.join(repoRoot, relPath);
+		manifest[absPath] = sha1(text);
+		const { fm, body } = readFrontmatter(text);
+		const titleMatch = /^#\s+(.+)$/m.exec(body);
+		const slug = stripControlAndBidi(path.basename(relPath, '.md'));
+		docs.push({
+			key: `${kind}:${slug}`,
+			class: 'A',
+			kind,
+			path: absPath,
+			symbol: null,
+			roles: fm.roles ?? [],
+			globs: fm.globs ?? [],
+			stacks: fm.stacks ?? [],
+			keywords: fm.keywords ?? [],
+			security: fm.security === true,
+			supersedes: fm.supersedes ?? [],
+			title: stripControlAndBidi(titleMatch ? titleMatch[1] : slug),
+			body,
+			provenance: provenanceFor(relPath),
+		});
+	}
+}
+
+/** Load one file (the overlay) as of `ref`, via `git show`. Never throws. */
+function loadSingleFromRef(repoRoot, ref, relPath, kind, docs, manifest) {
+	if (!ref) return;
+	if (isGitSymlinkEntry(repoRoot, ref, relPath)) return; // engsys#140 H3 — never inject a symlink's target string as content
+	const text = readGitBlob(repoRoot, ref, relPath);
+	if (text === null) return;
+	const absPath = path.join(repoRoot, relPath);
+	manifest[absPath] = sha1(text);
+	docs.push({
+		key: `${kind}:${absPath}`,
+		class: 'A',
+		kind,
+		path: absPath,
+		symbol: null,
+		roles: [],
+		globs: [],
+		stacks: [],
+		keywords: [],
+		security: false,
+		supersedes: [],
+		title: stripControlAndBidi(path.basename(relPath, '.md')),
+		body: text,
+	});
 }
 
 /** Parse a leading `---`-delimited YAML frontmatter block (flat scalars/lists only — the subset
@@ -172,7 +387,7 @@ function loadMdDir(dir, kind, docs, manifest, { provenanceFor = () => 'project-l
 			keywords: fm.keywords ?? [],
 			security: fm.security === true,
 			supersedes: fm.supersedes ?? [],
-			title: titleMatch ? titleMatch[1] : path.basename(file, '.md'),
+			title: stripControlAndBidi(titleMatch ? titleMatch[1] : path.basename(file, '.md')),
 			body,
 			provenance: provenanceFor(file),
 		});
@@ -205,14 +420,40 @@ function loadSingle(file, kind, docs, manifest) {
  * (path -> sha1) in place for the watermark. Never throws. */
 export function loadClassADocs(roots, manifest = {}, opts = {}) {
 	const seedSubdir = opts.seedSubdir ?? 'library'; // matches lessons.into: docs/agent-lessons/library
-	const seededPrefix = `${seedSubdir}${path.sep}`;
+	const seededPrefix = `${seedSubdir}/`; // relDir below is always `/`-joined (git path convention), not path.sep
 	const raw = [];
+	// Bundled lessons-library: the plugin's OWN content, read from disk (never the project's
+	// working tree) — see the module-level comment above loadMdDirFromRef for why this is the one
+	// exception to "project Class A comes from the reviewed default branch" (engsys#140 H3).
 	loadMdDir(roots.lessonsDir, SOURCE_KIND.LESSON, raw, manifest, { provenanceFor: () => 'bundled' });
-	loadMdDir(roots.agentLessonsDir, SOURCE_KIND.LESSON, raw, manifest, {
-		provenanceFor: (file) => (path.relative(roots.agentLessonsDir, file).startsWith(seededPrefix) ? 'seeded' : 'project-local'),
-	});
-	loadMdDir(roots.adrDir, SOURCE_KIND.ADR, raw, manifest, { provenanceFor: () => 'adr' });
-	loadSingle(roots.overlayFile, SOURCE_KIND.OVERLAY, raw, manifest);
+
+	// Everything else is PROJECT content. `opts.repoRoot` OMITTED entirely is a direct/unit-test
+	// call with no git context at all — falls back to reading the working tree (the pre-H3
+	// behavior), since there is no "reviewed ref" concept without a repo. `opts.repoRoot` GIVEN
+	// (the real path: `ensureIndex` always passes it) reads from `origin/<default>` instead, never
+	// the working tree (engsys#140 H3 — Nyx F3); if that ref can't be resolved at all (no network,
+	// no `origin`, a shallow clone with no remote HEAD symref), this degrades to "bundled lessons
+	// only" — a documented fail-safe, not a silent fall-through to the less-trusted working tree.
+	const repoRoot = opts.repoRoot;
+	if (repoRoot === undefined) {
+		loadMdDir(roots.agentLessonsDir, SOURCE_KIND.LESSON, raw, manifest, {
+			provenanceFor: (file) => (path.relative(roots.agentLessonsDir, file).startsWith(`${seedSubdir}${path.sep}`) ? 'seeded' : 'project-local'),
+		});
+		loadMdDir(roots.adrDir, SOURCE_KIND.ADR, raw, manifest, { provenanceFor: () => 'adr' });
+		loadSingle(roots.overlayFile, SOURCE_KIND.OVERLAY, raw, manifest);
+	} else {
+		const ref = resolveDefaultRef(repoRoot);
+		if (ref) {
+			const relAgentLessons = path.relative(repoRoot, roots.agentLessonsDir).split(path.sep).join('/');
+			const relAdr = path.relative(repoRoot, roots.adrDir).split(path.sep).join('/');
+			const relOverlay = path.relative(repoRoot, roots.overlayFile).split(path.sep).join('/');
+			loadMdDirFromRef(repoRoot, ref, relAgentLessons, SOURCE_KIND.LESSON, raw, manifest, {
+				provenanceFor: (relPath) => (relPath.startsWith(`${relAgentLessons}/${seededPrefix}`) ? 'seeded' : 'project-local'),
+			});
+			loadMdDirFromRef(repoRoot, ref, relAdr, SOURCE_KIND.ADR, raw, manifest, { provenanceFor: () => 'adr' });
+			loadSingleFromRef(repoRoot, ref, relOverlay, SOURCE_KIND.OVERLAY, raw, manifest);
+		}
+	}
 	// A same-named lesson can exist under BOTH the bundled lessons-library and a project's
 	// docs/agent-lessons/ (dogfooding this checkout, or a copy-mode project with a same-slug local
 	// lesson, or — in copy mode specifically — the project's OWN top-level docs/agent-lessons/ file
@@ -311,6 +552,7 @@ const DDL = [
 function buildInto(dbPath, { sqlite, docs, events, manifest }) {
 	const { DatabaseSync } = sqlite;
 	const db = new DatabaseSync(dbPath);
+	try { fs.chmodSync(dbPath, 0o600); } catch { /* best effort; the cache DIR's 0700 is the primary control */ }
 	try {
 		// NOT WAL: this file is written once by a single process, then renamed into place and
 		// reopened read-only by every caller afterward. WAL would need a -wal/-shm sidecar that
@@ -327,7 +569,13 @@ function buildInto(dbPath, { sqlite, docs, events, manifest }) {
 		}
 		const insEv = db.prepare('INSERT INTO events (key, kind, repo, number, path, line, symbol, marker, outcome, author_id, author_kind, editor_id, updated_at, url, flags, text) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
 		const insDocEv = db.prepare('INSERT INTO docs (key, class, kind, path, symbol, roles, globs, keywords, body) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
-		for (const e of events) {
+		for (const raw of events) {
+			// engsys#140 H2: validate at insert too, not just at render — a malformed/forged
+			// field never even reaches the writable index.sqlite. `opts.allowedMarkers` is
+			// intentionally omitted here (this module has no config access); the
+			// configured-marker-membership check happens again, with config, at render time.
+			const e = validatePointerEvent(raw);
+			if (!e) continue;
 			insEv.run(e.k, e.kind ?? null, e.repo ?? null, e.number ?? null, e.path ?? null, e.line ?? null, e.symbol ?? null, e.marker ?? null, e.outcome ?? null, e.author_id ?? null, e.author_kind ?? null, e.editor_id ?? null, e.updated_at ?? null, e.url ?? null, JSON.stringify(e.flags ?? []), e.text ?? '');
 			insDocEv.run(e.k, 'B', SOURCE_KIND.EVENT, e.path ?? null, e.symbol ?? null, '', '', '', e.text ?? '');
 		}
@@ -359,14 +607,18 @@ export function ensureIndex(opts = {}) {
 	if (!sqlite || !sqlite.DatabaseSync) return null;
 
 	try {
-		fs.mkdirSync(cacheDir, { recursive: true });
+		// 0700: this cache holds the full rendered content of every lesson/event a brief could
+		// ever surface (engsys#140 M1) — other local users/processes have no business reading it,
+		// on top of it being untrustworthy to WRITE to from outside this tool's own logic.
+		fs.mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
+		fs.chmodSync(cacheDir, 0o700); // mkdirSync's mode is masked by umask; force it explicitly
 	} catch {
 		return null;
 	}
 
 	const roots = resolveClassARoots(repoRoot, { pluginRoot: opts.pluginRoot });
 	const manifest = {};
-	const { docs } = loadClassADocs(roots, manifest);
+	const { docs } = loadClassADocs(roots, manifest, { repoRoot });
 	const events = loadClassBEvents(cacheDir);
 	let eventsFingerprint = 0;
 	try {
