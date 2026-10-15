@@ -226,6 +226,18 @@ history and goes to `journal-YYYY-MM.md` **and** `journal-YYYY-MM.jsonl` in the
 same dir (append-only, one file pair per month). The engsys guard hook denies a
 Write that would leave `state.md` over 4096 bytes and flags an Edit that does
 (it knows the state dir by the baton file, `.watch/` or journal beside it).
+As a backstop, before a Write or Edit changes a `state.md` that is already
+over the limit, it copies the file verbatim to `state.md.pre-schema-<stamp>`
+beside it, and denies the change if that copy fails.
+
+**Archive before the first rewrite.** A `state.md` from before this schema is
+an append log, often far over the limit. Before you first rewrite it, append
+it **verbatim** to `journal-YYYY-MM.md` under a heading
+`## state.md archive (pre-schema, <YYYY-MM-DD>)` (copy the bytes; never
+summarize or trim), and only then Write the schema version. Same for any
+`state.md` you find over the limit later. Never append to `state.md` with
+Bash (`>>`, `tee -a`, `sed -i`) either: the guard does not inspect shell
+writes, since the next wake's whole Write is what bounds the file.
 
 ```markdown
 # merge-monster state · <ISO time, UTC>

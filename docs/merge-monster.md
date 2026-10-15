@@ -363,9 +363,21 @@ Three surfaces, one per audience:
 
 | Surface | Audience | Content |
 |---|---|---|
-| `<state-dir>/state.md` | "what's happening right now" | current queue table (position, PR, state, one-line reason), active PR, last events — rewritten every cycle |
+| `<state-dir>/state.md` | "what's happening right now" | an overwrite-only snapshot, ≤4096 bytes and ≤60 lines, rewritten whole with Write on every wake that saw a change: header (config, skill, baton, heartbeat), active PR, queue ≤10, holds ≤5, operator carry-forwards ≤5, last 5 decisions as one-line journal pointers. Schema: SKILL.md § state.md |
 | `<state-dir>/journal-YYYY-MM.md` + `.jsonl` | post-hoc review, tooling | append-only: every ordering decision with reasoning, merges, rebases, fix agents, escalations, Dependabot actions |
 | the pinned ledger issue | anyone, anywhere | heartbeat, session start/end digests, escalation pings |
+
+`state.md` is never a log: history goes to the journal. The singleton-write
+guard holds it to the schema: a Write that would leave it over 4096 bytes is
+denied, an Edit that leaves it over gets feedback, and the state dir is known by
+its baton files (`baton-<role>.json`, `.notice`, `.lost`, `.events`), `.watch/`
+or a monthly journal. A pre-schema `state.md` (an append log) is archived
+verbatim to `journal-YYYY-MM.md` under `## state.md archive (pre-schema, <date>)`
+before its first rewrite (SKILL.md); as a backstop the guard copies any
+over-limit `state.md` to `state.md.pre-schema-<stamp>` before a Write or Edit
+changes it (engsys#134). Bash appends are not guarded: the next wake's whole
+Write bounds the file, and a lexical guard over shell writes could not be
+complete.
 
 `<state-dir>` defaults to `logs/merge-monster/` (gitignored in most setups).
 Per-PR reasoning lives on the PR itself. The journal's `.jsonl` twin is the

@@ -206,6 +206,16 @@ same dir (append-only, one file pair per month). The engsys guard hook denies a
 Write that would leave `state.md` over 4096 bytes and flags an Edit that does (when the session runs with the guard armed; a broker session does not arm it, so hold
 the limits yourself).
 
+**Archive before the first rewrite.** A `state.md` from before this schema is
+an append log, often far over the limit. Before you first rewrite it, append
+it **verbatim** to `journal-YYYY-MM.md` under a heading
+`## state.md archive (pre-schema, <YYYY-MM-DD>)` (copy the bytes; never
+summarize or trim), and only then Write the schema version. Same for any
+`state.md` you find over the limit later. Never append to `state.md` with
+Bash (`>>`, `tee -a`, `sed -i`) either. A broker session has no guard
+hook, so no `state.md.pre-schema-<stamp>` backstop copy is made for you:
+the journal archive is the only one.
+
 ```markdown
 # resource-broker state · <ISO time, UTC>
 config: <abs config path> · skill: <abs SKILL.md path> · baton: <holding|standby> · heartbeat: <time>
