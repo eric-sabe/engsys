@@ -45,12 +45,12 @@ import { createEnvelope } from '../lib/untrusted.mjs';
 import { isMainEntry } from '../lib/is-main.mjs';
 import {
 	ensureIndex,
-	listClassAFrontmatter,
 	listEvents,
 	MARKER_SHAPE_RE,
 	queryIndex,
 	readFrontmatter,
 	resolveCacheDir,
+	resolveReviewedSha,
 	validatePointerEvent,
 } from '../lib/memory/index-db.mjs';
 import { parseYaml } from '../lib/yaml.js';
@@ -77,15 +77,27 @@ export const DEFAULTS = {
 /** Load `.claude/memory.yml` (or `memory.yml` directly, if `repoRoot` IS a fleet config dir)
  * merged over DEFAULTS. A missing/unreadable/malformed file is just "use the defaults" — never
  * throws. */
-export function loadConfig(repoRoot) {
-	for (const rel of [path.join('.claude', 'memory.yml'), 'memory.yml']) {
-		const p = path.join(repoRoot, rel);
+/**
+ * Load `.claude/memory.yml` — the trust allowlists and markers (docs/memory-spec.md §10) — from
+ * the REVIEWED SHA, never the working tree (engsys#140 N5 — Nyx re-review): an attacker who could
+ * edit an uncommitted/unreviewed `.claude/memory.yml` could otherwise hand themselves a trusted
+ * author id or a marker to mine. Falls back to `memory.yml` in the FLEET config dir
+ * (`CLAUDE_CONFIG_DIR`, a path genuinely outside the project's working tree — reading it from
+ * disk is not a trust violation the way the working tree copy would be), then to defaults.
+ */
+export function loadConfig(repoRoot, { sha } = {}) {
+	const reviewedSha = sha ?? (repoRoot ? resolveReviewedSha(repoRoot) : null);
+	if (reviewedSha) {
 		try {
-			const raw = parseYaml(fs.readFileSync(p, 'utf8'));
-			return { ...DEFAULTS, ...raw };
-		} catch {
-			/* try the next candidate / fall through to defaults */
-		}
+			const out = execFileSync('git', ['-C', repoRoot, 'show', `${reviewedSha}:.claude/memory.yml`], { encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] });
+			return { ...DEFAULTS, ...parseYaml(out) };
+		} catch { /* not committed there — fall through to the fleet config dir */ }
+	}
+	if (process.env.CLAUDE_CONFIG_DIR) {
+		try {
+			const raw = fs.readFileSync(path.join(process.env.CLAUDE_CONFIG_DIR, 'memory.yml'), 'utf8');
+			return { ...DEFAULTS, ...parseYaml(raw) };
+		} catch { /* no fleet config dir copy either — defaults */ }
 	}
 	return { ...DEFAULTS };
 }
@@ -115,17 +127,40 @@ export function resolveExcludedAgents(config, { agentsRoot = process.env.CLAUDE_
 	const excluded = new Set((config?.exclude_class_b_agents ?? []).map((a) => bareAgentType(String(a)) || String(a)));
 	const candidateDirs = [
 		path.join(agentsRoot, 'core', 'agents'), // repo/dev layout
-		path.join(agentsRoot, 'agents'), // plugin layout (agentsRoot = CLAUDE_PLUGIN_ROOT)
+		path.join(agentsRoot, 'agents'), // plugin layout, when CLAUDE_PLUGIN_ROOT IS set correctly
 		path.join(agentsRoot, 'optional-agents'), // both layouts
+		// engsys#140 N3: with CLAUDE_PLUGIN_ROOT unset, `agentsRoot` falls back to
+		// REPO_ROOT_DEFAULT (this module's own location, two levels up — `<pluginRoot>/scripts/..`,
+		// which lands OUTSIDE the plugin cache entirely, not at its root). `HERE/../agents` is
+		// always `<pluginRoot>/agents` regardless of any env var, since this file's own location
+		// IS inside the plugin cache whenever it's actually running from one.
+		path.resolve(HERE, '..', 'agents'),
 	];
-	for (const dir of candidateDirs) {
+	let foundAnySecurityAgent = false;
+	for (const dir of [...new Set(candidateDirs)]) {
 		let files;
 		try { files = fs.readdirSync(dir).filter((f) => f.endsWith('.md')); } catch { continue; }
 		for (const f of files) {
 			let text;
 			try { text = fs.readFileSync(path.join(dir, f), 'utf8'); } catch { continue; }
 			const { fm } = readFrontmatter(text);
-			if (fm.security === true) excluded.add(f.replace(/\.md$/, ''));
+			if (fm.security === true) {
+				excluded.add(f.replace(/\.md$/, ''));
+				foundAnySecurityAgent = true;
+			}
+		}
+	}
+	// engsys#140 N3: if NO security:true agent definition was found in ANY scanned directory, the
+	// scan itself is almost certainly broken (wrong root, agents/ missing, a packaging change) —
+	// failing toward "nobody is excluded" would then silently hand Class B to every agent,
+	// including the one(s) that are supposed to never get it. Fail toward MORE exclusion instead:
+	// every known agent type this module can see is treated as excluded until the scan actually
+	// finds at least one real security agent to calibrate against.
+	if (!foundAnySecurityAgent) {
+		for (const dir of [...new Set(candidateDirs)]) {
+			let files;
+			try { files = fs.readdirSync(dir).filter((f) => f.endsWith('.md')); } catch { continue; }
+			for (const f of files) excluded.add(f.replace(/\.md$/, ''));
 		}
 	}
 	return excluded;
@@ -173,7 +208,10 @@ export function lessonMatchScore(fm, { touchedPaths = [], agentType = null, stac
 	// namespace prefix (engsys#140 H1) — compare bare-to-bare.
 	const bareAgent = bareAgentType(agentType);
 	if (bareAgent && fm.roles?.length && fm.roles.includes(bareAgent)) score += 2;
-	if (fm.stacks?.length && fm.stacks.some((s) => stacks.includes(s))) score += 1;
+	if (fm.stacks?.length) {
+		const normalizedStacks = new Set(stacks.map(normalizeStackId));
+		if (fm.stacks.some((s) => normalizedStacks.has(normalizeStackId(s)))) score += 1;
+	}
 	return score;
 }
 
@@ -395,14 +433,17 @@ function firstLine(body) {
 // a merged/reviewed lesson apart from one a feature branch is adding uncommitted or unreviewed
 // (README.md: "reviewed path (not just a feature branch)"). HEAD on a feature branch already
 // contains that branch's own commits, so it would rubber-stamp exactly the case this must catch.
-export function isReviewedOnDefaultBranch(doc, { repoRoot, ref = 'origin/main' }) {
+export function isReviewedOnDefaultBranch(doc, { repoRoot, sha }) {
 	try {
+		if (!sha) return false; // unresolvable reviewed ref — conservative: not reviewed
 		const rel = path.relative(repoRoot, doc.path);
 		if (rel.startsWith('..') || path.isAbsolute(rel)) return false; // outside repoRoot — never "reviewed"
-		const committed = execFileSync('git', ['-C', repoRoot, 'show', `${ref}:${rel}`], { encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] });
+		// A pinned SHA, never a short ref name (engsys#140 N1) — `resolveReviewedSha`'s own comment
+		// has the full rationale (a tag/branch literally named "origin/main" would otherwise shadow it).
+		const committed = execFileSync('git', ['-C', repoRoot, 'show', `${sha}:${rel}`], { encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] });
 		return committed === fs.readFileSync(doc.path, 'utf8');
 	} catch {
-		return false; // not committed there (yet), or no such ref — treat as NOT reviewed, the conservative direction
+		return false; // not committed there (yet), or no such sha/path — treat as NOT reviewed, the conservative direction
 	}
 }
 
@@ -427,7 +468,7 @@ export function buildBrief(opts = {}) {
 		const handle = ensureIndex({ repoRoot, pluginRoot: opts.pluginRoot, cacheDir: opts.cacheDir, version: opts.version ?? 'dev', sqlite: opts.sqlite });
 		if (!handle) return empty;
 
-		// Reviewed-ref content only, via `handle.docs` (loadClassADocs -> loadSingleFromRef) — NOT
+		// Reviewed-ref content only, via `handle.docs` (loadClassADocs -> loadProjectClassADocs) — NOT
 		// a direct fs.readFileSync here, which would re-introduce exactly what H3 closed: an
 		// uncommitted/unpushed overlay injected before review, and a symlinked overlay followed
 		// straight into every subagent's system-authority context (engsys#140, cr review).
@@ -436,8 +477,24 @@ export function buildBrief(opts = {}) {
 		const terms = bm25Terms(opts.prompt);
 		const bm25Rows = terms.length ? queryIndex(handle.db, { text: terms.join(' '), limit: 50 }) : [];
 		// queryIndex already flips sqlite's bm25() sign so higher `r.score` = more relevant.
-		const bm25ByKey = new Map(bm25Rows.filter((r) => r.class === 'A').map((r) => [r.key, Math.max(0, r.score)]));
-		const frontmatterRows = listClassAFrontmatter(handle.db);
+		// engsys#140 N2 (Nyx re-review): the DB is index.sqlite — writable, and its watermark is
+		// recomputed from the same filesystem state an attacker could also control. A forged EXTRA
+		// row (a key with no corresponding fresh doc at all) must score as if it doesn't exist —
+		// filtered by `docsByKey` membership below, not trusted just because it came back from a
+		// MATCH query.
+		const docsByKey = new Map(handle.docs.map((d) => [d.key, d]));
+		const bm25ByKey = new Map(bm25Rows.filter((r) => r.class === 'A' && docsByKey.has(r.key)).map((r) => [r.key, Math.max(0, r.score)]));
+
+		// engsys#140 N2: ALL selection metadata (globs/roles/stacks/security/supersedes/path/title)
+		// comes from the FRESH docs this run just parsed — never from `frontmatter` in index.sqlite.
+		// A forged DB row's `supersedes`/`security`/`path` previously had real power: it could
+		// suppress a real security:true lesson, or claim to be "reviewed" via a forged path. Now
+		// the DB contributes nothing but a BM25 relevance number, keyed by a key that must already
+		// exist in `docsByKey` to mean anything.
+		const frontmatterRows = handle.docs.map((d) => ({
+			key: d.key, globs: d.globs, stacks: d.stacks, roles: d.roles, keywords: d.keywords,
+			security: d.security, supersedes: d.supersedes, path: d.path, title: d.title,
+		}));
 
 		const lessons = selectLessons(
 			frontmatterRows,
@@ -446,10 +503,9 @@ export function buildBrief(opts = {}) {
 				touchedPaths: opts.touchedPaths ?? [],
 				agentType: opts.agentType ?? null,
 				stacks: opts.stacks ?? [],
-				// origin/main, NOT HEAD — see isReviewedOnDefaultBranch's own comment: HEAD would let a
-				// feature branch's own unreviewed commit rubber-stamp itself as "reviewed", which is
-				// exactly the case this check exists to catch (a security:true supersede exception).
-				isReviewed: (doc) => isReviewedOnDefaultBranch(doc, { repoRoot, ref: opts.reviewedRef ?? 'origin/main' }),
+				// A pinned SHA, NOT a short ref name — see resolveReviewedSha's own comment (N1):
+				// a tag/branch literally named "origin/main" would otherwise shadow the real ref.
+				isReviewed: (doc) => isReviewedOnDefaultBranch(doc, { repoRoot, sha: opts.reviewedSha ?? resolveReviewedSha(repoRoot, { defaultBranch: opts.defaultBranch }) }),
 			},
 			5,
 		);
@@ -465,8 +521,8 @@ export function buildBrief(opts = {}) {
 		// file is writable and its watermark is recomputed from the same filesystem state an
 		// attacker could also control, so a forged row would otherwise persist into every brief
 		// until the next rebuild. The DB (`frontmatterRows`, `bm25ByKey`) is used ONLY to rank
-		// which keys win; the rendered text always comes from this run's own parse.
-		const docsByKey = new Map(handle.docs.map((d) => [d.key, d]));
+		// which keys win; the rendered text always comes from this run's own parse. (`docsByKey`
+		// is the same map built above for the N2 fix.)
 		const renderLessons = lessons.map((fm) => {
 			const doc = docsByKey.get(fm.key);
 			return { key: fm.key, title: doc?.title ?? '(untitled)', body: doc?.body ?? '' };
@@ -524,29 +580,76 @@ function parseArgs(argv) {
 	return out;
 }
 
+// Bare pack name -> category, mirroring eric-sabe/engsys's own stacks/<category>/<name> layout
+// (and .claude-plugin/marketplace.json's plugin -> source mapping). A copy-mode project's
+// engsys.config.yaml already writes canonical `category/name` ids (see detectStacks below); this
+// table exists so a PLUGIN-MODE project's bare `.claude/settings.json` plugin name — just
+// "engsys-prisma", no category — normalizes to the same `db/prisma` form. Kept in sync by hand;
+// an unrecognized bare name falls through `normalizeStackId` unchanged rather than being dropped.
+const STACK_PACK_CATEGORY = {
+	aws: 'cloud', azure: 'cloud', cloudflare: 'cloud', gcp: 'cloud',
+	bicep: 'iac', cdk: 'iac', terraform: 'iac',
+	mongo: 'db', prisma: 'db',
+	kotlin: 'lang', python: 'lang', shell: 'lang', swift: 'lang', typescript: 'lang',
+	android: 'platform', ios: 'platform', web: 'platform',
+	'mobile-growth': 'domain',
+	'issue-tracker-github': 'tooling', 'issue-tracker-linear': 'tooling',
+	'provider-anthropic': 'tooling', 'provider-codex': 'tooling', 'provider-deepseek': 'tooling', 'provider-grok': 'tooling',
+};
+
+/**
+ * Canonicalize a stack id to `category/name` so a lesson's frontmatter (which may write either
+ * form) and a project's detected packs (ditto) compare equal regardless of which form either side
+ * used (engsys#140 P9). Already-qualified ids (contain `/`) and unrecognized bare names pass
+ * through unchanged.
+ */
+export function normalizeStackId(id) {
+	if (typeof id !== 'string' || id === '' || id.includes('/')) return id;
+	const cat = STACK_PACK_CATEGORY[id];
+	return cat ? `${cat}/${id}` : id;
+}
+
 /**
  * The project's selected stack packs (e.g. `["lang/typescript", "platform/web"]`), matching the
- * same ids lesson frontmatter's `stacks:` field uses — read from `engsys.config.{yaml,yml,json}`'s
- * `stack` block, the same file the installer itself resolves packs from. Empty (never throws) if
- * no config file exists or it doesn't parse; engsys#140 W2 — this was previously never computed,
- * so the `stacks` term in `lessonMatchScore` always scored 0 for every caller.
+ * same ids lesson frontmatter's `stacks:` field uses. Two sources, merged (engsys#140 P9 — a
+ * plugin-mode project like keystone has no `engsys.config.*`, only `.claude/settings.json`):
+ *   1. `engsys.config.{yaml,yml,json}`'s `stack` block (copy-mode installs) — the file the
+ *      installer itself resolves packs from.
+ *   2. `.claude/settings.json`'s `enabledPlugins` map (plugin-mode installs) — each key is
+ *      `<plugin-name>@<marketplace>`; `engsys-<pack>` entries (not bare `engsys` or any
+ *      non-`engsys-` plugin, e.g. `feedfrwd`) normalize via `normalizeStackId`.
+ * Never throws; returns `[]` if neither file exists or parses. engsys#140 W2 — this was
+ * previously never computed, so the `stacks` term in `lessonMatchScore` always scored 0.
  */
 export function detectStacks(repoRoot) {
+	const packs = new Set();
+
 	for (const name of ['engsys.config.yaml', 'engsys.config.yml', 'engsys.config.json']) {
 		let raw;
 		try { raw = fs.readFileSync(path.join(repoRoot, name), 'utf8'); } catch { continue; }
 		let config;
 		try { config = name.endsWith('.json') ? JSON.parse(raw) : parseYaml(raw); } catch { continue; }
 		const stack = config?.stack ?? {};
-		const packs = [];
 		for (const cat of ['cloud', 'iac', 'db', 'lang', 'platform', 'domain']) {
 			for (const val of [].concat(stack[cat] ?? [])) {
-				if (val && val !== 'none') packs.push(`${cat}/${val}`);
+				if (val && val !== 'none') packs.add(normalizeStackId(`${cat}/${val}`));
 			}
 		}
-		return packs;
+		break; // first config file found wins, same as before
 	}
-	return [];
+
+	try {
+		const raw = fs.readFileSync(path.join(repoRoot, '.claude', 'settings.json'), 'utf8');
+		const settings = JSON.parse(raw);
+		for (const rawKey of Object.keys(settings?.enabledPlugins ?? {})) {
+			if (settings.enabledPlugins[rawKey] !== true) continue;
+			const name = rawKey.split('@')[0];
+			if (name === 'engsys' || !name.startsWith('engsys-')) continue;
+			packs.add(normalizeStackId(name.slice('engsys-'.length)));
+		}
+	} catch { /* no settings.json, or it doesn't parse — fine, config-file packs (if any) stand */ }
+
+	return [...packs];
 }
 
 export function main(argv, { out = console.log, err = console.error, cwd = process.cwd() } = {}) {

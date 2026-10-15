@@ -34,6 +34,12 @@ Rules:
    free text never goes through the hook**.
 3. Agents listed in `exclude_class_b_agents` (by default, any agent whose frontmatter sets
    `security: true`) receive Class A only.
+4. "Reviewed" for Class A means: content present at the fully-qualified `refs/remotes/origin/<default>`
+   ref (resolved once, pinned to a commit SHA, and used for every subsequent read — never a short
+   ref name, which a same-named local branch/tag could otherwise shadow). A local attacker who can
+   write directly into `refs/remotes/origin/*` themselves is out of scope — the trust boundary this
+   spec defends is the git transport (what actually got reviewed and pushed upstream), not the
+   local refs database.
 
 ## 3. Storage
 

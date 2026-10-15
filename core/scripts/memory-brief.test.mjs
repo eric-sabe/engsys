@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { hermeticGit } from '../lib/git-env.mjs';
+import { resolveReviewedSha } from '../lib/memory/index-db.mjs';
 
 const require = createRequire(import.meta.url);
 // node:sqlite needs Node >= 22.5 (see index-db.test.mjs for the full rationale); tests that build a
@@ -22,6 +23,7 @@ import {
 	buildBrief,
 	isClassBExcluded,
 	detectStacks,
+	normalizeStackId,
 	isReviewedOnDefaultBranch,
 	lessonMatchScore,
 	loadConfig,
@@ -110,6 +112,81 @@ describe('detectStacks (engsys#140 W2)', () => {
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
+
+	test('derives packs from .claude/settings.json\'s enabledPlugins in a plugin-mode project, keystone\'s real shape (engsys#140 P9)', () => {
+		const dir = mktmp();
+		try {
+			mkdirSync(join(dir, '.claude'), { recursive: true });
+			// Verbatim shape of FeedFrwd/keystone's .claude/settings.json enabledPlugins block.
+			writeFileSync(join(dir, '.claude', 'settings.json'), JSON.stringify({
+				enabledPlugins: {
+					'engsys@engsys': true,
+					'engsys-azure@engsys': true,
+					'engsys-bicep@engsys': true,
+					'engsys-typescript@engsys': true,
+					'engsys-web@engsys': true,
+					'engsys-prisma@engsys': true,
+					'engsys-issue-tracker-github@engsys': true,
+					'feedfrwd@feedfrwd': true,
+				},
+			}));
+			assert.deepEqual(
+				new Set(detectStacks(dir)),
+				new Set(['cloud/azure', 'iac/bicep', 'lang/typescript', 'platform/web', 'db/prisma', 'tooling/issue-tracker-github']),
+				'bare engsys plugin, non-engsys plugins (feedfrwd), and disabled entries are excluded; each engsys-<pack> normalizes to category/name',
+			);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('a disabled (false) plugin entry in settings.json contributes no pack', () => {
+		const dir = mktmp();
+		try {
+			mkdirSync(join(dir, '.claude'), { recursive: true });
+			writeFileSync(join(dir, '.claude', 'settings.json'), JSON.stringify({
+				enabledPlugins: { 'engsys-prisma@engsys': false, 'engsys-web@engsys': true },
+			}));
+			assert.deepEqual(detectStacks(dir), ['platform/web']);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('merges engsys.config.yaml AND settings.json packs when both are present', () => {
+		const dir = mktmp();
+		try {
+			writeFileSync(join(dir, 'engsys.config.yaml'), 'stack:\n  lang: [python]\n');
+			mkdirSync(join(dir, '.claude'), { recursive: true });
+			writeFileSync(join(dir, '.claude', 'settings.json'), JSON.stringify({
+				enabledPlugins: { 'engsys-web@engsys': true },
+			}));
+			assert.deepEqual(new Set(detectStacks(dir)), new Set(['lang/python', 'platform/web']));
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe('normalizeStackId (engsys#140 P9)', () => {
+	test('a bare pack name with a known category normalizes to category/name', () => {
+		assert.equal(normalizeStackId('prisma'), 'db/prisma');
+		assert.equal(normalizeStackId('typescript'), 'lang/typescript');
+	});
+
+	test('an already-qualified id passes through unchanged', () => {
+		assert.equal(normalizeStackId('db/prisma'), 'db/prisma');
+	});
+
+	test('an unrecognized bare name passes through unchanged rather than being dropped', () => {
+		assert.equal(normalizeStackId('some-future-pack'), 'some-future-pack');
+	});
+
+	test('lessonMatchScore matches a lesson whose frontmatter writes the bare form against a project stack in category/name form, and vice versa', () => {
+		assert.equal(lessonMatchScore({ stacks: ['prisma'] }, { stacks: ['db/prisma'] }), 1, 'bare lesson stack vs. qualified project stack');
+		assert.equal(lessonMatchScore({ stacks: ['db/prisma'] }, { stacks: ['prisma'] }), 1, 'qualified lesson stack vs. bare project stack');
+		assert.equal(lessonMatchScore({ stacks: ['prisma'] }, { stacks: ['mongo'] }), 0, 'no match when the packs actually differ');
+	});
 });
 
 describe('loadConfig', () => {
@@ -124,11 +201,12 @@ describe('loadConfig', () => {
 		}
 	});
 
-	test('merges .claude/memory.yml over the defaults', () => {
-		const dir = mktmp();
+	test('merges .claude/memory.yml over the defaults, read from the REVIEWED SHA (engsys#140 N5)', () => {
+		const dir = makeRepo({});
 		try {
 			mkdirSync(join(dir, '.claude'), { recursive: true });
 			writeFileSync(join(dir, '.claude', 'memory.yml'), 'brief_bytes: 512\nexclude_class_b_agents: [nyx]\n');
+			commitAndPush(dir, 'add memory.yml');
 			const cfg = loadConfig(dir);
 			assert.equal(cfg.brief_bytes, 512);
 			assert.deepEqual(cfg.exclude_class_b_agents, ['nyx']);
@@ -217,6 +295,69 @@ describe('resolveExcludedAgents', () => {
 		}
 	});
 
+	test('CLAUDE_PLUGIN_ROOT unset falls back to <HERE>/../agents (plugin layout), without needing a dev-layout core/agents at all (engsys#140 P6, Nyx N3)', () => {
+		// No agentsRoot override passed at all — exercises the real default
+		// (`process.env.CLAUDE_PLUGIN_ROOT ?? REPO_ROOT_DEFAULT`) with the env var unset, same as a
+		// plugin-cache install whose SubagentStart hook never got CLAUDE_PLUGIN_ROOT wired through.
+		const prev = process.env.CLAUDE_PLUGIN_ROOT;
+		delete process.env.CLAUDE_PLUGIN_ROOT;
+		try {
+			const excluded = resolveExcludedAgents({ exclude_class_b_agents: [] });
+			assert.ok(excluded.has('nyx'), 'positive control: the real security:true agent is still found via HERE/../agents, env var or not');
+			assert.ok(!excluded.has('isabelle'), 'a non-security agent must not be swept up as a side effect of the fallback path');
+		} finally {
+			if (prev === undefined) delete process.env.CLAUDE_PLUGIN_ROOT; else process.env.CLAUDE_PLUGIN_ROOT = prev;
+		}
+	});
+
+	test('when NO security:true agent definition is found anywhere (including the module\'s own HERE/../agents), every agent found is excluded as a fail-safe (engsys#140 P6, Nyx N3)', () => {
+		// resolveExcludedAgents ALWAYS also scans path.resolve(HERE, '..', 'agents') off THIS
+		// module's own real location — core/agents/, which really does contain a security:true
+		// nyx.md in this checkout — so a fixture `agentsRoot` alone can never exercise the
+		// fail-safe branch; it'd just find the real nyx via that fixed fallback path regardless.
+		// Exercise it for real: copy the whole module tree so HERE itself points somewhere with NO
+		// security:true agent anywhere, then run resolveExcludedAgents from that copy in a
+		// subprocess (a fresh import is required — HERE is captured once, at module load).
+		const pluginRoot = mkdtempSync(join(tmpdir(), 'memory-brief-noagents-'));
+		try {
+			cpSync(fileURLToPath(new URL('..', import.meta.url)), pluginRoot, { recursive: true });
+			// `pluginRoot` IS the copy of `core/` itself (new URL('..', ...) from core/scripts/ lands
+			// on core/), so the agents dir this module's own HERE/../agents fallback will hit is
+			// `<pluginRoot>/agents`, not `<pluginRoot>/core/agents`.
+			rmSync(join(pluginRoot, 'optional-agents'), { recursive: true, force: true });
+			const agentsDir = join(pluginRoot, 'agents');
+			for (const f of require('node:fs').readdirSync(agentsDir).filter((f) => f.endsWith('.md'))) {
+				const text = require('node:fs').readFileSync(join(agentsDir, f), 'utf8').replace(/security:\s*true/g, 'security: false');
+				writeFileSync(join(agentsDir, f), text);
+			}
+			const scriptPath = join(pluginRoot, '_resolve-excluded-agents-fixture.mjs');
+			writeFileSync(
+				scriptPath,
+				`import { resolveExcludedAgents } from './scripts/memory-brief.mjs';\nconsole.log(JSON.stringify([...resolveExcludedAgents({ exclude_class_b_agents: [] }, { agentsRoot: ${JSON.stringify(pluginRoot)} })]));\n`,
+			);
+			const out = execFileSync(process.execPath, [scriptPath], { encoding: 'utf8', cwd: pluginRoot });
+			const excluded = new Set(JSON.parse(out));
+			assert.ok(excluded.size > 0, 'fail-safe: every scanned agent is excluded when none carries security: true');
+			assert.ok(excluded.has('isabelle'), 'a normally-non-security agent is swept in by the fail-safe (nyx.md was neutered for this fixture, so this can only be the fail-safe firing, not a real security:true match)');
+		} finally {
+			rmSync(pluginRoot, { recursive: true, force: true });
+		}
+	});
+
+	test('positive control for the fail-safe above: as soon as ONE real security:true agent is present, a non-security agent is correctly NOT excluded', () => {
+		const dir = mkdtempSync(join(tmpdir(), 'memory-brief-withagent-'));
+		try {
+			mkdirSync(join(dir, 'agents'), { recursive: true });
+			writeFileSync(join(dir, 'agents', 'nyx.md'), '---\nname: nyx\nsecurity: true\n---\n\nbody\n');
+			writeFileSync(join(dir, 'agents', 'isabelle.md'), '---\nname: isabelle\nsecurity: false\n---\n\nbody\n');
+			const excluded = resolveExcludedAgents({ exclude_class_b_agents: [] }, { agentsRoot: dir });
+			assert.ok(excluded.has('nyx'));
+			assert.ok(!excluded.has('isabelle'), 'the fail-safe must not fire once the scan actually finds a real security agent');
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	test('the default agentsRoot resolves nyx in BOTH layouts off this real checkout and CLAUDE_PLUGIN_ROOT', () => {
 		// Repo/dev layout: no CLAUDE_PLUGIN_ROOT set, default agentsRoot = this repo's root.
 		const repoExcluded = resolveExcludedAgents({ exclude_class_b_agents: [] });
@@ -255,9 +396,10 @@ describe('isReviewedOnDefaultBranch', () => {
 		hermeticGit(repo, [...GIT_OPTS, 'commit', '-q', '-am', 'feature change'], { isolateConfig: true });
 		try {
 			const doc = { path: join(repo, 'lesson.md') };
-			assert.equal(isReviewedOnDefaultBranch(doc, { repoRoot: repo, ref: 'HEAD' }), true, 'sanity: HEAD does contain this exact content');
+			assert.equal(isReviewedOnDefaultBranch(doc, { repoRoot: repo, sha: 'HEAD' }), true, 'sanity: HEAD does contain this exact content (git itself resolves "HEAD" as a valid commit-ish)');
 			// Still no origin/main ref fetched locally in this clone for the new content — not reviewed.
-			assert.equal(isReviewedOnDefaultBranch(doc, { repoRoot: repo }), false);
+			const sha = resolveReviewedSha(repo);
+			assert.equal(isReviewedOnDefaultBranch(doc, { repoRoot: repo, sha }), false);
 		} finally {
 			rmSync(origin, { recursive: true, force: true });
 			rmSync(repo, { recursive: true, force: true });
@@ -276,7 +418,8 @@ describe('isReviewedOnDefaultBranch', () => {
 		hermeticGit(repo, [...GIT_OPTS, 'fetch', '-q', 'origin'], { isolateConfig: true });
 		try {
 			const doc = { path: join(repo, 'lesson.md') };
-			assert.equal(isReviewedOnDefaultBranch(doc, { repoRoot: repo }), true);
+			const sha = resolveReviewedSha(repo);
+			assert.equal(isReviewedOnDefaultBranch(doc, { repoRoot: repo, sha }), true);
 		} finally {
 			rmSync(origin, { recursive: true, force: true });
 			rmSync(repo, { recursive: true, force: true });
@@ -538,6 +681,56 @@ describe('buildBrief — end to end, fail-open, and the agent exclusion boundary
 			const second = buildBrief({ repoRoot: dir, agentType: 'isabelle', prompt: 'widget' });
 			assert.ok(!second.text.includes('FORGED'), 'the forged DB title must never be rendered — title/body come from the freshly re-parsed source doc');
 			assert.match(second.text, /Real title/, 'the real, freshly-loaded title still renders');
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('a forged EXTRA row in index.sqlite (a key with no corresponding fresh doc at all) never surfaces as a lesson (engsys#140 P2, Nyx N2)', { skip: !SQLITE_AVAILABLE }, () => {
+		const dir = makeRepo({ lessons: [['one', { keywords: ['widget'], title: 'Real title' }]] });
+		try {
+			const first = buildBrief({ repoRoot: dir, agentType: 'isabelle', prompt: 'widget forged' });
+			assert.match(first.text, /Real title/, 'positive control: the real lesson is injected before any forgery');
+
+			const dbPath = join(dir, '.git', 'engsys-memory', 'index.sqlite');
+			const { DatabaseSync } = require('node:sqlite');
+			const db = new DatabaseSync(dbPath);
+			// A row with a key that has no backing doc at all — the attack N2 actually worries about:
+			// INSERT a brand-new "lesson" straight into the index with no source file behind it.
+			db.exec(`INSERT INTO frontmatter (key, globs, stacks, roles, keywords, security, supersedes, path, title)
+				VALUES ('lesson:forged-extra', '[]', '[]', '[]', '["widget","forged"]', 0, '[]', 'docs/agent-lessons/forged-extra.md', 'FORGED EXTRA LESSON')`);
+			db.exec(`INSERT INTO docs (key, class, kind, path, symbol, body) VALUES ('lesson:forged-extra', 'A', 'lesson', 'docs/agent-lessons/forged-extra.md', NULL, 'FORGED EXTRA LESSON body forged widget')`);
+			db.close();
+
+			const second = buildBrief({ repoRoot: dir, agentType: 'isabelle', prompt: 'widget forged' });
+			assert.ok(!second.lessonKeys.includes('lesson:forged-extra'), 'a DB key with no fresh doc behind it must never be selected');
+			assert.ok(!second.text.includes('FORGED EXTRA LESSON'), 'and must never render');
+			assert.match(second.text, /Real title/, 'positive control: the real lesson still renders after the forgery attempt');
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('a forged `supersedes` row in index.sqlite cannot suppress a real security:true lesson (engsys#140 P2, Nyx N2)', { skip: !SQLITE_AVAILABLE }, () => {
+		const dir = makeRepo({ lessons: [['guarded', { keywords: ['widget'], security: true, title: 'Guarded security lesson' }]] });
+		try {
+			const first = buildBrief({ repoRoot: dir, agentType: 'isabelle', prompt: 'widget' });
+			assert.match(first.text, /Guarded security lesson/, 'positive control: the security lesson is injected before any forgery');
+
+			const dbPath = join(dir, '.git', 'engsys-memory', 'index.sqlite');
+			const { DatabaseSync } = require('node:sqlite');
+			const db = new DatabaseSync(dbPath);
+			// Forge a fake "superseder" row claiming to replace the guarded lesson, AND forge the
+			// guarded lesson's own row to carry a bogus path pretending it's reviewed-equivalent.
+			db.exec(`INSERT INTO frontmatter (key, globs, stacks, roles, keywords, security, supersedes, path, title)
+				VALUES ('lesson:fake-superseder', '[]', '[]', '[]', '[]', 0, '["lesson:guarded"]', 'docs/agent-lessons/fake-superseder.md', 'Fake superseder')`);
+			db.exec(`INSERT INTO docs (key, class, kind, path, symbol, body) VALUES ('lesson:fake-superseder', 'A', 'lesson', 'docs/agent-lessons/fake-superseder.md', NULL, 'fake superseder body')`);
+			db.exec("UPDATE frontmatter SET supersedes = '[\"lesson:fake-superseder-is-reviewed\"]', path = 'docs/agent-lessons/does-not-exist-on-disk.md' WHERE key = 'lesson:guarded'");
+			db.close();
+
+			const second = buildBrief({ repoRoot: dir, agentType: 'isabelle', prompt: 'widget' });
+			assert.ok(!second.lessonKeys.includes('lesson:fake-superseder'), 'the forged superseder row itself must never be selected (no fresh doc behind it)');
+			assert.match(second.text, /Guarded security lesson/, 'the real security lesson must still render — a forged DB supersedes/path has no suppression power at all');
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
