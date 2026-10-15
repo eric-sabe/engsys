@@ -32,6 +32,9 @@ import { resolveCacheDir } from '../lib/memory/index-db.mjs';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const MEMORY_BRIEF = path.resolve(HERE, '..', 'scripts', 'memory-brief.mjs');
 const TIMEOUT_MS = 2000;
+// Below this, less budget remains than a bare `node` process typically needs just to start —
+// spawning memory-brief anyway would only burn that startup cost en route to a guaranteed timeout.
+const MIN_SPAWN_MS = 300;
 
 function firstString(...candidates) {
 	for (const c of candidates) if (typeof c === 'string' && c.length) return c;
@@ -136,9 +139,11 @@ export async function main({ stdin = process.stdin, now = () => Date.now(), writ
 		const touchedPaths = resolveTouchedPaths(input, { cwd });
 		// Give memory-brief only what's LEFT of the 2s total budget after resolveTouchedPaths' own
 		// (separately timed) git calls, so the two stages together can never exceed TIMEOUT_MS plus
-		// node startup — not TIMEOUT_MS on top of whatever resolveTouchedPaths already spent.
-		const remainingMs = Math.max(100, TIMEOUT_MS - (now() - t0));
-		const result = runMemoryBrief({ agentType, prompt, touchedPaths, cwd, timeoutMs: remainingMs });
+		// node startup — not TIMEOUT_MS on top of whatever resolveTouchedPaths already spent. Below
+		// MIN_SPAWN_MS there isn't even enough budget left for node's own startup, so the spawn is
+		// SKIPPED outright (saves that startup cost too) rather than launched to a guaranteed timeout.
+		const remainingMs = TIMEOUT_MS - (now() - t0);
+		const result = remainingMs >= MIN_SPAWN_MS ? runMemoryBrief({ agentType, prompt, touchedPaths, cwd, timeoutMs: remainingMs }) : null;
 		if (result) {
 			briefText = result.text ?? '';
 			logKeys = { lesson_keys: result.lessonKeys ?? [], pointer_keys: result.pointerKeys ?? [], bytes: result.bytes ?? Buffer.byteLength(briefText, 'utf8') };

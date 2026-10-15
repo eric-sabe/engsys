@@ -58,7 +58,7 @@ export function resolveCacheDir(cwd = process.cwd()) {
 		const common = execFileSync(
 			'git',
 			['-C', cwd, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
-			{ encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+			{ encoding: 'utf8', timeout: 500, killSignal: 'SIGKILL', stdio: ['ignore', 'pipe', 'ignore'] },
 		).trim();
 		if (!common) return null;
 		return path.join(common, 'engsys-memory');
@@ -282,7 +282,12 @@ function buildInto(dbPath, { sqlite, docs, events, manifest }) {
 	const { DatabaseSync } = sqlite;
 	const db = new DatabaseSync(dbPath);
 	try {
-		db.exec('PRAGMA journal_mode = WAL');
+		// NOT WAL: this file is written once by a single process, then renamed into place and
+		// reopened read-only by every caller afterward. WAL would need a -wal/-shm sidecar that
+		// `renameSync` (main file only) leaves orphaned in the cache dir, and a read-only open can
+		// need to create that sidecar itself on a filesystem that won't allow it. DELETE needs
+		// neither: every write before `close()` lands directly in the main file.
+		db.exec('PRAGMA journal_mode = DELETE');
 		for (const stmt of DDL) db.exec(stmt);
 		const insDoc = db.prepare('INSERT INTO docs (key, class, kind, path, symbol, roles, globs, keywords, body) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
 		const insFm = db.prepare('INSERT INTO frontmatter (key, globs, stacks, roles, keywords, security, supersedes, path, title) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
