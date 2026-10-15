@@ -23,7 +23,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseYaml } from '../../lib/yaml.js';
+import { parseYaml } from '../lib/yaml.js';
+import { isMainEntry } from '../lib/is-main.mjs';
 
 const REQUIRED_ARRAY_KEYS = ['globs', 'stacks', 'roles', 'keywords', 'supersedes'];
 const SCHEMA_KEYS = new Set([...REQUIRED_ARRAY_KEYS, 'security']);
@@ -113,6 +114,6 @@ function main(argv, { cwd = process.cwd(), out = console.log, err = console.erro
 	return 1;
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isMainEntry(import.meta.url)) {
 	process.exit(main(process.argv.slice(2)));
 }

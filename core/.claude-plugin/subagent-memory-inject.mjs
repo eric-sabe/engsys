@@ -27,6 +27,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isMainEntry } from '../lib/is-main.mjs';
 import { resolveCacheDir } from '../lib/memory/index-db.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -42,13 +43,20 @@ function firstString(...candidates) {
 }
 
 /** Best-effort `agent_type` extraction from a SubagentStart payload whose exact shape may vary. */
+// Verified against the Claude Code 2.1.285 binary (docs/memory-spec.md §12, engsys#140 W1): a
+// SubagentStart payload is `{...base, hook_event_name, agent_id, agent_type}` — `base` carries
+// `cwd` (read separately in main()). There is NO task-prompt field at this event; the earlier
+// multi-field guessing across `subagent_type`/`tool_input.*` never matched anything real and is
+// removed. Targeting at SubagentStart is therefore path-based (touched_paths / git diff) plus
+// role-based (agent_type), not prompt-text BM25 — §5 of the spec notes this.
 export function extractAgentType(input) {
-	return firstString(input?.agent_type, input?.subagent_type, input?.tool_input?.subagent_type, input?.tool_input?.agent_type);
+	return firstString(input?.agent_type);
 }
 
-/** Best-effort task-prompt extraction. */
+/** No verified prompt field exists at SubagentStart (see the note above) — reads `input.prompt`
+ * only in case a future payload adds one; never guesses through a nested `tool_input`. */
 export function extractPrompt(input) {
-	return firstString(input?.prompt, input?.task, input?.tool_input?.prompt, input?.tool_input?.description, input?.tool_input?.task) ?? '';
+	return firstString(input?.prompt) ?? '';
 }
 
 /** Touched paths: an explicit list on the payload, else `git diff --name-only <base>` in `cwd`
@@ -174,7 +182,7 @@ export async function main({ stdin = process.stdin, now = () => Date.now(), writ
 	return 0;
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isMainEntry(import.meta.url)) {
 	main()
 		.then((code) => process.exit(code ?? 0))
 		.catch(() => {

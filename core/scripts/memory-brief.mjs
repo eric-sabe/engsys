@@ -42,15 +42,18 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createEnvelope } from '../lib/untrusted.mjs';
+import { isMainEntry } from '../lib/is-main.mjs';
 import {
 	ensureIndex,
 	listClassAFrontmatter,
 	listEvents,
+	MARKER_SHAPE_RE,
 	queryIndex,
 	readFrontmatter,
 	resolveCacheDir,
+	validatePointerEvent,
 } from '../lib/memory/index-db.mjs';
-import { parseYaml } from '../../lib/yaml.js';
+import { parseYaml } from '../lib/yaml.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT_DEFAULT = path.resolve(HERE, '..', '..');
@@ -88,14 +91,34 @@ export function loadConfig(repoRoot) {
 }
 
 /**
- * Class B exclusion set (docs/memory-spec.md §2 rule 3): `config.exclude_class_b_agents` plus
- * every agent definition (`core/agents/*.md`, `optional-agents/*.md`) whose OWN frontmatter sets
- * `security: true`. Scans this engsys checkout (via `agentsRoot`, default resolved relative to
- * this module) — never the task prompt or any ingested text. Never throws.
+ * Strip an `engsys:` (or any) namespace prefix an agent_type may carry — Claude Code's own
+ * dispatcher names subagents `engsys:nyx`, `engsys:isabelle`, etc. (docs/memory-spec.md §12 /
+ * engsys#140 H1), while every frontmatter-derived set here (lesson `roles`, the excluded-agents
+ * set from filenames) is keyed on the BARE name. Returns `''` for null/empty/non-string input —
+ * never throws, never returns something that could accidentally match a real bare name.
  */
-export function resolveExcludedAgents(config, { agentsRoot = REPO_ROOT_DEFAULT } = {}) {
-	const excluded = new Set((config?.exclude_class_b_agents ?? []).map(String));
-	for (const dir of [path.join(agentsRoot, 'core', 'agents'), path.join(agentsRoot, 'optional-agents')]) {
+export function bareAgentType(agentType) {
+	if (typeof agentType !== 'string' || !agentType) return '';
+	const parts = agentType.split(':');
+	return parts[parts.length - 1];
+}
+
+/**
+ * Class B exclusion set (docs/memory-spec.md §2 rule 3): `config.exclude_class_b_agents` plus
+ * every agent definition whose OWN frontmatter sets `security: true`. Scans BOTH layouts this
+ * module can run from — the plugin cache (`<pluginRoot>/agents/`, `<pluginRoot>/optional-agents/`,
+ * where `agentsRoot` is `CLAUDE_PLUGIN_ROOT`) and this engsys checkout in dev/dogfood mode
+ * (`<repoRoot>/core/agents/`, `<repoRoot>/optional-agents/`) — never the task prompt or any
+ * ingested text. Never throws. Returned set holds BARE agent names (no namespace prefix).
+ */
+export function resolveExcludedAgents(config, { agentsRoot = process.env.CLAUDE_PLUGIN_ROOT ?? REPO_ROOT_DEFAULT } = {}) {
+	const excluded = new Set((config?.exclude_class_b_agents ?? []).map((a) => bareAgentType(String(a)) || String(a)));
+	const candidateDirs = [
+		path.join(agentsRoot, 'core', 'agents'), // repo/dev layout
+		path.join(agentsRoot, 'agents'), // plugin layout (agentsRoot = CLAUDE_PLUGIN_ROOT)
+		path.join(agentsRoot, 'optional-agents'), // both layouts
+	];
+	for (const dir of candidateDirs) {
 		let files;
 		try { files = fs.readdirSync(dir).filter((f) => f.endsWith('.md')); } catch { continue; }
 		for (const f of files) {
@@ -106,6 +129,15 @@ export function resolveExcludedAgents(config, { agentsRoot = REPO_ROOT_DEFAULT }
 		}
 	}
 	return excluded;
+}
+
+/** Is `agentType` excluded from Class B (fails toward EXCLUDED — less privilege — on a
+ * null/empty/unresolved agent type, per engsys#140 H1: "a null agent type fails toward allowing
+ * Class B" was the finding; the fix is the opposite default). */
+export function isClassBExcluded(agentType, excludedSet) {
+	const bare = bareAgentType(agentType);
+	if (!bare) return true; // no agent type at all — least privilege
+	return excludedSet.has(bare) || excludedSet.has(agentType);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -137,7 +169,10 @@ export function lessonMatchScore(fm, { touchedPaths = [], agentType = null, stac
 	// Only a SPECIFIC match (this file area / this agent / this stack) adds to the BM25 base score.
 	let score = bm25Score;
 	if (globMatchesAny(fm.globs, touchedPaths)) score += 3;
-	if (agentType && fm.roles?.length && fm.roles.includes(agentType)) score += 2;
+	// Roles in frontmatter are bare names ("nyx", "aaron"); agentType may carry an `engsys:`
+	// namespace prefix (engsys#140 H1) — compare bare-to-bare.
+	const bareAgent = bareAgentType(agentType);
+	if (bareAgent && fm.roles?.length && fm.roles.includes(bareAgent)) score += 2;
 	if (fm.stacks?.length && fm.stacks.some((s) => stacks.includes(s))) score += 1;
 	return score;
 }
@@ -225,6 +260,18 @@ export function selectLessons(frontmatterRows, bm25ByKey, opts = {}, limit = 5) 
 // pointer selection (Class B) — structured fields only, see the file-top security note
 // ---------------------------------------------------------------------------------------------
 
+/** Bare (no `<!-- -->`) marker names this instance accepts, from `config.review_markers` plus the
+ * house defaults (docs/memory-spec.md §8's own examples) — used to reject a pointer whose marker
+ * isn't actually one this instance is configured to mine (engsys#140 H2). */
+export function allowedMarkerNames(config) {
+	const set = new Set(['local-review-findings', 'cr-cli-findings', 'samuel-review']);
+	for (const raw of config?.review_markers ?? []) {
+		const bare = String(raw).replace(/^<!--\s*/, '').replace(/\s*-->\s*$/, '').trim();
+		if (MARKER_SHAPE_RE.test(bare)) set.add(bare);
+	}
+	return set;
+}
+
 const OUTCOME_WEIGHT = { fixed: 1.0, unresolved: 0.5, disputed: 0.2, bounced: 0.3, merged: 0.8, none: 0.1 };
 
 /** docs/memory-spec.md §5's pointer score: anchor × idf(file) × recency × outcome. */
@@ -258,16 +305,25 @@ export function pointerScore(event, { touchedPaths = [], touchedLines = {}, prCo
  * 2026-10-12] key=<k>`.
  */
 export function renderPointerLine(event) {
-	const date = event.updated_at ? String(event.updated_at).slice(0, 10) : 'unknown-date';
-	const loc = event.line ? `${event.path}:${event.line}` : (event.path ?? event.symbol ?? '?');
-	const num = event.number ? `#${event.number}` : (event.repo ?? '?');
-	return `[${num} ${event.kind ?? 'event'} ${loc} ${event.marker ?? '-'} ${event.outcome ?? 'none'} ${date}] key=${event.key ?? event.k}`;
+	// The last choke point before a field is interpolated into `additionalContext` — re-validate
+	// even though `selectPointers` already should have (defense in depth against a forged/writable
+	// index.sqlite row that reached here some other way, per engsys#140 M1/H2). `null` here means
+	// the CALLER must drop this pointer entirely; it is never silently rendered as a blank line.
+	const safe = validatePointerEvent(event);
+	if (!safe) return null;
+	const date = safe.updated_at ? String(safe.updated_at).slice(0, 10) : 'unknown-date';
+	const loc = safe.line ? `${safe.path}:${safe.line}` : (safe.path ?? safe.symbol ?? '?');
+	const num = safe.number ? `#${safe.number}` : (safe.repo ?? '?');
+	return `[${num} ${safe.kind ?? 'event'} ${loc} ${safe.marker ?? '-'} ${safe.outcome ?? 'none'} ${date}] key=${safe.key}`;
 }
 
 /** Top Class B pointers (up to 3 per spec §5), highest pointerScore first, ties broken by key for
  * determinism. */
 export function selectPointers(events, opts = {}, limit = 3) {
-	return events
+	const valid = events
+		.map((e) => validatePointerEvent(e, { allowedMarkers: opts.allowedMarkers }))
+		.filter(Boolean);
+	return valid
 		.map((e) => ({ e, score: pointerScore(e, opts) }))
 		.filter((x) => x.score > 0)
 		.sort((a, b) => b.score - a.score || String(a.e.key).localeCompare(String(b.e.key)))
@@ -310,7 +366,10 @@ export function renderBrief({ overlay = '', lessons = [], pointers = [] } = {}, 
 		const excerpt = (l.title ? `**${l.title}**` : '') + (l.body ? ` — ${firstLine(l.body)}` : '');
 		sections.push(`[lesson ${l.key}] ${excerpt}`.trim());
 	}
-	for (const p of pointers) sections.push(renderPointerLine(p));
+	for (const p of pointers) {
+		const line = renderPointerLine(p);
+		if (line) sections.push(line);
+	}
 
 	let text = sections.join('\n');
 	// Drop whole sections from the end until it fits — never emit a half-line.
@@ -363,7 +422,7 @@ export function buildBrief(opts = {}) {
 		const config = loadConfig(repoRoot);
 		const budgetBytes = opts.budgetBytes ?? config.brief_bytes ?? DEFAULTS.brief_bytes;
 		const excluded = resolveExcludedAgents(config);
-		const classBAllowed = !excluded.has(opts.agentType);
+		const classBAllowed = !isClassBExcluded(opts.agentType, excluded);
 
 		const handle = ensureIndex({ repoRoot, pluginRoot: opts.pluginRoot, cacheDir: opts.cacheDir, version: opts.version ?? 'dev', sqlite: opts.sqlite });
 		if (!handle) return empty;
@@ -398,10 +457,22 @@ export function buildBrief(opts = {}) {
 		let pointers = [];
 		if (classBAllowed) {
 			const events = listEvents(handle.db);
-			pointers = selectPointers(events, { touchedPaths: opts.touchedPaths ?? [], now: opts.now ?? Date.now() }, 3);
+			pointers = selectPointers(events, { touchedPaths: opts.touchedPaths ?? [], now: opts.now ?? Date.now(), allowedMarkers: allowedMarkerNames(config) }, 3);
 		}
 
-		const text = renderBrief({ overlay, lessons, pointers }, budgetBytes);
+		// engsys#140 M1: render Class A title/body from the FRESHLY LOADED source docs
+		// (`handle.docs`, read from disk/origin-this-run), never from `index.sqlite` — the cache
+		// file is writable and its watermark is recomputed from the same filesystem state an
+		// attacker could also control, so a forged row would otherwise persist into every brief
+		// until the next rebuild. The DB (`frontmatterRows`, `bm25ByKey`) is used ONLY to rank
+		// which keys win; the rendered text always comes from this run's own parse.
+		const docsByKey = new Map(handle.docs.map((d) => [d.key, d]));
+		const renderLessons = lessons.map((fm) => {
+			const doc = docsByKey.get(fm.key);
+			return { key: fm.key, title: doc?.title ?? '(untitled)', body: doc?.body ?? '' };
+		});
+
+		const text = renderBrief({ overlay, lessons: renderLessons, pointers }, budgetBytes);
 		return { text, lessonKeys: lessons.map((l) => l.key), pointerKeys: pointers.map((p) => p.key), bytes: byteLen(text) };
 	} catch {
 		return empty;
@@ -479,6 +550,6 @@ export function main(argv, { out = console.log, err = console.error, cwd = proce
 	return 0;
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isMainEntry(import.meta.url)) {
 	process.exit(main(process.argv.slice(2)));
 }

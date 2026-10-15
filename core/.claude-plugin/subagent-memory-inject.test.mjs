@@ -31,21 +31,20 @@ function stdinOf(text) {
 }
 
 describe('extractAgentType / extractPrompt', () => {
-	test('reads the top-level agent_type field', () => {
-		assert.equal(extractAgentType({ agent_type: 'isabelle' }), 'isabelle');
+	// Per the verified Claude Code 2.1.285 payload shape (docs/memory-spec.md §12, engsys#140 W1):
+	// SubagentStart carries `agent_type` directly — there is no `subagent_type` or `tool_input`
+	// nesting at this event, and no prompt field at all. The old multi-field guessing is removed.
+	test('reads the agent_type field', () => {
+		assert.equal(extractAgentType({ agent_type: 'engsys:isabelle' }), 'engsys:isabelle');
 	});
-	test('falls back through subagent_type and tool_input variants', () => {
-		assert.equal(extractAgentType({ subagent_type: 'nyx' }), 'nyx');
-		assert.equal(extractAgentType({ tool_input: { subagent_type: 'aaron' } }), 'aaron');
-	});
-	test('returns null for an unrecognized shape instead of throwing', () => {
+	test('returns null for a missing/malformed shape instead of throwing', () => {
 		assert.equal(extractAgentType({}), null);
 		assert.equal(extractAgentType(null), null);
+		assert.equal(extractAgentType({ subagent_type: 'nyx' }), null, 'subagent_type is not a real field at SubagentStart — must not be guessed');
 	});
-	test('extractPrompt falls back to the empty string', () => {
+	test('extractPrompt is always the empty string on the real (promptless) payload shape', () => {
 		assert.equal(extractPrompt({}), '');
-		assert.equal(extractPrompt({ prompt: 'do the thing' }), 'do the thing');
-		assert.equal(extractPrompt({ tool_input: { description: 'desc' } }), 'desc');
+		assert.equal(extractPrompt({ tool_input: { description: 'desc' } }), '', 'tool_input is not nested under a SubagentStart payload — must not be guessed');
 	});
 });
 
