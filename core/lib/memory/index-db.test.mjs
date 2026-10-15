@@ -3,10 +3,10 @@
 // consistent index; the index fails open when node:sqlite is missing.
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { hermeticGit } from '../git-env.mjs';
 import {
 	closeIndex,
 	computeWatermark,
@@ -18,19 +18,21 @@ import {
 	resolveClassARoots,
 } from './index-db.mjs';
 
+// A plain `git init`/`git config` here would inherit any GIT_DIR exported by a pre-push hook and
+// rewrite the DEVELOPER'S real repo (core/lessons-library/git-core-bare-flip-breaks-all-worktrees.md)
+// — hermeticGit() scrubs that env, and identity goes in via -c instead of a `git config` write.
+const GIT_OPTS = ['-c', 'user.name=a', '-c', 'user.email=a@b.c'];
 function makeRepo() {
 	const dir = mkdtempSync(join(tmpdir(), 'memory-idx-'));
-	execFileSync('git', ['-C', dir, 'init', '-q']);
-	execFileSync('git', ['-C', dir, 'config', 'user.email', 'a@b.c']);
-	execFileSync('git', ['-C', dir, 'config', 'user.name', 'a']);
+	hermeticGit(dir, [...GIT_OPTS, 'init', '-q'], { isolateConfig: true });
 	mkdirSync(join(dir, 'docs', 'agent-lessons'), { recursive: true });
 	writeFileSync(
 		join(dir, 'docs', 'agent-lessons', 'one.md'),
 		'---\nglobs: []\nstacks: []\nroles: ["isabelle"]\nkeywords: ["widget"]\nsecurity: false\nsupersedes: []\n---\n\n# Widgets need care\n\nbody text about widgets\n',
 	);
 	writeFileSync(join(dir, '.gitignore'), 'engsys-memory/\n');
-	execFileSync('git', ['-C', dir, 'add', '-A']);
-	execFileSync('git', ['-C', dir, 'commit', '-q', '-m', 'init']);
+	hermeticGit(dir, [...GIT_OPTS, 'add', '-A'], { isolateConfig: true });
+	hermeticGit(dir, [...GIT_OPTS, 'commit', '-q', '-m', 'init'], { isolateConfig: true });
 	return dir;
 }
 
@@ -66,6 +68,24 @@ describe('resolveClassARoots + loadClassADocs', () => {
 			const slugs = docs.map((d) => d.key);
 			assert.ok(slugs.includes('lesson:one'));
 			assert.ok(Object.keys(manifest).length > 1);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('a same-slug lesson in both the bundled lessons-library and docs/agent-lessons/ dedupes to one doc, project-local wins (never a duplicate-key build crash)', () => {
+		const dir = makeRepo();
+		try {
+			const roots = resolveClassARoots(dir);
+			// Collide with a real bundled lesson's slug.
+			writeFileSync(
+				join(dir, 'docs', 'agent-lessons', 'worktrees-need-bootstrap-from-origin-main.md'),
+				'---\nglobs: []\nstacks: []\nroles: []\nkeywords: ["override"]\nsecurity: false\nsupersedes: []\n---\n\n# Project override\n\nlocal override body\n',
+			);
+			const { docs } = loadClassADocs(roots);
+			const matches = docs.filter((d) => d.key === 'lesson:worktrees-need-bootstrap-from-origin-main');
+			assert.equal(matches.length, 1, 'exactly one doc should survive the collision, not two with the same key');
+			assert.match(matches[0].body, /local override body/, 'the project-local copy (loaded after the bundled one) wins');
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
@@ -119,6 +139,21 @@ describe('computeWatermark', () => {
 });
 
 describe('ensureIndex', () => {
+	test('a same-slug lesson collision never crashes the build (regression for the frontmatter PRIMARY KEY)', () => {
+		const dir = makeRepo();
+		try {
+			writeFileSync(
+				join(dir, 'docs', 'agent-lessons', 'worktrees-need-bootstrap-from-origin-main.md'),
+				'---\nglobs: []\nstacks: []\nroles: []\nkeywords: ["override"]\nsecurity: false\nsupersedes: []\n---\n\n# Project override\n\nbody\n',
+			);
+			const h = ensureIndex({ repoRoot: dir, version: 'v1' });
+			assert.ok(h, 'the build must succeed despite the duplicate key');
+			closeIndex(h);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	test('fails open (returns null) when node:sqlite has no DatabaseSync', () => {
 		const dir = makeRepo();
 		try {

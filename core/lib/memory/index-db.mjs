@@ -201,12 +201,19 @@ function loadSingle(file, kind, docs, manifest) {
 /** Load every Class A doc from `roots` (as returned by resolveClassARoots). Also fills `manifest`
  * (path -> sha1) in place for the watermark. Never throws. */
 export function loadClassADocs(roots, manifest = {}) {
-	const docs = [];
-	loadMdDir(roots.lessonsDir, SOURCE_KIND.LESSON, docs, manifest);
-	loadMdDir(roots.agentLessonsDir, SOURCE_KIND.LESSON, docs, manifest);
-	loadMdDir(roots.adrDir, SOURCE_KIND.ADR, docs, manifest);
-	loadSingle(roots.overlayFile, SOURCE_KIND.OVERLAY, docs, manifest);
-	return { docs, manifest };
+	const raw = [];
+	loadMdDir(roots.lessonsDir, SOURCE_KIND.LESSON, raw, manifest);
+	loadMdDir(roots.agentLessonsDir, SOURCE_KIND.LESSON, raw, manifest);
+	loadMdDir(roots.adrDir, SOURCE_KIND.ADR, raw, manifest);
+	loadSingle(roots.overlayFile, SOURCE_KIND.OVERLAY, raw, manifest);
+	// A same-named lesson can exist under BOTH the bundled lessons-library and a project's
+	// docs/agent-lessons/ (dogfooding this checkout, or a copy-mode project with a same-slug local
+	// lesson) — `frontmatter.key` is a SQLite PRIMARY KEY, so a duplicate would throw mid-build and
+	// take the whole index down with it (every brief then comes back empty). Dedupe by key here,
+	// LAST write wins — agentLessonsDir is loaded after lessonsDir, so the project-local copy wins.
+	const byKey = new Map();
+	for (const d of raw) byKey.set(d.key, d);
+	return { docs: [...byKey.values()], manifest };
 }
 
 // ---------------------------------------------------------------------------------------------

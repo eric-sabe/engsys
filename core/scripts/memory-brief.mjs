@@ -150,15 +150,56 @@ export function lessonMatchScore(fm, { touchedPaths = [], agentType = null, stac
  * lesson) — callers that can really tell (buildBrief, via git) pass a real check. A supersede
  * cycle is detected and ignored (logged via `log`), never followed.
  */
+function resolveTargetKey(target) {
+	return target.includes(':') ? target : `lesson:${target}`;
+}
+
+/**
+ * Every key that participates in a supersede CYCLE (A -> B -> ... -> A, including the direct
+ * A -> A case), via a standard white/gray/black DFS over the `supersedes` graph. A lesson in a
+ * cycle is never suppressed by it — the relationship is self-contradictory, so there is no
+ * trustworthy "which one is the real successor" answer. Each distinct cycle is logged once.
+ */
+function findCycleMembers(frontmatterRows, byKey, log) {
+	const color = new Map(); // key -> 'gray' (on the current DFS stack) | 'black' (fully explored)
+	const members = new Set();
+	const loggedCycles = new Set();
+	const edgesOf = (key) => (byKey.get(key)?.supersedes ?? []).map(resolveTargetKey).filter((t) => byKey.has(t));
+
+	function dfs(key, stack) {
+		color.set(key, 'gray');
+		stack.push(key);
+		for (const next of edgesOf(key)) {
+			if (color.get(next) === 'gray') {
+				const cycleStart = stack.indexOf(next);
+				const cycle = stack.slice(cycleStart).concat(next);
+				const cycleId = [...new Set(cycle)].sort().join(',');
+				if (!loggedCycles.has(cycleId)) {
+					loggedCycles.add(cycleId);
+					log(`memory-brief: supersede cycle ignored: ${cycle.join(' -> ')}`);
+				}
+				for (const k of cycle) members.add(k);
+			} else if (!color.has(next)) {
+				dfs(next, stack);
+			}
+		}
+		stack.pop();
+		color.set(key, 'black');
+	}
+
+	for (const row of frontmatterRows) if (!color.has(row.key)) dfs(row.key, []);
+	return members;
+}
+
 export function resolveSupersession(frontmatterRows, { isReviewed = () => false, log = () => {} } = {}) {
 	const byKey = new Map(frontmatterRows.map((r) => [r.key, r]));
+	const cycleMembers = findCycleMembers(frontmatterRows, byKey, log);
 	const suppressed = new Set();
 	for (const row of frontmatterRows) {
-		const seen = new Set([row.key]);
-		let cur = row;
+		if (cycleMembers.has(row.key)) continue; // never follow an edge that's part of a cycle
 		for (const target of row.supersedes ?? []) {
-			const targetKey = target.includes(':') ? target : `lesson:${target}`;
-			if (seen.has(targetKey)) { log(`memory-brief: supersede cycle involving ${row.key} -> ${targetKey}, ignored`); continue; }
+			const targetKey = resolveTargetKey(target);
+			if (cycleMembers.has(targetKey)) continue;
 			const targetRow = byKey.get(targetKey);
 			if (!targetRow) continue;
 			if (targetRow.security && !isReviewed(row)) continue; // protected: superseder not (provably) reviewed
@@ -292,13 +333,18 @@ function firstLine(body) {
 // git helpers (best-effort; a failure here never blocks a brief)
 // ---------------------------------------------------------------------------------------------
 
-function isReviewedOnDefaultBranch(doc, { repoRoot, ref = 'HEAD' }) {
+// Default `origin/main`, NOT `HEAD` or any local branch — the whole point of this check is telling
+// a merged/reviewed lesson apart from one a feature branch is adding uncommitted or unreviewed
+// (README.md: "reviewed path (not just a feature branch)"). HEAD on a feature branch already
+// contains that branch's own commits, so it would rubber-stamp exactly the case this must catch.
+export function isReviewedOnDefaultBranch(doc, { repoRoot, ref = 'origin/main' }) {
 	try {
 		const rel = path.relative(repoRoot, doc.path);
-		const committed = execFileSync('git', ['-C', repoRoot, 'show', `${ref}:${rel}`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+		if (rel.startsWith('..') || path.isAbsolute(rel)) return false; // outside repoRoot — never "reviewed"
+		const committed = execFileSync('git', ['-C', repoRoot, 'show', `${ref}:${rel}`], { encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] });
 		return committed === fs.readFileSync(doc.path, 'utf8');
 	} catch {
-		return false; // not committed there (yet) — treat as NOT reviewed, the conservative direction
+		return false; // not committed there (yet), or no such ref — treat as NOT reviewed, the conservative direction
 	}
 }
 

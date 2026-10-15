@@ -7,9 +7,11 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { hermeticGit } from '../lib/git-env.mjs';
 import {
 	bm25Terms,
 	buildBrief,
+	isReviewedOnDefaultBranch,
 	loadConfig,
 	pointerScore,
 	renderBrief,
@@ -20,11 +22,13 @@ import {
 	selectPointers,
 } from './memory-brief.mjs';
 
+// hermeticGit scrubs GIT_DIR etc. so these calls can never target the real repo if this suite runs
+// under a pre-push hook (core/lessons-library/git-core-bare-flip-breaks-all-worktrees.md); identity
+// goes in via -c rather than a `git config` write.
+const GIT_OPTS = ['-c', 'user.name=a', '-c', 'user.email=a@b.c'];
 function makeRepo({ lessons = [], agentsSecurityTrue = [] } = {}) {
 	const dir = mktmp();
-	execFileSync('git', ['-C', dir, 'init', '-q']);
-	execFileSync('git', ['-C', dir, 'config', 'user.email', 'a@b.c']);
-	execFileSync('git', ['-C', dir, 'config', 'user.name', 'a']);
+	hermeticGit(dir, [...GIT_OPTS, 'init', '-q'], { isolateConfig: true });
 	mkdirSync(join(dir, 'docs', 'agent-lessons'), { recursive: true });
 	writeFileSync(join(dir, 'README.md'), 'fixture repo\n'); // ensures `git commit` always has something, even with zero lessons/agents
 	for (const [slug, fm] of lessons) {
@@ -34,8 +38,8 @@ function makeRepo({ lessons = [], agentsSecurityTrue = [] } = {}) {
 	for (const name of agentsSecurityTrue) {
 		writeFileSync(join(dir, 'core', 'agents', `${name}.md`), `---\nname: ${name}\nsecurity: true\n---\n\nbody\n`);
 	}
-	execFileSync('git', ['-C', dir, 'add', '-A']);
-	execFileSync('git', ['-C', dir, 'commit', '-q', '-m', 'init']);
+	hermeticGit(dir, [...GIT_OPTS, 'add', '-A'], { isolateConfig: true });
+	hermeticGit(dir, [...GIT_OPTS, 'commit', '-q', '-m', 'init'], { isolateConfig: true });
 	return dir;
 }
 
@@ -108,6 +112,54 @@ describe('resolveExcludedAgents', () => {
 	});
 });
 
+describe('isReviewedOnDefaultBranch', () => {
+	test('a file only committed on HEAD of a feature branch (not yet on origin/main) is NOT reviewed', () => {
+		const origin = mktmp();
+		hermeticGit(origin, [...GIT_OPTS, 'init', '-q', '--bare'], { isolateConfig: true });
+		const repo = mktmp();
+		hermeticGit(repo, [...GIT_OPTS, 'clone', '-q', origin, '.'], { isolateConfig: true });
+		writeFileSync(join(repo, 'lesson.md'), 'reviewed content\n');
+		hermeticGit(repo, [...GIT_OPTS, 'add', '-A'], { isolateConfig: true });
+		hermeticGit(repo, [...GIT_OPTS, 'commit', '-q', '-m', 'init'], { isolateConfig: true });
+		hermeticGit(repo, [...GIT_OPTS, 'push', '-q', 'origin', 'HEAD:main'], { isolateConfig: true });
+		hermeticGit(repo, [...GIT_OPTS, 'checkout', '-q', '-b', 'feature'], { isolateConfig: true });
+		writeFileSync(join(repo, 'lesson.md'), 'unreviewed feature-branch content\n');
+		hermeticGit(repo, [...GIT_OPTS, 'commit', '-q', '-am', 'feature change'], { isolateConfig: true });
+		try {
+			const doc = { path: join(repo, 'lesson.md') };
+			assert.equal(isReviewedOnDefaultBranch(doc, { repoRoot: repo, ref: 'HEAD' }), true, 'sanity: HEAD does contain this exact content');
+			// Still no origin/main ref fetched locally in this clone for the new content — not reviewed.
+			assert.equal(isReviewedOnDefaultBranch(doc, { repoRoot: repo }), false);
+		} finally {
+			rmSync(origin, { recursive: true, force: true });
+			rmSync(repo, { recursive: true, force: true });
+		}
+	});
+
+	test('once the content is actually pushed to origin/main (and fetched), it IS reviewed', () => {
+		const origin = mktmp();
+		hermeticGit(origin, [...GIT_OPTS, 'init', '-q', '--bare'], { isolateConfig: true });
+		const repo = mktmp();
+		hermeticGit(repo, [...GIT_OPTS, 'clone', '-q', origin, '.'], { isolateConfig: true });
+		writeFileSync(join(repo, 'lesson.md'), 'reviewed content\n');
+		hermeticGit(repo, [...GIT_OPTS, 'add', '-A'], { isolateConfig: true });
+		hermeticGit(repo, [...GIT_OPTS, 'commit', '-q', '-m', 'init'], { isolateConfig: true });
+		hermeticGit(repo, [...GIT_OPTS, 'push', '-q', 'origin', 'HEAD:main'], { isolateConfig: true });
+		hermeticGit(repo, [...GIT_OPTS, 'fetch', '-q', 'origin'], { isolateConfig: true });
+		try {
+			const doc = { path: join(repo, 'lesson.md') };
+			assert.equal(isReviewedOnDefaultBranch(doc, { repoRoot: repo }), true);
+		} finally {
+			rmSync(origin, { recursive: true, force: true });
+			rmSync(repo, { recursive: true, force: true });
+		}
+	});
+
+	test('a doc path outside repoRoot is never "reviewed"', () => {
+		assert.equal(isReviewedOnDefaultBranch({ path: '/completely/elsewhere/x.md' }, { repoRoot: '/tmp/repo' }), false);
+	});
+});
+
 describe('resolveSupersession', () => {
 	test('a plain (non-security) lesson is suppressed by supersedes regardless of review state', () => {
 		const rows = [
@@ -136,13 +188,37 @@ describe('resolveSupersession', () => {
 		assert.ok(suppressed.has('lesson:old-security'));
 	});
 
-	test('a supersede cycle is ignored, not followed into infinite recursion', () => {
+	test('a mutual supersede cycle is ignored (never followed) and logged, and neither member is suppressed', () => {
 		const rows = [
 			{ key: 'lesson:a', security: false, supersedes: ['b'] },
 			{ key: 'lesson:b', security: false, supersedes: ['a'] },
 		];
 		const logs = [];
-		assert.doesNotThrow(() => resolveSupersession(rows, { isReviewed: () => true, log: (m) => logs.push(m) }));
+		const suppressed = resolveSupersession(rows, { isReviewed: () => true, log: (m) => logs.push(m) });
+		assert.ok(!suppressed.has('lesson:a'));
+		assert.ok(!suppressed.has('lesson:b'));
+		assert.equal(logs.length, 1, 'the cycle is logged exactly once, not once per edge');
+	});
+
+	test('a transitive 3-node cycle (a -> b -> c -> a) is detected and none of its members is suppressed', () => {
+		const rows = [
+			{ key: 'lesson:a', security: false, supersedes: ['b'] },
+			{ key: 'lesson:b', security: false, supersedes: ['c'] },
+			{ key: 'lesson:c', security: false, supersedes: ['a'] },
+		];
+		const suppressed = resolveSupersession(rows, { isReviewed: () => true });
+		assert.deepEqual(suppressed, new Set());
+	});
+
+	test('a non-cyclic chain (a -> b, b -> c, c has no supersedes) still suppresses normally', () => {
+		const rows = [
+			{ key: 'lesson:a', security: false, supersedes: ['b'] },
+			{ key: 'lesson:b', security: false, supersedes: ['c'] },
+			{ key: 'lesson:c', security: false, supersedes: [] },
+		];
+		const suppressed = resolveSupersession(rows, { isReviewed: () => true });
+		assert.ok(suppressed.has('lesson:b'));
+		assert.ok(suppressed.has('lesson:c'));
 	});
 
 	test('default isReviewed is conservative (false) — a security lesson is protected by default', () => {

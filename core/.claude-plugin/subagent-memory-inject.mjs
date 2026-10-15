@@ -55,7 +55,9 @@ export function resolveTouchedPaths(input, { cwd, exec = execFileSync } = {}) {
 	if (Array.isArray(input?.touched_paths)) return input.touched_paths.filter((p) => typeof p === 'string');
 	for (const base of ['HEAD', 'origin/main']) {
 		try {
-			const out = exec('git', ['-C', cwd, 'diff', '--name-only', base], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+			// A short, hard timeout — this must never eat into the hook's overall 2s budget (a lock
+			// wait or a huge repo could otherwise block the dispatch before memory-brief even runs).
+			const out = exec('git', ['-C', cwd, 'diff', '--name-only', base], { encoding: 'utf8', timeout: 500, killSignal: 'SIGKILL', stdio: ['ignore', 'pipe', 'ignore'] });
 			const paths = out.split('\n').filter(Boolean);
 			if (paths.length) return paths;
 		} catch {
