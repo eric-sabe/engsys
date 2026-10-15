@@ -360,6 +360,14 @@ asks you to act, you fence and act.
 has no `reviewThreads` field (thread resolution is GraphQL-only); this script
 stitches `isDraft,mergeable,mergeStateStatus,baseRefName,body,comments,files,commits`
 from `gh pr view` together with a `reviewThreads` GraphQL query into one object.
+Comments come **projected** (engsys#126): `comments.markers` counts each
+leading HTML marker (`{"<!-- name -->": n}`), `comments.findingAcks` counts
+`FINDING-ACK` lines, and `comments.items` lists only the comments that carry a
+marker or an ACK, each with its markers, ACK lines and a 300-character
+excerpt (enough for a handoff block's fields). Check the configured
+`review_marker` against `comments.markers`. `--full` returns the raw
+comments; when one must be read in full, have a subagent read it (§ Context
+discipline).
 
 - all review threads resolved (the ruleset will block otherwise)
 - `ready_requirements.review_marker` comment present, if configured

@@ -6,15 +6,20 @@
 // didn't hold, so this enforces it at the two points where the stall is created:
 //
 //   SubagentStop (mode `subagent`) — a subagent about to hand back:
-//     • its final message says work is still pending ("will continue once…", "still running",
-//       "waiting for…") and it didn't declare INCOMPLETE → block once: finish it now, or hand back
-//       an explicit `STATUS: INCOMPLETE — <what remains>`.
-//     • an engsys persona (agent_type `engsys:*`) without a `STATUS: COMPLETE|INCOMPLETE` line →
-//       block once: add it.
+//     A. its final message says work is still pending ("will continue once…", "still running",
+//        "waiting for…") and it didn't declare INCOMPLETE → block once: finish it now, or hand back
+//        an explicit `STATUS: INCOMPLETE — <what remains>`.
+//     B. an engsys persona (agent_type `engsys:*`) without a `STATUS: COMPLETE|INCOMPLETE` line →
+//        block once: add it. Not when it ends on a conclusive verdict (`VERDICT: CLEAN`, `FINDINGS`,
+//        `PASS`, `APPROVE`, …; engsys#126): a reviewer's verdict is its completion line, and the extra
+//        turn only re-sent the same report.
 //     • INCOMPLETE → allowed, and recorded for the parent session.
 //   Stop (mode `stop`) — the main session about to end its turn:
-//     • recorded INCOMPLETE hand-backs it hasn't been told about → block once, listing them: resume
-//       the agent (SendMessage), take the work over, or arm a watchdog (subagent-liveness skill).
+//     C. recorded INCOMPLETE hand-backs it hasn't been told about → block once, listing them: resume
+//        the agent (SendMessage), take the work over, or arm a watchdog (subagent-liveness skill).
+//        Skipped in a singleton monster session (ENGSYS_SINGLETON_ROLE set; engsys#126): a monster
+//        ends a turn after every wake, and it already tracks each agent it dispatched in its spawn
+//        registry and watchdog, so the block cost a full-context turn per wake and added nothing.
 //
 // Every block happens at most once per stop attempt (`stop_hook_active`) and per hand-back, so a
 // session is never trapped. Fail-open: any error → allow (exit 0, no output).
@@ -36,6 +41,9 @@ const STRONG = [
 // Weak: suggests pending work; only counts when no explicit status was given.
 const WEAK = [/\b(?:waiting|wait)\s+(?:on|for)\b/i, /\bin[- ]progress\b/i];
 const STATUS = /^\s*[*_`]*STATUS[*_`]*\s*:\s*[*_`]*\s*(COMPLETE|INCOMPLETE)\b[*_`]*(.*)$/im;
+// A verdict line: `VERDICT: <WORD>`. Conclusive unless the word says the review did not conclude.
+const VERDICT = /^\s*[*_`]*VERDICT[*_`]*\s*:\s*[*_`]*\s*([A-Z][A-Z_-]*)\b/im;
+const INCONCLUSIVE = new Set(['PENDING', 'INCONCLUSIVE', 'UNKNOWN', 'TBD', 'NONE', 'INCOMPLETE', 'BLOCKED-ON', 'WAITING']);
 
 function pendingSentence(m) {
   for (const re of [...STRONG, ...WEAK]) {
@@ -50,8 +58,9 @@ function pendingSentence(m) {
 }
 
 /**
- * Classify a final message → { status, pending, remains }:
+ * Classify a final message → { status, pending, remains, verdict }:
  *   status  'COMPLETE' | 'INCOMPLETE' | null (no status line)
+ *   verdict the word of a conclusive `VERDICT:` line (CLEAN, FINDINGS, PASS, …), else null
  *   pending true when it promises unfinished work (strong phrases always; weak ones only without a status)
  *   remains what's unfinished (the INCOMPLETE line's text, else the pending sentence)
  */
@@ -63,7 +72,9 @@ export function classify(message) {
   const weak = WEAK.some((re) => re.test(m));
   const pending = strong || (!status && weak);
   const stated = s ? s[2].replace(/^[\s*_`—–:-]+/, '').replace(/[\s*_`]+$/, '').trim() : '';
-  return { status, pending, remains: stated || (pending ? pendingSentence(m) : '') };
+  const v = m.match(VERDICT);
+  const verdict = v && !INCONCLUSIVE.has(v[1].toUpperCase()) ? v[1].toUpperCase() : null;
+  return { status, pending, remains: stated || (pending ? pendingSentence(m) : ''), verdict };
 }
 
 /** SubagentStop decision → reason string to block with, or null to allow. */
@@ -82,7 +93,7 @@ export function subagentDecision(input) {
       '     parent session knows it must act.',
     ].join('\n');
   }
-  if (!c.status && /^engsys:/.test(String(input.agent_type || ''))) {
+  if (!c.status && !c.verdict && /^engsys:/.test(String(input.agent_type || ''))) {
     return 'engsys hand-back guard: end your final message with a status line — `STATUS: COMPLETE`, or `STATUS: INCOMPLETE — <what remains>` if anything is unfinished (a pending review, build, push, or follow-up counts as unfinished).';
   }
   return null;
@@ -108,8 +119,9 @@ export function recordHandback(input) {
 }
 
 /** Stop decision → reason string to block with (marks the listed hand-backs surfaced), or null. */
-export function stopDecision(input) {
+export function stopDecision(input, env = process.env) {
   if (input.stop_hook_active) return null;
+  if (env.ENGSYS_SINGLETON_ROLE) return null; // block C: a monster tracks its agents in its registry
   const dir = stateDir(input.session_id);
   const open = [];
   for (const name of fs.readdirSync(dir)) {

@@ -98,3 +98,26 @@ test('hook I/O: exit 2 + stderr reason on block; exit 0 + silence on allow; fail
   const garbage = run('stop', 'not json');
   assert.equal(garbage.status, 0);
 });
+
+// ---------------------------------------------------------------------------------- engsys#126 --
+
+test('block B: an engsys persona that ends on a conclusive verdict needs no status line', () => {
+  for (const m of ['Re-ran the gate.\nVERDICT: CLEAN', '**VERDICT:** FINDINGS — 2 warnings, see above', '`VERDICT: PASS`', 'VERDICT: APPROVE']) {
+    assert.equal(subagentDecision({ last_assistant_message: m, agent_type: 'engsys:nyx' }), null, m);
+  }
+  assert.match(subagentDecision({ last_assistant_message: 'Looked at it.\nVERDICT: PENDING', agent_type: 'engsys:nyx' }), /status line/, 'an inconclusive verdict is no completion');
+  assert.match(subagentDecision({ last_assistant_message: 'The verdict: clean.', agent_type: 'engsys:nyx' }), /status line/, 'prose is not a verdict line');
+  assert.match(subagentDecision({ last_assistant_message: 'Review is still running; will finish once it lands.\nVERDICT: CLEAN', agent_type: 'engsys:nyx' }), /never woken again/,
+    'a verdict never hides pending work (block A still applies)');
+});
+
+test('block C: a singleton monster session is never blocked at Stop; any other session still is', () => {
+  const sid = 'sess-monster';
+  recordHandback({ session_id: sid, agent_id: 'm1', agent_type: 'engsys:isabelle', last_assistant_message: 'STATUS: INCOMPLETE — push pending' });
+  for (const role of ['merge', 'maintain']) assert.equal(stopDecision({ session_id: sid }, { ENGSYS_SINGLETON_ROLE: role }), null, role);
+  assert.match(stopDecision({ session_id: sid }, {}), /1 subagent\(s\) handed back INCOMPLETE/, 'unsurfaced, so a non-monster session still hears about it');
+  recordHandback({ session_id: 'sess-monster-2', agent_id: 'm2', last_assistant_message: 'STATUS: INCOMPLETE — review pending' });
+  const run = spawnSync(process.execPath, [HOOK, 'stop'], { input: JSON.stringify({ session_id: 'sess-monster-2' }), env: { ...process.env, ENGSYS_HANDBACK_DIR: DIR, ENGSYS_SINGLETON_ROLE: 'merge' }, encoding: 'utf8' });
+  assert.equal(run.status, 0);
+  assert.equal(run.stderr, '');
+});

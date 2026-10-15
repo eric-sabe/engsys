@@ -229,5 +229,35 @@ printf '{"transcript_path":"%s"}\n' "$TR" >"$T/sessions/acme-mm.json"
 printf '{"transcript_path":"relative.jsonl"}\n' >"$T/sessions/acme-mm.json"
 [ -z "$(ENGSYS_SESSIONS_DIR="$T/sessions" monster_transcript)" ] && ok "  …a relative path is refused" || bad "  …relative refused"
 
+echo "preflight comment projection (engsys#126)"
+BIG="$(printf 'finding detail %.0s' $(seq 1 2000))"
+jq -n --arg big "$BIG" '{isDraft: true, mergeable: "MERGEABLE", mergeStateStatus: "BLOCKED", baseRefName: "main", body: "Closes #1", files: [], commits: [],
+  comments: [
+    {author: {login: "alice"}, createdAt: "t1", url: "u1", body: ("<!-- review-findings -->\n## Findings\n" + $big)},
+    {author: {login: "bob"}, createdAt: "t2", url: "u2", body: "<!-- mm-handoff -->\ndepends_on: [7]\nmigration: true\n"},
+    {author: {login: "carol"}, createdAt: "t3", url: "u3", body: "  <!--  other-bot   v=2 -->\n<!-- second -->\nhi"},
+    {author: {login: "dave"}, createdAt: "t4", url: "u4", body: "Thanks!\nFINDING-ACK F1 fixed in abc123\n  FINDING-ACK F2 wontfix: by design"},
+    {author: {login: "erin"}, createdAt: "t5", url: "u5", body: "looks good <!-- not-leading -->"},
+    {author: {login: "alice"}, createdAt: "t6", url: "u6", body: "<!-- review-findings -->\nround 2"}
+  ]}' >"$T/resp/pr-view"
+echo '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"id":"t","isResolved":true}]}}}}}' >"$T/resp/api-graphql"
+run bash "$HERE/mm-preflight.sh" --repo acme/app --pr 12
+rc_is "mm-preflight.sh exits 0" 0
+C="$(jq -c .comments <<<"$OUT")"
+[ "$(jq -r .count <<<"$C")" = 6 ] && ok "every comment is counted" || bad "every comment is counted" "$C"
+[ "$(jq -c .markers <<<"$C")" = '{"<!-- review-findings -->":2,"<!-- mm-handoff -->":1,"<!-- other-bot v=2 -->":1,"<!-- second -->":1}' ] \
+  && ok "leading markers are counted by their text, none special-cased (whitespace collapsed)" || bad "marker counts" "$(jq -c .markers <<<"$C")"
+[ "$(jq -r .findingAcks <<<"$C")" = 2 ] && ok "FINDING-ACK lines are counted" || bad "FINDING-ACK count" "$C"
+[ "$(jq -c '[.items[] | .url]' <<<"$C")" = '["u1","u2","u3","u4","u6"]' ] && ok "items: only comments with a marker or a FINDING-ACK (a mid-body marker does not count)" || bad "items" "$(jq -c '[.items[] | .url]' <<<"$C")"
+[ "$(jq -c '.items[] | select(.url == "u4") | .findingAcks' <<<"$C")" = '["FINDING-ACK F1 fixed in abc123","FINDING-ACK F2 wontfix: by design"]' ] && ok "  …each FINDING-ACK line is kept" || bad "acks" "$C"
+jq -e '.items[] | select(.url == "u2") | .excerpt | startswith("depends_on: [7]\nmigration: true")' <<<"$C" >/dev/null && ok "  …a marked comment keeps a short excerpt (a handoff block's fields)" || bad "excerpt" "$C"
+[ "${#OUT}" -lt 4000 ] && ok "  …and the 30 KB review dump is gone (${#OUT} bytes)" || bad "projection size" "${#OUT}"
+[ "$(jq -r '.reviewThreads.nodes | length' <<<"$OUT")" = 1 ] && [ "$(jq -r .mergeStateStatus <<<"$OUT")" = BLOCKED ] && ok "  …the other preflight fields are unchanged" || bad "other fields" "$OUT"
+run bash "$HERE/mm-preflight.sh" --repo acme/app --pr 12 --full
+[ "$(jq -r '.comments | type' <<<"$OUT")" = array ] && ok "--full keeps the raw comments" || bad "--full" "$(jq -c '.comments | type' <<<"$OUT")"
+grep -n 'review-findings\|mm-handoff' "$HERE/mm-preflight.sh" | grep -v '^[0-9]*:#' >/dev/null \
+  && bad "no marker name is hardcoded in the script's code" "$(grep -n 'review-findings\|mm-handoff' "$HERE/mm-preflight.sh")" || ok "no marker name is hardcoded in the script's code"
+rm -f "$T/resp"/*
+
 echo "monster-bus.test: $pass passed, $fail failed"
 [ "$fail" = 0 ]
