@@ -250,7 +250,7 @@ stacks/             detachable capability packs — pick per project (scalar or 
   tooling/          issue-tracker-github · issue-tracker-linear
 
 optional-agents/    opt-in: sandy (marketing), jos (monetization), steve (morale)
-lessons-library/    curated cross-project lessons (seeded into projects on install)
+core/lessons-library/  curated cross-project lessons (seeded into projects on install)
 docs/               architecture · naturalization · fleet-guide · review-methodology · monsters · …
 lib/  install       the zero-dep Node installer
 index.html          single-page visual explainer
@@ -374,7 +374,7 @@ canary order for adopting an engsys release. Related: the
 ## Feedback loop
 
 Project closeouts mine local review findings into `docs/agent-lessons/`. When a
-lesson generalizes across projects, PR it into [`lessons-library/`](lessons-library/)
+lesson generalizes across projects, PR it into [`lessons-library/`](core/lessons-library/)
 so the next install can seed it. That keeps engsys the source of truth instead of
 a fork point.
 

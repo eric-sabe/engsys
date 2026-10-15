@@ -34,6 +34,12 @@ Rules:
    free text never goes through the hook**.
 3. Agents listed in `exclude_class_b_agents` (by default, any agent whose frontmatter sets
    `security: true`) receive Class A only.
+4. "Reviewed" for Class A means: content present at the fully-qualified `refs/remotes/origin/<default>`
+   ref (resolved once, pinned to a commit SHA, and used for every subsequent read — never a short
+   ref name, which a same-named local branch/tag could otherwise shadow). A local attacker who can
+   write directly into `refs/remotes/origin/*` themselves is out of scope — the trust boundary this
+   spec defends is the git transport (what actually got reviewed and pushed upstream), not the
+   local refs database.
 
 ## 3. Storage
 
@@ -104,6 +110,12 @@ directory is shared by every worktree, is never committed, and survives `git wor
 
 - **Input:** `agent_type`, the task prompt, the issue number if present, and touched paths (from the
   prompt, or from `git diff --name-only <base>` when a worktree is known).
+  **At SubagentStart specifically (§12), there is no task-prompt field** — `memory-brief` still
+  accepts `--prompt` for callers that DO have task text (a future PreToolUse-based alternative,
+  the CLI used directly, tests), but the hook itself can only supply `agent_type` and touched
+  paths (from `git diff`). Targeting at SubagentStart is therefore **path-based plus role-based**,
+  not prompt-text BM25 — the BM25 blend in point 2 below still runs, it just has no prompt terms
+  to score against unless one is supplied some other way.
 - **Output:** at most `brief_bytes` (default 2048).
   1. The overlay, if any.
   2. The top 3–5 Class A lessons, by frontmatter match (`globs` against touched paths, `roles`
@@ -223,6 +235,16 @@ max_events: 20000
 publish_role: maintain                  # which singleton publishes refs/engsys/memory/events
 ```
 
+`loadConfig()` reads BOTH the repo's own `.claude/memory.yml` (from the reviewed SHA, never the
+working tree — §2 rule 4) and the fleet config dir's `memory.yml` (`CLAUDE_CONFIG_DIR`), and
+**merges** them rather than one replacing the other (round 4, Nyx L4): `exclude_class_b_agents`,
+`trusted_bot_user_ids`, `operator_user_ids`, and `review_markers` are **unioned** (deduplicated) —
+a fleet-wide allowlist/marker set and a repo's own are both meant to apply, not compete. Every
+other field is a plain override, with the fleet value winning when both configs set it. A
+working-tree-only `.claude/memory.yml` (uncommitted, or committed but not yet pushed to the
+reviewed ref) is never read at all — it contributes nothing to either source, so the merged result
+is just the fleet config (if any) over the defaults.
+
 ## 11. Onboarding
 
 `engsys install` and `/naturalize` take these steps:
@@ -237,6 +259,13 @@ publish_role: maintain                  # which singleton publishes refs/engsys/
 ## 12. Verified runtime facts (Claude Code 2.1.285)
 
 - SubagentStart `additionalContext` is delivered to every subagent as a system-role reminder.
+- A SubagentStart hook's stdin payload is `{...base, hook_event_name, agent_id, agent_type}` —
+  `base` carries `cwd` (and the usual session fields), and `agent_type` is the matcher field (the
+  subagent's type, e.g. `engsys:isabelle`). There is **no task-prompt field** at this event — a
+  hook cannot read the dispatching task's text. Earlier revisions of
+  `subagent-memory-inject.mjs` guessed through `subagent_type`/`tool_input.prompt`/
+  `tool_input.description`/etc.; none of those ever matched a real payload and the guessing was
+  removed (engsys#140 W1).
 - `node:sqlite` with FTS5 and `bm25()` works on Node 22.22.3 (SQLite 3.51.3).
 - A naive in-place SQLite rebuild by concurrent processes fails (`database is locked`) and duplicates
   rows. Temp file + rename is safe.

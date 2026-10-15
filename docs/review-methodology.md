@@ -30,7 +30,7 @@ time; promoting the candidate to gate is a decision (section 8), not a default.
 
 "Advisory" is not "ignore". An advisory reviewer's Critical findings deserve a read against the code.
 Each review layer catches a different class of bug (see
-[each-review-layer-catches-a-different-bug-class](../lessons-library/each-review-layer-catches-a-different-bug-class.md)),
+[each-review-layer-catches-a-different-bug-class](../core/lessons-library/each-review-layer-catches-a-different-bug-class.md)),
 and the candidate is often catching exactly the class the gate is blind to. That is the reason to run it.
 
 `core/templates/review/review.sh.tmpl` implements this pairing (section 9).
@@ -108,9 +108,9 @@ sized for a short brief.
 Have the reviewer emit findings through a **schema-enforced channel** (a tool call, or a response schema)
 rather than asking for JSON in prose. Prompt-policed formatting drifts: fences appear, prose creeps in,
 fields go missing. See
-[prefer-tool-enforced-structured-output](../lessons-library/prefer-tool-enforced-structured-output.md)
+[prefer-tool-enforced-structured-output](../core/lessons-library/prefer-tool-enforced-structured-output.md)
 and, for what to do when you cannot enforce it,
-[llm-judge-parse-defensively-and-start-advisory](../lessons-library/llm-judge-parse-defensively-and-start-advisory.md).
+[llm-judge-parse-defensively-and-start-advisory](../core/lessons-library/llm-judge-parse-defensively-and-start-advisory.md).
 
 Minimum schema for one finding:
 
@@ -133,7 +133,7 @@ marker on its first line. Several reviewers often share one PR and sometimes one
 protocol needs rules. They come from a live bug in which one reviewer's comment merely *mentioned*
 another's marker in prose, was matched by a substring test, and was overwritten. The general rule is
 recorded in
-[match-marker-comments-by-leading-position-and-author](../lessons-library/match-marker-comments-by-leading-position-and-author.md)
+[match-marker-comments-by-leading-position-and-author](../core/lessons-library/match-marker-comments-by-leading-position-and-author.md)
 (added in v1.2.0). Summary:
 
 1. **One unique marker per reviewer**, emitted as line 1 of the comment (`<!-- review-a -->`).
@@ -156,7 +156,7 @@ The scorer applies the same matching when it harvests (leading position, optiona
 
 A verdict belongs to a commit, not to "the PR". A commit pushed after the review is unreviewed code, and
 a CI result computed for an older head does not cover it. See
-[review-and-ci-are-per-commit-not-per-pr](../lessons-library/review-and-ci-are-per-commit-not-per-pr.md).
+[review-and-ci-are-per-commit-not-per-pr](../core/lessons-library/review-and-ci-are-per-commit-not-per-pr.md).
 
 - **Every posted review names the SHA (or range) it covered.** Put it in the machine block
   (`"sha": "<full or short sha>"`) and a human line (`Reviewed commit: 1a2b3c4`). The wrapper exports the

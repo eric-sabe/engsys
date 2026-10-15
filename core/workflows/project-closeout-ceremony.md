@@ -33,22 +33,48 @@ The concrete commands live in the tracker skill's `close-board` (GitHub closes t
 
 ## Step 4 — Mine ALL review findings (the core of the ceremony)
 
-Don't rely on memory of what you fixed inline. The durable record is the marked review-findings comment each PR/work item posts after its local review (plus any static-analysis / security-scanning alerts CI still produces). Pull them from **every** work item in the project into one corpus via the skill's `list-issues` / `get-issue` operations. On GitHub the findings live as the marked comment on each PR — pull them directly with `gh`:
+Don't rely on memory of what you fixed inline. The durable record is the marked review-findings comment each PR/work item posts after its local review (plus any static-analysis / security-scanning alerts CI still produces, FINDING-ACK lines from fix rounds, PR reviews, inline review threads, and monster journals). Run `<engsys-root>/scripts/harvest-findings.mjs` instead of a hand-rolled single-marker loop — it already reads every configured marker (default: any leading `<!-- *-(findings|review) -->`, plus `.claude/memory.yml`'s `review_markers`), correlates `FINDING-ACK` outcomes, and groups by mistake **family** (docs/memory-spec.md §8):
+
+`harvest-findings.mjs` refuses to run at all unless a trust allowlist is configured (`.claude/memory.yml`'s
+`trusted_bot_user_ids`/`operator_user_ids`, docs/memory-spec.md §10) — pass numeric user ids via
+`--trusted-bot-ids`/`--operator-ids` if the project hasn't set them: `gh api users/<login>[bot] --jq .id`
+for a review bot, `gh api user --jq .id` for your own operator id. `--trusted-bot-ids` must list the
+numeric id of **whichever identity actually posts the findings comment** on this repo, not just a
+generic review-bot login — on a fleet-managed repo that's the fleet host's own GitHub App bot (e.g.
+`feedfrwd-fleet[bot]`: `gh api 'users/feedfrwd-fleet[bot]' --jq .id` → `331745698`), since that's the
+account whose comments the ceremony is mining, not CodeRabbit's or any other reviewer's. (The
+harvester itself never resolves a login to an id at runtime — engsys#140 Nyx N4 — it reads the
+numeric id straight off the GitHub API response; this `gh api` lookup is a one-time operator step to
+populate the config, not something the tool does per finding.)
 
 ```bash
-for pr in <all-project-PR-numbers>; do
-  gh pr view "$pr" --json comments \
-    --jq '.comments[] | select(.body | contains("<!-- local-review-findings -->")) | .body'
-done
+# Dry run: print the proposal (recurring families + draft lesson files), write nothing.
+node <engsys-root>/scripts/harvest-findings.mjs run --repo <owner>/<repo> \
+  --prs <all-project-PR-numbers, comma-separated> \
+  --trusted-bot-ids <review-bot user ids, comma-separated> --operator-ids <your user id>
+
+# Once the proposal looks right, open it as a reviewable docs PR (never a direct edit of
+# docs/agent-lessons/** or the engsys lessons-library on the default branch):
+node <engsys-root>/scripts/harvest-findings.mjs run --repo <owner>/<repo> \
+  --prs <all-project-PR-numbers, comma-separated> \
+  --trusted-bot-ids <review-bot user ids, comma-separated> --operator-ids <your user id> --apply
 ```
 
-(If a PR is missing its findings comment, note the gap — that PR went out without a recorded review, which is itself a process finding worth a lesson.)
+**Copy mode:** `<engsys-root>/scripts/harvest-findings.mjs` only exists in **plugin mode** — copy
+mode's installer seeds lesson *content* (`docs/agent-lessons/library/`) but does not install the
+harvester or its `core/lib/` dependencies (engsys#140 W3). If this project is on copy mode, run
+the harvester from an engsys checkout directly instead:
+`node <path-to-engsys-checkout>/core/scripts/harvest-findings.mjs run --repo <owner>/<repo> --prs …`
+(same flags). Check which mode applies with `[ -f .claude/engsys.lock ] && echo copy || echo plugin`
+(copy mode writes that lockfile; plugin mode never materializes anything under `.claude/engsys*`),
+or just try the `<engsys-root>` path first and fall back if it's missing.
 
-Then classify by **mistake family**, not by individual fix. For each family ask:
+(If a PR is missing its findings comment, note the gap — that PR went out without a recorded review, which is itself a process finding worth a lesson. `--journal-dir <dir>` additionally mines a monster's bounce journals.)
 
-- How many times did it recur, across how many distinct PRs? (≥2 PRs = a real pattern.)
-- Is it already in `docs/agent-lessons/` (or the engsys lessons-library)? If yes but it still recurred → the lesson exists but wasn't _applied at authoring time_; strengthen the trigger/check, don't just re-file.
-- Was it Critical/Major, or a nitpick? Prioritize the families that produced real bugs.
+The tool already ranks by recurrence (≥2 distinct PRs = a real pattern) and surfaces unresolved occurrences first. For each proposed family, still ask:
+
+- Is it already in `docs/agent-lessons/` (or the engsys lessons-library)? If yes but it still recurred → the lesson exists but wasn't _applied at authoring time_; strengthen the trigger/check on the EXISTING file instead of merging the tool's draft as a duplicate.
+- Was it Critical/Major, or a nitpick? Prioritize the families that produced real bugs — a low-recurrence nitpick family the tool still surfaced (it met `--min-recurrence`) is not automatically worth a lesson.
 
 ## Step 5 — Memorialize (team-facing, in the repo)
 

@@ -185,4 +185,4 @@ git status                                         # confirm git works again
 
 Then check `git log --all --author=<injected name>` for mis-authored commits. Repair is temporary
 until the hermetic fix is on the branch you push from: the next push that runs the tests corrupts it
-again. See the lesson `lessons-library/git-core-bare-flip-breaks-all-worktrees.md`.
+again. See the lesson `core/lessons-library/git-core-bare-flip-breaks-all-worktrees.md`.

@@ -52,7 +52,7 @@ try {
   );
   t = t.replace(
     '{{LESSONS_NOTE}}',
-    "Durable lessons live in the project's `docs/agent-lessons/` (plugin mode doesn't seed the engsys lessons-library).",
+    "Durable lessons live in the project's `docs/agent-lessons/`; the engsys `lessons-library` is read in place from the plugin root (no copy) by the memory brief (SubagentStart injection — docs/memory-spec.md §5-§6). The injection hook and the harvester (`harvest-findings.mjs`) run in PLUGIN MODE ONLY for now — copy mode seeds the lesson *content* (`docs/agent-lessons/library/`) but installs neither the hook nor the memory-brief/harvest-findings tooling (engsys#140 W3); run the harvester from an engsys checkout directly in copy mode (`node <engsys-checkout>/core/scripts/harvest-findings.mjs run --repo … --prs …`).",
   );
   t = t.replace(/\n<!--\s*\n\s*ENGSYS:PROJECT-FACTS region\.[\s\S]*$/, '\n'); // the project's CLAUDE.md is its facts
 
