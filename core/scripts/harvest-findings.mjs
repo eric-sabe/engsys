@@ -131,11 +131,12 @@ export function aggregateFamilies(records, { minRecurrence = 2 } = {}) {
 
 /**
  * Extract finding records from one PR's comments + reviews + inline review-thread comments.
- * `acks` found anywhere in the PR are zipped positionally onto the marker-comment's findings
- * (F1 -> findings[0], F2 -> findings[1], …) IFF the counts agree — a mismatch means the
- * correlation can't be trusted, so every finding from that PR is left `outcome: null` rather than
- * guessed. This is the one place in the harvester that resolves "was this fixed, disputed, or
- * ignored" — getting it wrong would misrank which family most needs a lesson.
+ * `FINDING-ACK: F<n> -> outcome` lines are resolved to `findings[n-1]` BY ID, scoped to the time
+ * window between this marker comment and the next one (so repeated review rounds, each restarting
+ * at F1, never cross-contaminate each other's outcomes). An id with no matching ack in that window
+ * leaves that finding's outcome `null` rather than guessed. This is the one place in the harvester
+ * that resolves "was this fixed, disputed, or ignored" — getting it wrong would misrank which
+ * family most needs a lesson.
  */
 export function extractFromPr(pr, matchers) {
 	const records = [];
@@ -460,5 +461,7 @@ export async function main(argv, { gh = defaultGh, git = defaultGit, out = conso
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
-	main(process.argv.slice(2)).then((code) => process.exit(code ?? 0));
+	main(process.argv.slice(2))
+		.then((code) => process.exit(code ?? 0))
+		.catch((e) => { console.error(String(e?.message ?? e)); process.exit(1); });
 }

@@ -3,9 +3,11 @@
 // without --apply) never reaches the real `openProposalPr`.
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
 	aggregateFamilies,
 	buildMarkerMatchers,
@@ -324,5 +326,20 @@ describe('CLI', () => {
 	test('an unknown command exits 1 with an error, not a crash', async () => {
 		const code = await main(['bogus'], { err: () => {}, out: () => {} });
 		assert.equal(code, 1);
+	});
+
+	test('a rejected main() (bad input) prints an error line and exits 1, never a raw stack trace', () => {
+		const SCRIPT = fileURLToPath(new URL('./harvest-findings.mjs', import.meta.url));
+		let threw = null;
+		let stdout = '';
+		try {
+			stdout = execFileSync('node', [SCRIPT, 'run', '--since', 'not-a-date'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+		} catch (e) {
+			threw = e;
+		}
+		assert.ok(threw, 'the bad date should make the process exit non-zero');
+		assert.equal(threw.status, 1);
+		assert.ok(!/at .*\(.*:\d+:\d+\)/.test(threw.stderr), 'stderr should be a clean error line, not a raw stack trace');
+		void stdout;
 	});
 });
