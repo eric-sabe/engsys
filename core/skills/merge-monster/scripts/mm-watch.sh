@@ -272,11 +272,13 @@ while true; do
           : > "$W/checks.tsv"
           printf '%s' "$ACTIVE@$SHA" > "$W/checks.pr"
         fi
-        printf '%s\n' "$OUT" | awk -F'\t' '$1 == "DONE" && $2 != "" { print $2 "\t" $3 }' | sort -u > "$W/checks.new"
-        comm -13 "$W/checks.tsv" "$W/checks.new" | while IFS="$(printf '\t')" read -r name concl; do
+        # One collation (C) for every sort and comm here, and the persisted history re-sorted first.
+        printf '%s\n' "$OUT" | awk -F'\t' '$1 == "DONE" && $2 != "" { print $2 "\t" $3 }' | LC_ALL=C sort -u > "$W/checks.new"
+        LC_ALL=C sort -u -o "$W/checks.tsv" "$W/checks.tsv"
+        LC_ALL=C comm -13 "$W/checks.tsv" "$W/checks.new" | while IFS="$(printf '\t')" read -r name concl; do
           case "$concl" in SUCCESS | NEUTRAL | SKIPPED | '') ;; *) echo "CHECK_FAIL #$ACTIVE $name: $concl" ;; esac
         done
-        sort -u "$W/checks.tsv" "$W/checks.new" > "$W/checks.union" && mv "$W/checks.union" "$W/checks.tsv"
+        LC_ALL=C sort -u "$W/checks.tsv" "$W/checks.new" > "$W/checks.union" && mv "$W/checks.union" "$W/checks.tsv"
         rm -f "$W/checks.new"
         TOTAL=$(printf '%s\n' "$OUT" | awk -F'\t' '$1 == "DONE" || $1 == "PENDING"' | wc -l | tr -d ' ')
         PENDING=$(printf '%s\n' "$OUT" | awk -F'\t' '$1 == "PENDING"' | wc -l | tr -d ' ')

@@ -109,11 +109,12 @@ monster_delta() {
   local dir="$1" new sha old
   mkdir -p "$dir"
   new="$dir/last-snapshot.new"
-  cat >"$new"
+  LC_ALL=C sort >"$new" # comm needs sorted input in one collation; never trust the caller's order
   sha=$(monster_sha256 "$new")
   old=$(cat "$dir/last-snapshot.sha" 2>/dev/null || true)
   if [ "$sha" = "$old" ] && [ -f "$dir/last-snapshot.lines" ]; then rm -f "$new"; return 0; fi
   touch "$dir/last-snapshot.lines"
+  LC_ALL=C sort -o "$dir/last-snapshot.lines" "$dir/last-snapshot.lines" # a file from an older version
   LC_ALL=C comm -23 "$dir/last-snapshot.lines" "$new" | sed 's/^/- /'
   LC_ALL=C comm -13 "$dir/last-snapshot.lines" "$new" | sed 's/^/+ /'
   mv "$new" "$dir/last-snapshot.lines"

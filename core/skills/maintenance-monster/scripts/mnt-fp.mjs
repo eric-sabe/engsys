@@ -994,7 +994,8 @@ function finish(records, asJson, latch = null) {
  * already judged (and left open, or is waiting on) came back every time, costing a fresh read of the code.
  * With --state-dir, a CANDIDATE / TRIPWIRE_FAILED / OUT_OF_SCOPE record is printed only the first time it
  * appears; the latch file then holds exactly the records of THIS run, so a record that goes away (dismissed,
- * fixed, or out of a failed listing) and later returns is printed again. ERROR is never latched. --all
+ * fixed) and later returns is printed again. A run with any ERROR keeps the prior keys too, so a transient
+ * listing failure does not make every judged alert print again. ERROR is never latched. --all
  * prints everything and still refreshes the latch. A latch that cannot be read counts as empty; one that
  * cannot be written is reported as an ERROR line, never silently.
  */
@@ -1015,7 +1016,8 @@ function applySeenLatch(records, latch) {
   try {
     fs.mkdirSync(path.dirname(latch.file), { recursive: true });
     const tmp = `${latch.file}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, now.join('\n\u0000\n'), { mode: 0o600 });
+    const keep = records.some((r) => r.status === 'ERROR') ? [...new Set([...now, ...seen])] : now;
+    fs.writeFileSync(tmp, keep.join('\n\u0000\n'), { mode: 0o600 });
     fs.renameSync(tmp, latch.file);
   } catch (e) {
     shown.push({ status: 'ERROR', alert: null, pr: null, policy: null, reason: `cannot write the seen-latch ${latch.file}: ${e.code || e.message}` });
