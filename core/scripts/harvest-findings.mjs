@@ -139,27 +139,39 @@ export function aggregateFamilies(records, { minRecurrence = 2 } = {}) {
  */
 export function extractFromPr(pr, matchers) {
 	const records = [];
-	const allText = [
-		...(pr.comments ?? []).map((c) => c.body),
-		...(pr.reviews ?? []).map((r) => r.body),
-	].join('\n');
-	const acks = parseFindingAcks(allText);
+	const withTime = (s) => s.createdAt ?? s.submittedAt ?? null;
+	const allSources = [...(pr.comments ?? []), ...(pr.reviews ?? [])]
+		.slice()
+		.sort((a, b) => String(withTime(a) ?? '').localeCompare(String(withTime(b) ?? '')));
+	const markerSources = allSources.filter((s) => isMarkerBody(s.body, matchers));
 
-	const markerBodies = [
-		...(pr.comments ?? []).filter((c) => isMarkerBody(c.body, matchers)),
-		...(pr.reviews ?? []).filter((r) => isMarkerBody(r.body, matchers)),
-	];
-	for (const source of markerBodies) {
+	for (let mi = 0; mi < markerSources.length; mi++) {
+		const source = markerSources[mi];
 		const parsed = parseReviewComment(source.body);
 		if (parsed.error || parsed.unparseable) continue;
-		const useAcks = acks.length === parsed.findings.length;
+		// FINDING-ACK ids (F1, F2, …) are scoped to the fix round for THIS marker comment: acks are
+		// looked for only between this marker and the next one (by createdAt/submittedAt, when
+		// present). A PR with repeated review rounds — each restarting at F1 — would otherwise have
+		// its later round's acks wrongly zipped onto the EARLIER round's findings by raw position.
+		const windowStart = withTime(source);
+		const windowEnd = mi + 1 < markerSources.length ? withTime(markerSources[mi + 1]) : null;
+		const ackText = allSources
+			.filter((s) => {
+				const t = withTime(s);
+				if (windowStart && t && t < windowStart) return false;
+				if (windowEnd && t && t >= windowEnd) return false;
+				return true;
+			})
+			.map((s) => s.body)
+			.join('\n');
+		const ackById = new Map(parseFindingAcks(ackText).map((a) => [a.id, a]));
 		parsed.findings.forEach((finding, i) => {
 			records.push({
 				finding,
 				prNumber: pr.number,
 				url: pr.url ?? null,
 				source: 'marker',
-				outcome: useAcks ? acks[i]?.outcome ?? null : null,
+				outcome: ackById.get(`F${i + 1}`)?.outcome ?? null,
 			});
 		});
 	}
@@ -352,10 +364,15 @@ async function defaultGit(args, { cwd } = {}) {
 export async function openProposalPr(families, opts, { git = defaultGit, gh = defaultGh, now = () => Date.now() } = {}) {
 	const cwd = opts.cwd ?? process.cwd();
 	const branch = opts.branch ?? `agent/memory-harvest-${now()}`;
-	await git(['checkout', '-B', branch], { cwd });
+	const defaultBranch = opts.defaultBranch ?? 'main';
+	// Branch from the FETCHED default branch, never the caller's current HEAD: `checkout -B` resets
+	// an existing branch to HEAD (discarding its commits) and, run from a feature branch, would base
+	// the proposal on that branch's unrelated work. `checkout -b` additionally refuses outright if
+	// `branch` already exists, instead of silently resetting it.
+	await git(['fetch', 'origin', defaultBranch], { cwd });
+	await git(['checkout', '-b', branch, `origin/${defaultBranch}`], { cwd });
 	const files = [];
 	const dir = path.join(cwd, 'docs', 'agent-lessons');
-	await git(['rev-parse', '--show-toplevel'], { cwd }).catch(() => {}); // sanity touch; real mkdir happens via fs below
 	fs.mkdirSync(dir, { recursive: true });
 	for (const fam of families) {
 		const file = path.join(dir, `${slugify(fam.title || fam.key)}.md`);

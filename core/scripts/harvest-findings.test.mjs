@@ -113,7 +113,7 @@ describe('familyKey / aggregateFamilies', () => {
 describe('extractFromPr', () => {
 	const matchers = buildMarkerMatchers({});
 
-	test('extracts findings from a marker comment and zips FINDING-ACK outcomes positionally when counts match', () => {
+	test('extracts findings from a marker comment and resolves FINDING-ACK outcomes by Fn id', () => {
 		const pr = {
 			number: 42,
 			url: 'https://example/pr/42',
@@ -130,17 +130,34 @@ describe('extractFromPr', () => {
 		assert.equal(records[0].prNumber, 42);
 	});
 
-	test('leaves outcome null when ack count does not match finding count (never guesses)', () => {
+	test('an unacked finding stays outcome: null — ids are resolved individually, never guessed from a count', () => {
 		const pr = {
 			number: 1,
 			comments: [
 				{ body: markerComment([{ file: 'a.ts', title: 'x' }, { file: 'b.ts', title: 'y' }]) },
-				{ body: 'FINDING-ACK: F1 -> fixed — only one ack for two findings' },
+				{ body: 'FINDING-ACK: F1 -> fixed — only F1 is acked here' },
 			],
 			reviews: [],
 		};
 		const records = extractFromPr(pr, matchers);
-		assert.ok(records.every((r) => r.outcome === null));
+		assert.equal(records[0].outcome, 'fixed'); // F1 -> findings[0]
+		assert.equal(records[1].outcome, null); // no F2 ack posted
+	});
+
+	test('two review rounds each restarting at F1 do not cross-contaminate (windowed by comment time)', () => {
+		const pr = {
+			number: 2,
+			comments: [
+				{ createdAt: '2026-01-01T00:00:00Z', body: markerComment([{ file: 'a.ts', title: 'round one issue' }]) },
+				{ createdAt: '2026-01-01T01:00:00Z', body: 'FINDING-ACK: F1 -> fixed — round one fix' },
+				{ createdAt: '2026-01-02T00:00:00Z', body: markerComment([{ file: 'b.ts', title: 'round two issue' }]) },
+				{ createdAt: '2026-01-02T01:00:00Z', body: 'FINDING-ACK: F1 -> disputed — round two is a false positive' },
+			],
+			reviews: [],
+		};
+		const records = extractFromPr(pr, matchers);
+		assert.equal(records.find((r) => r.finding.file === 'a.ts').outcome, 'fixed');
+		assert.equal(records.find((r) => r.finding.file === 'b.ts').outcome, 'disputed');
 	});
 
 	test('a comment that merely mentions the marker in prose contributes no records', () => {
@@ -268,10 +285,14 @@ describe('openProposalPr — never touches the default branch, everything inject
 			);
 			assert.equal(result.branch, 'agent/memory-harvest-test');
 			assert.equal(result.prUrl, 'https://github.com/o/r/pull/123');
-			assert.ok(gitCalls.some((c) => c[0] === 'checkout' && c.includes('agent/memory-harvest-test')));
+			assert.ok(gitCalls.some((c) => c[0] === 'fetch' && c.includes('origin') && c.includes('main')), 'fetches the default branch before branching from it');
+			assert.ok(gitCalls.some((c) => c[0] === 'checkout' && c[1] === '-b' && c.includes('agent/memory-harvest-test') && c.includes('origin/main')), 'branches from origin/main with -b, never -B');
 			assert.ok(gitCalls.some((c) => c[0] === 'commit'));
 			assert.ok(gitCalls.some((c) => c[0] === 'push'));
-			assert.ok(!gitCalls.some((c) => c.includes('main') || c.includes('master')), 'must never touch the default branch');
+			// "Never touches the default branch" means never checked out ONTO main/master itself —
+			// fetching/branching FROM origin/main (above) is exactly how that's avoided, not something
+			// to forbid; what's actually forbidden is a plain `checkout main` / `checkout -B main`.
+			assert.ok(!gitCalls.some((c) => c[0] === 'checkout' && (c.includes('main') || c.includes('master')) && c[1] !== '-b'), 'must never check out onto the default branch itself');
 			assert.ok(ghCalls.some((c) => c[0] === 'pr' && c.includes('--draft')), 'the PR must be opened as a draft');
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
