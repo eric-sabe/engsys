@@ -26,6 +26,7 @@
 
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseArgs, promisify } from 'node:util';
@@ -394,33 +395,42 @@ export async function openProposalPr(families, opts, { git = defaultGit, gh = de
 	const cwd = opts.cwd ?? process.cwd();
 	const branch = opts.branch ?? `agent/memory-harvest-${now()}`;
 	const defaultBranch = opts.defaultBranch ?? 'main';
-	// Branch from the FETCHED default branch, never the caller's current HEAD: `checkout -B` resets
-	// an existing branch to HEAD (discarding its commits) and, run from a feature branch, would base
-	// the proposal on that branch's unrelated work. `checkout -b` additionally refuses outright if
-	// `branch` already exists, instead of silently resetting it.
+	// Do all of this in an ISOLATED `git worktree`, not the caller's own checkout: `cwd` may be the
+	// operator's active working tree (uncommitted changes, a different branch mid-task) — checking
+	// out a new branch there, succeeding or failing, would collide with or silently carry over
+	// whatever the operator is doing, and leave them stranded on the harvest branch afterward.
+	const worktreeDir = opts.worktreeDir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'harvest-proposal-'));
 	await git(['fetch', 'origin', defaultBranch], { cwd });
-	await git(['checkout', '-b', branch, `origin/${defaultBranch}`], { cwd });
-	const files = [];
-	const dir = path.join(cwd, 'docs', 'agent-lessons');
-	fs.mkdirSync(dir, { recursive: true });
-	// Disambiguate up front (two families can slugify to the same base — same finding title in two
-	// different files, say) and seed it with whatever's already on disk/branch, so a collision gets
-	// a -2/-3 suffix instead of the second family's write silently overwriting the first.
-	const existing = new Set(fs.readdirSync(dir).filter((f) => f.endsWith('.md')).map((f) => f.replace(/\.md$/, '')));
-	const slugOf = uniqueSlugs(families, existing);
-	for (const fam of families) {
-		const file = path.join(dir, `${slugOf.get(fam)}.md`);
-		fs.writeFileSync(file, renderLessonProposal(fam));
-		files.push(path.relative(cwd, file));
+	// `-b` (not `-B`): refuses outright on an existing branch name instead of silently resetting it.
+	await git(['worktree', 'add', worktreeDir, '-b', branch, `origin/${defaultBranch}`], { cwd });
+	try {
+		const files = [];
+		const dir = path.join(worktreeDir, 'docs', 'agent-lessons');
+		fs.mkdirSync(dir, { recursive: true });
+		// Disambiguate up front (two families can slugify to the same base — same finding title in
+		// two different files, say) and seed it with whatever's already on disk/branch, so a
+		// collision gets a -2/-3 suffix instead of the second family's write overwriting the first.
+		const existing = new Set(fs.readdirSync(dir).filter((f) => f.endsWith('.md')).map((f) => f.replace(/\.md$/, '')));
+		const slugOf = uniqueSlugs(families, existing);
+		for (const fam of families) {
+			const file = path.join(dir, `${slugOf.get(fam)}.md`);
+			fs.writeFileSync(file, renderLessonProposal(fam));
+			files.push(path.relative(worktreeDir, file));
+		}
+		await git(['add', ...files], { cwd: worktreeDir });
+		await git(['commit', '-m', `docs(memory): propose ${files.length} harvested lesson(s)`], { cwd: worktreeDir });
+		await git(['push', '-u', 'origin', branch], { cwd: worktreeDir });
+		const body = renderProposal(families, { repo: opts.repo, slugs: slugOf });
+		const prArgs = ['pr', 'create', '--draft', '--title', `docs: propose ${files.length} harvested lesson(s)`, '--body', body, '--head', branch];
+		if (opts.repo) prArgs.push('--repo', opts.repo);
+		const prUrl = (await gh(prArgs)).trim();
+		return { branch, files, prUrl };
+	} finally {
+		// Best-effort cleanup — a failure here must never mask the real result/error above, and
+		// must never touch the caller's own checkout (`cwd`), only the throwaway worktree.
+		try { await git(['worktree', 'remove', worktreeDir, '--force'], { cwd }); } catch { /* best effort */ }
+		try { fs.rmSync(worktreeDir, { recursive: true, force: true }); } catch { /* best effort */ }
 	}
-	await git(['add', ...files], { cwd });
-	await git(['commit', '-m', `docs(memory): propose ${files.length} harvested lesson(s)`], { cwd });
-	await git(['push', '-u', 'origin', branch], { cwd });
-	const body = renderProposal(families, { repo: opts.repo, slugs: slugOf });
-	const prArgs = ['pr', 'create', '--draft', '--title', `docs: propose ${files.length} harvested lesson(s)`, '--body', body, '--head', branch];
-	if (opts.repo) prArgs.push('--repo', opts.repo);
-	const prUrl = (await gh(prArgs)).trim();
-	return { branch, files, prUrl };
 }
 
 // ---------------------------------------------------------------------------------------------

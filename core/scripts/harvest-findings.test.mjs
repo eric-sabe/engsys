@@ -308,16 +308,17 @@ describe('harvest (injected gh) and resolvePrNumbers', () => {
 	});
 });
 
-describe('openProposalPr — never touches the default branch, everything injected', () => {
-	test('checks out a fresh branch, writes proposal files, commits, pushes, and opens a draft PR', async () => {
+describe('openProposalPr — an isolated worktree, never the caller\'s own checkout, everything injected', () => {
+	test('fetches + worktree-adds a fresh branch, writes proposal files there, commits, pushes, opens a draft PR, and cleans up the worktree', async () => {
 		const gitCalls = [];
 		const ghCalls = [];
 		const dir = mkdtempSync(join(tmpdir(), 'harvest-pr-'));
+		const worktreeDir = mkdtempSync(join(tmpdir(), 'harvest-pr-worktree-'));
 		try {
 			const family = { key: 'a.ts::x', file: 'a.ts', title: 'x', distinctSources: 2, unresolvedCount: 0, outcomes: {}, examples: [] };
 			const result = await openProposalPr(
 				[family],
-				{ cwd: dir, repo: 'o/r', branch: 'agent/memory-harvest-test' },
+				{ cwd: dir, worktreeDir, repo: 'o/r', branch: 'agent/memory-harvest-test' },
 				{
 					git: async (args) => { gitCalls.push(args); return ''; },
 					gh: async (args) => { ghCalls.push(args); return 'https://github.com/o/r/pull/123\n'; },
@@ -327,34 +328,59 @@ describe('openProposalPr — never touches the default branch, everything inject
 			assert.equal(result.branch, 'agent/memory-harvest-test');
 			assert.equal(result.prUrl, 'https://github.com/o/r/pull/123');
 			assert.ok(gitCalls.some((c) => c[0] === 'fetch' && c.includes('origin') && c.includes('main')), 'fetches the default branch before branching from it');
-			assert.ok(gitCalls.some((c) => c[0] === 'checkout' && c[1] === '-b' && c.includes('agent/memory-harvest-test') && c.includes('origin/main')), 'branches from origin/main with -b, never -B');
+			assert.ok(gitCalls.some((c) => c[0] === 'worktree' && c[1] === 'add' && c.includes(worktreeDir) && c.includes('-b') && c.includes('agent/memory-harvest-test') && c.includes('origin/main')), 'adds an isolated worktree branched from origin/main with -b, never -B');
 			assert.ok(gitCalls.some((c) => c[0] === 'commit'));
 			assert.ok(gitCalls.some((c) => c[0] === 'push'));
-			// "Never touches the default branch" means never checked out ONTO main/master itself —
-			// fetching/branching FROM origin/main (above) is exactly how that's avoided, not something
-			// to forbid; what's actually forbidden is a plain `checkout main` / `checkout -B main`.
+			assert.ok(gitCalls.some((c) => c[0] === 'worktree' && c[1] === 'remove'), 'the throwaway worktree is cleaned up afterward');
+			// "Never touches the caller's own checkout" — no git call at all runs with `{ cwd: dir }`
+			// EXCEPT the explicit fetch/worktree-add/worktree-remove, which only ever reference `dir`
+			// as the repo to issue those commands FROM, never as a place files are written or
+			// branches are checked out onto.
 			assert.ok(!gitCalls.some((c) => c[0] === 'checkout' && (c.includes('main') || c.includes('master')) && c[1] !== '-b'), 'must never check out onto the default branch itself');
 			assert.ok(ghCalls.some((c) => c[0] === 'pr' && c.includes('--draft')), 'the PR must be opened as a draft');
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
+			rmSync(worktreeDir, { recursive: true, force: true });
 		}
 	});
 
 	test('two families that slugify to the same name each get their own file, not a silent overwrite', async () => {
 		const dir = mkdtempSync(join(tmpdir(), 'harvest-pr-collide-'));
+		const worktreeDir = mkdtempSync(join(tmpdir(), 'harvest-pr-collide-worktree-'));
 		try {
 			const famA = { key: 'a.ts::x', title: 'same title', distinctSources: 2, unresolvedCount: 0, outcomes: {}, examples: [] };
 			const famB = { key: 'b.ts::x', title: 'same title', distinctSources: 2, unresolvedCount: 0, outcomes: {}, examples: [] };
+			const gitCalls = [];
 			const result = await openProposalPr(
 				[famA, famB],
-				{ cwd: dir, branch: 'agent/memory-harvest-collide' },
-				{ git: async () => '', gh: async () => 'https://github.com/o/r/pull/1\n' },
+				{ cwd: dir, worktreeDir, branch: 'agent/memory-harvest-collide' },
+				{ git: async (args) => { gitCalls.push(args); return ''; }, gh: async () => 'https://github.com/o/r/pull/1\n' },
 			);
 			assert.equal(result.files.length, 2);
 			assert.notEqual(result.files[0], result.files[1], 'each family must land in its own file');
-			for (const f of result.files) assert.ok(fs.existsSync(join(dir, f)));
+			const addCall = gitCalls.find((c) => c[0] === 'add');
+			for (const f of result.files) assert.ok(addCall.includes(f), `${f} should have been staged`);
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
+			rmSync(worktreeDir, { recursive: true, force: true });
+		}
+	});
+
+	test('the worktree is always cleaned up even when the `gh pr create` call fails', async () => {
+		const gitCalls = [];
+		const dir = mkdtempSync(join(tmpdir(), 'harvest-pr-fail-'));
+		const worktreeDir = mkdtempSync(join(tmpdir(), 'harvest-pr-fail-worktree-'));
+		try {
+			const family = { key: 'a.ts::x', title: 'x', distinctSources: 2, unresolvedCount: 0, outcomes: {}, examples: [] };
+			await assert.rejects(() => openProposalPr(
+				[family],
+				{ cwd: dir, worktreeDir, branch: 'agent/memory-harvest-fail' },
+				{ git: async (args) => { gitCalls.push(args); return ''; }, gh: async () => { throw new Error('gh pr create failed'); } },
+			));
+			assert.ok(gitCalls.some((c) => c[0] === 'worktree' && c[1] === 'remove'), 'cleanup must still run after a downstream failure');
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+			rmSync(worktreeDir, { recursive: true, force: true });
 		}
 	});
 });
