@@ -200,9 +200,18 @@ export function loadClassADocs(roots, manifest = {}) {
 	// docs/agent-lessons/ (dogfooding this checkout, or a copy-mode project with a same-slug local
 	// lesson) — `frontmatter.key` is a SQLite PRIMARY KEY, so a duplicate would throw mid-build and
 	// take the whole index down with it (every brief then comes back empty). Dedupe by key here,
-	// LAST write wins — agentLessonsDir is loaded after lessonsDir, so the project-local copy wins.
+	// LAST write wins — agentLessonsDir is loaded after lessonsDir, so the project-local copy wins —
+	// EXCEPT once a `security: true` doc has claimed a key, it is never silently replaced by a
+	// non-security one for the same key: an unreviewed project/feature-branch file landing on the
+	// exact slug of a bundled security lesson must not be able to neutralize it by collision (that
+	// would bypass the whole `supersedes` review-gate this module exists to enforce). A SECOND
+	// security:true doc for the same key still follows last-write-wins — both are equally protected.
 	const byKey = new Map();
-	for (const d of raw) byKey.set(d.key, d);
+	for (const d of raw) {
+		const prev = byKey.get(d.key);
+		if (prev?.security && !d.security) continue;
+		byKey.set(d.key, d);
+	}
 	return { docs: [...byKey.values()], manifest };
 }
 
@@ -218,17 +227,23 @@ export function loadClassBEvents(cacheDir) {
 	const file = path.join(cacheDir, 'delta.jsonl');
 	let text;
 	try { text = fs.readFileSync(file, 'utf8'); } catch { return []; }
-	const events = [];
+	// `events.key` is a SQLite PRIMARY KEY (§4); an append-only delta.jsonl can carry the same `k`
+	// more than once (an update re-emits the record) — last write wins, same as loadClassADocs'
+	// dedup, and a tombstone (deleted: true) removes whatever came before it rather than being
+	// filtered out unconditionally (§3.2: "last writer wins by updated_at").
+	const byKey = new Map();
 	for (const line of text.split('\n')) {
 		if (!line.trim()) continue;
 		try {
 			const e = JSON.parse(line);
-			if (e && typeof e.k === 'string' && !e.deleted) events.push(e);
+			if (!e || typeof e.k !== 'string') continue;
+			if (e.deleted) byKey.delete(e.k);
+			else byKey.set(e.k, e);
 		} catch {
 			/* one bad line never kills the rest */
 		}
 	}
-	return events;
+	return [...byKey.values()];
 }
 
 // ---------------------------------------------------------------------------------------------

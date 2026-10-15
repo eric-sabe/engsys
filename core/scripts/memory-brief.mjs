@@ -431,11 +431,20 @@ export function evidenceText(key, opts = {}) {
 // CLI
 // ---------------------------------------------------------------------------------------------
 
+/**
+ * A minimal `--key value` / `--key=value` parser. The `=` form is the one callers MUST use for a
+ * value that can itself start with `--` (a task prompt like "--fix the build", or a touched path
+ * that starts with a flag-looking token) — the space form would otherwise read it as the next
+ * flag and silently drop the real value (degrading, not failing: the brief loses its targeting
+ * but still fails open, which is why this was a minor finding, not a security one).
+ */
 function parseArgs(argv) {
 	const out = {};
 	for (let i = 0; i < argv.length; i++) {
 		const a = argv[i];
 		if (!a.startsWith('--')) continue;
+		const eq = a.indexOf('=');
+		if (eq !== -1) { out[a.slice(2, eq)] = a.slice(eq + 1); continue; }
 		const key = a.slice(2);
 		const next = argv[i + 1];
 		if (next === undefined || next.startsWith('--')) { out[key] = true; continue; }

@@ -71,10 +71,13 @@ export function resolveTouchedPaths(input, { cwd, exec = execFileSync } = {}) {
  * `{ text, lessonKeys, pointerKeys, bytes }`, or null on ANY failure (non-zero exit, timeout,
  * spawn error, unparseable output) — all treated identically as "no brief". Never throws. */
 export function runMemoryBrief({ agentType, prompt, touchedPaths, cwd, timeoutMs = TIMEOUT_MS, scriptPath = MEMORY_BRIEF, exec = execFileSync } = {}) {
-	const args = [scriptPath, '--json', '--repo-root', cwd];
-	if (agentType) args.push('--agent-type', agentType);
-	if (prompt) args.push('--prompt', prompt);
-	if (touchedPaths?.length) args.push('--paths', touchedPaths.join(','));
+	// The `=` form for every value that could itself start with `--` (a task prompt, a touched
+	// path) — memory-brief.mjs's space-separated form would read such a value as the NEXT flag and
+	// silently drop it (memory-brief.mjs's parseArgs doc comment has the full rationale).
+	const args = [scriptPath, '--json', `--repo-root=${cwd}`];
+	if (agentType) args.push(`--agent-type=${agentType}`);
+	if (prompt) args.push(`--prompt=${prompt}`);
+	if (touchedPaths?.length) args.push(`--paths=${touchedPaths.join(',')}`);
 	try {
 		const out = exec('node', args, {
 			encoding: 'utf8',

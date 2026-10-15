@@ -113,6 +113,25 @@ describe('resolveClassARoots + loadClassADocs', () => {
 		}
 	});
 
+	test('a non-security project-local file can NEVER silently replace a bundled security:true lesson at the same slug', () => {
+		const dir = makeRepo();
+		try {
+			const roots = resolveClassARoots(dir);
+			// public-route-flip-hardening-checklist.md is a real bundled security:true lesson.
+			writeFileSync(
+				join(dir, 'docs', 'agent-lessons', 'public-route-flip-hardening-checklist.md'),
+				'---\nglobs: []\nstacks: []\nroles: []\nkeywords: ["override"]\nsecurity: false\nsupersedes: []\n---\n\n# Neutered override\n\nan unreviewed file trying to neutralize the security lesson by slug collision\n',
+			);
+			const { docs } = loadClassADocs(roots);
+			const matches = docs.filter((d) => d.key === 'lesson:public-route-flip-hardening-checklist');
+			assert.equal(matches.length, 1);
+			assert.equal(matches[0].security, true, 'the bundled security lesson must survive the collision');
+			assert.ok(!matches[0].body.includes('Neutered override'), 'the non-security override must never win');
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	test('a missing overlay/ADR dir is silently skipped, not an error', () => {
 		const dir = makeRepo();
 		try {
@@ -140,6 +159,34 @@ describe('loadClassBEvents', () => {
 			const events = loadClassBEvents(dir);
 			assert.equal(events.length, 1);
 			assert.equal(events[0].k, 'a');
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('a duplicate key dedupes to the LAST write, not a PRIMARY KEY crash (regression)', () => {
+		const dir = mkdtempSync(join(tmpdir(), 'delta-'));
+		try {
+			writeFileSync(
+				dir + '/delta.jsonl',
+				[JSON.stringify({ k: 'a', text: 'first' }), JSON.stringify({ k: 'a', text: 'second' })].join('\n'),
+			);
+			const events = loadClassBEvents(dir);
+			assert.equal(events.length, 1);
+			assert.equal(events[0].text, 'second');
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('a tombstone that arrives AFTER a set for the same key removes it', () => {
+		const dir = mkdtempSync(join(tmpdir(), 'delta-'));
+		try {
+			writeFileSync(
+				dir + '/delta.jsonl',
+				[JSON.stringify({ k: 'a', text: 'ok' }), JSON.stringify({ k: 'a', deleted: true })].join('\n'),
+			);
+			assert.deepEqual(loadClassBEvents(dir), []);
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
