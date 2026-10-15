@@ -157,13 +157,9 @@ Test at the following viewports:
 ### 3.1 Issue Prioritization
 
 ```mermaid
-block-beta
-    columns 1
-    block:priority["Priority Matrix"]
-        P1["P1: Fix Immediately\n(Layout issues affecting functionality)"]
-        P2["P2: Fix Next\n(Visual issues degrading UX)"]
-        P3["P3: Fix If Possible\n(Minor visual inconsistencies)"]
-    end
+flowchart TD
+    P1["P1: Fix Immediately (Layout issues affecting functionality)"] --> P2["P2: Fix Next (Visual issues degrading UX)"]
+    P2 --> P3["P3: Fix If Possible (Minor visual inconsistencies)"]
 ```
 
 ### 3.2 Identifying Source Files
@@ -172,13 +168,13 @@ Identify source files from problematic elements:
 
 1. **Selector-based Search**
    - Search codebase by class name or ID
-   - Explore style definitions with `grep_search`
+   - Explore style definitions with `Grep`
 
 2. **Component-based Search**
    - Identify components from element text or structure
-   - Explore related files with `semantic_search`
+   - Locate related component and route files with `Glob` and `Grep`
 
-3. **File Pattern Filtering**
+3. **File Pattern Filtering (`Glob`)**
 
    ```text
    Style files: src/**/*.css, styles/**/*

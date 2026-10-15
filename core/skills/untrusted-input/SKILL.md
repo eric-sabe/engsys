@@ -106,3 +106,11 @@ The design is small enough to re-implement; keep these properties or the port is
 5. Property-test with an astral character (emoji) before the marker to prove the offset map stays
    aligned, and with legitimate Cyrillic prose to prove it is not mangled.
 6. One shared constant for the delimiters, one shared `defang`, applied per field at every call site.
+
+## Agentic, MCP & RAG Security Boundaries
+
+1. **MCP Tool Responses (`mcp__*`)**: Treat every payload returned by an external MCP server (database rows, ticket bodies, browser DOM snapshots, third-party APIs) as untrusted input. Wrap and `defang()` before re-injecting into downstream prompts.
+2. **Tool-Call Argument Injection**: Never allow model output derived from untrusted data to interpolate directly into shell commands, file paths outside the workspace, or Git refs without strict allowlist validation (`execFileSync` with argv arrays, path normalization).
+3. **Subagent Privilege Escalation**: Never spawn a write-capable subagent whose prompt contains raw, un-defanged external text, and never forward lease tokens (`baton-*.json`) or operator credentials into subagent prompts.
+4. **RAG & Memory Poisoning**: Verify provenance (`author_id`, `editor_id`, `updatedAt`) before harvesting comments or documents into persistent agent memory (`memory.db`), and wrap retrieved memory snippets in an untrusted envelope when injecting into subagent prompts.
+
