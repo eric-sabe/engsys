@@ -33,22 +33,25 @@ The concrete commands live in the tracker skill's `close-board` (GitHub closes t
 
 ## Step 4 — Mine ALL review findings (the core of the ceremony)
 
-Don't rely on memory of what you fixed inline. The durable record is the marked review-findings comment each PR/work item posts after its local review (plus any static-analysis / security-scanning alerts CI still produces). Pull them from **every** work item in the project into one corpus via the skill's `list-issues` / `get-issue` operations. On GitHub the findings live as the marked comment on each PR — pull them directly with `gh`:
+Don't rely on memory of what you fixed inline. The durable record is the marked review-findings comment each PR/work item posts after its local review (plus any static-analysis / security-scanning alerts CI still produces, FINDING-ACK lines from fix rounds, PR reviews, inline review threads, and monster journals). Run `<engsys-root>/scripts/harvest-findings.mjs` instead of a hand-rolled single-marker loop — it already reads every configured marker (default: any leading `<!-- *-(findings|review) -->`, plus `.claude/memory.yml`'s `review_markers`), correlates `FINDING-ACK` outcomes, and groups by mistake **family** (docs/memory-spec.md §8):
 
 ```bash
-for pr in <all-project-PR-numbers>; do
-  gh pr view "$pr" --json comments \
-    --jq '.comments[] | select(.body | contains("<!-- local-review-findings -->")) | .body'
-done
+# Dry run: print the proposal (recurring families + draft lesson files), write nothing.
+node <engsys-root>/scripts/harvest-findings.mjs run --repo <owner>/<repo> \
+  --prs <all-project-PR-numbers, comma-separated>
+
+# Once the proposal looks right, open it as a reviewable docs PR (never a direct edit of
+# docs/agent-lessons/** or the engsys lessons-library on the default branch):
+node <engsys-root>/scripts/harvest-findings.mjs run --repo <owner>/<repo> \
+  --prs <all-project-PR-numbers, comma-separated> --apply
 ```
 
-(If a PR is missing its findings comment, note the gap — that PR went out without a recorded review, which is itself a process finding worth a lesson.)
+(If a PR is missing its findings comment, note the gap — that PR went out without a recorded review, which is itself a process finding worth a lesson. `--journal-dir <dir>` additionally mines a monster's bounce journals.)
 
-Then classify by **mistake family**, not by individual fix. For each family ask:
+The tool already ranks by recurrence (≥2 distinct PRs = a real pattern) and surfaces unresolved occurrences first. For each proposed family, still ask:
 
-- How many times did it recur, across how many distinct PRs? (≥2 PRs = a real pattern.)
-- Is it already in `docs/agent-lessons/` (or the engsys lessons-library)? If yes but it still recurred → the lesson exists but wasn't _applied at authoring time_; strengthen the trigger/check, don't just re-file.
-- Was it Critical/Major, or a nitpick? Prioritize the families that produced real bugs.
+- Is it already in `docs/agent-lessons/` (or the engsys lessons-library)? If yes but it still recurred → the lesson exists but wasn't _applied at authoring time_; strengthen the trigger/check on the EXISTING file instead of merging the tool's draft as a duplicate.
+- Was it Critical/Major, or a nitpick? Prioritize the families that produced real bugs — a low-recurrence nitpick family the tool still surfaced (it met `--min-recurrence`) is not automatically worth a lesson.
 
 ## Step 5 — Memorialize (team-facing, in the repo)
 
