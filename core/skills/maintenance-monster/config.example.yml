@@ -1,7 +1,8 @@
 # Maintenance Monster per-repo config — copy to .claude/maintenance-monster.yml
 # (or to maintenance-monster.yml in a fleet config dir outside the repo — see
-# SKILL.md § Prerequisites) and edit. Read by the model at session start; scripts take flags and do
-# not parse YAML — the one exception is the fp_policies block, which the mnt-fp-* scripts read.
+# SKILL.md § Prerequisites) and edit. Read by the model at session start; scripts take flags. The
+# exceptions: the fp_policies block, which the mnt-fp-* scripts read, and pulse_max / heartbeat_minutes /
+# stale_lock_minutes / rotate_context_tokens, which mnt-watch.sh and mnt-tick.sh read when given --config.
 # Design spec: docs/maintenance-monster.md.
 
 repo: owner/name
@@ -11,8 +12,11 @@ ledger_issue: 0 # printed by scripts/mnt-setup.sh --repo owner/name — distinct
 
 state_dir: logs/maintenance-monster # working memory: state.md, journal, .watch/ (keep gitignored)
 poll_interval: 30 # seconds — mnt-watch.sh cadence
-heartbeat_minutes: 10 # ScheduleWakeup fallback tick; at most 10 while holding the baton (it renews it)
+heartbeat_minutes: 10 # ScheduleWakeup fallback tick (mnt-tick.sh); each tick renews the baton
+# pulse_max: 22m # keepalive idle bound: no model renew for this long → stop renewing. Default 2.25 x heartbeat_minutes,
+#                 clamped to heartbeat_minutes + 2 < pulse_max <= stale_lock_minutes - 11 - 0.75 x heartbeat_minutes
 stale_lock_minutes: 45 # continuous watchdog: own Monitor + heartbeat, mirrors Merge Monster
+rotate_context_tokens: 300000 # heartbeat asks for rotation past this context size with nothing active (0 = off)
 
 # Phase gate. Phase 1 = watch + triage + REPORT only, no auto-PRs. Flip to
 # auto_drive only once triage quality is proven against real findings — no

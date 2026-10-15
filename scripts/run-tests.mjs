@@ -21,6 +21,7 @@ const SUITES = [
   ["node --test scripts/security-model.test.mjs"],
   ["node --test core/.claude-plugin/approve-own-scripts.test.mjs"],
   ["node --test core/.claude-plugin/handback-guard.test.mjs"],
+  ["node --test core/.claude-plugin/session-transcript.test.mjs"],
   ["node --test core/.claude-plugin/singleton-write-guard.test.mjs"],
   ["node --test core/fleet/identity/gh-app-token.test.mjs"],
   ["node --test core/fleet/notify.test.mjs"],
@@ -66,6 +67,7 @@ const SUITES = [
   ["bash core/scripts/worker-package.test.sh"],
   ["bash core/skills/maintenance-monster/scripts/mnt-fp.test.sh"],
   ["bash core/skills/merge-monster/scripts/mm-baton.test.sh"],
+  ["bash core/skills/merge-monster/scripts/monster-bus.test.sh"],
 ];
 
 // Variables the kit reads from a fleet session's environment.

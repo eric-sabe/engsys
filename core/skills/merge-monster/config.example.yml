@@ -1,7 +1,8 @@
 # Merge Monster per-repo config — copy to .claude/merge-monster.yml (or to
 # merge-monster.yml in a fleet config dir outside the repo — see SKILL.md
 # § Prerequisites) and edit.
-# Read by the model at session start; scripts take flags, never parse YAML.
+# Read by the model at session start. Scripts take flags; the ones given --config read only the
+# keys they name (mm-watch.sh: pulse_max, heartbeat_minutes, stale_lock_minutes, dependabot.auto_merge; mm-tick.sh: heartbeat_minutes, rotate_context_tokens).
 # Design spec: docs/merge-monster.md in engsys.
 
 repo: owner/name
@@ -10,8 +11,14 @@ ledger_issue: 0              # printed by scripts/mm-setup.sh --repo owner/name
 
 state_dir: logs/merge-monster # working memory: state.md, journal, .watch/ (keep gitignored)
 poll_interval: 30            # seconds — mm-watch.sh cadence (2-4 gh calls/cycle)
-heartbeat_minutes: 10        # ScheduleWakeup fallback tick; at most 10 while holding the baton (it renews it)
+heartbeat_minutes: 10        # ScheduleWakeup fallback tick (mm-tick.sh); each tick renews the baton
+# pulse_max: 22m             # the keepalive stops renewing after this long with no renew from the model
+                             # (a wedged model never keeps the role). Default: 2.25 x heartbeat_minutes,
+                             # clamped so the lease lapses before the heartbeat reads stale:
+                             #   heartbeat_minutes + 2 < pulse_max <= stale_lock_minutes - 11 - 0.75 x heartbeat_minutes
+                             # (needs stale_lock_minutes >= 1.75 x heartbeat_minutes + 13). Minutes, or 22m / 1350s / 1h.
 stale_lock_minutes: 45       # heartbeat older than this ⇒ baton is stale, manual merging allowed
+rotate_context_tokens: 300000 # heartbeat asks for rotation past this context size with nothing active (0 = off)
 
 merge_method:
   multi_commit: merge        # batch PRs keep per-issue commits
@@ -19,7 +26,7 @@ merge_method:
 
 ready_requirements:
   review_marker: ""          # evidence comment preflight requires on the PR,
-                             # e.g. "<!-- cr-cli-findings -->" — empty to skip
+                             # e.g. "<!-- review-findings -->" — empty to skip
 
 # Globs (against changed files) whose PRs merge early to minimize queue-wide
 # rebase churn — lockfiles, CI workflow files, schemas, shared-package APIs.

@@ -228,6 +228,14 @@ arms the engsys plugin's singleton-write guard hook: raw GitHub writes are
 denied unless they go through the monster's fenced wrappers (merge-monster
 SKILL.md § The baton). Every other session has it unset.
 
+**Context-aware rotation** (engsys#125). The engsys plugin's SessionStart hook
+records the transcript path of every fleet-launched session (ENGSYS_SESSION set)
+under `$XDG_STATE_HOME/engsys/sessions/`. A monster's heartbeat reads its last
+context size from that transcript and, past `rotate_context_tokens` (default
+300000) with nothing in flight, writes `rotation requested — ctx <N>k` itself
+(sticky for that session), so the row above fires even when the model never
+decided to rotate.
+
 **A Claude session can't exit itself.** A monster that honors a rotation
 request posts its digest + final `rotation requested` heartbeat, stops its
 loop, and then sits at the prompt with its process still alive — so the

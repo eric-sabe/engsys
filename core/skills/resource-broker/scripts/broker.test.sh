@@ -398,15 +398,19 @@ has "…and health-checked" "$(cat "$FAKE/actions.log")" "health slot=$(slot_of 
 sleep 1.6
 run $W
 rc_is "the next tick exits 0" 0
-has "the stale grant is detected and reaped: SLOT_REAPED <slot> <previous owner>" "$OUT" "SLOT_REAPED $(slot_of "$B") acme-worker"
-has "a live grant is visible as SLOT_GRANTED" "$OUT" "SLOT_GRANTED $(slot_of "$A") acme-build"
+JM="$STATE/journal-$(date -u +%Y-%m)"
+has "the stale grant is detected and reaped, journaled in bash: slot_reaped <slot> <previous owner>" "$(cat "$JM.md")" "slot_reaped slot $(slot_of "$B") acme-worker"
+has "…in the jsonl twin too" "$(cat "$JM.jsonl")" '"event":"slot_reaped","slot":"'"$(slot_of "$B")"'","who":"acme-worker"'
+has "a live grant is journaled as slot_granted" "$(cat "$JM.md")" "slot_granted slot $(slot_of "$A") acme-build"
+hasnt "slot transitions never reach the Monitor (engsys#124)" "$OUT" "SLOT_"
+eq "…the counters keep the totals" "$(jq -c . "$STATE/.watch/slot-counters.json")" '{"slot_reaped":1,"slot_granted":1}' 
 eq "the reap freed the slot" "$(pc status | jq -r --arg s "$(slot_of "$B")" '.slots[] | select((.slot_id|tostring) == $s) | .state')" free
 eq "…and only the live grant is still held" "$(pc status | jq '[.slots[] | select(.state == "held")] | length')" 1
 run $W
 eq "an unchanged pool emits nothing" "$OUT" ""
 C="$(pc acquire --owner acme-cache --no-wait)"
 run $W
-has "a second grant is visible" "$OUT" "SLOT_GRANTED $(slot_of "$C") acme-cache"
+has "a second grant is journaled" "$(cat "$JM.md")" "slot_granted slot $(slot_of "$C") acme-cache"
 REQ="$(pc request --owner acme-agent --session acme-agent)"
 WAITERS+=("$(jq -r .waiter_pid <<<"$REQ")")
 eq "a saturated pool queues the request at position 1" "$(jq -r .position <<<"$REQ")" 1
@@ -418,7 +422,54 @@ run $W
 has "a waiter that went silent is dropped by the pump: QUEUE_DROPPED" "$OUT" "QUEUE_DROPPED 1"
 eq "…and the queue is empty" "$(pc status | jq '.queue | length')" 0
 run $W
-has "a released slot is announced" "$(pc release --slot "$(slot_of "$C")" --owner acme-cache --token "$(tok_of "$C")" >/dev/null; $W 2>&1)" "SLOT_RELEASED $(slot_of "$C")"
+pc release --slot "$(slot_of "$C")" --owner acme-cache --token "$(tok_of "$C")" >/dev/null; run $W
+has "a released slot is journaled" "$(cat "$JM.md")" "slot_released slot $(slot_of "$C")"
+eq "…silently" "$OUT" ""
+
+echo "== D2. one bus per monster: the watch runs the subagent scan (engsys#122)"
+printf 'rev\t1\trunning\t-\t-\trebase\tslot#1\t%s\t%s\t0\t-\n' "$(( $(date +%s) - 120 ))" "$(( $(date +%s) - 60 ))" >"$STATE/agents.tsv"
+run $W
+has "an overdue running subagent is reported by the broker bus itself" "$OUT" "AGENT_OVERDUE rev gen=1 task=slot#1"
+run $W
+hasnt "…once per deadline" "$OUT" "AGENT_OVERDUE"
+printf 'rev2\t1\trunning\t-\t-\trebase\tslot#2\t%s\t%s\t0\t-\n' "$(( $(date +%s) - 120 ))" "$(( $(date +%s) - 60 ))" >>"$STATE/agents.tsv"
+run $W --no-agents
+hasnt "--no-agents skips the scan" "$OUT" "AGENT_OVERDUE"
+rm -f "$STATE/agents.tsv"
+
+echo "== D3. the single-call tick (engsys#123)"
+TK="bash $S/broker-tick.sh --config-dir $CFG --state-dir $STATE"
+rm -f "$STATE/.watch/last-heartbeat" "$STATE/.watch/last-snapshot.sha" "$STATE/.watch/last-snapshot.lines"
+run $TK
+rc_is "the first tick exits 0" 0
+has "…and reports the occupancy picture as + lines" "$OUT" '+ {"k":"slots"'
+has "…a due heartbeat was written to the ledger" "$(cat "$FAKE/gh/issues/101/body")" "status: running"
+[ -s "$STATE/.watch/last-heartbeat" ] && ok "…and recorded for the next tick" || bad "…and recorded for the next tick"
+run $TK
+eq "an unchanged pool with no heartbeat due → exactly NOOP" "$OUT" "NOOP"
+run bash "$S/broker-tick.sh" --config-dir "$CFG"
+rc_is "--state-dir is required" 2
+
+echo "== D4. the heartbeat asks for rotation past rotate_context_tokens (engsys#125)"
+mkdir -p "$T/sessions"
+TRX="$T/broker-transcript.jsonl"
+printf '{"type":"assistant","message":{"usage":{"input_tokens":5000,"cache_creation_input_tokens":0,"cache_read_input_tokens":345000}}}\n' >"$TRX"
+printf '{"transcript_path":"%s"}\n' "$TRX" >"$T/sessions/acme-broker.json"
+HBR=(env ENGSYS_SESSION=acme-broker ENGSYS_SESSIONS_DIR="$T/sessions" bash "$S/broker-heartbeat.sh" --config-dir "$CFG")
+echo 3 >"$STATE/active"
+run "${HBR[@]}" --status running
+hasnt "a directed action in flight (<state-dir>/active) holds it off" "$OUT" "ROTATION_REQUESTED"
+: >"$STATE/active"
+run "${HBR[@]}" --status running
+has "nothing active, 350k > 300k → the ledger says rotation requested — ctx 350k" "$(cat "$FAKE/gh/issues/101/body")" "status: rotation requested — ctx 350k"
+has "…and the heartbeat says what to do" "$OUT" "ROTATION_REQUESTED broker (rotation requested — ctx 350k)"
+run "${HBR[@]}" --status running
+has "…sticky: the next heartbeat repeats it" "$(cat "$FAKE/gh/issues/101/body")" "status: rotation requested — ctx 350k"
+run "${HBR[@]}" --status "session end"
+has "…but a session end goes through" "$(cat "$FAKE/gh/issues/101/body")" "status: session end"
+rm -f "$STATE/.watch/rotation-requested" "$STATE/active"
+run "${HBR[@]}" --status running --rotate-context-tokens 0
+has "--rotate-context-tokens 0 turns it off" "$(cat "$FAKE/gh/issues/101/body")" "status: running"
 
 echo "== E. a grant nudge reaches a waiting session"
 C="$(pc acquire --owner acme-cache --no-wait)"

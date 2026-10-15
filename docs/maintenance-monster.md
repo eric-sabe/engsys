@@ -250,7 +250,9 @@ the policy is invalid, the shape does not match, or a `git`/`gh` call fails.
 
 ### What the monster does with it
 
-On each CodeQL tick it runs the candidates script. For a `CANDIDATE` it reads the
+On each CodeQL tick it runs the candidates script, with a seen-latch in its state dir
+(engsys#124): a line it already printed is counted, not re-printed, until it leaves
+and comes back, so one judgment per alert, not one per tick. For a `CANDIDATE` it reads the
 flagged code at the alert's commit and dismisses **only** if the code clearly
 matches a known shape; unsure means the ordinary propose-with-`risk-accepted`
 path. On `TRIPWIRE_FAILED` it escalates once and dismisses nothing under that
@@ -335,7 +337,8 @@ repo: acme/app
 session_name: acme-maintain # advertised in its own ledger (discovery)
 ledger_issue: <new pinned issue, distinct from MM — created by mnt-setup.sh>
 state_dir: logs/maintenance-monster
-heartbeat_minutes: 10 # at most 10 while holding the baton
+heartbeat_minutes: 10 # the tick (mnt-tick.sh); each tick renews the baton
+pulse_max: 22m # optional; keepalive idle bound, default 2.25 x heartbeat_minutes, clamped as in merge-monster.md § 5
 stale_lock_minutes: 45 # continuous watchdog: own Monitor + heartbeat, mirrors MM
 phase: read_only # Phase 1: watch + triage + report; no auto-PRs (raise to auto_drive later)
 watch:

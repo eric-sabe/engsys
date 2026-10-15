@@ -16,7 +16,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// Low-risk bookkeeping only: liveness registry + watchdog, GitHub watch/snapshot, ledger heartbeat,
+// Low-risk bookkeeping only: liveness registry + watchdog, GitHub watch/snapshot, ledger heartbeat, the
+// single-call ticks (renew-if-due + snapshot delta + heartbeat-when-due, engsys#123),
 // the monsters' baton (mm-baton.sh / mnt-baton.sh: acquire, renew, fence, release and status of their
 // own lease; the fenced mutations, mm-act.sh / mnt-act.sh, stay behind a prompt), merge preflight, session-sync, the read-only approval verifier (gate-check.sh only reads GitHub; its
 // sibling gate-request.sh posts a comment, so it stays behind a prompt), and the read-only false-positive
@@ -29,6 +30,7 @@ export const ALLOWED = new Set([
   'merge-monster/scripts/mm-watch.sh',
   'merge-monster/scripts/mm-snapshot.sh',
   'merge-monster/scripts/mm-heartbeat.sh',
+  'merge-monster/scripts/mm-tick.sh',
   'merge-monster/scripts/mm-baton.sh',
   'merge-monster/scripts/mm-preflight.sh',
   'merge-monster/scripts/mm-session-sync.sh',
@@ -36,10 +38,12 @@ export const ALLOWED = new Set([
   'maintenance-monster/scripts/mnt-watch.sh',
   'maintenance-monster/scripts/mnt-snapshot.sh',
   'maintenance-monster/scripts/mnt-heartbeat.sh',
+  'maintenance-monster/scripts/mnt-tick.sh',
   'maintenance-monster/scripts/mnt-baton.sh',
   'maintenance-monster/scripts/mnt-fp-candidates.sh',
   'resource-broker/scripts/broker-watch.sh',
   'resource-broker/scripts/broker-heartbeat.sh',
+  'resource-broker/scripts/broker-tick.sh',
   'resource-broker/scripts/broker-reconcile.sh',
 ]);
 

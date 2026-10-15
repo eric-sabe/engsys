@@ -645,6 +645,36 @@ run_c --config "$CFG"
 run_c --config "$CFG" --json
 eq "PATCH calls made by every candidates run" "$(patches)" 0
 
+echo "seen-latch (engsys#124)"
+set_main "$A"
+clear_alerts
+LD="$T/latch-state"; rm -rf "$LD"
+page 1 "$(alert_json 1 open "$RULE" CodeQL "$A" src/sign.ts 12)"
+run_c --config "$CFG" --state-dir "$LD"
+eq "the first latched run prints the candidate" "$OUT" "CANDIDATE 1 $POLICY src/sign.ts:12 $A"
+[ -s "$LD/.watch/fp-seen.txt" ] && ok "  …and records it in .watch/fp-seen.txt" || bad "  …and records it in .watch/fp-seen.txt"
+run_c --config "$CFG" --state-dir "$LD"
+eq "the next run prints only the count" "$OUT" "SEEN 1 unchanged since the last run (latched; --all prints them)"
+rc_is "  …exit 0" 0
+run_c --config "$CFG" --state-dir "$LD" --all
+has "--all prints it again" "$OUT" "CANDIDATE 1 $POLICY src/sign.ts:12 $A"
+page 1 "$(alert_json 1 open "$RULE" CodeQL "$A" src/sign.ts 12)" "$(alert_json 2 open "$RULE" CodeQL "$B" src/sign.ts 20)"
+run_c --config "$CFG" --state-dir "$LD"
+has "a new record is printed" "$OUT" "TRIPWIRE_FAILED 2 $POLICY absent_regex#0 commit"
+hasnt "  …the seen one is not" "$OUT" "CANDIDATE 1 "
+has "  …it is counted" "$OUT" "SEEN 1 "
+clear_alerts
+page 1 "$(alert_json 2 open "$RULE" CodeQL "$B" src/sign.ts 20)"
+run_c --config "$CFG" --state-dir "$LD"
+clear_alerts
+page 1 "$(alert_json 1 open "$RULE" CodeQL "$A" src/sign.ts 12)" "$(alert_json 2 open "$RULE" CodeQL "$B" src/sign.ts 20)"
+run_c --config "$CFG" --state-dir "$LD"
+has "a record that left and came back prints again" "$OUT" "CANDIDATE 1 $POLICY src/sign.ts:12 $A"
+run_c --config "$CFG" --all
+rc_is "--all without --state-dir is a usage error" 2
+run_c --config "$CFG"
+has "no --state-dir: no latch, everything prints" "$OUT" "CANDIDATE 1 $POLICY src/sign.ts:12 $A"
+
 PASS="$(wc -l <"$T/pass.log" | tr -d ' ')" FAIL="$(wc -l <"$T/fail.log" | tr -d ' ')"
 echo
 echo "mnt-fp: $PASS passed, $FAIL failed"

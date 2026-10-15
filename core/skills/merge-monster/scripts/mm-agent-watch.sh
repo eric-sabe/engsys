@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # mm-agent-watch.sh — subagent liveness watchdog (docs/subagent-liveness.md
-# §3 Layer 2). Sibling of mm-watch.sh; runs under a persistent Monitor and emits
-# ONE LINE PER STATE CHANGE for rows in the spawn registry (agents.tsv, written
-# via mm-agent-reg.sh). The orchestrator's fallback tick re-arms this script if
-# it dies — the wake guarantee rests on the tick, not on this process.
+# §3 Layer 2). Emits ONE LINE PER STATE CHANGE for rows in the spawn registry
+# (agents.tsv, written via mm-agent-reg.sh). The monsters do not arm it as a
+# Monitor of its own: their watch buses (mm-watch.sh, mnt-watch.sh,
+# broker-watch.sh) run its scan with --once every cycle, and their ticks run it
+# once more as a backstop, so each monster keeps ONE Monitor (engsys#122). Any
+# other session may still run it under its own persistent Monitor.
 #
 # Events (all refer to the HIGHEST generation of a name with status=running):
 #   AGENT_OVERDUE <name> gen=<g> task=<ref>          deadline_epoch passed
@@ -24,8 +26,8 @@
 #
 # Usage: mm-agent-watch.sh --state-dir DIR [--interval 60] [--stale-min 10]
 #                          [--once] [--no-stale]
-#   --once runs a single scan and exits — used by the fallback tick as a
-#   synchronous backstop when the persistent Monitor may have died.
+#   --once runs a single scan and exits — what the watch buses run every cycle,
+#   and the ticks' synchronous backstop when the bus may have died.
 #   --no-stale disables AGENT_STALE emission entirely (arm with this when the
 #   config sets liveness.stale_probe: false — no point waking the orchestrator
 #   with events it is configured to ignore; OVERDUE still fires).

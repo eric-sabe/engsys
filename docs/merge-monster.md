@@ -56,8 +56,8 @@ GitHub is the bus and the durable store; local files are the working memory.
 │  persistent Monitor ──► mm-watch.sh: shell poll loop (~30s), diffs GitHub state,  │
 │      (event bus)        emits one line per EVENT → wakes the model instantly      │
 │                                                                                   │
-│  ScheduleWakeup ──► heartbeat tick (~30 min): refresh baton, rewrite state.md,    │
-│    (fallback)       Dependabot idle work, self-heal if the Monitor died           │
+│  ScheduleWakeup ──► mm-tick.sh, one call: renew if due, snapshot delta, agent     │
+│    (fallback)       scan, heartbeat if due → NOOP, or the delta to act on         │
 │                                                                                   │
 │  model loop ──► on each wake: rebuild queue, decide, act (label / rebase-agent /  │
 │                 mark-ready / merge / fix-agent / escalate), log, sleep            │
@@ -78,15 +78,27 @@ Events emitted by `mm-watch.sh` (one line each):
 |---|---|
 | `READY #N <title>` | a PR gained the ready label — new enqueue |
 | `UNREADY #N` | ready label removed (session withdrew it) |
-| `CHECK #N <name>: <state>` | a required/watched check on the **active** PR reached a terminal state |
+| `CHECK_FAIL #N <name>: <conclusion>` | a check on the **active** PR ended in a non-success; once per (check, conclusion) per head. Successes are silent |
+| `CHECKS_READY #N head=<sha> state=<mss> pending=<n>` | once per (PR, head sha), latched in `.watch/ready.<pr>.<sha>`: the active PR is `CLEAN` / `HAS_HOOKS` / `UNSTABLE`, or no check is pending |
 | `CONFLICT #N` | a queued PR's `mergeStateStatus` turned `DIRTY` |
-| `DEPENDABOT #N <title>` | new Dependabot PR opened |
+| `DEPENDABOT #N <title>` | new Dependabot PR opened (not polled when `dependabot.auto_merge` is empty: `--no-dependabot` is on by itself) |
 | `MAIN_RED <workflow>` | newest non-scheduled default-branch run concluded failure (merge-gating only; each failing run fires once) |
 | `STOP` | the ledger issue was closed (kill switch) |
+| `AGENT_OVERDUE` / `AGENT_STALE` | the subagent watchdog's scan (`mm-agent-watch.sh --once`), run by the bus every cycle |
 
 The script reads the currently active PR number from a state file
 (`<state-dir>/active`) so one persistent Monitor serves the whole session even
 as the in-flight PR changes.
+
+**Coalesced events** (engsys#124). A check that passes wakes nobody; the
+model wakes once for each failure and once when the PR's head is ready to
+decide on, instead of once per check.
+
+**One watcher per monster** (engsys#122). The bus also runs the subagent
+watchdog's scan, so a monster arms exactly one Monitor. A Monitor ends at its
+30-minute timeout; a clean expiry (no event lines) costs exactly one tool call,
+the re-arm, with no snapshot, heartbeat or `state.md` write. An exit-on-event
+watcher was rejected: it goes deaf the first time the model forgets to re-arm.
 
 ## 4. Communication protocol — GitHub is the bus
 
@@ -164,10 +176,39 @@ review):
   in-flight act has finished or failed.
 - **Renew.** TTL 10 minutes. `mm-watch.sh` renews every 2.5 minutes in the
   background; `mm-heartbeat.sh --state-dir` renews on every heartbeat and
-  writes the heartbeat only while MM holds the lease. MM ticks at most every
-  10 minutes while holding. The background renewer stops when its session
-  process (claude) is gone, or when the model has not touched the baton for
-  20 minutes, so a live watch bus never keeps a dead or wedged session's role.
+  writes the heartbeat only while MM holds the lease. Each tick
+  (`mm-tick.sh`, every `heartbeat_minutes`) renews when due, which is the
+  model's pulse. The background renewer stops when its session process
+  (claude) is gone, or when the model has not touched the baton for
+  `pulse_max` (default 2.25 × `heartbeat_minutes`), so a live watch bus never
+  keeps a dead or wedged session's role.
+- **Lease before heartbeat.** The lease must lapse before the heartbeat reads
+  stale, or a human who merges by hand on a stale heartbeat races a monster
+  still holding a live lease. Only the tick's and the heartbeat's renew
+  (`renew --pulse`) record the model's pulse; a fence (every `mm-act.sh`
+  act) and a bare `mm-baton.sh renew` do not, since a fenced act between
+  ticks comes with a heartbeat up to 1.75 × `heartbeat_minutes` old. So the
+  last pulse comes with a heartbeat at most 0.75 × `heartbeat_minutes` old,
+  and the lease outlives the pulse by at most `pulse_max` + 10 minutes, so:
+  `heartbeat_minutes + 2 < pulse_max ≤ stale_lock_minutes − 11 − 0.75 × heartbeat_minutes`,
+  which needs `stale_lock_minutes ≥ 1.75 × heartbeat_minutes + 13`. The bus
+  clamps `pulse_max` into that window from `--config` and prints a
+  `CONFIG_WARNING` line when it clamps or the window is empty. Example:
+  `heartbeat_minutes: 20` needs `stale_lock_minutes` ≥ 48; with 55 the default
+  `pulse_max` is 29m. The fleet supervisor's stale threshold for the session
+  should equal `stale_lock_minutes`.
+- **Ticks** (engsys#123). A tick is one call: `mm-tick.sh` renews when due,
+  compares the open-PR snapshot's SHA-256 with the last one, runs the subagent
+  backstop scan, writes the heartbeat only when one is due (none in the last
+  0.75 × `heartbeat_minutes`), and prints `NOOP` or the delta (`+`/`-` lines).
+  A `NOOP` tick writes no `state.md` and no journal line.
+- **Context-aware rotation** (engsys#125). A SessionStart hook records each
+  fleet-launched session's transcript path (under
+  `$XDG_STATE_HOME/engsys/sessions/`). Each heartbeat reads the last
+  main-thread usage from the transcript's last 64 KB; past
+  `rotate_context_tokens` (default 300000) with nothing active it writes the
+  sticky status `rotation requested — ctx <N>k`, which the fleet supervisor
+  already acts on. It is a backstop under the model's own rotation rule.
 - **Fence.** Every write to GitHub goes through `mm-act.sh`: it checks the
   lease has at least 60 s left by GitHub's clock, that the local deadline
   (`Date.now()` at the start of the last good renew or check, plus the time it
@@ -337,9 +378,21 @@ Three surfaces, one per audience:
 
 | Surface | Audience | Content |
 |---|---|---|
-| `<state-dir>/state.md` | "what's happening right now" | current queue table (position, PR, state, one-line reason), active PR, last events — rewritten every cycle |
+| `<state-dir>/state.md` | "what's happening right now" | an overwrite-only snapshot, ≤4096 bytes and ≤60 lines, rewritten whole with Write on every wake that saw a change: header (config, skill, baton, heartbeat), active PR, queue ≤10, holds ≤5, operator carry-forwards ≤5, last 5 decisions as one-line journal pointers. Schema: SKILL.md § state.md |
 | `<state-dir>/journal-YYYY-MM.md` + `.jsonl` | post-hoc review, tooling | append-only: every ordering decision with reasoning, merges, rebases, fix agents, escalations, Dependabot actions |
 | the pinned ledger issue | anyone, anywhere | heartbeat, session start/end digests, escalation pings |
+
+`state.md` is never a log: history goes to the journal. The singleton-write
+guard holds it to the schema: a Write that would leave it over 4096 bytes is
+denied, an Edit that leaves it over gets feedback, and the state dir is known by
+its baton files (`baton-<role>.json`, `.notice`, `.lost`, `.events`), `.watch/`
+or a monthly journal. A pre-schema `state.md` (an append log) is archived
+verbatim to `journal-YYYY-MM.md` under `## state.md archive (pre-schema, <date>)`
+before its first rewrite (SKILL.md); as a backstop the guard copies any
+over-limit `state.md` to `state.md.pre-schema-<stamp>` before a Write or Edit
+changes it (engsys#134). Bash appends are not guarded: the next wake's whole
+Write bounds the file, and a lexical guard over shell writes could not be
+complete.
 
 `<state-dir>` defaults to `logs/merge-monster/` (gitignored in most setups).
 Per-PR reasoning lives on the PR itself. The journal's `.jsonl` twin is the
@@ -348,8 +401,9 @@ substrate for the v2 metrics dashboard.
 ## 11. Configuration
 
 One YAML per repo — `.claude/merge-monster.yml` — read by the model at session
-start. Scripts take everything as flags/env so nothing shells out to parse
-YAML. Reference (see `config.example.yml` in the skill for the annotated
+start. Scripts take everything as flags/env; the bus and the tick, given
+`--config`, read only the few keys they name (`pulse_max`, `heartbeat_minutes`,
+`stale_lock_minutes`, `dependabot.auto_merge`, `rotate_context_tokens`). Reference (see `config.example.yml` in the skill for the annotated
 version):
 
 ```yaml
@@ -358,13 +412,15 @@ default_branch: main
 ledger_issue: 0              # written by mm-setup.sh
 state_dir: logs/merge-monster
 poll_interval: 30            # seconds, watch-script cadence
-heartbeat_minutes: 10        # ScheduleWakeup fallback tick; at most 10 while holding the baton
+heartbeat_minutes: 10        # ScheduleWakeup fallback tick (mm-tick.sh); each tick renews the baton
+pulse_max: 22m               # optional; keepalive idle bound, default 2.25 x heartbeat_minutes, clamped (§ 5)
 stale_lock_minutes: 45       # baton freshness contract
+rotate_context_tokens: 300000 # heartbeat asks for rotation past this context size with nothing active (0 = off)
 merge_method:
   multi_commit: merge        # preserve per-issue commits in batches
   single_commit: squash
 ready_requirements:
-  review_marker: ""          # e.g. "<!-- cr-cli-findings -->" — evidence comment MM requires
+  review_marker: ""          # e.g. "<!-- review-findings -->" — evidence comment MM requires
 conflict_magnets: []         # globs whose PRs merge early (churn minimization)
 migration_globs: []          # globs marking migration-bearing PRs (operator window)
 local_gate: ""               # full local validation command (Dependabot gate)

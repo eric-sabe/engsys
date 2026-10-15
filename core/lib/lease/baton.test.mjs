@@ -1387,3 +1387,51 @@ test("#92 NF2: with no trusted git the guarded push is refused before anything i
   assert.match(NO_TRUSTED_GIT, /Command Line Tools/);
   assert.equal(calls.length, 0);
 });
+
+// ------------------------------------------------- engsys#137 review W1: only tick/heartbeat renews pulse --
+
+test("W1: a fence and a bare renew record no model pulse; renew with pulse does", async () => {
+  const w = world();
+  const s = session(w);
+  await s.baton.startup();
+  const pulseOf = () => JSON.parse(readFileSync(join(s.stateDir, "baton-merge.json"), "utf8")).pulseMs;
+  const p0 = pulseOf();
+  assert.ok(p0, "startup pulses (its heartbeat follows at once)");
+  w.advance(5 * MIN);
+  assert.equal((await s.baton.fence()).exit, EXIT.OK);
+  assert.equal(pulseOf(), p0, "a fence (every mm-act guard and merge) does not pulse: it writes no heartbeat");
+  w.advance(1 * MIN);
+  assert.equal((await s.baton.renew({ source: "model", pulse: false })).exit, EXIT.OK);
+  assert.equal(pulseOf(), p0, "a bare renew does not pulse");
+  w.advance(1 * MIN);
+  assert.equal((await s.baton.renew({ source: "model", pulse: true })).exit, EXIT.OK);
+  assert.equal(pulseOf(), w.local.t, "the tick's and the heartbeat's renew (--pulse) does");
+});
+
+test("W1 worked case (hb 20, stale 55, pulse_max 29m): a fenced merge at 34m cannot keep the lease past the stale heartbeat", async () => {
+  const w = world();
+  const s = session(w);
+  await s.baton.startup(); // t=0: pulse and the session-start heartbeat (H=0)
+  const t0 = w.local.t;
+  const at = () => (w.local.t - t0) / MIN;
+  const HB_STALE_AT = 55;
+  const PULSE_MAX = 29 * MIN;
+  let lastRenew = 0;
+  const lines = [];
+  // the keepalive cycle (each one also sleeps its 2.5 min on this world's clock)
+  const cycle = async () => {
+    const before = w.api.state.log.length;
+    const t = at();
+    await s.baton.keepalive({ out: (l) => lines.push(l), parentAlive: () => true, pulseMaxMs: PULSE_MAX, maxCycles: 1 });
+    if (w.api.state.log.length > before) lastRenew = t;
+    if (at() === t) w.advance(2.5 * MIN); // an idle keepalive sleeps nothing: the bus asks again next poll
+  };
+  while (at() < 34) await cycle();
+  assert.equal((await s.baton.fence()).exit, EXIT.OK, "a fenced merge at ~34m");
+  const fencedAt = at();
+  while (at() < 80) await cycle();
+  assert.ok(fencedAt >= 34, `fenced at ${fencedAt}m`);
+  assert.ok(lastRenew <= 29, `the keepalive's last renew is at ${lastRenew}m, within pulse_max of the last pulse (0m)`);
+  assert.ok(lastRenew + 10 < HB_STALE_AT, `the lease lapses by ${lastRenew + 10}m, before the heartbeat reads stale at ${HB_STALE_AT}m`);
+  assert.ok(lines.some((l) => /^BATON_IDLE merge/.test(l)), "the keepalive says it stopped");
+});

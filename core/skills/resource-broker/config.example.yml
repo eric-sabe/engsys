@@ -19,6 +19,7 @@ state_dir: logs/resource-broker # working memory: state.md, journal, .watch/ (ke
 poll_interval: 30 # seconds: the active-reap tick of broker-watch.sh [script]
 heartbeat_minutes: 30 # ScheduleWakeup fallback tick
 stale_lock_minutes: 60 # mirrors the fleet supervisor conf's threshold for this session
+rotate_context_tokens: 300000 # heartbeat asks for rotation past this context size with nothing active (0 = off) [script]
 
 # The pool this broker arbitrates. The pool file is durable-lease's JSON format (slot table, provision /
 # reset / health commands, grantEnv ...): see the durable-lease skill. acme-pool.json next to this

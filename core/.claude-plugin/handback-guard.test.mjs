@@ -98,3 +98,46 @@ test('hook I/O: exit 2 + stderr reason on block; exit 0 + silence on allow; fail
   const garbage = run('stop', 'not json');
   assert.equal(garbage.status, 0);
 });
+
+// ---------------------------------------------------------------------------------- engsys#126 --
+
+test('block B: an engsys persona that ends on a conclusive verdict needs no status line', () => {
+  for (const m of ['Re-ran the gate.\nVERDICT: CLEAN', '**VERDICT:** FINDINGS — 2 warnings, see above', '`VERDICT: PASS`', 'VERDICT: APPROVE']) {
+    assert.equal(subagentDecision({ last_assistant_message: m, agent_type: 'engsys:nyx' }), null, m);
+  }
+  assert.match(subagentDecision({ last_assistant_message: 'Looked at it.\nVERDICT: PENDING', agent_type: 'engsys:nyx' }), /status line/, 'an inconclusive verdict is no completion');
+  assert.match(subagentDecision({ last_assistant_message: 'The verdict: clean.', agent_type: 'engsys:nyx' }), /status line/, 'prose is not a verdict line');
+  assert.match(subagentDecision({ last_assistant_message: 'Verdict: needs work', agent_type: 'engsys:nyx' }), /status line/, 'lower-case words are not the conclusive vocabulary');
+  assert.match(subagentDecision({ last_assistant_message: 'VERDICT: MAYBE', agent_type: 'engsys:nyx' }), /status line/, 'nor is any other capitalised word');
+  assert.match(subagentDecision({ last_assistant_message: 'VERDICT: CLEAN\n\nThen I went on:\na\nb\nc\nd\ne', agent_type: 'engsys:nyx' }), /status line/, 'only the last five lines count');
+  for (const m of ['Verdict: REQUIRED CHANGES', 'VERDICT: CHANGES REQUESTED — see 3 findings', 'VERDICT: BLOCK']) {
+    assert.equal(subagentDecision({ last_assistant_message: m, agent_type: 'engsys:nyx' }), null, m);
+  }
+  assert.match(subagentDecision({ last_assistant_message: 'Review is still running; will finish once it lands.\nVERDICT: CLEAN', agent_type: 'engsys:nyx' }), /never woken again/,
+    'a verdict never hides pending work (block A still applies)');
+});
+
+test('block C: a singleton monster session is never blocked at Stop; any other session still is', () => {
+  const sid = 'sess-monster';
+  recordHandback({ session_id: sid, agent_id: 'm1', agent_type: 'engsys:isabelle', last_assistant_message: 'STATUS: INCOMPLETE — push pending' });
+  for (const role of ['merge', 'maintain']) assert.equal(stopDecision({ session_id: sid }, { ENGSYS_SINGLETON_ROLE: role }), null, role);
+  assert.match(stopDecision({ session_id: sid }, {}), /1 subagent\(s\) handed back INCOMPLETE/, 'unsurfaced, so a non-monster session still hears about it');
+  recordHandback({ session_id: 'sess-monster-2', agent_id: 'm2', last_assistant_message: 'STATUS: INCOMPLETE — review pending' });
+  const run = spawnSync(process.execPath, [HOOK, 'stop'], { input: JSON.stringify({ session_id: 'sess-monster-2' }), env: { ...process.env, ENGSYS_HANDBACK_DIR: DIR, ENGSYS_SINGLETON_ROLE: 'merge' }, encoding: 'utf8' });
+  assert.equal(run.status, 0);
+  assert.equal(run.stderr, '');
+});
+
+test('block C net for monsters: an INCOMPLETE hand-back in a fleet session is logged for the bus to relay', async () => {
+  const sdir = fs.mkdtempSync(path.join(os.tmpdir(), 'engsys-hb-sess-'));
+  const env = { ENGSYS_SESSION: 'acme-mm', ENGSYS_SESSION_RUN: 'r7', ENGSYS_SINGLETON_ROLE: 'merge', ENGSYS_SESSIONS_DIR: sdir };
+  recordHandback({ session_id: 'sess-net', agent_id: 'n1', agent_type: 'engsys:isabelle', last_assistant_message: 'STATUS: INCOMPLETE — push\u0007 pending' }, env);
+  recordHandback({ session_id: 'sess-net', agent_id: 'n2', agent_type: 'engsys:isabelle', last_assistant_message: 'Done.\nSTATUS: COMPLETE' }, env);
+  const lines = fs.readFileSync(path.join(sdir, 'acme-mm.handbacks.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  assert.equal(lines.length, 1, 'only the INCOMPLETE one');
+  assert.equal(lines[0].run, 'r7');
+  assert.equal(lines[0].agent_id, 'n1');
+  assert.equal(lines[0].remains, 'push  pending', 'control characters are stripped');
+  recordHandback({ session_id: 'sess-net2', agent_id: 'n3', last_assistant_message: 'STATUS: INCOMPLETE — x' }, { ENGSYS_SESSIONS_DIR: sdir });
+  assert.deepEqual(fs.readdirSync(sdir), ['acme-mm.handbacks.jsonl'], 'nothing logged outside a fleet session');
+});

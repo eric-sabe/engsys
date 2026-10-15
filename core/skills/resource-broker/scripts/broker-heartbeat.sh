@@ -8,7 +8,14 @@
 # whether the session is fresh, asked to rotate ("rotation requested") or ended ("session end").
 #
 # Usage: broker-heartbeat.sh [--repo owner/name] [--issue N] [--status "text"]
-#                            [--config FILE | --config-dir DIR]
+#                            [--config FILE | --config-dir DIR] [--state-dir DIR]
+#                            [--rotate-context-tokens 300000] [--transcript PATH]
+# --state-dir (default: the config's state_dir) is where the heartbeat records its time for broker-tick.sh.
+# --rotate-context-tokens (default: the config's rotate_context_tokens, else 300000; 0 = off): context-aware
+# rotation (engsys#125). When the session's last main-thread usage (from the last 64 KB of the transcript the
+# SessionStart hook recorded for ENGSYS_SESSION; --transcript wins) is over it and nothing is active (no
+# <state-dir>/active, no running subagent), the status becomes `rotation requested — ctx <N>k`, sticky for
+# that transcript, and a ROTATION_REQUESTED line says what to do.
 # --repo / --issue default to `repo` / `ledger_issue` of resource-broker.yml, or in multi-fleet mode to
 # the fleet's status issue (broker-config.sh). The status issue also carries other writers' blocks (the
 # supervisor's `<!-- fleet-heartbeat -->`), so this rewrites only its own block, then reads the body back
@@ -23,9 +30,11 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=broker-config.sh
 . "$here/broker-config.sh"
+# shellcheck source=../../../lib/monster.sh
+. "$here/../../../lib/monster.sh"
 
-REPO="" ISSUE="" STATUS="running" CONFIG="" CONFIG_DIR=""
-usage() { echo "usage: broker-heartbeat.sh [--repo owner/name] [--issue N] [--status text] [--config FILE | --config-dir DIR]" >&2; exit 2; }
+REPO="" ISSUE="" STATUS="running" CONFIG="" CONFIG_DIR="" STATE_DIR="" ROTATE="" TRANSCRIPT=""
+usage() { echo "usage: broker-heartbeat.sh [--repo owner/name] [--issue N] [--status text] [--config FILE | --config-dir DIR] [--state-dir DIR] [--rotate-context-tokens N] [--transcript PATH]" >&2; exit 2; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) [ $# -ge 2 ] || usage; REPO="$2"; shift 2 ;;
@@ -33,14 +42,25 @@ while [ $# -gt 0 ]; do
     --status) [ $# -ge 2 ] || usage; STATUS="$2"; shift 2 ;;
     --config) [ $# -ge 2 ] || usage; CONFIG="$2"; shift 2 ;;
     --config-dir) [ $# -ge 2 ] || usage; CONFIG_DIR="$2"; shift 2 ;;
+    --state-dir) [ $# -ge 2 ] || usage; STATE_DIR="$2"; shift 2 ;;
+    --rotate-context-tokens) [ $# -ge 2 ] || usage; ROTATE="$2"; shift 2 ;;
+    --transcript) [ $# -ge 2 ] || usage; TRANSCRIPT="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; usage ;;
   esac
 done
 broker_find_config "$CONFIG" "$CONFIG_DIR" || exit 1
 broker_fill_ledger REPO ISSUE || exit 1
+broker_fill_var STATE_DIR state_dir
+broker_fill_var ROTATE rotate_context_tokens
 { [ -n "$REPO" ] && [ -n "$ISSUE" ] && [ "$ISSUE" != 0 ]; } || { echo "broker-heartbeat: need --repo and --issue (or a resource-broker.yml with repo and a real ledger_issue)" >&2; exit 2; }
 
 command -v gh >/dev/null || { echo "gh not found" >&2; exit 1; }
+
+MONSTER_ROTATION=0
+if [ -n "$STATE_DIR" ]; then
+  monster_rotation_status "$STATE_DIR" "$STATUS" "$ROTATE" "$TRANSCRIPT"
+  STATUS="$MONSTER_STATUS"
+fi
 
 NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 TMP=$(mktemp)
@@ -80,4 +100,8 @@ while :; do
   echo "heartbeat: lost to a concurrent edit of $REPO#$ISSUE, retrying" >&2
   sleep "${BROKER_HEARTBEAT_RETRY_SECS:-2}"
 done
+[ -z "$STATE_DIR" ] || monster_heartbeat_mark "$STATE_DIR" # broker-tick.sh writes the next one only when due
 echo "heartbeat: $NOW ($STATUS)"
+if [ "$MONSTER_ROTATION" = 1 ]; then
+  echo "ROTATION_REQUESTED broker ($STATUS) with nothing active: post the session-end digest and stop; the fleet supervisor relaunches the session"
+fi

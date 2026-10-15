@@ -9,14 +9,18 @@
 # boundary: this loop only ACTUATES (reap dead leases, relay grant nudges). It never decides
 # environment health or what a failure means.
 #
+# Slot transitions never wake the model (engsys#124): they are journaled here, in bash, to
+# <state-dir>/journal-YYYY-MM.{md,jsonl}, with running totals in <state-dir>/.watch/slot-counters.json
+# (the tick's occupancy delta carries them):
+#   slot_reaped <slot> <prev-owner>   the pump's dead-man's switch freed a slot
+#   slot_granted <slot> <holder>      a slot went free/queued -> held (the grant happened in the lessee's
+#                                     own process)
+#   slot_released <slot>              a held slot went to free/queued
+#
 # Events:
-#   SLOT_REAPED <slot> <prev-owner>   the pump's dead-man's switch freed a slot
 #   QUEUE_DROPPED <n>                 the pump dropped N silent (dead-waiter) queue entries
 #   WAITER_QUEUED <session> <mode> <position>
 #                                     a session joined the queue because the pool is saturated
-#   SLOT_GRANTED <slot> <holder>      a slot went free/queued -> held (visibility only: the grant
-#                                     itself happened in the lessee's own process)
-#   SLOT_RELEASED <slot>              a held slot went to free/queued
 #   NUDGE <session> <json>            a queued async-grant nudge to relay to <session> with
 #                                     SendMessage. The JSON is {event, session, request_id, slot_id}
 #                                     only: the fencing token and the grant env never leave the store
@@ -24,6 +28,12 @@
 #                                     blind until PUMP_OK; reconcile before trusting any picture
 #   PUMP_OK                           the pump recovered
 #   STOP                              ledger issue closed (kill switch); the script exits
+#   HANDBACK_INCOMPLETE <agent> (<id>): <remains>
+#                                    a subagent handed back unfinished work (the engsys hand-back hook's log
+#                                    for this session and launch; engsys#126 review)
+#   AGENT_OVERDUE / AGENT_STALE …     the subagent watchdog (merge-monster's mm-agent-watch.sh --once, run
+#                                     every tick while <state-dir>/agents.tsv exists): one bus per monster
+#                                     (engsys#122)
 #
 # --once runs a single tick and exits (the synchronous backstop for the fallback tick, and the test
 # hook). State lives under <state-dir>/.watch: the last slot picture and a nudge cursor, so a restart
@@ -33,6 +43,9 @@
 # Usage: broker-watch.sh [--repo owner/name] [--state-dir DIR] [--interval 30] [--ledger N]
 #                        [--owner OWNER] [--pool FILE] [--store DIR] [--owner-pattern REGEX]
 #                        [--config FILE | --config-dir DIR] [--once]
+#                        [--stale-min 10] [--no-stale] [--no-agents]
+# --stale-min / --no-stale go to the subagent scan (liveness.stale_minutes / stale_probe: false);
+# --no-agents skips it (a no-op anyway without a spawn registry).
 # Every value defaults to resource-broker.yml (repo, state_dir, poll_interval, ledger_issue,
 # lease.owner, lease.pool_file, lease.store, lease.owner_pattern). In multi-fleet mode the ledger is the
 # fleet's status issue and the owner and fence are fleet-qualified (broker-config.sh).
@@ -45,9 +58,12 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=broker-config.sh
 . "$here/broker-config.sh"
+# shellcheck source=../../../lib/monster.sh
+. "$here/../../../lib/monster.sh"
 
 REPO="" DIR="" INTERVAL="" LEDGER="" OWNER="" POOL_FILE="" STORE="" OWNER_PATTERN="" CONFIG="" CONFIG_DIR="" ONCE=0
-usage() { echo "usage: broker-watch.sh [--repo owner/name] [--state-dir DIR] [--interval N] [--ledger N] [--owner OWNER] [--pool FILE] [--store DIR] [--config FILE | --config-dir DIR] [--once]" >&2; exit 2; }
+STALE_MIN=10 NOSTALE="" AGENTS=1
+usage() { echo "usage: broker-watch.sh [--repo owner/name] [--state-dir DIR] [--interval N] [--ledger N] [--owner OWNER] [--pool FILE] [--store DIR] [--config FILE | --config-dir DIR] [--once] [--stale-min N] [--no-stale] [--no-agents]" >&2; exit 2; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) [ $# -ge 2 ] || usage; REPO="$2"; shift 2 ;;
@@ -61,6 +77,9 @@ while [ $# -gt 0 ]; do
     --config) [ $# -ge 2 ] || usage; CONFIG="$2"; shift 2 ;;
     --config-dir) [ $# -ge 2 ] || usage; CONFIG_DIR="$2"; shift 2 ;;
     --once) ONCE=1; shift ;;
+    --stale-min) [ $# -ge 2 ] || usage; STALE_MIN="$2"; shift 2 ;;
+    --no-stale) NOSTALE=1; shift ;;
+    --no-agents) AGENTS=0; shift ;;
     *) echo "unknown arg: $1" >&2; usage ;;
   esac
 done
@@ -96,6 +115,28 @@ mkdir -p "$W"
 [ -s "$W/slots.json" ] || echo '[]' >"$W/slots.json"
 PUMP_BAD=0
 POOL_DIR=""
+monster_handback_prune "$DIR" # drop earlier launches' hand-back lines (engsys#137 review)
+
+# slot_journal <event> <slot> [who]: one line in each monthly journal, and the running counters.
+slot_journal() {
+  local ev="$1" slot="$2" who="${3:-}" ts month c
+  ts=$(date -u +%Y-%m-%dT%H:%M:%SZ); month=$(date -u +%Y-%m)
+  jq -cn --arg ts "$ts" --arg ev "$ev" --arg slot "$slot" --arg who "$who" \
+    '{ts: $ts, event: $ev, slot: $slot} + (if $who == "" then {} else {who: $who} end) + {by: "broker-watch"}' \
+    >>"$DIR/journal-$month.jsonl"
+  printf -- '- %s %s slot %s%s (broker-watch)\n' "$ts" "$ev" "$slot" "${who:+ $who}" >>"$DIR/journal-$month.md"
+  c="$W/slot-counters.json"
+  [ -s "$c" ] || echo '{}' >"$c"
+  jq -c --arg ev "$ev" '.[$ev] = ((.[$ev] // 0) + 1)' "$c" >"$c.tmp" 2>/dev/null && mv "$c.tmp" "$c"
+}
+
+# The subagent watchdog's scan, once per tick, so the broker keeps ONE Monitor (engsys#122). Its latches
+# and lock live in <state-dir>/.watch, shared with a fallback tick's backstop scan.
+AGENT_WATCH="$here/../../merge-monster/scripts/mm-agent-watch.sh"
+agents_event() {
+  [ "$AGENTS" = 1 ] && [ -f "$DIR/agents.tsv" ] || return 0
+  bash "$AGENT_WATCH" --state-dir "$DIR" --once --stale-min "$STALE_MIN" ${NOSTALE:+--no-stale} 2>>"$W/agent-watch.err" || true
+}
 
 tick() {
   # Kill switch: ledger issue closed.
@@ -104,6 +145,8 @@ tick() {
     echo "STOP"
     return 1
   fi
+  agents_event
+  monster_handback_events "$DIR" # INCOMPLETE hand-backs (engsys#126 review)
 
   # Active reaping pass (dead-man's-switch sweep + stale-queue-entry drop).
   PUMP_ERR=$(mktemp)
@@ -122,7 +165,7 @@ tick() {
   jq -c '.reapedSlots // [] | .[]' <<<"$PUMP" 2>/dev/null | while IFS= read -r reaped; do
     id=$(jq -r '.slot_id' <<<"$reaped")
     prev=$(jq -r '.previousOwner // "unknown"' <<<"$reaped")
-    echo "SLOT_REAPED $id $prev"
+    slot_journal slot_reaped "$id" "$prev"
   done
 
   DROPPED=$(jq -r '.droppedEntries // 0 | if type == "array" then length else . end' <<<"$PUMP" 2>/dev/null || echo 0)
@@ -140,9 +183,9 @@ tick() {
       holder=$(jq -r '.holder // "none"' <<<"$slot")
       prev_state=$(jq -r --arg id "$id" '[.[] | select((.slot_id | tostring) == $id) | .state] | first // "unknown"' <<<"$OLD_SLOTS" 2>/dev/null)
       if [ "$state" = "held" ] && [ "$prev_state" != "held" ]; then
-        echo "SLOT_GRANTED $id $holder"
+        slot_journal slot_granted "$id" "$holder"
       elif [ "$state" != "held" ] && [ "$prev_state" = "held" ]; then
-        echo "SLOT_RELEASED $id"
+        slot_journal slot_released "$id"
       fi
     done
     echo "$NEW_SLOTS" >"$W/slots.json"

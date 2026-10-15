@@ -3,7 +3,7 @@
 // policies for the Maintenance Monster). Zero dependencies, ESM, Node >= 20.
 //
 //   node mnt-fp.mjs candidates --repo owner/name --config FILE [--policy ID] [--json]
-//                              [--repo-dir DIR] [--default-branch NAME]
+//                              [--repo-dir DIR] [--default-branch NAME] [--state-dir DIR [--all]]
 //   node mnt-fp.mjs dismiss    --repo owner/name --config FILE --alert N --policy ID
 //                              --shape TEXT --evidence TEXT [--state-dir DIR] [--repo-dir DIR]
 //                              [--default-branch NAME] [--no-baton]
@@ -886,8 +886,11 @@ function cmdCandidates(argv) {
   const o = parseArgs(argv, {
     '--repo': { key: 'repo' }, '--config': { key: 'config' }, '--policy': { key: 'policy' }, '--json': { key: 'json', flag: true },
     '--repo-dir': { key: 'repoDir' }, '--default-branch': { key: 'defaultBranch' }, '--prs': { key: 'prs' },
+    '--state-dir': { key: 'stateDir' }, '--all': { key: 'all', flag: true },
   });
   checkCommon(o);
+  if (o.all && !o.stateDir) throw new UsageError('--all only applies with --state-dir (the seen-latch)');
+  const latch = o.stateDir ? { file: path.join(o.stateDir, '.watch', 'fp-seen.txt'), all: Boolean(o.all) } : null;
   o.prs = o.prs ?? 'all';
   if (!PRS_RE.test(o.prs)) throw new UsageError('--prs must be all, none, or a comma-separated list of PR numbers');
   const records = [];
@@ -896,7 +899,7 @@ function cmdCandidates(argv) {
     cfg = loadConfig(o.config);
   } catch (e) {
     records.push(errRec(null, e.message));
-    return finish(records, o.json);
+    return finish(records, o.json, latch);
   }
   let selected = cfg.policies;
   if (o.policy) {
@@ -908,7 +911,7 @@ function cmdCandidates(argv) {
     if (r.ok) valid.push(r.policy);
     else records.push(errRec(r.label, `invalid policy, no candidates: ${r.errors.join('; ')}`));
   }
-  if (valid.length === 0) return finish(records, o.json);
+  if (valid.length === 0) return finish(records, o.json, latch);
 
   const ctx = makeCtx({ repoDir: o.repoDir || '.', repo: o.repo, defaultBranch: o.defaultBranch || cfg.defaultBranch });
 
@@ -927,7 +930,7 @@ function cmdCandidates(argv) {
   } catch (e) {
     // Affects every alert: fail every policy closed.
     for (const p of valid) records.push(errRec(p.id, `cannot list the default branch's alerts: ${e.message}`));
-    return finish(records, o.json);
+    return finish(records, o.json, latch);
   }
   let prs = [];
   if (o.prs === 'all') {
@@ -966,13 +969,60 @@ function cmdCandidates(argv) {
     }
     records.push(...(wide ? polRecs.filter((r) => r.status !== 'CANDIDATE') : polRecs));
   }
-  return finish(records, o.json);
+  return finish(records, o.json, latch);
 }
 
-function finish(records, asJson) {
-  if (asJson) process.stdout.write(JSON.stringify(records, null, 2) + '\n');
-  else for (const l of textLines(records)) process.stdout.write(l + '\n');
-  return records.some((r) => r.status === 'ERROR') ? 1 : 0;
+function finish(records, asJson, latch = null) {
+  const exit = records.some((r) => r.status === 'ERROR') ? 1 : 0;
+  let shown = records;
+  let seenCount = 0;
+  if (latch) {
+    const r = applySeenLatch(records, latch);
+    shown = r.shown;
+    seenCount = r.seenCount;
+  }
+  if (asJson) process.stdout.write(JSON.stringify(shown, null, 2) + '\n');
+  else {
+    for (const l of textLines(shown)) process.stdout.write(l + '\n');
+    if (seenCount) process.stdout.write(`SEEN ${seenCount} unchanged since the last run (latched; --all prints them)\n`);
+  }
+  return exit;
+}
+
+/**
+ * The seen-latch (engsys#124). The Maintenance Monster runs `candidates` on every tick, and an alert it
+ * already judged (and left open, or is waiting on) came back every time, costing a fresh read of the code.
+ * With --state-dir, a CANDIDATE / TRIPWIRE_FAILED / OUT_OF_SCOPE record is printed only the first time it
+ * appears; the latch file then holds exactly the records of THIS run, so a record that goes away (dismissed,
+ * fixed) and later returns is printed again. A run with any ERROR keeps the prior keys too, so a transient
+ * listing failure does not make every judged alert print again. ERROR is never latched. --all
+ * prints everything and still refreshes the latch. A latch that cannot be read counts as empty; one that
+ * cannot be written is reported as an ERROR line, never silently.
+ */
+function applySeenLatch(records, latch) {
+  const keyOf = (r) => textLines([r]).join('\n');
+  let seen = new Set();
+  try { seen = new Set(fs.readFileSync(latch.file, 'utf8').split('\n\u0000\n').filter(Boolean)); } catch { /* first run */ }
+  const now = [];
+  const shown = [];
+  let seenCount = 0;
+  for (const r of records) {
+    if (r.status === 'ERROR') { shown.push(r); continue; }
+    const k = keyOf(r);
+    now.push(k);
+    if (seen.has(k) && !latch.all) seenCount++;
+    else shown.push(r);
+  }
+  try {
+    fs.mkdirSync(path.dirname(latch.file), { recursive: true });
+    const tmp = `${latch.file}.${process.pid}.tmp`;
+    const keep = records.some((r) => r.status === 'ERROR') ? [...new Set([...now, ...seen])] : now;
+    fs.writeFileSync(tmp, keep.join('\n\u0000\n'), { mode: 0o600 });
+    fs.renameSync(tmp, latch.file);
+  } catch (e) {
+    shown.push({ status: 'ERROR', alert: null, pr: null, policy: null, reason: `cannot write the seen-latch ${latch.file}: ${e.code || e.message}` });
+  }
+  return { shown, seenCount };
 }
 
 const MAX_COMMENT = 280;

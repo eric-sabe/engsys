@@ -19,6 +19,12 @@
 #   FLEET_MSG                  a cross-fleet message is waiting in this session's inbox (engsys#77; multi-fleet only):
 #                              run the command the line names (msg.mjs inbox --mark-read), then msg.mjs read <url>
 #   STOP                       ledger issue closed (kill switch) — script exits
+#   HANDBACK_INCOMPLETE <agent> (<id>): <remains>
+#                             a subagent handed back unfinished work (the engsys hand-back hook's log
+#                             for this session and launch; engsys#126 review)
+#   AGENT_OVERDUE / AGENT_STALE …  the subagent watchdog (merge-monster's mm-agent-watch.sh --once, run
+#                              every cycle while <state-dir>/agents.tsv exists): one bus per monster
+#                              (engsys#122)
 #
 # GHAS surfaces (Dependabot alerts, CodeQL) may be disabled/forbidden for a
 # repo — each gh call is individually guarded so one failing surface never
@@ -26,7 +32,16 @@
 #
 # Usage: mnt-watch.sh --repo owner/name --state-dir DIR [--interval 30]
 #                     [--default-branch main] [--ledger N]
-#                    [--session NAME] [--pulse-max 20m]
+#                     [--session NAME] [--pulse-max 20m]
+#                     [--config FILE] [--heartbeat-minutes 10]
+#                     [--stale-min 10] [--no-stale] [--no-agents]
+#   --stale-min / --no-stale  passed to the subagent scan (liveness.stale_minutes / stale_probe: false)
+#   --no-agents               skip the subagent scan (it is a no-op anyway without a spawn registry)
+#   --pulse-max               the keepalive's idle bound. Default (engsys#123): the config's pulse_max, else
+#                             2.25 x heartbeat_minutes (--heartbeat-minutes, else the config's), else 20m
+#   --stale-lock-minutes      with heartbeat_minutes, bounds pulse_max so the lease always lapses before
+#                             the heartbeat reads stale (a CONFIG_WARNING line says when it clamps)
+#   --config                  the monster's yml, read for pulse_max, heartbeat_minutes and stale_lock_minutes only
 #
 # Baton keepalive (engsys#62, #87): while <state-dir>/baton-maintain.json carries this session's token,
 # a `baton.mjs keepalive` renews the lease every 2.5 min (the caller rule: TTL 10 min, renew <= 3m20s;
@@ -35,7 +50,7 @@
 # to adopt the session's running renewer (pidfile <state-dir>/baton-maintain.keepalive.pid, checked by
 # pid and process start time) or start one, and never kills it on exit. The renewer stops when its
 # session process (the claude process found by walking up past the shells) is gone, when the token is
-# released or lost, and when the model has not touched the baton for --pulse-max (default 20m, so a
+# released or lost, and when the model has not touched the baton for --pulse-max (2.25 x the tick, so a
 # wedged or dead model never keeps the role). Its BATON_* lines go to <state-dir>/baton-maintain.events,
 # which this bus relays (offset in <state-dir>/.watch/baton-events.off, so a new bus also reports what
 # happened while no bus ran; only `BATON_<NAME> maintain …` lines, capped at 300 characters). When the
@@ -45,8 +60,11 @@ set -u
 # shellcheck source=../../../lib/fleet-gh.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/fleet-gh.sh"
 fleet_gh_resolve
+# shellcheck source=../../../lib/monster.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/monster.sh"
 
-REPO="" DIR="" INTERVAL=30 DEFBRANCH=main LEDGER="" SESSION="${ENGSYS_SESSION:-}" PULSE_MAX=20m
+REPO="" DIR="" INTERVAL=30 DEFBRANCH=main LEDGER="" SESSION="${ENGSYS_SESSION:-}" PULSE_MAX="" CONFIG="" HB_MIN="" STALE_LOCK=""
+STALE_MIN=10 NOSTALE="" AGENTS=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) REPO="$2"; shift 2 ;;
@@ -56,14 +74,26 @@ while [ $# -gt 0 ]; do
     --ledger) LEDGER="$2"; shift 2 ;;
     --session) SESSION="$2"; shift 2 ;;
     --pulse-max) PULSE_MAX="$2"; shift 2 ;;
+    --config) CONFIG="$2"; shift 2 ;;
+    --heartbeat-minutes) HB_MIN="$2"; shift 2 ;;
+    --stale-lock-minutes) STALE_LOCK="$2"; shift 2 ;;
+    --stale-min) STALE_MIN="$2"; shift 2 ;;
+    --no-stale) NOSTALE=1; shift ;;
+    --no-agents) AGENTS=0; shift ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
 [ -n "$REPO" ] && [ -n "$DIR" ] || { echo "usage: mnt-watch.sh --repo owner/name --state-dir DIR" >&2; exit 2; }
+[ -n "$HB_MIN" ] || HB_MIN="$(monster_cfg_scalar "$CONFIG" heartbeat_minutes)"
+[ -n "$STALE_LOCK" ] || STALE_LOCK="$(monster_cfg_scalar "$CONFIG" stale_lock_minutes)"
+PULSE_OUT="$(monster_pulse_max "${PULSE_MAX:-$(monster_cfg_scalar "$CONFIG" pulse_max)}" "$HB_MIN" "$STALE_LOCK")"
+PULSE_MAX="${PULSE_OUT%%$'\t'*}" PULSE_WARN="${PULSE_OUT#*$'\t'}"
 
 W="$DIR/.watch"
 mkdir -p "$W"
 touch "$W/deps_pr.tsv" "$W/dep_alerts.tsv" "$W/codeql_alerts.tsv" "$W/secretrun.txt" "$W/trivyrun.txt"
+[ -z "$PULSE_WARN" ] || echo "CONFIG_WARNING ${PULSE_WARN:0:280}"
+monster_handback_prune "$DIR" # drop earlier launches' hand-back lines (engsys#137 review)
 
 # --- baton keepalive (see the header) ----------------------------------------
 BATON_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/lease/baton.mjs"
@@ -178,8 +208,20 @@ inbox_event() {
   mv "$W/inbox.new" "$W/inbox.seen"
 }
 
+# --- subagent liveness (engsys#122) ---------------------------------------------
+# The watchdog's scan runs inside this bus, once per cycle, so a monster keeps ONE Monitor. The scan's
+# latches and lock live in <state-dir>/.watch, shared with a tick's `mm-agent-watch.sh --once` backstop,
+# so the two never emit the same transition twice.
+AGENT_WATCH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../merge-monster/scripts/mm-agent-watch.sh"
+agents_event() {
+  [ "$AGENTS" = 1 ] && [ -f "$DIR/agents.tsv" ] || return 0
+  bash "$AGENT_WATCH" --state-dir "$DIR" --once --stale-min "$STALE_MIN" ${NOSTALE:+--no-stale} 2>>"$W/agent-watch.err" || true
+}
+
 while true; do
   baton_tick || exit 0
+  agents_event
+  monster_handback_events "$DIR" # INCOMPLETE hand-backs (engsys#126 review)
   # Once, after the baton check (a lost baton exits quietly first): an unauthenticated gh must
   # surface as an event, never as a bus that sees nothing (engsys#90).
   if [ -z "${GH_AUTH_CHECKED:-}" ]; then assert_gh_auth mnt-watch event || exit 1; GH_AUTH_CHECKED=1; fi

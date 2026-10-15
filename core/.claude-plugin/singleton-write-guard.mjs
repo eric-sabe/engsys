@@ -12,7 +12,8 @@
 // In a singleton session it is an ALLOWLIST:
 //   Bash | Monitor (any tool input with a `command` string, #85 M1)
 //          a command that is one plain invocation of a fenced wrapper passes (mm-act/mnt-act,
-//          mm-baton/mnt-baton, and mm-heartbeat/mnt-heartbeat with --state-dir), with no chaining,
+//          mm-baton/mnt-baton, and mm-heartbeat/mnt-heartbeat and the mm-tick/mnt-tick/broker-tick
+//          ticks with --state-dir), with no chaining,
 //          redirects or substitution; only 2>&1, `| jq …` / `| cat`, `; echo $?` and a heredoc of
 //          data on its stdin may follow (#85 F2), the heredoc with a quoted delimiter so its body
 //          expands nothing (#106). Otherwise every gh, git and HTTP client invocation
@@ -50,6 +51,9 @@
 //   mcp__*github*   only tools whose name starts with get_/list_/search_/read_/fetch_/download_/view_.
 //   Write           also denied when it would leave a monster's state.md over 4096 bytes (#120); an
 //                   Edit or MultiEdit that leaves it over gets feedback after the fact (PostToolUse).
+//                   Before a Write, Edit or MultiEdit changes a state.md that is already over the limit
+//                   (a pre-schema append log), the file is copied verbatim to state.md.pre-schema-<stamp>
+//                   (#134; see archiveOverLimit). Bash appends to state.md are not guarded (ibid.).
 //   CronCreate      denied (#119): a monster paces itself with ScheduleWakeup, one wake at a time; a
 //                   cron job fires on its own schedule, piles up wakes and outlives a lost baton.
 //
@@ -73,8 +77,15 @@ export const WRAPPERS = new Set([
   'maintenance-monster/scripts/mnt-act.sh',
   'maintenance-monster/scripts/mnt-heartbeat.sh',
   'maintenance-monster/scripts/mnt-baton.sh',
+  // The single-call ticks (engsys#123): they renew, heartbeat and scan, so they run only as one plain
+  // invocation, and only with --state-dir (the renew needs it, and the broker's names its state dir).
+  'merge-monster/scripts/mm-tick.sh',
+  'maintenance-monster/scripts/mnt-tick.sh',
+  'resource-broker/scripts/broker-tick.sh',
 ]);
-const HEARTBEATS = new Set(['merge-monster/scripts/mm-heartbeat.sh', 'maintenance-monster/scripts/mnt-heartbeat.sh']);
+/** Wrappers that are no fence without --state-dir: the heartbeats renew through it (L-a), the ticks too. */
+const NEEDS_STATE_DIR = new Set(['merge-monster/scripts/mm-heartbeat.sh', 'maintenance-monster/scripts/mnt-heartbeat.sh',
+  'merge-monster/scripts/mm-tick.sh', 'maintenance-monster/scripts/mnt-tick.sh', 'resource-broker/scripts/broker-tick.sh']);
 
 const GH_READ_GROUPS = new Set(['pr', 'issue', 'run', 'workflow', 'repo', 'release', 'label', 'cache']);
 const GH_READ_VERBS = new Set(['view', 'list', 'status', 'diff', 'checks', 'download', 'watch']);
@@ -801,8 +812,8 @@ export function wrapperInvocation(cmd, pluginRoot, env = process.env) {
   try { root = fs.realpathSync(pluginRoot); real = fs.realpathSync(exe); } catch { return null; }
   const rel = path.relative(path.join(root, 'skills'), real).split(path.sep).join('/');
   if (!WRAPPERS.has(rel)) return null;
-  // L-a: the heartbeat without a renew is no fence.
-  if (HEARTBEATS.has(rel) && !words.some((w) => w === '--state-dir' || w.startsWith('--state-dir='))) return null;
+  // L-a: the heartbeat (or a tick) without a renew is no fence.
+  if (NEEDS_STATE_DIR.has(rel) && !words.some((w) => w === '--state-dir' || w.startsWith('--state-dir='))) return null;
   return rel;
 }
 
@@ -818,8 +829,12 @@ function denyMessage(role, found) {
 
 /** The overwrite-only working memory a monster rewrites every wake (SKILL.md § state.md, #120). */
 export const STATE_MAX_BYTES = 4096;
-/** Files only a monster's state dir holds: the baton's files, the watch bus and the monthly journal. */
-const STATE_DIR_MARKER = /^(baton-[\w-]+\.json|\.watch|journal-\d{4}-\d{2}\.(md|jsonl))$/;
+/**
+ * Files only a monster's state dir holds: the baton's files, the watch bus and the monthly journal. The
+ * baton's notice / lost / events files count too (#134): a session that starts in standby
+ * (held_elsewhere, wait_self) with a new state dir writes a notice long before any baton-<role>.json.
+ */
+const STATE_DIR_MARKER = /^(baton-[\w-]+\.(json|notice|lost|events)|\.watch|journal-\d{4}-\d{2}\.(md|jsonl))$/;
 
 /**
  * True when `p` is a monster's `<state_dir>/state.md`. The hook does not see the monster's config, so
@@ -835,6 +850,55 @@ export function monsterStatePath(p, { cwd = process.cwd() } = {}) {
 const stateRule = `state.md is overwrite-only working memory: at most ${STATE_MAX_BYTES} bytes and 60 lines (header, active, queue ≤10, holds ≤5, `
   + 'operator carry-forwards ≤5, last 5 decisions as one-line journal pointers). History goes to journal-YYYY-MM.md and .jsonl, never state.md '
   + '(SKILL.md § state.md).';
+
+/**
+ * Archive before rewrite (#134). The first rewrite of a pre-schema state.md (an append log, tens or hundreds
+ * of kilobytes) to the schema destroyed its history once: a monster relaunched on the new schema rewrote a
+ * 56 KB file at startup with no backup. The SKILL now says to append it verbatim to the month's journal
+ * first, and the guard makes sure nothing is lost even when that step is skipped: before a Write, Edit or
+ * MultiEdit changes an existing state.md that is over STATE_MAX_BYTES, it copies the file byte for byte to
+ * `state.md.pre-schema-<UTC stamp>` beside it (skipped when the newest such copy is already identical; at most
+ * PRE_SCHEMA_KEEP are kept, always including the oldest), then
+ * lets the tool run. A copy that fails denies the tool: fail closed, nothing is overwritten unarchived.
+ *
+ * Why a copy and not a deny-until-journaled: a deny keyed on a journal heading trusts the model's archive
+ * (a heading over a partial or paraphrased paste passes), can trap a monster at startup in a deny loop over
+ * a heading's spelling, and a Bash write gets past it anyway. The copy is mechanical, verbatim, needs
+ * nothing from the model, and never blocks the rewrite the schema asks for.
+ *
+ * Bash appends (`>> state.md`, tee -a, sed -i, …) are not guarded, by decision: the guard is lexical and a
+ * shell has too many ways to write a file to make that complete, and the bound does not need it. Every wake
+ * rewrites state.md whole with Write (SKILL.md § state.md), and that Write is held to the limit, so an append
+ * lives at most until the next wake; the archive copy above catches the over-limit file that rewrite replaces.
+ * -> { archived: path } | { archived: null } (nothing to do) | throws (the copy failed).
+ */
+/** Pre-schema copies kept per state dir: the oldest plus the newest two. */
+export const PRE_SCHEMA_KEEP = 3;
+
+export function archiveOverLimit(p, { cwd = process.cwd(), now = () => new Date() } = {}) {
+  const file = path.resolve(cwd, p);
+  let st;
+  try { st = fs.lstatSync(file); } catch { return { archived: null } }
+  if (!st.isFile() || st.size <= STATE_MAX_BYTES) return { archived: null };
+  const dir = path.dirname(file);
+  const prior = fs.readdirSync(dir).filter((f) => /^state\.md\.pre-schema-\d{8}T\d{6}Z(-\d+)?$/.test(f)).sort();
+  const cur = fs.readFileSync(file);
+  const last = prior.length ? path.join(dir, prior[prior.length - 1]) : null;
+  if (last) {
+    try { if (fs.readFileSync(last).equals(cur)) return { archived: last }; } catch { /* copy anew */ }
+  }
+  const stamp = now().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
+  let dest = path.join(dir, `state.md.pre-schema-${stamp}`);
+  for (let i = 1; fs.existsSync(dest); i++) dest = path.join(dir, `state.md.pre-schema-${stamp}-${i}`);
+  fs.writeFileSync(dest, cur, { flag: 'wx', mode: 0o600 });
+  // Keep at most PRE_SCHEMA_KEEP copies: the OLDEST (the real pre-schema history) and the newest others. A
+  // monster trimming an over-limit file with several Edits would otherwise leave one copy per Edit.
+  const all = [...prior, path.basename(dest)];
+  for (const f of all.slice(1, Math.max(1, all.length - (PRE_SCHEMA_KEEP - 1)))) {
+    try { fs.unlinkSync(path.join(dir, f)); } catch { /* best effort */ }
+  }
+  return { archived: dest };
+}
 
 /**
  * PostToolUse (#120): an Edit or MultiEdit that left a monster's state.md over STATE_MAX_BYTES. The edit
@@ -873,9 +937,16 @@ export function decide({ tool_name: tool = 'Bash', tool_input: input = {}, comma
   if (['Write', 'Edit', 'MultiEdit', 'NotebookEdit'].includes(tool)) {
     const p = input.file_path ?? input.notebook_path ?? input.path;
     if (protectedPath(p, ctx)) return { deny: `engsys singleton-write guard: settings, git config and plugin files are read-only in a ${role} monster session (${p}): changing them could switch off the hooks that fence its GitHub writes, or plant a program in its push.` };
-    if (tool === 'Write' && monsterStatePath(p, { cwd })) {
-      const bytes = Buffer.byteLength(String(input.content ?? ''), 'utf8');
-      if (bytes > STATE_MAX_BYTES) return { deny: `engsys singleton-write guard: this Write would make ${p} ${bytes} bytes, over the ${STATE_MAX_BYTES}-byte limit. ${stateRule} Trim it to the schema and write it again.` };
+    if (['Write', 'Edit', 'MultiEdit'].includes(tool) && monsterStatePath(p, { cwd })) {
+      if (tool === 'Write') {
+        const bytes = Buffer.byteLength(String(input.content ?? ''), 'utf8');
+        if (bytes > STATE_MAX_BYTES) return { deny: `engsys singleton-write guard: this Write would make ${p} ${bytes} bytes, over the ${STATE_MAX_BYTES}-byte limit. ${stateRule} Trim it to the schema and write it again.` };
+      }
+      try {
+        archiveOverLimit(p, { cwd });
+      } catch (e) {
+        return { deny: `engsys singleton-write guard: ${p} is over ${STATE_MAX_BYTES} bytes and could not be archived to state.md.pre-schema-<stamp> before this ${tool} (${String(e && (e.code || e.message))}), so it is not changed. Append it verbatim to journal-YYYY-MM.md under "## state.md archive (pre-schema, <date>)" first, then retry (SKILL.md § state.md).` };
+      }
     }
     return null;
   }

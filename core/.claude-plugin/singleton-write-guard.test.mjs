@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { STATE_MAX_BYTES, WRAPPERS, decide, githubWrites, heredocOperator, lex, monsterStatePath, postDecide, splitHeredocs, wrapperInvocation } from './singleton-write-guard.mjs';
+import { STATE_MAX_BYTES, WRAPPERS, archiveOverLimit, decide, githubWrites, heredocOperator, lex, monsterStatePath, postDecide, splitHeredocs, wrapperInvocation } from './singleton-write-guard.mjs';
 
 const HOOK = path.join(path.dirname(fileURLToPath(import.meta.url)), 'singleton-write-guard.mjs');
 
@@ -298,6 +298,22 @@ test('L-c: GitHub MCP tools that may write are denied; reads pass', () => {
 test('L-a: the heartbeat exception needs --state-dir (a heartbeat with no renew is no fence)', () => {
   assert.equal(decide({ command: `${HB} --repo o/r --issue 7 --state-dir d --status x`, env: MERGE, pluginRoot: ROOT }), null);
   assert.ok(wrapperInvocation(`${HB} --repo o/r --issue 7 --status x`, ROOT) === null);
+});
+
+test('#123: the ticks are fenced wrappers that need --state-dir; anything else around them is denied', () => {
+  for (const rel of ['merge-monster/scripts/mm-tick.sh', 'maintenance-monster/scripts/mnt-tick.sh', 'resource-broker/scripts/broker-tick.sh']) {
+    assert.ok(WRAPPERS.has(rel), rel);
+    const p = path.join(ROOT, 'skills', rel);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, '#!/usr/bin/env bash\n', { mode: 0o755 });
+    for (const env of [MERGE, { ENGSYS_SINGLETON_ROLE: 'maintain' }]) {
+      assert.equal(decide({ command: `${p} --repo o/r --state-dir logs/m --issue 7`, env, pluginRoot: ROOT }), null, `plain ${rel}`);
+      assert.equal(decide({ command: `bash ${p} --state-dir=logs/m --config c.yml 2>&1`, env, pluginRoot: ROOT }), null, `bash ${rel}`);
+      assert.ok(denied(`${p} --repo o/r --issue 7`, env), `${rel} without --state-dir`);
+      assert.ok(denied(`${p} --repo o/r --state-dir d --issue 7 && gh pr merge 1`, env), `${rel} chained`);
+    }
+    assert.equal(wrapperInvocation(`${p} --repo o/r --issue 7`, ROOT), null);
+  }
 });
 
 test('the guard is registered for Bash, the edit tools and MCP tools', () => {
@@ -1122,4 +1138,66 @@ test('#120: the hook emits the Write deny and the PostToolUse feedback; hooks.js
   const hooks = JSON.parse(fs.readFileSync(path.join(path.dirname(HOOK), 'hooks.json'), 'utf8'));
   const postMatchers = (hooks.hooks.PostToolUse ?? []).filter((h) => h.hooks.some((x) => x.command.includes('singleton-write-guard.mjs'))).map((h) => new RegExp(`^(?:${h.matcher})$`));
   for (const t of ['Edit', 'MultiEdit']) assert.ok(postMatchers.some((m) => m.test(t)), `PostToolUse routes ${t}`);
+});
+
+// ------------------------------------------------- #134: standby state dirs; archive before rewrite --
+
+test('#134: a standby session\'s new state dir is known by the baton notice, lost or events file', () => {
+  for (const marker of ['baton-merge.notice', 'baton-maintain.lost', 'baton-merge.events']) {
+    assert.equal(monsterStatePath(path.join(stateDir(marker), 'state.md')), true, marker);
+  }
+  assert.equal(monsterStatePath(path.join(stateDir('baton-merge.txt'), 'state.md')), false, 'not any baton-* file');
+  const file = path.join(stateDir('baton-merge.notice'), 'state.md');
+  assert.ok(decide({ tool_name: 'Write', tool_input: { file_path: file, content: 'x'.repeat(5000) }, env: MERGE, pluginRoot: ROOT }), 'so its Write is held to the limit');
+});
+
+test('#134: a Write or Edit over a pre-schema (over-limit) state.md first archives it verbatim', () => {
+  const dir = stateDir('baton-merge.json');
+  const file = path.join(dir, 'state.md');
+  const history = Buffer.from(`# old append log\n${'2026-10-01 merged #1 é\n'.repeat(1500)}`);
+  fs.writeFileSync(file, history);
+  const copies = () => fs.readdirSync(dir).filter((f) => f.startsWith('state.md.pre-schema-')).sort();
+  assert.equal(decide({ tool_name: 'Write', tool_input: { file_path: file, content: '# merge-monster state\n' }, env: MERGE, pluginRoot: ROOT }), null, 'the schema rewrite is allowed');
+  assert.equal(copies().length, 1, 'one archive copy');
+  assert.match(copies()[0], /^state\.md\.pre-schema-\d{8}T\d{6}Z$/);
+  assert.ok(fs.readFileSync(path.join(dir, copies()[0])).equals(history), 'byte for byte');
+  assert.equal(fs.statSync(path.join(dir, copies()[0])).mode & 0o777, 0o600);
+  decide({ tool_name: 'Edit', tool_input: { file_path: file, old_string: 'a', new_string: 'b' }, env: MERGE, pluginRoot: ROOT });
+  assert.equal(copies().length, 1, 'the same content is not copied twice');
+  fs.appendFileSync(file, 'one more line\n');
+  for (const tool of ['Edit', 'MultiEdit']) decide({ tool_name: tool, tool_input: { file_path: file }, env: { ENGSYS_SINGLETON_ROLE: 'maintain' }, pluginRoot: ROOT });
+  assert.equal(copies().length, 2, 'changed content is archived again (once)');
+  fs.writeFileSync(file, '# merge-monster state\n');
+  decide({ tool_name: 'Write', tool_input: { file_path: file, content: '# next\n' }, env: MERGE, pluginRoot: ROOT });
+  assert.equal(copies().length, 2, 'an at-limit state.md is just rewritten');
+  const other = path.join(stateDir('baton-merge.json'), 'state.md');
+  fs.writeFileSync(other, 'x'.repeat(9000));
+  decide({ tool_name: 'Write', tool_input: { file_path: other, content: 'y' }, env: {}, pluginRoot: ROOT });
+  assert.deepEqual(fs.readdirSync(path.dirname(other)).filter((f) => f.startsWith('state.md.pre')), [], 'non-singleton: no opinion, no copy');
+  assert.equal(archiveOverLimit(path.join(stateDir(null), 'missing.md')).archived, null);
+  // repeated trims of an over-limit file: the oldest copy (the true pre-schema history) plus the newest two
+  const first = copies()[0];
+  for (let i = 0; i < 4; i++) {
+    fs.writeFileSync(file, `${'z'.repeat(5000)}${i}`);
+    archiveOverLimit(file, { now: () => new Date(Date.UTC(2030, 0, 1, 0, 0, i)) });
+  }
+  assert.equal(copies().length, 3, 'at most three copies');
+  assert.equal(copies()[0], first, 'the oldest is always kept');
+  assert.ok(fs.readFileSync(path.join(dir, copies()[0])).equals(history), '…and it is still the full history');
+  assert.match(fs.readFileSync(path.join(dir, copies()[2]), 'utf8'), /3$/, 'the newest is the latest content');
+});
+
+test('#134: when the archive copy cannot be written, the change is denied (fail closed)', { skip: process.getuid?.() === 0 }, () => {
+  const dir = stateDir('baton-merge.json');
+  const file = path.join(dir, 'state.md');
+  fs.writeFileSync(file, 'x'.repeat(9000));
+  fs.chmodSync(dir, 0o500);
+  try {
+    const d = decide({ tool_name: 'Write', tool_input: { file_path: file, content: '# state\n' }, env: MERGE, pluginRoot: ROOT });
+    assert.ok(d, 'denied');
+    assert.match(d.deny, /could not be archived/);
+    assert.match(d.deny, /## state\.md archive \(pre-schema/);
+  } finally {
+    fs.chmodSync(dir, 0o700);
+  }
 });
