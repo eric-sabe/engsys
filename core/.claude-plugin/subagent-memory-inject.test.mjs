@@ -48,6 +48,29 @@ describe('resolveTouchedPaths', () => {
 		const fakeExec = () => { throw new Error('nope'); };
 		assert.deepEqual(resolveTouchedPaths({}, { cwd: '/nonexistent', exec: fakeExec }), []);
 	});
+
+	test('no uncommitted changes (HEAD diff empty) falls back to a merge-base diff, never a raw origin/main diff', () => {
+		const calls = [];
+		const fakeExec = (cmd, args) => {
+			calls.push(args);
+			if (args.includes('merge-base')) return 'abc123\n';
+			if (args.includes('diff') && calls.filter((c) => c.includes('diff')).length === 1) return ''; // the first (HEAD-only) probe: nothing uncommitted
+			if (args.includes('diff')) return 'changed-file.ts\n'; // the merge-base diff
+			throw new Error('unexpected call');
+		};
+		const paths = resolveTouchedPaths({}, { cwd: '/repo', exec: fakeExec });
+		assert.deepEqual(paths, ['changed-file.ts']);
+		assert.ok(calls.some((a) => a.includes('merge-base') && a.includes('origin/main')));
+		assert.ok(!calls.some((a) => a.includes('diff') && a.includes('origin/main')), 'must never diff directly against origin/main');
+	});
+
+	test('a failing merge-base (e.g. no origin/main) yields [] rather than throwing', () => {
+		const fakeExec = (cmd, args) => {
+			if (args.includes('merge-base')) throw new Error('no such ref');
+			return '';
+		};
+		assert.deepEqual(resolveTouchedPaths({}, { cwd: '/repo', exec: fakeExec }), []);
+	});
 });
 
 describe('runMemoryBrief', () => {

@@ -51,20 +51,31 @@ export function extractPrompt(input) {
 /** Touched paths: an explicit list on the payload, else `git diff --name-only <base>` in `cwd`
  * when a worktree/repo is resolvable. `base` tries HEAD first (uncommitted work), then
  * `origin/main`. Never throws; an unresolvable repo yields []. */
+// A short, hard timeout on every git call here — this must never eat into the hook's overall 2s
+// budget (a lock wait or a huge repo could otherwise block the dispatch before memory-brief runs).
+const GIT_CALL_OPTS = { encoding: 'utf8', timeout: 500, killSignal: 'SIGKILL', stdio: ['ignore', 'pipe', 'ignore'] };
+
 export function resolveTouchedPaths(input, { cwd, exec = execFileSync } = {}) {
 	if (Array.isArray(input?.touched_paths)) return input.touched_paths.filter((p) => typeof p === 'string');
-	for (const base of ['HEAD', 'origin/main']) {
-		try {
-			// A short, hard timeout — this must never eat into the hook's overall 2s budget (a lock
-			// wait or a huge repo could otherwise block the dispatch before memory-brief even runs).
-			const out = exec('git', ['-C', cwd, 'diff', '--name-only', base], { encoding: 'utf8', timeout: 500, killSignal: 'SIGKILL', stdio: ['ignore', 'pipe', 'ignore'] });
-			const paths = out.split('\n').filter(Boolean);
-			if (paths.length) return paths;
-		} catch {
-			/* try the next base, or give up below */
-		}
+	try {
+		const out = exec('git', ['-C', cwd, 'diff', '--name-only', 'HEAD'], GIT_CALL_OPTS);
+		const paths = out.split('\n').filter(Boolean);
+		if (paths.length) return paths;
+	} catch {
+		/* no uncommitted changes, or not resolvable — fall through to the merge-base diff below */
 	}
-	return [];
+	try {
+		// NOT `git diff --name-only origin/main` directly: on a stale/diverged checkout that would
+		// also list every upstream commit the local branch doesn't have yet, anchoring lessons and
+		// pointers to files this dispatch never touched. Diff against the MERGE-BASE instead, so
+		// only this branch's own commits since it forked from origin/main are "touched".
+		const base = exec('git', ['-C', cwd, 'merge-base', 'HEAD', 'origin/main'], GIT_CALL_OPTS).trim();
+		if (!base) return [];
+		const out = exec('git', ['-C', cwd, 'diff', '--name-only', base, 'HEAD'], GIT_CALL_OPTS);
+		return out.split('\n').filter(Boolean);
+	} catch {
+		return [];
+	}
 }
 
 /** Run memory-brief.mjs --json as a child process with a hard wall-clock budget. Returns
