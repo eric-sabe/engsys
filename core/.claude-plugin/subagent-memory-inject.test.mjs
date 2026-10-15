@@ -1,9 +1,12 @@
 // Tests for subagent-memory-inject.mjs — run by
 // `node --test core/.claude-plugin/subagent-memory-inject.test.mjs`.
 // §13 (docs/memory-spec.md): the injection hook returns {} on error and on timeout.
-import { test, describe } from 'node:test';
+import { after, test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import {
@@ -94,6 +97,15 @@ describe('runMemoryBrief', () => {
 });
 
 describe('main — fail-open contract', () => {
+	// A NON-git temp dir for `defaultCwd` — these tests fall back to it (no `cwd` in the, unparsed,
+	// stdin), and it must resolve to "no cache dir, no index, empty brief" deterministically. Using
+	// `process.cwd()` here (this engsys checkout) would instead pick up THIS BRANCH's real diff
+	// against origin/main via resolveTouchedPaths' merge-base fallback — which is nonempty on any
+	// branch with actual changes, and scores real lessons, breaking the "always {}" expectation on
+	// every PR that touches more than a trivial diff.
+	const isolatedCwd = mkdtempSync(join(tmpdir(), 'inject-isolated-'));
+	after(() => rmSync(isolatedCwd, { recursive: true, force: true }));
+
 	test('malformed stdin JSON yields {} and exit 0, never throws', async () => {
 		const code = await captureAndRun('not json at all');
 		assert.equal(code.exitCode, 0);
@@ -112,7 +124,7 @@ describe('main — fail-open contract', () => {
 
 	async function captureAndRun(stdinText) {
 		const chunks = [];
-		const exitCode = (await main({ stdin: stdinOf(stdinText), write: (s) => chunks.push(s) })) ?? 0;
+		const exitCode = (await main({ stdin: stdinOf(stdinText), write: (s) => chunks.push(s), defaultCwd: isolatedCwd })) ?? 0;
 		return { stdout: chunks.join(''), exitCode };
 	}
 });
@@ -127,7 +139,16 @@ describe('CLI end to end', () => {
 	});
 
 	test('garbage stdin never crashes the process (exit 0, {})', () => {
-		const out = execFileSync('node', [SCRIPT], { input: '{{{not json', encoding: 'utf8', env: { ...process.env, NODE_NO_WARNINGS: '1' } });
-		assert.equal(out, '{}');
+		// Run from an isolated non-git tmpdir for the same reason as the isolatedCwd above: garbage
+		// stdin means main() falls back to the SPAWNED process's OWN cwd, which execFileSync's `cwd`
+		// option controls here — defaulting to this repo checkout would make the result depend on
+		// this branch's live diff against origin/main instead of being deterministically {}.
+		const dir = mkdtempSync(join(tmpdir(), 'inject-cli-isolated-'));
+		try {
+			const out = execFileSync('node', [SCRIPT], { input: '{{{not json', encoding: 'utf8', cwd: dir, env: { ...process.env, NODE_NO_WARNINGS: '1' } });
+			assert.equal(out, '{}');
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });

@@ -119,7 +119,7 @@ function logInjection(cwd, record) {
 	}
 }
 
-export async function main({ stdin = process.stdin, now = () => Date.now(), write = (s) => process.stdout.write(s) } = {}) {
+export async function main({ stdin = process.stdin, now = () => Date.now(), write = (s) => process.stdout.write(s), defaultCwd = process.cwd() } = {}) {
 	const t0 = now();
 	let input = null;
 	try {
@@ -129,7 +129,7 @@ export async function main({ stdin = process.stdin, now = () => Date.now(), writ
 	} catch {
 		input = null;
 	}
-	const cwd = (typeof input?.cwd === 'string' && input.cwd) || process.cwd();
+	const cwd = (typeof input?.cwd === 'string' && input.cwd) || defaultCwd;
 	const agentType = extractAgentType(input);
 
 	let briefText = '';
