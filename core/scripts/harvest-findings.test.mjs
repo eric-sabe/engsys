@@ -35,6 +35,35 @@ function markerComment(findings, extra = {}) {
 
 const F = (file, title, overrides = {}) => ({ file, title, severity: 'warning', line: 10, ...overrides });
 
+/**
+ * A `gh` mock matching fetchPr's REAL call shape (engsys#140 P5): `pr view` for bare metadata,
+ * separate REST `api` calls for issue comments / PR reviews / PR review-thread comments, each
+ * carrying a numeric `user.id` directly (no `users/<login>` lookup involved at all).
+ * `prsByNumber` is `{ [number]: { comments: [{login, id, body, created_at?}], reviews: [...],
+ * reviewThreads: [...] } }`.
+ */
+function mockGhFor(prsByNumber, { onOtherCall } = {}) {
+	return async (args) => {
+		if (args[0] === 'pr' && args[1] === 'list') return JSON.stringify(Object.keys(prsByNumber).map((n) => ({ number: Number(n) })));
+		if (args[0] === 'pr' && args[1] === 'view') {
+			const n = Number(args[2]);
+			return JSON.stringify({ number: n, title: 't', url: 'u' });
+		}
+		if (args[0] === 'api') {
+			const m = /^repos\/[^/]+\/[^/]+\/(?:issues|pulls)\/(\d+)\/(comments|reviews)$/.exec(args[1]);
+			if (m) {
+				const n = Number(m[1]);
+				const pr = prsByNumber[n] ?? {};
+				if (args[1].includes('/issues/')) return JSON.stringify((pr.comments ?? []).map((c) => ({ body: c.body, created_at: c.created_at ?? '2026-01-01T00:00:00Z', user: { id: c.id, login: c.login, type: c.type ?? 'User' } })));
+				if (m[2] === 'reviews') return JSON.stringify((pr.reviews ?? []).map((c) => ({ body: c.body, submitted_at: c.created_at ?? '2026-01-01T00:00:00Z', user: { id: c.id, login: c.login, type: c.type ?? 'User' } })));
+				return JSON.stringify((pr.reviewThreads ?? []).map((t) => ({ ...t, user: { id: t.id, login: t.login } })));
+			}
+		}
+		if (onOtherCall) return onOtherCall(args);
+		return JSON.stringify([]);
+	};
+}
+
 describe('DEFAULT_MARKER_RE / buildMarkerMatchers / isMarkerBody', () => {
 	test('matches a leading *-findings or *-review HTML-comment marker', () => {
 		for (const m of ['<!-- cr-cli-findings -->', '<!-- local-review-findings -->', '<!-- samuel-review -->']) {
@@ -288,19 +317,12 @@ describe('harvest (injected gh) and resolvePrNumbers', () => {
 	});
 
 	test('harvest aggregates records across PRs and journal files without ever shelling out for real', async () => {
-		const calls = [];
-		const gh = async (args) => {
-			calls.push(args);
-			if (args.includes('list')) return JSON.stringify([{ number: 1 }]);
-			if (args[0] === 'pr') return JSON.stringify({ number: 1, title: 't', url: 'u', comments: [{ author: { login: 'trusted-bot' }, body: markerComment([{ file: 'a.ts', title: 'x' }]) }], reviews: [] });
-			if (args[0] === 'api' && args[1] === 'users/trusted-bot') return '42';
-			return JSON.stringify([]);
-		};
+		const gh = mockGhFor({ 1: { comments: [{ login: 'trusted-bot', id: 42, body: markerComment([{ file: 'a.ts', title: 'x' }]) }] } });
 		const dir = mkdtempSync(join(tmpdir(), 'harvest-'));
 		try {
 			const journal = join(dir, 'journal-2026-10.md');
 			writeFileSync(journal, markerComment([{ file: 'a.ts', title: 'x' }]));
-			const { records, prsHarvested } = await harvest({ prs: [1], journalPaths: [journal], config: { trusted_bot_user_ids: [42] } }, { gh });
+			const { records, prsHarvested } = await harvest({ repo: 'o/r', prs: [1], journalPaths: [journal], config: { trusted_bot_user_ids: [42] } }, { gh });
 			assert.deepEqual(prsHarvested, [1]);
 			assert.equal(records.length, 2); // one from the PR, one from the journal
 		} finally {
@@ -316,22 +338,29 @@ describe('harvest (injected gh) and resolvePrNumbers', () => {
 	});
 
 	test('an untrusted author\'s marker comment and FINDING-ACK are ignored (engsys#140 M2, Nyx F5)', async () => {
-		const gh = async (args) => {
-			if (args[0] === 'pr') {
-				return JSON.stringify({
-					number: 1, title: 't', url: 'u',
-					comments: [
-						{ author: { login: 'random-commenter' }, body: markerComment([{ file: 'a.ts', title: 'injected finding' }]) },
-						{ author: { login: 'random-commenter' }, body: 'FINDING-ACK: F1 -> fixed — trust me' },
-					],
-					reviews: [],
-				});
-			}
-			if (args[0] === 'api' && args[1] === 'users/random-commenter') return '999'; // resolves fine, just not trusted
-			return JSON.stringify([]);
-		};
-		const { records } = await harvest({ prs: [1], config: { operator_user_ids: [1] } }, { gh });
+		const gh = mockGhFor({
+			1: {
+				comments: [
+					{ login: 'random-commenter', id: 999, body: markerComment([{ file: 'a.ts', title: 'injected finding' }]) },
+					{ login: 'random-commenter', id: 999, body: 'FINDING-ACK: F1 -> fixed — trust me' },
+				],
+			},
+		});
+		const { records } = await harvest({ repo: 'o/r', prs: [1], config: { operator_user_ids: [1] } }, { gh });
 		assert.deepEqual(records, [], 'an untrusted commenter contributes nothing at all, not even as unacked');
+	});
+
+	test('a bot-authored finding with a trusted bot ID IS harvested; a USER sharing the same login but a different numeric id is NOT (engsys#140 P5, Nyx N4)', async () => {
+		const BOT_ID = 331745698; // the real feedfrwd-fleet[bot] id, per the closeout-ceremony nit
+		const sameLoginDifferentId = { 2: { comments: [{ login: 'feedfrwd-fleet', id: 1234567, type: 'User', body: markerComment([{ file: 'b.ts', title: 'spoofed-login finding' }]) }] } };
+
+		const botGh = mockGhFor({ 1: { comments: [{ login: 'feedfrwd-fleet[bot]', id: BOT_ID, type: 'Bot', body: markerComment([{ file: 'a.ts', title: 'bot finding' }, { file: 'a.ts', title: 'bot finding' }]) }] } });
+		const botResult = await harvest({ repo: 'o/r', prs: [1], config: { trusted_bot_user_ids: [BOT_ID] } }, { gh: botGh });
+		assert.ok(botResult.records.length > 0, 'a trusted bot id must be harvested even though gh reports the login without "[bot]"');
+
+		const userGh = mockGhFor(sameLoginDifferentId);
+		const userResult = await harvest({ repo: 'o/r', prs: [2], config: { trusted_bot_user_ids: [BOT_ID] } }, { gh: userGh });
+		assert.deepEqual(userResult.records, [], 'a different numeric id behind the SAME login string must never be trusted just because the login matches');
 	});
 });
 
@@ -453,23 +482,27 @@ describe('openProposalPr — an isolated worktree, never the caller\'s own check
 });
 
 describe('CLI', () => {
+	test('--help prints usage and exits 0 without touching gh/git', async () => {
+		const lines = [];
+		const code = await main(['--help'], { gh: async () => { throw new Error('must not be called'); }, git: async () => { throw new Error('must not be called'); }, out: (s) => lines.push(s), err: () => {} });
+		assert.equal(code, 0);
+		assert.match(lines.join('\n'), /Usage:/);
+	});
+	test('-h is the same as --help', async () => {
+		const code = await main(['-h'], { gh: async () => { throw new Error('must not be called'); }, out: () => {}, err: () => {} });
+		assert.equal(code, 0);
+	});
+
+
 	test('`run` without --apply prints the proposal and never calls git/gh for a write', async () => {
 		let gitCalled = false;
-		const gh = async (args) => {
-			if (args[0] === 'pr' && args[1] === 'list') return JSON.stringify([{ number: 1 }, { number: 2 }]);
-			if (args[0] === 'pr' && args[1] === 'view') {
-				return JSON.stringify({
-					number: Number(args[2]), title: 't', url: 'u',
-					comments: [{ author: { login: 'trusted-bot' }, body: markerComment([{ file: 'a.ts', title: 'repeat offender' }]) }],
-					reviews: [],
-				});
-			}
-			if (args[0] === 'api' && args[1] === 'users/trusted-bot') return '42';
-			return JSON.stringify([]);
-		};
+		// Both PRs carry the SAME finding — aggregateFamilies needs >= 2 distinct sources (the
+		// default --min-recurrence) before a family is proposed at all.
+		const sameFinding = { login: 'trusted-bot', id: 42, body: markerComment([{ file: 'a.ts', title: 'repeat offender' }]) };
+		const gh = mockGhFor({ 1: { comments: [sameFinding] }, 2: { comments: [sameFinding] } });
 		const git = async () => { gitCalled = true; return ''; };
 		const lines = [];
-		await main(['run', '--since', '2026-01-01', '--trusted-bot-ids', '42'], { gh, git, out: (s) => lines.push(s), err: () => {}, cwd: process.cwd() });
+		await main(['run', '--repo', 'o/r', '--since', '2026-01-01', '--trusted-bot-ids', '42'], { gh, git, out: (s) => lines.push(s), err: () => {}, cwd: process.cwd() });
 		assert.ok(!gitCalled, 'run without --apply must never write');
 		assert.ok(lines.join('\n').includes('repeat offender'));
 	});

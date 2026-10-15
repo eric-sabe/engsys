@@ -38,7 +38,14 @@ Don't rely on memory of what you fixed inline. The durable record is the marked 
 `harvest-findings.mjs` refuses to run at all unless a trust allowlist is configured (`.claude/memory.yml`'s
 `trusted_bot_user_ids`/`operator_user_ids`, docs/memory-spec.md §10) — pass numeric user ids via
 `--trusted-bot-ids`/`--operator-ids` if the project hasn't set them: `gh api users/<login>[bot] --jq .id`
-for a review bot, `gh api user --jq .id` for your own operator id.
+for a review bot, `gh api user --jq .id` for your own operator id. `--trusted-bot-ids` must list the
+numeric id of **whichever identity actually posts the findings comment** on this repo, not just a
+generic review-bot login — on a fleet-managed repo that's the fleet host's own GitHub App bot (e.g.
+`feedfrwd-fleet[bot]`: `gh api 'users/feedfrwd-fleet[bot]' --jq .id` → `331745698`), since that's the
+account whose comments the ceremony is mining, not CodeRabbit's or any other reviewer's. (The
+harvester itself never resolves a login to an id at runtime — engsys#140 Nyx N4 — it reads the
+numeric id straight off the GitHub API response; this `gh api` lookup is a one-time operator step to
+populate the config, not something the tool does per finding.)
 
 ```bash
 # Dry run: print the proposal (recurring families + draft lesson files), write nothing.

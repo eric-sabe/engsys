@@ -284,50 +284,43 @@ export async function resolvePrNumbers(opts, { gh = defaultGh } = {}) {
 /** Fetch one PR's comments, reviews, and inline review-thread comments. Inline threads use the
  * REST endpoint (`gh api repos/.../pulls/{n}/comments`) rather than GraphQL — simpler, and every
  * thread's first comment already carries the path/line/resolved-ish fields this harvester needs. */
+/**
+ * Fetch one PR's metadata plus comments/reviews/inline-thread-comments — ALL THREE via the REST
+ * API, never `gh pr view --json comments,reviews` (engsys#140 P5 — Nyx N4). The REST endpoints
+ * each carry a real numeric `user.id` directly on every comment/review; the GraphQL shape `gh
+ * --json` uses only exposes `author.login`, and GitHub reports a bot's login WITHOUT its `[bot]`
+ * suffix in some contexts, so mapping that login back to an id via `users/<login>` 404s for every
+ * bot — and worse, a human user can share a login string with a bot in a different namespace, so
+ * a login-based lookup can silently resolve to the WRONG account's id. Reading the id straight off
+ * the comment/review object sidesteps both problems entirely.
+ */
 export async function fetchPr(number, opts, { gh = defaultGh } = {}) {
 	const repoArgs = opts.repo ? ['--repo', opts.repo] : [];
-	const v = await ghJson(gh, ['pr', 'view', String(number), ...repoArgs, '--json', 'number,title,url,comments,reviews'], `reading PR #${number}`);
+	const v = await ghJson(gh, ['pr', 'view', String(number), ...repoArgs, '--json', 'number,title,url'], `reading PR #${number}`);
+	let comments = [];
+	let reviews = [];
 	let reviewThreads = [];
 	if (opts.repo) {
 		try {
-			reviewThreads = await ghJson(gh, ['api', `repos/${opts.repo}/pulls/${number}/comments`, '--paginate'], `reading PR #${number} review comments`);
-		} catch {
-			reviewThreads = []; // optional enrichment; a failure here must not sink the whole harvest
-		}
+			const raw = await ghJson(gh, ['api', `repos/${opts.repo}/issues/${number}/comments`, '--paginate'], `reading PR #${number} comments`);
+			comments = raw.map((c) => ({ body: c.body, createdAt: c.created_at, authorId: c.user?.id ?? null, authorType: c.user?.type ?? null, author: { login: c.user?.login ?? null } }));
+		} catch { /* optional; a failure here must not sink the whole harvest */ }
+		try {
+			const raw = await ghJson(gh, ['api', `repos/${opts.repo}/pulls/${number}/reviews`, '--paginate'], `reading PR #${number} reviews`);
+			reviews = raw.map((r) => ({ body: r.body, submittedAt: r.submitted_at, authorId: r.user?.id ?? null, authorType: r.user?.type ?? null, author: { login: r.user?.login ?? null } }));
+		} catch { /* optional */ }
+		try {
+			const raw = await ghJson(gh, ['api', `repos/${opts.repo}/pulls/${number}/comments`, '--paginate'], `reading PR #${number} review comments`);
+			reviewThreads = raw.map((t) => ({ ...t, authorId: t.user?.id ?? null }));
+		} catch { /* optional */ }
 	}
-	return { ...v, reviewThreads };
+	return { ...v, comments, reviews, reviewThreads };
 }
 
 /**
  * Harvest records for every PR in `opts.prs`/`opts.since..until`, plus any journal files under
  * `opts.journalPaths`. Returns `{ records, prsHarvested }`.
  */
-/** Resolve each distinct `login` to its numeric user id via `gh api users/<login>`, once per
- * login (cached). A login that fails to resolve maps to `null` (never trusted — see
- * `isTrustedAuthor`), never thrown. */
-async function resolveAuthorIds(gh, logins) {
-	const cache = new Map();
-	for (const login of logins) {
-		if (!login || cache.has(login)) continue;
-		try {
-			const out = await gh(['api', `users/${login}`, '--jq', '.id']);
-			const id = Number(String(out).trim());
-			cache.set(login, Number.isFinite(id) ? id : null);
-		} catch {
-			cache.set(login, null);
-		}
-	}
-	return cache;
-}
-
-/** Attach a numeric `authorId` to every comment/review in `pr`, resolved via `idByLogin`
- * (comments/reviews only carry `author.login` from `gh pr view --json`; review-thread entries
- * from the REST API already carry a numeric `user.id` and need no resolution). */
-function withAuthorIds(pr, idByLogin) {
-	const tag = (s) => ({ ...s, authorId: idByLogin.get(s.author?.login) ?? null });
-	return { ...pr, comments: (pr.comments ?? []).map(tag), reviews: (pr.reviews ?? []).map(tag) };
-}
-
 export async function harvest(opts, { gh = defaultGh, readFile = (p) => fs.readFileSync(p, 'utf8'), log = () => {} } = {}) {
 	const config = opts.config ?? {};
 	const matchers = buildMarkerMatchers(config);
@@ -341,10 +334,7 @@ export async function harvest(opts, { gh = defaultGh, readFile = (p) => fs.readF
 	const numbers = await resolvePrNumbers(opts, { gh });
 	const records = [];
 	for (const n of numbers) {
-		let pr = await fetchPr(n, opts, { gh });
-		const logins = [...(pr.comments ?? []), ...(pr.reviews ?? [])].map((s) => s.author?.login).filter(Boolean);
-		const idByLogin = await resolveAuthorIds(gh, [...new Set(logins)]);
-		pr = withAuthorIds(pr, idByLogin);
+		const pr = await fetchPr(n, opts, { gh }); // fetchPr already attaches a real numeric authorId per source (engsys#140 P5)
 		const prRecords = extractFromPr(pr, matchers, { trustedIds });
 		records.push(...prRecords);
 		log(`harvested #${n}: ${prRecords.length} finding(s)`);
@@ -515,7 +505,25 @@ export async function openProposalPr(families, opts, { git = defaultGit, gh = de
 // CLI
 // ---------------------------------------------------------------------------------------------
 
+const HELP_TEXT = `harvest-findings.mjs — mine recurring review-finding families, propose lessons/overlay changes as a docs PR (docs/memory-spec.md §8)
+
+Usage:
+  node harvest-findings.mjs harvest --repo owner/repo (--prs 12,15,19 | --since 2026-09-01 [--until ...])
+       --trusted-bot-ids <ids,...> --operator-ids <ids,...>
+       [--markers '<!-- cr-cli-findings -->,...'] [--journal-dir docs/agent-lessons] [--min-recurrence 2] [--out proposal.json]
+  node harvest-findings.mjs propose proposal.json [--md out.md]
+  node harvest-findings.mjs run --repo owner/repo (--prs ... | --since ...) --trusted-bot-ids ... --operator-ids ... [--apply] [--branch NAME]
+  node harvest-findings.mjs --help | -h
+
+Refuses to run (harvest/run) unless at least one of --trusted-bot-ids/--operator-ids resolves a
+non-empty trust allowlist (together with .claude/memory.yml's trusted_bot_user_ids/operator_user_ids).
+`;
+
 export async function main(argv, { gh = defaultGh, git = defaultGit, out = console.log, err = console.error, cwd = process.cwd() } = {}) {
+	if (argv.includes('--help') || argv.includes('-h')) {
+		out(HELP_TEXT);
+		return 0;
+	}
 	const [cmd, ...rest] = argv;
 	const { values } = parseArgs({
 		args: rest,
