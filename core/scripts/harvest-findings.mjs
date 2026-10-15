@@ -312,17 +312,23 @@ export async function fetchPr(number, opts, { gh = defaultGh, log = () => {} } =
 	let reviews = [];
 	let reviewThreads = [];
 	if (repo) {
+		// --paginate alone prints each page as its own top-level JSON array back to back
+		// ([...][...], no separator) -- ghJson's single JSON.parse rejects that the moment a PR
+		// has more than one page (REST's default is 30 items/page), and the catch below then
+		// silently drops ALL of that source's comments/reviews/threads for exactly the busiest,
+		// most valuable PRs (cr review, round 3). --slurp wraps the pages into one JSON array of
+		// per-page arrays instead; per_page=100 just cuts how often that's even needed.
 		try {
-			const raw = await ghJson(gh, ['api', `repos/${repo}/issues/${number}/comments`, '--paginate'], `reading PR #${number} comments`);
-			comments = raw.map((c) => ({ body: c.body, createdAt: c.created_at, authorId: c.user?.id ?? null, authorType: c.user?.type ?? null, author: { login: c.user?.login ?? null } }));
+			const raw = await ghJson(gh, ['api', `repos/${repo}/issues/${number}/comments?per_page=100`, '--paginate', '--slurp'], `reading PR #${number} comments`);
+			comments = raw.flat().map((c) => ({ body: c.body, createdAt: c.created_at, authorId: c.user?.id ?? null, authorType: c.user?.type ?? null, author: { login: c.user?.login ?? null } }));
 		} catch (err) { log(`harvest-findings: PR #${number} comments fetch failed, continuing without them: ${err?.message ?? err}`); }
 		try {
-			const raw = await ghJson(gh, ['api', `repos/${repo}/pulls/${number}/reviews`, '--paginate'], `reading PR #${number} reviews`);
-			reviews = raw.map((r) => ({ body: r.body, submittedAt: r.submitted_at, authorId: r.user?.id ?? null, authorType: r.user?.type ?? null, author: { login: r.user?.login ?? null } }));
+			const raw = await ghJson(gh, ['api', `repos/${repo}/pulls/${number}/reviews?per_page=100`, '--paginate', '--slurp'], `reading PR #${number} reviews`);
+			reviews = raw.flat().map((r) => ({ body: r.body, submittedAt: r.submitted_at, authorId: r.user?.id ?? null, authorType: r.user?.type ?? null, author: { login: r.user?.login ?? null } }));
 		} catch (err) { log(`harvest-findings: PR #${number} reviews fetch failed, continuing without them: ${err?.message ?? err}`); }
 		try {
-			const raw = await ghJson(gh, ['api', `repos/${repo}/pulls/${number}/comments`, '--paginate'], `reading PR #${number} review comments`);
-			reviewThreads = raw.map((t) => ({ ...t, authorId: t.user?.id ?? null }));
+			const raw = await ghJson(gh, ['api', `repos/${repo}/pulls/${number}/comments?per_page=100`, '--paginate', '--slurp'], `reading PR #${number} review comments`);
+			reviewThreads = raw.flat().map((t) => ({ ...t, authorId: t.user?.id ?? null }));
 		} catch (err) { log(`harvest-findings: PR #${number} review comments fetch failed, continuing without them: ${err?.message ?? err}`); }
 	} else {
 		log(`harvest-findings: PR #${number} -- could not resolve a repo (no --repo and \`gh repo view\` failed); comments/reviews/threads will be empty`);

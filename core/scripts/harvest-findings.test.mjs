@@ -50,7 +50,7 @@ function mockGhFor(prsByNumber, { onOtherCall } = {}) {
 			return JSON.stringify({ number: n, title: 't', url: 'u' });
 		}
 		if (args[0] === 'api') {
-			const m = /^repos\/[^/]+\/[^/]+\/(?:issues|pulls)\/(\d+)\/(comments|reviews)$/.exec(args[1]);
+			const m = /^repos\/[^/]+\/[^/]+\/(?:issues|pulls)\/(\d+)\/(comments|reviews)(?:\?.*)?$/.exec(args[1]);
 			if (m) {
 				const n = Number(m[1]);
 				const pr = prsByNumber[n] ?? {};
@@ -322,14 +322,35 @@ describe('harvest (injected gh) and resolvePrNumbers', () => {
 			calls.push(args);
 			if (args[0] === 'repo' && args[1] === 'view') return JSON.stringify({ nameWithOwner: 'o/resolved' });
 			if (args[0] === 'pr' && args[1] === 'view') return JSON.stringify({ number: 1, title: 't', url: 'u' });
-			if (args[0] === 'api' && args[1] === 'repos/o/resolved/issues/1/comments') {
-				return JSON.stringify([{ body: 'a finding', created_at: '2026-01-01T00:00:00Z', user: { id: 1, login: 'x', type: 'User' } }]);
+			if (args[0] === 'api' && args[1].startsWith('repos/o/resolved/issues/1/comments')) {
+				// --slurp wraps pages into an array-of-arrays; one page here.
+				return JSON.stringify([[{ body: 'a finding', created_at: '2026-01-01T00:00:00Z', user: { id: 1, login: 'x', type: 'User' } }]]);
 			}
 			return JSON.stringify([]);
 		};
 		const pr = await fetchPr(1, {}, { gh });
 		assert.equal(pr.comments.length, 1, 'comments must actually be collected once the repo is resolved from `gh repo view`, not left empty just because --repo was omitted');
 		assert.ok(calls.some((c) => c[0] === 'repo' && c[1] === 'view'), 'the repo must actually be resolved, not assumed');
+	});
+
+	test('fetchPr requests --slurp and flattens a multi-page `gh api --paginate` result, instead of JSON.parse rejecting the concatenated pages (cr review, round 3)', async () => {
+		const calls = [];
+		const gh = async (args) => {
+			calls.push(args);
+			if (args[0] === 'pr' && args[1] === 'view') return JSON.stringify({ number: 1, title: 't', url: 'u' });
+			if (args[0] === 'api' && args[1].startsWith('repos/o/r/issues/1/comments')) {
+				// Exactly what `--paginate --slurp` produces: an array of per-page arrays, here
+				// simulating a PR with more comments than fit in one REST page.
+				const page1 = Array.from({ length: 30 }, (_, i) => ({ body: `c${i}`, created_at: '2026-01-01T00:00:00Z', user: { id: i, login: 'x', type: 'User' } }));
+				const page2 = [{ body: 'c30', created_at: '2026-01-01T00:00:00Z', user: { id: 30, login: 'x', type: 'User' } }];
+				return JSON.stringify([page1, page2]);
+			}
+			return JSON.stringify([]);
+		};
+		const pr = await fetchPr(1, { repo: 'o/r' }, { gh });
+		assert.equal(pr.comments.length, 31, 'both pages must be flattened into one comments array, not just the first');
+		const commentsCall = calls.find((c) => c[0] === 'api' && c[1].includes('/comments'));
+		assert.ok(commentsCall.includes('--slurp'), '--slurp must actually be requested, or gh would print the pages back-to-back with no separator and ghJson\'s JSON.parse would throw');
 	});
 
 	test('fetchPr logs (does not silently swallow) a failed comments/reviews/threads fetch', async () => {
