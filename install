@@ -23,8 +23,10 @@ function parseArgs(argv) {
     const a = argv[i];
     if (a === '--dry-run') args.dryRun = true;
     else if (a === '--force') args.force = true;
+    else if (a === '--selftest') args.selftest = true;
     else if (a === '--into') args.into = argv[++i];
     else if (a === '--config') args.config = argv[++i];
+    else if (a === '--harness') args.harness = argv[++i];
     else if (a === '--org') args.org = argv[++i];
     else if (a === '--namespace') args.namespace = argv[++i];
     else if (a === '--pin-repo') args.pinRepo = argv[++i];
@@ -52,12 +54,12 @@ Commands:
       Scaffold engsys.config.yaml in <path> (default: current dir) from the
       bundled example. Handy after \`npm install -g engsys\`, where you don't
       have the repo's example file to copy. Edit it, then run \`install\`.
-  install --into <path> [--config <file>] [--dry-run] [--force]
+  install --into <path> [--config <file>] [--harness claude|copilot|antigravity|all] [--dry-run] [--force]
       First-time materialization. Adopts existing infra: backs up a foreign
       CLAUDE.md (folding it into project facts), merges settings/.mcp.json,
       preserves the project's own agents, and imports Copilot/Cursor config.
       Re-running over an existing install behaves as update.
-  update  --into <path> [--config <file>] [--dry-run]
+  update  --into <path> [--config <file>] [--harness claude|copilot|antigravity|all] [--dry-run]
       Re-render from current engsys + config. Preserves CLAUDE.md project facts
       and hand-added permissions; prunes files orphaned by deselected packs.
   verify  --into <path>
@@ -66,9 +68,10 @@ Commands:
   enable-providers <names> --into <path> [--dry-run]
       One-command path onto the multi-provider worker layer for an existing
       install: appends a providers: block (comma-separated names from: codex,
-      deepseek, grok, anthropic) with per-role model defaults to the project
+      deepseek, grok, anthropic, copilot, agy) with per-role model defaults to the project
       config, then runs update. Refuses if the config already has one.
   fleet init --into <dir> --org <slug> --namespace <ns> --pin-repo <owner/repo> --pin-dir <path>
+             [--harness claude|copilot|antigravity]
              [--instance-marketplace <name>] [--identity github-app|none] [--cloud azure|none]
              [--resource-broker] [--fleet <id>]
              [--engsys-dir <path>] [--worktrees-dir <path>] [--dry-run] [--force]
@@ -80,6 +83,7 @@ Commands:
         --namespace <ns>              session-name prefix (<ns>-mm, <ns>-maintain, <ns>-build, ...)
         --pin-repo <owner/repo>       the repo whose .claude/settings.json holds the plugin pins
         --pin-dir <path>              its local checkout on the fleet host (the sessions' workdir)
+        --harness <name>              agent harness for this fleet: claude (default) | copilot | antigravity
         --instance-marketplace <name> also scaffold the instance plugin (marketplace, SessionStart hook, per-repo configs)
         --identity github-app|none    github-app sets GH_APP_ENV=~/.config/<org>/gh-app.env (default none)
         --cloud azure|none            azure adds the service-principal env source + login job (default none)
@@ -172,6 +176,10 @@ function report(result, cmd) {
 
 function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args.selftest) {
+    require('./lib/selftest');
+    process.exit(0);
+  }
   const cmd = args._[0];
 
   if (args.help || !cmd) { console.log(USAGE); process.exit(args.help ? 0 : 1); }
@@ -207,6 +215,7 @@ function main() {
       r = runFleetInit({
         engsysRoot, into, force: args.force, dryRun: args.dryRun,
         org: args.org, namespace: args.namespace, pinRepo: args.pinRepo, pinDir: args.pinDir,
+        harness: args.harness,
         instanceMarketplace: args.instanceMarketplace, identity: args.identity, cloud: args.cloud, resourceBroker: args.resourceBroker,
         fleet: args.fleet, engsysDir: args.engsysDir, worktreesDir: args.worktreesDir,
       });
@@ -224,7 +233,7 @@ function main() {
     if (!args.into) { console.error('error: --into <path> is required'); process.exit(1); }
     const into = path.resolve(args.into);
     if (!exists(into)) { console.error(`error: target does not exist: ${into}`); process.exit(1); }
-    const result = runInstall({ engsysRoot, into, config: args.config, dryRun: args.dryRun, force: args.force, mode: cmd });
+    const result = runInstall({ engsysRoot, into, config: args.config, harness: args.harness, dryRun: args.dryRun, force: args.force, mode: cmd });
     const tag = args.dryRun ? ' (dry run — nothing written)' : '';
     console.log(`engsys ${result.mode}${tag} → ${into}`);
     console.log(`config: ${path.relative(into, result.configPath) || result.configPath}`);

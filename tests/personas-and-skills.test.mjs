@@ -320,5 +320,22 @@ describe('Personas & Skills Contract Suite (CT-PS-01..CT-PS-09)', () => {
     assert.doesNotMatch(skillMd, /output_format:\s*zodOutputFormat/);
     assert.doesNotMatch(providerDetails, /output_format:\s*zodOutputFormat/);
   });
+
+  test('CT-PS-10: Conditional skill manifest pruning (RETIRED_CORE_SKILLS and includeGhCli on issue_tracker: linear)', async () => {
+    const manifestMod = await import(path.join(ROOT, 'lib/manifest.js'));
+    const { buildManifest, RETIRED_CORE_SKILLS, includeGhCli } = manifestMod.default || manifestMod;
+    assert.deepEqual([...RETIRED_CORE_SKILLS], ['git-commit', 'github-issues', 'terraform-conventions']);
+    assert.equal(includeGhCli({ issue_tracker: 'linear', stacks: ['tooling/linear'] }), false);
+    assert.equal(includeGhCli({ issue_tracker: 'linear', stacks: ['tooling/linear', 'tooling/github'] }), true);
+
+    const plan = buildManifest(ROOT, { issue_tracker: 'linear', stacks: ['tooling/linear'] });
+    const skillNames = plan.skillDirs.map((s) => s.name);
+    for (const retired of RETIRED_CORE_SKILLS) {
+      assert.ok(!skillNames.includes(retired), `Retired skill '${retired}' must be absent from manifest`);
+    }
+    assert.ok(!skillNames.includes('gh-cli'), 'gh-cli must be omitted when issue_tracker is linear without github pack');
+    assert.ok(skillNames.includes('issue-tracker-linear'), 'issue-tracker-linear must be present');
+  });
 });
+
 

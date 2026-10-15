@@ -78,6 +78,19 @@ Out-of-scope follow-ups found during a PR: **always** file a tracking issue — 
 1. Title cites the parent (e.g. "Follow-up to #123"); body has acceptance criteria + context and a `Deferred from #123` line; same labels as the parent.
 2. Add it to the **same board/project as the parent**, in a sensible phase (issue-tracker skill `add-to-board`).
 
+## Spec-Driven Development (SDD) & `/design-change`
+
+Use `/design-change` (or `/generate-project`) as the unified SDD entrypoint before non-trivial implementation. It performs warm-chat intake, evaluates the **6 Escalation Tripwires (`TW-1..TW-6`)**, and routes to the right ceremony tier:
+
+| Tier | Trigger (`TW-1..TW-6`) | Artifact | Critics & Gate |
+| :--- | :--- | :--- | :--- |
+| **Tier S** (Direct Issue) | `0` tripwires fired, `≤ 3` files in a single subsystem | Direct issue with `<!-- engsys:issue-meta -->` (`no_spec_reason`) | `Isabelle` implements directly; no spec doc required |
+| **Tier M** (Mini-Spec) | `1` tripwire fired (never `TW-3` or `TW-4`), single PR | `docs/specs/<slug>.md` (`spec-mini.md.tmpl`) + `1–3` issues | Targeted domain critic(s) + `Marcelo` contract table |
+| **Tier L** (Full Spec) | `≥ 2` tripwires, or `TW-3` (Security) / `TW-4` (Multi-PR) | `docs/specs/<slug>.md` (`spec-full.md.tmpl`) + phased board | Full critic panel (`Melvin`, `Nyx`, `Leith`/`Gary`, `Otto`, `Aaron`, `Marcelo`, `Jody`) |
+
+- **Tripwires**: `TW-1` Data/Schema migration · `TW-2` Public API/CLI/Wire protocol · `TW-3` Auth/Trust boundary/Security (`Nyx`, never Tier S) · `TW-4` Multi-PR/Cross-subsystem · `TW-5` AI/LLM/Agentic pipeline (`Otto` + `Marcelo`) · `TW-6` Infra/CI/Deploy (`Aaron`).
+- **Context slicing & contract check**: Every SDD-backed issue carries a machine-readable `<!-- engsys:issue-meta -->` footer (`spec_refs`, `touches`, `verify`). Workers slice exact spec headings via `node <engsys-root>/lib/spec-slice.mjs` and preflight/PR gates verify `touches` globs, `spec_refs` anchors, and `Marcelo` contract test IDs via `node <engsys-root>/lib/contract-check.mjs`.
+
 ## Filing issues
 
 1. **Investigate first** — search, root cause, real fix. No band-aids.
