@@ -51,7 +51,12 @@ describe('plugin-mode module resolution (engsys#140 C1)', () => {
 	test('the SubagentStart hook runs from a plugin-cache-shaped layout without a module-resolution crash', () => {
 		const { base, pluginRoot } = makePluginRoot();
 		try {
-			const result = run('node', [join(pluginRoot, '.claude-plugin', 'subagent-memory-inject.mjs')], { input: '{}' });
+			// `cwd: base` (an isolated, non-git temp dir), not this test process's own cwd: empty
+			// stdin makes the hook fall back to `defaultCwd = process.cwd()`, and defaulting to
+			// THIS repo checkout would pick up this branch's real diff against origin/main via
+			// resolveTouchedPaths' merge-base fallback — nonempty on any PR with real changes,
+			// surfacing a real lesson instead of the expected empty brief.
+			const result = run('node', [join(pluginRoot, '.claude-plugin', 'subagent-memory-inject.mjs')], { input: '{}', cwd: base });
 			assertNoModuleResolutionCrash(result, 'subagent-memory-inject.mjs');
 			assert.equal(result.code, 0, 'the hook must always exit 0');
 			assert.equal(result.stdout.trim(), '{}', 'empty input yields the empty brief, not a crash');
