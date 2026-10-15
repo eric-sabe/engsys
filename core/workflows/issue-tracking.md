@@ -44,6 +44,22 @@ rm tmp/issue-body-<slug>.md
 - **Dependencies** — what must be done first.
 - **Effort** — S / M / L.
 - **Owner** — which agent persona.
+- **Machine-readable contract (`<!-- engsys:issue-meta -->`)** — every issue ends with an `<!-- engsys:issue-meta -->` block declaring `depends_on`, `touches`, `risk`, `needs_judgment`, `spec_refs`, and `no_external`:
+
+```markdown
+<!-- engsys:issue-meta
+depends_on: []
+touches: ["src/auth/**"]
+risk: low
+needs_judgment: false
+spec_refs: []
+no_external: false
+-->
+```
+
+### 4. Escalation Tripwire Check (`TW-1..TW-6`)
+
+Before filing a standalone issue, check the 6 Escalation Tripwires (`TW-1` Data/Schema, `TW-2` Public API/CLI/Wire, `TW-3` Auth/Security, `TW-4` Multi-PR `>1 PR`, `TW-5` AI/LLM/Agentic, `TW-6` Infra/CI/Deploy). If 1 or more tripwires fire (or `>3` files across subsystems are touched), escalate to [/design-change](../commands/design-change.md) (`generate-project.md` Tier M or Tier L) so the change gets a reviewed spec in `docs/specs/` before implementation.
 
 ---
 

@@ -96,9 +96,10 @@ unchanged.
 ## Phase 2: Implement
 
 - Edit files inside the worktree only.
+- Extract any cited `spec_refs` from the issue's `<!-- engsys:issue-meta -->` block using `node <engsys-root>/lib/spec-slice.mjs <path#Heading>` so the section's `non_negotiable_anchors` and `Testing Strategy` (`CT-*` case IDs) are in context before editing.
 - Complete one issue at a time and commit it before moving to the next issue.
 - Each implementation commit must reference the issue it satisfies: `feat(<scope>): add invite endpoint (#131)`.
-- **File-overlap exception:** when two issues legitimately touch the same source files (same controller, DTO, service), forcing a split creates a broken intermediate commit. Co-commit those issues instead and cite all issue numbers in the subject: `feat(<scope>): PATCH /auth/me + PATCH /auth/me/default-tenant (#1565, #1566)`. The PR body's `Closes #` lines still auto-close all issues on merge.
+- **File-overlap & co-commit justification:** when two issues legitimately touch the same source files, co-commit those issues and cite all issue numbers in the subject. If implementation legitimately requires touching a file outside the issue's declared `touches` globs, include a non-empty `### Co-commit justification` section in the PR body (`NA-SDD-4`).
 - Keep review-fix commits (from the local review or later human review) as follow-ups after the issue commits.
 - Use the `tmp/` folder for commit messages and PR bodies — **never HEREDOC**.
 
@@ -109,13 +110,14 @@ git commit -F tmp/commit-msg-<issue-number>.txt
 
 ---
 
-## Phase 3: Verify + Review Before Push
+## Phase 3: Verify + Contract Gate + Review Before Push
 
-When all issue commits are complete, validate locally **and run the local code review** before pushing or opening the PR. Go in clean: a clean local review means the first CI run is also the last.
+When all issue commits are complete, validate locally, **run `contract-check.mjs`**, and **run the local code review** before pushing or opening the PR. Go in clean: a clean local review means the first CI run is also the last.
 
 ```bash
 git fetch origin                       # local main is often stale in a worktree
 <the project's pre-push gate / precheck>   # build, lint, format, unit tests, path-gated gates
+node <engsys-root>/lib/contract-check.mjs --issue-file tmp/issue-<n>.md --base origin/main
 <the gate reviewer against origin/main>   # built-in /code-review skill, or the project's CLI reviewer
 <the advisory reviewer, if configured>     # same diff; never blocks
 ```

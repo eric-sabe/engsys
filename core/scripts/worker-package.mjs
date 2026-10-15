@@ -208,7 +208,27 @@ for (const n of ordered) {
 
 const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 
+let sharedSliceSpecHeading = null;
+try {
+	const modPath = join(SCRIPT_DIR, '..', 'lib', 'spec-slice.mjs');
+	if (existsSync(modPath)) {
+		({ sliceSpecHeading: sharedSliceSpecHeading } = await import(modPath));
+	}
+} catch {
+	sharedSliceSpecHeading = null;
+}
+
 function extractSection(file, anchor) {
+	if (sharedSliceSpecHeading) {
+		try {
+			return sharedSliceSpecHeading(file, anchor || null, { repoRoot: worktree }).formatted;
+		} catch (err) {
+			fatal(err?.message || String(err), 'Fix the spec_refs / --spec path or heading.');
+		}
+	}
+	if (file.includes('..') || !file.startsWith('docs/specs/')) {
+		fatal(`invalid_spec_path: ${file}`, 'Spec refs must reside under docs/specs/*.md.');
+	}
 	const abs = join(worktree, file);
 	if (!existsSync(abs)) fatal(`spec ref file not found: ${file}`, 'Fix the spec_refs / --spec path.');
 	const text = readFileSync(abs, 'utf8');
