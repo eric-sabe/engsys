@@ -28,6 +28,13 @@ Before deploying, keep the three layers of the stack distinct:
 | **Stage 3** | **Single-Host Autonomous Fleet** *(Monsters + Health Desk)* | High-throughput repos with an always-on macOS host (e.g., Mac mini / workstation) that want unattended PR merging (`Merge Monster`), security/Dependabot triage (`Maintenance Monster`), and upstream outage monitoring (`Fleet Health Desk`). | Stage 2 + always-on macOS host (`launchd`), `tmux`, `jq`, and a GitHub App bot identity. | **~30 min** |
 | **Stage 4** | **Multi-Repo / Multi-Host Federated Fleet** | Organizations running multiple repos and/or multiple always-on machines sharing build/test hardware pools and cross-host singleton leases. | Stage 3 + fleet instance repo, `federation.yml`, and optional `resource-broker`. | **~60 min** |
 
+### OS / Platform Support Matrix (`macOS` · `Linux` · `Windows`)
+
+| Stage | macOS | Linux | Windows |
+|---|---|---|---|
+| **Stages 1 & 2** *(Interactive Team, SDD, Multi-Provider Review, Agentic Memory)* | **Full native support** | **Full native support** | **WSL2 (recommended) or Git Bash** (`sh`/`bash` on `PATH` for shell lifecycle hooks; installer & `.mjs` scripts normalize POSIX paths on `win32`). |
+| **Stages 3 & 4** *(Autonomous Monsters, Fleet Health Desk, Resource Broker, Federation)* | **Tier-1 native support** (`tmux` + `launchd` via `fleet install-jobs`) | **Supported (`tmux` + `cron`/`systemd`)** — all monster scripts, batons, health desk, and `fleet supervise` work natively on Linux (`stat -c` / `date -u -d` / `sha256sum`); only `fleet install-jobs` is macOS `launchd`-specific (schedule `fleet supervise` & `fleet relay` via `systemd` timer or `cron` on Linux). | **WSL2 Linux only** (requires `tmux`, POSIX `ps`/`kill`, and Unix `0600`/root-owned `/usr/bin/git` trust checks; not supported on native `cmd.exe`/PowerShell). |
+
 ---
 
 ## Stage 1: Interactive Team (Single Repo, No Monsters)

@@ -44,8 +44,12 @@ Start at **Stage 1** in 3 minutes on your laptop, and graduate only when your pr
 |---|---|---|---|---|
 | **[Stage 1](#stage-1--interactive-team-start-here--3-minutes)** | **Interactive Team** — 11 core + 4 opt-in specialists, 24 stack packs, `/design-change` SDD, `/implement-issue`, `/pre-push`, and 51 curated lessons inside Claude Code, Copilot CLI, or Antigravity. | **No** | **No** | **~3 min** |
 | **[Stage 2](#stage-2--cross-family-review--compounding-memory)** | **Cross-Family Review & Agentic Memory** — External review models (`Codex`, `Grok`, `DeepSeek`) enforce `reviewer family != author family`, and PR history feeds subagent memory briefs. | **No** | **No** | **~10 min** |
-| **[Stage 3](#stage-3--single-host-autonomous-fleet-monsters--health-desk)** | **Single-Host Autonomous Fleet** — **Merge Monster** pilots `mm:ready` PRs through CI to merge, **Maintenance Monster** triages Dependabot/CodeQL & runs the **Fleet Health Desk**, supervised by `launchd`. | **Yes** (`mm`, `maintain`) | **1 macOS host** (`tmux`) | **~30 min** |
+| **[Stage 3](#stage-3--single-host-autonomous-fleet-monsters--health-desk)** | **Single-Host Autonomous Fleet** — **Merge Monster** pilots `mm:ready` PRs through CI to merge, **Maintenance Monster** triages Dependabot/CodeQL & runs the **Fleet Health Desk**, supervised by `launchd` (macOS) or `systemd`/`cron` (Linux). | **Yes** (`mm`, `maintain`) | **1 macOS/Linux host** (`tmux`) | **~30 min** |
 | **[Stage 4](#stage-4--multi-repo--multi-host-federated-fleet)** | **Federated Multi-Host Fleet** — GitHub-ref compare-and-swap batons fence monsters across machines, **Resource Broker** pools heavy build/test slots, and `fleet verify` enforces release-tree SHA & settings trust. | **Yes** (`+ broker`) | **1–N hosts** | **~60 min** |
+
+> **Platform Support (`macOS` · `Linux` · `Windows`):**
+> - **Stages 1 & 2 (Interactive Team, SDD, Multi-Provider Review, Agentic Memory):** Natively supported on **macOS**, **Linux**, and **Windows** (via **WSL2** or **Git Bash** so POSIX `.sh` lifecycle hooks can run; the `engsys` installer and `.mjs` scripts normalize paths across platforms).
+> - **Stages 3 & 4 (Autonomous Fleet & Monsters):** Natively supported on **macOS** (`tmux` + `launchd` via `fleet install-jobs`) and **Linux / WSL2** (`tmux` + `systemd` user timer or `cron` running `fleet supervise` / `fleet relay`; all monster, baton, and supervisor scripts include GNU/Linux + BSD/macOS dual paths). Not supported on native Windows `cmd.exe`/PowerShell.
 
 ---
 

@@ -150,7 +150,7 @@ set_comments() { # set_comments <owner_repo> <json objects...>
 add_comment() { # add_comment <owner_repo> <json object>
   jq -c --argjson c "$2" '. + [$c]' "$FAKE/gh/$1.json" >"$T/list.json" && mv "$T/list.json" "$FAKE/gh/$1.json"
 }
-perms() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"; }
+perms() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
 
 # =================================================================================================
 echo "== A. single-fleet mode: the relay and its status are no-ops"
