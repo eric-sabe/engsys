@@ -62,14 +62,23 @@ done
 [ -n "$HB_MIN" ] || HB_MIN="$(monster_cfg_scalar "$CONFIG" heartbeat_minutes)"
 case "$HB_MIN" in '' | 0 | *[!0-9]*) HB_MIN=10 ;; esac
 [ -n "$ROTATE" ] || ROTATE="$(monster_cfg_scalar "$CONFIG" rotate_context_tokens)"
-case "$ROTATE" in '' | *[!0-9]*) ROTATE=300000 ;; esac
+ROTATE_OUT="$(monster_rotate_tokens "$ROTATE")"
+ROTATE="${ROTATE_OUT%%$'\t'*}" ROTATE_WARN="${ROTATE_OUT#*$'\t'}"
 W="$DIR/.watch"
 mkdir -p "$W"
 DELTA=()
+if [ -n "$ROTATE_WARN" ] && [ ! -f "$W/rotate-warn.said" ]; then
+  DELTA+=("CONFIG_WARNING ${ROTATE_WARN:0:280}")
+  : >"$W/rotate-warn.said"
+fi
+HB_DUE=0
+monster_heartbeat_due "$DIR" "$HB_MIN" && HB_DUE=1
 
-# 1. renew when due -------------------------------------------------------------------------------
+# 1. renew when due (pulse only when the heartbeat is already fresh; when due, the heartbeat pulses after it writes, #138)
+PULSE_FLAG="--pulse"
+[ "$HB_DUE" = 0 ] || PULSE_FLAG=""
 RC=0
-OUT=$(node "$here/../../../lib/lease/baton.mjs" renew --pulse --role merge --repo "$REPO" --state-dir "$DIR" \
+OUT=$(node "$here/../../../lib/lease/baton.mjs" renew $PULSE_FLAG --role merge --repo "$REPO" --state-dir "$DIR" \
   --if-due "$IF_DUE" ${SESSION:+--session "$SESSION"} 2>&1) || RC=$?
 case "$RC" in
   0) if printf '%s' "$OUT" | jq -e '.handover' >/dev/null 2>&1; then

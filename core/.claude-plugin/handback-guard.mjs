@@ -133,7 +133,8 @@ const NAME = /^[A-Za-z0-9._-]{1,128}$/;
 /**
  * The monsters' net for block C (engsys#126 review): append an INCOMPLETE hand-back to the session's
  * hand-back log, which the watch bus and tick relay as an event. Only in a fleet-launched session; the run
- * id lets a relaunch ignore its predecessor's lines. Never throws (the guard fails open).
+ * id lets a relaunch ignore its predecessor's lines. Coordinates with monster_handback_prune /
+ * monster_handback_events via `<file>.lock` (engsys#138). Never throws (the guard fails open).
  */
 export function relayHandback(input, remains, env = process.env) {
   try {
@@ -142,9 +143,74 @@ export function relayHandback(input, remains, env = process.env) {
     if (!session || !NAME.test(session) || (fleet && !NAME.test(fleet))) return null;
     const dir = sessionsDir(env);
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    const file = path.join(dir, `${fleet ? `${fleet}.` : ''}${session}.handbacks.jsonl`);
+    const base = `${fleet ? `${fleet}.` : ''}${session}.handbacks.jsonl`;
+    const file = path.join(dir, base);
+    const lock = `${file}.lock`;
+    const reclaim = `${lock}.reclaim`;
+    const timeoutMs = Math.max(0, Number(env.ENGSYS_HANDBACK_LOCK_TIMEOUT_MS ?? 5000) || 0);
+    let locked = false;
+    const deadline = Date.now() + timeoutMs;
+    while (!locked) {
+      try {
+        fs.mkdirSync(lock, { mode: 0o700 });
+        locked = true;
+      } catch {
+        try {
+          const st = fs.statSync(lock);
+          if (Date.now() - st.mtimeMs > 30_000) {
+            try {
+              const rst = fs.statSync(reclaim);
+              if (Date.now() - rst.mtimeMs > 30_000) fs.rmdirSync(reclaim);
+            } catch { /* no stale reclaim lock */ }
+            let reclaiming = false;
+            try {
+              fs.mkdirSync(reclaim, { mode: 0o700 });
+              reclaiming = true;
+            } catch { /* another process is reclaiming */ }
+            if (reclaiming) {
+              try {
+                const st2 = fs.statSync(lock);
+                if (st2.ino === st.ino && Date.now() - st2.mtimeMs > 30_000) {
+                  const staleLock = `${lock}.stale.${process.pid}`;
+                  fs.renameSync(lock, staleLock);
+                  fs.rmdirSync(staleLock);
+                }
+              } catch { /* already released */ } finally {
+                try { fs.rmdirSync(reclaim); } catch { /* ignore */ }
+              }
+            }
+          }
+        } catch { /* released or raced */ }
+        if (Date.now() >= deadline) break;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(20, Math.max(1, deadline - Date.now())));
+      }
+    }
     const clean = (v, n) => String(v ?? '').replace(/[\u0000-\u001f\u007f]+/g, ' ').slice(0, n);
-    fs.appendFileSync(file, `${JSON.stringify({ at: new Date().toISOString(), run: env.ENGSYS_SESSION_RUN || null, agent_id: clean(input.agent_id, 80), agent_type: clean(input.agent_type || 'agent', 80), remains: clean(remains, 200) })}\n`, { mode: 0o600 });
+    const entry = `${JSON.stringify({ at: new Date().toISOString(), run: env.ENGSYS_SESSION_RUN || null, agent_id: clean(input.agent_id, 80), agent_type: clean(input.agent_type || 'agent', 80), remains: clean(remains, 200) })}\n`;
+    if (!locked) {
+      const suffix = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const tmpPending = `${file}.tmp.${suffix}`;
+      const pending = `${file}.pending.${suffix}`;
+      fs.writeFileSync(tmpPending, entry, { mode: 0o600 });
+      fs.renameSync(tmpPending, pending);
+      return pending;
+    }
+    try {
+      const prefix = `${base}.pending.`;
+      for (const name of fs.readdirSync(dir).filter((n) => n.startsWith(prefix)).sort()) {
+        const pf = path.join(dir, name);
+        const df = `${pf}.draining.${process.pid}`;
+        try {
+          fs.renameSync(pf, df);
+          const data = fs.readFileSync(df, 'utf8');
+          if (data) fs.appendFileSync(file, data, { mode: 0o600 });
+          fs.rmSync(df, { force: true });
+        } catch { /* ignore raced pending file */ }
+      }
+      fs.appendFileSync(file, entry, { mode: 0o600 });
+    } finally {
+      try { fs.rmdirSync(lock); } catch { /* ignore */ }
+    }
     return file;
   } catch {
     return null;
