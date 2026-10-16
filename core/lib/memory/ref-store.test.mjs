@@ -198,7 +198,7 @@ describe('ref-store (#130)', () => {
 
     const r2 = await store.readEvents();
     assert.equal(r2.ok, true);
-    assert.deepEqual(r2.parents, [], 'compaction commit must be parentless so old blobs GC');
+    assert.deepEqual(r2.parents, [w1.sha], 'compaction commit retains tip as parent so CAS stays fast-forward');
     // Old tombstone dropped; oldest remaining ('ev:1') trimmed to cap at 3 newest
     assert.deepEqual(
       r2.events.map((e) => e.k),

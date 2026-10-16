@@ -538,14 +538,18 @@ export function normalizeRepoUrl(url) {
 	if (typeof url !== 'string') return null;
 	const s = url.trim().replace(/\/+$/, '');
 	if (!s || s.startsWith('/') || s.startsWith('.')) return null;
-	const urlMatch = /^(?:https?|ssh|git):\/\/[^/\s]+\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?$/i.exec(s);
+	const urlMatch = /^(?:https?|ssh|git):\/\/(?:[^@/\s]+@)?([^/:\s]+)(?::\d+)?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?$/i.exec(s);
 	if (urlMatch) {
-		const slug = urlMatch[1].replace(/\.git$/i, '');
+		const host = urlMatch[1].toLowerCase();
+		if (host !== 'github.com') return null;
+		const slug = urlMatch[2].replace(/\.git$/i, '');
 		return REPO_RE.test(slug) ? slug.toLowerCase() : null;
 	}
-	const scpMatch = /^[^@/\s]+@[^:/\s]+:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?$/i.exec(s);
+	const scpMatch = /^[^@/\s]+@([^:/\s]+):([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?$/i.exec(s);
 	if (scpMatch) {
-		const slug = scpMatch[1].replace(/\.git$/i, '');
+		const host = scpMatch[1].toLowerCase();
+		if (host !== 'github.com') return null;
+		const slug = scpMatch[2].replace(/\.git$/i, '');
 		return REPO_RE.test(slug) ? slug.toLowerCase() : null;
 	}
 	const bare = s.replace(/\.git$/i, '');
@@ -762,10 +766,14 @@ function applyJsonlLinesToMap(text, byKey) {
  * (docs/memory-spec.md §3.2, #132) into Event[], merging by `k` (last-writer-wins by `updated_at`)
  * and dropping tombstones (`deleted: true`). Never throws.
  */
-export function loadClassBEvents(cacheDir, { repoRoot = null, refShas = null } = {}) {
+export function loadClassBEvents(cacheDir, { repoRoot = null, refShas = null, pluginRoot = undefined, allowedRepos = undefined } = {}) {
 	const byKey = new Map();
 	if (repoRoot) {
-		const refs = Array.isArray(refShas) ? refShas : listMemoryRefShas(repoRoot);
+		const refs = Array.isArray(refShas)
+			? refShas
+			: isRepoAllowlisted(repoRoot, { pluginRoot, allowedRepos })
+				? listMemoryRefShas(repoRoot)
+				: [];
 		for (const r of refs) {
 			try {
 				const blobText = execFileSync(
@@ -905,8 +913,9 @@ export function ensureIndex(opts = {}) {
 
 	const roots = resolveClassARoots(repoRoot, { pluginRoot: opts.pluginRoot });
 	const manifest = {};
-	const { docs } = loadClassADocs(roots, manifest, { repoRoot, pluginRoot: opts.pluginRoot, allowedRepos: opts.allowedRepos, defaultBranch: opts.defaultBranch, reviewedSha: opts.reviewedSha });
-	const refShas = listMemoryRefShas(repoRoot);
+	const allowlisted = isRepoAllowlisted(repoRoot, { pluginRoot: opts.pluginRoot, allowedRepos: opts.allowedRepos });
+	const { docs } = loadClassADocs(roots, manifest, { repoRoot, allowlisted, pluginRoot: opts.pluginRoot, allowedRepos: opts.allowedRepos, defaultBranch: opts.defaultBranch, reviewedSha: opts.reviewedSha });
+	const refShas = allowlisted ? listMemoryRefShas(repoRoot) : [];
 	const events = loadClassBEvents(cacheDir, { repoRoot, refShas });
 	let eventsFingerprint = 0;
 	try {

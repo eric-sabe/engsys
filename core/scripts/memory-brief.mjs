@@ -67,6 +67,8 @@ export const DEFAULTS = {
 	review_markers: [],
 	trusted_bot_user_ids: [],
 	operator_user_ids: [],
+	operator_emails: [],
+	operator_logins: [],
 	exclude_class_b_agents: [],
 	high_fanout_globs: [],
 	brief_bytes: 2048,
@@ -85,7 +87,7 @@ export const DEFAULTS = {
  * fleet config dir (`CLAUDE_CONFIG_DIR`) and plugin config dir (`CLAUDE_PLUGIN_ROOT`), then
  * defaults. Scalar list fields are coerced to one-item lists (#155).
  */
-const UNION_FIELDS = ['exclude_class_b_agents', 'trusted_bot_user_ids', 'operator_user_ids', 'review_markers', 'high_fanout_globs'];
+const UNION_FIELDS = ['exclude_class_b_agents', 'trusted_bot_user_ids', 'operator_user_ids', 'operator_emails', 'operator_logins', 'review_markers', 'high_fanout_globs'];
 
 function isPlainObject(v) {
 	return Boolean(v) && typeof v === 'object' && !Array.isArray(v);
@@ -361,6 +363,18 @@ const OUTCOME_WEIGHT = { fixed: 1.0, unresolved: 0.5, disputed: 0.2, bounced: 0.
 export function isEventTrusted(event, config) {
 	if (!event || typeof event !== 'object') return false;
 	if (!config) return true;
+	if (event.kind === 'commit') {
+		if (event.author_kind === 'operator' && (event.author_email || event.author_login)) {
+			const opEmails = new Set((config.operator_emails ?? []).map((e) => String(e).toLowerCase()));
+			const opLogins = new Set((config.operator_logins ?? []).map((l) => String(l).toLowerCase()));
+			if (opEmails.size > 0 || opLogins.size > 0) {
+				const emailOk = event.author_email && opEmails.has(String(event.author_email).toLowerCase());
+				const loginOk = event.author_login && opLogins.has(String(event.author_login).toLowerCase());
+				if (!emailOk && !loginOk) return false;
+			}
+		}
+		return true;
+	}
 	const trustedBots = new Set((config.trusted_bot_user_ids ?? []).map(Number));
 	const operators = new Set((config.operator_user_ids ?? []).map(Number));
 	const kind = String(event.author_kind || '');
@@ -442,10 +456,24 @@ export function pointerScore(
 	// Files matching `high_fanout_globs` (e.g. schema.prisma, package.json) are keyed by symbol
 	// rather than path alone unless an exact nearby line is touched (docs/memory-spec.md §5, #132).
 	if (highFanoutGlobs?.length && globMatchesAny(highFanoutGlobs, [event.path]) && anchor < 1.0) {
-		const sym = event.symbol ? String(event.symbol).toLowerCase() : '';
+		const rawSym = event.symbol ? String(event.symbol) : '';
+		const sym = rawSym.toLowerCase();
 		if (!sym) return 0;
+		const symWords = new Set(
+			rawSym
+				.replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+				.split(/[^A-Za-z0-9]+/)
+				.map((w) => w.toLowerCase())
+				.filter((w) => w.length >= 3),
+		);
 		const symCandidates = [...(touchedSymbols ?? []), ...(promptTerms ?? [])].map((s) => String(s).toLowerCase());
-		if (!symCandidates.some((c) => c === sym || sym.includes(c) || c.includes(sym))) return 0;
+		if (
+			!symCandidates.some(
+				(c) => c === sym || symWords.has(c) || (c.length >= 6 && (sym.includes(c) || c.includes(sym))),
+			)
+		) {
+			return 0;
+		}
 		anchor = Math.max(anchor, 0.8);
 	}
 

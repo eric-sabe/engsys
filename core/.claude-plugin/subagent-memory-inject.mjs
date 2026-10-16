@@ -89,17 +89,45 @@ export function extractWorktreeFromInput(toolInput, prompt = '') {
 
 const GIT_CALL_OPTS = { encoding: 'utf8', timeout: 500, killSignal: 'SIGKILL', stdio: ['ignore', 'pipe', 'ignore'] };
 
-/** True iff `dirA` and `dirB` resolve to the exact same `--git-common-dir` (#142). Prevents a
- * prompt-mentioned path from pointing `resolveTouchedPaths` at an unrelated repo. */
-export function sharesGitCommonDir(dirA, dirB, { exec = execFileSync } = {}) {
-	if (!dirA || !dirB) return false;
+/**
+ * Resolve `candidateDir` to its registered git worktree root iff it is listed in
+ * `git -C trustedRepoDir worktree list --porcelain` (#142). Never runs `git -C` on
+ * `candidateDir` itself, preventing an unverified path from triggering a repo-local git config.
+ */
+export function resolveRegisteredWorktree(trustedRepoDir, candidateDir, { exec = execFileSync } = {}) {
+	if (!trustedRepoDir || !candidateDir) return null;
+	let realCandidate;
 	try {
-		const commonA = exec('git', ['-C', dirA, 'rev-parse', '--path-format=absolute', '--git-common-dir'], GIT_CALL_OPTS).trim();
-		const commonB = exec('git', ['-C', dirB, 'rev-parse', '--path-format=absolute', '--git-common-dir'], GIT_CALL_OPTS).trim();
-		return Boolean(commonA && commonA === commonB);
+		realCandidate = fs.realpathSync(candidateDir);
 	} catch {
-		return false;
+		return null;
 	}
+	try {
+		const out = exec('git', ['-C', trustedRepoDir, 'worktree', 'list', '--porcelain'], GIT_CALL_OPTS);
+		for (const line of out.split('\n')) {
+			if (!line.startsWith('worktree ')) continue;
+			const wtPath = line.slice('worktree '.length).trim();
+			if (!wtPath) continue;
+			let realWt;
+			try {
+				realWt = fs.realpathSync(wtPath);
+			} catch {
+				continue;
+			}
+			if (realCandidate === realWt || realCandidate.startsWith(realWt + path.sep)) {
+				return realWt;
+			}
+		}
+		return null;
+	} catch {
+		return null;
+	}
+}
+
+/** True iff `dirB` is a registered worktree of `dirA` (#142). Prevents a prompt-mentioned path
+ * from pointing `resolveTouchedPaths` at an unrelated repo or running `git -C` on an untrusted dir. */
+export function sharesGitCommonDir(dirA, dirB, { exec = execFileSync } = {}) {
+	return Boolean(resolveRegisteredWorktree(dirA, dirB, { exec }));
 }
 
 function sweepExpiredDispatches(pendingDir, nowMs) {
@@ -158,9 +186,13 @@ export function consumePendingDispatch(input, { cwd, now = () => Date.now() } = 
 
 		const sessionId = safeIdToken(firstString(input?.session_id) ?? 'default');
 		const agentKey = safeIdToken(bareAgent(extractAgentType(input)) || 'any');
-		const prefixes = [`${sessionId}--${agentKey}--`, `${sessionId}--any--`];
+		const sessionFiles = files.filter((f) => f.startsWith(`${sessionId}--`));
+		const hasTypedForSession = sessionFiles.some((f) => !f.startsWith(`${sessionId}--any--`));
+		const prefixes = agentKey === 'any' || !hasTypedForSession
+			? [`${sessionId}--${agentKey}--`, `${sessionId}--any--`]
+			: [`${sessionId}--${agentKey}--`];
 		for (const prefix of prefixes) {
-			const match = files.find((f) => f.startsWith(prefix));
+			const match = sessionFiles.find((f) => f.startsWith(prefix));
 			if (!match) continue;
 			const full = path.join(pendingDir, match);
 			let parsed = null;
@@ -323,11 +355,9 @@ export async function main({ argv = process.argv.slice(2), stdin = process.stdin
 		const pending = input ? consumePendingDispatch(input, { cwd, now }) : null;
 		const prompt = extractPrompt(input) || pending?.prompt || '';
 		let diffCwd = cwd;
-		if (pending?.worktree && sharesGitCommonDir(cwd, pending.worktree)) {
-			try {
-				const wtTop = execFileSync('git', ['-C', pending.worktree, 'rev-parse', '--show-toplevel'], GIT_CALL_OPTS).trim();
-				if (wtTop) diffCwd = wtTop;
-			} catch { /* fall back to cwd */ }
+		if (pending?.worktree) {
+			const matchedWt = resolveRegisteredWorktree(cwd, pending.worktree);
+			if (matchedWt) diffCwd = matchedWt;
 		}
 		const gitTouched = resolveTouchedPaths(input, { cwd: diffCwd });
 		const touchedPaths = [...new Set([...gitTouched, ...(pending?.promptPaths ?? [])])];

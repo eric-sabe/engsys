@@ -6,12 +6,12 @@
 //     incoming records by `k` (last-writer-wins by `updated_at`) -> write new
 //     blob + tree + commit -> PATCH ref expecting previous SHA; on 422
 //     (`outcome === 'lost'`), re-fetch and re-merge.
-//   - Compaction: when total lines exceed `maxEvents` (default 20,000) or
-//     `forceCompact` is requested, keep only the latest version of each key `k`,
-//     drop tombstones (`deleted: true`) older than `tombstoneTtlDays` (default
-//     180 days), cap at `maxEvents` newest records, and write a single
-//     parentless commit (`parents: []`) with `force: true` on the ref update so
-//     old blobs become unreachable and GC'd.
+//   - Compaction: when total lines or merged keys exceed `maxEvents` (default
+//     20,000) or `forceCompact` is requested, keep only the latest version of
+//     each key `k`, drop tombstones (`deleted: true`) older than
+//     `tombstoneTtlDays` (default 180 days), cap at `maxEvents` newest records,
+//     and write a child commit (`parents: [tip.sha]`) using a fast-forward CAS
+//     update so concurrent writers are never overwritten.
 //   - Secret scan: every outgoing event is scanned in-process before any blob
 //     write; matching events are rejected and logged (never written to any ref).
 
@@ -408,7 +408,7 @@ export function createMemoryRefStore({
       const merged = mergeEvents(tip.events, cleanEvents);
       const shouldCompact =
         Boolean(forceCompact) ||
-        tip.rawLineCount + cleanEvents.length > maxEvents ||
+        tip.rawLineCount > maxEvents ||
         merged.length > maxEvents;
 
       const finalEvents = shouldCompact
@@ -433,15 +433,15 @@ export function createMemoryRefStore({
         return { ok: false, error: treeRes.failure, rejected };
       }
 
-      const parents = shouldCompact ? [] : tip.sha ? [tip.sha] : [];
+      // Keep tip.sha as parent so ref updates remain fast-forward CAS checks and never
+      // clobber a concurrent writer's commit via a forced PATCH.
+      const parents = tip.sha ? [tip.sha] : [];
       const commitRes = await gitData.createCommit(message, parents, treeRes.sha);
       if (commitRes.failure) {
         return { ok: false, error: commitRes.failure, rejected };
       }
 
-      const casRes = await gitData.cas(fullRef, tip.sha, commitRes.sha, {
-        force: shouldCompact,
-      });
+      const casRes = await gitData.cas(fullRef, tip.sha, commitRes.sha);
       if (casRes.outcome === 'won') {
         return {
           ok: true,

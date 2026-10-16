@@ -7,6 +7,7 @@
 // deterministic unit tests.
 
 import { execFile, execFileSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { parseArgs, promisify } from 'node:util';
@@ -117,8 +118,8 @@ export function classifyTextSafety(text) {
 export function appendQuarantineLog(cacheDir, entry) {
   if (!cacheDir) return;
   try {
-    fs.mkdirSync(cacheDir, { recursive: true });
-    fs.appendFileSync(path.join(cacheDir, 'quarantine.jsonl'), JSON.stringify(entry) + '\n', 'utf8');
+    fs.mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
+    fs.appendFileSync(path.join(cacheDir, 'quarantine.jsonl'), JSON.stringify(entry) + '\n', { encoding: 'utf8', mode: 0o600 });
   } catch {
     // Best effort
   }
@@ -304,13 +305,14 @@ export function evaluateNodeEligibility(node, config = {}) {
     }
   }
 
-  // Fallback: check pre-edit revisions in userContentEdits if available
+  // Fallback: check pre-edit revisions in userContentEdits if available (must have an explicit edit.editor)
   const edits = Array.isArray(node.userContentEdits?.nodes) ? node.userContentEdits.nodes : [];
   for (const edit of edits) {
     if (!edit || typeof edit.diff !== 'string' || !edit.diff.trim()) continue;
-    const editActor = edit.editor || node.author;
+    const editActor = edit.editor;
+    if (!editActor) continue;
     const editAssoc =
-      editActor && authorRes.id != null && Number(editActor.databaseId) === Number(authorRes.id)
+      authorRes.id != null && Number(editActor.databaseId) === Number(authorRes.id)
         ? node.authorAssociation
         : null;
     const editRes = evaluateActorEligibility(editActor, editAssoc, config);
@@ -336,8 +338,19 @@ export function evaluateNodeEligibility(node, config = {}) {
  */
 export function isEventTrustedByConfig(event, config = {}) {
   if (!event || typeof event !== 'object') return false;
-  // Local commits and monster journals without an untrusted GitHub author pass if not flagged untrusted
-  if (event.kind === 'commit' || event.kind === 'journal') return true;
+  if (event.kind === 'journal') return true;
+  if (event.kind === 'commit') {
+    if (event.author_kind === 'operator' && (event.author_email || event.author_login)) {
+      const opEmails = new Set((config.operator_emails ?? []).map((e) => String(e).toLowerCase()));
+      const opLogins = new Set((config.operator_logins ?? []).map((l) => String(l).toLowerCase()));
+      if (opEmails.size > 0 || opLogins.size > 0) {
+        const emailOk = event.author_email && opEmails.has(String(event.author_email).toLowerCase());
+        const loginOk = event.author_login && opLogins.has(String(event.author_login).toLowerCase());
+        if (!emailOk && !loginOk) return false;
+      }
+    }
+    return true;
+  }
 
   const trustedBots = new Set((config.trusted_bot_user_ids ?? []).map(Number));
   const operators = new Set((config.operator_user_ids ?? []).map(Number));
@@ -505,10 +518,14 @@ export function extractEventsFromPrNode(pr, { repo, config = {}, cacheDir = null
     if (elig.eligible) collectAcks(elig.bodyText);
   }
 
-  // Process PR comments (marker findings vs general comments, plus tombstones for isMinimized)
-  for (const [idx, c] of (pr.comments?.nodes ?? []).entries()) {
+  // Process PR comments & review bodies (marker findings vs general comments, plus tombstones for isMinimized)
+  const reviewLikeNodes = [
+    ...(pr.comments?.nodes ?? []).map((n, idx) => ({ node: n, fallbackId: String(idx) })),
+    ...(pr.reviews?.nodes ?? []).map((n, idx) => ({ node: n, fallbackId: `r-${idx}` })),
+  ];
+  for (const { node: c, fallbackId } of reviewLikeNodes) {
     if (!c) continue;
-    const cid = normalizeSafeKeySegment(c.id || String(idx));
+    const cid = normalizeSafeKeySegment(c.id || fallbackId);
     const cUpdated = c.updatedAt || c.createdAt || updatedAt;
     if (c.isMinimized) {
       const tk = `${keyPrefix}:pr_review:${prNum}:${cid}`;
@@ -518,12 +535,29 @@ export function extractEventsFromPrNode(pr, { repo, config = {}, cacheDir = null
         deleted: true,
         updated_at: cUpdated,
       });
+      const emittedFindingKeys = new Set();
+      if (isMarkerBody(c.body, matchers)) {
+        const parsedHidden = parseReviewComment(String(c.body ?? ''));
+        const hiddenFindings = Array.isArray(parsedHidden) ? parsedHidden : (parsedHidden?.findings ?? []);
+        for (const [fIdx, f] of hiddenFindings.entries()) {
+          const fk = `${keyPrefix}:marker_finding:${prNum}:${cid}:${normalizeSafeKeySegment(f.id || `F${fIdx + 1}`)}`;
+          emittedFindingKeys.add(fk);
+          out.push({ k: fk, id: fk, deleted: true, updated_at: cUpdated });
+        }
+      }
+      if (emittedFindingKeys.size === 0) {
+        for (let i = 1; i <= 10; i++) {
+          const fk = `${keyPrefix}:marker_finding:${prNum}:${cid}:F${i}`;
+          out.push({ k: fk, id: fk, deleted: true, updated_at: cUpdated });
+        }
+      }
       continue;
     }
     const elig = evaluateNodeEligibility(c, config);
     if (!elig.eligible) continue;
+    if (!String(elig.bodyText || '').trim()) continue;
 
-    // Structured finding lines are extracted ONLY from comments with a leading configured marker (§7.2)
+    // Structured finding lines are extracted ONLY from comments/reviews with a leading configured marker (§7.2)
     if (isMarkerBody(elig.bodyText, matchers)) {
       const mMatch = String(elig.bodyText).trimStart().match(/^<!--\s*([a-z0-9-]+)\s*-->/i);
       const markerName = mMatch ? mMatch[1].toLowerCase() : 'local-review-findings';
@@ -813,6 +847,8 @@ export function extractEventFromCommit(
       updated_at: dateIso,
       author_id: null,
       author_kind: isOperatorCommit ? 'operator' : 'member',
+      author_email: isOperatorCommit ? authorEmail : null,
+      author_login: isOperatorCommit ? authorName : null,
       url: normRepo ? `https://github.com/${normRepo}/commit/${commit.sha}` : '',
       summary: subject.slice(0, 200),
       text: textContent,
@@ -830,12 +866,16 @@ export function ingestLocalCommits(
   repoRoot,
   { repo = '', config = {}, cacheDir = null, maxCount = INIT_CAPS.commits, since = null, exec = execFileSync, now = () => Date.now() } = {},
 ) {
+  const nonce = crypto.randomBytes(8).toString('hex');
+  const recSep = `__REC_${nonce}__`;
+  const fldSep = `__FLD_${nonce}__`;
+  const endSep = `__END_${nonce}__`;
   const args = [
     '-C',
     repoRoot,
     'log',
     `--max-count=${maxCount}`,
-    '--format=%x1e%H%x1f%an%x1f%ae%x1f%aI%x1f%s%x1f%b%x1d',
+    `--format=${recSep}%H${fldSep}%an${fldSep}%ae${fldSep}%aI${fldSep}%s${fldSep}%b${endSep}`,
     '--name-only',
   ];
   if (since) args.push(`--since=${since}`);
@@ -846,12 +886,17 @@ export function ingestLocalCommits(
     return [];
   }
 
+  const useNonce = raw.includes(recSep);
+  const rSep = useNonce ? recSep : '\x1e';
+  const fSep = useNonce ? fldSep : '\x1f';
+  const eSep = useNonce ? endSep : '\x1d';
+
   const events = [];
-  for (const record of raw.split('\x1e')) {
+  for (const record of raw.split(rSep)) {
     if (!record.trim()) continue;
-    const [headerPart, filesPart = ''] = record.split('\x1d');
-    const [sha, authorName, authorEmail, date, subject, body] = headerPart.split('\x1f');
-    if (!sha || !sha.trim()) continue;
+    const [headerPart, filesPart = ''] = record.split(eSep);
+    const [sha, authorName, authorEmail, date, subject, body] = headerPart.split(fSep);
+    if (!sha || !/^[0-9a-f]{7,40}$/i.test(sha.trim())) continue;
     const files = filesPart
       .split('\n')
       .map((s) => s.trim())
@@ -889,8 +934,8 @@ export function readCursors(cacheDir) {
 
 export function writeCursors(cacheDir, cursors) {
   if (!cacheDir) return;
-  fs.mkdirSync(cacheDir, { recursive: true });
-  fs.writeFileSync(path.join(cacheDir, 'cursors.json'), JSON.stringify(cursors, null, 2), 'utf8');
+  fs.mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(cacheDir, 'cursors.json'), JSON.stringify(cursors, null, 2), { encoding: 'utf8', mode: 0o600 });
 }
 
 /**
@@ -916,10 +961,10 @@ export function readDeltaEvents(cacheDir) {
 
 export function writeDeltaEvents(cacheDir, incomingEvents) {
   if (!cacheDir) return [];
-  fs.mkdirSync(cacheDir, { recursive: true });
+  fs.mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
   const existing = readDeltaEvents(cacheDir);
   const merged = mergeEvents(existing, incomingEvents);
-  fs.writeFileSync(path.join(cacheDir, 'delta.jsonl'), formatEventsJsonl(merged), 'utf8');
+  fs.writeFileSync(path.join(cacheDir, 'delta.jsonl'), formatEventsJsonl(merged), { encoding: 'utf8', mode: 0o600 });
   return merged;
 }
 
@@ -1054,7 +1099,9 @@ export async function fetchRepoPrsAndIssues(
   { gh = defaultGh, isInit = false, sinceIso = null } = {},
 ) {
   const normRepo = normalizeOptionalRepo(repo);
-  if (!normRepo || typeof gh !== 'function') return { prs: [], issues: [] };
+  if (!normRepo || typeof gh !== 'function') {
+    return { prs: [], issues: [], ok: false, complete: false };
+  }
   const [owner, name] = normRepo.split('/');
   const maxPrs = isInit ? INIT_CAPS.prs : 100;
   const maxIssues = isInit ? INIT_CAPS.issues : 100;
@@ -1066,6 +1113,9 @@ export async function fetchRepoPrsAndIssues(
   let issueAfter = null;
   let fetchMorePrs = true;
   let fetchMoreIssues = true;
+  let ok = true;
+  let hitPrCap = false;
+  let hitIssueCap = false;
 
   while ((fetchMorePrs && prs.length < maxPrs) || (fetchMoreIssues && issues.length < maxIssues)) {
     const prPageSize = fetchMorePrs ? Math.min(50, maxPrs - prs.length) : 0;
@@ -1094,9 +1144,13 @@ export async function fetchRepoPrsAndIssues(
       const raw = await gh(gqlArgs);
       repoData = JSON.parse(raw)?.data?.repository ?? null;
     } catch {
+      ok = false;
       break;
     }
-    if (!repoData) break;
+    if (!repoData) {
+      ok = false;
+      break;
+    }
 
     if (fetchMorePrs) {
       const prConn = repoData.pullRequests;
@@ -1107,9 +1161,18 @@ export async function fetchRepoPrsAndIssues(
           fetchMorePrs = false;
           break;
         }
-        if (prs.length < maxPrs) prs.push(n);
+        if (prs.length < maxPrs) {
+          prs.push(n);
+        } else {
+          hitPrCap = true;
+          fetchMorePrs = false;
+          break;
+        }
       }
       if (!prConn?.pageInfo?.hasNextPage || !prConn?.pageInfo?.endCursor || nodes.length === 0) {
+        fetchMorePrs = false;
+      } else if (prs.length >= maxPrs) {
+        hitPrCap = true;
         fetchMorePrs = false;
       } else {
         prAfter = prConn.pageInfo.endCursor;
@@ -1125,9 +1188,18 @@ export async function fetchRepoPrsAndIssues(
           fetchMoreIssues = false;
           break;
         }
-        if (issues.length < maxIssues) issues.push(n);
+        if (issues.length < maxIssues) {
+          issues.push(n);
+        } else {
+          hitIssueCap = true;
+          fetchMoreIssues = false;
+          break;
+        }
       }
       if (!issueConn?.pageInfo?.hasNextPage || !issueConn?.pageInfo?.endCursor || nodes.length === 0) {
+        fetchMoreIssues = false;
+      } else if (issues.length >= maxIssues) {
+        hitIssueCap = true;
         fetchMoreIssues = false;
       } else {
         issueAfter = issueConn.pageInfo.endCursor;
@@ -1135,7 +1207,8 @@ export async function fetchRepoPrsAndIssues(
     }
   }
 
-  return { prs, issues };
+  const complete = ok && (isInit || (!hitPrCap && !hitIssueCap));
+  return { prs, issues, ok, complete };
 }
 
 /**
@@ -1161,8 +1234,13 @@ export async function runMemorySync({
   const cursors = readCursors(cacheDir);
   const repoCursor = cursors[repo || '_local'] || {};
   const isInit = mode === 'init';
+  const hasGhRepo = Boolean(normalizeOptionalRepo(repo));
 
-  const sinceIso = isInit ? null : computeOverlapSince(repoCursor.updatedAt);
+  const prevCommitCursor = repoCursor.commitUpdatedAt ?? (!hasGhRepo ? repoCursor.updatedAt : null) ?? '';
+  const prevGhCursor = repoCursor.ghUpdatedAt ?? (hasGhRepo ? repoCursor.updatedAt : null) ?? '';
+
+  const commitSinceIso = isInit ? null : computeOverlapSince(prevCommitCursor);
+  const ghSinceIso = isInit ? null : computeOverlapSince(prevGhCursor);
   const collected = [];
 
   // 1. Local git commits (capped at 500 on --init)
@@ -1171,7 +1249,7 @@ export async function runMemorySync({
     config: cfg,
     cacheDir,
     maxCount: INIT_CAPS.commits,
-    since: sinceIso,
+    since: commitSinceIso,
     exec,
     now,
   });
@@ -1180,35 +1258,38 @@ export async function runMemorySync({
   // 2. PRs & Issues (injected nodes or fetched via GraphQL when `repo` is provided on init/delta)
   let resolvedPrNodes = prNodes;
   let resolvedIssueNodes = issueNodes;
-  if (
-    mode !== 'publish' &&
-    (resolvedPrNodes === null || resolvedIssueNodes === null) &&
-    normalizeOptionalRepo(repo)
-  ) {
+  let ghFetchComplete = true;
+  if (resolvedPrNodes !== null || resolvedIssueNodes !== null) {
+    resolvedPrNodes = resolvedPrNodes ?? [];
+    resolvedIssueNodes = resolvedIssueNodes ?? [];
+  } else if (mode !== 'publish' && hasGhRepo) {
     const fetched = await fetchRepoPrsAndIssues(repo, {
       gh: gh || defaultGh,
       isInit,
-      sinceIso,
+      sinceIso: ghSinceIso,
     });
-    if (resolvedPrNodes === null) resolvedPrNodes = fetched.prs;
-    if (resolvedIssueNodes === null) resolvedIssueNodes = fetched.issues;
+    resolvedPrNodes = fetched.prs;
+    resolvedIssueNodes = fetched.issues;
+    ghFetchComplete = Boolean(fetched.complete);
   }
 
+  const ghEvents = [];
   const prs = Array.isArray(resolvedPrNodes)
     ? resolvedPrNodes.slice(0, isInit ? INIT_CAPS.prs : resolvedPrNodes.length)
     : [];
   for (const pr of prs) {
-    if (sinceIso && pr.updatedAt && Date.parse(pr.updatedAt) < Date.parse(sinceIso)) continue;
-    collected.push(...extractEventsFromPrNode(pr, { repo, config: cfg, cacheDir, now }));
+    if (ghSinceIso && pr.updatedAt && Date.parse(pr.updatedAt) < Date.parse(ghSinceIso)) continue;
+    ghEvents.push(...extractEventsFromPrNode(pr, { repo, config: cfg, cacheDir, now }));
   }
 
   const issues = Array.isArray(resolvedIssueNodes)
     ? resolvedIssueNodes.slice(0, isInit ? INIT_CAPS.issues : resolvedIssueNodes.length)
     : [];
   for (const issue of issues) {
-    if (sinceIso && issue.updatedAt && Date.parse(issue.updatedAt) < Date.parse(sinceIso)) continue;
-    collected.push(...extractEventsFromIssueNode(issue, { repo, config: cfg, cacheDir, now }));
+    if (ghSinceIso && issue.updatedAt && Date.parse(issue.updatedAt) < Date.parse(ghSinceIso)) continue;
+    ghEvents.push(...extractEventsFromIssueNode(issue, { repo, config: cfg, cacheDir, now }));
   }
+  collected.push(...ghEvents);
 
   // 3. Explicit tombstones for deleted sources (§7.5)
   const nowIso = new Date(now()).toISOString();
@@ -1217,17 +1298,30 @@ export async function runMemorySync({
     collected.push({ k, id: k, deleted: true, updated_at: nowIso });
   }
 
-  // 4. Merge into delta.jsonl and advance cursors
+  // 4. Merge into delta.jsonl and advance cursors independently for local commits vs GitHub PRs/issues
   const mergedDelta = writeDeltaEvents(cacheDir, collected);
-  let maxUpdated = repoCursor.updatedAt || '';
-  for (const ev of collected) {
-    if (ev.updated_at && String(ev.updated_at) > maxUpdated) {
-      maxUpdated = String(ev.updated_at);
+  let nextCommitCursor = prevCommitCursor;
+  for (const ev of commitEvents) {
+    if (ev.updated_at && String(ev.updated_at) > nextCommitCursor) {
+      nextCommitCursor = String(ev.updated_at);
     }
   }
-  if (!maxUpdated) maxUpdated = nowIso;
+  let nextGhCursor = prevGhCursor;
+  if (ghFetchComplete) {
+    for (const ev of ghEvents) {
+      if (ev.updated_at && String(ev.updated_at) > nextGhCursor) {
+        nextGhCursor = String(ev.updated_at);
+      }
+    }
+  }
+  const effectiveUpdatedAt = hasGhRepo
+    ? nextGhCursor || (ghFetchComplete ? nextCommitCursor || nowIso : prevGhCursor)
+    : nextCommitCursor || prevCommitCursor || nowIso;
+
   cursors[repo || '_local'] = {
-    updatedAt: maxUpdated,
+    updatedAt: effectiveUpdatedAt,
+    ghUpdatedAt: nextGhCursor || null,
+    commitUpdatedAt: nextCommitCursor || null,
     lastMode: mode,
     syncedAt: nowIso,
   };
@@ -1265,8 +1359,10 @@ export async function runMemorySync({
     mode,
     collectedCount: collected.length,
     deltaCount: mergedDelta.length,
-    sinceIso,
-    cursorUpdatedAt: maxUpdated,
+    sinceIso: hasGhRepo ? ghSinceIso : commitSinceIso,
+    ghSinceIso,
+    commitSinceIso,
+    cursorUpdatedAt: effectiveUpdatedAt,
     publishResult,
   };
 }
