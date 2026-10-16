@@ -33,8 +33,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/subagent-memory-inject.mjs\" pre-agent",
-            "timeout": 5
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/subagent-memory-inject.mjs\" pre-agent"
           }
         ]
       }

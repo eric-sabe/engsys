@@ -103,13 +103,40 @@ rm_worktree() { # rm_worktree <repo> <dir> — drop a (possibly stale) scratch w
 emit() { echo "$1" >&3; }
 
 check_engsys_tag() { # check_engsys_tag <tag> <owner/repo>
-  local rc=0
-  git ls-remote --exit-code --tags "https://github.com/$2.git" "refs/tags/$1" >/dev/null 2>&1 || rc=$?
+  local tag="$1" repo="$2" rc=0 want="${1#v}" tmp pkg_v mk_v core_v ls_out tag_sha head_sha mk_plug_bad="" stack_bad="" sm sv
+  ls_out="$(git ls-remote --exit-code --tags "https://github.com/$repo.git" "refs/tags/$tag" "refs/tags/$tag^{}" 2>/dev/null)" || rc=$?
   case "$rc" in
     0) ;;
-    2) fleet_die "$ENGSYS_MARKETPLACE $1 isn't released. From a machine logged in as the maintainer: gh release create $1 -R $2 --target main --generate-notes" ;;
-    *) fleet_die "couldn't list tags of https://github.com/$2.git (git ls-remote exit $rc)" ;;
+    2) fleet_die "$ENGSYS_MARKETPLACE $tag isn't released. Bump the version in package.json to $want, run 'npm run build:plugins', open a PR and merge, then from a machine logged in as the maintainer: gh release create $tag -R $repo --target main --generate-notes" ;;
+    *) fleet_die "couldn't list tags of https://github.com/$repo.git (git ls-remote exit $rc)" ;;
   esac
+  tag_sha="$(printf '%s\n' "$ls_out" | awk '$2 ~ /\^\{\}$/ { s=$1 } s=="" { s=$1 } END { print s }')"
+  tmp="$FLEET_STATE/wt-engsys-tag"
+  rm -rf "$tmp"
+  if ! git clone -q --depth 1 --branch "$tag" "https://github.com/$repo.git" "$tmp" >/dev/null 2>&1; then
+    rm -rf "$tmp"
+    fleet_die "couldn't fetch $ENGSYS_MARKETPLACE tag $tag from https://github.com/$repo.git"
+  fi
+  head_sha="$(git -C "$tmp" rev-parse HEAD 2>/dev/null || true)"
+  if [ -n "$tag_sha" ] && [ "$head_sha" != "$tag_sha" ]; then
+    rm -rf "$tmp"
+    fleet_die "$ENGSYS_MARKETPLACE ref $tag resolved to $head_sha instead of tag commit $tag_sha (possible branch/tag collision)"
+  fi
+  pkg_v="$(jq -r '.version // empty' "$tmp/package.json" 2>/dev/null || true)"
+  mk_v="$(jq -r '.metadata.version // empty' "$tmp/.claude-plugin/marketplace.json" 2>/dev/null || true)"
+  core_v="$(jq -r '.version // empty' "$tmp/core/.claude-plugin/plugin.json" 2>/dev/null || true)"
+  mk_plug_bad="$(jq -r --arg w "$want" '.plugins[]? | select(has("version") and .version != $w) | "\(.name // "plugin")=\(.version)"' "$tmp/.claude-plugin/marketplace.json" 2>/dev/null | paste -sd, - || true)"
+  for sm in "$tmp"/stacks/*/*/.claude-plugin/plugin.json; do
+    [ -f "$sm" ] || continue
+    sv="$(jq -r '.version // empty' "$sm" 2>/dev/null || true)"
+    if [ "$sv" != "$want" ]; then
+      stack_bad="${stack_bad:+$stack_bad, }${sm#"$tmp/"}=${sv:-missing}"
+    fi
+  done
+  rm -rf "$tmp"
+  if [ "$pkg_v" != "$want" ] || [ "$mk_v" != "$want" ] || [ "$core_v" != "$want" ] || [ -n "$mk_plug_bad" ] || [ -n "$stack_bad" ]; then
+    fleet_die "$ENGSYS_MARKETPLACE $tag manifests don't match $want (package.json=${pkg_v:-missing}, .claude-plugin/marketplace.json=${mk_v:-missing}, core/.claude-plugin/plugin.json=${core_v:-missing}${mk_plug_bad:+, marketplace.plugins=$mk_plug_bad}${stack_bad:+, $stack_bad}). Set the version in package.json to $want, run 'npm run build:plugins', open a PR, merge, then tag."
+  fi
 }
 
 # --- instance release --------------------------------------------------------------------------

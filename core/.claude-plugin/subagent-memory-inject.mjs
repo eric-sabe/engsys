@@ -1,23 +1,42 @@
 #!/usr/bin/env node
-// subagent-memory-inject.mjs — SubagentStart + PreToolUse(Agent|Task) hook for the engsys core PLUGIN:
-// push the memory brief (core/scripts/memory-brief.mjs) into a subagent's context before it starts.
+// subagent-memory-inject.mjs — SubagentStart hook for the engsys core PLUGIN: push the memory
+// brief (core/scripts/memory-brief.mjs) into a subagent's context before it starts.
 // Design: docs/memory-spec.md §6, §12 (verified runtime facts), §13 (tests).
 //
 // FAIL-OPEN BY DESIGN (spec §6): any error, any timeout, or an empty brief all produce the exact
-// same output, `{}` — this hook NEVER blocks a dispatch and NEVER throws into the harness.
+// same output, `{}` — this hook NEVER blocks a dispatch and NEVER throws into the harness. It is
+// deliberately kept separate from any enforcement hook (e.g. singleton-write-guard.mjs), which
+// fails CLOSED; this one does the opposite on purpose.
+//
+// SubagentStart's `additionalContext` is delivered to the subagent as a SYSTEM-role reminder
+// (§12) — the reason memory-brief.mjs only ever renders Class A text plus Class B STRUCTURED
+// pointers here. See the security note at the top of memory-brief.mjs for the full argument; this
+// file's only job is to get that already-safe text (or nothing) into the hook's stdout, log the
+// injection, and never make a network call.
+//
+// Input shape: Claude Code's SubagentStart hook payload is not fully pinned down across versions,
+// so every field is read defensively with multiple candidate paths, and a missing/odd shape
+// degrades to "no agent_type / no prompt" rather than throwing — memory-brief.mjs still returns a
+// reasonable (if less targeted) brief, or the empty one.
+//
+// Logging: `{ts, agent_type, lesson_keys, pointer_keys, bytes, ms}` appended to
+// `<cacheDir>/injections.jsonl` (docs/memory-spec.md §3.3, §6). A logging failure never affects
+// the hook's output.
 
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { detectHarness, parseHookInput } from '../lib/harness-io.mjs';
 import { isMainEntry } from '../lib/is-main.mjs';
 import { isValidPointerKey, resolveCacheDir } from '../lib/memory/index-db.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const MEMORY_BRIEF = path.resolve(HERE, '..', 'scripts', 'memory-brief.mjs');
 const TIMEOUT_MS = 2000;
+// Below this, less budget remains than a bare `node` process typically needs just to start —
+// spawning memory-brief anyway would only burn that startup cost en route to a guaranteed timeout.
 const MIN_SPAWN_MS = 300;
+
 const PENDING_TTL_MS = 30_000;
 
 function firstString(...candidates) {
@@ -35,7 +54,8 @@ function safeIdToken(s) {
 	return String(s ?? '').replace(/[^A-Za-z0-9_.-]/g, '_').slice(0, 64) || 'none';
 }
 
-/** Extract repo-relative file path hints mentioned in a task prompt (#142). */
+/** Extract repo-relative file path hints mentioned in a task prompt (#142). Excludes URLs and
+ * bare words without a `/` + extension. */
 export function extractPathsFromPrompt(prompt) {
 	if (typeof prompt !== 'string' || !prompt) return [];
 	const withoutUrls = prompt.replace(/https?:\/\/\S+/g, ' ');
@@ -48,7 +68,9 @@ export function extractPathsFromPrompt(prompt) {
 	return [...seen];
 }
 
-/** Extract a candidate worktree path from `tool_input` (`worktree`/`cwd`) or an absolute path in `prompt` (#142). */
+/** Extract a candidate worktree path from `tool_input` (`worktree`/`cwd`) or an absolute path in
+ * `prompt` (#142). The candidate is only trusted later if `sharesGitCommonDir(parentCwd, candidate)`
+ * confirms it belongs to the same repository. */
 export function extractWorktreeFromInput(toolInput, prompt = '') {
 	const direct = firstString(toolInput?.worktree, toolInput?.cwd);
 	if (direct) return direct;
@@ -67,15 +89,45 @@ export function extractWorktreeFromInput(toolInput, prompt = '') {
 
 const GIT_CALL_OPTS = { encoding: 'utf8', timeout: 500, killSignal: 'SIGKILL', stdio: ['ignore', 'pipe', 'ignore'] };
 
-export function sharesGitCommonDir(dirA, dirB, { exec = execFileSync } = {}) {
-	if (!dirA || !dirB) return false;
+/**
+ * Resolve `candidateDir` to its registered git worktree root iff it is listed in
+ * `git -C trustedRepoDir worktree list --porcelain` (#142). Never runs `git -C` on
+ * `candidateDir` itself, preventing an unverified path from triggering a repo-local git config.
+ */
+export function resolveRegisteredWorktree(trustedRepoDir, candidateDir, { exec = execFileSync } = {}) {
+	if (!trustedRepoDir || !candidateDir) return null;
+	let realCandidate;
 	try {
-		const commonA = exec('git', ['-C', dirA, 'rev-parse', '--path-format=absolute', '--git-common-dir'], GIT_CALL_OPTS).trim();
-		const commonB = exec('git', ['-C', dirB, 'rev-parse', '--path-format=absolute', '--git-common-dir'], GIT_CALL_OPTS).trim();
-		return Boolean(commonA && commonA === commonB);
+		realCandidate = fs.realpathSync(candidateDir);
 	} catch {
-		return false;
+		return null;
 	}
+	try {
+		const out = exec('git', ['-C', trustedRepoDir, 'worktree', 'list', '--porcelain'], GIT_CALL_OPTS);
+		for (const line of out.split('\n')) {
+			if (!line.startsWith('worktree ')) continue;
+			const wtPath = line.slice('worktree '.length).trim();
+			if (!wtPath) continue;
+			let realWt;
+			try {
+				realWt = fs.realpathSync(wtPath);
+			} catch {
+				continue;
+			}
+			if (realCandidate === realWt || realCandidate.startsWith(realWt + path.sep)) {
+				return realWt;
+			}
+		}
+		return null;
+	} catch {
+		return null;
+	}
+}
+
+/** True iff `dirB` is a registered worktree of `dirA` (#142). Prevents a prompt-mentioned path
+ * from pointing `resolveTouchedPaths` at an unrelated repo or running `git -C` on an untrusted dir. */
+export function sharesGitCommonDir(dirA, dirB, { exec = execFileSync } = {}) {
+	return Boolean(resolveRegisteredWorktree(dirA, dirB, { exec }));
 }
 
 function sweepExpiredDispatches(pendingDir, nowMs) {
@@ -91,6 +143,8 @@ function sweepExpiredDispatches(pendingDir, nowMs) {
 	}
 }
 
+/** Stash a short-lived pending dispatch record at `PreToolUse` (`Agent|Task`) so the subsequent
+ * `SubagentStart` hook can recover the task prompt, prompt path hints, and target worktree (#142). */
 export function recordPendingDispatch(input, { cwd, now = () => Date.now() } = {}) {
 	try {
 		const cacheDir = resolveCacheDir(cwd);
@@ -101,12 +155,11 @@ export function recordPendingDispatch(input, { cwd, now = () => Date.now() } = {
 		const ts = now();
 		sweepExpiredDispatches(pendingDir, ts);
 
-		const parsed = parseHookInput(input, process.env);
-		const toolInput = parsed.toolInput ?? {};
-		const sessionId = safeIdToken(firstString(parsed.sessionId, input?.session_id) ?? 'default');
-		const rawAgent = firstString(toolInput?.subagent_type, toolInput?.agent_type, parsed.agentType) ?? 'any';
+		const toolInput = input?.tool_input ?? {};
+		const sessionId = safeIdToken(firstString(input?.session_id) ?? 'default');
+		const rawAgent = firstString(toolInput?.subagent_type, toolInput?.agent_type, input?.agent_type) ?? 'any';
 		const agentKey = safeIdToken(bareAgent(rawAgent) || 'any');
-		const prompt = [firstString(toolInput?.description), firstString(parsed.prompt, toolInput?.prompt)].filter(Boolean).join('\n').slice(0, 8192);
+		const prompt = [firstString(toolInput?.description), firstString(toolInput?.prompt)].filter(Boolean).join('\n').slice(0, 8192);
 		const promptPaths = extractPathsFromPrompt(prompt);
 		const worktree = extractWorktreeFromInput(toolInput, prompt);
 		const record = { ts, sessionId, agentKey, prompt, promptPaths, worktree };
@@ -119,6 +172,7 @@ export function recordPendingDispatch(input, { cwd, now = () => Date.now() } = {
 	}
 }
 
+/** Pop the oldest non-expired pending dispatch matching `(session_id, bareAgent(agent_type))` (#142). */
 export function consumePendingDispatch(input, { cwd, now = () => Date.now() } = {}) {
 	try {
 		const cacheDir = resolveCacheDir(cwd);
@@ -130,11 +184,15 @@ export function consumePendingDispatch(input, { cwd, now = () => Date.now() } = 
 		try { files = fs.readdirSync(pendingDir).filter((f) => f.endsWith('.json')).sort(); } catch { return null; }
 		if (files.length === 0) return null;
 
-		const sessionId = safeIdToken(firstString(input?.session_id, input?.sessionId) ?? 'default');
+		const sessionId = safeIdToken(firstString(input?.session_id) ?? 'default');
 		const agentKey = safeIdToken(bareAgent(extractAgentType(input)) || 'any');
-		const prefixes = [`${sessionId}--${agentKey}--`, `${sessionId}--any--`];
+		const sessionFiles = files.filter((f) => f.startsWith(`${sessionId}--`));
+		const hasTypedForSession = sessionFiles.some((f) => !f.startsWith(`${sessionId}--any--`));
+		const prefixes = agentKey === 'any' || !hasTypedForSession
+			? [`${sessionId}--${agentKey}--`, `${sessionId}--any--`]
+			: [`${sessionId}--${agentKey}--`];
 		for (const prefix of prefixes) {
-			const match = files.find((f) => f.startsWith(prefix));
+			const match = sessionFiles.find((f) => f.startsWith(prefix));
 			if (!match) continue;
 			const full = path.join(pendingDir, match);
 			let parsed = null;
@@ -150,14 +208,25 @@ export function consumePendingDispatch(input, { cwd, now = () => Date.now() } = 
 	}
 }
 
+/** Best-effort `agent_type` extraction from a SubagentStart payload whose exact shape may vary. */
+// Verified against the Claude Code 2.1.285 binary (docs/memory-spec.md §12, engsys#140 W1): a
+// SubagentStart payload is `{...base, hook_event_name, agent_id, agent_type}` — `base` carries
+// `cwd` (read separately in main()). There is NO task-prompt field at this event; PreToolUse
+// (`subagent-memory-inject.mjs pre-agent`) stashes a short-lived pending dispatch record so
+// SubagentStart can recover the prompt, prompt path hints, and target worktree (#142).
 export function extractAgentType(input) {
-	return firstString(input?.agent_type, input?.agentType);
+	return firstString(input?.agent_type);
 }
 
+/** No verified prompt field exists at SubagentStart (see the note above) — reads `input.prompt`
+ * only in case a future payload adds one; never guesses through a nested `tool_input`. */
 export function extractPrompt(input) {
 	return firstString(input?.prompt) ?? '';
 }
 
+/** Touched paths: an explicit list on the payload, else `git diff --name-only <base>` in `cwd`
+ * when a worktree/repo is resolvable. `base` tries HEAD first (uncommitted work), then
+ * `origin/main`. Never throws; an unresolvable repo yields []. */
 export function resolveTouchedPaths(input, { cwd, exec = execFileSync } = {}) {
 	if (Array.isArray(input?.touched_paths)) return input.touched_paths.filter((p) => typeof p === 'string');
 	try {
@@ -165,9 +234,13 @@ export function resolveTouchedPaths(input, { cwd, exec = execFileSync } = {}) {
 		const paths = out.split('\n').filter(Boolean);
 		if (paths.length) return paths;
 	} catch {
-		/* fall through */
+		/* no uncommitted changes, or not resolvable — fall through to the merge-base diff below */
 	}
 	try {
+		// NOT `git diff --name-only origin/main` directly: on a stale/diverged checkout that would
+		// also list every upstream commit the local branch doesn't have yet, anchoring lessons and
+		// pointers to files this dispatch never touched. Diff against the MERGE-BASE instead, so
+		// only this branch's own commits since it forked from origin/main are "touched".
 		const base = exec('git', ['-C', cwd, 'merge-base', 'HEAD', 'origin/main'], GIT_CALL_OPTS).trim();
 		if (!base) return [];
 		const out = exec('git', ['-C', cwd, 'diff', '--name-only', base, 'HEAD'], GIT_CALL_OPTS);
@@ -177,20 +250,39 @@ export function resolveTouchedPaths(input, { cwd, exec = execFileSync } = {}) {
 	}
 }
 
+/** Run memory-brief.mjs --json as a child process with a hard wall-clock budget. Returns
+ * `{ text, lessonKeys, pointerKeys, bytes }`, or null on ANY failure (non-zero exit, timeout,
+ * spawn error, unparseable output) — all treated identically as "no brief". Never throws. */
 export function runMemoryBrief({ agentType, prompt, touchedPaths, cwd, timeoutMs = TIMEOUT_MS, scriptPath = MEMORY_BRIEF, exec = execFileSync } = {}) {
+	// The `=` form for every value that could itself start with `--` (a task prompt, a touched
+	// path) — memory-brief.mjs's space-separated form would read such a value as the NEXT flag and
+	// silently drop it (memory-brief.mjs's parseArgs doc comment has the full rationale).
 	const args = [scriptPath, '--json', `--repo-root=${cwd}`];
 	if (agentType) args.push(`--agent-type=${agentType}`);
+	// Truncated: one argv element over Linux's MAX_ARG_STRLEN (128 KiB) makes the spawn itself fail
+	// with E2BIG — fails open to {} either way, but silently, for exactly the long, detailed task
+	// prompts where a targeted brief would matter most. BM25 only needs a prefix of the prompt.
 	if (prompt) args.push(`--prompt=${prompt.slice(0, 8192)}`);
+	// Capped the same way as --prompt= above and for the same reason: a large refactor/rename
+	// can list thousands of touched paths, and an uncapped join can itself blow past argv's
+	// MAX_ARG_STRLEN (E2BIG) -- exactly the large-change case where a brief matters most.
 	if (touchedPaths?.length) {
 		let joined = '';
 		for (const p of touchedPaths) {
 			const next = joined ? `${joined},${p}` : p;
+			// Buffer.byteLength, not .length — a non-ASCII filename's UTF-16 code-unit count
+			// undercounts the UTF-8 byte size that actually matters against MAX_ARG_STRLEN
+			// (round 4 nit).
 			if (Buffer.byteLength(next, 'utf8') > 65536) break;
 			joined = next;
 		}
 		if (joined) args.push(`--paths=${joined}`);
 	}
 	try {
+		// process.execPath, not a bare 'node' resolved off PATH: a hook's PATH is whatever the
+		// harness/shell gave it, which may not have the SAME node this hook itself is running
+		// under (a different version, or none at all on a minimal PATH) — execPath is always
+		// exactly the interpreter currently executing this file.
 		const out = exec(process.execPath, args, {
 			encoding: 'utf8',
 			timeout: timeoutMs,
@@ -202,7 +294,7 @@ export function runMemoryBrief({ agentType, prompt, touchedPaths, cwd, timeoutMs
 		if (typeof parsed?.text !== 'string') return null;
 		return parsed;
 	} catch {
-		return null;
+		return null; // non-zero exit, timeout (ETIMEDOUT), spawn failure, or bad JSON — same outcome
 	}
 }
 
@@ -227,42 +319,64 @@ export async function main({ argv = process.argv.slice(2), stdin = process.stdin
 	} catch {
 		input = null;
 	}
+	// Claude Code reports the session directory as `cwd`, which in a monorepo can be a
+	// subdirectory (e.g. packages/api) rather than the work-tree root. memory-brief.mjs's
+	// Class A reads (git ls-tree/cat-file against docs/agent-lessons, the overlay, ADRs) and
+	// resolveTouchedPaths' own top-level-relative paths both assume repoRoot IS the top level
+	// — resolve it once here so every downstream git call agrees on the same root.
 	const rawCwd = (typeof input?.cwd === 'string' && input.cwd) || defaultCwd;
 	let cwd = rawCwd;
 	try {
 		const top = execFileSync('git', ['-C', rawCwd, 'rev-parse', '--show-toplevel'], GIT_CALL_OPTS).trim();
 		if (top) cwd = top;
-	} catch { /* keep rawCwd */ }
+	} catch { /* not a repo, or git unavailable — keep rawCwd; memory-brief fails open from there */ }
 
+	// PreToolUse (`Agent|Task`) mode (#142): stash the dispatch prompt, prompt path hints, and any
+	// target worktree path under `<cacheDir>/pending-dispatch/` so the immediately following
+	// SubagentStart hook can consume it. Always fails open with `{}`.
 	if (argv[0] === 'pre-agent' || input?.hook_event_name === 'PreToolUse' || input?.hookEventName === 'preToolUse') {
 		if (input) recordPendingDispatch(input, { cwd, now });
-		write('{}');
-		return 0;
+		if (!process.env.ENGSYS_HARNESS || process.env.ENGSYS_HARNESS === 'claude') {
+			write('{}');
+			return 0;
+		}
 	}
 
 	const agentType = extractAgentType(input);
+
 	let briefText = '';
 	let logKeys = { lesson_keys: [], pointer_keys: [], bytes: 0 };
+	// Diagnostics for "the brief disappeared with no clear reason" (resolveTouchedPaths' own git
+	// calls, and memory-brief's per-superseder `git show` calls inside buildBrief, both eat into
+	// the same 2s budget `runMemoryBrief`'s timeout enforces) — distinguishes "never even tried"
+	// from "tried and got nothing back" (almost always a timeout, since every other memory-brief
+	// failure path is caught and logged there, not silently swallowed).
 	let skippedBudget = false;
 	let spawnFailed = false;
 	try {
 		const pending = input ? consumePendingDispatch(input, { cwd, now }) : null;
 		const prompt = extractPrompt(input) || pending?.prompt || '';
 		let diffCwd = cwd;
-		if (pending?.worktree && sharesGitCommonDir(cwd, pending.worktree)) {
-			try {
-				const wtTop = execFileSync('git', ['-C', pending.worktree, 'rev-parse', '--show-toplevel'], GIT_CALL_OPTS).trim();
-				if (wtTop) diffCwd = wtTop;
-			} catch { /* fall back to cwd */ }
+		if (pending?.worktree) {
+			const matchedWt = resolveRegisteredWorktree(cwd, pending.worktree);
+			if (matchedWt) diffCwd = matchedWt;
 		}
 		const gitTouched = resolveTouchedPaths(input, { cwd: diffCwd });
 		const touchedPaths = [...new Set([...gitTouched, ...(pending?.promptPaths ?? [])])];
+		// Give memory-brief only what's LEFT of the 2s total budget after resolveTouchedPaths' own
+		// (separately timed) git calls, so the two stages together can never exceed TIMEOUT_MS plus
+		// node startup — not TIMEOUT_MS on top of whatever resolveTouchedPaths already spent. Below
+		// MIN_SPAWN_MS there isn't even enough budget left for node's own startup, so the spawn is
+		// SKIPPED outright (saves that startup cost too) rather than launched to a guaranteed timeout.
 		const remainingMs = TIMEOUT_MS - (now() - t0);
 		skippedBudget = remainingMs < MIN_SPAWN_MS;
 		const result = skippedBudget ? null : runMemoryBrief({ agentType, prompt, touchedPaths, cwd: diffCwd, timeoutMs: remainingMs });
 		spawnFailed = !skippedBudget && !result;
 		if (result) {
 			briefText = result.text ?? '';
+			// engsys#140 Nyx F8: pointer_keys are re-validated against the same key allowlist
+			// `validatePointerEvent` enforces before they're even logged — defense in depth; a key
+			// that somehow reached here invalid is dropped from the log line, not just from the brief.
 			const safePointerKeys = (result.pointerKeys ?? []).filter(isValidPointerKey);
 			logKeys = { lesson_keys: result.lessonKeys ?? [], pointer_keys: safePointerKeys, bytes: result.bytes ?? Buffer.byteLength(briefText, 'utf8') };
 		}
@@ -276,10 +390,7 @@ export async function main({ argv = process.argv.slice(2), stdin = process.stdin
 		write('{}');
 		return 0;
 	}
-	write(JSON.stringify({
-		additionalContext: briefText,
-		hookSpecificOutput: { hookEventName: 'SubagentStart', additionalContext: briefText },
-	}));
+	write(JSON.stringify({ additionalContext: briefText, hookSpecificOutput: { hookEventName: 'SubagentStart', additionalContext: briefText } }));
 	return 0;
 }
 
@@ -287,6 +398,7 @@ if (isMainEntry(import.meta.url)) {
 	main()
 		.then((code) => process.exit(code ?? 0))
 		.catch(() => {
+			// The absolute last line of defense: even a bug in main() above must still fail open.
 			try { process.stdout.write('{}'); } catch { /* nothing left to do */ }
 			process.exit(0);
 		});

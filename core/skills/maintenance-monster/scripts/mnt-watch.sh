@@ -88,11 +88,14 @@ done
 [ -n "$STALE_LOCK" ] || STALE_LOCK="$(monster_cfg_scalar "$CONFIG" stale_lock_minutes)"
 PULSE_OUT="$(monster_pulse_max "${PULSE_MAX:-$(monster_cfg_scalar "$CONFIG" pulse_max)}" "$HB_MIN" "$STALE_LOCK")"
 PULSE_MAX="${PULSE_OUT%%$'\t'*}" PULSE_WARN="${PULSE_OUT#*$'\t'}"
+ROTATE_OUT="$(monster_rotate_tokens "$(monster_cfg_scalar "$CONFIG" rotate_context_tokens)")"
+ROTATE_WARN="${ROTATE_OUT#*$'\t'}"
 
 W="$DIR/.watch"
 mkdir -p "$W"
 touch "$W/deps_pr.tsv" "$W/dep_alerts.tsv" "$W/codeql_alerts.tsv" "$W/secretrun.txt" "$W/trivyrun.txt"
 [ -z "$PULSE_WARN" ] || echo "CONFIG_WARNING ${PULSE_WARN:0:280}"
+[ -z "$ROTATE_WARN" ] || echo "CONFIG_WARNING ${ROTATE_WARN:0:280}"
 monster_handback_prune "$DIR" # drop earlier launches' hand-back lines (engsys#137 review)
 
 # --- baton keepalive (see the header) ----------------------------------------

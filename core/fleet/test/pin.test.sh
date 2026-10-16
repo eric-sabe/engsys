@@ -93,9 +93,16 @@ export PATH="$T/bin:$PATH"
 # --- remotes -----------------------------------------------------------------------------------
 E="$T/seed/engsys"
 seed_repo vendor/engsys "$E"
-echo engsys >"$E/README"; commit_all "$E" "engsys 1.0.0"; git -C "$E" tag v1.0.0
-git -C "$E" commit -q --allow-empty -m "engsys 1.1.0"; git -C "$E" tag v1.1.0
-push_all "$E"     # v1.2.0 is deliberately not released
+mkdir -p "$E/.claude-plugin" "$E/core/.claude-plugin"
+seed_engsys_ver() {
+  printf '{"name":"engsys","version":"%s"}\n' "$1" >"$E/package.json"
+  printf '{"name":"engsys","metadata":{"version":"%s"}}\n' "$1" >"$E/.claude-plugin/marketplace.json"
+  printf '{"name":"engsys","version":"%s"}\n' "$1" >"$E/core/.claude-plugin/plugin.json"
+}
+echo engsys >"$E/README"; seed_engsys_ver 1.0.0; commit_all "$E" "engsys 1.0.0"; git -C "$E" tag v1.0.0
+seed_engsys_ver 1.1.0; commit_all "$E" "engsys 1.1.0"; git -C "$E" tag v1.1.0
+git -C "$E" commit -q --allow-empty -m "engsys 1.1.1 without manifest bump"; git -C "$E" tag v1.1.1
+push_all "$E"     # v1.2.0 is deliberately not released; v1.1.1 has stale 1.1.0 manifests
 
 # the instance repo: main at "instance base"; v0.1.0 is a stamp commit ON TOP of it (as real releases are),
 # tagged and pushed as a tag only — main never carries the stamp
@@ -210,6 +217,12 @@ rc_is "a missing engsys tag dies" 1
 has "…printing the exact release command" "$OUT" "gh release create v9.9.9 -R vendor/engsys --target main --generate-notes"
 eq "…before anything is opened" "$(gcount 'pr create')" 0
 eq "…or released" "$(gcount 'release create')" 0
+run fleet pin --engsys v1.1.1 --release next --no-wait
+rc_is "an engsys tag whose manifests don't match the tag version dies" 1
+has "…reporting the mismatched manifest versions" "$OUT" "manifests don't match 1.1.1 (package.json=1.1.0, .claude-plugin/marketplace.json=1.1.0, core/.claude-plugin/plugin.json=1.1.0)"
+has "…and printing the bump recipe" "$OUT" "npm run build:plugins"
+eq "…before cutting an instance release" "$(gcount 'release create')" 0
+eq "…or opening a pin PR" "$(gcount 'pr create')" 0
 
 echo "== B. already pinned: no PR, straight to sync (and next reuses the latest release)"
 reset

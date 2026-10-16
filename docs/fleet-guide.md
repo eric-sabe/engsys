@@ -985,9 +985,13 @@ read the output, then add the label yourself once you are satisfied. `fleet pin`
 `fleet sync` later. `--no-wait` stops after the PR is queued. Interrupted anywhere? Re-run the same
 command: an existing release tag and an open PR for the same pins are reused.
 
-**Adopt an engsys release.** engsys releases are cut by its maintainers, not by the fleet's App. If you
-consume upstream engsys, the tag already exists; if you consume your own fork, release there first. Then
-on the host:
+**Adopt an engsys release.** engsys releases are cut by its maintainers, not by the fleet's App. In
+engsys, a release starts with a version-bump PR (set `version` in `package.json`, run
+`npm run build:plugins` so `.claude-plugin/marketplace.json` and `core/.claude-plugin/plugin.json` match,
+and merge to `main`), then `gh release create vX.Y.Z -R eric-sabe/engsys --target main --generate-notes`
+(`fleet pin` refuses a tag whose plugin manifests do not match `X.Y.Z`, because Claude Code keys its
+plugin cache on the manifest version). If you consume upstream engsys, the tag already exists; if you
+consume your own fork, cut the bump commit and release there first. Then on the host:
 
 ```bash
 fleet pin --engsys vX.Y.Z            # add --release next to ship an instance change in the same PR

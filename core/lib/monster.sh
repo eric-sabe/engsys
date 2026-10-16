@@ -203,38 +203,75 @@ monster_transcript() {
   return 0
 }
 
-# _monster_lock DIR NAME / _monster_unlock DIR NAME: the scan.lock pattern (mm-agent-watch.sh): mkdir is the
-# mutex, a lock older than 30 s is a crashed holder and is stolen by an atomic mv. Gives up after ~5 s (exit 1):
-# the caller skips this pass and the next poll catches up.
+# _monster_lock LOCKDIR / _monster_unlock LOCKDIR: the scan.lock pattern (mm-agent-watch.sh): mkdir is the
+# mutex, a lock older than 30 s is a crashed holder and is reclaimed under `$lock.reclaim` after re-verifying age.
+# Gives up after ~5 s (exit 1): the caller skips this pass and the next poll catches up. Shared at `<file>.lock`
+# with relayHandback in handback-guard.mjs so a SubagentStop append and monster_handback_prune never race (engsys#138).
+_monster_mtime() {
+  local m
+  m=$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0)
+  case "$m" in '' | *[!0-9]*) m=0 ;; esac
+  printf '%s\n' "$m"
+}
 _monster_lock() {
-  local l="$1/.watch/$2.lock" tries=0 lm
+  local l="$1" r="$1.reclaim" tries=0 lm rm_t
   until mkdir "$l" 2>/dev/null; do
     tries=$((tries + 1)); [ "$tries" -le 25 ] || return 1
-    lm=$(stat -c %Y "$l" 2>/dev/null || stat -f %m "$l" 2>/dev/null || echo 0)
-    case "$lm" in '' | *[!0-9]*) lm=0 ;; esac
+    lm=$(_monster_mtime "$l")
     if [ "$lm" -gt 0 ] && [ $(($(date +%s) - lm)) -gt 30 ]; then
-      mv "$l" "$l.stale.$$" 2>/dev/null && rmdir "$l.stale.$$" 2>/dev/null
-      continue
+      rm_t=$(_monster_mtime "$r")
+      [ "$rm_t" -gt 0 ] && [ $(($(date +%s) - rm_t)) -gt 30 ] && rmdir "$r" 2>/dev/null
+      if mkdir "$r" 2>/dev/null; then
+        lm=$(_monster_mtime "$l")
+        if [ "$lm" -gt 0 ] && [ $(($(date +%s) - lm)) -gt 30 ]; then
+          mv "$l" "$l.stale.$$" 2>/dev/null && rmdir "$l.stale.$$" 2>/dev/null
+        fi
+        rmdir "$r" 2>/dev/null
+        continue
+      fi
     fi
     sleep 0.2
   done
 }
-_monster_unlock() { rmdir "$1/.watch/$2.lock" 2>/dev/null || true; }
+_monster_unlock() { rmdir "$1" 2>/dev/null || true; }
+_monster_has_handback() {
+  local f="$1" p
+  [ -f "$f" ] && return 0
+  for p in "$f".pending.*; do [ -f "$p" ] && return 0; done
+  return 1
+}
+_monster_drain_pending() {
+  local f="$1" p d
+  for p in "$f".pending.*; do
+    [ -f "$p" ] || continue
+    d="$p.draining.$$"
+    if mv "$p" "$d" 2>/dev/null; then
+      if cat "$d" >>"$f"; then
+        chmod 600 "$f" 2>/dev/null || true
+        rm -f "$d"
+      fi
+    fi
+  done
+}
 
 monster_handback_events() {
-  local s="${ENGSYS_SESSION:-}" f size off chunk
+  local dir="$1" s="${ENGSYS_SESSION:-}" f lock size off chunk
   case "$s" in '' | *[!A-Za-z0-9._-]*) return 0 ;; esac
   f="$(monster_sessions_dir)/${FLEET_ID:+$FLEET_ID.}$s.handbacks.jsonl"
-  [ -f "$f" ] || return 0
-  mkdir -p "$1/.watch" 2>/dev/null || return 0
-  # The bus and the tick both relay: one reader at a time, so no line is emitted twice (engsys#137 review).
-  _monster_lock "$1" handbacks || return 0
-  size=$(wc -c <"$f" | tr -d ' ')
-  off=$(cat "$1/.watch/handbacks.off" 2>/dev/null || true)
+  _monster_has_handback "$f" || return 0
+  lock="$f.lock"
+  mkdir -p "$dir/.watch" 2>/dev/null || return 0
+  # The bus, the tick and the SubagentStop hook share $f.lock: one reader/writer at a time (engsys#137, #138).
+  _monster_lock "$lock" || return 0
+  _monster_drain_pending "$f"
+  [ -f "$f" ] || { _monster_unlock "$lock"; return 0; }
+  size=$(wc -c <"$f" 2>/dev/null | tr -d ' ')
+  case "$size" in '' | *[!0-9]*) size=0 ;; esac
+  off=$(cat "$dir/.watch/handbacks.off" 2>/dev/null || true)
   case "$off" in '' | *[!0-9]*) off=0 ;; esac
   [ "$off" -le "$size" ] || off=0 # the log was replaced
   if [ "$size" -gt "$off" ]; then
-    chunk=$(mktemp "$1/.watch/handbacks.chunk.XXXXXX") || { _monster_unlock "$1" handbacks; return 0; }
+    chunk=$(mktemp "$dir/.watch/handbacks.chunk.XXXXXX") || { _monster_unlock "$lock"; return 0; }
     # Complete lines only: a line still being appended stays for the next read (the offset stops before it).
     tail -c +"$((off + 1))" "$f" | head -c "$((size - off))" >"$chunk"
     if [ "$(tail -c 1 "$chunk" | od -An -tx1 | tr -d ' \n')" != 0a ]; then
@@ -246,35 +283,38 @@ monster_handback_events() {
     size=$((off + $(wc -c <"$chunk" | tr -d ' ')))
     rm -f "$chunk"
   fi
-  printf '%s\n' "$size" >"$1/.watch/handbacks.off"
-  _monster_unlock "$1" handbacks
+  printf '%s\n' "$size" >"$dir/.watch/handbacks.off"
+  _monster_unlock "$lock"
 }
 
 # monster_handback_prune: drop the hand-back log's lines from other launches (run != ENGSYS_SESSION_RUN), so
 # the log never grows across relaunches. The buses run it once at start, before their first read; the
 # offset file is reset with it, since the kept lines are renumbered.
 monster_handback_prune() {
-  local s="${ENGSYS_SESSION:-}" run="${ENGSYS_SESSION_RUN:-}" f tmp off
+  local dir="$1" s="${ENGSYS_SESSION:-}" run="${ENGSYS_SESSION_RUN:-}" f lock tmp off
   case "$s" in '' | *[!A-Za-z0-9._-]*) return 0 ;; esac
   [ -n "$run" ] || return 0
   f="$(monster_sessions_dir)/${FLEET_ID:+$FLEET_ID.}$s.handbacks.jsonl"
-  [ -f "$f" ] || return 0
-  mkdir -p "$1/.watch" 2>/dev/null || return 0
-  _monster_lock "$1" handbacks || return 0
-  tmp=$(mktemp "$f.XXXXXX") || { _monster_unlock "$1" handbacks; return 0; }
-  off=$(cat "$1/.watch/handbacks.off" 2>/dev/null || true)
+  _monster_has_handback "$f" || return 0
+  lock="$f.lock"
+  mkdir -p "$dir/.watch" 2>/dev/null || return 0
+  _monster_lock "$lock" || return 0
+  _monster_drain_pending "$f"
+  [ -f "$f" ] || { _monster_unlock "$lock"; return 0; }
+  tmp=$(mktemp "$f.XXXXXX") || { _monster_unlock "$lock"; return 0; }
+  off=$(cat "$dir/.watch/handbacks.off" 2>/dev/null || true)
   case "$off" in '' | *[!0-9]*) off=0 ;; esac
   # Keep this launch's complete lines. The new offset is the size of the kept lines that lay before the old
   # offset (already relayed), so nothing this launch logged is lost or relayed twice.
   jq -R -c --arg run "$run" 'fromjson? | select(.run == $run)' "$f" >"$tmp" 2>/dev/null
   if [ "$(wc -c <"$tmp" | tr -d ' ')" -lt "$(wc -c <"$f" | tr -d ' ')" ]; then
-    head -c "$off" "$f" | jq -R -c --arg run "$run" 'fromjson? | select(.run == $run)' 2>/dev/null | wc -c | tr -d ' ' >"$1/.watch/handbacks.off"
+    head -c "$off" "$f" | jq -R -c --arg run "$run" 'fromjson? | select(.run == $run)' 2>/dev/null | wc -c | tr -d ' ' >"$dir/.watch/handbacks.off"
     chmod 600 "$tmp" 2>/dev/null
     mv "$tmp" "$f"
   else
     rm -f "$tmp"
   fi
-  _monster_unlock "$1" handbacks
+  _monster_unlock "$lock"
 }
 
 monster_context_tokens() {
@@ -285,11 +325,51 @@ monster_context_tokens() {
     2>/dev/null | tail -n 1
 }
 
+# monster_rotate_tokens [CONFIGURED] [COMPACT_WINDOW]: prints `<tokens><TAB><warning>` (engsys#144).
+#   Default (when CONFIGURED is unset): 70% of the effective compaction window — CLAUDE_CODE_AUTO_COMPACT_WINDOW
+#   when set (e.g. 250000 -> 175000), else 1000000 when the model has `[1m]` (-> 700000), else 200000 (-> 140000).
+#   0 = off. When a configured value is >= the effective compaction point (CLAUDE_CODE_AUTO_COMPACT_WINDOW when
+#   set), emits a warning and clamps to window * 7 / 10 so rotation fires before auto-compaction.
+monster_rotate_tokens() {
+  local cfg="${1:-}" win="${2-${CLAUDE_CODE_AUTO_COMPACT_WINDOW:-}}" eff_win=200000 def warn="" v=""
+  case "$win" in
+    '' | *[!0-9]*) win="" ;;
+    *) win="${win#"${win%%[!0]*}"}" ;;
+  esac
+  if [ -n "$win" ]; then
+    eff_win="$win"
+  else
+    case "${ANTHROPIC_MODEL:-}${CLAUDE_MODEL:-}" in *"[1m]"*) eff_win=1000000 ;; esac
+  fi
+  def=$((eff_win * 7 / 10))
+  case "$cfg" in
+    '') v="$def" ;;
+    *[!0-9]*)
+      warn="rotate_context_tokens '$cfg' is not a non-negative integer; using the default ($def)"
+      v="$def" ;;
+    *)
+      v="${cfg#"${cfg%%[!0]*}"}"
+      if [ -z "$v" ]; then
+        v=0
+      elif [ -n "$win" ] && [ "$v" -ge "$win" ]; then
+        warn="rotate_context_tokens $cfg >= CLAUDE_CODE_AUTO_COMPACT_WINDOW $win (the session compacts before reaching it); clamped to $def"
+        v="$def"
+      fi ;;
+  esac
+  printf '%s\t%s\n' "$v" "$warn"
+}
+
 monster_rotation_status() {
-  local dir="$1" threshold="$3" t sticky tokens
+  local dir="$1" threshold="${3:-}" t sticky tokens rot_out rot_warn
   MONSTER_STATUS="$2" MONSTER_ROTATION=0 MONSTER_CTX=""
   case "$MONSTER_STATUS" in *[Rr]otation\ requested* | *[Ss]ession\ end* | *[Hh]andover*) return 0 ;; esac
-  case "$threshold" in '' | *[!0-9]*) threshold=300000 ;; esac
+  rot_out="$(monster_rotate_tokens "$threshold")"
+  threshold="${rot_out%%$'\t'*}"
+  rot_warn="${rot_out#*$'\t'}"
+  if [ -n "$rot_warn" ] && [ ! -f "$dir/.watch/rotate-warned" ]; then
+    mkdir -p "$dir/.watch" 2>/dev/null && : >"$dir/.watch/rotate-warned"
+    printf 'CONFIG_WARNING: %s\n' "$rot_warn" >&2
+  fi
   t=$(monster_transcript "${4:-}")
   [ -n "$t" ] || return 0
   sticky="$dir/.watch/rotation-requested"

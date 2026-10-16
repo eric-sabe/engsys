@@ -18,7 +18,9 @@ heartbeat_minutes: 10        # ScheduleWakeup fallback tick (mm-tick.sh); each t
                              #   heartbeat_minutes + 2 < pulse_max <= stale_lock_minutes - 11 - 0.75 x heartbeat_minutes
                              # (needs stale_lock_minutes >= 1.75 x heartbeat_minutes + 13). Minutes, or 22m / 1350s / 1h.
 stale_lock_minutes: 45       # heartbeat older than this ⇒ baton is stale, manual merging allowed
-rotate_context_tokens: 300000 # heartbeat asks for rotation past this context size with nothing active (0 = off)
+# rotate_context_tokens: 175000 # heartbeat asks for rotation past this context size with nothing active (0 = off).
+                             # Default: 70% of CLAUDE_CODE_AUTO_COMPACT_WINDOW when set (250k → 175k), else 140k (700k on [1m]);
+                             # a value >= CLAUDE_CODE_AUTO_COMPACT_WINDOW is clamped to 70% with a CONFIG_WARNING.
 
 merge_method:
   multi_commit: merge        # batch PRs keep per-issue commits

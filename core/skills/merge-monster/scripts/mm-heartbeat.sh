@@ -24,7 +24,7 @@ fleet_gh_resolve
 # shellcheck source=../../../lib/monster.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/monster.sh"
 
-REPO="" ISSUE="" STATUS="running" STATE_DIR="" SESSION="" ROTATE=300000 TRANSCRIPT=""
+REPO="" ISSUE="" STATUS="running" STATE_DIR="" SESSION="" ROTATE="" TRANSCRIPT="" IF_DUE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) REPO="$2"; shift 2 ;;
@@ -35,6 +35,7 @@ while [ $# -gt 0 ]; do
     --session) SESSION="$2"; shift 2 ;;
     --rotate-context-tokens) ROTATE="$2"; shift 2 ;;
     --transcript) TRANSCRIPT="$2"; shift 2 ;;
+    --if-due) IF_DUE="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -42,8 +43,8 @@ done
 
 if [ -n "$STATE_DIR" ]; then
   BATON_RC=0
-  BATON_OUT=$(node "$(dirname "${BASH_SOURCE[0]}")/../../../lib/lease/baton.mjs" renew --pulse --role merge --repo "$REPO" \
-    --state-dir "$STATE_DIR" ${SESSION:+--session "$SESSION"}) || BATON_RC=$?
+  BATON_OUT=$(node "$(dirname "${BASH_SOURCE[0]}")/../../../lib/lease/baton.mjs" renew --role merge --repo "$REPO" \
+    --state-dir "$STATE_DIR" ${IF_DUE:+--if-due "$IF_DUE"} ${SESSION:+--session "$SESSION"}) || BATON_RC=$?
   case "$BATON_RC" in
     0) if printf '%s' "$BATON_OUT" | jq -e '.handover' >/dev/null 2>&1; then
          echo "BATON_HANDOVER $(printf '%s' "$BATON_OUT" | jq -r '.handover.home // "none"')"
@@ -84,7 +85,12 @@ if ! grep -q "mm-heartbeat" "$TMP"; then
 fi
 
 "$FLEET_GH" issue edit "$ISSUE" -R "$REPO" --body-file "$TMP" >/dev/null
-[ -z "$STATE_DIR" ] || monster_heartbeat_mark "$STATE_DIR" # the tick writes the next one only when due
+if [ -n "$STATE_DIR" ]; then
+  monster_heartbeat_mark "$STATE_DIR" # the tick writes the next one only when due
+  # Record the model's pulse only AFTER the heartbeat write succeeds (engsys#138).
+  node "$(dirname "${BASH_SOURCE[0]}")/../../../lib/lease/baton.mjs" renew --pulse --if-due 60m --role merge --repo "$REPO" \
+    --state-dir "$STATE_DIR" ${SESSION:+--session "$SESSION"} >/dev/null 2>&1 || true
+fi
 echo "heartbeat: $NOW ($STATUS)"
 if [ "$MONSTER_ROTATION" = 1 ]; then
   echo "ROTATION_REQUESTED merge ($STATUS) with nothing active: post the session-end digest, release the baton (mm-baton.sh release --reason rotation) and stop; the fleet supervisor relaunches the session"
