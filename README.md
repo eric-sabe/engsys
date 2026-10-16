@@ -1,87 +1,90 @@
 # engsys
 
-**An AI engineering team you install into any project.**
+**A meta-harness that installs a complete AI engineering organization into any project.**
 
-A complete Claude Code engineering system — agent personas, slash commands,
-skills, hooks, workflow docs, and curated lessons — plus a deterministic
-installer that materializes it **faithfully** into any project from one config
-file.
+Works natively across **Claude Code**, **GitHub Copilot CLI**, and **Google Antigravity** — materializing **15 specialist personas**, **24 composable stack packs**, **Adaptive Spec-Driven Development (`/design-change`)**, a **compounding Agentic Memory Engine**, and an **optional always-on autonomous fleet** from one declarative config file.
 
-**[Live explainer ↗](https://eric-sabe.github.io/engsys/)** — or open
-[`index.html`](index.html) locally — for a visual tour of the system and the team.
+- **[Live Interactive Explainer ↗](https://eric-sabe.github.io/engsys/)** — or open [`index.html`](index.html) locally — for a visual tour of the mental model, the 15 specialists, the pipeline, and the graduation ladder.
+- **[Deployment Playbook (`DEPLOY.md`)](DEPLOY.md)** — standalone, step-by-step runbook for both humans and AI agents.
+  > **Want your agent to install it?** Paste this into Claude Code, Copilot CLI, or Antigravity:
+  > `Read https://raw.githubusercontent.com/eric-sabe/engsys/main/DEPLOY.md and deploy Stage 1 into this repository.`
 
-## Why
+---
 
-The system used to live copy-pasted across projects at different maturity
-levels. That caused two recurring pains:
+## Mental Model: Model vs. Coding Harness vs. Meta-Harness
 
-1. **Re-naturalization tax** — hand-editing agent profiles per stack (the cloud
-   architect as AWS vs Azure vs GCP) on every import.
-2. **Unfaithful plumbing** — when commands were ported and a model was asked to
-   "set up the folders," it improvised and skipped steps.
+When people talk about "AI coding agents," three distinct layers often get blurred together. `engsys` is the **top layer**:
 
-engsys fixes both. See [`docs/architecture.md`](docs/architecture.md) for the
-full design.
+| Layer | Role | Examples | What It Does — and Where It Stops |
+|---|---|---|---|
+| **1. Model** *(The Brain)* | Stateless reasoning & code generation | Claude Opus / Sonnet, GPT / Codex, Gemini, Grok, DeepSeek | Answers prompts and calls tools, but starts every session with amnesia and has no engineering process. |
+| **2. Coding Harness** *(The Workbench)* | Interactive CLI / IDE runtime | **Claude Code** (`claude`), **GitHub Copilot CLI** (`copilot`), **Google Antigravity** (CLI `agy`, config `antigravity`) | Gives a model a terminal, file editor, subagents, MCP servers, and lifecycle hooks (`PreToolUse`, `PostToolUse`, `SubagentStart`) — but out of the box it is still **one generalist assistant** with no org chart, no stack packs, and no cross-PR memory. |
+| **3. Meta-Harness** *(The Engineering Org — **`engsys`**)* | Portable engineering operating system | **`engsys`** (`engsys install`, `fleet`) | Sits **above** your coding harness and **across** models. Defines *who* does the work (15 specialists), *which* stack rules apply (24 packs), *how* work moves (spec → isolated worktree → independent review → merge), and *what the team remembers* (Agentic Memory) — then compiles that organization into whichever coding harness you run. |
 
-## The core idea: three layers
+### The Three-Part File Taxonomy Inside `engsys`
 
-| Layer | Question | Stability | Lives in |
-|-------|----------|-----------|----------|
-| **Persona** | *Who* does the work | Stable everywhere | `core/agents/` |
-| **Capability** | *Which* stack/tech | Chosen per project | `stacks/**/skills/` (packs) |
-| **Project facts** | What's true about *this* repo | Unique per project | generated `CLAUDE.md` |
+Inside the meta-harness, every file `engsys` manages belongs to one of three parts so you never rewrite prompts when switching projects or clouds:
 
-The cloud architect (Melvin) never changes; you install `cloud-architecture-aws`
-**or** `-azure` **or** `-gcp` **or** `-cloudflare` and he auto-loads whichever is
-present. Adapting to a project becomes *choosing packs*, not *editing prose*.
+| Part | Question | Stability | Lives in |
+|---|---|---|---|
+| **Persona** | *Who* does the work | Stable across every project | `core/agents/` & `optional-agents/` |
+| **Capability** | *Which* stack / cloud / language | Chosen per project (composable packs) | `stacks/**/skills/` |
+| **Project Facts** | What is true about *this* repository | Unique per project | Generated `CLAUDE.md` / `GEMINI.md` / `.github/copilot-instructions.md` |
 
-## Quickstart
+The cloud architect (**Melvin**) never changes; you select `cloud: aws` **or** `azure` **or** `gcp` **or** `cloudflare` in `engsys.config.yaml` and he automatically loads the matching pack.
 
-**Option A — install from npm** (global CLI):
+---
+
+## Where to Start: The 4-Stage Graduation Ladder
+
+**You do not need background daemons, "monsters," a second machine, or a GitHub App to use `engsys`.**
+Start at **Stage 1** in 3 minutes on your laptop, and graduate only when your project's throughput demands it:
+
+| Stage | What You Deploy | Monsters Needed? | Always-On Host? | Setup Time |
+|---|---|---|---|---|
+| **[Stage 1](#stage-1--interactive-team-start-here--3-minutes)** | **Interactive Team** — 11 core + 4 opt-in specialists, 24 stack packs, `/design-change` SDD, `/implement-issue`, `/pre-push`, and 51 curated lessons inside Claude Code, Copilot CLI, or Antigravity. | **No** | **No** | **~3 min** |
+| **[Stage 2](#stage-2--cross-family-review--compounding-memory)** | **Cross-Family Review & Agentic Memory** — External review models (`Codex`, `Grok`, `DeepSeek`) enforce `reviewer family != author family`, and PR history feeds subagent memory briefs. | **No** | **No** | **~10 min** |
+| **[Stage 3](#stage-3--single-host-autonomous-fleet-monsters--health-desk)** | **Single-Host Autonomous Fleet** — **Merge Monster** pilots `mm:ready` PRs through CI to merge, **Maintenance Monster** triages Dependabot/CodeQL & runs the **Fleet Health Desk**, supervised by `launchd`. | **Yes** (`mm`, `maintain`) | **1 macOS host** (`tmux`) | **~30 min** |
+| **[Stage 4](#stage-4--multi-repo--multi-host-federated-fleet)** | **Federated Multi-Host Fleet** — GitHub-ref compare-and-swap batons fence monsters across machines, **Resource Broker** pools heavy build/test slots, and `fleet verify` enforces release-tree SHA & settings trust. | **Yes** (`+ broker`) | **1–N hosts** | **~60 min** |
+
+---
+
+## Stage 1 — Interactive Team (Start Here — 3 Minutes)
+
+If you have an active project and **Claude Code**, **GitHub Copilot CLI**, or **Google Antigravity**, four commands give you the entire interactive engineering team.
+
+### Option A — Install into your project (CLI or Clone)
 
 ```bash
+# 1. Install the zero-dependency CLI (Node >= 20.11) — or `git clone https://github.com/eric-sabe/engsys`
 npm install -g engsys
 
+# 2. Scaffold engsys.config.yaml in your repository
 cd your-project
-engsys init                 # scaffold engsys.config.yaml from the bundled example
-$EDITOR engsys.config.yaml  # pick cloud / iac / lang / platform / db / agents
-engsys install --into .     # materialize .claude/, CLAUDE.md, settings, .mcp.json
+engsys init
 
-# open the project in Claude Code and run /naturalize  (the one model-driven step)
-engsys verify --into .      # anytime: confirm nothing drifted
+# 3. Edit engsys.config.yaml (pick harness: claude | copilot | antigravity | all and stack packs), then materialize:
+engsys install --into .
+engsys verify --into .      # confirm all managed files match the lockfile
+
+# 4. Open your project in Claude Code, Copilot CLI, or Antigravity and run the one model-driven step:
+#    /naturalize
 ```
 
-**Option B — run from a clone** (no global install; the repo is also where you
-fork packs and PR lessons back, so you'll likely want it anyway):
+> **Running from a git clone instead of global npm?** Replace `engsys` with `node /path/to/engsys/install` (or run `npm link` once inside the clone).
+> **Existing setup in the repo?** `engsys install` **adopts** existing `CLAUDE.md`, settings, agents, and Copilot/Cursor rules without clobbering them, and snapshots originals into `.claude/.engsys-backup/` so `engsys uninstall --into .` restores your repo byte-for-byte. See [`docs/install-scenarios.md`](docs/install-scenarios.md).
 
-```bash
-git clone https://github.com/eric-sabe/engsys
+### Option B — Install as Claude Code Plugins (Zero Files Copied Into Repo)
 
-cd your-project
-cp /path/to/engsys/engsys.config.example.yaml ./engsys.config.yaml
-$EDITOR engsys.config.yaml
-node /path/to/engsys/install install --into .   # same CLI, invoked directly
-node /path/to/engsys/install verify  --into .
-```
-
-> Tip: from a clone you can also `cd engsys && npm link` once to get the bare
-> `engsys` command on your PATH, then use it exactly like Option A.
-
-The installer is **zero-dependency** Node (≥20.11) — it adds nothing to your
-project's dependency tree and runs the same on macOS, Windows, and Linux.
-
-**Option C — install as Claude Code plugins** (nothing copied into the project):
-
-This repo is also a Claude Code **plugin marketplace**: the `engsys` core plugin (personas,
-orchestrators, commands, workflows) plus one `engsys-<value>` plugin per stack pack
-(`engsys-azure`, `engsys-bicep`, `engsys-typescript`, `engsys-web`, `engsys-prisma`,
-`engsys-issue-tracker-github`, …). Pin it per project in the project's committed
-`.claude/settings.json`, so upgrades are a deliberate one-line ref bump:
+For Claude Code users who want zero agent/skill files committed to the target repository, `engsys` ships as a **Claude Code plugin marketplace** (`engsys` core + one `engsys-<pack>` plugin per stack pack). Pin it in `.claude/settings.json`:
 
 ```json
 {
   "extraKnownMarketplaces": {
-    "engsys": { "source": { "source": "github", "repo": "eric-sabe/engsys", "ref": "v1.5.0" }, "autoUpdate": false }
+    "engsys": {
+      "source": { "source": "github", "repo": "eric-sabe/engsys", "ref": "v2.0.0" },
+      "autoUpdate": false
+    }
   },
   "enabledPlugins": {
     "engsys@engsys": true,
@@ -91,365 +94,195 @@ orchestrators, commands, workflows) plus one `engsys-<value>` plugin per stack p
 }
 ```
 
-Declaring plugins doesn't install them — install once per machine (`claude plugin marketplace add
-eric-sabe/engsys#v1.5.0`, then `claude plugin install engsys@engsys` and each pack), or accept the
-prompt when opening the project. In plugin mode:
+Install once per machine (`claude plugin marketplace add eric-sabe/engsys#v2.0.0`, then `claude plugin install engsys@engsys` and your chosen pack plugins). Commands and agents are namespaced (`/engsys:implement-issue`, `engsys:isabelle`).
 
-- **The project's own `CLAUDE.md` is its project facts.** The core plugin injects the generic engsys
-  conventions at session start; each pack plugin injects its own guidance, MCP servers, and post-edit
-  reminders. Permissions and project hook patterns stay in the project's settings.
-- **Names are namespaced**: commands/skills are `/engsys:<name>` (e.g. `/engsys:implement-issue`), agents
-  are `engsys:<agent>`. A project command/skill/agent with the same bare name overrides for that repo.
-- Paths in engsys content are written `<engsys-root>/…` (the plugin root here; `.claude/` in a copy
-  install), so the same content works in both modes.
-- engsys's bookkeeping scripts (liveness registry/watchdog, monster watch/snapshot/heartbeat) live under a
-  per-user, per-version plugin-cache path that no portable permission rule can match, so the core plugin
-  ships a `PreToolUse` hook that auto-approves exactly one shape: a single invocation of one of those scripts
-  by its literal path inside the plugin (no variables, chaining, pipes, redirects, or globs). Anything else
-  asks as usual, and deny/ask rules still apply. Copy installs get equivalent static allow rules.
-- The multi-provider worker layer is copy-mode only for now.
+### What Stage 1 Gives You Immediately
 
-Plugin artifacts are generated from the pack sources by `npm run build:plugins` (all under
-`.claude-plugin/` dirs plus pack-root `.mcp.json`, never copied by the installer); `npm test` fails if
-they're stale.
+1. **Multi-Harness Materialization (`harness: claude | copilot | antigravity | all`)**:
+   - **`claude` (default):** `.claude/{agents,commands,skills,hooks,workflows}/`, `CLAUDE.md`, `.claude/settings.json`, and `.mcp.json`.
+   - **`copilot`:** `.github/copilot-instructions.md`, `.github/agents/*.agent.md`, `.github/skills/<name>/SKILL.md`, `.github/hooks/engsys-hooks.json`, `.github/copilot/settings.json`, and `.vscode/mcp.json`.
+   - **`antigravity`:** `GEMINI.md`, `AGENTS.md`, `.agents/agents/*.md`, `.agents/skills/<name>/SKILL.md`, `.agents/rules/*.md`, `.agents/workflows/*.md`, `.agents/hooks.json`, and `.agents/plugins/engsys/plugin.json`.
+   - Universal hook I/O normalization ([`core/lib/harness-io.mjs`](core/lib/harness-io.mjs)) translates hook events and allow/deny/context decisions across all three harnesses automatically.
+2. **15 Specialist Personas (11 Core + 4 Opt-In)**:
+   - **Core (`agents.core: all`):** **Leith** (Product/UX Specs), **Melvin** (Cloud & Scale Architect), **Aaron** (IaC & Deploys), **Jody** (Planner), **Isabelle** (Implementer), **Bert** (Bug Hunter), **Marcelo** (Testing Strategist), **Patricia** (Librarian / ADRs), **Nyx** (Offensive Security — pinned to `claude-opus-4-8`), **Otto** (LLM/Token Optimization), and **Gary** (Design Critic).
+   - **Opt-In (`agents.extra`):** **Sandy** (Marketing/SEO), **Jos** (Monetization/ASO), **DeAndre** (Tutor & Plain-Language Session Explainer), and **Steve** (Morale Scapegoat).
+   - Every persona carries least-privilege `tools:` allowlists, explicit `skills:` bindings, and a machine-checked `## Handback Protocol` (`HANDBACK: COMPLETE` / `HANDBACK: INCOMPLETE`).
+3. **Adaptive Spec-Driven Development (`/design-change`)**:
+   - Risk-adaptive spec classification ([`core/lib/sdd-validator.mjs`](core/lib/sdd-validator.mjs), [`core/scripts/sdd-check.mjs`](core/scripts/sdd-check.mjs)):
+     - **Tier 0 (Trivial):** Skip spec ceremony for typos and isolated 1-file fixes.
+     - **Tier 1 (Standard):** Inline micro-spec in the issue/PR with explicit `touches` and verification commands.
+     - **Tier 2 (Architectural / High-Risk):** Full spec in `docs/specs/<slug>.md` ([`core/templates/spec.md.tmpl`](core/templates/spec.md.tmpl)) triggered by 6 Escalation Tripwires (Data Model, Public Contract, Security/Trust Boundary, Concurrency/Leases, Performance/Scale, Cross-Boundary UX), sliced via [`core/scripts/spec-slice.mjs`](core/scripts/spec-slice.mjs) and verified at `/pre-push` via [`core/scripts/contract-check.mjs`](core/scripts/contract-check.mjs).
+4. **51 Curated Cross-Project Lessons**:
+   - Seeded into `docs/agent-lessons/library/` (or read in place in plugin mode) with structured YAML frontmatter (`applies_to.{stacks,paths,agents,roles}`, `security: true` floor, `triggers`).
 
-## Multi-harness support: Claude Code, GitHub Copilot CLI, Google Antigravity
+---
 
-engsys supports three host harnesses via `harness: claude | copilot | antigravity` (or a list of harnesses) in `engsys.config.yaml` for standalone installs and `HARNESS=claude|copilot|antigravity` in `fleet.conf` for fleet deployments (see [`docs/specs/multi-harness-support.md`](docs/specs/multi-harness-support.md)):
+## Stage 2 — Cross-Family Review & Compounding Memory
 
-- **`claude` (default):** Materializes `.claude/`, `CLAUDE.md`, `.claude/settings.json`, and `.mcp.json`.
-- **`copilot`:** Materializes `.github/copilot-instructions.md`, `.github/agents/*.agent.md`, `.github/skills/<name>/SKILL.md`, `.github/hooks/engsys-hooks.json`, and `.vscode/mcp.json`. Supports unattended headless monster execution via `copilot -p` with separate `COPILOT_HOME` identity (`core/fleet/identity/bin/gh`).
-- **`antigravity`:** Materializes `GEMINI.md`, `.agents/skills/<name>/SKILL.md`, `.agents/rules/*.md`, and `.agents/plugins/engsys/plugin.json` (excluding Claude/Copilot-only skills `agent-sessions` and `subagent-liveness`).
+When you want stronger verification and cross-session learning — still 100% interactive on your workstation, with **no monsters required** — add **External Worker/Review Providers** and the **Agentic Memory Engine**.
 
-## Adaptive Spec-Driven Development (`/design-change`)
+### 2.1 Cross-Family Model Review & Worker Dispatch (`Codex`, `Grok`, `DeepSeek`)
 
-Every non-trivial change routes through `/design-change` (`core/commands/design-change.md`, spec in [`docs/specs/engsys-sdd-upgrade.md`](docs/specs/engsys-sdd-upgrade.md)):
-
-- **Risk-adaptive tiers (`Tier S | M | L`):** Classified deterministically by scope and 6 Escalation Tripwires (`TW-1` Data Model, `TW-2` Public Contract, `TW-3` Security/Trust Boundary, `TW-4` Concurrency/Leases, `TW-5` Performance/Scale, `TW-6` Cross-Boundary UX).
-- **Scoped spec slicing (`core/scripts/spec-slice.mjs`):** Extracts only the YAML frontmatter, Non-Negotiable Anchors, and issue-scoped contract slice (`<= 2,500` words) for subagent context.
-- **Executable contract verification (`core/scripts/contract-check.mjs`):** Verifies `touches` globs (or `### Co-commit justification`), `must_not_touch` globs, `Forbidden Patterns`, and `Verification Commands` at `/pre-push` and `/prep-review` time.
-
-## Worker providers (optional): Codex, DeepSeek, Grok
-
-engsys can dispatch **implement / review / critique / investigate** work to
-external model providers under one hard contract — packages in, machine-checked
-receipts out, with cross-family review as the merge gate (the reviewer's model
-family must differ from the author's). Design: [`docs/multi-provider-spec.md`](docs/multi-provider-spec.md);
-day-to-day procedure: `core/workflows/worker-dispatch.md` (installed to
-`.claude/workflows/`).
-
-**1. One-time machine setup** (per provider you want):
+When the same model reviews code it just wrote, blind spots compound. `engsys` dispatches **implement / review / critique / investigate** packages to external model families under a strict machine-checked receipt contract ([`docs/multi-provider-spec.md`](docs/multi-provider-spec.md)):
 
 ```bash
-# Codex (OpenAI) — CLI worker with its own sandbox; ChatGPT plan or API billing
-npm install -g @openai/codex
-codex login            # browser sign-in; `codex login status` to confirm
+# 1. One-time CLI or API key setup for the providers you want:
+npm install -g @openai/codex && codex login            # OpenAI Codex CLI
+curl -fsSL https://x.ai/cli/install.sh | bash && grok  # xAI Grok Build CLI (or XAI_API_KEY in .env)
+# For DeepSeek or metered Grok API, add DEEPSEEK_API_KEY / XAI_API_KEY to ~/.config/engsys/env (chmod 0600)
+
+# 2. Enable your configured providers in the repo and check readiness:
+engsys enable-providers codex,grok,deepseek,anthropic --into .
+engsys verify --into .
 ```
-
-```bash
-# Grok (xAI), subscription route — the Grok Build CLI (SuperGrok tiers;
-# flat-rate, tool-capable in a read-only sandbox — the same engine xAI's
-# grok-build Claude Code plugin shells out to). `via: auto` in the config
-# prefers this route and falls back to an API key:
-curl -fsSL https://x.ai/cli/install.sh | bash
-grok                   # sign in once; `grok models` succeeding = logged in
-```
-
-**API keys go in a gitignored `.env`, not your shell profile.** DeepSeek
-(create + fund a key at platform.deepseek.com) and Grok's metered API route
-(console.x.ai) are key-based. The worker scripts load, in order — real
-environment variables always winning over files:
-
-1. `$ENGSYS_ENV_FILE` — explicit override, any path
-2. `<project>/.env` — the repo you're dispatching from (**gitignore it**)
-3. the main checkout's `.env` when running in a git worktree (worktrees don't
-   share untracked files; the loader hops to the main checkout so dispatches
-   from worktrees still find your keys)
-4. `~/.config/engsys/env` — machine-wide, outside any repo
-
-```bash
-# in the project (or in ~/.config/engsys/env for machine-wide):
-cat >> .env <<'KEYS'
-DEEPSEEK_API_KEY=sk-...
-XAI_API_KEY=xai-...
-KEYS
-grep -qx '.env' .gitignore || echo '.env' >> .gitignore
-```
-
-The loader warns loudly if a `.env` it reads is tracked by git — a committed
-`.env` publishes its keys to every clone; gitignore it and rotate anything it
-held.
-
-> nvm users: global npm packages don't follow you across node versions — after
-> `nvm use`/upgrades, re-run `npm install -g @openai/codex` (login state
-> survives in `~/.codex/`).
-
-**2. Enable providers** — one command on a new *or existing* install:
-
-```bash
-engsys enable-providers codex,deepseek,grok,anthropic --into .
-```
-
-It appends a `providers:` block with per-role model defaults to your config
-(refusing if one already exists — edit that directly) and runs `update`, which
-installs `.claude/scripts/worker-run.mjs` + `worker-package.mjs`, per-provider
-adapters, worker briefs, and renders the routing table into `CLAUDE.md`.
-Prefer hand-editing? The example config ships the full block; flip
-`enabled: true` per worker and run `update` yourself.
-
-**3. Check readiness** — `engsys verify --into .` now prints a provider doctor
-matrix (binary present, auth valid, key accepted) alongside drift detection:
 
 ```text
 provider doctor:
   READY     codex — codex-cli 0.147.0
-  READY     deepseek — claude 2.x, remapped to https://api.deepseek.com/anthropic
-  READY     grok — xAI API reachable, key accepted
+  READY     grok — grok-build CLI authenticated (or xAI API reachable)
+  READY     deepseek — remapped to https://api.deepseek.com/anthropic
   READY     anthropic — claude 2.x
 ```
 
-**4. Naturalize the worker briefs** — run `/naturalize` and fill
-`.claude/workflows/briefs/project-brief-overlay.md` (house invariants, failure
-corpus, the exact verify commands). Review packages **refuse to build** while
-it's unfilled — a reviewer with no local priors is a review in name only.
+### 2.2 The Agentic Memory Engine ([`docs/memory-spec.md`](docs/memory-spec.md))
 
-Two properties worth knowing before the first dispatch: workers never commit,
-push, or open PRs (the conductor commits per issue with a
-`Worker: <provider>/<model>` trailer), and a worker run that can't prove its
-protocol — missing receipt, wrong package hash, mutated tree on a read-only
-role — exits `2` ("did not run"), which is never read as findings and never as
-a pass.
+`engsys` ships a two-tier memory engine (requires Node.js `>= 22.5` for `node:sqlite`) that makes every subagent smarter without risking prompt injection from untrusted GitHub comments:
 
-## Commands
+- **Class A (Trusted Instructions):** Loaded strictly from reviewed git refs (`origin/HEAD`) across `core/lessons-library/*.md`, `docs/agent-lessons/library/*.md`, `docs/agent-lessons/*.md`, and `docs/agent-lessons-overlay.yml`.
+- **Class B (Historical Repo Evidence):** Merged PR summaries, review findings, and issue outcomes stored on an append-only custom Git data ref (`refs/engsys/memory/events/v1` via [`core/lib/memory/ref-store.mjs`](core/lib/memory/ref-store.mjs)) with mandatory pre-write secret scanning, bot-identity (`databaseId`) & edit-history (`userContentEdits`) verification, and prompt-boundary spoofing quarantine ([`core/scripts/memory-sync.mjs`](core/scripts/memory-sync.mjs)).
+- **Subagent Brief Injection (`<= 2 KB`):**
+  - On `PreToolUse` (`Agent|Task`), [`core/.claude-plugin/subagent-memory-inject.mjs`](core/.claude-plugin/subagent-memory-inject.mjs) stashes the subagent's task prompt and target paths (`0600`, 30s TTL).
+  - On `SubagentStart`, [`core/scripts/memory-brief.mjs`](core/scripts/memory-brief.mjs) queries a host-local `node:sqlite` FTS5 cache ([`core/lib/memory/index-db.mjs`](core/lib/memory/index-db.mjs)) to inject mandatory `security: true` lessons, BM25/path-matched Class A lessons, and compact Class B pointers (`anchor * idf * recency * outcome * flagMultiplier`).
+  - `nyx` (security) is strictly isolated to Class A instructions only. Full Class B evidence is fetched on demand (`memory-brief.mjs --evidence <key>`) inside an untrusted `HISTORICAL REPO EVIDENCE` envelope.
+- **Finding Harvester ([`core/scripts/harvest-findings.mjs`](core/scripts/harvest-findings.mjs)):** Clusters recurring PR review findings during `/project-closeout` into candidate Class A lessons.
 
-| Command | What it does |
-|---------|--------------|
-| `init [--into <path>]` | Scaffold `engsys.config.yaml` from the bundled example (default: current dir). Handy after a global `npm install`. |
-| `install --into <path>` | First-time materialization of `.claude/`, `CLAUDE.md`, settings, `.mcp.json`. |
-| `update --into <path>` | Re-render from current engsys + config. Preserves the CLAUDE.md PROJECT-FACTS region and any hand-added permissions; heals drift in managed files. |
-| `verify --into <path>` | Compares installed managed files against the lockfile; reports missing/modified. Prints the provider readiness matrix when a worker layer is installed. |
-| `enable-providers <names> --into <path>` | Appends a `providers:` block (from `codex,deepseek,grok,anthropic`) with per-role model defaults to the project config, then runs `update`. |
-| `uninstall --into <path>` | Removes everything engsys added and restores the project's prior files. |
-| `--dry-run` | (install/update/uninstall) print the plan, write nothing. |
+---
 
-engsys **adopts** a repo's existing setup rather than overwriting it — a foreign
-`CLAUDE.md` is folded in and backed up, settings merge, the project's own agents
-are preserved, and Copilot/Cursor config is imported for `/naturalize`. It's fully
-reversible with `uninstall`. See [`docs/install-scenarios.md`](docs/install-scenarios.md).
+## Stage 3 — Single-Host Autonomous Fleet (Monsters + Health Desk)
 
-## Layout
+When your repository produces enough PRs and security alerts that human merge-babysitting becomes the bottleneck, graduate to **Stage 3** on an always-on macOS host (e.g., a Mac mini or workstation running `tmux` and `launchd`):
 
-```
-core/               stack-agnostic — always installed
-  agents/           personas: architect, IaC, implementer, planner, designer,
-                    tester, librarian, security, LLM-opt, bug hunter
-  commands/         generate-project → implement → file-issue → project-closeout,
-                    pre-push, design-*, prep-review*, naturalize, merge-monster
-  skills/           git-workflow-agents, code-review, gh-cli, github-issues,
-                    github-actions, merge-monster, pre-push, refactor, …
-  workflows/        long-form procedure docs the commands reference
-  templates/        CLAUDE.md, settings, hook, ADR + issue templates
-                    + repo-gates/: agent-PR workflow templates (auto-draft, secret scan,
-                    required-check skip), husky hooks, precheck + worktree-bootstrap skeletons
-  fleet/            fleet kit: fleet sync · pin · restart · launch · supervise · install-jobs,
-                    identity (GitHub App bot), launchd jobs, `engsys fleet init` scaffold
-  lib/              agent-safety libraries (untrusted-data envelope, hermetic child git) and
-                    lease/: durable lease + resource pool (host-resource coordination)
-
-stacks/             detachable capability packs — pick per project (scalar or list)
-  cloud/            aws · azure · gcp · cloudflare
-  iac/              terraform · bicep · cdk
-  lang/             typescript · python · swift · kotlin · shell
-  platform/         web · ios · android
-  db/               prisma · mongo
-  domain/           mobile-growth
-  tooling/          issue-tracker-github · issue-tracker-linear
-
-optional-agents/    opt-in: sandy (marketing), jos (monetization), steve (morale)
-core/lessons-library/  curated cross-project lessons (seeded into projects on install)
-docs/               architecture · naturalization · fleet-guide · review-methodology · monsters · …
-lib/  install       the zero-dep Node installer
-index.html          single-page visual explainer
-team-images/        team roster art (lib/generate-team-avatars.mjs (re)generates it)
-```
-
-### Pack contract
-
-Every pack under `stacks/<category>/<value>/` may contain:
-
-```
-skills/<name>/SKILL.md     the capability (auto-triggers by description)
-agents/<name>.md           a pack-specific persona (rare)
-hooks/<name>.sh            a pack-specific hook
-claude.fragment.md         markdown spliced into the project CLAUDE.md
-settings.fragment.json     { permissions: {allow,deny}, mcpServers }
-```
-
-The installer copies skills/agents/hooks, splices fragments, merges permissions
-and MCP servers, and records everything in `.claude/engsys.lock`.
-
-## The always-on fleet (monsters + sessions)
-
-For repos with an always-on machine, engsys ships a composable fleet of
-long-running sessions — installed like everything else, configured per repo:
-
-- **Merge Monster** (`/merge-monster`) — owns the merge baton: orders the
-  `mm:ready` queue, pilots PRs through ready → CI → merge, escalates with
-  diagnosis. Skill: `core/skills/merge-monster/`; design: `docs/merge-monster.md`.
-- **Maintenance Monster** (`/maintenance-monster`) — owns the security/
-  dependency surface (Dependabot, code/secret scanning, image scans): watches,
-  triages, reports (Phase 1) or drives fixes into `mm:ready` PRs Merge Monster
-  merges (Phase 2). Sole Dependabot owner when running. Design:
-  `docs/maintenance-monster.md`.
-- **Cross-session messaging** — best-effort latency layer over the GitHub
-  source of truth; named sessions under a `<ns>-` namespace fence,
-  validate-before-act on every inbound message. Design: `docs/agent-messaging.md`.
-- **Subagent liveness** — spawn registry + transcript-staleness watchdog +
-  probe-then-classify + fence-before-respawn, so no orchestrator ever idles on
-  a quietly-dead worker. Skill: `core/skills/subagent-liveness/`; design:
-  `docs/subagent-liveness.md`.
-- **The fleet launcher** (`core/skills/agent-sessions/`) — roster-file driven
-  tmux launcher with per-role permission modes (bypass only for the unattended
-  monsters), remote control, and duplicate-name safety.
-
-Quickstart, per repo: install engsys → `mm-setup.sh` / `mnt-setup.sh` → write
-the two configs + `.claude/agent-sessions.roster` → run the launcher on the
-always-on machine.
-
-### Roster defaults — yours to change
-
-`roster.example` ships an opinionated five-role fleet; every line of it is a
-choice, not a requirement:
-
-- **Roles**: `mm` (merge orchestrator) + `maintain` (security/dependency
-  watchdog) + `build` / `investigate` / `design` interactive workers. Add,
-  drop, or rename roles freely — only the `<NAMESPACE>-` prefix is enforced.
-- **Permission modes, per role**: the two monsters run
-  `--dangerously-skip-permissions` (unattended by design — their skills carry
-  validate-before-act and a ledger kill switch); interactive workers run
-  `--permission-mode auto --add-dir <worktrees dir>` (routine actions flow,
-  risky ones ask; `--add-dir` because agent worktrees live beside the
-  checkout, outside the session's working directory). Tighten or loosen per
-  role to taste — the reasoning is in the agent-sessions SKILL.md
-  § Permission modes.
-- **`MODEL=`** (commented out by default): pin every session to a specific
-  model when your orchestration experience warrants it — e.g. the reference
-  deployment pins `--model claude-opus-4-8` for orchestration sessions,
-  having found it stronger there than newer defaults. Leave unset to use
-  each session's default model; override per-session via the extra-flags
-  field instead of the global.
-- **`--remote-control`** on every session: transcripts and permission prompts
-  reach the operator's other devices. Drop it for air-gapped setups.
-- **`ENV_FILE=`**: the hook for a durable machine identity (e.g. a
-  certificate-credential cloud service principal) so no session depends on an
-  interactive login surviving the night.
-
-## The always-on fleet: engsys fleet kit
-
-engsys can run as an **always-on fleet** on one machine: a merge orchestrator, a security and dependency
-watchdog, and interactive worker roles, each a named long-running Claude Code session in tmux, relaunched
-by a supervisor that has no LLM in its restart path. The **fleet kit** (`core/fleet/`) is the host tooling
-for it:
-
-- **`fleet sync` / `fleet restart`**: your config, context and org skills live in a small *instance repo*;
-  engsys stays a tag-pinned upstream. One `fleet sync` makes the host match the pins without touching a
-  running session, and `fleet restart --stale` cycles sessions onto the new versions when you choose.
-- **`fleet pin`**: cut a release of your instance plugin and open a reviewed, refs-only pin PR.
-- **An identity that is not a person**: a GitHub App bot, scoped to the fleet's own processes through
-  environment-carried git config and a `gh` shim, so nothing global is written and a person's own git and
-  `gh` are untouched. An optional Azure service-principal login ships in the Azure pack.
-- **`fleet install-jobs`**: renders and loads the launchd jobs (supervisor, identity health check).
-- **`engsys fleet init`**: scaffolds the instance repo, and `/engsys:fleet-bootstrap` walks an agent through
-  the whole bring-up, stopping wherever a human must create a credential.
-
-**Quickstart** (macOS; the host needs `git`, `gh`, `jq`, `tmux`, `node` in `/opt/homebrew/bin`, and Claude
-Code from Homebrew; details in the guide):
+- **Merge Monster (`/merge-monster` · [`docs/merge-monster.md`](docs/merge-monster.md)):** Owns the merge baton. Preflights `mm:ready` PRs (projecting comment markers and `FINDING-ACK`s via `mm-preflight.sh`), pilots `ready → CI → merge` one active PR at a time, and bounces failures with root-cause diagnosis.
+- **Maintenance Monster (`/maintenance-monster` · [`docs/maintenance-monster.md`](docs/maintenance-monster.md)):** Sole owner of Dependabot, CodeQL, secret scanning, and image scanning alerts; filters standing false-positive policies (`mnt-fp.mjs`) and hands verified fix PRs to Merge Monster.
+- **Fleet Health Desk (`fleet health` · [`docs/fleet-health-desk.md`](docs/fleet-health-desk.md)):**
+  - Probes upstream dependencies (`statuspage` with ETag `304` caching, `observed` CI rolling windows, `http-health`, and `synthetic-command` with local-auth separation) using asymmetric hysteresis (`trip_fails` / `recover_clean`) and `depends_on` DAG alarm suppression.
+  - Maintains a pinned `<!-- fleet-health -->` GitHub status board, posts calm transition-only Slack alerts, correlates inbound session friction reports (`fleet health report`), and injects 1–2 lines of weather context at `SessionStart` / `UserPromptSubmit` ([`core/.claude-plugin/weather-check.mjs`](core/.claude-plugin/weather-check.mjs)) only when services are degraded or down.
+- **Single-Watcher Efficiency & Deterministic Supervision:**
+  - Each monster runs **one** unified watcher (`mm-watch.sh`, `mnt-watch.sh`, `broker-watch.sh`) and single-call ticks (`mm-tick.sh`, `mnt-tick.sh`, `broker-tick.sh`) that coalesce events so a quiet 30-minute window costs **1 tool call**.
+  - When idle context usage crosses `rotate_context_tokens` (clamped below 70% of the compaction window), the monster runs `mm-baton.sh rotate` / `mnt-baton.sh rotate` to record `rotation requested`, release its baton, and let the deterministic `launchd` supervisor ([`fleet-supervisor.sh`](core/skills/agent-sessions/scripts/fleet-supervisor.sh)) relaunch a fresh session (with automatic `forfeited-on-rotation` baton recovery if the session idles at its prompt).
 
 ```bash
-git clone https://github.com/eric-sabe/engsys ~/git/engsys            # the pinned checkout the kit runs from
-~/git/engsys/install fleet init --into ~/git/acme-fleet --org acme --namespace acme \
-  --pin-repo owner/repo --pin-dir ~/git/repo --instance-marketplace acme --identity github-app
-#   ...a human creates the GitHub App and places its key (core/fleet/identity/README.md),
-#   creates the ledgers (mm-setup.sh, mnt-setup.sh), and pins the release tags in owner/repo's .claude/settings.json
-~/git/acme-fleet/scripts/fleet sync                                   # checkouts + plugins to the pins
-~/git/acme-fleet/scripts/fleet launch                                 # start the sessions
-~/git/acme-fleet/scripts/fleet install-jobs                           # supervisor + identity jobs
+# Scaffold a dedicated fleet instance repo on your always-on host:
+git clone https://github.com/eric-sabe/engsys ~/git/engsys
+~/git/engsys/install fleet init \
+  --into ~/git/acme-fleet \
+  --org acme --namespace acme \
+  --pin-repo owner/repo --pin-dir ~/git/repo \
+  --harness claude --identity github-app
+
+# After placing your GitHub App key (core/fleet/identity/README.md) and running mm-setup.sh / mnt-setup.sh:
+~/git/acme-fleet/scripts/fleet sync           # sync checkouts + plugins in isolated worktrees
+~/git/acme-fleet/scripts/fleet verify         # verify wrapper, host ENGSYS_DIR & settings integrity
+~/git/acme-fleet/scripts/fleet launch         # launch tmux sessions
+~/git/acme-fleet/scripts/fleet install-jobs   # load launchd supervisor & identity jobs
 ```
 
-Read the [fleet guide](docs/fleet-guide.md) for the decisions (plugin vs copy mode, one repo vs several,
-the instance-layer pattern, identity, models), the generic host setup, and day-2 operations including the
-canary order for adopting an engsys release. Related: the
-[identity kit](core/fleet/identity/README.md), the
-[Azure service-principal login](stacks/cloud/azure/fleet/README.md), the
-[`agent-sessions` skill](core/skills/agent-sessions/SKILL.md) (launcher, roster, supervisor), and the
-[merge](docs/merge-monster.md) and [maintenance](docs/maintenance-monster.md) monsters, and the optional
-[resource broker](core/skills/resource-broker/SKILL.md) for shared host resources (on the
-[durable lease](core/skills/durable-lease/SKILL.md)). Reviewing agent PRs with more than one reviewer:
-[review methodology](docs/review-methodology.md).
+---
 
-## Feedback loop
+## Stage 4 — Multi-Repo / Multi-Host Federated Fleet
 
-Project closeouts mine local review findings into `docs/agent-lessons/`. When a
-lesson generalizes across projects, PR it into [`lessons-library/`](core/lessons-library/)
-so the next install can seed it. That keeps engsys the source of truth instead of
-a fork point.
+For organizations running multiple repositories or multiple always-on hosts ([`docs/multi-fleet.md`](docs/multi-fleet.md), [`docs/fleet-guide.md`](docs/fleet-guide.md)):
 
-## Activity dashboard (optional)
+- **GitHub-Ref Compare-and-Swap Batons ([`core/lib/lease/baton.mjs`](core/lib/lease/baton.mjs)):** Singleton roles (`merge`, `maintain`) hold lease batons on custom Git refs (`refs/engsys/leases/baton-<role>`) with session-bound keepalives and fenced write guards ([`core/.claude-plugin/singleton-write-guard.mjs`](core/.claude-plugin/singleton-write-guard.mjs)).
+- **Resource Broker (`/resource-broker` · [`core/skills/resource-broker/SKILL.md`](core/skills/resource-broker/SKILL.md)):** Built on [`core/skills/durable-lease/`](core/skills/durable-lease/SKILL.md), pools finite host hardware (simulators, Docker stacks, e2e runners) across concurrent workers.
+- **Cross-Fleet Messaging (`fleet msg` & `fleet relay`):** Routes nudges across fleets (`<fleet>:<session>`) via validated GitHub issue comments.
+- **Closed-Loop Host & Singleton Trust (`fleet verify` · [`core/fleet/lib/verify-wrappers.mjs`](core/fleet/lib/verify-wrappers.mjs)):** Verifies singleton plugin files, host `ENGSYS_DIR` scripts, and `.claude/settings.json` against the pinned GitHub release tree SHAs; revokes singleton batons (`--reason integrity-mismatch`) if tampering or drift is detected; enforces root-owned `git` and clean SSH config on guarded pushes; and holds relaunches if harness OAuth expires.
 
-A self-hosted GitHub activity dashboard ships in this repo ([`dashboard.html`](dashboard.html)),
-fed by a daily collector. It charts commits, PRs, issues, code-review discipline,
-languages, and a contribution heatmap across your repos and orgs. It's built to be
-**publishable**: the committed `data/stats.json` carries only opaque per-repo aliases
-(e.g. "Sneaky Raccoon") — never repo/owner names, issue titles, branches, or commit
-messages. The alias↔name mapping is never serialized.
+---
 
-No identity lives in the source — the collector reads it from the environment
-(`.env` locally, Actions secrets in CI). Set it up for yourself:
+## CLI Reference
 
-1. **Configure identity.** Copy [`.env.example`](.env.example) to `.env` (gitignored)
-   and fill it in — the collector loads `.env` automatically:
+### Project Installer (`engsys` / `./install`)
 
-   ```bash
-   DASHBOARD_PAT=ghp_your_token_here          # classic PAT, scopes: repo, read:org, read:user
-   DASHBOARD_LOGIN=octocat                     # your GitHub login
-   DASHBOARD_EMAILS=you@example.com            # commit-author emails (CSV)
-   DASHBOARD_OWNERS=octocat:user,your-org:org  # owners to scan, "name:type" (user|org)
-   DASHBOARD_EXTRA_LOGINS=                     # optional: legacy/renamed logins to fold in
-   ```
-
-   Create the PAT at <https://github.com/settings/tokens>.
-
-2. **Collect and commit:**
-
-   ```bash
-   node scripts/collect-stats.mjs                  # full trailing-12-month run
-   git add data/stats.json && git commit -m "dashboard: initial stats"
-   ```
-
-3. **Publish** via GitHub Pages (Settings → Pages → deploy from `main`, root). The
-   dashboard is then live at `/dashboard.html`.
-
-4. **Automate** the daily refresh: add the same five variables as repo secrets
-   (Settings → Secrets and variables → Actions) — `DASHBOARD_PAT`, `DASHBOARD_LOGIN`,
-   `DASHBOARD_EMAILS`, `DASHBOARD_OWNERS`, and (optionally) `DASHBOARD_EXTRA_LOGINS`.
-   The workflow in [`.github/workflows/dashboard.yml`](.github/workflows/dashboard.yml)
-   runs a delta collection each morning and commits the result.
-
-Collection modes:
-
-| Invocation | Use |
+| Command | Purpose |
 |---|---|
-| `node scripts/collect-stats.mjs` | full run — the whole trailing window |
-| `… --delta` | only the current week, merged in (what the cron uses) |
-| `… --repo owner/name` | recollect specific repos (repeatable); leaves the rest intact |
-| `DIRECT_LOC_SLEEP_MS=150 node …` | speed up the per-commit LOC walk for one-off backfills (default 500ms is cron-safe) |
+| `engsys init [--into <path>]` | Scaffold `engsys.config.yaml` from the bundled example. |
+| `engsys install --into <path> [--harness claude\|copilot\|antigravity\|all]` | Materialize personas, skills, commands, hooks, settings, and lessons into `<path>` (adopting any existing setup). |
+| `engsys update --into <path>` | Re-render from current `engsys` + config; preserves `PROJECT-FACTS` and hand-added permissions; prunes deselected packs. |
+| `engsys verify --into <path>` | Verify all managed files against `.claude/engsys.lock` and print the external provider readiness matrix. |
+| `engsys enable-providers <names> --into <path>` | Append a `providers:` block (`codex,deepseek,grok,anthropic`) to `engsys.config.yaml` and run `update`. |
+| `engsys fleet init --into <dir> ...` | Scaffold a fleet instance repository (`fleet.conf`, roster, launchd templates, `scripts/fleet` shim, optional `federation.yml` & `resource-broker`). |
+| `engsys uninstall --into <path>` | Remove all `engsys`-managed files and restore snapshotted originals byte-for-byte. |
 
-Full design notes and the data model live in [`docs/dashboard-spec.md`](docs/dashboard-spec.md).
+### Fleet Host CLI (`scripts/fleet` in a fleet instance)
+
+| Command | Purpose |
+|---|---|
+| `fleet status [--federation]` | Show pin alignment, session state, auth holds, or federation-wide heartbeats and baton holders. |
+| `fleet sync [--check]` | Sync host checkouts and plugins to pinned tags using per-instance worktree isolation. |
+| `fleet verify [--alert]` | Verify singleton guard scripts, host `ENGSYS_DIR`, and settings against GitHub release tree SHAs. |
+| `fleet launch` / `fleet restart [--stale]` | Start missing sessions or cycle stale sessions onto newly synced pins. |
+| `fleet supervise` / `fleet install-jobs` | Run one deterministic supervisor tick or load the recurring `launchd` jobs. |
+| `fleet health <subcommand>` | Operate the Fleet Health Desk (`validate`, `status`, `tick`, `check`, `report`, `simulate`, `invoke`, `self-probe`, `digest`, `watch-add`). |
+| `fleet msg <route\|send\|inbox>` / `fleet relay` | Send, route, and poll cross-fleet messages. |
+| `fleet pin` | Verify tag/manifest version alignment (`package.json`, `marketplace.json`, `plugin.json`) and open a pin bump PR. |
+
+---
+
+## Repository Layout & Documentation Map
+
+```text
+core/
+  agents/             11 core specialists (melvin, aaron, isabelle, bert, jody, leith, marcelo, patricia, nyx, otto, gary)
+  commands/           /generate-project, /design-change, /implement-project, /implement-issue, /pre-push,
+                      /prep-review*, /project-closeout, /naturalize, /merge-monster, /maintenance-monster, /resource-broker
+  skills/             stack-agnostic skills: git-workflow-agents, code-review, gh-cli, github-actions, pre-push,
+                      refactor, llm-structured-outputs, web-design-reviewer, webapp-testing, chrome-devtools,
+                      agentic-eval, interactive-explainer, subagent-liveness, untrusted-input, hermetic-git-tests,
+                      merge-monster, maintenance-monster, mnt-watch, resource-broker, durable-lease, agent-sessions
+  fleet/              fleet kit (bin/fleet, sync, verify, launch, supervise, pin, notify, federation, msg, relay)
+                      + health/ (Fleet Health Desk: registry, adapters, hysteresis engine, incidents, board, cli)
+                      + identity/ (GitHub App bot token minting & scoped gh shim)
+  lib/                harness-io.mjs (tri-harness hook adapter), sdd-validator.mjs, untrusted.mjs, git-env.mjs,
+                      monster.sh, claim.mjs, lease/ (GitHub-ref CAS baton), memory/ (SQLite FTS5 index-db & ref-store)
+  scripts/            memory-brief.mjs, memory-sync.mjs, harvest-findings.mjs, validate-lessons.mjs,
+                      sdd-check.mjs, spec-slice.mjs, contract-check.mjs, worker-run.mjs, worker-package.mjs
+  lessons-library/    51 curated, frontmatter-validated cross-project lessons
+  workflows/          long-form procedures & multi-provider worker briefs
+  templates/          CLAUDE.md, GEMINI.md, copilot-instructions.md, spec.md.tmpl, settings, hooks, repo-gates
+
+stacks/               24 detachable capability packs — compose per project (scalar or list)
+  cloud/              aws · azure · gcp · cloudflare
+  iac/                terraform · bicep · cdk
+  lang/               typescript · python · swift · kotlin · shell
+  platform/           web · ios · android
+  db/                 prisma · mongo
+  domain/             mobile-growth
+  tooling/            issue-tracker-github · issue-tracker-linear · provider-{anthropic,codex,deepseek,grok}
+
+optional-agents/      sandy (marketing/SEO), jos (monetization), deandre (tutor/explainer), steve (morale)
+DEPLOY.md             standalone LLM & human progressive deployment playbook (Stages 1–4)
+index.html            interactive visual explainer (https://eric-sabe.github.io/engsys/)
+dashboard.html        privacy-preserving GitHub activity dashboard
+```
+
+### Deep-Dive Documentation (`docs/`)
+
+- **Getting Started & Architecture:** [`DEPLOY.md`](DEPLOY.md) · [`docs/architecture.md`](docs/architecture.md) · [`docs/install-scenarios.md`](docs/install-scenarios.md) · [`docs/naturalization.md`](docs/naturalization.md)
+- **Specs, Review & Memory:** [`docs/specs/engsys-sdd-upgrade.md`](docs/specs/engsys-sdd-upgrade.md) · [`docs/memory-spec.md`](docs/memory-spec.md) · [`docs/multi-provider-spec.md`](docs/multi-provider-spec.md) · [`docs/review-methodology.md`](docs/review-methodology.md)
+- **Autonomous Fleet & Multi-Harness:** [`docs/specs/multi-harness-support.md`](docs/specs/multi-harness-support.md) · [`docs/fleet-guide.md`](docs/fleet-guide.md) · [`docs/multi-fleet.md`](docs/multi-fleet.md) · [`docs/merge-monster.md`](docs/merge-monster.md) · [`docs/maintenance-monster.md`](docs/maintenance-monster.md) · [`docs/fleet-health-desk.md`](docs/fleet-health-desk.md) · [`docs/agent-messaging.md`](docs/agent-messaging.md) · [`docs/subagent-liveness.md`](docs/subagent-liveness.md) · [`docs/gate-check.md`](docs/gate-check.md)
+
+---
+
+## Activity Dashboard (Optional)
+
+A self-hosted, privacy-preserving GitHub activity dashboard ships in [`dashboard.html`](dashboard.html), fed by [`scripts/collect-stats.mjs`](scripts/collect-stats.mjs). Committed stats (`data/stats.json`) store only opaque per-repo aliases — never repo/owner names, issue titles, branches, or commit messages. See [`docs/dashboard-spec.md`](docs/dashboard-spec.md) for setup and daily GitHub Actions automation.
 
 ## Tests
 
 ```bash
-npm test     # exercises the YAML-subset config parser
+npm test                     # runs installer selftests + all Node & shell test suites
+npm run build:plugins        # regenerates .claude-plugin manifests & hooks (--check to verify)
 ```
 
 ## License

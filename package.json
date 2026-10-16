@@ -1,12 +1,13 @@
 {
   "name": "engsys",
   "version": "1.16.0",
-  "description": "Canonical home for the Claude Code engineering system — agents, commands, skills, stack packs, and a deterministic installer.",
+  "description": "The meta-harness for AI software engineering — 15 specialist personas, 24 stack packs, Adaptive SDD, compounding memory, and an optional autonomous fleet for Claude Code, GitHub Copilot CLI, and Google Antigravity.",
   "bin": {
     "engsys": "./install"
   },
   "files": [
     "install",
+    "DEPLOY.md",
     "lib/",
     "core/",
     "optional-agents/",
@@ -24,6 +25,9 @@
   "keywords": [
     "claude",
     "claude-code",
+    "copilot",
+    "antigravity",
+    "meta-harness",
     "ai",
     "agents",
     "engineering",
