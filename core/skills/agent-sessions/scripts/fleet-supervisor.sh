@@ -377,13 +377,18 @@ auth_add_lines() { # auth_add_lines <file> <lines> → appended, each line once
 auth_probe() {
   AUTH_PROBE_WHY=""
   [ "$AUTH_PROBE" = on ] || { AUTH_PROBE_WHY="no test request (AUTH_PROBE=off)"; return 1; }
-  local probe_bin="claude"
-  if [ "${HARNESS:-claude}" = "copilot" ]; then probe_bin="copilot"; fi
+  local probe_bin="claude" h="${HARNESS:-claude}"
+  case "$h" in
+    copilot) probe_bin="copilot" ;;
+    antigravity | agy) h="antigravity"; probe_bin="agy" ;;
+  esac
   command -v "$probe_bin" >/dev/null 2>&1 || { AUTH_PROBE_WHY="no test request ($probe_bin is not on PATH)"; return 1; }
   local dir pid rc=0 waited=0 last
   dir="$(mktemp -d "${TMPDIR:-/tmp}/fleet-supervisor-auth.XXXXXX")"
-  if [ "${HARNESS:-claude}" = "copilot" ]; then
+  if [ "$h" = "copilot" ]; then
     (cd "$dir" && exec copilot -p 'Reply with the single word OK' -s --no-custom-instructions --disable-builtin-mcps --model claude-haiku-4.5) </dev/null >"$dir.out" 2>&1 &
+  elif [ "$h" = "antigravity" ]; then
+    (cd "$dir" && exec agy -p 'Reply with the single word OK') </dev/null >"$dir.out" 2>&1 &
   else
     (cd "$dir" && exec claude -p --setting-sources project --strict-mcp-config --no-session-persistence --model haiku 'Reply with the single word OK') </dev/null >"$dir.out" 2>&1 &
   fi
@@ -396,7 +401,11 @@ auth_probe() {
   last="$(grep -v '^[[:space:]]*$' "$dir.out" | tail -n 1 | cut -c1-200 || true)"
   rm -rf "$dir" "$dir.out"
   if [ "$rc" = 0 ]; then
-    if [ "${HARNESS:-claude}" = "copilot" ]; then AUTH_PROBE_WHY="a test request through Copilot CLI succeeded"; else AUTH_PROBE_WHY="a test request through Claude Code succeeded"; fi
+    case "$h" in
+      copilot) AUTH_PROBE_WHY="a test request through Copilot CLI succeeded" ;;
+      antigravity) AUTH_PROBE_WHY="a test request through Antigravity CLI succeeded" ;;
+      *) AUTH_PROBE_WHY="a test request through Claude Code succeeded" ;;
+    esac
     return 0
   fi
   if grep -Eq "$AUTH_RE" <<<"$last"; then AUTH_PROBE_WHY="the test request failed the same way: $last"

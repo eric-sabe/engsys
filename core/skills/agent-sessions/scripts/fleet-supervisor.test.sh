@@ -570,6 +570,28 @@ expect "CT-14: HARNESS=copilot auth_probe runs copilot -p" "^copilot-probe -p Re
 expect "CT-14: HARNESS=copilot probe ok → relaunch proceeds" "^launch acme-rel"
 rm -f "$T"/pane-* "$T"/capture-* "$T/probe-ok"
 
+# CT-14b: HARNESS=antigravity in fleet-supervisor.sh auth_probe
+cat >"$T/bin/agy" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = "remote-control" ]; then
+  if [ "${2:-}" = "status" ]; then
+    echo "Daemon status: not running"
+    exit 0
+  fi
+  echo "agy-rc $*" >>"$FAKE/actions"
+  exit 0
+fi
+echo "agy-probe $*" >>"$FAKE/actions"
+if [ -f "$FAKE/probe-ok" ]; then echo OK; exit 0; fi
+echo "Login expired · Please run /login"; exit 1
+SH
+chmod +x "$T/bin/agy"
+authconf "HARNESS=antigravity"; reset; rm -f "$T"/pane-* "$T"/capture-*; touch "$T/probe-ok"; ledger 1 "ok"; ledger2 90 "ok"; rpane
+wpane acme-w "● Login expired · Please run /login"; run
+expect "CT-14b: HARNESS=antigravity auth_probe runs agy -p" "^agy-probe -p Reply with the single word OK"
+expect "CT-14b: HARNESS=antigravity probe ok → relaunch proceeds" "^launch acme-rel"
+rm -f "$T"/pane-* "$T"/capture-* "$T/probe-ok"
+
 # CT-14: launch-agent-sessions.sh with HARNESS=copilot translates flags and invokes copilot --name ... -i ...
 cat >"$T/bin/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -581,6 +603,12 @@ printf 'NAMESPACE=acme\nacme-mm|%s|/engsys:merge-monster|--model opus --effort h
 : >"$T/actions"
 (cd "$T/w" && HARNESS=copilot bash "$HERE/launch-agent-sessions.sh" --roster "$T/w/copilot.roster" >/dev/null 2>&1)
 expect "CT-14: launch-agent-sessions.sh with HARNESS=copilot invokes copilot --name acme-mm -i /engsys:merge-monster" "copilot --name acme-mm -i /engsys:merge-monster --model claude-opus-4.6 --reasoning-effort high --remote --yolo --mode autopilot --no-ask-user"
+
+# CT-14b: launch-agent-sessions.sh with HARNESS=antigravity auto-starts agy remote-control daemon and translates flags
+: >"$T/actions"
+(cd "$T/w" && HARNESS=antigravity bash "$HERE/launch-agent-sessions.sh" --roster "$T/w/copilot.roster" >/dev/null 2>&1)
+expect "CT-14b: launch-agent-sessions.sh with HARNESS=antigravity auto-starts agy remote-control daemon" "^agy-rc remote-control start --name acme-"
+expect "CT-14b: launch-agent-sessions.sh with HARNESS=antigravity invokes agy with translated flags" "agy .* -i /engsys:merge-monster --effort high --remote-control --dangerously-skip-permissions"
 
 echo "$pass passed, $fail failed."
 [ "$fail" = 0 ]
