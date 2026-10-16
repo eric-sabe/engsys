@@ -905,9 +905,10 @@ export function main(argv, { out = console.log, err = console.error, cwd = proce
 
 	const touchedPaths = typeof args.paths === 'string' ? args.paths.split(',').filter(Boolean) : [];
 	const stacks = typeof args.stacks === 'string' ? args.stacks.split(',').filter(Boolean) : detectStacks(repoRoot);
+	const rawAgentType = args['agent-type'] ?? args.agent ?? args.persona;
 	const result = buildBrief({
 		repoRoot,
-		agentType: typeof args['agent-type'] === 'string' ? args['agent-type'] : null,
+		agentType: typeof rawAgentType === 'string' ? rawAgentType : null,
 		prompt: typeof args.prompt === 'string' ? args.prompt : '',
 		issue: args.issue,
 		touchedPaths,
