@@ -5,11 +5,11 @@
 
 ---
 
-## Anthropic Claude Sonnet 5 / Opus 4.8
+## Anthropic Claude Opus 5.5 / Sonnet 5 / Opus 4.8 / Fable 5.1
 
-**Model IDs:** `claude-sonnet-5` · `claude-opus-4-8` (also legacy `claude-opus-4-6` / `claude-sonnet-4-6`)
+**Model IDs:** `claude-opus-5-5` (judgment & synthesis) · `claude-sonnet-5` (execution) · `claude-opus-4-8` (security lane without cyber classifier) · `claude-fable-5-1` (escalation) · `claude-haiku-4-5` (fast probes)
 **Context window:** 500K–1M tokens
-**Max output tokens:** 128K (`claude-opus-4-8`), 64K (`claude-sonnet-5`)
+**Max output tokens:** 128K (`claude-opus-5-5` / `claude-opus-4-8`), 64K (`claude-sonnet-5`)
 **Structured outputs status:** Generally available (GA) — no beta header required
 
 ### API parameter: `output_config.format`
@@ -19,7 +19,7 @@ The API parameter is `output_config.format` (`output_config: { format: { type: "
 ```typescript
 // TypeScript — direct API call
 const response = await anthropic.messages.create({
-  model: "claude-sonnet-5", // or "claude-opus-4-8"
+  model: "claude-sonnet-5", // or "claude-opus-5-5", "claude-opus-4-8", "claude-fable-5-1"
   max_tokens: 4096,
   messages: [{ role: "user", content: prompt }],
   output_config: {
@@ -34,7 +34,7 @@ const parsed = JSON.parse(response.content[0].text);
 // TypeScript — using SDK .parse() helper
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 const response = await anthropic.messages.parse({
-  model: "claude-opus-4-8",
+  model: "claude-opus-5-5",
   max_tokens: 4096,
   messages: [{ role: "user", content: prompt }],
   output_config: {
@@ -70,16 +70,16 @@ tools: [
 
 ---
 
-## OpenAI GPT-5.6 (`gpt-5.6-terra` / `gpt-5.6-sol`)
+## OpenAI GPT-5.6 (`gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna`)
 
-**Model IDs:** `gpt-5.6-terra` (deep reasoning & complex synthesis) · `gpt-5.6-sol` (high-speed execution & tool use)
+**Model IDs:** `gpt-5.6-sol` (premier reasoning, independent review & escalation) · `gpt-5.6-terra` (default execution & synthesis) · `gpt-5.6-luna` (smaller / faster low-latency & enrichment)
 **Structured outputs status:** GA via both Responses API and Chat Completions API
 
 ### Responses API (recommended)
 
 ```typescript
 const response = await openai.responses.create({
-  model: "gpt-5.6-terra",
+  model: "gpt-5.6-terra", // or "gpt-5.6-sol" / "gpt-5.6-luna"
   input: prompt,
   text: {
     format: {
@@ -168,9 +168,9 @@ const parsed = JSON.parse(response.choices[0].message.content);
 
 ---
 
-## xAI Grok 4.5 (`grok-4.5` / `grok-4.5-reasoning`)
+## xAI Grok 4.7 (`grok-4.7` / `grok-4.7-build-fast` / `grok-4.5`)
 
-**Model IDs:** `grok-4.5` · `grok-4.5-reasoning`
+**Model IDs:** `grok-4.7` (default premier reasoning & review) · `grok-4.7-build-fast` (fast coding/probes) · `grok-4.6` · `grok-4.5`
 **Context window:** 1M tokens
 **OpenAI-compatible API:** Yes — base URL `https://api.x.ai/v1`
 
@@ -183,7 +183,7 @@ const client = new OpenAI({
 });
 
 const response = await client.chat.completions.create({
-  model: "grok-4.5-reasoning",
+  model: "grok-4.7",
   messages: [{ role: "user", content: prompt }],
   response_format: {
     type: "json_schema",

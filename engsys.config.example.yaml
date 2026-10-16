@@ -50,9 +50,9 @@ providers:
       enabled: false          # review/critique/investigate lane only
       via: auto               # cli (Grok Build subscription) | api (XAI_API_KEY, metered) | auto (prefer cli)
       models:
-        review: grok-4.5
-        critique: grok-4.5
-        investigate: grok-4.5
+        review: grok-4.7
+        critique: grok-4.7
+        investigate: grok-4.7
     anthropic:
       enabled: false          # explicit worker lane (fresh claude session), review-chain terminal fallback
       models:
@@ -85,7 +85,7 @@ lessons:
   into: docs/agent-lessons/library  # where seeded lessons land (project-local lessons stay at docs/agent-lessons/)
 
 naturalize:
-  model_strategy: "Three tiers: Sonnet 5 for execution; Opus 4.8 for orchestration and judgement; escalate to Fable 5 for the hardest / highest-stakes / stuck cases (Fable is the top, most expensive tier — reserve it)."
+  model_strategy: "Four tiers + security carve-out: Sonnet 5 (claude-sonnet-5) for execution; Opus 5.5 (claude-opus-5-5) for orchestration and judgement; escalate to Fable 5.1 (claude-fable-5-1) for the hardest architecture/concurrency/migration cases; Haiku 4.5 (claude-haiku-4-5) for fast probes; and Opus 4.8 (claude-opus-4-8) pinned for Nyx and security work."
   hook_patterns:
     - glob: "*/schema.prisma"
       reminder: "Schema changed — regenerate the client and rebuild dependents before pushing."
