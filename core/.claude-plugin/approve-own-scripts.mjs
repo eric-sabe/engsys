@@ -103,12 +103,7 @@ async function main() {
   for await (const chunk of process.stdin) raw += chunk;
   const parsed = parseHookInput(raw, process.env);
   if (parsed.toolName !== 'Bash') return;
-  const pluginRoot =
-    process.env.CLAUDE_PLUGIN_ROOT ||
-    process.env.COPILOT_PLUGIN_ROOT ||
-    process.env.AGY_PLUGIN_ROOT ||
-    process.env.ENGSYS_PLUGIN_ROOT ||
-    resolvePluginRoot(process.env);
+  const pluginRoot = resolvePluginRoot(process.env, import.meta.url);
   const rel = approvable(parsed.command, pluginRoot);
   if (!rel) return;
   if (parsed.harness === 'antigravity') return;

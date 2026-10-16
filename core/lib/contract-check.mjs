@@ -32,21 +32,35 @@ export function parseIssueMeta(body) {
 
   const block = m[1];
   const meta = {};
+  let activeListKey = null;
   for (const rawLine of block.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith('#')) continue;
-    const kv = line.match(/^([A-Za-z0-9_-]+)\s*:\s*(.+)$/);
+    const trimmed = rawLine.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    if (activeListKey && /^\s*-\s+/.test(rawLine)) {
+      const item = rawLine
+        .replace(/^\s*-\s+/, '')
+        .trim()
+        .replace(/^["']|["']$/g, '');
+      if (item) meta[activeListKey].push(item);
+      continue;
+    }
+    activeListKey = null;
+    const kv = trimmed.match(/^([A-Za-z0-9_ -]+?)\s*:\s*(.*)$/);
     if (!kv) {
       return {
         present: true,
         valid: false,
         meta: null,
-        error: `malformed line in engsys:issue-meta: "${line}"`,
+        error: `malformed line in engsys:issue-meta: "${trimmed}"`,
       };
     }
-    const [, key, rawVal] = kv;
+    const [, rawKey, rawVal] = kv;
+    const key = rawKey.trim();
     const val = rawVal.trim();
-    if (val.startsWith('[') || val.endsWith(']')) {
+    if (val === '') {
+      meta[key] = [];
+      activeListKey = key;
+    } else if (val.startsWith('[') || val.endsWith(']')) {
       if (!val.startsWith('[') || !val.endsWith(']')) {
         return {
           present: true,
@@ -226,7 +240,8 @@ export function verifyContract({
         .split(/\r?\n/)
         .map((s) => s.trim())
         .filter(Boolean);
-    } catch {
+    } catch (e) {
+      errors.push(`could not diff ${baseRef}...HEAD in ${repoRoot}: ${e?.message || e}`);
       files = [];
     }
   }
@@ -319,7 +334,8 @@ export function main(argv = process.argv.slice(2), { out = process.stdout, err =
   const { values } = parseArgs({
     args: argv,
     options: {
-      'repo-root': { type: 'string', default: process.cwd() },
+      'repo-root': { type: 'string', default: '' },
+      root: { type: 'string', default: '' },
       'issue-file': { type: 'string', multiple: true, default: [] },
       'pr-body-file': { type: 'string', default: '' },
       'changed-files': { type: 'string', default: '' },
@@ -330,7 +346,7 @@ export function main(argv = process.argv.slice(2), { out = process.stdout, err =
     strict: false,
   });
 
-  const repoRoot = path.resolve(String(values['repo-root'] || process.cwd()));
+  const repoRoot = path.resolve(String(values['repo-root'] || values.root || process.cwd()));
   const issueBodies = (values['issue-file'] || []).map((f) => fs.readFileSync(path.resolve(f), 'utf8'));
   const prBody = values['pr-body-file']
     ? fs.readFileSync(path.resolve(String(values['pr-body-file'])), 'utf8')

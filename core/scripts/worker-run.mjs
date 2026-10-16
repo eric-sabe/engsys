@@ -655,8 +655,13 @@ if (readOnly) {
 						console.log(`worker-run: contract-check OK (${cc.status})`);
 					}
 				}
-			} catch {
-				/* advisory unless ENGSYS_ENFORCE_CONTRACT_CHECK=1 */
+			} catch (err) {
+				if (process.env.ENGSYS_ENFORCE_CONTRACT_CHECK === '1') {
+					unavailableLogged(
+						`contract-check threw an error under enforcement: ${err?.message || err}`,
+						'Inspect core/lib/contract-check.mjs and the package contract files.',
+					);
+				}
 			}
 		}
 	}

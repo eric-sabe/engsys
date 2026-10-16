@@ -313,6 +313,8 @@ sync_non_claude_plugins() { # sync_non_claude_plugins <check> <engsys_target>
     if [ "$m" = "$ENGSYS_MARKETPLACE" ]; then src_repo="$engsys_checkout"; else src_repo="$FLEET_REPO"; fi
     while IFS= read -r p; do
       [ -n "$p" ] || continue
+      [[ "$m" =~ ^[A-Za-z0-9._-]+$ ]] && [ "$m" != "." ] && [ "$m" != ".." ] || fleet_die "unsafe marketplace name in settings: $m"
+      [[ "$p" =~ ^[A-Za-z0-9._-]+$ ]] && [ "$p" != "." ] && [ "$p" != ".." ] || fleet_die "unsafe plugin name in settings: $p"
       sub="$(jq -r --arg p "$p" '.plugins[]? | select(.name == $p) | .source // empty' "$src_repo/.claude-plugin/marketplace.json" 2>/dev/null || true)"
       sub="${sub#./}"
       [ -n "$sub" ] || sub="core"
@@ -334,13 +336,19 @@ sync_non_claude_plugins() { # sync_non_claude_plugins <check> <engsys_target>
           say "plugin $p@$m is at '${cur_ver:-absent}' (pin $want)"; drift=1
           continue
         fi
+        [ -d "$src_repo/$sub" ] && [ ! -L "$src_repo/$sub" ] || fleet_die "plugin source $src_repo/$sub not found for $p@$m"
+        src_root_real="$(cd "$src_repo" && pwd -P)"
+        src_sub_real="$(cd "$src_repo/$sub" && pwd -P)"
+        case "$src_sub_real/" in
+          "$src_root_real/"*) ;;
+          *) fleet_die "plugin source $src_repo/$sub escapes repository root for $p@$m" ;;
+        esac
+        if [ -n "$(find "$src_repo/$sub" -type l -print -quit 2>/dev/null)" ]; then
+          fleet_die "plugin source $src_repo/$sub contains symlinks for $p@$m"
+        fi
         rm -rf "$cache_dir"
         mkdir -p "$(dirname "$cache_dir")"
-        if [ -d "$src_repo/$sub" ]; then
-          cp -R "$src_repo/$sub" "$cache_dir"
-        else
-          mkdir -p "$cache_dir"
-        fi
+        cp -R "$src_repo/$sub" "$cache_dir"
         say "installed $p@$m ($want) -> $cache_dir"; changed=1
       fi
       entries="$(jq -cn --argjson arr "$entries" --arg id "$p@$m" --arg n "$p" --arg m "$m" --arg v "$want" --arg c "$cache_dir" \
@@ -350,9 +358,13 @@ sync_non_claude_plugins() { # sync_non_claude_plugins <check> <engsys_target>
   if [ "$check_mode" = 0 ]; then
     mkdir -p "$(dirname "$cfg_file")"
     if [ "${HARNESS:-claude}" = "copilot" ]; then
+      existing_cfg="{}"
+      if [ -f "$cfg_file" ]; then
+        existing_cfg="$(sed '/^[[:space:]]*\/\//d' "$cfg_file" | jq -c 'if type == "object" then . else {} end' 2>/dev/null || echo "{}")"
+      fi
       {
         echo "// Managed by fleet sync (HARNESS=copilot)"
-        jq -n --argjson p "$entries" '{installedPlugins: $p}'
+        jq -n --argjson base "$existing_cfg" --argjson p "$entries" '$base + {installedPlugins: $p}'
       } >"$cfg_file"
     else
       jq -n --argjson p "$entries" '{plugins: $p}' >"$cfg_file"

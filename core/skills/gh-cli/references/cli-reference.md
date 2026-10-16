@@ -689,7 +689,7 @@ gh issue create \
 gh issue create --body-file issue.md
 
 # Create with labels
-gh issue create --title "Fix bug" --labels bug,high-priority
+gh issue create --title "Fix bug" --label bug,high-priority
 
 # Create with assignees
 gh issue create --title "Fix bug" --assignee user1,user2
@@ -721,7 +721,7 @@ gh issue list --assignee username
 gh issue list --assignee @me
 
 # Filter by labels
-gh issue list --labels bug,enhancement
+gh issue list --label bug,enhancement
 
 # Filter by milestone
 gh issue list --milestone "v1.0"
@@ -913,7 +913,7 @@ gh pr create --assignee user1,user2
 gh pr create --reviewer user1,user2
 
 # Add labels
-gh pr create --labels enhancement,feature
+gh pr create --label enhancement,feature
 
 # Link to issue
 gh pr create --issue 123
@@ -954,7 +954,7 @@ gh pr list --author @me
 gh pr list --assignee username
 
 # Filter by labels
-gh pr list --labels bug,enhancement
+gh pr list --label bug,enhancement
 
 # Limit results
 gh pr list --limit 50
@@ -1423,25 +1423,25 @@ gh project item-list 123
 gh project item-create 123 --title "New item"
 
 # Add item to project
-gh project item-add 123 --owner-owner --repo repo --issue 456
+gh project item-add 123 --owner owner --url https://github.com/owner/repo/issues/456
 
 # Edit item
-gh project item-edit 123 --id 456 --title "Updated title"
+gh project item-edit --project-id PVT_xxx --id PVTI_xxx --title "Updated title"
 
 # Delete item
-gh project item-delete 123 --id 456
+gh project item-delete 123 --owner owner --id PVTI_xxx
 
 # Archive item
-gh project item-archive 123 --id 456
+gh project item-archive 123 --owner owner --id PVTI_xxx
 
-# Link items
-gh project link 123 --id 456 --link-id 789
+# Link project to repository
+gh project link 123 --owner owner --repo repo
 
-# Unlink items
-gh project unlink 123 --id 456 --link-id 789
+# Unlink project from repository
+gh project unlink 123 --owner owner --repo repo
 
 # View project in browser
-gh project view 123 --web
+gh project view 123 --owner owner --web
 ```
 
 ## Releases (gh release)
@@ -1484,8 +1484,8 @@ gh release upload v1.0.0 ./file.tar.gz
 # Upload multiple assets
 gh release upload v1.0.0 ./file1.tar.gz ./file2.tar.gz
 
-# Upload with label (casing sensitive)
-gh release upload v1.0.0 ./file.tar.gz --casing
+# Upload with display label
+gh release upload v1.0.0 './file.tar.gz#My Archive'
 
 # Delete release
 gh release delete v1.0.0
@@ -1511,7 +1511,7 @@ gh release download v1.0.0 --archive zip
 # Edit release
 gh release edit v1.0.0 --notes "Updated notes"
 
-# Verify release signature
+# Verify release attestation
 gh release verify v1.0.0
 
 # Verify specific asset
@@ -1558,7 +1558,7 @@ gh gist edit abc123
 gh gist delete abc123
 
 # Rename gist file
-gh gist rename abc123 --filename old.py new.py
+gh gist rename abc123 old.py new.py
 
 # Clone gist
 gh gist clone abc123
@@ -1592,16 +1592,16 @@ gh codespace view
 gh codespace ssh
 
 # SSH with specific command
-gh codespace ssh --command "cd /workspaces && ls"
+gh codespace ssh -- "cd /workspaces && ls"
 
-# Open codespace in browser
+# Open codespace in VS Code
 gh codespace code
 
-# Open in VS Code
-gh codespace code --codec
+# Open specific codespace in VS Code
+gh codespace code -c <codespace-name>
 
-# Open with specific path
-gh codespace code --path /workspaces/repo
+# Open in browser-based VS Code
+gh codespace code --web
 
 # Stop codespace
 gh codespace stop
@@ -1610,9 +1610,7 @@ gh codespace stop
 gh codespace delete
 
 # View logs
-gh codespace logs
-
---tail 100
+gh codespace logs --follow
 
 # View ports
 gh codespace ports
@@ -2024,13 +2022,12 @@ git push
 
 # Create PR linking to issue — one Closes per line (NEVER comma-separated)
 # ❌ WRONG: "Closes #1, #2, #3" — GitHub only closes the FIRST issue
-# ✅ CORRECT: one keyword per line
-gh pr create --title "Fix #123" --body "$(cat --body-file tmp/body.md
-Fixes the bug.
-
-Closes #123
-EOF
-)"
+# ✅ CORRECT: one keyword per line (write tmp/body.md with Write tool first — no heredocs)
+gh pr create --title "Fix #123" --body-file tmp/body.md
+# where tmp/body.md contains:
+# Fixes the bug.
+#
+# Closes #123
 
 # For multiple issues — always one Closes per line in the PR body
 gh pr create --title "feat: implement X (#100, #101)" --body-file tmp/pr-body.md
@@ -2081,8 +2078,9 @@ gh label create documentation --color "0075ca" --description "Documentation"
 ### CI/CD Workflow
 
 ```bash
-# Run workflow and wait
-RUN_ID=$(gh workflow run ci.yml --ref main --jq '.databaseId')
+# Trigger workflow and retrieve the newest run ID
+gh workflow run ci.yml --ref main
+RUN_ID=$(gh run list --workflow=ci.yml --branch main --limit 1 --json databaseId --jq '.[0].databaseId')
 
 # Watch the run
 gh run watch "$RUN_ID"
@@ -2130,14 +2128,8 @@ alias gco='gh pr checkout'
 ### Git Configuration
 
 ```bash
-# Use gh as credential helper
+# Configure git to use gh as its credential helper
 gh auth setup-git
-
-# Set gh as default for repo operations
-git config --global credential.helper 'gh !gh auth setup-git'
-
-# Or manually
-git config --global credential.helper github
 ```
 
 ## Best Practices

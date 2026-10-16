@@ -1438,11 +1438,11 @@ test("W1 worked case (hb 20, stale 55, pulse_max 29m): a fenced merge at 34m can
 
 test("CT-08 (NA-5): isClaudeCommand / isSupportedHarnessCommand accepts claude, copilot, agy, antigravity, and language_server, and resolveSessionOwnerPid binds keepalive to the harness PID", async () => {
   const { isClaudeCommand, isSupportedHarnessCommand, resolveSessionOwnerPid } = await import("./baton.mjs");
-  for (const cmd of ["claude", "copilot", "agy", "antigravity", "language_server", "language_server_macos_arm", "2.1.233"]) {
+  for (const cmd of ["claude", "copilot", "agy", "antigravity", "language_server_macos_arm", "language_server_linux_x64", "2.1.233"]) {
     assert.equal(isClaudeCommand(cmd), true, cmd);
     assert.equal(isSupportedHarnessCommand(cmd), true, cmd);
   }
-  for (const cmd of ["bash", "node", "tmux", ""]) {
+  for (const cmd of ["bash", "node", "tmux", "language_server", "typescript-language-server", ""]) {
     assert.equal(isClaudeCommand(cmd), false, cmd);
   }
   const fakePs = (pid) => {

@@ -134,4 +134,30 @@ describe('contract-check.mjs (#147)', () => {
     assert.equal(malformedRes.ok, false);
     assert.equal(malformedRes.status, 'malformed_issue_meta');
   });
+
+  it('parses multi-line YAML block lists and spaced keys from jody.md / bert.md templates', () => {
+    const blockBody = [
+      '<!-- engsys:issue-meta',
+      'schema: 1',
+      'track: feature',
+      'Recommended agent: isabelle',
+      'depends_on: []',
+      'touches:',
+      '  - core/lib/**',
+      '  - core/agents/isabelle.md',
+      'spec_refs:',
+      '  - docs/specs/feat.md#Architecture',
+      'verify:',
+      '  - npm test',
+      '-->',
+    ].join('\n');
+    const parsed = parseIssueMeta(blockBody);
+    assert.equal(parsed.present, true);
+    assert.equal(parsed.valid, true);
+    assert.equal(parsed.meta['Recommended agent'], 'isabelle');
+    assert.deepEqual(parsed.meta.touches, ['core/lib/**', 'core/agents/isabelle.md']);
+    assert.deepEqual(parsed.meta.spec_refs, ['docs/specs/feat.md#Architecture']);
+    assert.deepEqual(parsed.meta.verify, ['npm test']);
+  });
 });
+

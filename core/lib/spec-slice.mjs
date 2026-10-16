@@ -174,6 +174,9 @@ export function sliceSpecHeading(
     let startIdx = -1;
     let level = 0;
     let inFence = false;
+    let subIdx = -1;
+    let subLevel = 0;
+    let subTitle = '';
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
@@ -187,17 +190,25 @@ export function sliceSpecHeading(
       const hLevel = h[1].length;
       const hText = h[2].trim();
       const hSlug = slugifyHeading(hText);
-      if (
-        hSlug === wantSlug ||
-        hText.toLowerCase() === wantRawLower ||
-        (wantSlug.length >= 4 && hSlug.includes(wantSlug))
-      ) {
+      if (hSlug === wantSlug || hText.toLowerCase() === wantRawLower) {
         startIdx = i;
         level = hLevel;
         matchedTitle = hText;
         matchedLevel = hLevel;
         break;
       }
+      if (subIdx === -1 && wantSlug.length >= 4 && hSlug.includes(wantSlug)) {
+        subIdx = i;
+        subLevel = hLevel;
+        subTitle = hText;
+      }
+    }
+
+    if (startIdx === -1 && subIdx !== -1) {
+      startIdx = subIdx;
+      level = subLevel;
+      matchedTitle = subTitle;
+      matchedLevel = subLevel;
     }
 
     if (startIdx === -1) {

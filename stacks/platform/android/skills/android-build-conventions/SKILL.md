@@ -25,8 +25,8 @@ Use `build.gradle.kts` (never Groovy `.gradle`) and target **API 36** (required 
 
 ```kotlin
 plugins {
+    // AGP 9.0+ includes built-in Kotlin support by default (do not apply org.jetbrains.kotlin.android)
     alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
 }
 
@@ -80,7 +80,6 @@ junit = { group = "junit", name = "junit", version = "4.13.2" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
-kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 ```
 

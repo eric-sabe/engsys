@@ -159,11 +159,13 @@ for pf in ${PREFLIGHTS[@]+"${PREFLIGHTS[@]}"}; do
   bash -c "$pf" || echo "warning: preflight failed (sessions start anyway): $pf" >&2
 done
 
-# Translate Claude-style roster flags into Copilot CLI flags when HARNESS=copilot.
+# Translate Claude-style roster flags into shell-escaped Copilot CLI flags when HARNESS=copilot.
 translate_copilot_flags() {
-  local raw="$1" out=() tok prev=""
+  local raw="$1" out=() tok q=()
+  set -f
   # shellcheck disable=SC2086
   set -- $raw
+  set +f
   while [ $# -gt 0 ]; do
     tok="$1"; shift
     case "$tok" in
@@ -190,7 +192,13 @@ translate_copilot_flags() {
         out+=("$tok") ;;
     esac
   done
-  printf '%s' "${out[*]:-}"
+  if [ "${#out[@]}" -gt 0 ]; then
+    local item
+    for item in "${out[@]}"; do
+      q+=("$(printf '%q' "$item")")
+    done
+    printf '%s' "${q[*]}"
+  fi
 }
 
 # ---------------------------------------------------------------------------

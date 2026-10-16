@@ -962,6 +962,9 @@ export function decide({
   // #85 M1: Monitor (and any tool that runs a shell command string) is Bash for this purpose.
   const cmd = command ?? parsed.command ?? input.command;
   if (tool === 'Bash' || typeof cmd === 'string') {
+    if (typeof cmd !== 'string') {
+      return { deny: denyMessage(role, ['a Bash tool call with a missing or unreadable command']) };
+    }
     if (wrapperInvocation(cmd, pluginRoot, env)) return null;
     let found = bashFindings(cmd, ctx);
     // #110: a heredoc delimiter we can't read the way bash does could hide the commands after it.
@@ -971,6 +974,9 @@ export function decide({
   }
   if (['Write', 'Edit', 'MultiEdit', 'NotebookEdit'].includes(tool)) {
     const p = parsed.filePath ?? input.file_path ?? input.notebook_path ?? input.path;
+    if (typeof p !== 'string' || !p.trim()) {
+      return { deny: `engsys singleton-write guard: ${tool} tool call with a missing target path is denied in a ${role} monster session.` };
+    }
     if (protectedPath(p, ctx)) return { deny: `engsys singleton-write guard: settings, git config and plugin files are read-only in a ${role} monster session (${p}): changing them could switch off the hooks that fence its GitHub writes, or plant a program in its push.` };
     if (['Write', 'Edit', 'MultiEdit'].includes(tool) && monsterStatePath(p, { cwd })) {
       if (tool === 'Write') {

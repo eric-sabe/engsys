@@ -81,9 +81,8 @@ else
   plist="$(mktemp "$FLEET_STATE/plugin-list.XXXXXX")"
   if [ "${HARNESS:-claude}" = "copilot" ]; then
     cfile="${COPILOT_HOME:-$FLEET_STATE/copilot-home}/config.json"
-    [ -f "$cfile" ] || cfile="$HOME/.copilot/config.json"
     if [ ! -f "$cfile" ]; then
-      out="fleet verify: not verified: copilot config.json not found at ${COPILOT_HOME:-$FLEET_STATE/copilot-home}/config.json (run: fleet sync)"; rc=3
+      out="fleet verify: not verified: copilot config.json not found at $cfile (run: fleet sync)"; rc=3
     else
       cp "$cfile" "$plist"
     fi

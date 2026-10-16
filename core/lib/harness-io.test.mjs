@@ -88,6 +88,26 @@ describe('core/lib/harness-io.mjs', () => {
     assert.equal(agyWrite.toolName, 'Write');
     assert.equal(agyWrite.toolInput.file_path, '/repo/.gemini/settings.json');
     assert.equal(agyWrite.content, '{}');
+
+    const agyProto = parseHookInput(
+      JSON.stringify({
+        conversationId: 'conv-agy-99',
+        workspacePaths: ['file:///repo/agy-ws'],
+        agentId: 'sub-1',
+        harness: 'copilot',
+        toolCall: {
+          name: 'run_command',
+          args: { CommandLine: 'git push --force origin main' },
+        },
+      }),
+      {},
+    );
+    assert.equal(agyProto.harness, 'antigravity');
+    assert.equal(agyProto.toolName, 'Bash');
+    assert.equal(agyProto.command, 'git push --force origin main');
+    assert.equal(agyProto.toolInput.command, 'git push --force origin main');
+    assert.equal(agyProto.sessionId, 'conv-agy-99');
+    assert.equal(agyProto.cwd, '/repo/agy-ws');
   });
 
   test('normalizeToolName maps all three harnesses to canonical engsys tool names', () => {

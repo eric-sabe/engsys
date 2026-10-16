@@ -128,18 +128,31 @@ const put = (rel, content) => {
 //   no_external: false
 //   -->
 function parseIssueMeta(body) {
-	const m = body.match(/<!--\s*engsys:issue-meta\s*\n([\s\S]*?)-->/);
+	const m = body.match(/<!--\s*engsys:issue-meta\s*\r?\n([\s\S]*?)-->/);
 	if (!m) return null;
 	const meta = {};
-	for (const line of m[1].split('\n')) {
-		const kv = line.match(/^\s*([\w-]+)\s*:\s*(.*)$/);
+	let activeListKey = null;
+	for (const rawLine of m[1].split(/\r?\n/)) {
+		const trimmed = rawLine.trim();
+		if (!trimmed || trimmed.startsWith('#')) continue;
+		if (activeListKey && /^\s*-\s+/.test(rawLine)) {
+			const item = rawLine.replace(/^\s*-\s+/, '').trim().replace(/^["']|["']$/g, '');
+			if (item) meta[activeListKey].push(item);
+			continue;
+		}
+		activeListKey = null;
+		const kv = trimmed.match(/^([A-Za-z0-9_ -]+?)\s*:\s*(.*)$/);
 		if (!kv) continue;
-		let v = kv[2].trim();
-		if (v.startsWith('[') && v.endsWith(']')) {
+		const key = kv[1].trim();
+		const v = kv[2].trim();
+		if (v === '') {
+			meta[key] = [];
+			activeListKey = key;
+		} else if (v.startsWith('[') && v.endsWith(']')) {
 			const inner = v.slice(1, -1).trim();
-			meta[kv[1]] = inner === '' ? [] : inner.split(',').map((s) => s.trim().replace(/^["']|["']$/g, ''));
-		} else if (v === 'true' || v === 'false') meta[kv[1]] = v === 'true';
-		else meta[kv[1]] = v.replace(/^["']|["']$/g, '');
+			meta[key] = inner === '' ? [] : inner.split(',').map((s) => s.trim().replace(/^["']|["']$/g, ''));
+		} else if (v === 'true' || v === 'false') meta[key] = v === 'true';
+		else meta[key] = v.replace(/^["']|["']$/g, '');
 	}
 	return meta;
 }

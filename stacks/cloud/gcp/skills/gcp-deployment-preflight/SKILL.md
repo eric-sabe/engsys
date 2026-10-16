@@ -26,11 +26,14 @@ gcloud config get-value compute/region
 
 ### 2a — Terraform / OpenTofu
 
+Use the project's active IaC executable (`IAC_BIN=terraform` or `IAC_BIN=tofu`):
+
 ```bash
-terraform fmt -check
-terraform validate
-terraform plan -out=tfplan
-terraform show -no-color tfplan
+IAC_BIN="${IAC_BIN:-terraform}" # set to `tofu` for OpenTofu repos
+"$IAC_BIN" fmt -check
+"$IAC_BIN" validate
+"$IAC_BIN" plan -out=tfplan
+"$IAC_BIN" show -no-color tfplan
 ```
 
 Inspect the plan for **destroys or `-/+` replacements of stateful resources** (Cloud SQL, Spanner, GCS buckets, persistent disks) and IAM policy bindings. Never rubber-stamp a stateful resource replacement.
@@ -44,8 +47,10 @@ gcloud infra-manager previews create <preview-id> \
   --deployment=<deployment-id> \
   --local-source="."
 
-# Cloud Run: deploy a non-serving revision first to validate image & startup probes
-gcloud run deploy <service> --image <image-digest> --no-traffic --tag preflight
+# Cloud Run (read-only preflight): verify image digest exists in Artifact Registry and inspect current service spec
+# (Keep revision-creating `gcloud run deploy` commands behind the operator approval gate)
+gcloud artifacts docker images describe <image-digest>
+gcloud run services describe <service> --region=<region> --format=export
 ```
 
 ## Step 3 — Inspect Stuck Operations & Blocking Resources

@@ -15,12 +15,27 @@ export function checkAgyCli(env = process.env) {
 	return { ready: false, detail: 'neither `agy` nor `antigravity` CLI is on PATH.' };
 }
 
+const DENIED_COMMANDS = [
+	'git push',
+	'git commit',
+	'git remote',
+	'git reset',
+	'gh pr',
+	'gh issue',
+	'gh repo',
+	'gh api',
+];
+
 export function runAgyCli({ frame, worktree, model, role, timeoutSec, transcriptPath, lastMessagePath, env = process.env }) {
 	const checkRes = checkAgyCli(env);
 	const bin = checkRes.bin || env.ENGSYS_AGY_BIN || 'agy';
 	const args = ['chat', '--mode', 'agent', '--print'];
 	if (model) args.push('--model', model);
-	if (role !== 'implement' && role !== 'review') args.push('--read-only');
+	if (role !== 'implement') {
+		args.push('--read-only');
+	} else {
+		for (const cmd of DENIED_COMMANDS) args.push('--deny-command', cmd);
+	}
 	args.push(frame);
 
 	const run = spawnSync(bin, args, {
@@ -36,6 +51,14 @@ export function runAgyCli({ frame, worktree, model, role, timeoutSec, transcript
 	writeFileSync(transcriptPath, `${stdout}${stderr}`);
 	if (run.error) {
 		return { ok: false, status: run.status, signal: run.signal, detail: `\`${bin} chat\` could not run: ${run.error.message}` };
+	}
+	if (run.status !== 0) {
+		return {
+			ok: false,
+			status: run.status,
+			signal: run.signal,
+			detail: `\`${bin} chat\` exited ${run.status ?? `signal ${run.signal}`}.`,
+		};
 	}
 
 	let finalText = stdout;

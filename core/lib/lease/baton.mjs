@@ -199,7 +199,7 @@ export function isSupportedHarnessCommand(comm) {
     name === "copilot" ||
     name === "agy" ||
     name === "antigravity" ||
-    name.startsWith("language_server") ||
+    /^language_server_(macos|linux)(_[a-z0-9_]+)?$/.test(name) ||
     /^\d+\.\d+\.\d+$/.test(name)
   );
 }

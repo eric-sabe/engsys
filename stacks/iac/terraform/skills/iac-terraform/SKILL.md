@@ -11,17 +11,17 @@ Operational discipline and HCL coding conventions for Terraform and OpenTofu (`*
 
 - **Infrastructure is software.** If it only works once, it doesn't work. "Just apply it again" is not a strategy — understand *why* it failed first.
 - **Plan is the contract.** Never `apply` without reading the `plan`. Treat a surprising plan as a bug to investigate, not a step to skip.
-- **Pin everything.** Pin required Terraform/OpenTofu versions and provider versions in `.terraform.lock.hcl` (committed).
+- **Pin everything.** Constrain the CLI version with `terraform.required_version`, declare provider version constraints in `required_providers`, and commit `.terraform.lock.hcl` to lock provider selections.
 
 ## State Management & Surgery
 
 - **Remote state with locking, always** (S3 + DynamoDB/native lock, GCS, Azure Blob lease, or Terraform Cloud). Never commit `.tfstate` files.
 - **Separate state per major component and environment** (`dev` vs. `prod` never share state) to minimize blast radius and lock contention.
-- **State surgery** when reality and state diverge:
-  - `terraform state list` — inspect tracked resources
-  - `terraform import <addr> <id>` (or `import {}` blocks) — adopt existing resources
-  - `moved { from = ... to = ... }` or `terraform state mv` — refactor without destroy+recreate
-  - `terraform state rm` — stop tracking without deleting the underlying cloud resource
+- **State surgery** when reality and state diverge (use the project's active IaC executable, `terraform` or `tofu`):
+  - `<terraform|tofu> state list` — inspect tracked resources
+  - `<terraform|tofu> import <addr> <id>` (or `import {}` blocks) — adopt existing resources
+  - `moved { from = ... to = ... }` or `<terraform|tofu> state mv` — refactor without destroy+recreate
+  - `<terraform|tofu> state rm` — stop tracking without deleting the underlying cloud resource
   - Always run `plan` immediately after state surgery to confirm zero unintended diffs.
 
 ## Security & Safe Defaults
@@ -34,7 +34,7 @@ Operational discipline and HCL coding conventions for Terraform and OpenTofu (`*
 
 - **Modules**: Group cohesive resources into version-pinned modules with typed, documented `variable` and `output` contracts. Never wrap a single resource in a thin pass-through module.
 - **File layout & ordering**: Group by domain (`providers.tf`, `variables.tf`, `main.tf`, `network.tf`, `outputs.tf`). Within a resource block, order: `depends_on` → `for_each`/`count` → required attributes → optional attributes → `lifecycle`. Prefer `for_each` (keyed by stable string ID) over positional `count`.
-- **Formatting & validation**: Run `terraform fmt -check`, `terraform validate`, and `tflint` before every commit.
+- **Formatting & validation**: Run `<terraform|tofu> fmt -check`, `<terraform|tofu> validate`, and `tflint` before every commit using the active IaC executable.
 - **Testing**: Author idempotent `.tftest.hcl` test suites covering both nominal and invalid variable inputs.
 
 ## Plan / Apply Gates & Drift

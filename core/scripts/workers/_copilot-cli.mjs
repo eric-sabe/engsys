@@ -17,19 +17,27 @@ export function checkCopilotCli(env = process.env) {
 
 const DENIED_TOOLS = [
 	'shell(git push:*)',
+	'shell(*git push*)',
 	'shell(git commit:*)',
+	'shell(*git commit*)',
 	'shell(git remote:*)',
+	'shell(*git remote*)',
 	'shell(git reset:*)',
+	'shell(*git reset*)',
 	'shell(gh pr:*)',
+	'shell(*gh pr*)',
 	'shell(gh issue:*)',
+	'shell(*gh issue*)',
 	'shell(gh repo:*)',
+	'shell(*gh repo*)',
 	'shell(gh api:*)',
+	'shell(*gh api*)',
 ];
 
 export function runCopilotCli({ frame, worktree, model, effort, role, timeoutSec, transcriptPath, lastMessagePath, env = process.env }) {
 	const bin = env.ENGSYS_COPILOT_BIN || 'copilot';
 	const denyArgs = DENIED_TOOLS.flatMap((t) => ['--deny-tool', t]);
-	if (role !== 'implement' && role !== 'review') {
+	if (role !== 'implement') {
 		denyArgs.push('--deny-tool', 'write', '--deny-tool', 'edit');
 	}
 	const childEnv = { ...env, COPILOT_REASONING_EFFORT: effort || 'high' };
@@ -50,6 +58,14 @@ export function runCopilotCli({ frame, worktree, model, effort, role, timeoutSec
 	writeFileSync(transcriptPath, `${stdout}${stderr}`);
 	if (run.error) {
 		return { ok: false, status: run.status, signal: run.signal, detail: `\`${bin} -p\` could not run: ${run.error.message}` };
+	}
+	if (run.status !== 0) {
+		return {
+			ok: false,
+			status: run.status,
+			signal: run.signal,
+			detail: `\`${bin} -p\` exited ${run.status ?? `signal ${run.signal}`}.`,
+		};
 	}
 
 	let finalText = stdout;

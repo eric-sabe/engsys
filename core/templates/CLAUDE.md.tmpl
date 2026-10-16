@@ -84,9 +84,9 @@ Use `/design-change` (or `/generate-project`) as the unified SDD entrypoint befo
 
 | Tier | Trigger (`TW-1..TW-6`) | Artifact | Critics & Gate |
 | :--- | :--- | :--- | :--- |
-| **Tier S** (Direct Issue) | `0` tripwires fired, `≤ 3` files in a single subsystem | Direct issue with `<!-- engsys:issue-meta -->` (`no_spec_reason`) | `Isabelle` implements directly; no spec doc required |
-| **Tier M** (Mini-Spec) | `1` tripwire fired (never `TW-3` or `TW-4`), single PR | `docs/specs/<slug>.md` (`spec-mini.md.tmpl`) + `1–3` issues | Targeted domain critic(s) + `Marcelo` contract table |
-| **Tier L** (Full Spec) | `≥ 2` tripwires, or `TW-3` (Security) / `TW-4` (Multi-PR) | `docs/specs/<slug>.md` (`spec-full.md.tmpl`) + phased board | Full critic panel (`Melvin`, `Nyx`, `Leith`/`Gary`, `Otto`, `Aaron`, `Marcelo`, `Jody`) |
+| **Tier S** (Direct Issue) | `0` tripwires fired, `≤ 3` files in a single PR | Direct issue with `<!-- engsys:issue-meta -->` (`no_spec_reason`) | `Isabelle` implements directly; no spec doc required |
+| **Tier M** (Mini-Spec) | `1–2` tripwires fired (`1–2` PRs) | `docs/specs/<slug>.md` (`spec-mini.md.tmpl`) + `1–3` issues | `Melvin + Nyx` (+ `Otto` on `TW-5` / `Aaron` on `TW-6`) + `Marcelo` contract table |
+| **Tier L** (Full Spec) | `≥ 3` tripwires, or `TW-4` multi-phase epic | `docs/specs/<slug>.md` (`spec-full.md.tmpl`) + phased board | Full critic panel (`Melvin`, `Nyx`, `Leith`/`Gary`, `Otto`, `Aaron`, `Marcelo`, `Jody`) |
 
 - **Tripwires**: `TW-1` Data/Schema migration · `TW-2` Public API/CLI/Wire protocol · `TW-3` Auth/Trust boundary/Security (`Nyx`, never Tier S) · `TW-4` Multi-PR/Cross-subsystem · `TW-5` AI/LLM/Agentic pipeline (`Otto` + `Marcelo`) · `TW-6` Infra/CI/Deploy (`Aaron`).
 - **Context slicing & contract check**: Every SDD-backed issue carries a machine-readable `<!-- engsys:issue-meta -->` footer (`spec_refs`, `touches`, `verify`). Workers slice exact spec headings via `node <engsys-root>/lib/spec-slice.mjs` and preflight/PR gates verify `touches` globs, `spec_refs` anchors, and `Marcelo` contract test IDs via `node <engsys-root>/lib/contract-check.mjs`.

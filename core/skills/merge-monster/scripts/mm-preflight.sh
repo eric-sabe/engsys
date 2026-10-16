@@ -65,6 +65,7 @@ if [ "$CHECK_CONTRACT" -eq 1 ] || [ -n "$ISSUE_FILE" ]; then
       echo "$CONTRACT_JSON" >&2
       exit 1
     fi
+    [ -n "$CONTRACT_JSON" ] || CONTRACT_JSON="null"
   }
   rm -f "$PR_BODY_TMP"
 fi

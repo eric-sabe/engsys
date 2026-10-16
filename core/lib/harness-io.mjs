@@ -62,8 +62,19 @@ export function detectHarness(env = process.env, rawStdinObj = null) {
   if (explicit) return explicit;
 
   if (rawStdinObj && typeof rawStdinObj === 'object') {
-    const payloadHarness = normalizeHarnessName(rawStdinObj.harness);
-    if (payloadHarness) return payloadHarness;
+    const tName =
+      rawStdinObj.tool_name ??
+      rawStdinObj.toolName ??
+      (rawStdinObj.toolCall && rawStdinObj.toolCall.name);
+    if (
+      AGY_TOOLS.has(tName) ||
+      (rawStdinObj.toolCall && typeof rawStdinObj.toolCall === 'object') ||
+      'conversationId' in rawStdinObj ||
+      Array.isArray(rawStdinObj.workspacePaths) ||
+      (rawStdinObj.tool_input && ('CommandLine' in rawStdinObj.tool_input || 'TargetFile' in rawStdinObj.tool_input))
+    ) {
+      return 'antigravity';
+    }
 
     if (
       'toolArgs' in rawStdinObj ||
@@ -76,18 +87,6 @@ export function detectHarness(env = process.env, rawStdinObj = null) {
       COPILOT_TOOLS.has(rawStdinObj.toolName)
     ) {
       return 'copilot';
-    }
-
-    const tName =
-      rawStdinObj.tool_name ??
-      rawStdinObj.toolName ??
-      (rawStdinObj.toolCall && rawStdinObj.toolCall.name);
-    if (
-      AGY_TOOLS.has(tName) ||
-      (rawStdinObj.toolCall && typeof rawStdinObj.toolCall === 'object') ||
-      (rawStdinObj.tool_input && ('CommandLine' in rawStdinObj.tool_input || 'TargetFile' in rawStdinObj.tool_input))
-    ) {
-      return 'antigravity';
     }
 
     if ('hook_event_name' in rawStdinObj || 'tool_name' in rawStdinObj) {
@@ -189,6 +188,11 @@ export function parseHookInput(rawStdin, env = process.env) {
     '';
   const toolName = normalizeToolName(rawToolName);
 
+  const tcPayload =
+    obj.toolCall && typeof obj.toolCall === 'object'
+      ? (obj.toolCall.args ?? obj.toolCall.arguments ?? obj.toolCall.input)
+      : null;
+
   let rawToolInput = {};
   if (typeof obj.toolArgs === 'string') {
     try {
@@ -198,8 +202,14 @@ export function parseHookInput(rawStdin, env = process.env) {
     }
   } else if (obj.toolArgs && typeof obj.toolArgs === 'object') {
     rawToolInput = obj.toolArgs;
-  } else if (obj.toolCall && obj.toolCall.arguments && typeof obj.toolCall.arguments === 'object') {
-    rawToolInput = obj.toolCall.arguments;
+  } else if (typeof tcPayload === 'string') {
+    try {
+      rawToolInput = JSON.parse(tcPayload);
+    } catch {
+      rawToolInput = { command: tcPayload };
+    }
+  } else if (tcPayload && typeof tcPayload === 'object') {
+    rawToolInput = tcPayload;
   } else if (obj.tool_input && typeof obj.tool_input === 'object') {
     rawToolInput = obj.tool_input;
   } else if (obj.toolInput && typeof obj.toolInput === 'object') {
@@ -251,9 +261,22 @@ export function parseHookInput(rawStdin, env = process.env) {
     ...(content !== null && content !== undefined ? { content } : {}),
   };
 
-  const sessionId = obj.session_id ?? obj.sessionId ?? env?.ENGSYS_SESSION ?? null;
+  const sessionId =
+    obj.session_id ??
+    obj.sessionId ??
+    obj.conversationId ??
+    env?.ENGSYS_SESSION ??
+    null;
   const transcriptPath = obj.transcript_path ?? obj.transcriptPath ?? null;
-  const cwd = (typeof obj.cwd === 'string' && obj.cwd) || process.cwd();
+  const workspaceRoot =
+    Array.isArray(obj.workspacePaths) && typeof obj.workspacePaths[0] === 'string'
+      ? obj.workspacePaths[0].replace(/^file:\/\//, '')
+      : null;
+  const cwd =
+    (typeof rawToolInput.Cwd === 'string' && rawToolInput.Cwd) ||
+    (typeof obj.cwd === 'string' && obj.cwd) ||
+    workspaceRoot ||
+    process.cwd();
 
   return {
     harness,

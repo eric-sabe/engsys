@@ -52,11 +52,11 @@ cd ../worktrees/<phase-or-project-slug>
 Before pushing or opening a PR:
 
 1. **Contract & Scope Check (`contract-check.mjs`)**:
-   - Verify changed files (`git diff --name-only origin/main...HEAD`) stay within the issue batch's declared `touches` globs and execute all `verify:` commands:
+   - Verify changed files (`git diff --name-only origin/main...HEAD`) stay within the issue batch's declared `touches` globs, resolve `spec_refs`, and check `CT-*` test IDs:
      ```bash
-     node <engsys-root>/lib/contract-check.mjs --issue-file <issue-body.md> --root . --run-verify
+     node <engsys-root>/lib/contract-check.mjs --issue-file <issue-body.md> --repo-root .
      ```
-2. **Local Build, Lint & Test Gate**: Run the project's full build, typecheck, lint, and test suite (`/pre-push`).
+2. **Local Build, Lint & Test Gate**: Run the project's full build, typecheck, lint, and test suite (`/pre-push`) as well as every command listed under `verify:` in `<!-- engsys:issue-meta -->`.
 3. **Local Code Review**: Run `/code-review` against `origin/main` before pushing; fix all Critical and Warning findings and re-run until clean.
 4. **Base-Branch Self-Check**: Run `git log --oneline origin/main..main`. If non-empty, cherry-pick onto the task branch and `git reset --hard origin/main`.
 5. **Draft PR & Merge Monster (`mm:ready`) Handoff**:
