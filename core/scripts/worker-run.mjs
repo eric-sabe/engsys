@@ -89,21 +89,27 @@ try {
 
 async function loadAdapter(provider) {
 	if (!/^[a-z0-9-]+$/.test(provider || '')) {
-		unavailable(`provider "${provider}" is not a valid adapter name.`, 'Pass --provider codex|deepseek|grok|anthropic.');
+		unavailable(`provider "${provider}" is not a valid adapter name.`, 'Pass --provider codex|deepseek|grok|anthropic|copilot|agy|antigravity.');
 	}
-	const path = join(SCRIPT_DIR, 'workers', `${provider}.mjs`);
-	if (!existsSync(path)) {
+	const candidates = [
+		join(SCRIPT_DIR, 'workers', `${provider}.mjs`),
+		join(SCRIPT_DIR, 'workers', `_${provider}-cli.mjs`),
+		join(SCRIPT_DIR, 'providers', `_${provider}-cli.mjs`),
+	];
+	const path = candidates.find((p) => existsSync(p));
+	if (!path) {
 		unavailable(
-			`no adapter installed for provider "${provider}" (${path}).`,
+			`no adapter installed for provider "${provider}" (${candidates[0]}).`,
 			'Enable the provider pack in engsys.config.yaml and re-run the installer.',
 		);
 	}
 	return import(pathToFileURL(path).href);
 }
 
-function loadProviders() {
+function loadProviders({ optional = false } = {}) {
 	const path = join(SCRIPT_DIR, 'providers.json');
 	if (!existsSync(path)) {
+		if (optional) return { workers: {} };
 		unavailable(
 			'providers.json is missing beside worker-run.mjs.',
 			'The installer generates it from the providers: block in engsys.config.yaml.',
@@ -125,7 +131,7 @@ if (flag('check')) {
 	const provider = arg('provider');
 	if (!provider) unavailable('--check requires --provider.', 'e.g. --check --provider codex');
 	const adapter = await loadAdapter(provider);
-	const conf = (loadProviders().workers || {})[provider] || {};
+	const conf = (loadProviders({ optional: true }).workers || {})[provider] || {};
 	const r = await adapter.check(conf);
 	console.log(`worker-run: ${provider} ${r.ready ? 'READY' : 'NOT READY'} — ${r.detail}`);
 	process.exit(r.ready ? 0 : 2);
@@ -620,6 +626,44 @@ if (readOnly) {
 		console.log(`worker-run: tree changes (uncommitted, conductor commits per issue):`);
 		for (const c of changed.slice(0, 40)) console.log(`  ${c}`);
 		if (changed.length > 40) console.log(`  … and ${changed.length - 40} more`);
+	}
+	if (outcome === 'IMPLEMENTED' && changed.length) {
+		const contractCheckPath = join(SCRIPT_DIR, '..', 'lib', 'contract-check.mjs');
+		if (existsSync(contractCheckPath)) {
+			try {
+				const { verifyContract } = await import(pathToFileURL(contractCheckPath).href);
+				const issueBodies = contractFiles
+					.filter((r) => /^contract\/issue-\d+\.md$/.test(r))
+					.map((r) => readPkg(r))
+					.filter((b) => /<!--\s*engsys:issue-meta\b/.test(b));
+				if (issueBodies.length) {
+					const changedPaths = changed.map((l) => l.slice(3).replace(/^"/, '').replace(/"$/, ''));
+					const cc = verifyContract({
+						repoRoot: worktree,
+						issueBodies,
+						changedFiles: changedPaths,
+					});
+					if (!cc.ok) {
+						console.error(`worker-run: contract-check warnings/errors: ${cc.errors.join('; ')}`);
+						if (process.env.ENGSYS_ENFORCE_CONTRACT_CHECK === '1') {
+							unavailableLogged(
+								`contract-check failed: ${cc.errors.join('; ')}`,
+								'Fix undeclared touches or missing CT-* test cases, or add ### Co-commit justification.',
+							);
+						}
+					} else {
+						console.log(`worker-run: contract-check OK (${cc.status})`);
+					}
+				}
+			} catch (err) {
+				if (process.env.ENGSYS_ENFORCE_CONTRACT_CHECK === '1') {
+					unavailableLogged(
+						`contract-check threw an error under enforcement: ${err?.message || err}`,
+						'Inspect core/lib/contract-check.mjs and the package contract files.',
+					);
+				}
+			}
+		}
 	}
 }
 

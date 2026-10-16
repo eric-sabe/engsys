@@ -8,6 +8,9 @@ project:
   name: Acme Widgets
   description: One-line description rendered into CLAUDE.md.
 
+# Agent harness target: claude (default) | copilot | antigravity | all
+harness: claude
+
 # Every stack dimension accepts a single value OR a list — mixed stacks compose
 # (each selected pack contributes its skills, CLAUDE.md fragment, and permissions).
 stack:

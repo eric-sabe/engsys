@@ -51,6 +51,7 @@
 import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -79,13 +80,14 @@ export function cachePath(root, repoPath) {
 /**
  * Every entry under one install root. → { [repoPath]: sha | 'not-a-file' }. A symlink (to a file or a
  * directory) or anything else that isn't a regular file or a real directory is 'not-a-file' and is not
- * followed: a symlink could be repointed after the check. Only <root>/.in_use/ is skipped.
+ * followed: a symlink could be repointed after the check. Only <root>/.in_use/ (and macOS .DS_Store) is skipped.
  */
 export function scanRoot(root) {
   const out = {};
   const visit = (absDir, relDir) => {
     for (const e of fs.readdirSync(absDir, { withFileTypes: true })) {
       if (relDir === '' && e.name === IN_USE && e.isDirectory()) continue;
+      if (e.name === '.DS_Store') continue;
       const abs = path.join(absDir, e.name);
       const rel = `${relDir}${e.name}`;
       if (e.isDirectory()) visit(abs, `${rel}/`);
@@ -100,6 +102,42 @@ export function scanRoot(root) {
 /** Scan every root. → { [root]: scanRoot(root) } */
 export function localState(roots) {
   return Object.fromEntries(roots.map((r) => [r, scanRoot(r)]));
+}
+
+/**
+ * Parse a plugin list from Claude Code (`claude plugin list --json`), Copilot CLI (`$COPILOT_HOME/config.json`
+ * with leading `//` JSONC comments and `installedPlugins`), or Antigravity (`.agents/plugins.json`).
+ */
+export function parsePluginList(raw) {
+  let parsed = raw;
+  if (typeof raw === 'string') {
+    const cleaned = raw
+      .split('\n')
+      .filter((line) => !line.trimStart().startsWith('//'))
+      .join('\n');
+    parsed = JSON.parse(cleaned);
+  }
+  const arr = Array.isArray(parsed)
+    ? parsed
+    : Array.isArray(parsed?.installedPlugins)
+      ? parsed.installedPlugins
+      : Array.isArray(parsed?.plugins)
+        ? parsed.plugins
+        : [];
+  return arr.map((e) => {
+    if (!e || typeof e !== 'object') return e;
+    const id = e.id || (e.name && e.marketplace ? `${e.name}@${e.marketplace}` : '');
+    const installPath = e.installPath ?? e.cache_path ?? e.install_path ?? '';
+    const projectPath = e.projectPath ?? e.project_path;
+    const scope = e.scope ?? 'user';
+    return {
+      ...e,
+      ...(id ? { id } : {}),
+      ...(installPath ? { installPath } : {}),
+      ...(projectPath ? { projectPath } : {}),
+      scope,
+    };
+  });
 }
 
 /** Parse a git trees API response into Map<path, blob sha>. Throws an Unverified on a bad or truncated tree. */
@@ -134,23 +172,67 @@ export function compare(tree, local) {
   return diffs;
 }
 
+function findShadowingPlugins(pluginId, verifiedRoots, candidateDirs, real) {
+  const pluginName = String(pluginId || '').split('@')[0];
+  if (!pluginName) return [];
+  const verifiedSet = new Set(verifiedRoots.map((r) => real(r)));
+  const shadows = [];
+  for (const baseDir of candidateDirs) {
+    if (!baseDir || !fs.existsSync(baseDir)) continue;
+    let entries = [];
+    try { entries = fs.readdirSync(baseDir, { withFileTypes: true }); } catch { continue; }
+    for (const e of entries) {
+      if (!e.isDirectory() && !e.isSymbolicLink()) continue;
+      const candidate = path.join(baseDir, e.name);
+      if (verifiedSet.has(real(candidate))) continue;
+      for (const rel of ['plugin.json', '.claude-plugin/plugin.json']) {
+        const mf = path.join(candidate, rel);
+        if (!fs.existsSync(mf)) continue;
+        try {
+          const parsed = JSON.parse(fs.readFileSync(mf, 'utf8'));
+          if (parsed && parsed.name === pluginName) {
+            shadows.push(`shadowed   ${pluginId} is shadowed by ${candidate} (${mf})`);
+            break;
+          }
+        } catch {
+          shadows.push(`shadowed   ${pluginId} has unreadable plugin manifest at ${mf}`);
+          break;
+        }
+      }
+    }
+  }
+  return shadows;
+}
+
 /**
- * Which installs apply in projectDir, from `claude plugin list --json` run there.
+ * Which installs apply in projectDir, from `claude plugin list --json` (or Copilot / Antigravity plugin list).
  * → { roots, problems, notInstalled }. problems are mismatches: an applicable entry at another version
- * or without a path, more than one install path, or no enabled entry.
+ * or without a path, more than one install path, no enabled entry, or an Antigravity global shadow (NA-4).
  */
-export function selectInstalls(list, { pluginId, projectDir, version }) {
+export function selectInstalls(list, { pluginId, projectDir, version, harness = 'claude', globalPluginsDir = '' }) {
   const real = (p) => { try { return fs.realpathSync(p); } catch { return path.resolve(p); } };
   const dir = real(projectDir);
-  const entries = (Array.isArray(list) ? list : []).filter((e) => e && e.id === pluginId);
+  const normalized = parsePluginList(list);
+  const entries = normalized.filter((e) => e && e.id === pluginId);
   const applicable = entries.filter((e) => !e.projectPath || real(e.projectPath) === dir);
-  if (!applicable.length) return { roots: [], problems: [], notInstalled: true };
-  const problems = [];
+  const roots = [...new Set(applicable.filter((e) => e.version === version && e.installPath).map((e) => real(e.installPath)))];
+
+  const shadowDirs = [];
+  if (harness === 'antigravity' || globalPluginsDir) {
+    shadowDirs.push(globalPluginsDir || process.env.AGY_GLOBAL_PLUGINS_DIR || path.join(os.homedir(), '.gemini', 'config', 'plugins'));
+    shadowDirs.push(path.join(dir, '.agents', 'plugins'));
+  }
+  const shadowProblems = findShadowingPlugins(pluginId, roots, shadowDirs, real);
+
+  if (!applicable.length) {
+    if (shadowProblems.length) return { roots: [], problems: shadowProblems, notInstalled: false };
+    return { roots: [], problems: [], notInstalled: true };
+  }
+  const problems = [...shadowProblems];
   for (const e of applicable) {
     if (e.version !== version) problems.push(`version    ${pluginId} (${e.scope || '?'} scope) is ${e.version ?? 'unversioned'}, not the pin ${version}: ${e.installPath || '(no path)'}`);
     else if (!e.installPath) problems.push(`no-path    ${pluginId} (${e.scope || '?'} scope) has no install path`);
   }
-  const roots = [...new Set(applicable.filter((e) => e.version === version && e.installPath).map((e) => real(e.installPath)))];
   if (roots.length > 1) problems.push(`two-paths  ${pluginId} has ${roots.length} install paths for ${dir}: ${roots.join(', ')}`);
   if (!applicable.some((e) => e.enabled === true && e.projectEnabled !== false)) {
     problems.push(`disabled   ${pluginId} is not enabled for ${dir}, so its guard hook would not load`);
@@ -205,7 +287,17 @@ const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const countFiles = (local) => new Set(Object.values(local).flatMap((m) => Object.keys(m))).size;
 
 export function parseArgs(argv) {
-  const a = { repo: '', tag: '', pluginId: '', projectDir: '', plugins: '', cache: '', maxAgeMin: null };
+  const a = {
+    repo: '',
+    tag: '',
+    pluginId: '',
+    projectDir: '',
+    plugins: '',
+    cache: '',
+    maxAgeMin: null,
+    harness: process.env.HARNESS || process.env.FLEET_HARNESS || 'claude',
+    globalPluginsDir: process.env.AGY_GLOBAL_PLUGINS_DIR || '',
+  };
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
     const v = () => { if (i + 1 >= argv.length) throw new Error(`${k} needs a value`); return argv[++i]; };
@@ -217,6 +309,8 @@ export function parseArgs(argv) {
       case '--plugins': a.plugins = v(); break;
       case '--cache': a.cache = v(); break;
       case '--max-age-min': a.maxAgeMin = Number(v()); break;
+      case '--harness': a.harness = v(); break;
+      case '--global-plugins-dir': a.globalPluginsDir = v(); break;
       default: throw new Error(`unknown argument: ${k}`);
     }
   }
@@ -246,8 +340,14 @@ export async function run(argv, { fetch = fetchRelease, now = Date.now, out = (s
   };
 
   let list;
-  try { list = JSON.parse(fs.readFileSync(a.plugins, 'utf8')); } catch (e) { out(`verify: not verified: can't read the plugin list (${e.message})`); return 3; }
-  const sel = selectInstalls(list, { pluginId: a.pluginId, projectDir: a.projectDir, version });
+  try { list = parsePluginList(fs.readFileSync(a.plugins, 'utf8')); } catch (e) { out(`verify: not verified: can't read the plugin list (${e.message})`); return 3; }
+  const sel = selectInstalls(list, {
+    pluginId: a.pluginId,
+    projectDir: a.projectDir,
+    version,
+    harness: a.harness,
+    globalPluginsDir: a.globalPluginsDir,
+  });
   if (sel.notInstalled) { out(`verify: not verified: ${a.pluginId} is not installed for ${a.projectDir} (run: fleet sync)`); return 3; }
   if (sel.problems.length) return mismatch(sel.problems);
 

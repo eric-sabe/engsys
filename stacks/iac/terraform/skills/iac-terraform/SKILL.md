@@ -1,93 +1,51 @@
 ---
 name: iac-terraform
-description: Terraform discipline for any project where Terraform is the active IaC tool — modules, remote state, workspaces, backends, plan/apply gates, drift detection, and import/state surgery. Activate when working on *.tf / *.tfvars files, terraform plan/apply/state operations, backend or workspace config, provider versioning, or diagnosing drift and partial applies.
+description: Terraform & OpenTofu discipline and HCL code conventions — modules, remote state, workspaces, backends, plan/apply gates, drift detection, state surgery, security defaults, style, and .tftest.hcl testing. Activate when working on *.tf / *.tfvars files, terraform/tofu plan/apply/state operations, backend or workspace config, provider versioning, or diagnosing drift and partial applies.
 ---
 
-# Terraform Discipline
+# Terraform & OpenTofu Discipline and Conventions
 
-The operational discipline for Terraform as the active IaC tool — cloud-independent.
-Service-level resource detail comes from the active `cloud-architecture-<cloud>` pack;
-project file layout and backend config come from `CLAUDE.md`. For repo-specific style
-(naming, ordering, security defaults) see the `terraform-conventions` skill if present.
+Operational discipline and HCL coding conventions for Terraform and OpenTofu (`*.tf`, `*.tfvars`, `*.tftest.hcl`) — cloud-independent. Service-level resource detail comes from the active `cloud-architecture-<cloud>` pack; project file layout and backend config come from `CLAUDE.md`.
 
-## Core stance
+## Core Stance
 
-- **Infrastructure is software.** If it only works once, it doesn't work. "Just apply it
-  again" is not a strategy — understand *why* it failed first.
-- **Plan is the contract.** Never `apply` without reading the `plan`. The plan is the
-  what-if; treat a surprising plan as a bug to investigate, not a step to skip.
-- **Pin everything.** Required Terraform version + provider versions in a lockfile
-  (`.terraform.lock.hcl`, committed). Unpinned providers are how "it worked yesterday"
-  happens.
+- **Infrastructure is software.** If it only works once, it doesn't work. "Just apply it again" is not a strategy — understand *why* it failed first.
+- **Plan is the contract.** Never `apply` without reading the `plan`. Treat a surprising plan as a bug to investigate, not a step to skip.
+- **Pin everything.** Constrain the CLI version with `terraform.required_version`, declare provider version constraints in `required_providers`, and commit `.terraform.lock.hcl` to lock provider selections.
 
-## State
+## State Management & Surgery
 
-- **Remote state with locking, always.** Local state is a single point of failure and
-  blocks collaboration. Use a backend with locking (e.g. S3 + DynamoDB lock table, GCS,
-  azurerm with blob lease, or Terraform Cloud). Never commit state — it contains secrets.
-- **Separate state per major component / environment** — smaller blast radius, faster
-  plan/apply, and a failure in one doesn't lock the others. Check the project's
-  `backend.tf` / backend config before touching anything stateful.
-- **State surgery** when reality and state diverge:
-  - `terraform state list` — see what's tracked.
-  - `terraform import <addr> <id>` — adopt an existing resource.
-  - `terraform state mv` — rename/move without destroy+recreate.
-  - `terraform state rm` — stop tracking (does NOT delete the real resource).
-  - Always `plan` after surgery to confirm convergence. Back up state first.
+- **Remote state with locking, always** (S3 + DynamoDB/native lock, GCS, Azure Blob lease, or Terraform Cloud). Never commit `.tfstate` files.
+- **Separate state per major component and environment** (`dev` vs. `prod` never share state) to minimize blast radius and lock contention.
+- **State surgery** when reality and state diverge (use the project's active IaC executable, `terraform` or `tofu`):
+  - `<terraform|tofu> state list` — inspect tracked resources
+  - `<terraform|tofu> import <addr> <id>` (or `import {}` blocks) — adopt existing resources
+  - `moved { from = ... to = ... }` or `<terraform|tofu> state mv` — refactor without destroy+recreate
+  - `<terraform|tofu> state rm` — stop tracking without deleting the underlying cloud resource
+  - Always run `plan` immediately after state surgery to confirm zero unintended diffs.
 
-## Modules
+## Security & Safe Defaults
 
-- **Modules for groups of related resources only.** Don't wrap a single resource in a
-  module — that's indirection without benefit.
-- Pin module sources to a version/ref. Expose interesting attributes via `output`; mark
-  sensitive ones `sensitive = true`.
-- Avoid deep nesting and circular dependencies. A module should have a clear, narrow
-  interface (typed `variable`s with `description`, validated where it matters).
-- Prefer composition (root config wires modules together) over monolithic mega-modules.
+- **Never store secrets in `.tf`, `.tfvars`, or state where avoidable.** Reference secrets from AWS Secrets Manager / SSM, Azure Key Vault, or GCP Secret Manager, and mark sensitive variables/outputs with `sensitive = true`.
+- Enforce least-privilege IAM/OIDC roles, private networking by default, encryption at rest and in transit, and static IaC scanning (`trivy`, `checkov`, or `tflint`) in CI.
+- Protect stateful resources (databases, disks, buckets) with `lifecycle { prevent_destroy = true }`.
 
-## Workspaces & environments
+## Modularity, Style & Testing Conventions
 
-- Workspaces (`terraform workspace`) give you state isolation for *the same config across
-  environments* — useful, but they share the same backend key prefix and are easy to
-  misuse. For genuinely different environments, **separate backend keys / directories +
-  tfvars** is usually clearer and safer than relying on workspace interpolation.
-- Never let `dev` and `prod` share state. Parameterize via `*.tfvars` per environment;
-  keep secrets out of tfvars (use a secrets manager + data sources / env vars).
+- **Modules**: Group cohesive resources into version-pinned modules with typed, documented `variable` and `output` contracts. Never wrap a single resource in a thin pass-through module.
+- **File layout & ordering**: Group by domain (`providers.tf`, `variables.tf`, `main.tf`, `network.tf`, `outputs.tf`). Within a resource block, order: `depends_on` → `for_each`/`count` → required attributes → optional attributes → `lifecycle`. Prefer `for_each` (keyed by stable string ID) over positional `count`.
+- **Formatting & validation**: Run `<terraform|tofu> fmt -check`, `<terraform|tofu> validate`, and `tflint` before every commit using the active IaC executable.
+- **Testing**: Author idempotent `.tftest.hcl` test suites covering both nominal and invalid variable inputs.
 
-## Plan / apply gates
+## Plan / Apply Gates & Drift
 
-- **`terraform fmt` → `validate` → `plan` → review → `apply`** is the pipeline. In CI:
-  plan on PR (post the plan), apply only on merge to the protected branch, behind
-  approval for prod.
-- **Read the plan for destroys and replacements.** A `-/+` (replace) on a stateful
-  resource (database, disk, bucket) is a data-loss event — stop and confirm. Use
-  `lifecycle { prevent_destroy = true }` on the truly precious.
-- Keep infra applies separate from app deploys unless there's a very good reason not to.
-- `-target` is an escape hatch for recovering a broken apply, not a normal workflow —
-  it produces partial state. Note it when you use it.
+- **Pipeline gate**: `fmt` → `validate` → `plan` (posted on PR) → operator approval gate → `apply` on merge.
+- **Inspect for `-/+` replacements**: Never rubber-stamp a replacement on a stateful resource.
+- **Drift**: Schedule `plan -refresh-only` checks; reconcile any out-of-band click-ops back into `.tf` immediately.
+- **Preflight**: Always run the active cloud's `*-deployment-preflight` skill before applying.
 
-## Drift
+## Hard-Won Lessons
 
-- **Detect drift before it bites:** `terraform plan` (or `plan -refresh-only`) on a
-  schedule shows out-of-band (click-ops) changes. A non-empty plan on an unchanged config
-  *is* drift.
-- Resolve drift deliberately: either bring the change into code (and apply), or revert
-  the manual change. Don't let an unexplained diff sit — it compounds.
-- **No click-ops in production**, ever. Manual changes create snowflake environments that
-  can't be recreated.
-
-## Troubleshooting
-
-- **Partial apply:** read which resources succeeded, reconcile state (import/refresh),
-  then re-plan. Don't blindly re-apply.
-- **API throttling:** tune `-parallelism`, add provider-level retries, back off.
-- **Provider auth / IAM:** trace the credential chain and the role/policy actually in
-  use; permission errors lie about the real missing action — read them for meaning.
-- **Lock held:** a crashed run can leave a stale lock; `force-unlock` only when you're
-  certain no apply is in flight.
-
-## Preflight
-
-Before applying, run the active cloud's `*-deployment-preflight` skill — it covers the
-cloud-specific concerns (stale/failed deployments, globally-unique naming, quota/SKU
-limits) that `terraform plan` alone won't surface.
+### Span two control planes? Use a multi-provider graph so one apply wires both sides
+- **Symptom:** Infrastructure crosses a cloud *and* a managed SaaS (e.g., Azure + MongoDB Atlas Private Endpoint), and single-cloud IaC (Bicep/CDK) leaves the SaaS half to manual console clicks.
+- **Fix:** Use Terraform/OpenTofu multi-provider composition (e.g., `azurerm` + `mongodbatlas` in one root module) so a single `plan`/`apply` wires both sides of the boundary deterministically.

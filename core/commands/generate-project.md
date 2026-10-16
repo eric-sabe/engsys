@@ -19,19 +19,21 @@ You (the main session) are the orchestrator. Subagents enrich the spec; you reco
 - **melvin** — architecture, service impact, data/consistency, scale/latency/cost
 - **nyx** — security/privacy, threat model, tenant isolation, abuse cases
 - **gary** — design expert, comprehension/usability audit of the spec's user-facing sections
-- **marcelo** — testing strategy, input validation matrix, quality gates
-- **jody** — phased plan, tracker project + issues, dependencies, owner/labels
+- **otto** — AI/LLM/agentic pipeline architecture, model routing, structured outputs, evals (`TW-5`)
+- **aaron** — infrastructure, IaC/Terraform, Docker/containers, CI/CD, deployment topology (`TW-6`)
+- **marcelo** — testing strategy (`CT-*` case IDs), input validation matrix, quality gates
+- **jody** — phased plan, tracker project + issues (`<!-- engsys:issue-meta -->`), dependencies, owner/labels
 
-**Phase sequence** (per the workflow doc):
+**Phase sequence** (per the workflow doc, shared with [/design-change](design-change.md)):
 
-1. **Intake** — capture goal, attachments, constraints.
-2. **Explore** — `docs/agent-lessons/` (project-local lessons), `docs/architecture/`, `CLAUDE.md`, existing specs, related code, existing issues/projects.
+1. **Intake (Warm-Chat or Cold-Start)** — distill prior chat ideation + `$ARGUMENTS`, attachments, and constraints into the spec baseline so subagents inherit full context.
+2. **Explore & Tripwire Evaluation (`TW-1..TW-6`)** — `docs/agent-lessons/`, `docs/architecture/`, `CLAUDE.md`, existing specs, related code; evaluate `TW-1..TW-6` and route to **Tier S** (inline issue), **Tier M** (`Melvin + Nyx` mini-spec), or **Tier L** (full multi-agent spec + board).
 3. **Clarifying questions** — one batched set, 5–8 max, each unlocks a decision.
-4. **Draft spec** — `docs/specs/<feature-slug>.md` with the section skeleton from the workflow doc.
-5. **Design loop** — Leith and Melvin in parallel, then Nyx and Gary in parallel, reconcile findings, then Marcelo, then Jody.
-6. **Tracker project mechanics** — use the issue-tracker skill's `create-board` / `add-to-board` / `set-board-field` operations to stand up the board and set Phase/Priority/Owner (on GitHub these run `gh project` / `gh api graphql` for ProjectV2). Issue bodies in `tmp/issue-body-<slug>.md` via `create-issue` — never heredoc.
-7. **Sanity check** — fresh subagent (e.g. `Plan` or `general-purpose`) reviews spec/project/issues with no design-loop context.
-8. **Reflect** — durable lessons → `docs/agent-lessons/` (and PR generalizable ones back to the engsys `lessons-library/`); agent role changes → `<engsys-root>/agents/*.md`; automatic behaviors → `CLAUDE.md` or `<engsys-root>/commands/*.md`.
+4. **Draft spec** — `docs/specs/<feature-slug>.md` with YAML frontmatter (`spec_id`, `status: draft`, `tier`, `owners`, `supercedes`, `non_negotiable_anchors`).
+5. **Design loop** — Tier M runs `Melvin + Nyx` (+ `Otto`/`Aaron` if `TW-5`/`TW-6` fire); Tier L runs Leith and Melvin (+ `Otto`/`Aaron` if `TW-5`/`TW-6` fire) in parallel, then Nyx and Gary in parallel, reconcile findings, then Marcelo, then Jody.
+6. **Tracker project mechanics** — use the issue-tracker skill's `create-board` / `add-to-board` / `set-board-field` operations to stand up the board and set Phase/Priority/Owner. Issue bodies in `tmp/issue-body-<slug>.md` via `create-issue` with `<!-- engsys:issue-meta -->` — never heredoc.
+7. **Sanity check** — fresh subagent reviews spec/project/issues with no design-loop context and validates `spec_refs` via `node <engsys-root>/lib/spec-slice.mjs`.
+8. **Reflect** — durable lessons → `docs/agent-lessons/`; agent role changes → `<engsys-root>/agents/*.md`; automatic behaviors → `CLAUDE.md` or `<engsys-root>/commands/*.md`.
 
 ## Key invariants
 

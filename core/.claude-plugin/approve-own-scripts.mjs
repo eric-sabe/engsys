@@ -15,6 +15,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseHookInput, resolvePluginRoot } from '../lib/harness-io.mjs';
 
 // Low-risk bookkeeping only: liveness registry + watchdog, GitHub watch/snapshot, ledger heartbeat, the
 // single-call ticks (renew-if-due + snapshot delta + heartbeat-when-due, engsys#123),
@@ -100,15 +101,20 @@ export function approvable(command, pluginRoot) {
 async function main() {
   let raw = '';
   for await (const chunk of process.stdin) raw += chunk;
-  const input = JSON.parse(raw);
-  if (input.tool_name !== 'Bash') return;
-  const rel = approvable(input.tool_input && input.tool_input.command, process.env.CLAUDE_PLUGIN_ROOT);
+  const parsed = parseHookInput(raw, process.env);
+  if (parsed.toolName !== 'Bash') return;
+  const pluginRoot = resolvePluginRoot(process.env, import.meta.url);
+  const rel = approvable(parsed.command, pluginRoot);
   if (!rel) return;
+  if (parsed.harness === 'antigravity') return;
+  const reason = `engsys: own bookkeeping script (${rel}) invoked by literal path`;
   process.stdout.write(JSON.stringify({
+    permissionDecision: 'allow',
+    permissionDecisionReason: reason,
     hookSpecificOutput: {
       hookEventName: 'PreToolUse',
       permissionDecision: 'allow',
-      permissionDecisionReason: `engsys: own bookkeeping script (${rel}) invoked by literal path`,
+      permissionDecisionReason: reason,
     },
   }));
 }

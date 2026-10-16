@@ -26,6 +26,20 @@ for d in "${_dirs[@]}"; do
 done
 [ -n "$REAL_GH" ] || { echo "gh (fleet shim): real gh not found on PATH" >&2; exit 127; }
 
+# If the GitHub Copilot CLI binary itself calls `gh auth token` or `gh auth status` to authenticate
+# the operator's Copilot seat, hand it GH_TOKEN_COPILOT_CLI (never the operator's personal gh keychain,
+# and never an environment-variable parent-name override). When ENGSYS_COPILOT_CLI_PID is set by the
+# launcher (`ENGSYS_COPILOT_CLI_PID=$$ exec copilot ...`), require PPID to match that exact PID so no
+# child shell or copied binary inside an agent Bash tool call can impersonate the root copilot process.
+if [ "${1:-}" = "auth" ] && { [ "${2:-}" = "token" ] || [ "${2:-}" = "status" ]; } && [ -n "${GH_TOKEN_COPILOT_CLI:-}" ]; then
+  if [ -z "${ENGSYS_COPILOT_CLI_PID:-}" ] || [ "$PPID" = "$ENGSYS_COPILOT_CLI_PID" ]; then
+    parent_comm="$(ps -o comm= -p "$PPID" 2>/dev/null | awk -F/ '{print $NF}' | sed 's/^-//')"
+    if [ "$parent_comm" = "copilot" ]; then
+      GH_TOKEN="$GH_TOKEN_COPILOT_CLI" exec "$REAL_GH" "$@"
+    fi
+  fi
+fi
+
 # Which account's installation to use (GH_APP_INSTALLATIONS in the env file). Precedence:
 # GH_APP_OWNER > --owner (names the account a command like `gh project`/`gh repo list`/
 # `gh search --owner` acts on) > -R/--repo > a `gh api repos/<owner>/...` path > a github.com

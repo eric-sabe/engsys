@@ -165,7 +165,7 @@ NavigationSplitView {
 
 #### Tab-Based
 
-Use `TabView` with a `NavigationStack` per tab. See the `swiftui-navigation` skill for full tab patterns.
+Use `TabView` with an independent `NavigationStack` per tab so each tab preserves its own navigation path.
 
 #### Toolbar
 
@@ -431,7 +431,7 @@ TabView(selection: $selectedTab) { /* tabs */ }
 
 For advanced haptic patterns beyond the simple feedback generators, use Core Haptics. It provides precise control over haptic intensity, sharpness, and timing with support for audio-haptic synchronization.
 
-> **Docs:** [CHHapticEngine](https://sosumi.ai/documentation/corehaptics/chhapticengine) · [Preparing your app to play haptics](https://sosumi.ai/documentation/corehaptics/preparing-your-app-to-play-haptics)
+> **Docs:** [CHHapticEngine](https://developer.apple.com/documentation/corehaptics/chhapticengine) · [Preparing your app to play haptics](https://developer.apple.com/documentation/corehaptics/preparing-your-app-to-play-haptics)
 
 #### Capabilities check
 
@@ -586,7 +586,7 @@ func playAHAPFile() throws {
 
 AHAP files support the same events, parameters, and parameter curves as the programmatic API. Use the **Core Haptics** design tools in Xcode to preview patterns.
 
-> **Docs:** [Representing haptic patterns in AHAP files](https://sosumi.ai/documentation/corehaptics/representing-haptic-patterns-in-ahap-files)
+> **Docs:** [Representing haptic patterns in AHAP files](https://developer.apple.com/documentation/corehaptics/representing-haptic-patterns-in-ahap-files)
 
 ## Matched Transitions
 

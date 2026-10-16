@@ -271,3 +271,53 @@ test('CLI: usage errors exit 2, including a ref that is not a release tag (revie
   assert.equal(await run(['--repo', 'nope', '--tag', 'v1.0.0', '--plugin-id', 'engsys@engsys', '--project-dir', PROJECT, '--plugins', plugins], { out: c.out }), 2);
   assert.equal(await run([...base, '--tag', 'v1.0.0', '--cache', '/c'], { out: c.out }), 2);
 });
+
+test('CT-11: Copilot JSONC config.json (leading // comments + installedPlugins[].cache_path) is parsed and verified (NA-3)', async () => {
+  const root = makeCache();
+  fs.writeFileSync(path.join(root, '.DS_Store'), 'macos finder noise');
+  const copilotConfig = path.join(tmp('verify-copilot-'), 'config.json');
+  const jsonc = [
+    '// GitHub Copilot CLI configuration',
+    '// Managed by fleet sync',
+    JSON.stringify({
+      installedPlugins: [
+        {
+          name: 'engsys',
+          marketplace: 'engsys',
+          version: '9.9.9',
+          enabled: true,
+          cache_path: root,
+        },
+      ],
+    }, null, 2),
+  ].join('\n');
+  fs.writeFileSync(copilotConfig, jsonc);
+
+  const fetch = async () => release;
+  let c = capture();
+  assert.equal(await run(args(copilotConfig, ['--harness', 'copilot']), { fetch, out: c.out }), 0);
+  assert.match(c.text(), new RegExp(`^verify: ok, ${FILES.length} protected files`));
+
+  fs.appendFileSync(cachePath(root, 'core/skills/merge-monster/scripts/mm-act.sh'), '\n# tampered\n');
+  c = capture();
+  assert.equal(await run(args(copilotConfig, ['--harness', 'copilot']), { fetch, out: c.out }), 1);
+  assert.match(c.text(), /verify: MISMATCH/);
+});
+
+test('CT-12: Antigravity global plugin directory shadowing engsys reports shadowed MISMATCH (NA-4)', async () => {
+  const root = makeCache();
+  const agyPlugins = pluginList([{ id: 'engsys@engsys', version: '9.9.9', enabled: true, installPath: root }]);
+  const globalPluginsDir = tmp('verify-agy-global-');
+  const shadowDir = path.join(globalPluginsDir, 'engsys');
+  fs.mkdirSync(shadowDir, { recursive: true });
+  fs.writeFileSync(path.join(shadowDir, 'plugin.json'), JSON.stringify({ name: 'engsys', version: '0.0.1-evil' }));
+
+  const fetch = async () => release;
+  const c = capture();
+  assert.equal(
+    await run(args(agyPlugins, ['--harness', 'antigravity', '--global-plugins-dir', globalPluginsDir]), { fetch, out: c.out }),
+    1,
+  );
+  assert.match(c.text(), /^verify: MISMATCH/m);
+  assert.match(c.text(), /shadowed\s+engsys@engsys is shadowed by/);
+});

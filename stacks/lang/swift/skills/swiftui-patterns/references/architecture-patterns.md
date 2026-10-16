@@ -377,7 +377,7 @@ Store `NavigationPath` as `Codable` for state restoration. Handle incoming URLs 
 }
 ```
 
-See the `swiftui-navigation` skill for full URL routing patterns.
+See [design-polish.md](design-polish.md) for navigation hierarchy and tab routing patterns.
 
 ### When to Use
 

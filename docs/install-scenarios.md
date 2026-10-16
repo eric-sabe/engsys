@@ -73,6 +73,7 @@ or add it to `.gitignore` to keep it local.
 
 - `--dry-run` — print the full plan (including what would be pruned/imported/backed
   up) and write nothing.
-- `--force` — overwrite the generated files (`CLAUDE.md`, `settings.json`,
+- `--force` — overwrite the generated files (`CLAUDE.md`, `GEMINI.md`, `.github/copilot-instructions.md`, `settings.json`,
   `.mcp.json`) instead of merging. Managed files and the project's own files are
   still never deleted except by the normal prune.
+- `harness: claude | copilot | antigravity` (or a list in `engsys.config.yaml`) — select which harness surface(s) `engsys install`, `update`, `verify`, and `uninstall` materialize and manage.

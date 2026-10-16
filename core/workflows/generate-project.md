@@ -1,13 +1,14 @@
-# Generate Project Workflow
+# Generate Project / Design Change Workflow (`/design-change` & `/generate-project`)
 
-Use this workflow when the operator asks to generate a feature design, spec, plan, or project from a goal. Output is a reviewed draft spec in `docs/specs/`, an organized tracker project, phased issues, and updated agent learning where useful.
+Use this workflow when the operator asks to design a change, generate a feature spec, plan, or project from a goal (or after warm-chat ideation). Output is right-sized by the **6 Escalation Tripwires (`TW-1..TW-6`)** into **Tier S** (inline issue), **Tier M** (2-persona `Melvin + Nyx` Mini-Spec in `docs/specs/`), or **Tier L** (full multi-persona spec in `docs/specs/` + organized tracker project + phased issues).
 
 Invocation examples:
 
 ```text
+/design-change [goal or warm-chat continuation]
 /generate-project <goal> [attachments...]
+design change: <goal>
 generate project: <goal>
-build a feature spec/plan for <goal>
 ```
 
 ---
@@ -29,34 +30,51 @@ build a feature spec/plan for <goal>
 
 ---
 
-## Phase 0: Intake
+## Phase 0: Intake (Warm-Chat & Cold-Start)
 
 The operator provides:
 
-- The goal or product outcome.
+- Prior freeform ideation in the active chat session (**Warm-Chat Mode**) and/or `$ARGUMENTS` (**Cold-Start Mode**).
 - Relevant attachments: screenshots, docs, links, logs, issue lists, customer notes, designs, or code pointers.
 - Optional constraints: deadline, scope, target user, tier, services, non-goals, project naming.
 
-Record initial assumptions in the draft spec later, but do not freeze them before exploration.
+Because subagents spawn with fresh context and cannot see the parent session's chat history, **always distill any decisions, constraints, and rejected alternatives from prior chat turns into the spec baseline (`## Context`, `## Operator Inputs`, `## Assumptions`)** before launching subagents.
 
 ---
 
-## Phase 1: Explore Context
+## Phase 1: Explore Context & Evaluate Escalation Tripwires (`TW-1..TW-6`)
 
-Build informed questions from evidence.
+Build informed questions and evaluate complexity tripwires from evidence.
 
 Read:
 
 - `docs/agent-lessons/` (and the engsys lessons-library if linked)
 - `docs/architecture/` relevant pages
-- project rules / `CLAUDE.md`
-- `<engsys-root>/agents/{leith,melvin,nyx,marcelo,jody}.md`
-- Existing specs in `docs/specs/`
+- project rules / `CLAUDE.md` / `AGENTS.md`
+- `<engsys-root>/agents/{leith,melvin,nyx,gary,otto,aaron,marcelo,jody}.md`
+- Existing specs in `docs/specs/` (check `status: active | draft`)
 - Related source files, routes, services, schemas, UI components, tests, seed scripts
 - Provided attachments and linked resources
 - Existing tracker issues/projects if the goal references them
 
-Capture: user/persona affected, current behavior, data model & API surface touched, service boundaries, security/auth/tenant implications, test surfaces and existing coverage, and unknowns that materially change product, architecture, security, testing, or plan shape.
+### The 6 Escalation Tripwires (`TW-1..TW-6`)
+
+Evaluate which tripwires fire based on the explored files:
+
+| Tripwire | Trigger Condition | Required Specialist Lens |
+| :--- | :--- | :--- |
+| **`TW-1`** | **Data Model / Schema / State Migration** (DB schema, persistent state files, config/lockfile schemas) | `Melvin` |
+| **`TW-2`** | **Public API / CLI / Wire Protocol** (REST/GraphQL/RPC endpoints, CLI flags, hook JSON envelopes) | `Melvin` + `Leith` |
+| **`TW-3`** | **Auth / Trust Boundary / Security** (permissions, secrets, untrusted-input parsing, guard hooks — `NA-SDD-3`) | **`Nyx` (Mandatory)** |
+| **`TW-4`** | **Multi-PR / Cross-Subsystem Scope** (`>1` PR or `>5` files spanning multiple modules) | `Jody` + `Marcelo` |
+| **`TW-5`** | **AI / LLM / Agentic Pipeline** (prompts, model routing, structured outputs, evals, memory) | **`Otto` + `Marcelo` (`agentic-eval`)** |
+| **`TW-6`** | **Infra / CI / Deploy Topology** (Terraform/IaC, Docker/containers, CI workflows, supervisor daemons) | **`Aaron`** |
+
+### Adaptive Tier Routing (`Tier S` / `Tier M` / `Tier L`)
+
+- **Tier S (Inline Issue)**: `0` tripwires fire and blast radius is `<= 3` files in a single PR → skip `docs/specs/`, file a self-contained issue with an `<!-- engsys:issue-meta -->` block (`core/workflows/issue-tracking.md`).
+- **Tier M (Mini-Spec, `<engsys-root>/templates/spec-mini.md.tmpl`)**: `1–2` tripwires fire (`1–2` PRs) → write `docs/specs/<slug>.md` (`tier: M`), run the 2-persona loop (`Melvin + Nyx`, plus `Otto` if `TW-5` or `Aaron` if `TW-6`), and file ordered issues with `<!-- engsys:issue-meta -->`.
+- **Tier L (Full Spec + Board, `<engsys-root>/templates/spec-full.md.tmpl`)**: `>= 3` tripwires fire or `TW-4` multi-phase epic → run the full multi-persona design loop and create a phased tracker board.
 
 Do not over-explore. Stop when questions are specific and answerable.
 
@@ -76,14 +94,20 @@ After the operator answers, update assumptions and proceed. If answers conflict 
 
 ## Phase 3: Start Draft Spec
 
-Create `docs/specs/<feature-slug>.md`:
+Create `docs/specs/<feature-slug>.md` (using `<engsys-root>/templates/spec-full.md.tmpl` for Tier L or `<engsys-root>/templates/spec-mini.md.tmpl` for Tier M) with machine-verifiable YAML frontmatter:
 
 ```markdown
-# <Feature / Project Name>
+---
+spec_id: SPEC-<YEAR>-<SLUG>
+status: draft
+tier: L
+owners: [leith, melvin, nyx, gary, marcelo, jody]
+supercedes: []
+non_negotiable_anchors:
+  - "NA-1: <hard architectural or security invariant>"
+---
 
-Status: Draft
-Owner: <operator or team>
-Generated: <date>
+# <Feature / Project Name>
 
 ## Goal
 
@@ -104,6 +128,10 @@ Generated: <date>
 ## Security and Privacy Specification
 
 ## Testing Strategy
+
+| Case ID | Scenario | Input | Expected Outcome | Verification Layer |
+| :--- | :--- | :--- | :--- | :--- |
+| `CT-01` | <happy path> | <input> | <expected> | Unit / Integration |
 
 ## Phased Project Plan
 

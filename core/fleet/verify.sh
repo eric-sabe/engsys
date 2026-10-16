@@ -73,17 +73,35 @@ elif ! [[ "$ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   out="fleet verify: not verified: the engsys ref '$ref' is not a release tag (vX.Y.Z)"; rc=3
 elif ! command -v node >/dev/null; then
   out="fleet verify: not verified: node not found"; rc=3
-elif ! command -v claude >/dev/null; then
+elif [ "${HARNESS:-claude}" = "claude" ] && ! command -v claude >/dev/null; then
   out="fleet verify: not verified: claude not found, so the installed plugin can't be located"; rc=3
 elif ! [ -d "$PIN_DIR" ]; then
   out="fleet verify: not verified: PIN_DIR not found: $PIN_DIR"; rc=3
 else
   plist="$(mktemp "$FLEET_STATE/plugin-list.XXXXXX")"
-  # The cwd decides which project-scope installs apply: the sessions start in PIN_DIR (engsys#86 review H2).
-  if ! (cd "$PIN_DIR" && claude plugin list --json) >"$plist" 2>/dev/null; then
-    out="fleet verify: not verified: claude plugin list failed in $PIN_DIR"; rc=3
+  if [ "${HARNESS:-claude}" = "copilot" ]; then
+    cfile="${COPILOT_HOME:-$FLEET_STATE/copilot-home}/config.json"
+    if [ ! -f "$cfile" ]; then
+      out="fleet verify: not verified: copilot config.json not found at $cfile (run: fleet sync)"; rc=3
+    else
+      cp "$cfile" "$plist"
+    fi
+  elif [ "${HARNESS:-claude}" = "antigravity" ]; then
+    afile="$PIN_DIR/.agents/plugins.json"
+    [ -f "$afile" ] || afile="$FLEET_STATE/agy-plugins.json"
+    if [ -f "$afile" ]; then
+      cp "$afile" "$plist"
+    else
+      echo '[]' >"$plist"
+    fi
   else
-    args=(--repo "$repo" --tag "$ref" --plugin-id "engsys@$ENGSYS_MARKETPLACE" --project-dir "$PIN_DIR" --plugins "$plist")
+    # The cwd decides which project-scope installs apply: the sessions start in PIN_DIR (engsys#86 review H2).
+    if ! (cd "$PIN_DIR" && claude plugin list --json) >"$plist" 2>/dev/null; then
+      out="fleet verify: not verified: claude plugin list failed in $PIN_DIR"; rc=3
+    fi
+  fi
+  if [ "$rc" = 0 ]; then
+    args=(--repo "$repo" --tag "$ref" --plugin-id "engsys@$ENGSYS_MARKETPLACE" --project-dir "$PIN_DIR" --plugins "$plist" --harness "${HARNESS:-claude}")
     [ -z "$max_age" ] || args+=(--cache "$FLEET_STATE/verify-wrappers.json" --max-age-min "$max_age")
     out="$(node "$FLEET_KIT_DIR/lib/verify-wrappers.mjs" "${args[@]}" 2>&1)" || rc=$?
     # node exits 1 on its own crash (a missing module, a syntax error): only the verifier's MISMATCH line counts.

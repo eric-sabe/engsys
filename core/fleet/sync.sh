@@ -36,7 +36,9 @@ main() {
   done
   # shellcheck source=lib/fleet-env.sh
   . "$(dirname "${BASH_SOURCE[0]}")/lib/fleet-env.sh"
-  command -v claude >/dev/null || fleet_die "claude is required"
+  if [ "${HARNESS:-claude}" = "claude" ]; then
+    command -v claude >/dev/null || fleet_die "claude is required"
+  fi
 
   # State carried across the re-execs below (a moved checkout means new code, so we start over).
   local resumed="${FLEET_SYNC_RESUMED:-}" prev_instance="${FLEET_SYNC_PREV_INSTANCE:-}" prev_engsys="${FLEET_SYNC_PREV_ENGSYS:-}"
@@ -95,20 +97,45 @@ main() {
 
   # --- 3. engsys host checkout (the kit's own code — re-exec from it) ----------------------------
   [ -e "$ENGSYS_DIR/.git" ] || fleet_die "engsys checkout not found at $ENGSYS_DIR — git clone <engsys repo> $ENGSYS_DIR"
-  local have_engsys
-  have_engsys="$(fleet_git_at "$ENGSYS_DIR")"
-  if [ "$have_engsys" != "$want_engsys" ]; then
-    if [ "$check" = 1 ]; then
-      say "engsys checkout is at $have_engsys (pin $want_engsys)"; drift=1
+  local have_engsys engsys_target="$ENGSYS_DIR"
+  if [ "${FLEET_ISOLATE_ENGSYS_WORKTREE:-0}" = 1 ]; then
+    engsys_target="$FLEET_STATE/engsys"
+    if [ -e "$engsys_target/.git" ]; then
+      have_engsys="$(fleet_git_at "$engsys_target")"
     else
-      [ -z "$prev_engsys" ] || fleet_die "engsys checkout still at $have_engsys after switching to $want_engsys"
-      require_clean "$ENGSYS_DIR"
-      git -C "$ENGSYS_DIR" fetch -q --tags origin
-      git -C "$ENGSYS_DIR" checkout -q "$want_engsys"
-      say "engsys: $have_engsys → $want_engsys"
-      [ -f "$ENGSYS_DIR/core/fleet/sync.sh" ] || fleet_die "engsys $want_engsys has no fleet kit (core/fleet/sync.sh) — the checkout is moved; pin a release that includes it"
-      FLEET_SYNC_RESUMED=1 FLEET_SYNC_PREV_INSTANCE="$prev_instance" FLEET_SYNC_PREV_ENGSYS="$have_engsys" FLEET_SYNC_CHANGED=1 \
-        exec bash "$ENGSYS_DIR/core/fleet/sync.sh" --instance "$FLEET_REPO"
+      have_engsys="absent"
+    fi
+    if [ "$have_engsys" != "$want_engsys" ]; then
+      if [ "$check" = 1 ]; then
+        say "engsys worktree is at $have_engsys (pin $want_engsys)"; drift=1
+      else
+        [ -z "$prev_engsys" ] || fleet_die "engsys worktree still at $have_engsys after switching to $want_engsys"
+        git -C "$ENGSYS_DIR" fetch -q --tags origin 2>/dev/null || true
+        mkdir -p "$FLEET_STATE"
+        git -C "$ENGSYS_DIR" worktree remove --force "$engsys_target" >/dev/null 2>&1 || rm -rf "$engsys_target"
+        git -C "$ENGSYS_DIR" worktree prune
+        git -C "$ENGSYS_DIR" worktree add -q --force --detach "$engsys_target" "$want_engsys"
+        say "engsys (isolated worktree): $have_engsys → $want_engsys"
+        [ -f "$engsys_target/core/fleet/sync.sh" ] || fleet_die "engsys $want_engsys has no fleet kit (core/fleet/sync.sh)"
+        FLEET_SYNC_RESUMED=1 FLEET_SYNC_PREV_INSTANCE="$prev_instance" FLEET_SYNC_PREV_ENGSYS="$have_engsys" FLEET_SYNC_CHANGED=1 \
+          exec bash "$engsys_target/core/fleet/sync.sh" --instance "$FLEET_REPO"
+      fi
+    fi
+  else
+    have_engsys="$(fleet_git_at "$ENGSYS_DIR")"
+    if [ "$have_engsys" != "$want_engsys" ]; then
+      if [ "$check" = 1 ]; then
+        say "engsys checkout is at $have_engsys (pin $want_engsys)"; drift=1
+      else
+        [ -z "$prev_engsys" ] || fleet_die "engsys checkout still at $have_engsys after switching to $want_engsys"
+        require_clean "$ENGSYS_DIR"
+        git -C "$ENGSYS_DIR" fetch -q --tags origin
+        git -C "$ENGSYS_DIR" checkout -q "$want_engsys"
+        say "engsys: $have_engsys → $want_engsys"
+        [ -f "$ENGSYS_DIR/core/fleet/sync.sh" ] || fleet_die "engsys $want_engsys has no fleet kit (core/fleet/sync.sh) — the checkout is moved; pin a release that includes it"
+        FLEET_SYNC_RESUMED=1 FLEET_SYNC_PREV_INSTANCE="$prev_instance" FLEET_SYNC_PREV_ENGSYS="$have_engsys" FLEET_SYNC_CHANGED=1 \
+          exec bash "$ENGSYS_DIR/core/fleet/sync.sh" --instance "$FLEET_REPO"
+      fi
     fi
   fi
 
@@ -125,54 +152,58 @@ main() {
     [ -n "${m_repos[$i]}" ] || fleet_die "no repo for marketplace '$m' in $PIN_SETTINGS"
     m_plugins[i]="$(fleet_enabled_plugins "$m")"
   done
-  sync_tmp
-  [ "$check" = 1 ] || settings_guard_begin
-  installed="$(user_plugins)"
-  for i in "${!markets[@]}"; do
-    m="${markets[$i]}" ref="${m_refs[$i]}" repo="${m_repos[$i]}"
-    cur="$(plugin_cli marketplace list --json | jq -r --arg m "$m" '.[] | select(.name == $m) | .ref // ""')"
-    if [ "$cur" != "$ref" ]; then
-      if [ "$check" = 1 ]; then
-        say "marketplace $m is at '${cur:-absent}' (pin $ref)"; drift=1; continue
+  if [ "${HARNESS:-claude}" = "copilot" ] || [ "${HARNESS:-claude}" = "antigravity" ]; then
+    sync_non_claude_plugins "$check" "$engsys_target"
+  else
+    sync_tmp
+    [ "$check" = 1 ] || settings_guard_begin
+    installed="$(user_plugins)"
+    for i in "${!markets[@]}"; do
+      m="${markets[$i]}" ref="${m_refs[$i]}" repo="${m_repos[$i]}"
+      cur="$(plugin_cli marketplace list --json | jq -r --arg m "$m" '.[] | select(.name == $m) | .ref // ""')"
+      if [ "$cur" != "$ref" ]; then
+        if [ "$check" = 1 ]; then
+          say "marketplace $m is at '${cur:-absent}' (pin $ref)"; drift=1; continue
+        fi
+        # remove uninstalls every plugin from this marketplace; running sessions keep their cache dirs.
+        if [ -n "$cur" ]; then plugin_cli marketplace remove "$m" --scope user >/dev/null; settings_guard_check "marketplace remove $m"; fi
+        plugin_cli marketplace add "https://github.com/$repo.git#$ref" --scope user >/dev/null \
+          || fleet_die "marketplace add $m#$ref failed — $m plugins are UNINSTALLED on this host. Re-run: fleet sync (running sessions are unaffected)."
+        settings_guard_check "marketplace add $m"
+        say "marketplace $m: ${cur:-absent} → $ref"; changed=1
+        installed="$(user_plugins)"
       fi
-      # remove uninstalls every plugin from this marketplace; running sessions keep their cache dirs.
-      if [ -n "$cur" ]; then plugin_cli marketplace remove "$m" --scope user >/dev/null; settings_guard_check "marketplace remove $m"; fi
-      plugin_cli marketplace add "https://github.com/$repo.git#$ref" --scope user >/dev/null \
-        || fleet_die "marketplace add $m#$ref failed — $m plugins are UNINSTALLED on this host. Re-run: fleet sync (running sessions are unaffected)."
-      settings_guard_check "marketplace add $m"
-      say "marketplace $m: ${cur:-absent} → $ref"; changed=1
-      installed="$(user_plugins)"
-    fi
-    while IFS= read -r p; do
-      [ -n "$p" ] || continue
-      installed_version "$p@$m" "$installed" >/dev/null && continue
-      if [ "$check" = 1 ]; then say "plugin $p@$m not installed"; drift=1; continue; fi
-      plugin_cli install "$p@$m" --scope user >/dev/null || fleet_die "plugin install $p@$m failed — re-run: fleet sync"
-      settings_guard_check "plugin install $p@$m"
-      say "installed $p@$m"; changed=1
-    done <<<"${m_plugins[$i]}"
-  done
-  [ "$check" = 1 ] || settings_guard_check "the plugin step"
-  # Every enabled plugin must now be installed at user scope, at the pinned version (a vX.Y.Z pin
-  # stamps X.Y.Z into every plugin — fleet pin).
-  installed="$(user_plugins)"
-  local have want bad=""
-  for i in "${!markets[@]}"; do
-    m="${markets[$i]}" ref="${m_refs[$i]}"
-    want=""; [[ "$ref" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([-+].*)?$ ]] && want="${ref#v}"
-    while IFS= read -r p; do
-      [ -n "$p" ] || continue
-      if ! have="$(installed_version "$p@$m" "$installed")"; then
-        [ "$check" = 1 ] || bad+=" $p@$m (not installed)"
-        continue
-      fi
-      [ -n "$want" ] && [ "$have" != "$want" ] || continue
-      if [ -z "$have" ]; then warn "plugin $p@$m reports no version; can't check it against the pin $ref"; continue; fi
-      if [ "$check" = 1 ]; then say "plugin $p@$m is at $have (pin $want)"; drift=1; else bad+=" $p@$m (at $have, pin $want)"; fi
-    done <<<"${m_plugins[$i]}"
-  done
-  [ -z "$bad" ] || fleet_die "after the plugin step these enabled plugins are not installed at the pin:$bad. NOT synced. Re-run: fleet sync. If a plugin stays at the wrong version: claude plugin uninstall --scope user <plugin@marketplace> (from a directory outside any project), then fleet sync."
-  GUARDED=(); sync_cleanup; trap - EXIT
+      while IFS= read -r p; do
+        [ -n "$p" ] || continue
+        installed_version "$p@$m" "$installed" >/dev/null && continue
+        if [ "$check" = 1 ]; then say "plugin $p@$m not installed"; drift=1; continue; fi
+        plugin_cli install "$p@$m" --scope user >/dev/null || fleet_die "plugin install $p@$m failed — re-run: fleet sync"
+        settings_guard_check "plugin install $p@$m"
+        say "installed $p@$m"; changed=1
+      done <<<"${m_plugins[$i]}"
+    done
+    [ "$check" = 1 ] || settings_guard_check "the plugin step"
+    # Every enabled plugin must now be installed at user scope, at the pinned version (a vX.Y.Z pin
+    # stamps X.Y.Z into every plugin — fleet pin).
+    installed="$(user_plugins)"
+    local have want bad=""
+    for i in "${!markets[@]}"; do
+      m="${markets[$i]}" ref="${m_refs[$i]}"
+      want=""; [[ "$ref" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([-+].*)?$ ]] && want="${ref#v}"
+      while IFS= read -r p; do
+        [ -n "$p" ] || continue
+        if ! have="$(installed_version "$p@$m" "$installed")"; then
+          [ "$check" = 1 ] || bad+=" $p@$m (not installed)"
+          continue
+        fi
+        [ -n "$want" ] && [ "$have" != "$want" ] || continue
+        if [ -z "$have" ]; then warn "plugin $p@$m reports no version; can't check it against the pin $ref"; continue; fi
+        if [ "$check" = 1 ]; then say "plugin $p@$m is at $have (pin $want)"; drift=1; else bad+=" $p@$m (at $have, pin $want)"; fi
+      done <<<"${m_plugins[$i]}"
+    done
+    [ -z "$bad" ] || fleet_die "after the plugin step these enabled plugins are not installed at the pin:$bad. NOT synced. Re-run: fleet sync. If a plugin stays at the wrong version: claude plugin uninstall --scope user <plugin@marketplace> (from a directory outside any project), then fleet sync."
+    GUARDED=(); sync_cleanup; trap - EXIT
+  fi
 
   # --- report ------------------------------------------------------------------------------------
   if [ "$check" = 1 ]; then
@@ -266,6 +297,81 @@ sync_cleanup() { [ -z "$SYNC_TMP" ] || rm -rf "$SYNC_TMP"; SYNC_TMP=""; }
 require_clean() { # tracked changes would block (or be carried across) a checkout
   git -C "$1" diff --quiet && git -C "$1" diff --cached --quiet \
     || fleet_die "$1 has uncommitted changes to tracked files — inspect with: git -C $1 status (discard only if it's noise)"
+}
+
+sync_non_claude_plugins() { # sync_non_claude_plugins <check> <engsys_target>
+  local check_mode="$1" engsys_checkout="$2" i m ref want p src_repo sub cache_dir cfg_file cur_ver
+  local entries="[]"
+  if [ "${HARNESS:-claude}" = "copilot" ]; then
+    cfg_file="${COPILOT_HOME:-$FLEET_STATE/copilot-home}/config.json"
+  else
+    cfg_file="$PIN_DIR/.agents/plugins.json"
+  fi
+  for i in "${!markets[@]}"; do
+    m="${markets[$i]}" ref="${m_refs[$i]}"
+    want="${ref#v}"
+    if [ "$m" = "$ENGSYS_MARKETPLACE" ]; then src_repo="$engsys_checkout"; else src_repo="$FLEET_REPO"; fi
+    while IFS= read -r p; do
+      [ -n "$p" ] || continue
+      [[ "$m" =~ ^[A-Za-z0-9._-]+$ ]] && [ "$m" != "." ] && [ "$m" != ".." ] || fleet_die "unsafe marketplace name in settings: $m"
+      [[ "$p" =~ ^[A-Za-z0-9._-]+$ ]] && [ "$p" != "." ] && [ "$p" != ".." ] || fleet_die "unsafe plugin name in settings: $p"
+      sub="$(jq -r --arg p "$p" '.plugins[]? | select(.name == $p) | .source // empty' "$src_repo/.claude-plugin/marketplace.json" 2>/dev/null || true)"
+      sub="${sub#./}"
+      [ -n "$sub" ] || sub="core"
+      if [ "${HARNESS:-claude}" = "copilot" ]; then
+        cache_dir="${COPILOT_HOME:-$FLEET_STATE/copilot-home}/installed-plugins/$m/$p"
+        cur_ver=""
+        if [ -f "$cfg_file" ]; then
+          cur_ver="$(sed '/^[[:space:]]*\/\//d' "$cfg_file" | jq -r --arg n "$p" --arg m "$m" '.installedPlugins[]? | select(.name == $n and .marketplace == $m) | .version // empty' 2>/dev/null || true)"
+        fi
+      else
+        cache_dir="$FLEET_STATE/agy-plugins/$m/$p/$want"
+        cur_ver=""
+        if [ -f "$cfg_file" ]; then
+          cur_ver="$(jq -r --arg id "$p@$m" '(.plugins // .)[]? | select(.id == $id) | .version // empty' "$cfg_file" 2>/dev/null || true)"
+        fi
+      fi
+      if [ "$cur_ver" != "$want" ] || [ ! -d "$cache_dir" ]; then
+        if [ "$check_mode" = 1 ]; then
+          say "plugin $p@$m is at '${cur_ver:-absent}' (pin $want)"; drift=1
+          continue
+        fi
+        [ -d "$src_repo/$sub" ] && [ ! -L "$src_repo/$sub" ] || fleet_die "plugin source $src_repo/$sub not found for $p@$m"
+        src_root_real="$(cd "$src_repo" && pwd -P)"
+        src_sub_real="$(cd "$src_repo/$sub" && pwd -P)"
+        case "$src_sub_real/" in
+          "$src_root_real/"*) ;;
+          *) fleet_die "plugin source $src_repo/$sub escapes repository root for $p@$m" ;;
+        esac
+        if [ -n "$(find "$src_repo/$sub" -type l -print -quit 2>/dev/null)" ]; then
+          fleet_die "plugin source $src_repo/$sub contains symlinks for $p@$m"
+        fi
+        rm -rf "$cache_dir"
+        mkdir -p "$(dirname "$cache_dir")"
+        cp -R "$src_repo/$sub" "$cache_dir"
+        say "installed $p@$m ($want) -> $cache_dir"; changed=1
+      fi
+      entries="$(jq -cn --argjson arr "$entries" --arg id "$p@$m" --arg n "$p" --arg m "$m" --arg v "$want" --arg c "$cache_dir" \
+        '$arr + [{id: $id, name: $n, marketplace: $m, version: $v, scope: "user", enabled: true, installPath: $c, cache_path: $c}]')"
+    done <<<"${m_plugins[$i]}"
+  done
+  if [ "$check_mode" = 0 ]; then
+    mkdir -p "$(dirname "$cfg_file")"
+    if [ "${HARNESS:-claude}" = "copilot" ]; then
+      existing_cfg="{}"
+      if [ -f "$cfg_file" ]; then
+        existing_cfg="$(sed '/^[[:space:]]*\/\//d' "$cfg_file" | jq -c 'if type == "object" then . else {} end' 2>/dev/null || echo "{}")"
+      fi
+      {
+        echo "// Managed by fleet sync (HARNESS=copilot)"
+        jq -n --argjson base "$existing_cfg" --argjson p "$entries" '$base + {installedPlugins: $p}'
+      } >"$cfg_file"
+    else
+      jq -n --argjson p "$entries" '{plugins: $p}' >"$cfg_file"
+      mkdir -p "$FLEET_STATE"
+      cp "$cfg_file" "$FLEET_STATE/agy-plugins.json" 2>/dev/null || true
+    fi
+  fi
 }
 
 # Wrapped in main so bash parses the whole file before steps 2 and 3 swap this code underneath it.

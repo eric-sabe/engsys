@@ -164,3 +164,26 @@ test('block C net for monsters: an INCOMPLETE hand-back in a fleet session is lo
   const drainedLines = fs.readFileSync(path.join(sdir, 'acme-mm.handbacks.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
   assert.deepEqual(drainedLines.map((l) => l.agent_id), ['n1', 'n4', 'n5', 'n6']);
 });
+
+test('CT-06: Copilot payload with pending promise exits 0 with JSON {"decision":"block","reason":"engsys hand-back guard:..."}', () => {
+  const r = spawnSync(
+    process.execPath,
+    [HOOK, 'subagent'],
+    {
+      input: JSON.stringify({
+        hookEventName: 'subagentStop',
+        sessionId: 'sess-copilot-hb',
+        agentId: 'a-cop',
+        agentType: 'engsys:isabelle',
+        lastAssistantMessage: 'I will continue once CI finishes.',
+      }),
+      env: { ...process.env, ENGSYS_HANDBACK_DIR: DIR },
+      encoding: 'utf8',
+    },
+  );
+  assert.equal(r.status, 0);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.decision, 'block');
+  assert.match(out.reason, /^engsys hand-back guard:/);
+});
+

@@ -6,14 +6,24 @@
 # Must be fast and fail-open: static text only, no network calls, no state reads. The one
 # exception is the operator time line below: it formats the current time from OPERATOR_* env, no I/O.
 # Rendered by the engsys installer; static content, no project fills.
-cat <<'EOF'
+PLUGIN_ROOT="${ENGSYS_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${COPILOT_PLUGIN_ROOT:-${AGY_PLUGIN_ROOT:-}}}}"
+TIME_LINE=""
+if [ -n "${OPERATOR_TIMEZONE:-}${OPERATOR_CLOCK:-}" ] && [ -n "$PLUGIN_ROOT" ] && [ -f "$PLUGIN_ROOT/lib/operator-time.mjs" ] && command -v node >/dev/null 2>&1; then
+  TIME_LINE="$(node "$PLUGIN_ROOT/lib/operator-time.mjs" context-line 2>/dev/null || true)"
+fi
+BODY="$(cat <<'EOF'
 Context was just compacted. Durable state, not the summary, is the source of truth:
 1. If this session runs a long-lived skill (merge-monster, maintenance-monster, or similar): re-read its SKILL.md, its config (.claude/*.yml, or the fleet-config-dir copy whose path heads state.md), and <state_dir>/state.md, then reconcile against live GitHub per the skill's Session startup steps — the summary is not your operating contract; the files are.
 2. Treat summarized precision as unverified: PR/issue numbers, SHAs, attempt counters, deadlines. Re-check from files or GitHub before acting on any of them.
 3. If you were mid-task: your working tree (git status), the task list, and your own state files are the resume point — not the summary's narrative.
 EOF
-# Operator time format (fleet sessions): same line the session-start context carries. Silent when no
-# setting exists, the plugin lib is missing, or node is absent.
-if [ -n "${OPERATOR_TIMEZONE:-}${OPERATOR_CLOCK:-}" ] && [ -f "${CLAUDE_PLUGIN_ROOT:-}/lib/operator-time.mjs" ] && command -v node >/dev/null 2>&1; then
-  node "${CLAUDE_PLUGIN_ROOT}/lib/operator-time.mjs" context-line 2>/dev/null || true
+)"
+if [ -n "$TIME_LINE" ]; then
+  BODY="$BODY
+$TIME_LINE"
+fi
+if command -v node >/dev/null 2>&1; then
+  node -e 'const c=process.argv[1]+"\n";process.stdout.write(JSON.stringify({additionalContext:c,hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:c}})+"\n")' "$BODY"
+else
+  printf '%s\n' "$BODY"
 fi

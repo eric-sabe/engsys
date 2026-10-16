@@ -47,6 +47,14 @@
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/singleton-write-guard.mjs\""
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "grep -qs '\"delivered_at\":null' \"${FLEET_INBOX_DIR:-/nonexistent}/${ENGSYS_SESSION:-none}.jsonl\" && node \"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/fleet-inbox.mjs\" post-tool-use; exit 0"
+          }
+        ]
       }
     ],
     "SubagentStart": [

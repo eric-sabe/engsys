@@ -69,12 +69,7 @@ ROSTER_DIR="$(cd "$(dirname "$ROSTER")" 2>/dev/null && pwd)" || ROSTER_DIR="$REP
 command -v tmux >/dev/null 2>&1 || { echo "error: tmux not found on PATH" >&2; exit 1; }
 # launchd jobs (the fleet supervisor) run with a fixed PATH that may not include where Claude Code was
 # installed: the native installer uses ~/.local/bin. Look in the standard install locations before failing.
-if ! command -v claude >/dev/null 2>&1; then
-  for d in "$HOME/.local/bin" /opt/homebrew/bin /usr/local/bin; do
-    if [ -x "$d/claude" ]; then PATH="$d:$PATH"; export PATH; break; fi
-  done
-fi
-command -v claude >/dev/null 2>&1 || { echo "error: claude not found on PATH (also looked in ~/.local/bin, /opt/homebrew/bin, /usr/local/bin)" >&2; exit 1; }
+HARNESS="${HARNESS:-${FLEET_HARNESS:-claude}}"
 
 # ---------------------------------------------------------------------------
 # Parse roster
@@ -93,11 +88,30 @@ while IFS= read -r line; do
     TMUX_SESSION=*) TMUX_SESSION="${line#TMUX_SESSION=}" ;;
     ENV_FILE=*) ENV_FILE="${line#ENV_FILE=}"; ENV_FILE="${ENV_FILE/#\~/$HOME}" ;;
     MODEL=*) MODEL="${line#MODEL=}" ;;
+    HARNESS=*) HARNESS="${line#HARNESS=}" ;;
     PREFLIGHT=*) PREFLIGHTS+=("${line#PREFLIGHT=}") ;;
     *\|*) SESSIONS+=("$line") ;;
     *) echo "error: unrecognized roster line: $line" >&2; exit 1 ;;
   esac
 done < "$ROSTER"
+
+case "$HARNESS" in
+  claude | copilot | antigravity) ;;
+  agy) HARNESS=antigravity ;;
+  *) echo "error: unsupported HARNESS '$HARNESS' (expected claude, copilot, or antigravity)" >&2; exit 1 ;;
+esac
+
+HARNESS_BIN="claude"
+case "$HARNESS" in
+  copilot) HARNESS_BIN="copilot" ;;
+  antigravity) HARNESS_BIN="agy" ;;
+esac
+if ! command -v "$HARNESS_BIN" >/dev/null 2>&1; then
+  for d in "$HOME/.local/bin" /opt/homebrew/bin /usr/local/bin; do
+    if [ -x "$d/$HARNESS_BIN" ]; then PATH="$d:$PATH"; export PATH; break; fi
+  done
+fi
+command -v "$HARNESS_BIN" >/dev/null 2>&1 || { echo "error: $HARNESS_BIN not found on PATH (also looked in ~/.local/bin, /opt/homebrew/bin, /usr/local/bin)" >&2; exit 1; }
 
 [ -n "$NAMESPACE" ] || { echo "error: roster must set NAMESPACE=" >&2; exit 1; }
 TMUX_SESSION="${TMUX_SESSION:-$NAMESPACE}"
@@ -112,18 +126,20 @@ SETTINGS_FILE="$HOME/.claude/${NAMESPACE}-messaging-settings.json"
 # The naming convention is only *safe* because the monster skills validate
 # every inbound message against the repo before acting.
 # ---------------------------------------------------------------------------
-if [ ! -f "$SETTINGS_FILE" ]; then
-  mkdir -p "$(dirname "$SETTINGS_FILE")"
-  printf '{\n  "crossSessionInbound": "accept"\n}\n' > "$SETTINGS_FILE"
-  echo "wrote messaging settings: $SETTINGS_FILE"
-elif command -v jq >/dev/null 2>&1; then
-  if [ "$(jq -r '.crossSessionInbound // empty' "$SETTINGS_FILE")" != "accept" ]; then
-    tmp="$(mktemp "${SETTINGS_FILE}.XXXXXX")"
-    jq '.crossSessionInbound = "accept"' "$SETTINGS_FILE" > "$tmp" && mv "$tmp" "$SETTINGS_FILE"
-    echo "patched messaging settings: $SETTINGS_FILE (crossSessionInbound=accept)"
+if [ "$HARNESS" = "claude" ]; then
+  if [ ! -f "$SETTINGS_FILE" ]; then
+    mkdir -p "$(dirname "$SETTINGS_FILE")"
+    printf '{\n  "crossSessionInbound": "accept"\n}\n' > "$SETTINGS_FILE"
+    echo "wrote messaging settings: $SETTINGS_FILE"
+  elif command -v jq >/dev/null 2>&1; then
+    if [ "$(jq -r '.crossSessionInbound // empty' "$SETTINGS_FILE")" != "accept" ]; then
+      tmp="$(mktemp "${SETTINGS_FILE}.XXXXXX")"
+      jq '.crossSessionInbound = "accept"' "$SETTINGS_FILE" > "$tmp" && mv "$tmp" "$SETTINGS_FILE"
+      echo "patched messaging settings: $SETTINGS_FILE (crossSessionInbound=accept)"
+    fi
+  else
+    echo "warning: jq not found — verify crossSessionInbound=accept in $SETTINGS_FILE manually" >&2
   fi
-else
-  echo "warning: jq not found — verify crossSessionInbound=accept in $SETTINGS_FILE manually" >&2
 fi
 
 # Optional per-machine env (credentials, endpoints — e.g. a durable cloud
@@ -142,6 +158,48 @@ fi
 for pf in ${PREFLIGHTS[@]+"${PREFLIGHTS[@]}"}; do
   bash -c "$pf" || echo "warning: preflight failed (sessions start anyway): $pf" >&2
 done
+
+# Translate Claude-style roster flags into shell-escaped Copilot CLI flags when HARNESS=copilot.
+translate_copilot_flags() {
+  local raw="$1" out=() tok q=()
+  set -f
+  # shellcheck disable=SC2086
+  set -- $raw
+  set +f
+  while [ $# -gt 0 ]; do
+    tok="$1"; shift
+    case "$tok" in
+      --dangerously-skip-permissions)
+        out+=(--yolo --mode autopilot --no-ask-user) ;;
+      --remote-control)
+        out+=(--remote) ;;
+      --permission-mode)
+        if [ "${1:-}" = "bypassPermissions" ]; then out+=(--yolo); fi
+        [ $# -eq 0 ] || shift ;;
+      --effort)
+        if [ $# -gt 0 ]; then out+=(--reasoning-effort "$1"); shift; fi ;;
+      --model)
+        if [ $# -gt 0 ]; then
+          case "$1" in
+            opus) out+=(--model claude-opus-4.6) ;;
+            sonnet) out+=(--model claude-sonnet-4.6) ;;
+            haiku) out+=(--model claude-haiku-4.5) ;;
+            *) out+=(--model "$1") ;;
+          esac
+          shift
+        fi ;;
+      *)
+        out+=("$tok") ;;
+    esac
+  done
+  if [ "${#out[@]}" -gt 0 ]; then
+    local item
+    for item in "${out[@]}"; do
+      q+=("$(printf '%q' "$item")")
+    done
+    printf '%s' "${q[*]}"
+  fi
+}
 
 # ---------------------------------------------------------------------------
 # Launch
@@ -177,6 +235,10 @@ launch_one() {
     *merge-monster*) role=merge ;;
     *maintenance-monster*) role=maintain ;;
   esac
+  if [ "$HARNESS" = "antigravity" ] && [ -n "$role" ] && [ "${AGY_HEADLESS_SUPPORTED:-0}" != 1 ]; then
+    echo "error: Antigravity ($name) does not support headless monster sessions yet (set AGY_HEADLESS_SUPPORTED=1 when available, or use HARNESS=claude|copilot for monsters)" >&2
+    return 1
+  fi
   # ENGSYS_SESSION_ROOT is the directory the session was launched in: a guarded `fleet msg send`
   # takes its --body-file only from <root>/tmp, wherever the session cd's later (engsys#108).
   local root
@@ -187,13 +249,24 @@ launch_one() {
   if [ -n "$session_env" ]; then
     cmd+="set -a && . $(printf %q "$session_env") && set +a && "
   fi
-  cmd+="claude --name $(printf %q "$name") --settings $(printf %q "$SETTINGS_FILE")"
-  # The prompt goes BEFORE the model/extra flags: several claude flags take a
-  # list (--add-dir, --allowedTools, …) and would swallow a trailing prompt as
-  # one more value — the session would start with no instruction.
-  [ -n "$prompt" ] && cmd+=" $(printf %q "$prompt")"
-  [ -n "$MODEL" ] && cmd+=" $MODEL"
-  [ -n "$extra" ] && cmd+=" $extra"
+  if [ "$HARNESS" = "copilot" ]; then
+    cmd+="copilot --name $(printf %q "$name")"
+    [ -n "$prompt" ] && cmd+=" -i $(printf %q "$prompt")"
+    local copilot_flags
+    copilot_flags="$(translate_copilot_flags "${MODEL:+$MODEL }${extra:-}")"
+    [ -n "$copilot_flags" ] && cmd+=" $copilot_flags"
+  elif [ "$HARNESS" = "antigravity" ]; then
+    cmd+="agy $(printf %q "$workdir")"
+    [ -n "$prompt" ] && cmd+=" -i $(printf %q "$prompt")"
+  else
+    cmd+="claude --name $(printf %q "$name") --settings $(printf %q "$SETTINGS_FILE")"
+    # The prompt goes BEFORE the model/extra flags: several claude flags take a
+    # list (--add-dir, --allowedTools, …) and would swallow a trailing prompt as
+    # one more value — the session would start with no instruction.
+    [ -n "$prompt" ] && cmd+=" $(printf %q "$prompt")"
+    [ -n "$MODEL" ] && cmd+=" $MODEL"
+    [ -n "$extra" ] && cmd+=" $extra"
+  fi
 
   # A duplicate logical name ANYWHERE the same user runs claude makes Claude
   # Code suffix this one (name-2), which breaks name addressing. Reject a name

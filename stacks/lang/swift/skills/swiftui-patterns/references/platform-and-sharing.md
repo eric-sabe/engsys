@@ -15,7 +15,7 @@
 
 Adopt the `Transferable` protocol to enable sharing, drag and drop, copy/paste, and `ShareLink` with a unified API. Available iOS 16+.
 
-> **Docs:** [Transferable](https://sosumi.ai/documentation/coretransferable/transferable) · [Choosing a transfer representation](https://sosumi.ai/documentation/coretransferable/choosing-a-transfer-representation-for-a-model-type)
+> **Docs:** [Transferable](https://developer.apple.com/documentation/coretransferable/transferable) · [Choosing a transfer representation](https://developer.apple.com/documentation/coretransferable/choosing-a-transfer-representation-for-a-model-type)
 
 ### Transferable protocol overview
 

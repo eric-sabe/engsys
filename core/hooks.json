@@ -1,0 +1,154 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/approve-own-scripts.mjs\""
+          }
+        ]
+      },
+      {
+        "matcher": "Bash|Monitor",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/singleton-write-guard.mjs\""
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit|CronCreate|mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/singleton-write-guard.mjs\""
+          }
+        ]
+      },
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/subagent-memory-inject.mjs\" pre-agent"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/singleton-write-guard.mjs\""
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "grep -qs '\"delivered_at\":null' \"${FLEET_INBOX_DIR:-/nonexistent}/${ENGSYS_SESSION:-none}.jsonl\" && node \"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/fleet-inbox.mjs\" post-tool-use; exit 0"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/subagent-memory-inject.mjs\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/handback-guard.mjs\" subagent"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "grep -qs '\"delivered_at\":null' \"${FLEET_INBOX_DIR:-/nonexistent}/${ENGSYS_SESSION:-none}.jsonl\" && node \"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/fleet-inbox.mjs\" prompt; exit 0"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/handback-guard.mjs\" stop"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/engsys-context.mjs\""
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/fleet-gh-path.mjs\""
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "grep -qs '\"delivered_at\":null' \"${FLEET_INBOX_DIR:-/nonexistent}/${ENGSYS_SESSION:-none}.jsonl\" && node \"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/fleet-inbox.mjs\" session-start; exit 0"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -z \"${ENGSYS_SESSION:-}\" ] || node \"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/session-transcript.mjs\" ; exit 0"
+          }
+        ]
+      },
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/templates/post-compact-reground.sh.tmpl\""
+          }
+        ]
+      },
+      {
+        "matcher": "clear|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/templates/post-clear-reground.sh.tmpl\""
+          }
+        ]
+      }
+    ]
+  }
+}

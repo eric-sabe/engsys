@@ -128,18 +128,31 @@ const put = (rel, content) => {
 //   no_external: false
 //   -->
 function parseIssueMeta(body) {
-	const m = body.match(/<!--\s*engsys:issue-meta\s*\n([\s\S]*?)-->/);
+	const m = body.match(/<!--\s*engsys:issue-meta\s*\r?\n([\s\S]*?)-->/);
 	if (!m) return null;
 	const meta = {};
-	for (const line of m[1].split('\n')) {
-		const kv = line.match(/^\s*([\w-]+)\s*:\s*(.*)$/);
+	let activeListKey = null;
+	for (const rawLine of m[1].split(/\r?\n/)) {
+		const trimmed = rawLine.trim();
+		if (!trimmed || trimmed.startsWith('#')) continue;
+		if (activeListKey && /^\s*-\s+/.test(rawLine)) {
+			const item = rawLine.replace(/^\s*-\s+/, '').trim().replace(/^["']|["']$/g, '');
+			if (item) meta[activeListKey].push(item);
+			continue;
+		}
+		activeListKey = null;
+		const kv = trimmed.match(/^([A-Za-z0-9_ -]+?)\s*:\s*(.*)$/);
 		if (!kv) continue;
-		let v = kv[2].trim();
-		if (v.startsWith('[') && v.endsWith(']')) {
+		const key = kv[1].trim();
+		const v = kv[2].trim();
+		if (v === '') {
+			meta[key] = [];
+			activeListKey = key;
+		} else if (v.startsWith('[') && v.endsWith(']')) {
 			const inner = v.slice(1, -1).trim();
-			meta[kv[1]] = inner === '' ? [] : inner.split(',').map((s) => s.trim().replace(/^["']|["']$/g, ''));
-		} else if (v === 'true' || v === 'false') meta[kv[1]] = v === 'true';
-		else meta[kv[1]] = v.replace(/^["']|["']$/g, '');
+			meta[key] = inner === '' ? [] : inner.split(',').map((s) => s.trim().replace(/^["']|["']$/g, ''));
+		} else if (v === 'true' || v === 'false') meta[key] = v === 'true';
+		else meta[key] = v.replace(/^["']|["']$/g, '');
 	}
 	return meta;
 }
@@ -208,7 +221,27 @@ for (const n of ordered) {
 
 const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 
+let sharedSliceSpecHeading = null;
+try {
+	const modPath = join(SCRIPT_DIR, '..', 'lib', 'spec-slice.mjs');
+	if (existsSync(modPath)) {
+		({ sliceSpecHeading: sharedSliceSpecHeading } = await import(modPath));
+	}
+} catch {
+	sharedSliceSpecHeading = null;
+}
+
 function extractSection(file, anchor) {
+	if (sharedSliceSpecHeading) {
+		try {
+			return sharedSliceSpecHeading(file, anchor || null, { repoRoot: worktree }).formatted;
+		} catch (err) {
+			fatal(err?.message || String(err), 'Fix the spec_refs / --spec path or heading.');
+		}
+	}
+	if (file.includes('..') || !file.startsWith('docs/specs/')) {
+		fatal(`invalid_spec_path: ${file}`, 'Spec refs must reside under docs/specs/*.md.');
+	}
 	const abs = join(worktree, file);
 	if (!existsSync(abs)) fatal(`spec ref file not found: ${file}`, 'Fix the spec_refs / --spec path.');
 	const text = readFileSync(abs, 'utf8');

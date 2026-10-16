@@ -185,14 +185,27 @@ export function sessionProcess({ startPid = process.ppid, ps = defaultPs } = {})
   return null;
 }
 
+export const resolveSessionOwnerPid = sessionProcess;
+
 /**
- * Is this `ps` comm the claude CLI? `claude` (as a path or a bare name), or the version string the
- * CLI renames its process to (e.g. `2.1.233`; fleet-supervisor.sh reads the same thing from tmux).
+ * Is this `ps` comm a supported harness CLI? `claude`, `copilot`, `agy`, `antigravity`,
+ * `language_server*` (as a path or a bare name), or the version string the CLI renames
+ * its process to (e.g. `2.1.233`; fleet-supervisor.sh reads the same thing from tmux).
  */
-export function isClaudeCommand(comm) {
+export function isSupportedHarnessCommand(comm) {
   const name = basename(String(comm ?? "").trim()).replace(/^-/, "");
-  return name === "claude" || /^\d+\.\d+\.\d+$/.test(name);
+  return (
+    name === "claude" ||
+    name === "copilot" ||
+    name === "agy" ||
+    name === "antigravity" ||
+    /^language_server_(macos|linux)(_[a-z0-9_]+)?$/.test(name) ||
+    /^\d+\.\d+\.\d+$/.test(name)
+  );
 }
+
+/** Back-compat alias for isSupportedHarnessCommand (#149). */
+export const isClaudeCommand = isSupportedHarnessCommand;
 
 /** True while the process `{pid, start}` is the same live process. */
 export function sameProcessAlive(proc, ps = defaultPs) {
