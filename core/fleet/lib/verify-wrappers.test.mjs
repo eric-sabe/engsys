@@ -352,7 +352,10 @@ test('#96 M3: --check-settings catches disableAllHooks, hooks, dangerous env key
   const projDir = tmp('verify-settings-proj-');
   const userDir = tmp('verify-settings-user-');
   fs.mkdirSync(path.join(projDir, '.claude'), { recursive: true });
-  const pinRaw = JSON.stringify({ enabledPlugins: { 'engsys@engsys': true } });
+  const pinRaw = JSON.stringify({
+    hooks: { PostToolUse: [{ matcher: 'Edit|Write|MultiEdit', hooks: [{ type: 'command', command: 'bash "$CLAUDE_PROJECT_DIR/.claude/hooks/post-edit-reminders.sh"' }] }] },
+    enabledPlugins: { 'engsys@engsys': true },
+  });
   fs.writeFileSync(path.join(projDir, '.claude', 'settings.json'), pinRaw);
   const pinSha = blobSha(pinRaw);
   const plugins = pluginList([userEntry(root)]);

@@ -225,8 +225,8 @@ export function checkSettings({ projectDir, userSettingsDir = '', pinSettingsSha
           if (pinCfg.disableAllHooks === true) {
             problems.push(`settings   ${pinFile} sets disableAllHooks: true`);
           }
-          if (pinCfg.hooks !== undefined) {
-            problems.push(`settings   ${pinFile} defines hooks`);
+          if (!pinSettingsSha && pinCfg.hooks !== undefined) {
+            problems.push(`settings   ${pinFile} defines hooks (unverified against origin)`);
           }
           if (pinCfg.env && typeof pinCfg.env === 'object' && !Array.isArray(pinCfg.env)) {
             for (const k of DANGEROUS_SETTINGS_ENV_KEYS) {
@@ -349,7 +349,18 @@ export function parseTree(json) {
   if (!t || !Array.isArray(t.tree)) throw new Unverified(`GitHub returned no tree${t && t.message ? `: ${t.message}` : ''}`);
   if (t.truncated) throw new Unverified('GitHub truncated the tree');
   const m = new Map();
-  for (const e of t.tree) if (e && e.type === 'blob' && typeof e.path === 'string' && typeof e.sha === 'string') m.set(e.path, e.sha);
+  for (const e of t.tree) {
+    if (
+      e &&
+      e.type === 'blob' &&
+      typeof e.path === 'string' &&
+      typeof e.sha === 'string' &&
+      e.path !== '.DS_Store' &&
+      !e.path.endsWith('/.DS_Store')
+    ) {
+      m.set(e.path, e.sha);
+    }
+  }
   return m;
 }
 
