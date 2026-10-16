@@ -98,7 +98,7 @@ However, the remaining 25% hardcodes Claude Code (`claude` CLI) assumptions acro
 
 ## Open Questions
 
-- *None blocking implementation*: Default model aliases in `fleet/fleet.conf` (`MM_MODEL`, `MAINTAIN_MODEL`, `BUILD_MODEL`, `SECURITY_MODEL`) map per harness (`opus`/`sonnet`/`haiku` on `claude`; `claude-opus-4.6`/`claude-sonnet-4.6`/`claude-haiku-4.5` or `gpt-5.4` on `copilot`; operator-configured model IDs on `antigravity`).
+- *None blocking implementation*: Default model aliases in `fleet/fleet.conf` (`MM_MODEL`, `MAINTAIN_MODEL`, `BUILD_MODEL`, `SECURITY_MODEL`) map per harness (`opus`/`sonnet`/`haiku` on `claude` pinned to `claude-opus-5-5`/`claude-sonnet-5-5`/`claude-haiku-5-5` with `claude-opus-4-8` for security; `claude-opus-5.5`/`claude-sonnet-5.5`/`claude-haiku-5.5` with `claude-opus-4.8` for security or `gpt-6-astra`/`gpt-6.1-sol`/`gpt-6-luna` on `copilot`; `gemini-4-argon` and `gemini-3.8-flash` on `antigravity`).
 
 ---
 
@@ -403,13 +403,13 @@ This guarantees:
    - **`HARNESS=copilot`**:
      - Maps `--dangerously-skip-permissions` to `--yolo --mode autopilot --no-ask-user` (so monsters run autonomously and cannot stall on `ask_user`).
      - Maps `--remote-control` (`--remote`) to `--remote`.
-     - Maps model aliases (`opus` $\rightarrow$ `claude-opus-4.6`, `sonnet` $\rightarrow$ `claude-sonnet-4.6`, `haiku` $\rightarrow$ `claude-haiku-4.5`, passing explicit model IDs like `gpt-5.4` or `claude-opus-4.7` through unchanged).
+     - Maps model aliases (`opus` $\rightarrow$ `claude-opus-5.5`, `sonnet` $\rightarrow$ `claude-sonnet-5.5`, `haiku` $\rightarrow$ `claude-haiku-5.5`, `claude-opus-4-8` $\rightarrow$ `claude-opus-4.8`, passing explicit model IDs like `gpt-6-astra` or `gpt-6.1-sol` through unchanged).
      - Launches `copilot --name "$NAME" -i "$PROMPT" ...`.
      - Resumes on `fleet restart` via `copilot --resume="$NAME"`.
    - **`HARNESS=antigravity`**: Launches `agy` with workspace and prompt arguments.
 3. **[`fleet-supervisor.sh`](file:///Users/eric/git/engineering/engsys/core/skills/agent-sessions/scripts/fleet-supervisor.sh#L372-L391) (`auth_probe`)**:
    - When `HARNESS=copilot`, `auth_probe()` runs:
-     `copilot -p 'Reply with the single word OK' -s --no-custom-instructions --disable-builtin-mcps --model claude-haiku-4.5`
+     `copilot -p 'Reply with the single word OK' -s --no-custom-instructions --disable-builtin-mcps --model claude-haiku-5.5`
      and `auth_scan()` checks for both Claude and Copilot auth error lines.
 
 ---

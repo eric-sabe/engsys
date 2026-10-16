@@ -12,6 +12,6 @@ and `.claude/workflows/worker-dispatch.md` for the procedure.
   the worker scripts load these automatically, env vars winning).
 - The adapter builds the child env from an allowlist (the worker never inherits
   this session) and **asserts the responding model id** — DeepSeek's compat
-  endpoint silently aliases unknown model names to `deepseek-v4-flash`.
+  endpoint silently aliases unknown model names to `deepseek-flash`.
 - Issues marked `no_external: true` in their engsys:issue-meta block will
   refuse to package for DeepSeek — route those to codex or anthropic.

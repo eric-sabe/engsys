@@ -343,7 +343,7 @@ Buildable at M1 with high confidence; it is a refactor of proven code.
 spawn claude -p --output-format json ... with EXPLICIT env (not inherited):
   ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
   ANTHROPIC_AUTH_TOKEN=$DEEPSEEK_API_KEY
-  ANTHROPIC_MODEL=<pinned per role>  (+ SMALL/SUBAGENT slots → deepseek-v4-flash)
+  ANTHROPIC_MODEL=<pinned per role>  (+ SMALL/SUBAGENT slots → deepseek-flash)
 ```
 
 Two mandatory defenses: **(1) env isolation** — the adapter constructs the child
@@ -351,7 +351,7 @@ environment from scratch (allowlist), so the worker can never inherit the
 conductor's session, settings, or push credentials; run with a restricted
 tool allowlist and `--dangerously-skip-permissions` *not* set. **(2) the alias
 trap** — DeepSeek's Anthropic-compat endpoint silently maps unknown model names
-to `deepseek-v4-flash`; the adapter must read the returned model id from the
+to `deepseek-flash`; the adapter must read the returned model id from the
 JSON result and **exit 2 on mismatch**. A Flash run billed as a Pro review is a
 false green with extra steps.
 
@@ -377,7 +377,7 @@ verdict is never the sole gate on execution-dependent work.
 campos27 idle-without-report failure is handled by the same timeout + no-receipt
 ⇒ exit 2 path as everyone else.
 
-### 6.3 Routing (Terra ≈ Sonnet-class, Sol ≈ Opus-class)
+### 6.3 Routing (Sol ≈ Sonnet 5.5-class, Astra ≈ Opus 5.5-class)
 
 Machine-readable in config, rendered as a CLAUDE.md table at install. The
 existing `naturalize.model_strategy` prose stays as judgment guidance; this
@@ -388,14 +388,14 @@ providers:
   conductor: anthropic
   workers:
     codex:    { enabled: true,  binary: codex,
-                models: { implement: gpt-5.6-terra, implement_hard: gpt-5.6-sol,
-                          review: gpt-5.6-sol } }
+                models: { implement: gpt-6.1-sol, implement_hard: gpt-6-astra,
+                          review: gpt-6-astra } }
     deepseek: { enabled: true,  via: claude-cli-remap,
-                models: { implement: deepseek-v4-flash,
+                models: { implement: deepseek-flash,
                           implement_hard: deepseek-v4-pro,
                           review: deepseek-v4-pro } }
     grok:     { enabled: true,  roles: [review, critique, investigate],
-                models: { review: grok-4.5 } }
+                models: { review: grok-4.7 } }
     anthropic:{ enabled: true,  via: claude-cli,
                 models: { implement: sonnet, review: opus } }
   routing:
@@ -413,18 +413,18 @@ providers:
 
 | Work type | Worker | Reviewer family |
 |---|---|---|
-| Well-specified domain/infra issue | Codex Terra | Anthropic or Grok |
-| Hard multi-file / subtle correctness | Codex Sol | Anthropic Opus or Grok |
-| High-volume mechanical / tests / boilerplate | DeepSeek Flash | Codex Terra or Anthropic |
-| Capable low-cost overflow | DeepSeek Pro | Codex or Anthropic |
-| UX / copy / error surfaces / product judgment | Anthropic (Isabelle/Leith) | Grok or Codex Terra |
-| Architecture / security hard calls | Anthropic Opus → Fable escalation | Codex Sol or Grok, mandatory |
-| Adversarial correctness review | Codex Sol and/or Grok | ≠ author |
-| Stuck-loop rescue / alternate plan | Grok investigate | Anthropic synthesizes |
+| Well-specified domain/infra issue | Codex (`gpt-6.1-sol`) | Anthropic or Grok |
+| Hard multi-file / subtle correctness | Codex (`gpt-6-astra`) | Anthropic Opus 5.5 or Grok |
+| High-volume mechanical / tests / boilerplate | DeepSeek Flash (`deepseek-flash`) | Codex (`gpt-6.1-sol`) or Anthropic |
+| Capable low-cost overflow | DeepSeek Pro (`deepseek-v4-pro`) | Codex or Anthropic |
+| UX / copy / error surfaces / product judgment | Anthropic (Isabelle/Leith) | Grok or Codex (`gpt-6.1-sol`) |
+| Architecture / security hard calls | Anthropic Opus 5.5 / 4.8 → Fable 5.1 escalation | Codex (`gpt-6-astra`) or Grok, mandatory |
+| Adversarial correctness review | Codex (`gpt-6-astra`) and/or Grok (`grok-4.7`) | ≠ author |
+| Stuck-loop rescue / alternate plan | Grok investigate (`grok-4.7`) | Anthropic synthesizes |
 
-Escalation *within* a family stays the existing three-tier policy (Sonnet →
-Opus → Fable); this table only decides *which family* holds the pen and which
-holds the red one. Sol is reached the same way Fable is: Terra failed once, the
+Escalation *within* a family stays the existing three-tier policy (Sonnet 5.5 →
+Opus 5.5 → Fable 5.1, with Opus 4.8 pinned for security); this table only decides *which family* holds the pen and which
+holds the red one. Astra is reached the same way Fable is: Sol failed once, the
 issue spans many modules, or the review needs mutation-hunting depth.
 
 ### 6.4 `/implement-project` § 3.5 becomes the cross-family gate

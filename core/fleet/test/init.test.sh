@@ -156,9 +156,9 @@ file_has "fleet.conf: github-app sets GH_APP_ENV" "$CONF" "GH_APP_ENV=~/.config/
 file_has "fleet.conf: azure sets AZURE_SP_ENV" "$CONF" "AZURE_SP_ENV=~/.config/acme/azure-sp.env"
 file_has "fleet.conf: worktrees default beside the pin checkout" "$CONF" "WORKTREES_DIR=$HOME/git/worktrees"
 file_has "fleet.conf: model defaults (opus)" "$CONF" "OPUS_MODEL=claude-opus-5-5"
-file_has "fleet.conf: model defaults (sonnet)" "$CONF" "SONNET_MODEL=claude-sonnet-5"
+file_has "fleet.conf: model defaults (sonnet)" "$CONF" "SONNET_MODEL=claude-sonnet-5-5"
 file_has "fleet.conf: model defaults (fable)" "$CONF" "FABLE_MODEL=claude-fable-5-1"
-file_has "fleet.conf: model defaults (haiku)" "$CONF" "HAIKU_MODEL=claude-haiku-4-5"
+file_has "fleet.conf: model defaults (haiku)" "$CONF" "HAIKU_MODEL=claude-haiku-5-5"
 file_has "fleet.conf: security model" "$CONF" "SECURITY_MODEL=claude-opus-4-8"
 file_has "fleet.conf: interactive permission mode" "$CONF" "INTERACTIVE_PERMISSION_MODE=auto"
 file_has "gitignore: .fleet/" "$FULL/.gitignore" ".fleet/"
@@ -435,9 +435,9 @@ has "maintain: the 5th field replaces the session env" "$(launched acme-maintain
 S="$(cat "$STATE/env/session.env")"
 X="$(cat "$STATE/env/security.env")"
 has "session env: alias pins rendered (opus)" "$S" 'ANTHROPIC_DEFAULT_OPUS_MODEL="claude-opus-5-5"'
-has "…sonnet" "$S" 'ANTHROPIC_DEFAULT_SONNET_MODEL="claude-sonnet-5"'
+has "…sonnet" "$S" 'ANTHROPIC_DEFAULT_SONNET_MODEL="claude-sonnet-5-5"'
 has "…fable" "$S" 'ANTHROPIC_DEFAULT_FABLE_MODEL="claude-fable-5-1"'
-has "…haiku" "$S" 'ANTHROPIC_DEFAULT_HAIKU_MODEL="claude-haiku-4-5"'
+has "…haiku" "$S" 'ANTHROPIC_DEFAULT_HAIKU_MODEL="claude-haiku-5-5"'
 has "session env: azure env sourced" "$S" ". \"$HOME/.config/acme/azure-sp.env\""
 # behavioral: source the rendered env the way the launcher does and check what a session actually gets
 SRC="$(env -i HOME="$HOME" PATH=/usr/bin:/bin GH_TOKEN=personal bash -c "set -a; . '$STATE/env/session.env' 2>/dev/null; set +a; printf '%s|%s|%s' \"\${PATH%%:*}\" \"\${GH_APP_ENV_FILE:-}\" \"\${GH_TOKEN:-none}\"")"
@@ -450,7 +450,7 @@ has "security env: opus aliased to the security model" "$X" 'ANTHROPIC_DEFAULT_O
 has "security env: fable aliased to the security model" "$X" 'ANTHROPIC_DEFAULT_FABLE_MODEL="claude-opus-4-8"'
 # Source the rendered env the way a session's login shell would (POSIX sh, exported), with a token in the way.
 got="$(env -i HOME="$HOME" PATH="/usr/bin:/bin" GH_TOKEN=leaked sh -c "set -a; . '$STATE/env/security.env'; set +a; echo \"\$ANTHROPIC_DEFAULT_OPUS_MODEL \$ANTHROPIC_DEFAULT_SONNET_MODEL \${GH_TOKEN-unset}\"")"
-eq "sourcing security.env in sh: opus is the security model, sonnet stays, GH_TOKEN is dropped" "$got" "claude-opus-4-8 claude-sonnet-5 unset"
+eq "sourcing security.env in sh: opus is the security model, sonnet stays, GH_TOKEN is dropped" "$got" "claude-opus-4-8 claude-sonnet-5-5 unset"
 
 echo "-- full scaffold: supervise and install-jobs"
 run "$INST/scripts/fleet" supervise

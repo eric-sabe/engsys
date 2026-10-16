@@ -566,7 +566,7 @@ SH
 chmod +x "$T/bin/copilot"
 authconf "HARNESS=copilot"; reset; rm -f "$T"/pane-* "$T"/capture-*; touch "$T/probe-ok"; ledger 1 "ok"; ledger2 90 "ok"; rpane
 wpane acme-w "● Failed to authenticate with GitHub Copilot"; run
-expect "CT-14: HARNESS=copilot auth_probe runs copilot -p" "^copilot-probe -p Reply with the single word OK -s --no-custom-instructions --disable-builtin-mcps --model claude-haiku-4.5"
+expect "CT-14: HARNESS=copilot auth_probe runs copilot -p" "^copilot-probe -p Reply with the single word OK -s --no-custom-instructions --disable-builtin-mcps --model claude-haiku-5.5"
 expect "CT-14: HARNESS=copilot probe ok → relaunch proceeds" "^launch acme-rel"
 rm -f "$T"/pane-* "$T"/capture-* "$T/probe-ok"
 
@@ -602,7 +602,7 @@ chmod +x "$T/bin/tmux"
 printf 'NAMESPACE=acme\nacme-mm|%s|/engsys:merge-monster|--model opus --effort high --remote-control --dangerously-skip-permissions\n' "$T/w" >"$T/w/copilot.roster"
 : >"$T/actions"
 (cd "$T/w" && HARNESS=copilot bash "$HERE/launch-agent-sessions.sh" --roster "$T/w/copilot.roster" >/dev/null 2>&1)
-expect "CT-14: launch-agent-sessions.sh with HARNESS=copilot invokes copilot --name acme-mm -i /engsys:merge-monster" "copilot --name acme-mm -i /engsys:merge-monster --model claude-opus-4.6 --reasoning-effort high --remote --yolo --mode autopilot --no-ask-user"
+expect "CT-14: launch-agent-sessions.sh with HARNESS=copilot invokes copilot --name acme-mm -i /engsys:merge-monster" "copilot --name acme-mm -i /engsys:merge-monster --model claude-opus-5.5 --reasoning-effort high --remote --yolo --mode autopilot --no-ask-user"
 
 # CT-14b: launch-agent-sessions.sh with HARNESS=antigravity auto-starts agy remote-control daemon and translates flags
 : >"$T/actions"

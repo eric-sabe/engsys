@@ -1,15 +1,15 @@
 # LLM Structured Outputs — Provider Details
 
 > Detailed per-provider reference. See [SKILL.md](../SKILL.md) for the quick-start guide.
-> Last updated: October 15, 2026.
+> Last updated: October 16, 2026.
 
 ---
 
-## Anthropic Claude Opus 5.5 / Sonnet 5 / Opus 4.8 / Fable 5.1
+## Anthropic Claude 5.5 (`claude-opus-5-5` / `claude-sonnet-5-5` / `claude-haiku-5-5`) + Opus 4.8 (Security) + Fable 5.1
 
-**Model IDs:** `claude-opus-5-5` (judgment & synthesis) · `claude-sonnet-5` (execution) · `claude-opus-4-8` (security lane without cyber classifier) · `claude-fable-5-1` (escalation) · `claude-haiku-4-5` (fast probes)
+**Model IDs:** `claude-opus-5-5` (judgment & synthesis) · `claude-sonnet-5-5` (execution) · `claude-haiku-5-5` (fast probes) · `claude-opus-4-8` (security lane without the 5.5 cyber classifier) · `claude-fable-5-1` (escalation)
 **Context window:** 500K–1M tokens
-**Max output tokens:** 128K (`claude-opus-5-5` / `claude-opus-4-8`), 64K (`claude-sonnet-5`)
+**Max output tokens:** 128K (`claude-opus-5-5` / `claude-opus-4-8` / `claude-fable-5-1`), 64K (`claude-sonnet-5-5` / `claude-haiku-5-5`)
 **Structured outputs status:** Generally available (GA) — no beta header required
 
 ### API parameter: `output_config.format`
@@ -19,7 +19,7 @@ The API parameter is `output_config.format` (`output_config: { format: { type: "
 ```typescript
 // TypeScript — direct API call
 const response = await anthropic.messages.create({
-  model: "claude-sonnet-5", // or "claude-opus-5-5", "claude-opus-4-8", "claude-fable-5-1"
+  model: "claude-sonnet-5-5", // or "claude-opus-5-5", "claude-haiku-5-5", "claude-opus-4-8" (security), "claude-fable-5-1"
   max_tokens: 4096,
   messages: [{ role: "user", content: prompt }],
   output_config: {
@@ -70,16 +70,16 @@ tools: [
 
 ---
 
-## OpenAI GPT-5.6 (`gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna`)
+## OpenAI GPT-6 / 6.1 (`gpt-6-astra` / `gpt-6.1-sol` / `gpt-6-luna`)
 
-**Model IDs:** `gpt-5.6-sol` (premier reasoning, independent review & escalation) · `gpt-5.6-terra` (default execution & synthesis) · `gpt-5.6-luna` (smaller / faster low-latency & enrichment)
+**Model IDs:** `gpt-6-astra` (flagship premier reasoning, independent review & escalation) · `gpt-6.1-sol` (default coding, execution & synthesis) · `gpt-6-luna` (smaller / faster low-latency & enrichment)
 **Structured outputs status:** GA via both Responses API and Chat Completions API
 
 ### Responses API (recommended)
 
 ```typescript
 const response = await openai.responses.create({
-  model: "gpt-5.6-terra", // or "gpt-5.6-sol" / "gpt-5.6-luna"
+  model: "gpt-6.1-sol", // or "gpt-6-astra" / "gpt-6-luna"
   input: prompt,
   text: {
     format: {
@@ -130,10 +130,10 @@ const parsed = JSON.parse(response.text);
 
 ---
 
-## DeepSeek V4 (`deepseek-v4-pro` / `deepseek-v4-flash`)
+## DeepSeek V4 Pro & V4.1 Flash (`deepseek-v4-pro` / `deepseek-flash`)
 
-**Model IDs:** `deepseek-v4-pro` (frontier reasoning + coding) · `deepseek-v4-flash` (low-latency structured extraction)
-**Context window:** 256K tokens
+**Model IDs:** `deepseek-v4-pro` (frontier reasoning + coding) · `deepseek-flash` (DeepSeek V4.1 Flash low-latency multimodal extraction; `deepseek-v4-flash` legacy alias)
+**Context window:** 1M tokens (`deepseek-v4-pro`, 384K max output)
 **OpenAI-compatible API:** Yes — base URL `https://api.deepseek.com/v1`
 
 ```typescript
@@ -168,9 +168,9 @@ const parsed = JSON.parse(response.choices[0].message.content);
 
 ---
 
-## xAI Grok 4.7 (`grok-4.7` / `grok-4.7-build-fast` / `grok-4.5`)
+## xAI Grok 4.7 (`grok-4.7` / `grok-4.7-build-fast`)
 
-**Model IDs:** `grok-4.7` (default premier reasoning & review) · `grok-4.7-build-fast` (fast coding/probes) · `grok-4.6` · `grok-4.5`
+**Model IDs:** `grok-4.7` (default premier reasoning & review) · `grok-4.7-build-fast` (fast coding/probes)
 **Context window:** 1M tokens
 **OpenAI-compatible API:** Yes — base URL `https://api.x.ai/v1`
 

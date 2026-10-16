@@ -312,7 +312,7 @@ describe('Personas & Skills Contract Suite (CT-PS-01..CT-PS-09)', () => {
       path.join(CORE_SKILLS_DIR, 'llm-structured-outputs/references/provider-details.md'),
       'utf8'
     );
-    for (const modelId of ['claude-opus-5-5', 'claude-sonnet-5', 'claude-opus-4-8', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gemini-4-argon', 'gemini-3.8-flash', 'deepseek-v4-pro', 'grok-4.7']) {
+    for (const modelId of ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-opus-4-8', 'claude-fable-5-1', 'gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-luna', 'gemini-4-argon', 'gemini-3.8-flash', 'deepseek-v4-pro', 'deepseek-flash', 'grok-4.7']) {
       assert.ok(skillMd.includes(modelId), `llm-structured-outputs/SKILL.md missing ${modelId}`);
       assert.ok(providerDetails.includes(modelId), `provider-details.md missing ${modelId}`);
     }
