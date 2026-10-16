@@ -95,6 +95,19 @@ naturalize:
   # project_facts: |     # optional; otherwise the installer leaves a TODO marker
   #   Multi-line project facts can go here.
 
+# Optional per-tier model overrides (defaults adapt automatically to `harness:`):
+# - claude:      judgement=opus, execution=sonnet, security=claude-opus-4-8, escalation=fable, fast=haiku
+# - copilot:     judgement=claude-opus-4.6, execution=claude-sonnet-4.6, security=claude-opus-4.6, fast=claude-haiku-4.5
+#                (or swap to OpenAI/Google: e.g. judgement=gpt-5.4, execution=gpt-5.3-codex, fast=gpt-5.4-mini)
+# - antigravity: judgement=inherit, execution=inherit, security=inherit, escalation=pro, fast=flash
+#                (Gemini uses 1 primary frontier model and scales depth via `effort: medium|high|max`)
+# models:
+#   judgement: claude-opus-4.6
+#   execution: claude-sonnet-4.6
+#   security: claude-opus-4.6
+#   escalation: claude-opus-4.6
+#   fast: claude-haiku-4.5
+
 # Cross-session & cross-fleet messaging (docs/agent-messaging.md, docs/multi-fleet.md).
 # For Claude Code (>= 2.1.232), sets `crossSessionInbound` in .claude/settings.local.json
 # so autonomous or named sessions (`claude --name <namespace>-<role> --remote-control`)
