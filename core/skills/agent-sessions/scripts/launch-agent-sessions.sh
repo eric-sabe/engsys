@@ -201,6 +201,70 @@ translate_copilot_flags() {
   fi
 }
 
+# Translate Claude-style roster flags into shell-escaped Antigravity CLI (agy) flags when HARNESS=antigravity.
+translate_antigravity_flags() {
+  local raw="$1" out=() tok q=()
+  set -f
+  # shellcheck disable=SC2086
+  set -- $raw
+  set +f
+  while [ $# -gt 0 ]; do
+    tok="$1"; shift
+    case "$tok" in
+      --dangerously-skip-permissions)
+        out+=(--dangerously-skip-permissions) ;;
+      --remote-control)
+        out+=(--remote-control) ;;
+      --permission-mode)
+        if [ "${1:-}" = "bypassPermissions" ]; then out+=(--dangerously-skip-permissions); fi
+        [ $# -eq 0 ] || shift ;;
+      --effort)
+        if [ $# -gt 0 ]; then out+=(--effort "$1"); shift; fi ;;
+      --model)
+        if [ $# -gt 0 ]; then
+          case "$1" in
+            opus | sonnet | haiku | claude-*) ;; # omit Claude-only shorthands so agy uses its configured Gemini model
+            *) out+=(--model "$1") ;;
+          esac
+          shift
+        fi ;;
+      *)
+        out+=("$tok") ;;
+    esac
+  done
+  if [ "${#out[@]}" -gt 0 ]; then
+    local item
+    for item in "${out[@]}"; do
+      q+=("$(printf '%q' "$item")")
+    done
+    printf '%s' "${q[*]}"
+  fi
+}
+
+# Turnkey Antigravity Remote Control: unlike Claude Code (where --remote-control is self-contained per session),
+# Antigravity requires a host-level background daemon (`agy remote-control start`) in addition to per-session
+# `--remote-control`. Auto-start the daemon when HARNESS=antigravity and any roster session uses --remote-control.
+if [ "$HARNESS" = "antigravity" ] && [ "${AGY_REMOTE_CONTROL_AUTOSTART:-1}" != 0 ]; then
+  agy_needs_rc=0
+  if [ "${AGY_REMOTE_CONTROL:-0}" = 1 ]; then
+    agy_needs_rc=1
+  else
+    for spec in "${SESSIONS[@]}"; do
+      case "$spec" in *--remote-control*) agy_needs_rc=1; break ;; esac
+    done
+  fi
+  if [ "$agy_needs_rc" = 1 ]; then
+    if ! agy remote-control status 2>/dev/null | grep -qi 'Daemon status:[[:space:]]*running'; then
+      agy_rc_name="${FLEET_ID:-$NAMESPACE}-$(hostname -s 2>/dev/null || echo host)"
+      if agy remote-control start --name "$agy_rc_name" >/dev/null 2>&1; then
+        echo "started Antigravity remote-control daemon: $agy_rc_name"
+      else
+        echo "warning: agy remote-control start failed (sessions start anyway)" >&2
+      fi
+    fi
+  fi
+fi
+
 # ---------------------------------------------------------------------------
 # Launch
 # ---------------------------------------------------------------------------
@@ -235,8 +299,8 @@ launch_one() {
     *merge-monster*) role=merge ;;
     *maintenance-monster*) role=maintain ;;
   esac
-  if [ "$HARNESS" = "antigravity" ] && [ -n "$role" ] && [ "${AGY_HEADLESS_SUPPORTED:-0}" != 1 ]; then
-    echo "error: Antigravity ($name) does not support headless monster sessions yet (set AGY_HEADLESS_SUPPORTED=1 when available, or use HARNESS=claude|copilot for monsters)" >&2
+  if [ "$HARNESS" = "antigravity" ] && [ -n "$role" ] && [ "${AGY_HEADLESS_SUPPORTED:-1}" != 1 ]; then
+    echo "error: Antigravity ($name) headless monster sessions disabled (AGY_HEADLESS_SUPPORTED=0)" >&2
     return 1
   fi
   # ENGSYS_SESSION_ROOT is the directory the session was launched in: a guarded `fleet msg send`
@@ -258,6 +322,9 @@ launch_one() {
   elif [ "$HARNESS" = "antigravity" ]; then
     cmd+="agy $(printf %q "$workdir")"
     [ -n "$prompt" ] && cmd+=" -i $(printf %q "$prompt")"
+    local agy_flags
+    agy_flags="$(translate_antigravity_flags "${MODEL:+$MODEL }${extra:-}")"
+    [ -n "$agy_flags" ] && cmd+=" $agy_flags"
   else
     cmd+="claude --name $(printf %q "$name") --settings $(printf %q "$SETTINGS_FILE")"
     # The prompt goes BEFORE the model/extra flags: several claude flags take a
