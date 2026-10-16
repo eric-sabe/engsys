@@ -211,7 +211,7 @@ human_text() { # human_text <text> → text with ISO UTC timestamps in the opera
 # have just re-created).
 LOCKDIR="$STATE_DIR/run.lock"
 if ! mkdir "$LOCKDIR" 2>/dev/null; then
-  lm=$(stat -f %m "$LOCKDIR" 2>/dev/null || stat -c %Y "$LOCKDIR" 2>/dev/null || echo 0)
+  lm=$(stat -c %Y "$LOCKDIR" 2>/dev/null || stat -f %m "$LOCKDIR" 2>/dev/null || echo 0)
   case "$lm" in '' | *[!0-9]*) lm=0 ;; esac
   if [ "$lm" -gt 0 ] && [ $(($(date +%s) - lm)) -gt 600 ]; then
     mv "$LOCKDIR" "$LOCKDIR.stale.$$" 2>/dev/null && rmdir "$LOCKDIR.stale.$$" 2>/dev/null || true

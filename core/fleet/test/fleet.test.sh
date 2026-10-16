@@ -305,7 +305,7 @@ rc_is "FLEET_INSTANCE is honoured" 0
   fi
 ) || bad "library checks aborted"
 
-mode_of() { stat -f %Lp "$1" 2>/dev/null || stat -c %a "$1"; }
+mode_of() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
 SHIM="$ENGSYS_HOST/core/fleet/identity/bin"
 
 # =============================================================================================
