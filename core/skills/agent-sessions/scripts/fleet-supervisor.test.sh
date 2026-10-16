@@ -608,7 +608,7 @@ expect "CT-14: launch-agent-sessions.sh with HARNESS=copilot invokes copilot --n
 : >"$T/actions"
 (cd "$T/w" && HARNESS=antigravity bash "$HERE/launch-agent-sessions.sh" --roster "$T/w/copilot.roster" >/dev/null 2>&1)
 expect "CT-14b: launch-agent-sessions.sh with HARNESS=antigravity auto-starts agy remote-control daemon" "^agy-rc remote-control start --name acme-"
-expect "CT-14b: launch-agent-sessions.sh with HARNESS=antigravity invokes agy with translated flags" "agy .* -i /engsys:merge-monster --effort high --remote-control --dangerously-skip-permissions"
+expect "CT-14b: launch-agent-sessions.sh with HARNESS=antigravity invokes agy with translated flags" "agy .* -i /engsys:merge-monster --model gemini-4-argon --effort high --remote-control --dangerously-skip-permissions"
 
 echo "$pass passed, $fail failed."
 [ "$fail" = 0 ]

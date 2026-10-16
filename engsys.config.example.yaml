@@ -98,9 +98,9 @@ naturalize:
 # Optional per-tier model overrides (defaults adapt automatically to `harness:`):
 # - claude:      judgement=opus, execution=sonnet, security=claude-opus-4-8, escalation=fable, fast=haiku
 # - copilot:     judgement=claude-opus-4.6, execution=claude-sonnet-4.6, security=claude-opus-4.6, fast=claude-haiku-4.5
-#                (or swap to OpenAI/Google: e.g. judgement=gpt-5.4, execution=gpt-5.3-codex, fast=gpt-5.4-mini)
-# - antigravity: judgement=inherit, execution=inherit, security=inherit, escalation=pro, fast=flash
-#                (Gemini uses 1 primary frontier model and scales depth via `effort: medium|high|max`)
+#                (or swap to OpenAI/Google: e.g. judgement=gpt-5.4, execution=gpt-5.3-codex, fast=gpt-5.4-mini, or gemini-4-argon / gemini-3.8-flash)
+# - antigravity: judgement=gemini-4-argon, execution=gemini-4-argon, security=gemini-4-argon, escalation=gemini-4-argon, fast=gemini-3.8-flash
+#                (Gemini 4 Argon is the premier model scaled via `effort: medium|high|max`; Gemini 3.8 Flash is the smaller/faster model)
 # models:
 #   judgement: claude-opus-4.6
 #   execution: claude-sonnet-4.6

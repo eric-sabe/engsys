@@ -223,7 +223,9 @@ translate_antigravity_flags() {
       --model)
         if [ $# -gt 0 ]; then
           case "$1" in
-            opus | sonnet | fable | haiku | claude-* | inherit | pro) ;; # omit tier aliases so agy uses its configured Gemini model
+            opus | sonnet | fable | claude-* | pro) out+=(--model gemini-4-argon) ;;
+            haiku | flash) out+=(--model gemini-3.8-flash) ;;
+            inherit) ;;
             *) out+=(--model "$1") ;;
           esac
           shift

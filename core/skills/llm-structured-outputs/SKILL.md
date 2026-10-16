@@ -1,6 +1,6 @@
 ---
 name: llm-structured-outputs
-description: "Cross-provider reference for LLM structured outputs with Claude Sonnet 5 / Opus 4.8, GPT-5.6 (Terra/Sol), Gemini 3.1 Pro, DeepSeek V4, and Grok 4.5. Use when implementing json_schema constrained decoding, writing Zod 4 schemas for LLM APIs, building multi-provider abstractions, or debugging schema compliance failures."
+description: "Cross-provider reference for LLM structured outputs with Claude Sonnet 5 / Opus 4.8, GPT-5.6 (Terra/Sol), Gemini 4 Argon / 3.8 Flash, DeepSeek V4, and Grok 4.5. Use when implementing json_schema constrained decoding, writing Zod 4 schemas for LLM APIs, building multi-provider abstractions, or debugging schema compliance failures."
 ---
 
 # LLM Structured Outputs
@@ -26,7 +26,7 @@ All five frontier providers support **constrained decoding**: you send a JSON Sc
 | Anthropic Claude 5 / 4.8                         | `claude-sonnet-5`, `claude-opus-4-8`           | `output_config.format`                | `"json_schema"`     |
 | OpenAI GPT-5.6 (Responses API)                   | `gpt-5.6-terra`, `gpt-5.6-sol`                 | `text.format`                         | `"json_schema"`     |
 | OpenAI GPT-5.6 (Chat Completions)                | `gpt-5.6-terra`, `gpt-5.6-sol`                 | `response_format`                     | `"json_schema"`     |
-| Google Gemini 3.1 Pro                            | `gemini-3.1-pro`                               | `generationConfig.responseJsonSchema` | N/A (schema object) |
+| Google Gemini 4 Argon / 3.8 Flash                | `gemini-4-argon`, `gemini-3.8-flash`           | `generationConfig.responseJsonSchema` | N/A (schema object) |
 | DeepSeek V4                                      | `deepseek-v4-pro`, `deepseek-v4-flash`         | `response_format`                     | `"json_schema"`     |
 | xAI Grok 4.5                                     | `grok-4.5`, `grok-4.5-reasoning`               | `response_format`                     | `"json_schema"`     |
 
@@ -92,14 +92,14 @@ const response = await openai.chat.completions.create({
 - **NOT supported:** `oneOf`, `allOf`, recursive schemas
 - `additionalProperties: false` and all fields listed in `required` (or `null`-unioned) are mandatory
 
-### Google Gemini 3.1 Pro
+### Google Gemini 4 Argon & 3.8 Flash (`gemini-4-argon` / `gemini-3.8-flash`)
 
 ```typescript
 import { GoogleGenAI } from "@google/genai";
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
 const response = await ai.models.generateContent({
-  model: "gemini-3.1-pro",
+  model: "gemini-4-argon", // or "gemini-3.8-flash" for low-latency / high-throughput
   contents: prompt,
   config: {
     responseMimeType: "application/json",
@@ -160,14 +160,14 @@ const parsed = JSON.parse(response.choices[0].message.content);
 
 ## Cross-Provider Feature Matrix
 
-| Feature                       | Claude Sonnet 5 / Opus 4.8 | GPT-5.6 (`terra`/`sol`) | Gemini 3.1 Pro | DeepSeek V4 |   Grok 4.5    |
-| ----------------------------- | :------------------------: | :---------------------: | :------------: | :---------: | :-----------: |
-| `anyOf`                       |             ❌             |           ✅            |       ✅       |     ✅      | ⚠️ flat only  |
-| `$ref` (recursive)            |       internal only        |         limited         |       ✅       |     ❌      |      ❌       |
-| `pattern`                     |             ❌             |           ✅            |       ✅       |     ❌      |      ❌       |
-| min/max constraints           |             ❌             |           ✅            |       ✅       |     ❌      |      ❌       |
-| `additionalProperties: false` |          required          |        required         |   supported    |  required   |   supported   |
-| Constrained decoding status   |             GA             |           GA            |       GA       |     GA      |      GA       |
+| Feature                       | Claude Sonnet 5 / Opus 4.8 | GPT-5.6 (`terra`/`sol`) | Gemini 4 Argon / 3.8 Flash | DeepSeek V4 |   Grok 4.5    |
+| ----------------------------- | :------------------------: | :---------------------: | :------------------------: | :---------: | :-----------: |
+| `anyOf`                       |             ❌             |           ✅            |             ✅             |     ✅      | ⚠️ flat only  |
+| `$ref` (recursive)            |       internal only        |         limited         |             ✅             |     ❌      |      ❌       |
+| `pattern`                     |             ❌             |           ✅            |             ✅             |     ❌      |      ❌       |
+| min/max constraints           |             ❌             |           ✅            |             ✅             |     ❌      |      ❌       |
+| `additionalProperties: false` |          required          |        required         |         supported          |  required   |   supported   |
+| Constrained decoding status   |             GA             |           GA            |             GA             |     GA      |      GA       |
 
 ---
 

@@ -103,9 +103,9 @@ const response = await openai.responses.create({
 
 ---
 
-## Google Gemini 3.1 Pro
+## Google Gemini 4 Argon & 3.8 Flash
 
-**Model ID:** `gemini-3.1-pro`
+**Model IDs:** `gemini-4-argon` (premier reasoning & engineering), `gemini-3.8-flash` (smaller / faster low-latency)
 **Context window:** 2M tokens input · 64K tokens output
 **Structured outputs status:** GA with constrained decoding
 
@@ -115,7 +115,7 @@ import { GoogleGenAI } from "@google/genai";
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
 const response = await ai.models.generateContent({
-  model: "gemini-3.1-pro",
+  model: "gemini-4-argon", // or "gemini-3.8-flash"
   contents: prompt,
   config: {
     responseMimeType: "application/json",
