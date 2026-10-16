@@ -695,5 +695,17 @@ has "session env carries the zone" "$S_ENV" "OPERATOR_TIMEZONE=Europe/Berlin"
 has "session env carries the clock" "$S_ENV" "OPERATOR_CLOCK=24h"
 rm -f "$HOME/.config/acme/fleet.local.conf"
 
+echo "== J. CT-13: per-instance worktree isolation and Copilot plugin sync"
+git -C "$ENGSYS_HOST" checkout -q v1.1.0
+printf 'INSTANCE_MARKETPLACE=\nGH_APP_ENV=\nENGSYS_REF=v1.2.0\nHARNESS=copilot\nFLEET_ISOLATE_ENGSYS_WORKTREE=1\n' >"$HOME/.config/acme/fleet.local.conf"
+run fleet sync
+rc_is "CT-13: isolated worktree + copilot sync exits 0" 0
+has "CT-13: isolated worktree created at pin" "$OUT" "engsys (isolated worktree): absent → v1.2.0"
+eq "CT-13: host ENGSYS_DIR checkout was NOT moved (sibling fleet safe)" "$(git -C "$ENGSYS_HOST" describe --tags --exact-match)" v1.1.0
+eq "CT-13: per-instance worktree at $STATE/engsys is at v1.2.0" "$(git -C "$STATE/engsys" describe --tags --exact-match)" v1.2.0
+[ -f "$STATE/copilot-home/config.json" ] && ok "CT-13: copilot config.json written in per-instance COPILOT_HOME" || bad "CT-13: copilot config.json written"
+rm -f "$HOME/.config/acme/fleet.local.conf"
+git -C "$ENGSYS_HOST" worktree remove --force "$STATE/engsys" >/dev/null 2>&1 || true
+
 # =============================================================================================
 finish fleet.test

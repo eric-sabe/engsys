@@ -167,6 +167,9 @@ release_instance() { # release_instance <vX.Y.Z|next> <owner/repo> → echoes th
     fi
     must stamp_json "$manifest" "$ver" '.version = $v'
     [ "$(jq -r .version "$manifest")" = "$ver" ] || fleet_die "version stamp failed in $manifest"
+    if [ -f "$wt${dir:+/$dir}/plugin.json" ]; then
+      must stamp_json "$wt${dir:+/$dir}/plugin.json" "$ver" '.version = $v'
+    fi
     plugin_dirs+=("$wt${dir:+/$dir}")
   done < <(jq -r '.plugins[]? | .source | strings' "$mf")
   [ "$n_src" = "$n_all" ] || say "WARNING $((n_all - n_src)) plugin(s) in the marketplace have a non-directory source — not stamped"

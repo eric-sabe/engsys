@@ -47,6 +47,14 @@ fleet_load_conf "$FLEET_REPO/fleet/fleet.conf"
 [ -f "$HOME/.config/$FLEET_ORG/fleet.local.conf" ] && fleet_load_conf "$HOME/.config/$FLEET_ORG/fleet.local.conf"
 
 : "${ENGSYS_DIR:=$HOME/git/engsys}"
+: "${HARNESS:=${FLEET_HARNESS:-claude}}"
+case "$HARNESS" in
+  claude | copilot | antigravity) ;;
+  agy) HARNESS=antigravity ;;
+  *) fleet_die "HARNESS must be claude, copilot, or antigravity (got '$HARNESS')" ;;
+esac
+FLEET_HARNESS="$HARNESS"
+: "${COPILOT_HOME:=$FLEET_STATE/copilot-home}"
 : "${ENGSYS_MARKETPLACE:=engsys}"
 : "${INSTANCE_MARKETPLACE:=}"
 : "${READY_LABEL:=mm:ready}"
@@ -86,7 +94,7 @@ for _k in PIN_REPO PIN_DIR; do
   [ -n "${!_k:-}" ] || fleet_die "$_k is not set in $FLEET_REPO/fleet/fleet.conf (or ~/.config/$FLEET_ORG/fleet.local.conf)"
 done
 unset _k
-export FLEET_ORG PIN_REPO PIN_DIR ENGSYS_DIR ENGSYS_MARKETPLACE INSTANCE_MARKETPLACE READY_LABEL REVIEW_BLOCK_REGEX PIN_WAIT_MAX_MIN VERIFY_MAX_AGE_MIN LOG_DIR SLACK_ENV NOTIFY_FALLBACK_ISSUE FLEET_ID FEDERATION_FILE FLEET_INSTANCE_REPO OPERATOR_TIMEZONE OPERATOR_CLOCK
+export FLEET_ORG PIN_REPO PIN_DIR ENGSYS_DIR HARNESS FLEET_HARNESS COPILOT_HOME ENGSYS_MARKETPLACE INSTANCE_MARKETPLACE READY_LABEL REVIEW_BLOCK_REGEX PIN_WAIT_MAX_MIN VERIFY_MAX_AGE_MIN LOG_DIR SLACK_ENV NOTIFY_FALLBACK_ISSUE FLEET_ID FEDERATION_FILE FLEET_INSTANCE_REPO OPERATOR_TIMEZONE OPERATOR_CLOCK
 
 command -v jq >/dev/null || fleet_die "jq is required"
 

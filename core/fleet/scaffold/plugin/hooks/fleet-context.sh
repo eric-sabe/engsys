@@ -9,7 +9,7 @@
 # missing files, no git, no remote and no jq are all just less context.
 set -u
 
-ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd -P)}"
+ROOT="${CLAUDE_PLUGIN_ROOT:-${COPILOT_PLUGIN_ROOT:-${AGY_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd -P)}}}"
 [ -d "${ROOT:-}" ] || exit 0
 
 # The session's working directory arrives as JSON on stdin ({"cwd": ...}); fall back to the project dir.
@@ -17,7 +17,7 @@ input=""
 [ -t 0 ] || input="$(cat 2>/dev/null || true)"
 cwd=""
 if [ -n "$input" ] && command -v jq >/dev/null 2>&1; then
-  cwd="$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null || true)"
+  cwd="$(printf '%s' "$input" | jq -r '.cwd // .workspacePaths[0] // empty' 2>/dev/null || true)"
 fi
 cwd="${cwd:-${CLAUDE_PROJECT_DIR:-$PWD}}"
 
@@ -53,7 +53,7 @@ fi
 [ -n "$ctx" ] || exit 0
 
 if command -v jq >/dev/null 2>&1; then
-  jq -n --arg c "$ctx" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $c}}' 2>/dev/null \
+  jq -n --arg c "$ctx" '{additionalContext: $c, hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $c}}' 2>/dev/null \
     || printf '%s\n' "$ctx"
 else
   printf '%s\n' "$ctx"

@@ -26,6 +26,20 @@ for d in "${_dirs[@]}"; do
 done
 [ -n "$REAL_GH" ] || { echo "gh (fleet shim): real gh not found on PATH" >&2; exit 127; }
 
+# If the GitHub Copilot CLI binary itself calls `gh auth token` or `gh auth status` to authenticate
+# the operator's Copilot seat, do NOT hand it a GitHub App installation token (ghs_...), which has
+# no Copilot subscription. Agent Bash tool calls run under a shell/node/git child process, never
+# with `copilot` as their direct PPID calling `gh auth token`.
+if [ "${1:-}" = "auth" ] && { [ "${2:-}" = "token" ] || [ "${2:-}" = "status" ]; }; then
+  parent_comm="${ENGSYS_GH_SHIM_PARENT_COMM:-$(ps -o comm= -p "$PPID" 2>/dev/null | awk -F/ '{print $NF}' | sed 's/^-//')}"
+  if [ "$parent_comm" = "copilot" ]; then
+    if [ -n "${GH_TOKEN_COPILOT_CLI:-}" ]; then
+      GH_TOKEN="$GH_TOKEN_COPILOT_CLI" exec "$REAL_GH" "$@"
+    fi
+    exec "$REAL_GH" "$@"
+  fi
+fi
+
 # Which account's installation to use (GH_APP_INSTALLATIONS in the env file). Precedence:
 # GH_APP_OWNER > --owner (names the account a command like `gh project`/`gh repo list`/
 # `gh search --owner` acts on) > -R/--repo > a `gh api repos/<owner>/...` path > a github.com

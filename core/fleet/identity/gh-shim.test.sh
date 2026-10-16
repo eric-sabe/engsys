@@ -56,6 +56,10 @@ check "--owner beats a URL argument (#55)"     tok_feedfrwd "$(run "$T/norepo" p
 check "--owner beats -R/--repo"                tok_feedfrwd "$(run "$T/norepo" pr list -R pat-person/tools --owner FeedFrwd)"
 check "--owner beats origin of current repo"   tok_feedfrwd "$(run "$T/repo-pat" project item-list 11 --owner FeedFrwd)"
 check "GH_APP_OWNER beats --owner"              tok_pat      "$(cd "$T/norepo" && env PATH="$HERE/bin:$T/realbin:$PATH" GH_APP_ENV_FILE="$T/gh-app.env" GH_APP_OWNER=pat-person "$SHIM" project item-list 11 --owner FeedFrwd)"
+check "CT-09: child bash calling gh auth token gets App token" tok_default "$(run "$T/norepo" auth token)"
+check "CT-09: copilot parent calling gh auth token passes through to REAL_GH without App token" "" "$(cd "$T/norepo" && env -u GH_TOKEN ENGSYS_GH_SHIM_PARENT_COMM=copilot PATH="$HERE/bin:$T/realbin:$PATH" GH_APP_ENV_FILE="$T/gh-app.env" "$SHIM" auth token)"
+check "CT-09: copilot parent calling gh auth status with GH_TOKEN_COPILOT_CLI gets seat token" "gho_seat" "$(cd "$T/norepo" && env -u GH_TOKEN GH_TOKEN_COPILOT_CLI=gho_seat ENGSYS_GH_SHIM_PARENT_COMM=copilot PATH="$HERE/bin:$T/realbin:$PATH" GH_APP_ENV_FILE="$T/gh-app.env" "$SHIM" auth status)"
+check "CT-09: copilot parent calling gh pr list still gets App token (NA-6)" tok_pat "$(cd "$T/repo-pat" && env -u GH_TOKEN GH_TOKEN_COPILOT_CLI=gho_seat ENGSYS_GH_SHIM_PARENT_COMM=copilot PATH="$HERE/bin:$T/realbin:$PATH" GH_APP_ENV_FILE="$T/gh-app.env" "$SHIM" pr list)"
 
 if [ "$FAILS" -gt 0 ]; then echo "gh-shim.test.sh: $FAILS failure(s)" >&2; exit 1; fi
 echo "gh-shim.test.sh: all passed"
