@@ -43,6 +43,8 @@
 #                                 the session's undelivered cross-fleet messages
 #   relay [status]                one poll of the cross-fleet relay (what the fleet-relay job runs), or its
 #                                 health line; no-op in single-fleet mode
+#   health <subcommand> ...       Fleet Health Desk (validate|status|tick|watch-board|check|report|simulate|
+#                                 invoke|self-probe|digest|watch-add|watch-remove; see `fleet health --help`)
 #   init ...                      scaffold a new fleet instance (engsys fleet init)
 #
 # The instance is --instance <dir>, else $FLEET_INSTANCE, else the git toplevel of the current
@@ -66,7 +68,7 @@ case "$cmd" in
   -h | --help | help) sed -n '2,/^set -/{/^set -/!p;}' "$0"; exit 0 ;;
   init) # the engsys CLI (this kit lives at <engsys>/core/fleet); no instance needed yet
     exec "$KIT/../../install" fleet init "$@" ;;
-  status | pin | sync | restart | launch | supervise | verify | install-jobs | notify | heartbeat | time | federation | msg | relay) ;;
+  status | pin | sync | restart | launch | supervise | verify | install-jobs | notify | heartbeat | time | federation | msg | relay | health) ;;
   *) echo "fleet: unknown command '$cmd' (fleet help)" >&2; exit 2 ;;
 esac
 
@@ -99,4 +101,5 @@ case "$cmd" in
   federation) exec bash "$KIT/federation.sh" "$@" ;;
   msg) exec bash "$KIT/msg.sh" "$@" ;;
   relay) exec bash "$KIT/relay.sh" "$@" ;;
+  health) exec bash "$KIT/health.sh" "$@" ;;
 esac

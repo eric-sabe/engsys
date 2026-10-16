@@ -610,6 +610,26 @@ without a ledger note), post a session-end digest to the ledger issue
 final heartbeat with status "session end", `mnt-baton.sh release …
 --reason exit`, stop the Monitor.
 
+## Fleet Health Desk (FHD)
+
+When `fleet-health.yml` (or `fhd_config` / `fhd_board_issue` in `maintenance-monster.yml`) is configured, Maintenance Monster owns the **Fleet Health Desk** (`<engsys-root>/fleet/health.sh` / `fleet health`) while holding the `maintain` baton:
+
+1. **Probe & Hysteresis Engine (`mnt-watch.sh` -> `fleet health tick`)**:
+   - Evaluates watched services (`statuspage`, `observed`, `http-health`, `synthetic-cmd`) with asymmetric hysteresis (`trip_fails` consecutive failures to trip `degraded`/`down`; `recover_clean` consecutive clean probes + statuspage clear to recover to `up`).
+   - Enforces dependency DAG (`depends_on`) so an upstream outage (`github-api`) sets `suppressed_by` on downstream services (`github-actions`) and suppresses duplicate alarms.
+   - Splits `synthetic-cmd` failures from host-local missing auth/context (`auth_check`), surfacing local config issues without tripping a false vendor-wide outage.
+   - Treats broken probes (`statuspage` non-200 or malformed JSON) as `unknown`, preserving `last_known_state` rather than silently reporting `up`.
+2. **Status Board & Broadcast (`board.mjs` / `weather-check.mjs`)**:
+   - Renders `<!-- fleet-health --> ... <!-- /fleet-health -->` (including machine-readable `<!-- fleet-health-json: {...} -->` and dual UTC + operator-time timestamps) onto the status board issue via fenced `mnt-act.sh guard`.
+   - Fires `fleet notify --incident fhd-<service>` only on confirmed, non-suppressed transitions (`--level action` when `down` or `hold_merges`, `--level info` when `degraded`, and `--resolve` on recovery).
+   - Feeds `mm-watch.sh` and `mnt-watch.sh` (`FHD_CHANGE <service> <state> — <advice>`) and the `SessionStart` / `UserPromptSubmit` hook (`weather-check.mjs`).
+3. **Structured Friction Reporting & Correlation (`incidents.mjs`)**:
+   - Sessions report repeated dependency friction via `fleet health report --service <id> --symptom "<text>"` (sanitized with `defang`; never accepts `PUSH_OVERRIDE`).
+   - Correlator collapses `N` reports within the window into one incident, triggers a rate-limited verification probe, and classifies `vendor-wide` (`FHD_REPORT_CORRELATED`) vs `session-local` (`FHD_LOCAL_GUIDANCE`).
+4. **Watch Management & Self-Health (`/mnt-watch`, `self-probe`, `digest`)**:
+   - Use `/mnt-watch` (`fleet health watch-add <service>` / `watch-remove <service>`) to add or remove watched dependencies behind an operator `gate-check` (`--kind config`). Refuse `observability: red` services that lack an honest probe surface.
+   - Run `fleet health self-probe` to verify registry validity, board freshness, and probe health, and `fleet health digest --days 7` for the weekly SLO-lite incident summary.
+
 ## Hard rules
 
 Never open a fix PR or apply a label outside Phase 1's read-only scope

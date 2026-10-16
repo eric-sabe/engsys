@@ -115,6 +115,7 @@ const coreHooksManifest = {
     // …and again on every prompt, so a running session hears about a message without keystrokes.
     UserPromptSubmit: [
       { hooks: [{ type: 'command', command: INBOX_HOOK('prompt') }] },
+      { hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/weather-check.mjs" prompt' }] },
     ],
     Stop: [
       { hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/handback-guard.mjs" stop' }] },
@@ -126,6 +127,9 @@ const coreHooksManifest = {
       // Cross-fleet inbox (engsys#77): a fleet session sees the messages the relay recorded for it. The
       // grep keeps it free outside a multi-fleet session (needs FLEET_INBOX_DIR and ENGSYS_SESSION).
       { hooks: [{ type: 'command', command: INBOX_HOOK('session-start') }] },
+      // Fleet Health Desk weather check (engsys#98): silent when healthy or unconfigured; injects concise
+      // weather + advice when a watched service is degraded/down or the board is stale.
+      { hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/weather-check.mjs" session-start' }] },
       // Context-aware rotation (engsys#125): record a fleet-launched session's transcript path for its
       // heartbeat. The test keeps node from starting outside a fleet session (needs ENGSYS_SESSION).
       { hooks: [{ type: 'command', command: '[ -z "${ENGSYS_SESSION:-}" ] || node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/session-transcript.mjs" ; exit 0' }] },

@@ -32,6 +32,9 @@
 #                         for this session and launch; engsys#126 review)
 #   AGENT_OVERDUE / AGENT_STALE …  the subagent watchdog (mm-agent-watch.sh --once, run every cycle
 #                          while <state-dir>/agents.tsv exists): one bus per monster (engsys#122)
+#   FHD_CHANGE <service> <state> — <advice>
+#                          Fleet Health Desk (engsys#98): emitted once per service state change on the
+#                          status board (when fhd_board_issue, ENGSYS_FHD_BOARD_ISSUE, or cache is configured)
 #
 # The active PR number is read each cycle from <state-dir>/active, so one
 # persistent monitor serves the whole session.
@@ -39,7 +42,7 @@
 # Usage: mm-watch.sh --repo owner/name --state-dir DIR [--interval 30]
 #                    [--default-branch main] [--ledger N]
 #                    [--session NAME] [--pulse-max 20m]
-#                    [--config FILE] [--heartbeat-minutes 10]
+#                    [--config FILE] [--health-config FILE] [--heartbeat-minutes 10]
 #                    [--stale-min 10] [--no-stale] [--no-agents] [--no-dependabot]
 #   --stale-min / --no-stale  passed to the subagent scan (liveness.stale_minutes / stale_probe: false)
 #   --no-agents               skip the subagent scan (it is a no-op anyway without a spawn registry)
@@ -48,6 +51,7 @@
 #   --stale-lock-minutes      with heartbeat_minutes, bounds pulse_max so the lease always lapses before
 #                             the heartbeat reads stale (a CONFIG_WARNING line says when it clamps)
 #   --config                  the monster's yml, read for pulse_max, heartbeat_minutes, stale_lock_minutes and dependabot.auto_merge
+#   --health-config           optional fleet-health.yml path for Fleet Health Desk board watching
 #   --no-dependabot           skip the Dependabot PR poll (no DEPENDABOT events)
 #
 # Baton keepalive (engsys#62, #87): while <state-dir>/baton-merge.json carries this session's token,
@@ -71,7 +75,7 @@ fleet_gh_resolve
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/monster.sh"
 
 REPO="" DIR="" INTERVAL=30 DEFBRANCH=main LEDGER="" SESSION="${ENGSYS_SESSION:-}" PULSE_MAX="" CONFIG="" HB_MIN="" STALE_LOCK=""
-STALE_MIN=10 NOSTALE="" AGENTS=1 NO_DEPENDABOT=0
+STALE_MIN=10 NOSTALE="" AGENTS=1 NO_DEPENDABOT=0 HEALTH_CFG="${FLEET_HEALTH_FILE:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) REPO="$2"; shift 2 ;;
@@ -82,6 +86,7 @@ while [ $# -gt 0 ]; do
     --session) SESSION="$2"; shift 2 ;;
     --pulse-max) PULSE_MAX="$2"; shift 2 ;;
     --config) CONFIG="$2"; shift 2 ;;
+    --health-config) HEALTH_CFG="$2"; shift 2 ;;
     --heartbeat-minutes) HB_MIN="$2"; shift 2 ;;
     --stale-lock-minutes) STALE_LOCK="$2"; shift 2 ;;
     --stale-min) STALE_MIN="$2"; shift 2 ;;
@@ -97,6 +102,9 @@ done
 # maintenance watchdog owns them), so the poll would only wake it for nothing.
 if [ -n "$CONFIG" ] && [ -f "$CONFIG" ] && monster_cfg_list_empty "$CONFIG" dependabot auto_merge; then NO_DEPENDABOT=1; fi
 [ -n "$STALE_LOCK" ] || STALE_LOCK="$(monster_cfg_scalar "$CONFIG" stale_lock_minutes)"
+[ -n "$HEALTH_CFG" ] || HEALTH_CFG="$(monster_cfg_scalar "$CONFIG" fhd_config)"
+[ -n "$HEALTH_CFG" ] || { [ -f "$DIR/fleet-health.yml" ] && HEALTH_CFG="$DIR/fleet-health.yml"; }
+FHD_BOARD_ISSUE="${ENGSYS_FHD_BOARD_ISSUE:-$(monster_cfg_scalar "$CONFIG" fhd_board_issue)}"
 PULSE_OUT="$(monster_pulse_max "${PULSE_MAX:-$(monster_cfg_scalar "$CONFIG" pulse_max)}" "$HB_MIN" "$STALE_LOCK")"
 PULSE_MAX="${PULSE_OUT%%$'\t'*}" PULSE_WARN="${PULSE_OUT#*$'\t'}"
 ROTATE_OUT="$(monster_rotate_tokens "$(monster_cfg_scalar "$CONFIG" rotate_context_tokens)")"
@@ -226,6 +234,17 @@ agents_event() {
   bash "$AGENT_WATCH" --state-dir "$DIR" --once --stale-min "$STALE_MIN" ${NOSTALE:+--no-stale} 2>>"$W/agent-watch.err" || true
 }
 
+# --- Fleet Health Desk (engsys#98) ----------------------------------------------
+# Watches the status board (with conditional ETag caching) and emits FHD_CHANGE once per state change.
+FHD_CLI="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../fleet/health" 2>/dev/null && pwd)/cli.mjs"
+fhd_event() {
+  [ -f "$FHD_CLI" ] || return 0
+  if [ -n "$FHD_BOARD_ISSUE" ] || [ -n "${ENGSYS_FHD_BOARD_CACHE:-}" ] || [ -f "$DIR/fhd/board-cache.json" ] || { [ -n "$HEALTH_CFG" ] && [ -f "$HEALTH_CFG" ]; }; then
+    node "$FHD_CLI" watch-board --state-dir "$DIR" --repo "$REPO" --role merge \
+      ${FHD_BOARD_ISSUE:+--issue "$FHD_BOARD_ISSUE"} ${HEALTH_CFG:+--file "$HEALTH_CFG"} 2>>"$W/fhd.err" || true
+  fi
+}
+
 while true; do
   baton_tick || exit 0
   agents_event
@@ -351,6 +370,7 @@ while true; do
     fi
   fi
 
+  fhd_event
   inbox_event
   sleep "$INTERVAL"
 done
