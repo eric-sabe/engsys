@@ -181,9 +181,9 @@ translate_copilot_flags() {
       --model)
         if [ $# -gt 0 ]; then
           case "$1" in
-            opus) out+=(--model claude-opus-4.6) ;;
-            sonnet) out+=(--model claude-sonnet-4.6) ;;
-            haiku) out+=(--model claude-haiku-4.5) ;;
+            opus | fable | claude-opus-5* | claude-opus-4-8 | claude-fable-*) out+=(--model claude-opus-4.6) ;;
+            sonnet | claude-sonnet-5*) out+=(--model claude-sonnet-4.6) ;;
+            haiku | claude-haiku-*) out+=(--model claude-haiku-4.5) ;;
             *) out+=(--model "$1") ;;
           esac
           shift
@@ -223,7 +223,7 @@ translate_antigravity_flags() {
       --model)
         if [ $# -gt 0 ]; then
           case "$1" in
-            opus | sonnet | haiku | claude-*) ;; # omit Claude-only shorthands so agy uses its configured Gemini model
+            opus | sonnet | fable | haiku | claude-* | inherit | pro) ;; # omit tier aliases so agy uses its configured Gemini model
             *) out+=(--model "$1") ;;
           esac
           shift
