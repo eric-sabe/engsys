@@ -56,13 +56,16 @@ fleet_check_engsys
 conf="$FLEET_STATE/supervisor.conf"
 fleet_render "$FLEET_REPO/fleet/supervisor.conf.tmpl" "$conf"
 fleet_host_init
-kept=0 dropped="" status_target="" status_why=""
+kept=0 dropped="" has_singleton=0 status_target="" status_why=""
 if [ -n "$FLEET_ID" ] && [ -f "$FEDERATION_FILE" ]; then
   status_target="$(node "$FLEET_KIT_DIR/lib/federation.mjs" status-issue --file "$FEDERATION_FILE" 2>&1)" || { status_why="${status_target#federation: }"; status_target=""; }
   [ -n "$status_target" ] || [ -n "$status_why" ] || status_why="no status issue resolved"
 fi
 while IFS= read -r line; do
   case "$line" in
+    INTEGRITY_CMD=*)
+      # engsys#96 L3: a template setting INTEGRITY_CMD=true cannot disable the supervisor integrity check.
+      [ "${FLEET_ALLOW_CUSTOM_INTEGRITY_CMD:-0}" = 1 ] || { printf '# ignored template INTEGRITY_CMD (kit enforces its own)\n'; continue; } ;;
     [a-z0-9]*\|*)
       n="${line%%|*}"
       if why="$(fleet_host_excluded "$n")"; then dropped="$dropped $n"; printf '# not on this host: %s (%s)\n' "$n" "$why"; continue; fi
@@ -81,13 +84,23 @@ while IFS= read -r line; do
       case "$kind" in
         merge | maintain)
           IFS='|' read -r _ l_ledger l_stale l_repo l_marker l_role <<<"$line"
-          [ -n "$l_role" ] || line="$n|$l_ledger|$l_stale|$l_repo|$l_marker|$kind" ;;
+          [ -n "$l_role" ] || line="$n|$l_ledger|$l_stale|$l_repo|$l_marker|$kind"
+          has_singleton=1 ;;
+        *)
+          IFS='|' read -r _ _ _ _ _ l_role <<<"$line"
+          case "${l_role:-}" in merge | maintain) has_singleton=1 ;; esac ;;
       esac
       kept=$((kept + 1)) ;;
   esac
   printf '%s\n' "$line"
 done <"$conf" >"$conf.host"
 mv "$conf.host" "$conf" && chmod 600 "$conf"
+if [ "$has_singleton" = 1 ] && grep -q '^LAUNCH_CMD=' "$conf" && [ "${FLEET_ALLOW_CUSTOM_LAUNCH_CMD:-0}" != 1 ]; then
+  tmpl_launch="$(sed -n 's/^LAUNCH_CMD=//p' "$conf" | tail -n 1)"
+  if [ "$tmpl_launch" != "$LAUNCH_CMD" ]; then
+    fleet_die "supervisor.conf.tmpl sets a custom LAUNCH_CMD ('$tmpl_launch') while supervising merge/maintain sessions (must use the kit's '$LAUNCH_CMD' so fleet verify runs before launch)"
+  fi
+fi
 # LAUNCH_CMD / TMUX_SESSION / HOST_CHECK_CMD default to the kit's own when the template doesn't set them.
 grep -q '^LAUNCH_CMD=' "$conf" || printf 'LAUNCH_CMD=%s\n' "$LAUNCH_CMD" >>"$conf"
 grep -q '^TMUX_SESSION=' "$conf" || printf 'TMUX_SESSION=%s\n' "$TMUX_SESSION" >>"$conf"

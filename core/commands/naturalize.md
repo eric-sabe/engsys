@@ -40,16 +40,20 @@ Do this:
    resource group, etc.) as a bullet in the PROJECT-FACTS region, which *is*
    preserved.
 
-3b. **Fill the project brief overlay (worker-layer installs only).** If
-   `.claude/workflows/briefs/project-brief-overlay.md` exists, fill every
-   section and remove the `TODO(naturalize)` sentinels: hard invariants, the
-   house failure corpus (mine `docs/agent-lessons/` and past review findings —
-   "here is how this repo fails" is the highest-leverage worker context),
+3b. **Seed and fill the project brief overlay (copy and plugin mode).** If
+   `.claude/workflows/briefs/project-brief-overlay.md` does not exist yet (for
+   example in plugin mode), seed it from
+   `${CLAUDE_PLUGIN_ROOT}/templates/project-brief-overlay.md` (or
+   `core/templates/project-brief-overlay.md`). Then fill every section and
+   remove the `TODO(naturalize)` sentinels: hard invariants, the house failure
+   corpus (mine `docs/agent-lessons/` and past review findings — "here is how
+   this repo fails" is the highest-leverage subagent and worker context),
    framework traps, the **exact verify commands** (worker packages extract the
-   fenced block into `verify.md`), and notes for reviewers. Review packages
-   refuse to build while the sentinel remains — a reviewer with no local priors
-   is a review in name only. This file is project-owned: `engsys update` never
-   touches it, and project closeout promotes new failure families into it.
+   fenced block into `verify.md`), and notes for reviewers. Both
+   `memory-brief.mjs` (Class A push injection) and `worker-package.mjs` consume
+   this overlay; review packages refuse to build while the sentinel remains.
+   This file is project-owned: `engsys update` never touches it, and project
+   closeout promotes new failure families into it.
 
 4. **Fold in imported AI config (if any).** If `docs/imported-ai-config/` exists,
    the installer found pre-existing Copilot/Cursor/etc. config and snapshotted it.
@@ -76,6 +80,19 @@ Do this:
    `.claude/hooks/post-edit-reminders.sh` nudges on them — edit the project's
    `engsys.config.yaml` and re-run `engsys update`, rather than hand-editing the
    generated hook (which `update` regenerates).
+
+6b. **Onboard project memory (`docs/memory-spec.md` §11).**
+   - Inspect recent PRs to **propose** `review_markers` and `trusted_bot_user_ids`
+     (resolved to numeric GitHub user `databaseId`s via `gh api "users/<slug>[bot]"`,
+     never App IDs) for `.claude/memory.yml`. The operator confirms them — nothing
+     is trusted automatically, and `dependabot` and `github-actions` are never
+     proposed.
+   - Recommend requiring human review (via `CODEOWNERS` or branch rulesets) on
+     all Class A paths: `docs/agent-lessons/**`,
+     `.claude/workflows/briefs/project-brief-overlay.md`,
+     `docs/architecture/adr/**`, and `.claude/memory.yml`.
+   - Once confirmed, run `memory-sync.mjs --init` (and `--publish` if this host
+     is the configured writer; the cache directory is created lazily on first use).
 
 7. **Report** what you set, what you folded in or reconciled, and list anything you
    couldn't determine so the human can confirm. Then suggest running

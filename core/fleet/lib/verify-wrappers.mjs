@@ -59,6 +59,33 @@ import { fileURLToPath } from 'node:url';
 export const PLUGIN_SUBDIR = 'core';
 const P = (rel) => `${PLUGIN_SUBDIR}/${rel}`;
 
+/**
+ * Host ENGSYS_DIR files that run outside the plugin cache (engsys#88): the identity shim, the fleet
+ * kit entry points, and the supervisor script. Checked against the same release tree when --engsys-dir
+ * is given.
+ */
+export const ENGSYS_HOST_PATHS = [
+  'core/fleet/identity/bin/gh',
+  'core/fleet/verify.sh',
+  'core/fleet/lib/verify-wrappers.mjs',
+  'core/fleet/launch.sh',
+  'core/fleet/supervise.sh',
+  'core/fleet/lib/fleet-env.sh',
+  'core/fleet/bin/fleet',
+  'core/skills/agent-sessions/scripts/fleet-supervisor.sh',
+];
+
+/** Settings env keys that can hijack hook execution or singleton fencing (engsys#96 M3). */
+export const DANGEROUS_SETTINGS_ENV_KEYS = [
+  'PATH',
+  'NODE_OPTIONS',
+  'CLAUDE_PLUGIN_ROOT',
+  'ENGSYS_SINGLETON_ROLE',
+  'GITHUB_API_URL',
+  'ENGSYS_ALLOW_CUSTOM_GITHUB_API_URL',
+  'GH_HOST',
+];
+
 /** Claude Code's PID-marker directory at the top of an install root: written by Claude Code, never loaded. */
 export const IN_USE = '.in_use';
 
@@ -102,6 +129,181 @@ export function scanRoot(root) {
 /** Scan every root. → { [root]: scanRoot(root) } */
 export function localState(roots) {
   return Object.fromEntries(roots.map((r) => [r, scanRoot(r)]));
+}
+
+/**
+ * Scan the protected host kit paths under engsysDir (engsys#88).
+ * → { [repoPath]: sha | 'missing' | 'not-a-file' }. Any symlink along the path (including engsysDir
+ * itself) is 'not-a-file'.
+ */
+export function scanHost(engsysDir) {
+  const out = {};
+  let rootSt = null;
+  try {
+    rootSt = fs.lstatSync(engsysDir);
+  } catch (e) {
+    if (e && e.code === 'ENOENT') {
+      for (const rel of ENGSYS_HOST_PATHS) out[rel] = 'missing';
+      return out;
+    }
+    throw e;
+  }
+  if (rootSt.isSymbolicLink() || !rootSt.isDirectory()) {
+    for (const rel of ENGSYS_HOST_PATHS) out[rel] = 'not-a-file';
+    return out;
+  }
+  for (const rel of ENGSYS_HOST_PATHS) {
+    const parts = rel.split('/');
+    let cur = engsysDir;
+    let state = null;
+    for (let i = 0; i < parts.length; i++) {
+      cur = path.join(cur, parts[i]);
+      let st;
+      try {
+        st = fs.lstatSync(cur);
+      } catch (e) {
+        if (e && e.code === 'ENOENT') state = 'missing';
+        else throw e;
+        break;
+      }
+      if (st.isSymbolicLink()) { state = 'not-a-file'; break; }
+      if (i < parts.length - 1 && !st.isDirectory()) { state = 'not-a-file'; break; }
+      if (i === parts.length - 1 && !st.isFile()) { state = 'not-a-file'; break; }
+    }
+    out[rel] = state ?? blobSha(fs.readFileSync(cur));
+  }
+  return out;
+}
+
+/**
+ * Compare scanHost(engsysDir) with the release tree (engsys#88).
+ * → [{ root, path, absPath, kind, have }]
+ */
+export function compareHost(tree, hostState, engsysDir) {
+  const diffs = [];
+  for (const [p, have] of Object.entries(hostState)) {
+    const want = tree.get(p) ?? null;
+    const absPath = path.join(engsysDir, p);
+    if (want === null) diffs.push({ root: engsysDir, path: p, absPath, kind: 'missing-in-release', have });
+    else if (have === 'missing') diffs.push({ root: engsysDir, path: p, absPath, kind: 'missing', have: '-' });
+    else if (have === 'not-a-file') diffs.push({ root: engsysDir, path: p, absPath, kind: 'not-a-file', have });
+    else if (want !== have) diffs.push({ root: engsysDir, path: p, absPath, kind: 'modified', have });
+  }
+  return diffs;
+}
+
+/**
+ * Check Claude Code settings files for hook/env/plugin overrides or pin drift (engsys#96 M3).
+ * Inspects:
+ *   - <projectDir>/.claude/settings.json (disableAllHooks, hooks, protected env, and optional blob SHA match vs origin)
+ *   - <projectDir>/.claude/settings.local.json
+ *   - <userSettingsDir>/settings.json and <userSettingsDir>/settings.local.json
+ */
+export function checkSettings({ projectDir, userSettingsDir = '', pinSettingsSha = '' }) {
+  const problems = [];
+  const pinFile = path.join(projectDir, '.claude', 'settings.json');
+  let pinCfg = null;
+  let pinEnabled = new Set();
+  if (fs.existsSync(pinFile)) {
+    let st;
+    try { st = fs.lstatSync(pinFile); } catch { st = null; }
+    if (!st || st.isSymbolicLink() || !st.isFile()) {
+      problems.push(`settings   ${pinFile} is not a regular file`);
+    } else {
+      const raw = fs.readFileSync(pinFile);
+      if (pinSettingsSha) {
+        const haveSha = blobSha(raw);
+        if (haveSha !== pinSettingsSha) {
+          problems.push(`settings   ${pinFile} differs from origin (${haveSha} != ${pinSettingsSha})`);
+        }
+      }
+      try {
+        pinCfg = JSON.parse(raw.toString('utf8'));
+        if (!pinCfg || typeof pinCfg !== 'object' || Array.isArray(pinCfg)) {
+          problems.push(`settings   ${pinFile} is not a JSON object`);
+        } else {
+          if (pinCfg.disableAllHooks === true) {
+            problems.push(`settings   ${pinFile} sets disableAllHooks: true`);
+          }
+          if (pinCfg.hooks !== undefined) {
+            problems.push(`settings   ${pinFile} defines hooks`);
+          }
+          if (pinCfg.env && typeof pinCfg.env === 'object' && !Array.isArray(pinCfg.env)) {
+            for (const k of DANGEROUS_SETTINGS_ENV_KEYS) {
+              if (Object.prototype.hasOwnProperty.call(pinCfg.env, k)) {
+                problems.push(`settings   ${pinFile} overrides protected env ${k}`);
+              }
+            }
+          }
+          pinEnabled = new Set(
+            pinCfg.enabledPlugins && typeof pinCfg.enabledPlugins === 'object' && !Array.isArray(pinCfg.enabledPlugins)
+              ? Object.entries(pinCfg.enabledPlugins)
+                  .filter(([, v]) => v === true)
+                  .map(([k]) => k)
+              : [],
+          );
+        }
+      } catch {
+        problems.push(`settings   ${pinFile} is not valid JSON`);
+      }
+    }
+  } else if (pinSettingsSha) {
+    problems.push(`settings   ${pinFile} is missing (expected ${pinSettingsSha})`);
+  }
+
+  const overlayFiles = [path.join(projectDir, '.claude', 'settings.local.json')];
+  if (userSettingsDir) {
+    overlayFiles.push(
+      path.join(userSettingsDir, 'settings.json'),
+      path.join(userSettingsDir, 'settings.local.json'),
+    );
+  }
+  for (const f of overlayFiles) {
+    let st;
+    try { st = fs.lstatSync(f); } catch (e) {
+      if (e && e.code === 'ENOENT') continue;
+      problems.push(`settings   ${f} cannot be stat'd`);
+      continue;
+    }
+    if (st.isSymbolicLink() || !st.isFile()) {
+      problems.push(`settings   ${f} is not a regular file`);
+      continue;
+    }
+    let cfg;
+    try {
+      cfg = JSON.parse(fs.readFileSync(f, 'utf8'));
+    } catch {
+      problems.push(`settings   ${f} is not valid JSON`);
+      continue;
+    }
+    if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) {
+      problems.push(`settings   ${f} is not a JSON object`);
+      continue;
+    }
+    if (cfg.disableAllHooks === true) {
+      problems.push(`settings   ${f} sets disableAllHooks: true`);
+    }
+    if (cfg.hooks !== undefined) {
+      problems.push(`settings   ${f} defines hooks`);
+    }
+    if (cfg.env && typeof cfg.env === 'object' && !Array.isArray(cfg.env)) {
+      for (const k of DANGEROUS_SETTINGS_ENV_KEYS) {
+        if (Object.prototype.hasOwnProperty.call(cfg.env, k)) {
+          problems.push(`settings   ${f} overrides protected env ${k}`);
+        }
+      }
+    }
+    if (cfg.enabledPlugins && typeof cfg.enabledPlugins === 'object' && !Array.isArray(cfg.enabledPlugins)) {
+      for (const [plugin, enabled] of Object.entries(cfg.enabledPlugins)) {
+        if (enabled === true && !pinEnabled.has(plugin)) {
+          problems.push(`settings   ${f} enables unpinned plugin ${plugin}`);
+        } else if (enabled === false && pinEnabled.has(plugin)) {
+          problems.push(`settings   ${f} disables pinned plugin ${plugin}`);
+        }
+      }
+    }
+  }
+  return problems;
 }
 
 /**
@@ -297,6 +499,10 @@ export function parseArgs(argv) {
     maxAgeMin: null,
     harness: process.env.HARNESS || process.env.FLEET_HARNESS || 'claude',
     globalPluginsDir: process.env.AGY_GLOBAL_PLUGINS_DIR || '',
+    engsysDir: '',
+    checkSettings: false,
+    userSettingsDir: '',
+    pinSettingsSha: '',
   };
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
@@ -311,6 +517,10 @@ export function parseArgs(argv) {
       case '--max-age-min': a.maxAgeMin = Number(v()); break;
       case '--harness': a.harness = v(); break;
       case '--global-plugins-dir': a.globalPluginsDir = v(); break;
+      case '--engsys-dir': a.engsysDir = v(); break;
+      case '--check-settings': a.checkSettings = true; break;
+      case '--user-settings-dir': a.userSettingsDir = v(); a.checkSettings = true; break;
+      case '--pin-settings-sha': a.pinSettingsSha = v(); a.checkSettings = true; break;
       default: throw new Error(`unknown argument: ${k}`);
     }
   }
@@ -349,16 +559,30 @@ export async function run(argv, { fetch = fetchRelease, now = Date.now, out = (s
     globalPluginsDir: a.globalPluginsDir,
   });
   if (sel.notInstalled) { out(`verify: not verified: ${a.pluginId} is not installed for ${a.projectDir} (run: fleet sync)`); return 3; }
-  if (sel.problems.length) return mismatch(sel.problems);
+  const preProblems = [...sel.problems];
+  if (a.checkSettings) {
+    preProblems.push(
+      ...checkSettings({
+        projectDir: a.projectDir,
+        userSettingsDir: a.userSettingsDir,
+        pinSettingsSha: a.pinSettingsSha,
+      }),
+    );
+  }
+  if (preProblems.length) return mismatch(preProblems);
 
   let local;
   try { local = localState(sel.roots); } catch (e) { out(`verify: not verified: can't read the plugin files (${e.message})`); return 3; }
+  let host = null;
+  if (a.engsysDir) {
+    try { host = scanHost(a.engsysDir); } catch (e) { out(`verify: not verified: can't read the host kit files (${e.message})`); return 3; }
+  }
   const where = sel.roots.join(', ');
 
   if (a.cache) {
     const c = readCache(a.cache);
     const ageMin = c ? (now() - Number(c.verifiedAt)) / 60_000 : Infinity;
-    if (c && c.result === 'ok' && c.repo === a.repo && c.tag === a.tag && sameJson(c.local, local) && ageMin >= 0 && ageMin < a.maxAgeMin) {
+    if (c && c.result === 'ok' && c.repo === a.repo && c.tag === a.tag && sameJson(c.local, local) && sameJson(c.host ?? null, host) && ageMin >= 0 && ageMin < a.maxAgeMin) {
       out(`verify: ok, ${countFiles(local)} protected files in ${where} match ${target} (unchanged since the check ${Math.floor(ageMin)}m ago)`);
       return 0;
     }
@@ -374,10 +598,13 @@ export async function run(argv, { fetch = fetchRelease, now = Date.now, out = (s
     problems.push(`release    ${a.tag} is commit ${rel.commit}, which is not on ${rel.defaultBranch} (compare: ${rel.status})`);
   }
   for (const d of compare(rel.tree, local)) problems.push(`${d.kind.padEnd(10)} ${cachePath(d.root, d.path)} ${d.have}`);
+  if (host) {
+    for (const d of compareHost(rel.tree, host, a.engsysDir)) problems.push(`${d.kind.padEnd(10)} ${d.absPath} ${d.have}`);
+  }
   if (problems.length) return mismatch(problems);
 
   if (a.cache) {
-    try { writeCache(a.cache, { repo: a.repo, tag: a.tag, local, result: 'ok', verifiedAt: now() }); } catch (e) {
+    try { writeCache(a.cache, { repo: a.repo, tag: a.tag, local, host, result: 'ok', verifiedAt: now() }); } catch (e) {
       out(`verify: WARNING can't write ${a.cache} (${e.message}); the next run asks GitHub again`);
     }
   }

@@ -963,7 +963,7 @@ const FLEET_CONFIG = [
   { scope: "command", key: "user.name", value: "fleet[bot]" },
 ];
 const PUSH_C = [
-  "-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=never", "-c", "core.fsmonitor=false", "-c", "http.sslVerify=true", "-c", "core.sshCommand=ssh", "-c", "core.askPass=",
+  "-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=never", "-c", "core.fsmonitor=false", "-c", "http.sslVerify=true", "-c", "core.sshCommand=/usr/bin/ssh -F /dev/null", "-c", "core.askPass=",
   "-c", "credential.helper=", "-c", "credential.helper=osxkeychain", "-c", "credential.https://github.com.helper=",
   "-c", "credential.https://github.com.helper=!node /fleet/gh-app-token.mjs git-credential", "-c", "push.gpgSign=false", "-c", "push.recurseSubmodules=no",
 ];
@@ -1067,8 +1067,8 @@ test("#71 L3: the push masks the checkout's credential helper, ssh command, askp
   // The reset comes first, then every non-local helper in git's read order: the fleet's env-scoped one last.
   const reset = values.indexOf("credential.helper=");
   assert.deepEqual(values.slice(reset, reset + 4), ["credential.helper=", "credential.helper=osxkeychain", "credential.https://github.com.helper=", "credential.https://github.com.helper=!fleet-helper"]);
-  assert.ok(values.includes("core.sshCommand=ssh") === false);
-  assert.ok(pushConfigArgs([]).includes("core.sshCommand=ssh"), "no ssh command anywhere: plain ssh");
+  assert.ok(values.includes("core.sshCommand=/usr/bin/ssh -F /dev/null") === false);
+  assert.ok(pushConfigArgs([]).includes("core.sshCommand=/usr/bin/ssh -F /dev/null"), "no ssh command anywhere: /usr/bin/ssh -F /dev/null (#96 I2)");
 });
 
 test("#71 L3: a guarded push refuses a checkout whose own config sets credential, proxy, TLS, URL-rewrite, include or transport keys", async () => {
@@ -1453,4 +1453,62 @@ test("CT-08 (NA-5): isClaudeCommand / isSupportedHarnessCommand accepts claude, 
   const owner = resolveSessionOwnerPid({ startPid: 300, ps: fakePs });
   assert.deepEqual(owner, { pid: 200, start: "Mon Oct 15 12:00:00 2026" });
 });
+
+test("#115: supervisorDecision and supervise --rotation-idle forfeit a self-held baton and release it on GitHub", async () => {
+  const own = "alice:acme-mm";
+  assert.equal(supervisorDecision({ home: HOME, status: { state: "held", holder: own, expiresAt: "x" }, ownHolder: own, rotationIdle: false }).relaunch, false);
+  const forf = supervisorDecision({ home: HOME, status: { state: "held", holder: own, expiresAt: "x" }, ownHolder: own, rotationIdle: true });
+  assert.equal(forf.relaunch, true);
+  assert.equal(forf.code, "forfeited_rotation");
+  assert.equal(forf.forfeited, true);
+  assert.equal(supervisorDecision({ home: HOME, status: { state: "held", holder: "bob:acme-mm", expiresAt: "x" }, ownHolder: own, rotationIdle: true }).relaunch, false, "held_elsewhere is never forfeited");
+
+  const w = world();
+  const s = session(w, { holder: own, run: "run-1" });
+  await s.baton.startup();
+  const out = [];
+  const io = { out: { write: (x) => out.push(x) }, err: { write: () => {} } };
+  const env = { FLEET_ID: "alice", ENGSYS_SESSION: "acme-mm" };
+  const fed = fakeFederation("alice");
+  assert.equal(await main(["supervise", "--repo", REPO, "--role", "merge", "--rotation-idle"], { ...io, env, api: w.api, federation: fed }), EXIT.OK);
+  assert.equal(JSON.parse(out.at(-1)).code, "forfeited_rotation");
+  // The relaunched session can now acquire immediately without waiting out the 10-minute TTL!
+  const next = session(w, { holder: own, run: "run-2", dir: s.stateDir });
+  const startNext = await next.baton.startup();
+  assert.equal(startNext.exit, EXIT.OK);
+  assert.equal(startNext.result.act, true);
+});
+
+test("#96 M4 & L1: revoke frees a self-held baton on integrity mismatch, and rootOwnedChain / xcrun validate the full git path chain", async () => {
+  const { rootOwnedChain } = await import("./baton.mjs");
+  const w = world();
+  const s = session(w, { holder: "alice:acme-mm", run: "run-1" });
+  await s.baton.startup();
+  const rev = await s.baton.revoke({ reason: "integrity-mismatch" });
+  assert.equal(rev.exit, EXIT.OK);
+  assert.equal(rev.result.revoked, true);
+  assert.ok(existsSync(s.store.lostFile), "local state marked lost");
+  assert.equal((await s.baton.fence()).exit, EXIT.REFUSED, "subsequent fences refuse immediately");
+
+  // rootOwnedChain rejects when any parent directory is group/other-writable or non-root
+  const mkSt = (uid, mode, isDir = true) => ({ uid, mode, isDirectory: () => isDir, isFile: () => !isDir });
+  const goodMap = {
+    "/": mkSt(0, 0o40755),
+    "/usr": mkSt(0, 0o40755),
+    "/usr/bin": mkSt(0, 0o40755),
+    "/usr/bin/xcrun": mkSt(0, 0o100755, false),
+    "/Library": mkSt(0, 0o40755),
+    "/Library/Developer": mkSt(0, 0o40755),
+    "/Library/Developer/CommandLineTools": mkSt(0, 0o40755),
+    "/Library/Developer/CommandLineTools/usr": mkSt(0, 0o40755),
+    "/Library/Developer/CommandLineTools/usr/bin": mkSt(0, 0o40755),
+    "/Library/Developer/CommandLineTools/usr/bin/git": mkSt(0, 0o100755, false),
+  };
+  assert.ok(rootOwnedChain("/Library/Developer/CommandLineTools/usr/bin/git", (p) => goodMap[p]));
+  const badParentMap = { ...goodMap, "/Library/Developer": mkSt(501, 0o40755) };
+  assert.equal(rootOwnedChain("/Library/Developer/CommandLineTools/usr/bin/git", (p) => badParentMap[p]), null);
+  const runXc = (exe, args) => (exe === "/usr/bin/xcrun" && args[0] === "--find" ? "/Library/Developer/CommandLineTools/usr/bin/git\n" : "git version 2");
+  assert.equal(pushGit({ dirs: ["/Library/Developer/CommandLineTools/usr/bin"], stat: (p) => goodMap[p], run: runXc, xcrun: true }), "/Library/Developer/CommandLineTools/usr/bin/git");
+});
+
 

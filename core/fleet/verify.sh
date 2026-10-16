@@ -101,7 +101,19 @@ else
     fi
   fi
   if [ "$rc" = 0 ]; then
-    args=(--repo "$repo" --tag "$ref" --plugin-id "engsys@$ENGSYS_MARKETPLACE" --project-dir "$PIN_DIR" --plugins "$plist" --harness "${HARNESS:-claude}")
+    args=(--repo "$repo" --tag "$ref" --plugin-id "engsys@$ENGSYS_MARKETPLACE" --project-dir "$PIN_DIR" --plugins "$plist" --harness "${HARNESS:-claude}" --check-settings --user-settings-dir "$HOME/.claude")
+    if [ -e "$ENGSYS_DIR" ] || [ -L "$ENGSYS_DIR" ]; then
+      args+=(--engsys-dir "$ENGSYS_DIR")
+    fi
+    if git -C "$PIN_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+      pin_origin_ref="$(git -C "$PIN_DIR" symbolic-ref --short -q refs/remotes/origin/HEAD 2>/dev/null || true)"
+      [ -n "$pin_origin_ref" ] || { git -C "$PIN_DIR" rev-parse --verify -q refs/remotes/origin/main >/dev/null 2>&1 && pin_origin_ref="origin/main"; }
+      [ -n "$pin_origin_ref" ] || { git -C "$PIN_DIR" rev-parse --verify -q refs/remotes/origin/master >/dev/null 2>&1 && pin_origin_ref="origin/master"; }
+      if [ -n "$pin_origin_ref" ]; then
+        pin_sha="$(git -C "$PIN_DIR" rev-parse -q --verify "refs/remotes/${pin_origin_ref}:.claude/settings.json" 2>/dev/null || true)"
+        [ -z "$pin_sha" ] || args+=(--pin-settings-sha "$pin_sha")
+      fi
+    fi
     [ -z "$max_age" ] || args+=(--cache "$FLEET_STATE/verify-wrappers.json" --max-age-min "$max_age")
     out="$(node "$FLEET_KIT_DIR/lib/verify-wrappers.mjs" "${args[@]}" 2>&1)" || rc=$?
     # node exits 1 on its own crash (a missing module, a syntax error): only the verifier's MISMATCH line counts.

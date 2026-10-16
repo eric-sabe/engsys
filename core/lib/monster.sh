@@ -386,3 +386,130 @@ monster_rotation_status() {
   fi
   return 0
 }
+
+# monster_stop_keepalive STATE_DIR ROLE: stop the detached keepalive recorded in
+# <state_dir>/baton-<role>.keepalive.pid (verify pid + start time when recorded) and remove the pidfile.
+monster_stop_keepalive() {
+  local state_dir="$1" role="$2" pidfile ka_pid="" ka_start="" cur_start="" i
+  pidfile="$state_dir/baton-$role.keepalive.pid"
+  [ -f "$pidfile" ] || return 0
+  IFS='|' read -r ka_pid ka_start _ <"$pidfile" || true
+  case "$ka_pid" in
+    '' | *[!0-9]*)
+      rm -f "$pidfile" 2>/dev/null || return 1
+      return 0 ;;
+  esac
+  if kill -0 "$ka_pid" 2>/dev/null; then
+    cur_start=$(ps -o lstart= -p "$ka_pid" 2>/dev/null | awk '{$1=$1; print}' || true)
+    if [ -n "$ka_start" ] && [ -n "$cur_start" ] && [ "$cur_start" != "$ka_start" ]; then
+      # PID was reused by a different process; the keepalive already exited.
+      rm -f "$pidfile" 2>/dev/null || return 1
+      return 0
+    fi
+    if [ -n "$ka_start" ] && [ -z "$cur_start" ]; then
+      # ps could not read lstart while kill -0 succeeded (or raced with exit); re-check kill -0 before failing closed.
+      if kill -0 "$ka_pid" 2>/dev/null; then
+        return 1
+      fi
+      rm -f "$pidfile" 2>/dev/null || return 1
+      return 0
+    fi
+    kill "$ka_pid" 2>/dev/null || true
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+      kill -0 "$ka_pid" 2>/dev/null || break
+      sleep 0.1
+    done
+    if kill -0 "$ka_pid" 2>/dev/null; then
+      kill -9 "$ka_pid" 2>/dev/null || true
+    fi
+  fi
+  rm -f "$pidfile" 2>/dev/null || return 1
+  return 0
+}
+
+# monster_baton_rotate ROLE HB_SCRIPT BATON_LIB ARGS...: scripted rotation sequence (engsys#116):
+#   1. Writes the final ledger heartbeat (`rotation requested`).
+#   2. Stops the keepalive (before releasing so a concurrent keepalive tick cannot renew after release).
+#   3. Releases the baton (`--reason rotation`).
+#   4. Exits non-zero, with a clear message, if any step fails.
+monster_baton_rotate() {
+  local role="$1" hb_script="$2" baton_lib="$3"
+  shift 3
+  local repo="" state_dir="" ledger="" session="" status="rotation requested" if_due="60m"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --repo) repo="${2:-}"; shift 2 ;;
+      --state-dir) state_dir="${2:-}"; shift 2 ;;
+      --state-dir=*) state_dir="${1#--state-dir=}"; shift ;;
+      --ledger | --issue) ledger="${2:-}"; shift 2 ;;
+      --session) session="${2:-}"; shift 2 ;;
+      --status) status="${2:-}"; shift 2 ;;
+      --if-due) if_due="${2:-}"; shift 2 ;;
+      *) echo "baton rotate ($role): unknown arg: $1" >&2; return 2 ;;
+    esac
+  done
+  if [ -z "$repo" ] || [ -z "$state_dir" ] || [ -z "$ledger" ]; then
+    echo "usage: $(basename "$hb_script" | sed 's/heartbeat/baton/') rotate --repo owner/name --state-dir DIR --ledger N [--session NAME] [--status text]" >&2
+    return 2
+  fi
+  case "$status" in
+    *[Rr]otation\ requested*) ;;
+    '') status="rotation requested" ;;
+    *) status="rotation requested — $status" ;;
+  esac
+
+  local hb_rc=0 hb_out="" rel_rc=0 rel_out="" ka_rc=0 err_msg=""
+  # Step 1: Write final ledger heartbeat ("rotation requested"). --if-due 60m checks the held baton locally
+  # without extending the GitHub lease TTL right before step 2 releases it; the ledger issue edit always runs.
+  hb_out=$(bash "$hb_script" --repo "$repo" --issue "$ledger" --state-dir "$state_dir" \
+    --if-due "$if_due" --status "$status" ${session:+--session "$session"} 2>&1) || hb_rc=$?
+  [ -z "$hb_out" ] || printf '%s\n' "$hb_out"
+  if [ "$hb_rc" -ne 0 ]; then
+    err_msg="${err_msg:+$err_msg; }step 1 (final heartbeat) failed (exit $hb_rc)"
+  fi
+
+  # Stop the detached keepalive before releasing so a concurrent keepalive tick cannot renew the baton after release.
+  if ! monster_stop_keepalive "$state_dir" "$role"; then
+    ka_rc=1
+  fi
+
+  # Step 2: Release the baton (--reason rotation).
+  if [ -n "${MONSTER_BATON_RELEASE_CMD:-}" ]; then
+    # shellcheck disable=SC2086
+    rel_out=$($MONSTER_BATON_RELEASE_CMD --role "$role" --repo "$repo" --state-dir "$state_dir" \
+      --reason rotation ${session:+--session "$session"} 2>&1) || rel_rc=$?
+  else
+    rel_out=$(node "$baton_lib" release --role "$role" --repo "$repo" --state-dir "$state_dir" \
+      --reason rotation ${session:+--session "$session"} 2>&1) || rel_rc=$?
+  fi
+  [ -z "$rel_out" ] || printf '%s\n' "$rel_out"
+  if [ "$rel_rc" -ne 0 ]; then
+    err_msg="${err_msg:+$err_msg; }step 2 (baton release) failed (exit $rel_rc)"
+  elif ! printf '%s' "$rel_out" | tail -n 1 | jq -e '.ok == true and .released == true' >/dev/null 2>&1; then
+    rel_rc=1
+    err_msg="${err_msg:+$err_msg; }step 2 (baton release) did not release a held baton: $(printf '%s' "$rel_out" | tail -n 1)"
+  fi
+
+  # Step 3: Ensure the detached keepalive is stopped.
+  if ! monster_stop_keepalive "$state_dir" "$role" || [ "$ka_rc" -ne 0 ]; then
+    err_msg="${err_msg:+$err_msg; }step 3 (stop keepalive) failed"
+  fi
+
+  if [ -n "$err_msg" ]; then
+    printf 'ERROR: %s baton rotate failed: %s\n' "$role" "$err_msg" >&2
+    return 1
+  fi
+  return 0
+}
+
+# monster_memory_tail_sync ROLE REPO STATE_DIR: best-effort memory delta sync on heartbeat (docs/memory-spec.md §9).
+monster_memory_tail_sync() {
+  local role="$1" repo="$2" state_dir="${3:-}" mem_script
+  [ "${ENGSYS_MEMORY_SYNC:-}" != "0" ] || return 0
+  [ "${ENGSYS_MEMORY_SYNC:-0}" = 1 ] || [ -f "${CLAUDE_PROJECT_DIR:-.}/.claude/memory.yml" ] || return 0
+  mem_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../scripts/memory-sync.mjs"
+  [ -f "$mem_script" ] || return 0
+  node "$mem_script" --delta --repo "$repo" ${state_dir:+--state-dir "$state_dir"} ${FLEET_ID:+--role "$role" --fleet "$FLEET_ID"} >/dev/null 2>&1 || true
+  return 0
+}
+

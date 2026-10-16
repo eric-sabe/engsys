@@ -72,5 +72,6 @@ Every nudge is routed first with `node <engsys-root>/fleet/msg.mjs route <addres
 
 ## Context discipline & Hard rules
 
-- **Context is cache; files and GitHub are truth.** Same contract as **§ Context discipline in [`<engsys-root>/skills/merge-monster/SKILL.md`](../merge-monster/SKILL.md)**.
+- **Context is cache; files and GitHub are truth.** Same contract as **§ Context discipline in [`<engsys-root>/skills/merge-monster/SKILL.md`](../merge-monster/SKILL.md)**: on `ROTATION_REQUESTED` or high context pressure when idle, post a session-end digest, run `<skill-dir>/scripts/mnt-baton.sh rotate --repo <repo> --state-dir <state_dir> --ledger <ledger_issue> --session <name>`, and stop. Never leave the baton for the next session — its token dies with you; an unreleased baton blocks your own relaunch until the lease expires.
 - **Hard rules**: Never open a fix PR or apply a label outside Phase 1's read-only scope · dismiss only through an approved `fp_policies` entry and `mnt-fp-dismiss.sh` · never merge anything · never post `/approve`, `/deny`, or an approving PR review yourself · never nudge a session without routing its address through `msg.mjs route` first · never write to GitHub without a passing fence (`mnt-act.sh`) · see [`references/phase-details.md`](references/phase-details.md) for full details.
+

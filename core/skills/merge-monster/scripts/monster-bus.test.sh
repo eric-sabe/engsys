@@ -23,10 +23,17 @@ cat >"$T/bin/gh" <<'SH'
 echo "gh $*" >>"$FAKE/gh.log"
 key="${1:-}-${2:-}"
 case "$key" in api-rate_limit) echo 5000; exit 0 ;; esac
+jq_expr="" body_file=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --jq) jq_expr="$2"; shift 2 ;;
+    --body-file) body_file="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -z "$body_file" ] || [ ! -f "$body_file" ] || cp "$body_file" "$FAKE/last-body"
 f="$FAKE/resp/$key"
 [ -f "$f" ] || exit 0
-jq_expr=""
-while [ $# -gt 0 ]; do case "$1" in --jq) jq_expr="$2"; shift 2 ;; *) shift ;; esac; done
 if [ -n "$jq_expr" ]; then jq -r "$jq_expr" "$f"; else cat "$f"; fi
 SH
 chmod +x "$T/bin/gh"
@@ -409,5 +416,64 @@ grep -n 'review-findings\|mm-handoff' "$HERE/mm-preflight.sh" | grep -v '^[0-9]*
   && bad "no marker name is hardcoded in the script's code" "$(grep -n 'review-findings\|mm-handoff' "$HERE/mm-preflight.sh")" || ok "no marker name is hardcoded in the script's code"
 rm -f "$T/resp"/*
 
+echo "scripted baton rotation (engsys#116)"
+cat >"$T/bin/mock-release-ok" <<'SH'
+#!/usr/bin/env bash
+role="" state_dir="" reason="exit"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --role) role="$2"; shift 2 ;;
+    --state-dir) state_dir="$2"; shift 2 ;;
+    --reason) reason="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+f="$state_dir/baton-$role.json"
+[ -f "$f" ] || { echo '{"ok":true,"released":false,"code":"not_started"}'; exit 0; }
+jq --arg r "$reason" '.token = null | .releasedAt = "2026-10-15T12:00:00Z" | .releaseReason = $r' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
+printf '{"ok":true,"released":true,"code":"released","role":"%s","reason":"%s"}\n' "$role" "$reason"
+SH
+cat >"$T/bin/mock-release-fail" <<'SH'
+#!/usr/bin/env bash
+echo '{"ok":false,"code":"error","reason":"simulated release failure"}'
+exit 3
+SH
+chmod +x "$T/bin/mock-release-ok" "$T/bin/mock-release-fail"
+
+rm -rf "$T/state"/baton-* "$T/state/.watch" "$T/last-body"
+held merge
+printf '%s\n' '{"body":"<!-- mm-heartbeat -->\nlast: old\n<!-- /mm-heartbeat -->\n"}' >"$T/resp/issue-view"
+sleep 30 &
+KA_PID=$!
+BUSES+=("$KA_PID")
+KA_START=$(ps -o lstart= -p "$KA_PID" 2>/dev/null | awk '{$1=$1; print}' || true)
+printf '%s|%s|1|start|r1\n' "$KA_PID" "$KA_START" >"$T/state/baton-merge.keepalive.pid"
+run env FLEET_ID=alice MONSTER_BATON_RELEASE_CMD="$T/bin/mock-release-ok" bash "$HERE/mm-baton.sh" rotate \
+  --repo acme/app --state-dir "$T/state" --ledger 7 --session acme-mm
+rc_is "mm-baton.sh rotate on a held baton exits 0" 0
+[ "$(jq -r '.token // "null"' "$T/state/baton-merge.json")" = "null" ] && [ "$(jq -r '.releaseReason' "$T/state/baton-merge.json")" = "rotation" ] \
+  && ok "  …leaves baton-merge.json released with releaseReason=rotation" || bad "  …baton-merge.json not released" "$(cat "$T/state/baton-merge.json")"
+grep -q "status: rotation requested" "$T/last-body" && ok "  …sets ledger heartbeat to rotation requested" || bad "  …ledger heartbeat not set" "$(cat "$T/last-body" 2>/dev/null || true)"
+! kill -0 "$KA_PID" 2>/dev/null && [ ! -f "$T/state/baton-merge.keepalive.pid" ] \
+  && ok "  …stops the keepalive process and removes keepalive.pid" || bad "  …keepalive still running or pidfile kept"
+
+rm -rf "$T/state"/baton-* "$T/state/.watch" "$T/last-body"
+held maintain
+printf '%s\n' '{"body":"<!-- mnt-heartbeat -->\nlast: old\n<!-- /mnt-heartbeat -->\n"}' >"$T/resp/issue-view"
+sleep 30 &
+KA_PID2=$!
+BUSES+=("$KA_PID2")
+KA_START2=$(ps -o lstart= -p "$KA_PID2" 2>/dev/null | awk '{$1=$1; print}' || true)
+printf '%s|%s|1|start|r1\n' "$KA_PID2" "$KA_START2" >"$T/state/baton-maintain.keepalive.pid"
+run env FLEET_ID=alice MONSTER_BATON_RELEASE_CMD="$T/bin/mock-release-fail" bash "$MNT/mnt-baton.sh" rotate \
+  --repo acme/app --state-dir "$T/state" --ledger 8 --session acme-mm
+rc_is "mnt-baton.sh rotate exits non-zero when release fails" 1
+has "  …reports step 2 failure clearly" "step 2 (baton release) failed"
+grep -q "status: rotation requested" "$T/last-body" && ok "  …heartbeat still says rotation requested (so supervisor forfeiture applies)" || bad "  …heartbeat not rotation requested on release failure" "$(cat "$T/last-body" 2>/dev/null || true)"
+! kill -0 "$KA_PID2" 2>/dev/null && [ ! -f "$T/state/baton-maintain.keepalive.pid" ] \
+  && ok "  …still stops the keepalive even when release fails" || bad "  …keepalive not stopped on release failure"
+rm -f "$T/resp"/*
+
 echo "monster-bus.test: $pass passed, $fail failed"
 [ "$fail" = 0 ]
+

@@ -37,6 +37,30 @@ export POOL_RUN_RETRY_SECS=1
 STORE="$T/store"
 
 slot_states() { node "$CLI" status --store "$STORE" | node -e 'const s=JSON.parse(require("fs").readFileSync(0,"utf8"));console.log(s.slots.map((x)=>x.state).join(","))'; }
+wait_for_slot_states() {
+  local want="$1"
+  for _ in $(seq 1 100); do
+    [[ "$(slot_states)" == "$want" ]] && return 0
+    sleep 0.1
+  done
+  return 1
+}
+wait_for_grep() {
+  local pat="$1" file="$2"
+  for _ in $(seq 1 100); do
+    grep -q "$pat" "$file" 2>/dev/null && return 0
+    sleep 0.1
+  done
+  return 1
+}
+wait_for_proc_gone() {
+  local pat="$1"
+  for _ in $(seq 1 100); do
+    pgrep -f "$pat" >/dev/null 2>&1 || return 0
+    sleep 0.1
+  done
+  return 1
+}
 
 echo "pool-run.sh"
 
@@ -50,36 +74,39 @@ rc=0
 check "exit code of the command is propagated" "$([[ "$rc" == "3" ]] && echo 0 || echo 1)"
 check "grant env is exported to the command" "$(grep -q '^port=4000 db=acme_test_1 slot=1 owner=ci-main$' "$T/env.txt" && echo 0 || echo 1)"
 check "the slot is held while the command runs" "$(grep -q '"state":"held"' "$T/during.json" && echo 0 || echo 1)"
-check "the slot is released after the command (even though it failed)" "$([[ "$(slot_states)" == "free,free" ]] && echo 0 || echo 1)"
-check "release is announced" "$(grep -q 'released' "$T/err1.txt" && echo 0 || echo 1)"
+check "the slot is released after the command (even though it failed)" "$(wait_for_slot_states "free,free" && echo 0 || echo 1)"
+check "release is announced" "$(wait_for_grep 'released' "$T/err1.txt" && echo 0 || echo 1)"
 
 # 2. SIGTERM: the command is terminated and the slot released via the EXIT trap.
 "$RUN" --owner ci-main --store "$STORE" -- sleep 28.41 2>"$T/err2.txt" &
 runner=$!
 for _ in $(seq 1 100); do
-  [[ "$(slot_states)" == "held,free" ]] && break
+  if [[ "$(slot_states)" == "held,free" ]] && grep -q 'granted slot 1' "$T/err2.txt" 2>/dev/null && pgrep -f 'sleep 28.41' >/dev/null 2>&1; then
+    break
+  fi
   sleep 0.1
 done
-check "slot held while a long command runs" "$([[ "$(slot_states)" == "held,free" ]] && echo 0 || echo 1)"
+check "slot held while a long command runs" "$(wait_for_slot_states "held,free" && echo 0 || echo 1)"
 kill -TERM "$runner"
 rc=0
 wait "$runner" || rc=$?
 check "SIGTERM exits 143" "$([[ "$rc" == "143" ]] && echo 0 || echo 1)"
-check "slot released after SIGTERM" "$([[ "$(slot_states)" == "free,free" ]] && echo 0 || echo 1)"
-check "SIGTERM terminated the command" "$(pgrep -f 'sleep 28.41' >/dev/null 2>&1 && echo 1 || echo 0)"
+check "slot released after SIGTERM" "$(wait_for_slot_states "free,free" && echo 0 || echo 1)"
+check "SIGTERM terminated the command" "$(wait_for_proc_gone 'sleep 28.41' && echo 0 || echo 1)"
 
 # 3. A run that outlives the TTL keeps its lease via the background heartbeat.
 rc=0
 "$RUN" --owner ci-main --store "$STORE" --ttl 0.05 --heartbeat-secs 1 -- sleep 5 2>"$T/err3.txt" || rc=$?
 check "heartbeat keeps a run alive past the TTL (ttl 3s, run 5s)" "$([[ "$rc" == "0" ]] && echo 0 || echo 1)"
+wait_for_slot_states "free,free" || true
 
 # 4. A lost lease terminates the command and exits 75. (Heartbeat slower than the TTL: the lease
 #    expires, the first beat is refused as expired, the retry too.)
 rc=0
 "$RUN" --owner ci-main --store "$STORE" --ttl 0.05 --heartbeat-secs 4 -- sleep 29.37 2>"$T/err4.txt" || rc=$?
 check "confirmed lease loss exits 75" "$([[ "$rc" == "75" ]] && echo 0 || echo 1)"
-check "lease loss is reported" "$(grep -q 'confirmed slot 1 lost' "$T/err4.txt" && echo 0 || echo 1)"
-check "the command was terminated, not left running" "$(pgrep -f 'sleep 29.37' >/dev/null 2>&1 && echo 1 || echo 0)"
+check "lease loss is reported" "$(wait_for_grep 'confirmed slot 1 lost' "$T/err4.txt" && echo 0 || echo 1)"
+check "the command was terminated, not left running" "$(wait_for_proc_gone 'sleep 29.37' && echo 0 || echo 1)"
 
 # 5. Saturated pool with --no-wait: exit 1, the command never runs.
 node "$CLI" acquire --owner holder-a --no-wait --store "$STORE" >/dev/null

@@ -90,8 +90,10 @@ if [ -n "$STATE_DIR" ]; then
   # Record the model's pulse only AFTER the heartbeat write succeeds (engsys#138).
   node "$(dirname "${BASH_SOURCE[0]}")/../../../lib/lease/baton.mjs" renew --pulse --if-due 60m --role merge --repo "$REPO" \
     --state-dir "$STATE_DIR" ${SESSION:+--session "$SESSION"} >/dev/null 2>&1 || true
+  monster_memory_tail_sync merge "$REPO" "$STATE_DIR"
 fi
 echo "heartbeat: $NOW ($STATUS)"
 if [ "$MONSTER_ROTATION" = 1 ]; then
-  echo "ROTATION_REQUESTED merge ($STATUS) with nothing active: post the session-end digest, release the baton (mm-baton.sh release --reason rotation) and stop; the fleet supervisor relaunches the session"
+  echo "ROTATION_REQUESTED merge ($STATUS) with nothing active: post the session-end digest, run mm-baton.sh rotate --repo $REPO --state-dir $STATE_DIR --ledger $ISSUE${SESSION:+ --session $SESSION}, and stop; the fleet supervisor relaunches the session"
 fi
+

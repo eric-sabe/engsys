@@ -249,7 +249,13 @@ code="$(cat "$FAKE/baton")"
 case "$code" in
   expired_self) echo '{"relaunch":true,"code":"expired","forfeited":true,"holder":"alice:acme-mm","reason":"baton of alice:acme-mm expired"}'; exit 0 ;;
   free | expired | malformed) echo "{\"relaunch\":true,\"code\":\"$code\",\"reason\":\"ok\"}"; exit 0 ;;
-  held_self | held_elsewhere | not_home) echo "{\"relaunch\":false,\"code\":\"$code\",\"reason\":\"held by bob:acme-mm\"}"; exit 1 ;;
+  held_self)
+    if [[ " $* " == *" --rotation-idle "* ]]; then
+      echo '{"relaunch":true,"code":"forfeited_rotation","forfeited":true,"holder":"alice:acme-mm","reason":"baton of alice:acme-mm forfeited on idle rotation"}'
+      exit 0
+    fi
+    echo '{"relaunch":false,"code":"held_self","reason":"held by alice:acme-mm"}'; exit 1 ;;
+  held_elsewhere | not_home) echo "{\"relaunch\":false,\"code\":\"$code\",\"reason\":\"held by bob:acme-mm\"}"; exit 1 ;;
   *) echo "{\"relaunch\":false,\"code\":\"error\",\"reason\":\"baton unreadable: 502\"}"; exit 3 ;;
 esac
 SH
@@ -289,9 +295,14 @@ reset; baton free; ledger 10 "session end"; pane exited; run
 expect "baton: session end stays a deliberate stop" "!^launch"
 
 reset; baton held_self; ledger 10 "rotation requested"; pane idle; run
-expect "baton: rotation + idle but the baton is still held → wait" "!^launch"
-baton free; run
-expect "  …released → relaunched" "^launch acme-mm"
+expect "baton: rotation + idle + held_self → forfeited and relaunched (#115)" "^launch acme-mm"
+expect "  …passed --rotation-idle to supervise" "^baton --repo o/r --role merge --session acme-mm --rotation-idle"
+reset; baton held_self; ledger 10 "rotation requested"; pane busy; run
+expect "baton: rotation + busy + held_self → wait (#115)" "!^launch"
+reset; baton held_self; ledger 2 "rotation requested"; pane idle; run
+expect "baton: rotation within grace + idle + held_self → wait (#115)" "!^launch"
+reset; baton held_elsewhere; ledger 10 "rotation requested"; pane idle; run
+expect "baton: rotation + idle + held_elsewhere → never relaunched (#115)" "!^launch"
 
 reset; baton expired; ledger 90 "ok — merging #12"; pane idle; run
 expect "baton: stale + alive + idle + forfeited baton → relaunched" "^launch acme-mm"
@@ -336,7 +347,9 @@ expect "an unknown 6th field skips the line" "!^launch"
 # check) holds every relaunch of a 6th-field session, fail closed, said once on its ledger; a running one
 # is never killed for it. The fake answers from $FAKE/integrity (0 | 1 | 3) and records each call.
 printf '#!/usr/bin/env bash\necho "integrity $*" >>"$FAKE/actions"; exit "$(cat "$FAKE/integrity")"\n' >"$T/integrity.sh"
-printf 'TMUX_SESSION=acme\nLAUNCH_CMD=bash %s/launch.sh\nBATON_CMD=bash %s/baton.sh\nINTEGRITY_CMD=bash %s/integrity.sh --alert\nREPO=o/r\nacme-mm|1|60|||merge\nacme-rel|2|60\n' "$T" "$T" "$T" >"$T/w/sup.conf"
+printf '#!/usr/bin/env bash\necho "revoke $*" >>"$FAKE/actions"; exit 0\n' >"$T/revoke.sh"
+chmod +x "$T/revoke.sh"
+printf 'TMUX_SESSION=acme\nLAUNCH_CMD=bash %s/launch.sh\nBATON_CMD=bash %s/baton.sh\nBATON_REVOKE_CMD=bash %s/revoke.sh\nINTEGRITY_CMD=bash %s/integrity.sh --alert\nREPO=o/r\nacme-mm|1|60|||merge\nacme-rel|2|60\n' "$T" "$T" "$T" "$T" >"$T/w/sup.conf"
 integrity() { echo "$1" >"$T/integrity"; }
 ledger2() { jq -n --arg b "last: $(iso "$1") — status: $2" '{state:"OPEN", body:$b}' >"$T/ledger-2.json"; }
 rpane() { echo zsh >"$T/pane-acme-rel"; : >"$T/capture-acme-rel"; }
@@ -346,6 +359,7 @@ expect "integrity: asked once per tick" "^integrity --alert"
 expect "  …passes → crash recovery relaunches as before" "^launch acme-mm"
 reset; baton free; integrity 1; ledger 90 "ok — merging #12"; ledger2 90 "ok"; pane exited; rpane; run
 expect "integrity: mismatch → the singleton monster is not relaunched" "!^launch acme-mm"
+expect "  …revokes the singleton baton lease (#96 M4)" "^revoke --repo o/r --role merge --session acme-mm --reason integrity-mismatch"
 expect "  …the lease is not even asked" "!^baton"
 expect "  …a session without a role is still relaunched" "^launch acme-rel"
 expect "  …the held relaunch is said on the monster's ledger" "comment 1: .*held: the engsys plugin on this host does not match its release"
@@ -358,6 +372,7 @@ expect "  …a new hold after a pass is said again" "comment 1: .*held"
 grep -q "integrity: MISMATCH" "$T/w/logs/fleet-supervisor/supervisor.log" && { pass=$((pass + 1)); echo "  ok    …logged"; } || { fail=$((fail + 1)); echo "  FAIL  …logged"; }
 reset; baton free; integrity 1; ledger 10 "rotation requested"; ledger2 2 "ok"; pane idle; rpane; run
 expect "integrity: mismatch + rotation requested + idle → not relaunched, not killed" "!^kill acme-mm"
+expect "  …revokes baton on live session too (#96 M4)" "^revoke --repo o/r --role merge --session acme-mm --reason integrity-mismatch"
 reset; baton expired; integrity 1; ledger 90 "ok — merging #12"; ledger2 2 "ok"; pane idle; rpane; run
 expect "integrity: mismatch + stale + idle → never killed" "!^kill acme-mm"
 expect "  …escalated on the ledger instead" "comment 1: .*stale"

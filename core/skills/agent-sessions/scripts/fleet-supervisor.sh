@@ -224,7 +224,7 @@ fi
 trap 'rmdir "$LOCKDIR" 2>/dev/null || true' EXIT
 
 TMUX_SESSION="" LAUNCH_CMD="" DEFAULT_REPO="" ROTATE_GRACE_MIN=3 HOST_CHECK_CMD=""
-HOST_HEALTH_CMD="" HOST_HEALTH_INCIDENT="host-health" NOTIFY_CMD="" HEARTBEAT_CMD="" BATON_CMD="" INTEGRITY_CMD=""
+HOST_HEALTH_CMD="" HOST_HEALTH_INCIDENT="host-health" NOTIFY_CMD="" HEARTBEAT_CMD="" BATON_CMD="" BATON_REVOKE_CMD="" INTEGRITY_CMD=""
 AUTH_PROBE=on AUTH_PROBE_TIMEOUT_SEC=90 AUTH_CHECK_WAIT_SEC=45 STATUS_URL=""
 HARNESS="${HARNESS:-${FLEET_HARNESS:-claude}}"
 SESSIONS=()
@@ -242,6 +242,7 @@ while IFS= read -r line; do
     NOTIFY_CMD=*) NOTIFY_CMD="${line#NOTIFY_CMD=}" ;;
     HEARTBEAT_CMD=*) HEARTBEAT_CMD="${line#HEARTBEAT_CMD=}" ;;
     BATON_CMD=*) BATON_CMD="${line#BATON_CMD=}" ;;
+    BATON_REVOKE_CMD=*) BATON_REVOKE_CMD="${line#BATON_REVOKE_CMD=}" ;;
     INTEGRITY_CMD=*) INTEGRITY_CMD="${line#INTEGRITY_CMD=}" ;;
     AUTH_PROBE=*) AUTH_PROBE="${line#AUTH_PROBE=}" ;;
     AUTH_PROBE_TIMEOUT_SEC=*) AUTH_PROBE_TIMEOUT_SEC="${line#AUTH_PROBE_TIMEOUT_SEC=}" ;;
@@ -535,15 +536,26 @@ notify() { # notify <args...> → 0 when NOTIFY_CMD ran and succeeded
 # incident (latch: <name>.baton-alerted), resolved on the first clean read after it.
 BATON_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/lease/baton.mjs"
 FORFEIT_CHECK_MIN=10 # the baton TTL (baton.mjs TTL_MINUTES): no younger heartbeat can sit on an expired lease
-baton_allows() { # baton_allows <name> <repo> <role> → 0 may relaunch
-  local name="$1" repo="$2" role="$3" out rc=0 latch="$STATE_DIR/$1.baton-alerted"
+revoke_singleton_baton() { # revoke_singleton_baton <name> <repo> <role> <reason>
+  local r_name="$1" r_repo="$2" r_role="$3" r_reason="$4"
+  if [ -n "${BATON_REVOKE_CMD:-}" ]; then
+    # shellcheck disable=SC2086
+    $BATON_REVOKE_CMD --repo "$r_repo" --role "$r_role" --session "$r_name" --reason "$r_reason" >>"$LOG" 2>&1 || return 1
+  else
+    node "$BATON_LIB" revoke --repo "$r_repo" --role "$r_role" --session "$r_name" --state-dir "$STATE_DIR" --reason "$r_reason" >>"$LOG" 2>&1 || return 1
+  fi
+}
+baton_allows() { # baton_allows <name> <repo> <role> [rotation_idle] → 0 may relaunch
+  local name="$1" repo="$2" role="$3" mode="${4:-}" out rc=0 latch="$STATE_DIR/$1.baton-alerted" rot_flag=""
+  [ "$mode" = "rotation_idle" ] && rot_flag="--rotation-idle"
   if [ -n "$BATON_CMD" ]; then
     # shellcheck disable=SC2086 # a command line, like LAUNCH_CMD
-    out=$($BATON_CMD --repo "$repo" --role "$role" --session "$name" 2>&1) || rc=$?
+    out=$($BATON_CMD --repo "$repo" --role "$role" --session "$name" $rot_flag 2>&1) || rc=$?
   else
-    out=$(node "$BATON_LIB" supervise --repo "$repo" --role "$role" --session "$name" 2>&1) || rc=$?
+    out=$(node "$BATON_LIB" supervise --repo "$repo" --role "$role" --session "$name" --state-dir "$STATE_DIR" $rot_flag 2>&1) || rc=$?
   fi
   out="$(printf '%s' "$out" | tail -n 1 | cut -c1-300)"
+  BATON_CODE="$(printf '%s' "$out" | jq -r '.code // empty' 2>/dev/null || true)"
   BATON_WHY="$(printf '%s' "$out" | jq -r '"\(.code): \(.reason)"' 2>/dev/null || printf '%s' "$out")"
   BATON_FORFEITED="$(printf '%s' "$out" | jq -r 'if .forfeited == true then 1 else 0 end' 2>/dev/null || echo 0)"
   if [ "$rc" = 0 ] || [ "$rc" = 1 ]; then
@@ -566,7 +578,7 @@ baton_allows() { # baton_allows <name> <repo> <role> → 0 may relaunch
 # A relaunch held by the integrity check is said once on the session's ledger (latch:
 # <name>.integrity-held), cleared by the first passing check (engsys#86 review L1).
 INTEGRITY_BLOCKED=0 INTEGRITY_WHY=""
-singleton_allows() { # singleton_allows <name> <repo> <role> <ledger> → 0 may relaunch
+singleton_allows() { # singleton_allows <name> <repo> <role> <ledger> [rotation_idle] → 0 may relaunch
   local held="$STATE_DIR/$1.integrity-held"
   if [ "$INTEGRITY_BLOCKED" = 1 ]; then
     BATON_WHY="plugin integrity: $INTEGRITY_WHY (fleet verify)"
@@ -577,7 +589,7 @@ singleton_allows() { # singleton_allows <name> <repo> <role> <ledger> → 0 may 
     return 2
   fi
   rm -f "$held"
-  baton_allows "$1" "$2" "$3"
+  baton_allows "$1" "$2" "$3" "${5:-}"
 }
 if [ -n "$INTEGRITY_CMD" ]; then
   for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
@@ -589,7 +601,17 @@ if [ -n "$INTEGRITY_CMD" ]; then
     case "$INTEGRITY_RC" in
       0) log "integrity: ok"; rm -f "$STATE_DIR"/*.integrity-held ;;
       1) INTEGRITY_BLOCKED=1 INTEGRITY_WHY="the engsys plugin on this host does not match its release"
-         log "integrity: MISMATCH, no merge/maintain session is relaunched this tick; running ones are left alone (alert: INTEGRITY_CMD)" ;;
+         log "integrity: MISMATCH, no merge/maintain session is relaunched this tick; running ones are left alone, revoking any self-held baton (alert: INTEGRITY_CMD)"
+         for rspec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
+           IFS='|' read -r r_name _ _ r_repo _ r_role <<<"$rspec"
+           [ -n "$r_role" ] || continue
+           r_repo="${r_repo:-$DEFAULT_REPO}"
+           [ -n "$r_repo" ] || r_repo=$(cwd_repo)
+           [ -n "$r_repo" ] || continue
+           if [ -n "${BATON_REVOKE_CMD:-}" ] || [ -z "${BATON_CMD:-}" ]; then
+             revoke_singleton_baton "$r_name" "$r_repo" "$r_role" "integrity-mismatch" || true
+           fi
+         done ;;
       *) INTEGRITY_BLOCKED=1 INTEGRITY_WHY="the engsys plugin check could not run (exit $INTEGRITY_RC)"
          log "integrity: the check could not run (exit $INTEGRITY_RC), so no merge/maintain session is relaunched this tick (fail closed): $(printf '%s' "$INTEGRITY_OUT" | tail -n 1 | cut -c1-200)" ;;
     esac
@@ -754,7 +776,7 @@ for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
         log "$name: rotation requested but the session is still mid-turn — waiting"
       elif [ "$AUTH_HELD" = 1 ]; then
         auth_hold "$name" "rotation requested ${AGE}m ago, session idle at its prompt"
-      elif [ -n "$role" ] && ! singleton_allows "$name" "$REPO_SLUG" "$role" "$ledger"; then
+      elif [ -n "$role" ] && ! singleton_allows "$name" "$REPO_SLUG" "$role" "$ledger" rotation_idle; then
         log "$name: rotation requested, but a relaunch is held (baton or integrity) — waiting ($BATON_WHY)"
       else
         relaunch "$name" "$ledger" "$REPO_SLUG" "rotation requested; session idle at its prompt ${AGE}m after its final heartbeat"

@@ -83,5 +83,6 @@ If `messaging:` is configured, route every author nudge (**bounced**, **escalate
 
 ## Context discipline & Hard rules
 
-- **Context is cache; files and GitHub are truth.** After any compaction, re-read this `SKILL.md`, config, and `state.md`, then re-snapshot live GitHub. On `ROTATION_REQUESTED` or high context pressure when idle, post a digest, write heartbeat `"rotation requested"`, run `mm-baton.sh release … --reason rotation`, and stop.
+- **Context is cache; files and GitHub are truth.** After any compaction, re-read this `SKILL.md`, config, and `state.md`, then re-snapshot live GitHub. On `ROTATION_REQUESTED` or high context pressure when idle, post a digest, run `<skill-dir>/scripts/mm-baton.sh rotate --repo <repo> --state-dir <state_dir> --ledger <ledger_issue> --session <name>`, and stop. Never leave the baton for the next session — its token dies with you; an unreleased baton blocks your own relaunch until the lease expires.
 - **Hard rules**: Never push to the default branch · never merge red required checks · never `--force` (lease only) · never admin-bypass · never post `/approve`, `/deny`, or an approving PR review yourself · never mutate GitHub without a passing fence (`mm-act.sh`) · never merge except through `mm-act.sh merge --sha <validated head>` · never nudge a session without routing its address through `msg.mjs route` first (another fleet gets a fenced `fleet-msg` on the PR, never a `SendMessage`) · see [`references/runbook-details.md`](references/runbook-details.md) for full details.
+

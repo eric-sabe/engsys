@@ -1264,3 +1264,31 @@ test('CT-04 (NA-1, NA-2): Antigravity replace_file_content targeting .gemini/set
   assert.match(r.stderr, /singleton-write guard/);
 });
 
+test('#96 Comment 2: partially-quoted/escaped heredoc delimiters, <<-, numbered fds, here-strings, and process-substitution loops are pinned', () => {
+  const env = { ...MERGE, HOME: '/Users/x', CLAUDE_PLUGIN_ROOT: ROOT };
+  const deniedIn = (command) => decide({ command, env, pluginRoot: ROOT, cwd: '/repo' }) !== null;
+
+  // Partially-quoted / escaped delimiters and <<- cannot smuggle a raw write after the true delimiter
+  for (const c of [
+    "cat <<'EOF'more\nbody\nEOFmore\ngh pr merge 5\nEOF",
+    'cat <<\\EOF\nbody\nEOF\ngh pr merge 5',
+    "cat <<-'EOF'\n\tbody\n\tEOF\ngh pr merge 5",
+    // Numbered fds (3>&1, 0</dev/null) and here-strings (<<<)
+    'gh pr merge 5 3>&1 0</dev/null',
+    "cat <<< 'gh pr merge 5' | bash",
+    "bash <<< 'gh pr merge 5'",
+    // Process-substitution-fed loop
+    'while read -r line; do eval "$line"; done < <(echo "gh pr merge 5")',
+    'while read -r line; do $line; done < <(printf "gh pr merge 5\\n")',
+  ]) {
+    assert.ok(deniedIn(c), `should deny: ${JSON.stringify(c)}`);
+  }
+
+  // Benign numbered fds and quoted heredocs with <<- or \EOF remain allowed when no raw write or shell sink is present
+  for (const c of [
+    "cat <<\\EOF 3>&1 0</dev/null\ngh pr merge is prose here\nEOF",
+    "cat <<-'EOF'\n\tgh pr merge is prose here\n\tEOF",
+  ]) {
+    assert.equal(deniedIn(c), false, `should allow: ${JSON.stringify(c)}`);
+  }
+});
