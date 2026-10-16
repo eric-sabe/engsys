@@ -280,7 +280,7 @@ dashboard.html        privacy-preserving GitHub activity dashboard
 
 - **Getting Started & Architecture:** [`DEPLOY.md`](DEPLOY.md) · [`docs/architecture.md`](docs/architecture.md) · [`docs/install-scenarios.md`](docs/install-scenarios.md) · [`docs/naturalization.md`](docs/naturalization.md)
 - **Specs, Review & Memory:** [`docs/specs/engsys-sdd-upgrade.md`](docs/specs/engsys-sdd-upgrade.md) · [`docs/memory-spec.md`](docs/memory-spec.md) · [`docs/multi-provider-spec.md`](docs/multi-provider-spec.md) · [`docs/review-methodology.md`](docs/review-methodology.md)
-- **Autonomous Fleet & Multi-Harness:** [`docs/specs/multi-harness-support.md`](docs/specs/multi-harness-support.md) · [`docs/fleet-guide.md`](docs/fleet-guide.md) · [`docs/multi-fleet.md`](docs/multi-fleet.md) · [`docs/merge-monster.md`](docs/merge-monster.md) · [`docs/maintenance-monster.md`](docs/maintenance-monster.md) · [`docs/fleet-health-desk.md`](docs/fleet-health-desk.md) · [`docs/agent-messaging.md`](docs/agent-messaging.md) · [`docs/subagent-liveness.md`](docs/subagent-liveness.md) · [`docs/gate-check.md`](docs/gate-check.md)
+- **Autonomous Fleet & Multi-Harness:** [`docs/specs/multi-harness-support.md`](docs/specs/multi-harness-support.md) · [`docs/harness-adaptation-guide.md`](docs/harness-adaptation-guide.md) · [`docs/fleet-guide.md`](docs/fleet-guide.md) · [`docs/multi-fleet.md`](docs/multi-fleet.md) · [`docs/merge-monster.md`](docs/merge-monster.md) · [`docs/maintenance-monster.md`](docs/maintenance-monster.md) · [`docs/fleet-health-desk.md`](docs/fleet-health-desk.md) · [`docs/agent-messaging.md`](docs/agent-messaging.md) · [`docs/subagent-liveness.md`](docs/subagent-liveness.md) · [`docs/gate-check.md`](docs/gate-check.md)
 
 ---
 
