@@ -95,5 +95,17 @@ naturalize:
   # project_facts: |     # optional; otherwise the installer leaves a TODO marker
   #   Multi-line project facts can go here.
 
+# Cross-session & cross-fleet messaging (docs/agent-messaging.md, docs/multi-fleet.md).
+# For Claude Code (>= 2.1.232), sets `crossSessionInbound` in .claude/settings.local.json
+# so autonomous or named sessions (`claude --name <namespace>-<role> --remote-control`)
+# accept peer nudges (`SendMessage` / `ListAgents`) without hanging on an approval dialog.
+# Cross-fleet messaging (`fleet msg` / `fleet relay` / `fleet-inbox.mjs`) works across
+# all harnesses (`claude`, `copilot`, `antigravity`) via GitHub App-verified comments.
+# messaging:
+#   enabled: true
+#   namespace: acme           # session name prefix (<namespace>-<role>, e.g. acme-mm, acme-build)
+#   inbound: accept           # accept | hold | refuse (`accept` required for unattended monsters)
+#   remote_control: true      # recommend --remote-control on launched sessions
+
 engsys:
   version: main         # tag / branch / commit the project was installed from

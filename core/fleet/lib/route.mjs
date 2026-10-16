@@ -31,8 +31,14 @@ export function route(address, { fleetId = null, homeFleet = null } = {}) {
 }
 
 /** The one line `fleet msg route` prints for a route. */
-export function routeLine(r) {
-  return r.via === VIA.SEND_MESSAGE
-    ? `same fleet: use SendMessage to ${r.session}`
-    : `other fleet: fleet msg send --to ${r.to}`;
+export function routeLine(r, { harness = 'claude' } = {}) {
+  if (r.via === VIA.SEND_MESSAGE) {
+    const h = String(harness || 'claude').trim().toLowerCase();
+    if (h === 'copilot' || h === 'antigravity' || h === 'agy') {
+      const label = h === 'agy' ? 'antigravity' : h;
+      return `same fleet: SendMessage unavailable in ${label} — skip peer nudge (GitHub state/comment is the notification)`;
+    }
+    return `same fleet: use SendMessage to ${r.session}`;
+  }
+  return `other fleet: fleet msg send --to ${r.to}`;
 }

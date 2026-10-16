@@ -140,7 +140,8 @@ export function routeCmd(argv, { env = process.env, out, err, api = ghApi } = {}
     err.write(`fleet msg: ${e.message}\n`);
     return EXIT.USAGE;
   }
-  out.write(`${routeLine(r)}\n`);
+  const harness = env.ENGSYS_HARNESS || env.HARNESS || 'claude';
+  out.write(`${routeLine(r, { harness })}\n`);
   return r.via === VIA.SEND_MESSAGE ? EXIT.SAME_FLEET : EXIT.OK;
 }
 
@@ -161,7 +162,8 @@ export function send(argv, { env = process.env, out, err, post = postComment, re
     return EXIT.USAGE;
   }
   if (r.via === VIA.SEND_MESSAGE) {
-    out.write(`${routeLine(r)}\n`);
+    const harness = env.ENGSYS_HARNESS || env.HARNESS || 'claude';
+    out.write(`${routeLine(r, { harness })}\n`);
     return EXIT.SAME_FLEET;
   }
   if (flags.re !== undefined && !RE_RE.test(flags.re)) { err.write(`fleet msg: --re must be owner/repo#n, got ${JSON.stringify(flags.re)}\n`); return EXIT.USAGE; }
