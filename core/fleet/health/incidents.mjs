@@ -10,9 +10,15 @@ import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { defang } from '../../lib/untrusted.mjs';
 import { ensureDir, readJson, withLock, writeFileAtomic } from '../lib/inbox.mjs';
-import { render as renderFleetMsg } from '../lib/fleet-msg.mjs';
+import { ADDRESS_RE, render as renderFleetMsg } from '../lib/fleet-msg.mjs';
 import { SERVICE_ID_RE } from './registry.mjs';
-import { loadEngineState, runEngineTick } from './engine.mjs';
+import {
+  defaultServiceState,
+  loadEngineState,
+  resolveImpactAdvice,
+  runEngineTick,
+  saveEngineState,
+} from './engine.mjs';
 
 const SESSION_SAFE_RE = /^[A-Za-z0-9._-]{1,64}$/;
 export const MAX_SYMPTOM_LEN = 240;
@@ -128,8 +134,16 @@ export function submitReport(registry, {
   };
 
   if (crossFleet || toAddress) {
-    const to = toAddress || 'home:maintain';
-    const from = fromAddress || `${cleanFleet === 'local' ? 'spoke' : cleanFleet}:${cleanSession}`;
+    if (!toAddress || !ADDRESS_RE.test(String(toAddress))) {
+      throw new Error(`cross-fleet report requires a valid --to <fleet>:<session> address, got ${JSON.stringify(toAddress)}`);
+    }
+    const to = String(toAddress);
+    const normSession = cleanSession.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+/, 's');
+    const normFleet = (cleanFleet === 'local' ? 'spoke' : cleanFleet).toLowerCase().replace(/[^a-z0-9-]/g, '-');
+    const from = fromAddress || `${normFleet}:${normSession || 'session'}`;
+    if (!ADDRESS_RE.test(from)) {
+      throw new Error(`cross-fleet report requires a valid sender <fleet>:<session>, got ${JSON.stringify(from)}`);
+    }
     const re = reRef || (registry.board?.repo && registry.board?.issue ? `${registry.board.repo}#${registry.board.issue}` : null);
     const body = `FHD_REPORT service=${service} session=${cleanSession} symptom=${JSON.stringify(cleanSymptom)}`;
     const payload = renderFleetMsg({ to, from, re, body });
@@ -138,6 +152,7 @@ export function submitReport(registry, {
       to,
       from,
       re,
+      body,
       payload,
       report,
     };
@@ -211,57 +226,62 @@ export function syncIncidentsWithEngineState(registry, {
   now = new Date(),
 } = {}) {
   const nowIso = nowIsoStr(now);
-  const incState = loadIncidentsState(stateDir);
+  let incState = null;
 
-  for (const [serviceId, spec] of Object.entries(registry.services ?? {})) {
-    if (spec.observability === 'per-session') continue;
-    const svc = engineState?.services?.[serviceId];
-    if (!svc) continue;
-    const active = incState.active[serviceId];
+  withLock(stateDir, () => {
+    incState = loadIncidentsState(stateDir);
 
-    if (svc.state === 'down' || svc.state === 'degraded') {
-      if (!active) {
-        const opened = {
-          id: `inc-${serviceId}-${Date.now()}-${randomBytes(2).toString('hex')}`,
-          service: serviceId,
-          state: 'confirmed',
-          service_state: svc.state,
-          classification: 'vendor-wide',
-          opened_at: svc.since || nowIso,
+    for (const [serviceId, spec] of Object.entries(registry.services ?? {})) {
+      if (spec.observability === 'per-session') continue;
+      const svc = engineState?.services?.[serviceId];
+      if (!svc) continue;
+      const active = incState.active[serviceId];
+
+      if (svc.state === 'down' || svc.state === 'degraded') {
+        if (!active) {
+          const opened = {
+            id: `inc-${serviceId}-${Date.now()}-${randomBytes(2).toString('hex')}`,
+            service: serviceId,
+            state: 'confirmed',
+            service_state: svc.state,
+            classification: 'vendor-wide',
+            opened_at: svc.since || nowIso,
+            updated_at: nowIso,
+            confidence: 'high',
+            contributing_reports: [],
+            root_cause: svc.root_cause || null,
+            suppressed_by: svc.suppressed_by || null,
+            mitigation: svc.advice || svc.detail || '',
+            resolved_at: null,
+          };
+          incState.active[serviceId] = opened;
+          appendIncidentHistoryLog(stateDir, { event: 'opened', at: nowIso, incident: opened });
+        } else {
+          const nextLifecycle = (active.service_state === 'down' && svc.state === 'degraded') ? 'mitigated' : 'confirmed';
+          active.state = nextLifecycle;
+          active.service_state = svc.state;
+          active.updated_at = nowIso;
+          active.root_cause = svc.root_cause || null;
+          active.suppressed_by = svc.suppressed_by || null;
+          active.mitigation = svc.advice || svc.detail || active.mitigation;
+        }
+      } else if (svc.state === 'healthy' && active) {
+        const resolved = {
+          ...active,
+          state: 'resolved',
+          service_state: 'healthy',
           updated_at: nowIso,
-          confidence: 'high',
-          contributing_reports: [],
-          root_cause: svc.root_cause || null,
-          suppressed_by: svc.suppressed_by || null,
-          mitigation: svc.advice || svc.detail || '',
-          resolved_at: null,
+          resolved_at: nowIso,
         };
-        incState.active[serviceId] = opened;
-        appendIncidentHistoryLog(stateDir, { event: 'opened', at: nowIso, incident: opened });
-      } else {
-        const nextLifecycle = (active.service_state === 'down' && svc.state === 'degraded') ? 'mitigated' : 'confirmed';
-        active.state = nextLifecycle;
-        active.service_state = svc.state;
-        active.updated_at = nowIso;
-        active.root_cause = svc.root_cause || null;
-        active.suppressed_by = svc.suppressed_by || null;
-        active.mitigation = svc.advice || svc.detail || active.mitigation;
+        delete incState.active[serviceId];
+        incState.history.push(resolved);
+        appendIncidentHistoryLog(stateDir, { event: 'resolved', at: nowIso, incident: resolved });
       }
-    } else if (svc.state === 'healthy' && active) {
-      const resolved = {
-        ...active,
-        state: 'resolved',
-        service_state: 'healthy',
-        updated_at: nowIso,
-        resolved_at: nowIso,
-      };
-      delete incState.active[serviceId];
-      incState.history.push(resolved);
-      appendIncidentHistoryLog(stateDir, { event: 'resolved', at: nowIso, incident: resolved });
     }
-  }
 
-  saveIncidentsState(stateDir, incState);
+    saveIncidentsState(stateDir, incState);
+  });
+
   return incState;
 }
 
@@ -287,7 +307,12 @@ export async function correlateReports(registry, {
   const allReports = readReports(stateDir);
   const pending = allReports.filter((r) => !r.processed && (nowMs - Date.parse(r.reported_at || nowIso) <= windowMs));
   if (pending.length === 0) {
-    return { incidentsState: loadIncidentsState(stateDir), events: [], engineResult: null };
+    return {
+      incidentsState: loadIncidentsState(stateDir),
+      events: [],
+      engineResult: null,
+      engineState: loadEngineState(stateDir, nowDate),
+    };
   }
 
   // Group pending reports by service
@@ -301,19 +326,20 @@ export async function correlateReports(registry, {
     byService.get(r.service).push(r);
   }
 
-  const incState = loadIncidentsState(stateDir);
   const forceServices = new Set();
-
-  for (const serviceId of byService.keys()) {
-    const spec = registry.services[serviceId];
-    if (spec.observability === 'per-session') continue;
-    const lastVer = incState.last_verified_at[serviceId] ? Date.parse(incState.last_verified_at[serviceId]) : 0;
-    if (!lastVer || (nowMs - lastVer) >= verifyCooldownSeconds * 1000) {
-      forceServices.add(serviceId);
-      incState.last_verified_at[serviceId] = nowIso;
+  withLock(stateDir, () => {
+    const incState = loadIncidentsState(stateDir);
+    for (const serviceId of byService.keys()) {
+      const spec = registry.services[serviceId];
+      if (spec.observability === 'per-session') continue;
+      const lastVer = incState.last_verified_at[serviceId] ? Date.parse(incState.last_verified_at[serviceId]) : 0;
+      if (!lastVer || (nowMs - lastVer) >= verifyCooldownSeconds * 1000) {
+        forceServices.add(serviceId);
+        incState.last_verified_at[serviceId] = nowIso;
+      }
     }
-  }
-  saveIncidentsState(stateDir, incState);
+    saveIncidentsState(stateDir, incState);
+  });
 
   // Run verification probes for reported central services
   let engineResult = null;
@@ -328,10 +354,11 @@ export async function correlateReports(registry, {
   const engineState = engineResult?.state ?? loadEngineState(stateDir, nowDate);
   const updatedIncState = loadIncidentsState(stateDir);
   const events = [...(engineResult?.events ?? [])];
+  let engineStateModified = false;
 
   for (const [serviceId, reports] of byService.entries()) {
     const spec = registry.services[serviceId];
-    const svcState = engineState.services?.[serviceId];
+    let svcState = engineState.services?.[serviceId];
     const probeConfirmedTrouble = spec.observability === 'central'
       && (
         svcState?.state === 'down'
@@ -348,11 +375,25 @@ export async function correlateReports(registry, {
         ? svcState.state
         : (svcState?.raw_state === 'down' ? 'down' : 'degraded');
 
-      // Ensure engine state reflects the confirmed report-corroborated state even if trip_fails > 1
-      if (svcState && svcState.state === 'healthy') {
+      if (!svcState) {
+        svcState = defaultServiceState(nowIso);
+        engineState.services[serviceId] = svcState;
+      }
+
+      // Ensure engine state reflects the confirmed report-corroborated state even if trip_fails > 1 or fleet-report-only
+      if (svcState.state === 'healthy') {
+        const { advice, hold_merges } = resolveImpactAdvice(spec, effectiveState, svcState.component_states);
         svcState.state = effectiveState;
         svcState.last_known_state = effectiveState;
+        svcState.raw_state = effectiveState;
         svcState.since = nowIso;
+        svcState.detail = svcState.detail && svcState.detail !== 'not polled yet'
+          ? svcState.detail
+          : `corroborated by ${reports.length} fleet report(s)`;
+        svcState.advice = advice;
+        svcState.hold_merges = hold_merges;
+        engineState.updated_at = nowIso;
+        engineStateModified = true;
       }
 
       let inc = updatedIncState.active[serviceId];
@@ -443,8 +484,15 @@ export async function correlateReports(registry, {
     }
   }
 
+  const processedIds = new Set(allReports.filter((r) => r.processed).map((r) => r.id));
   withLock(stateDir, () => {
-    writeReports(stateDir, allReports);
+    const freshReports = readReports(stateDir).map((r) =>
+      processedIds.has(r.id) ? { ...r, processed: true } : r,
+    );
+    writeReports(stateDir, freshReports);
+    if (engineStateModified) {
+      saveEngineState(stateDir, engineState);
+    }
     saveIncidentsState(stateDir, updatedIncState);
   });
 
@@ -452,6 +500,7 @@ export async function correlateReports(registry, {
     incidentsState: updatedIncState,
     events,
     engineResult,
+    engineState,
   };
 }
 

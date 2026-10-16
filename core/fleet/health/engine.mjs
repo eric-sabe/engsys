@@ -294,6 +294,13 @@ export function applyDependencyGraph(registryServices, servicesState) {
   return out;
 }
 
+export function isSimulationActive(simulated, now = new Date()) {
+  if (!simulated || typeof simulated !== 'object' || !VALID_STATUSES.has(simulated.state)) return false;
+  const exp = simulated.expires_at ? Date.parse(simulated.expires_at) : Infinity;
+  const nowMs = (now instanceof Date ? now : new Date(now)).getTime();
+  return nowMs < exp;
+}
+
 /**
  * Decide whether a service should be probed on this tick.
  */
@@ -309,8 +316,11 @@ export function shouldProbeService(serviceSpec, prevServiceState, {
   if (serviceSpec.probe?.adapter === 'fleet-report-only') return false;
   if (force || forceServices.has(serviceSpec.id)) return true;
 
-  // Active simulation does not need a live probe, but evaluateServiceTransition still runs
-  if (prevServiceState?.simulated?.state) return false;
+  // Active simulation does not need a live probe, but an expired simulation must probe immediately
+  if (prevServiceState?.simulated?.state) {
+    if (isSimulationActive(prevServiceState.simulated, now)) return false;
+    return true;
+  }
 
   const tier = serviceSpec.probe?.tier ?? 'passive';
   const curState = prevServiceState?.state ?? 'healthy';
@@ -351,6 +361,7 @@ export async function runEngineTick(registry, {
   const nextServices = { ...currentState.services };
 
   const order = topologicalOrder(registry.services);
+  let anyEvaluated = Object.keys(prevServices).length === 0;
 
   for (const id of order) {
     const spec = registry.services[id];
@@ -361,24 +372,32 @@ export async function runEngineTick(registry, {
           ...defaultServiceState(nowIso),
           detail: 'per-session (self-probed on each host)',
         };
+        anyEvaluated = true;
       }
       continue;
     }
 
     const prev = prevServices[id] ? { ...defaultServiceState(nowIso), ...prevServices[id] } : defaultServiceState(nowIso);
-    const hasSim = Boolean(prev.simulated?.state);
+    const hadExpiredSim = Boolean(prev.simulated?.state) && !isSimulationActive(prev.simulated, now);
+    const hasSim = isSimulationActive(prev.simulated, now);
     const doProbe = shouldProbeService(spec, prev, {
       now,
-      force,
+      force: force || hadExpiredSim,
       forceServices,
       allServicesState: nextServices,
     });
+
+    if (hadExpiredSim) {
+      prev.simulated = null;
+      anyEvaluated = true;
+    }
 
     if (!doProbe && !hasSim) {
       nextServices[id] = prev;
       continue;
     }
 
+    anyEvaluated = true;
     let probeResult = null;
     let statuspageGateResult = null;
 
@@ -430,25 +449,37 @@ export async function runEngineTick(registry, {
     const spec = registry.services[id];
     if (!spec || spec.observability === 'per-session') continue;
     const before = prevServices[id]?.state ?? 'healthy';
+    const beforeKnown = prevServices[id]?.last_known_state ?? before;
+    const beforeSuppressedBy = prevServices[id]?.suppressed_by ?? null;
     const afterObj = rootedServices[id];
     if (!afterObj) continue;
     const after = afterObj.state;
+    const afterSuppressedBy = afterObj.suppressed_by || null;
 
     if (afterObj.auth_local_failure && forceServices.has(id)) {
       const guide = spec.runbook ? `${afterObj.detail} (runbook: ${spec.runbook})` : afterObj.detail;
       events.push(`FHD_LOCAL_GUIDANCE ${env.ENGSYS_SESSION || 'local'} ${id} — ${guide}`);
     }
 
-    if (before === after) continue;
+    const unsuppressedWhileFailing =
+      before === after &&
+      Boolean(beforeSuppressedBy) &&
+      !afterSuppressedBy &&
+      (after === 'degraded' || after === 'down');
+
+    if (before === after && !unsuppressedWhileFailing) continue;
 
     const transition = {
       service: id,
       from: before,
+      from_known: beforeKnown,
       to: after,
       since: afterObj.since || nowIso,
       advice: afterObj.advice || '',
       detail: afterObj.detail || '',
-      suppressed_by: afterObj.suppressed_by || null,
+      suppressed_by: afterSuppressedBy,
+      was_suppressed_by: beforeSuppressedBy,
+      unsuppressed: unsuppressedWhileFailing,
       root_cause: afterObj.root_cause || null,
       hold_merges: Boolean(afterObj.hold_merges),
       simulated: Boolean(afterObj.simulated),
@@ -461,10 +492,10 @@ export async function runEngineTick(registry, {
     if (after === 'unknown') continue;
 
     const suffix = transition.advice ? ` — ${transition.advice}` : (transition.detail ? ` — ${transition.detail}` : '');
-    if (before === 'healthy' && (after === 'degraded' || after === 'down')) {
+    if ((before === 'healthy' || unsuppressedWhileFailing) && (after === 'degraded' || after === 'down')) {
       events.push(`FHD_TRIP ${id} ${after}${suffix}`);
       events.push(`FHD_CHANGE ${id} ${after}${suffix}`);
-    } else if ((before === 'degraded' || before === 'down') && after === 'healthy') {
+    } else if ((before === 'degraded' || before === 'down' || (before === 'unknown' && (beforeKnown === 'degraded' || beforeKnown === 'down'))) && after === 'healthy') {
       events.push(`FHD_RECOVER ${id} healthy`);
       events.push(`FHD_CHANGE ${id} healthy`);
     } else {
@@ -472,9 +503,13 @@ export async function runEngineTick(registry, {
     }
   }
 
+  const updatedAt = (anyEvaluated || transitions.length > 0 || events.length > 0 || !currentState.updated_at)
+    ? nowIso
+    : currentState.updated_at;
+
   const updatedState = {
     version: 1,
-    updated_at: nowIso,
+    updated_at: updatedAt,
     services: rootedServices,
   };
 

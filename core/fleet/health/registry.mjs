@@ -84,7 +84,7 @@ const PROBE_KEYS = new Set([
   'source_file',
 ]);
 const THRESHOLD_KEYS = new Set(['trip_fails', 'recover_clean']);
-const INVOKE_KEYS = new Set(['command', 'args', 'timeout_ms', 'allow_args', 'description']);
+const INVOKE_KEYS = new Set(['command', 'args', 'timeout_ms', 'allow_args', 'description', 'requires_gate']);
 const RESERVED_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 export class RegistryError extends Error {
@@ -382,6 +382,8 @@ function normalizeImpact(rawImpact, at, err) {
     down: null,
     degraded: null,
     hold_merges: false,
+    pause_claims: false,
+    dispatch_warn: false,
     components: {},
   };
   if (rawImpact === undefined || rawImpact === null) return out;
@@ -398,9 +400,9 @@ function normalizeImpact(rawImpact, at, err) {
     return out;
   }
   for (const [k, v] of Object.entries(rawImpact)) {
-    if (k === 'hold_merges') {
-      if (typeof v !== 'boolean') err(`${at}.impact.hold_merges: must be boolean, got ${show(v)}`);
-      else out.hold_merges = v;
+    if (k === 'hold_merges' || k === 'pause_claims' || k === 'dispatch_warn') {
+      if (typeof v !== 'boolean') err(`${at}.impact.${k}: must be boolean, got ${show(v)}`);
+      else out[k] = v;
       continue;
     }
     if (typeof v !== 'string') {
@@ -705,11 +707,18 @@ export function validateRegistry(doc, { file = '' } = {}) {
         if (!hasCmd) err(`${at}.invoke.command: required non-empty string or string array`);
         const invTimeout = s.invoke.timeout_ms ?? 60000;
         if (!isPosInt(invTimeout)) err(`${at}.invoke.timeout_ms: must be a positive integer, got ${show(s.invoke.timeout_ms)}`);
+        if (s.invoke.allow_args !== undefined && typeof s.invoke.allow_args !== 'boolean') {
+          err(`${at}.invoke.allow_args: must be boolean, got ${show(s.invoke.allow_args)}`);
+        }
+        if (s.invoke.requires_gate !== undefined && typeof s.invoke.requires_gate !== 'boolean') {
+          err(`${at}.invoke.requires_gate: must be boolean, got ${show(s.invoke.requires_gate)}`);
+        }
         invoke = {
           command: s.invoke.command,
           args: Array.isArray(s.invoke.args) ? s.invoke.args.map(String) : [],
           timeout_ms: invTimeout,
-          allow_args: s.invoke.allow_args !== false,
+          allow_args: s.invoke.allow_args === true,
+          requires_gate: Boolean(s.invoke.requires_gate),
           description: typeof s.invoke.description === 'string' ? s.invoke.description : null,
         };
       }
@@ -727,6 +736,7 @@ export function validateRegistry(doc, { file = '' } = {}) {
 
     out.services[id] = {
       id,
+      name: typeof s.name === 'string' && s.name.trim() ? s.name.trim() : id,
       kind,
       observability,
       probe,

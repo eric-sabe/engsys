@@ -19,6 +19,7 @@ import {
 } from './adapters.mjs';
 import {
   evaluateServiceTransition,
+  loadEngineState,
   runEngineTick,
   simulateServiceState,
 } from './engine.mjs';
@@ -28,6 +29,8 @@ import {
   ingestCrossFleetReport,
   correlateReports,
   syncIncidentsWithEngineState,
+  loadIncidentsState,
+  readReports,
   computeDigest,
 } from './incidents.mjs';
 import {
@@ -35,6 +38,7 @@ import {
   parseBoardBlock,
   updateIssueBodyWithBoard,
   fetchBoardCached,
+  applyBoardToGitHub,
   notifyTransitions,
 } from './board.mjs';
 import { runCli } from './cli.mjs';
@@ -662,6 +666,217 @@ describe('P3 (#100): CLI subcommands (simulate, watch-add, watch-remove, invoke,
         await runCli(['watch-remove', 'github-actions', '--file', cfgFile, '--json']),
         0,
       );
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test('docs/fleet-health-desk.md YAML example validates cleanly and preserves name and impact booleans', () => {
+    const docPath = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../../../docs/fleet-health-desk.md');
+    const docText = fs.readFileSync(docPath, 'utf8');
+    const yamlMatch = /```yaml\n([\s\S]*?)```/.exec(docText);
+    assert.ok(yamlMatch, 'docs/fleet-health-desk.md must contain a yaml snippet');
+    const reg = parseRegistry(yamlMatch[1]);
+    assert.equal(reg.services['github-api'].name, 'GitHub API');
+    assert.equal(reg.services['github-api'].impact.pause_claims, true);
+    assert.equal(reg.services['github-api'].impact.dispatch_warn, true);
+    assert.equal(reg.services['github-actions'].invoke.requires_gate, true);
+    assert.equal(reg.services['github-actions'].invoke.allow_args, false);
+  });
+
+  test('expired simulation resumes live probes immediately instead of turning unknown, and unsuppressed downstream outage alarms on upstream recovery', async () => {
+    const tmp = makeTmpDir();
+    try {
+      const reg = parseRegistry(SAMPLE_YAML);
+      const t0 = new Date('2026-10-15T18:00:00Z');
+      // Simulate github-api down with 10-minute TTL
+      await simulateServiceState(reg, {
+        stateDir: tmp,
+        serviceId: 'github-api',
+        targetState: 'down',
+        ttlMinutes: 10,
+        now: t0,
+        customAdapters: {
+          statuspage: async (_cfg, opts) =>
+            opts.serviceId === 'github-actions'
+              ? { status: 'down', detail: 'Actions still down' }
+              : { status: 'healthy', detail: 'All systems operational' },
+        },
+      });
+
+      // Tick again while github-api is simulated down so github-actions trips (trip_fails: 2) while suppressed_by github-api
+      const tickSuppressed = await runEngineTick(reg, {
+        stateDir: tmp,
+        force: true,
+        now: new Date('2026-10-15T18:01:00Z'),
+        customAdapters: {
+          statuspage: async (_cfg, opts) =>
+            opts.serviceId === 'github-actions'
+              ? { status: 'down', detail: 'Actions still down' }
+              : { status: 'healthy', detail: 'All systems operational' },
+        },
+      });
+      assert.equal(tickSuppressed.state.services['github-actions'].state, 'down');
+      assert.equal(tickSuppressed.state.services['github-actions'].suppressed_by, 'github-api');
+
+      // Advance past the 10-minute simulation TTL (without force: true!) -> github-api simulation expires and probes live healthy,
+      // while github-actions stays down and becomes unsuppressed (suppressed_by: null), firing FHD_TRIP!
+      let apiProbed = 0;
+      const tickAfterExpiry = await runEngineTick(reg, {
+        stateDir: tmp,
+        now: new Date('2026-10-15T18:15:00Z'),
+        customAdapters: {
+          statuspage: async (_cfg, opts) => {
+            if (opts.serviceId === 'github-api') {
+              apiProbed++;
+              return { status: 'healthy', detail: 'API operational' };
+            }
+            return { status: 'down', detail: 'Actions still down' };
+          },
+        },
+      });
+      assert.equal(apiProbed, 1, 'expired simulation triggers immediate live probe');
+      assert.notEqual(tickAfterExpiry.state.services['github-api'].state, 'unknown');
+
+      // One more clean tick completes recover_clean: 2 for github-api
+      const tickRecovered = await runEngineTick(reg, {
+        stateDir: tmp,
+        force: true,
+        now: new Date('2026-10-15T18:16:00Z'),
+        customAdapters: {
+          statuspage: async (_cfg, opts) =>
+            opts.serviceId === 'github-api'
+              ? { status: 'healthy', detail: 'API operational' }
+              : { status: 'down', detail: 'Actions still down' },
+        },
+      });
+      assert.equal(tickRecovered.state.services['github-api'].state, 'healthy');
+      assert.equal(tickRecovered.state.services['github-actions'].state, 'down');
+      assert.equal(tickRecovered.state.services['github-actions'].suppressed_by, null);
+      assert.ok(
+        tickRecovered.events.some((e) => e.startsWith('FHD_TRIP github-actions down')),
+        'newly unsuppressed downstream outage emits FHD_TRIP',
+      );
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test('board escapes HTML comment terminators in probe detail and applyBoardToGitHub skips unchanged fingerprints', () => {
+    const tmp = makeTmpDir();
+    try {
+      const reg = parseRegistry(SAMPLE_YAML);
+      const engineState = {
+        updated_at: '2026-10-15T18:00:00Z',
+        services: {
+          'github-api': {
+            state: 'degraded',
+            since: '2026-10-15T17:55:00Z',
+            detail: 'upstream error --> <!-- injected comment -->',
+          },
+        },
+      };
+      const block1 = renderBoardBlock(reg, engineState, {}, { now: new Date('2026-10-15T18:00:00Z') });
+      const parsed = parseBoardBlock(block1);
+      assert.equal(parsed.services['github-api'].state, 'degraded');
+
+      let editCalls = 0;
+      let storedIssueBody = '# Fleet Status\n';
+      const mockExec = (cmd, args) => {
+        if (cmd === 'gh' && args[0] === 'api') {
+          return JSON.stringify({ number: 42, body: storedIssueBody });
+        }
+        if (cmd === 'gh' && args[0] === 'issue' && args[1] === 'edit') {
+          editCalls++;
+          const bfIdx = args.indexOf('--body-file');
+          storedIssueBody = fs.readFileSync(args[bfIdx + 1], 'utf8');
+          return '';
+        }
+        return '';
+      };
+
+      const pub1 = applyBoardToGitHub({
+        repo: 'acme/app',
+        issue: 42,
+        stateDir: tmp,
+        renderedBlock: block1,
+        fence: false,
+        now: new Date('2026-10-15T18:00:00Z'),
+        execFn: mockExec,
+      });
+      assert.equal(pub1.updated, true);
+      assert.equal(editCalls, 1);
+
+      // Render a block 30s later with the same service states (different timestamp) -> must skip edit!
+      const block2 = renderBoardBlock(
+        reg,
+        { ...engineState, updated_at: '2026-10-15T18:00:30Z' },
+        {},
+        { now: new Date('2026-10-15T18:00:30Z') },
+      );
+      const pub2 = applyBoardToGitHub({
+        repo: 'acme/app',
+        issue: 42,
+        stateDir: tmp,
+        renderedBlock: block2,
+        fence: false,
+        now: new Date('2026-10-15T18:00:30Z'),
+        execFn: mockExec,
+      });
+      assert.equal(pub2.updated, false);
+      assert.equal(pub2.reason, 'unchanged-fingerprint');
+      assert.equal(editCalls, 1);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test('correlateReports persists corroborated state to disk and preserves concurrent reports submitted during probe', async () => {
+    const tmp = makeTmpDir();
+    try {
+      const reg = parseRegistry(SAMPLE_YAML);
+      const now = new Date('2026-10-15T18:10:00Z');
+      submitReport(reg, {
+        stateDir: tmp,
+        service: 'github-api',
+        symptom: 'HTTP 502 on first call',
+        session: 'worker-1',
+        now,
+      });
+
+      // Probe returns degraded (consecutive_fails=1 < trip_fails=2) AND a second report arrives concurrently during the probe
+      await correlateReports(reg, {
+        stateDir: tmp,
+        now,
+        customAdapters: {
+          statuspage: async () => {
+            submitReport(reg, {
+              stateDir: tmp,
+              service: 'github-actions',
+              symptom: 'Concurrent report during probe',
+              session: 'worker-2',
+              now,
+            });
+            return { status: 'degraded', detail: 'Minor outage' };
+          },
+        },
+      });
+
+      // Reload engine state from disk and run syncIncidentsWithEngineState (just like cmdTick does)
+      const persistedEngine = loadEngineState(tmp, now);
+      assert.equal(persistedEngine.services['github-api'].state, 'degraded');
+      const syncedInc = syncIncidentsWithEngineState(reg, {
+        stateDir: tmp,
+        engineState: persistedEngine,
+        now,
+      });
+      assert.ok(syncedInc.active['github-api'], 'corroborated incident stays active after sync');
+
+      // Concurrent report submitted during the probe was NOT dropped
+      const allReps = readReports(tmp);
+      const concurrentRep = allReps.find((r) => r.service === 'github-actions');
+      assert.ok(concurrentRep, 'concurrent report submitted during verification probe is preserved');
+      assert.equal(concurrentRep.processed, false);
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }

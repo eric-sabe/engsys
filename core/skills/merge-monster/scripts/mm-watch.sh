@@ -236,7 +236,7 @@ agents_event() {
 
 # --- Fleet Health Desk (engsys#98) ----------------------------------------------
 # Watches the status board (with conditional ETag caching) and emits FHD_CHANGE once per state change.
-FHD_CLI="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../fleet/health" 2>/dev/null && pwd)/cli.mjs"
+FHD_CLI="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../fleet/health" 2>/dev/null && pwd -P)/cli.mjs"
 fhd_event() {
   [ -f "$FHD_CLI" ] || return 0
   if [ -n "$FHD_BOARD_ISSUE" ] || [ -n "${ENGSYS_FHD_BOARD_CACHE:-}" ] || [ -f "$DIR/fhd/board-cache.json" ] || { [ -n "$HEALTH_CFG" ] && [ -f "$HEALTH_CFG" ]; }; then

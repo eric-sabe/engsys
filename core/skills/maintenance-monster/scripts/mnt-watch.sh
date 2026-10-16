@@ -25,7 +25,7 @@
 #   AGENT_OVERDUE / AGENT_STALE …  the subagent watchdog (merge-monster's mm-agent-watch.sh --once, run
 #                              every cycle while <state-dir>/agents.tsv exists): one bus per monster
 #                              (engsys#122)
-#   FHD_TRANSITION / FHD_CHANGE / FHD_REPORT_CORRELATED / FHD_LOCAL_GUIDANCE …
+#   FHD_TRIP / FHD_RECOVER / FHD_CHANGE / FHD_REPORT_CORRELATED / FHD_LOCAL_GUIDANCE …
 #                              Fleet Health Desk (engsys#97-#99): probe transitions, status board changes,
 #                              and correlated friction reports (when fleet-health.yml or board is configured)
 #
@@ -232,14 +232,13 @@ agents_event() {
 # --- Fleet Health Desk (engsys#97-#99) ------------------------------------------
 # Runs probe ticks + report correlation when fleet-health.yml is configured on this maintainer,
 # and watches the status board (with conditional ETag caching) to emit FHD_CHANGE lines.
-FHD_CLI="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../fleet/health" 2>/dev/null && pwd)/cli.mjs"
+FHD_CLI="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../fleet/health" 2>/dev/null && pwd -P)/cli.mjs"
 fhd_event() {
   [ -f "$FHD_CLI" ] || return 0
   if [ -n "$HEALTH_CFG" ] && [ -f "$HEALTH_CFG" ]; then
     node "$FHD_CLI" tick --file "$HEALTH_CFG" --state-dir "$DIR" --repo "$REPO" \
       ${FHD_BOARD_ISSUE:+--issue "$FHD_BOARD_ISSUE" --publish-github} --notify 2>>"$W/fhd.err" || true
-  fi
-  if [ -n "$FHD_BOARD_ISSUE" ] || [ -n "${ENGSYS_FHD_BOARD_CACHE:-}" ] || [ -f "$DIR/fhd/board-cache.json" ]; then
+  elif [ -n "$FHD_BOARD_ISSUE" ] || [ -n "${ENGSYS_FHD_BOARD_CACHE:-}" ] || [ -f "$DIR/fhd/board-cache.json" ]; then
     node "$FHD_CLI" watch-board --state-dir "$DIR" --repo "$REPO" --role maintain \
       ${FHD_BOARD_ISSUE:+--issue "$FHD_BOARD_ISSUE"} ${HEALTH_CFG:+--file "$HEALTH_CFG"} 2>>"$W/fhd.err" || true
   fi

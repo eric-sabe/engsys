@@ -20,6 +20,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { isMainEntry } from '../../lib/is-main.mjs';
+import { GATE_ID_RE } from '../../lib/gate-check.mjs';
 import {
   loadRegistry,
   resolveRegistryFile,
@@ -214,7 +216,7 @@ async function cmdTick(flags) {
     if (correlationResult.events?.length) {
       busLines.push(...correlationResult.events);
     }
-    engineState = loadEngineState(stateDir);
+    engineState = correlationResult.engineState || loadEngineState(stateDir);
   }
 
   const incidentsState = syncIncidentsWithEngineState(registry, { stateDir, engineState });
@@ -246,6 +248,8 @@ async function cmdTick(flags) {
         issue,
         stateDir,
         renderedBlock,
+        boardData,
+        force,
         fence: !flags['no-fence'],
       });
     } catch (err) {
@@ -471,6 +475,42 @@ async function cmdReport(positionals, flags) {
     toAddress: typeof flags.to === 'string' ? flags.to : null,
   });
 
+  if (res.mode === 'cross-fleet') {
+    if (flags['dry-run']) {
+      if (flags.json) {
+        process.stdout.write(`${JSON.stringify({ ok: true, dry_run: true, ...res }, null, 2)}\n`);
+      } else {
+        process.stdout.write(`${res.payload}\n`);
+      }
+      return 0;
+    }
+
+    const msgScript = path.resolve(__dirname, '../msg.mjs');
+    const msgArgs = [msgScript, 'send', '--to', res.to, '--from', res.report.session, '--body-file', '-'];
+    if (res.re) msgArgs.push('--re', res.re);
+    try {
+      const sentOut = execFileSync(process.execPath, msgArgs, {
+        input: res.body,
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+      if (flags.json) {
+        process.stdout.write(`${JSON.stringify({ ok: true, sent: true, url: sentOut, ...res }, null, 2)}\n`);
+      } else {
+        process.stdout.write(`fleet health report: sent cross-fleet report to '${res.to}' (${sentOut})\n`);
+      }
+      return 0;
+    } catch (err) {
+      const errMsg = err.stderr ? String(err.stderr).trim() : err.message;
+      if (flags.json) {
+        process.stdout.write(`${JSON.stringify({ ok: false, error: errMsg, ...res }, null, 2)}\n`);
+      } else {
+        process.stderr.write(`fleet health report: failed to send cross-fleet report: ${errMsg}\n`);
+      }
+      return 1;
+    }
+  }
+
   let correlation = null;
   if (flags.correlate && res.mode === 'local') {
     correlation = await correlateReports(registry, { stateDir });
@@ -584,9 +624,71 @@ function cmdInvoke(positionals, flags) {
     process.stderr.write(`fleet health invoke: service '${serviceId}' has no invoke command configured\n`);
     return 1;
   }
-  if (extraArgs.length > 0 && svc.invoke.allow_args === false) {
+  if (extraArgs.length > 0 && svc.invoke.allow_args !== true) {
     process.stderr.write(`fleet health invoke: service '${serviceId}' does not allow extra arguments\n`);
     return 2;
+  }
+
+  const approvedGate = flags['approved-gate'];
+  if (svc.invoke.requires_gate && !approvedGate) {
+    const msg = `service '${serviceId}' requires an operator approval gate (--approved-gate <id>)`;
+    if (flags.json) process.stdout.write(`${JSON.stringify({ ok: false, service: serviceId, error: msg })}\n`);
+    else process.stderr.write(`fleet health invoke: ${msg}\n`);
+    return 1;
+  }
+
+  if (approvedGate !== undefined) {
+    if (typeof approvedGate !== 'string' || !GATE_ID_RE.test(approvedGate)) {
+      const msg = `invalid --approved-gate id ${JSON.stringify(approvedGate)}`;
+      if (flags.json) process.stdout.write(`${JSON.stringify({ ok: false, service: serviceId, error: msg })}\n`);
+      else process.stderr.write(`fleet health invoke: ${msg}\n`);
+      return 2;
+    }
+    const gateCheckScript = path.resolve(__dirname, '../../lib/gate-check.mjs');
+    const repo =
+      (typeof flags.repo === 'string' && flags.repo) ||
+      process.env.FLEET_INSTANCE_REPO ||
+      registry.board?.repo ||
+      '';
+    const issue =
+      (typeof flags.issue === 'string' && flags.issue) ||
+      process.env.ENGSYS_FHD_BOARD_ISSUE ||
+      registry.board?.issue ||
+      '';
+    const requester = (typeof flags.requester === 'string' && flags.requester) || process.env.ENGSYS_GATE_REQUESTER || '';
+    const target = (typeof flags.target === 'string' && flags.target) || `fleet-health:invoke:${serviceId}`;
+    const kind = (typeof flags.kind === 'string' && flags.kind) || 'config';
+    const opTeam = (typeof flags['operators-team'] === 'string' && flags['operators-team']) || process.env.FLEET_OPERATORS_TEAM || '';
+    const ops = (typeof flags.operators === 'string' && flags.operators) || process.env.FLEET_OPERATORS || '';
+    const checkArgs = [
+      gateCheckScript,
+      'check',
+      '--repo',
+      String(repo),
+      '--issue',
+      String(issue),
+      '--gate',
+      String(approvedGate),
+      '--requester',
+      String(requester),
+      '--target',
+      String(target),
+      '--kind',
+      String(kind),
+    ];
+    if (opTeam) checkArgs.push('--operators-team', String(opTeam));
+    else if (ops) checkArgs.push('--operators', String(ops));
+    try {
+      execFileSync(process.execPath, checkArgs, {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (err) {
+      const errMsg = `gate check failed for '${approvedGate}': ${err.stderr ? String(err.stderr).trim() : err.message}`;
+      if (flags.json) process.stdout.write(`${JSON.stringify({ ok: false, service: serviceId, error: errMsg })}\n`);
+      else process.stderr.write(`fleet health invoke: ${errMsg}\n`);
+      return 1;
+    }
   }
 
   const cmdSpec = parseCommandSpec(svc.invoke.command, [...(svc.invoke.args || []), ...extraArgs]);
@@ -915,6 +1017,6 @@ export async function runCli(argv = process.argv.slice(2)) {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isMainEntry(import.meta.url)) {
   runCli().then((code) => process.exit(code));
 }

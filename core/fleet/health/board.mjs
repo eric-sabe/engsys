@@ -31,6 +31,16 @@ export function isHealthyState(state) {
   return state === 'healthy' || state === 'up';
 }
 
+function safeText(raw, maxLen = 240) {
+  return defang(String(raw ?? ''))
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/<!--/g, '<! --')
+    .replace(/--!?>/g, '-- >')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLen);
+}
+
 /**
  * Derive concise advice for a service given its registry entry and runtime state.
  */
@@ -40,25 +50,25 @@ export function deriveServiceAdvice(svcConfig, svcRuntime) {
 
   const parts = [];
   if (svcRuntime?.advice) {
-    parts.push(defang(String(svcRuntime.advice)));
+    parts.push(safeText(svcRuntime.advice));
   } else {
     const impact = svcConfig?.impact || {};
     if (state === 'down' || state === 'degraded') {
       if (impact.hold_merges && !/\bhold\s+merges\b/i.test(impact.advice || '')) {
         parts.push('hold merges');
       }
-      if (state === 'down' && impact.down) parts.push(defang(impact.down));
-      else if (state === 'degraded' && impact.degraded) parts.push(defang(impact.degraded));
-      else if (impact.advice) parts.push(defang(impact.advice));
+      if (state === 'down' && impact.down) parts.push(safeText(impact.down));
+      else if (state === 'degraded' && impact.degraded) parts.push(safeText(impact.degraded));
+      else if (impact.advice) parts.push(safeText(impact.advice));
     }
     const runbookText =
       typeof svcConfig?.runbook === 'string'
         ? svcConfig.runbook
         : svcConfig?.runbook?.advice || '';
-    if (runbookText.trim() && !parts.includes(defang(runbookText.trim()))) {
-      parts.push(defang(runbookText.trim()));
+    if (runbookText.trim() && !parts.includes(safeText(runbookText.trim()))) {
+      parts.push(safeText(runbookText.trim()));
     } else if (!parts.length && (svcRuntime?.detail || svcRuntime?.summary)) {
-      parts.push(defang(String(svcRuntime.detail || svcRuntime.summary)));
+      parts.push(safeText(svcRuntime.detail || svcRuntime.summary));
     }
   }
 
@@ -96,20 +106,20 @@ export function buildBoardData(
     const summaryText = rt.detail || rt.summary || '';
     services[id] = {
       id,
-      name: svcConfig.name || id,
+      name: safeText(svcConfig.name || id, 80),
       state,
       since: rt.since || rt.last_transition_at || null,
       last_checked: rt.last_polled_at || rt.last_checked || null,
       last_known_state: rt.last_known_state || null,
       suppressed_by: rt.suppressed_by || null,
-      root_cause: rt.root_cause || null,
+      root_cause: rt.root_cause ? safeText(rt.root_cause, 200) : null,
       simulated: Boolean(rt.simulated),
       auth_local_failure: Boolean(rt.auth_local_failure),
       hold_merges: Boolean(active && (rt.hold_merges || impact.hold_merges)),
       pause_claims: Boolean(active && impact.pause_claims),
       dispatch_warn: Boolean(active && (impact.dispatch_warn || impact.dispatch)),
       advice: deriveServiceAdvice(svcConfig, rt),
-      summary: summaryText ? defang(String(summaryText)).slice(0, 200) : '',
+      summary: summaryText ? safeText(summaryText, 200) : '',
     };
   }
 
@@ -118,14 +128,14 @@ export function buildBoardData(
   for (const inc of Object.values(activeMap)) {
     if (inc && (inc.state === 'confirmed' || inc.state === 'mitigated' || inc.status === 'open')) {
       activeIncidents.push({
-        id: inc.id,
-        service: inc.service,
+        id: safeText(inc.id, 80),
+        service: safeText(inc.service, 80),
         classification: inc.classification || 'vendor-wide',
         opened_at: inc.opened_at,
         report_count:
           inc.report_count ??
           (Array.isArray(inc.contributing_reports) ? inc.contributing_reports.length : 1),
-        summary: defang(String(inc.mitigation || inc.summary || '')).slice(0, 160),
+        summary: safeText(inc.mitigation || inc.summary || '', 160),
       });
     }
   }
@@ -163,7 +173,10 @@ export function renderBoardBlock(
   }
 
   const timeDisplay = humanTime !== updatedIso ? `${updatedIso} (${humanTime})` : updatedIso;
-  const jsonComment = `${BOARD_JSON_PREFIX}${JSON.stringify(boardData)}${BOARD_JSON_SUFFIX}`;
+  const escapedJson = JSON.stringify(boardData)
+    .replace(/<!--/g, '\\u003c!--')
+    .replace(/--!?>/g, '--\\u003e');
+  const jsonComment = `${BOARD_JSON_PREFIX}${escapedJson}${BOARD_JSON_SUFFIX}`;
 
   const lines = [
     BOARD_START,
@@ -315,7 +328,12 @@ export function boardFingerprint(boardData) {
       const normState = isHealthyState(s.state) ? 'healthy' : s.state;
       return `${id}:${normState}:${s.suppressed_by || ''}:${s.hold_merges ? 1 : 0}:${s.pause_claims ? 1 : 0}`;
     });
-  return items.join('|');
+  const incs = Array.isArray(boardData.active_incidents)
+    ? boardData.active_incidents
+        .map((inc) => `${inc.id}:${inc.service}:${inc.classification}:${inc.report_count}`)
+        .sort()
+    : [];
+  return incs.length ? `${items.join('|')}#${incs.join(',')}` : items.join('|');
 }
 
 /**
@@ -516,7 +534,23 @@ export function fetchBoardCached({
     return { ok: false, source: 'http-error', status, error: `HTTP ${status}` };
   }
 
-  const board = parseBoardBlock(json.body || '');
+  let board;
+  try {
+    board = parseBoardBlock(json.body || '');
+  } catch (err) {
+    if (cached?.board) {
+      return {
+        ok: true,
+        source: 'cache-stale-on-parse-error',
+        etag: cached.etag,
+        board: cached.board,
+        prevBoard: cached.board,
+        changes: [],
+        warning: err.message,
+      };
+    }
+    return { ok: false, source: 'parse-error', error: err.message };
+  }
   if (!board) {
     return { ok: false, source: 'no-board-block', error: `Issue ${repo}#${issueNum} has no fleet-health block` };
   }
@@ -540,12 +574,17 @@ export function fetchBoardCached({
 
 /**
  * Update the GitHub status board issue body, fenced by `mnt-act.sh guard` when `fence: true`.
+ * Publishes only when `boardFingerprint` changes compared with the last published fingerprint,
+ * or when the refresh interval (half of `stale_minutes`) has elapsed so the board does not go stale.
  */
 export function applyBoardToGitHub({
   repo,
   issue,
   stateDir,
   renderedBlock,
+  boardData = null,
+  force = false,
+  now = new Date(),
   mntActPath = path.resolve(__dirname, '../../skills/maintenance-monster/scripts/mnt-act.sh'),
   fence = true,
   execFn = execFileSync,
@@ -553,21 +592,87 @@ export function applyBoardToGitHub({
   if (!repo || !issue) throw new Error('applyBoardToGitHub requires repo and issue');
   if (!stateDir) throw new Error('applyBoardToGitHub requires stateDir');
 
+  const nowDate = now instanceof Date ? now : new Date(now);
+  const nowMs = nowDate.getTime();
   const issueNum = String(issue).replace(/^#/, '');
+  const issueRef = `${repo}#${issueNum}`;
+  const fhdDir = path.join(stateDir, 'fhd');
+  fs.mkdirSync(fhdDir, { recursive: true });
+  const pubStateFile = path.join(fhdDir, `github-published-${issueNum}.json`);
+
+  let parsedCandidate = boardData;
+  if (!parsedCandidate) {
+    try {
+      parsedCandidate = parseBoardBlock(renderedBlock);
+    } catch {
+      parsedCandidate = null;
+    }
+  }
+  const candidateFp = parsedCandidate ? boardFingerprint(parsedCandidate) : null;
+  const staleMinutes = parsedCandidate?.stale_minutes ?? DEFAULT_STALE_MINUTES;
+  const refreshIntervalMs = Math.max(60_000, Math.floor((staleMinutes * 60_000) / 2));
+
+  if (!force && candidateFp) {
+    try {
+      const prevPub = JSON.parse(fs.readFileSync(pubStateFile, 'utf8'));
+      const prevAtMs = prevPub?.published_at ? Date.parse(prevPub.published_at) : NaN;
+      if (
+        prevPub?.issue === issueRef &&
+        prevPub?.fingerprint === candidateFp &&
+        Number.isFinite(prevAtMs) &&
+        nowMs - prevAtMs >= 0 &&
+        nowMs - prevAtMs < refreshIntervalMs
+      ) {
+        return { updated: false, reason: 'unchanged-fingerprint' };
+      }
+    } catch {
+      // No prior published state recorded; proceed to inspect GitHub issue
+    }
+  }
+
   const rawIssueJson = execFn('gh', ['api', `/repos/${repo}/issues/${issueNum}`], {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const issueObj = JSON.parse(rawIssueJson);
   const existingBody = issueObj?.body || '';
+
+  if (!force && candidateFp) {
+    try {
+      const existingBoard = parseBoardBlock(existingBody);
+      const existingUpdatedMs = existingBoard?.last_updated ? Date.parse(existingBoard.last_updated) : NaN;
+      if (
+        existingBoard &&
+        boardFingerprint(existingBoard) === candidateFp &&
+        Number.isFinite(existingUpdatedMs) &&
+        nowMs - existingUpdatedMs >= 0 &&
+        nowMs - existingUpdatedMs < refreshIntervalMs
+      ) {
+        fs.writeFileSync(
+          pubStateFile,
+          JSON.stringify({ issue: issueRef, fingerprint: candidateFp, published_at: existingBoard.last_updated }, null, 2) + '\n',
+          'utf8',
+        );
+        return { updated: false, reason: 'unchanged-fingerprint' };
+      }
+    } catch {
+      // Proceed with updateIssueBodyWithBoard
+    }
+  }
+
   const updatedBody = updateIssueBodyWithBoard(existingBody, renderedBlock);
 
   if (updatedBody === existingBody) {
+    if (candidateFp) {
+      fs.writeFileSync(
+        pubStateFile,
+        JSON.stringify({ issue: issueRef, fingerprint: candidateFp, published_at: nowDate.toISOString() }, null, 2) + '\n',
+        'utf8',
+      );
+    }
     return { updated: false, reason: 'unchanged' };
   }
 
-  const fhdDir = path.join(stateDir, 'fhd');
-  fs.mkdirSync(fhdDir, { recursive: true });
   const bodyFile = path.join(fhdDir, `board-body-${issueNum}.md`);
   fs.writeFileSync(bodyFile, updatedBody, 'utf8');
 
@@ -598,6 +703,14 @@ export function applyBoardToGitHub({
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+  }
+
+  if (candidateFp) {
+    fs.writeFileSync(
+      pubStateFile,
+      JSON.stringify({ issue: issueRef, fingerprint: candidateFp, published_at: nowDate.toISOString() }, null, 2) + '\n',
+      'utf8',
+    );
   }
 
   return { updated: true, bodyFile };
@@ -654,7 +767,8 @@ export function notifyTransitions(
       ...(stateDir ? { FLEET_STATE: stateDir } : {}),
     };
 
-    if (isHealthyState(t.to) && (t.from === 'degraded' || t.from === 'down')) {
+    const fromEffective = t.from === 'unknown' ? (t.from_known || t.from) : t.from;
+    if (isHealthyState(t.to) && (fromEffective === 'degraded' || fromEffective === 'down')) {
       const args = ['--level', 'info', '--incident', incidentKey, '--resolve'];
       try {
         runNotify(args, callEnv);

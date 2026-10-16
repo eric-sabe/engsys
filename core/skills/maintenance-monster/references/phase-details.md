@@ -615,10 +615,10 @@ final heartbeat with status "session end", `mnt-baton.sh release …
 When `fleet-health.yml` (or `fhd_config` / `fhd_board_issue` in `maintenance-monster.yml`) is configured, Maintenance Monster owns the **Fleet Health Desk** (`<engsys-root>/fleet/health.sh` / `fleet health`) while holding the `maintain` baton:
 
 1. **Probe & Hysteresis Engine (`mnt-watch.sh` -> `fleet health tick`)**:
-   - Evaluates watched services (`statuspage`, `observed`, `http-health`, `synthetic-cmd`) with asymmetric hysteresis (`trip_fails` consecutive failures to trip `degraded`/`down`; `recover_clean` consecutive clean probes + statuspage clear to recover to `up`).
+   - Evaluates watched services (`statuspage`, `observed`, `http-health`, `synthetic-command`, `fleet-report-only`) with asymmetric hysteresis (`trip_fails` consecutive failures to trip `degraded`/`down`; `recover_clean` consecutive clean probes + statuspage clear to recover to `healthy`).
    - Enforces dependency DAG (`depends_on`) so an upstream outage (`github-api`) sets `suppressed_by` on downstream services (`github-actions`) and suppresses duplicate alarms.
-   - Splits `synthetic-cmd` failures from host-local missing auth/context (`auth_check`), surfacing local config issues without tripping a false vendor-wide outage.
-   - Treats broken probes (`statuspage` non-200 or malformed JSON) as `unknown`, preserving `last_known_state` rather than silently reporting `up`.
+   - Splits `synthetic-command` failures from host-local missing auth/context (`auth_check`), surfacing local config issues without tripping a false vendor-wide outage.
+   - Treats broken probes (`statuspage` non-200 or malformed JSON) as `unknown`, preserving `last_known_state` rather than silently reporting `healthy`.
 2. **Status Board & Broadcast (`board.mjs` / `weather-check.mjs`)**:
    - Renders `<!-- fleet-health --> ... <!-- /fleet-health -->` (including machine-readable `<!-- fleet-health-json: {...} -->` and dual UTC + operator-time timestamps) onto the status board issue via fenced `mnt-act.sh guard`.
    - Fires `fleet notify --incident fhd-<service>` only on confirmed, non-suppressed transitions (`--level action` when `down` or `hold_merges`, `--level info` when `degraded`, and `--resolve` on recovery).
