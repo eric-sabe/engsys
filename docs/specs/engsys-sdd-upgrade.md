@@ -1,6 +1,6 @@
 ---
 spec_id: SPEC-2026-SDD-UPGRADE
-status: draft
+status: active
 tier: L
 owner: eric-sabe
 owners: [leith, melvin, nyx, gary, marcelo, jody]

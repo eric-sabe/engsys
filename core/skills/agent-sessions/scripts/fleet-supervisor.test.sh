@@ -539,5 +539,31 @@ expect "  …the heartbeat's machine field stays ISO UTC" "^heartbeat .*auth: ex
 expect "  …its people line shows the operator's clock" "^heartbeat .*since [A-Z][a-z][a-z] [0-9]*, [0-9]*:[0-9][0-9] [AP]M E[SD]T\. Run"
 rm -f "$T"/pane-* "$T"/capture-*
 
+# CT-14: HARNESS=copilot in launch-agent-sessions.sh and fleet-supervisor.sh auth_probe
+cat >"$T/bin/copilot" <<'SH'
+#!/usr/bin/env bash
+echo "copilot-probe $*" >>"$FAKE/actions"
+if [ -f "$FAKE/probe-ok" ]; then echo OK; exit 0; fi
+echo "Failed to authenticate with GitHub Copilot"; exit 1
+SH
+chmod +x "$T/bin/copilot"
+authconf "HARNESS=copilot"; reset; rm -f "$T"/pane-* "$T"/capture-*; touch "$T/probe-ok"; ledger 1 "ok"; ledger2 90 "ok"; rpane
+wpane acme-w "● Failed to authenticate with GitHub Copilot"; run
+expect "CT-14: HARNESS=copilot auth_probe runs copilot -p" "^copilot-probe -p Reply with the single word OK -s --no-custom-instructions --disable-builtin-mcps --model claude-haiku-4.5"
+expect "CT-14: HARNESS=copilot probe ok → relaunch proceeds" "^launch acme-rel"
+rm -f "$T"/pane-* "$T"/capture-* "$T/probe-ok"
+
+# CT-14: launch-agent-sessions.sh with HARNESS=copilot translates flags and invokes copilot --name ... -i ...
+cat >"$T/bin/tmux" <<'SH'
+#!/usr/bin/env bash
+echo "tmux-launch $*" >>"$FAKE/actions"
+exit 0
+SH
+chmod +x "$T/bin/tmux"
+printf 'NAMESPACE=acme\nacme-mm|%s|/engsys:merge-monster|--model opus --effort high --remote-control --dangerously-skip-permissions\n' "$T/w" >"$T/w/copilot.roster"
+: >"$T/actions"
+(cd "$T/w" && HARNESS=copilot bash "$HERE/launch-agent-sessions.sh" --roster "$T/w/copilot.roster" >/dev/null 2>&1)
+expect "CT-14: launch-agent-sessions.sh with HARNESS=copilot invokes copilot --name acme-mm -i /engsys:merge-monster" "copilot --name acme-mm -i /engsys:merge-monster --model claude-opus-4.6 --reasoning-effort high --remote --yolo --mode autopilot --no-ask-user"
+
 echo "$pass passed, $fail failed."
 [ "$fail" = 0 ]

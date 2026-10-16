@@ -97,6 +97,8 @@ for tmpl in "$FLEET_REPO"/fleet/env/*.env.tmpl; do
     } >>"$dest"
   fi
   if [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ]; then printf 'CLAUDE_CONFIG_DIR=%q\n' "$FLEET_CLAUDE_CONFIG_DIR" >>"$dest"; fi
+  if [ "${HARNESS:-claude}" != claude ]; then printf 'HARNESS=%q\n' "$HARNESS" >>"$dest"; fi
+  if [ "${HARNESS:-claude}" = copilot ] && [ -n "${COPILOT_HOME:-}" ]; then printf 'COPILOT_HOME=%q\n' "$COPILOT_HOME" >>"$dest"; fi
   if [ -n "$FLEET_ID" ]; then
     printf '# Multi-fleet identity (fleet/fleet.conf FLEET_ID; registry: FEDERATION_FILE when it exists).\nFLEET_ID=%q\n' "$FLEET_ID" >>"$dest"
     if [ -f "$FEDERATION_FILE" ]; then printf 'FEDERATION_FILE=%q\n' "$FEDERATION_FILE" >>"$dest"; fi
@@ -142,6 +144,7 @@ singleton_integrity_ok() { # → 0 when merge/maintain sessions may start
 }
 is_singleton() { case "$(fleet_host_kind_of "$1")" in merge | maintain) return 0 ;; esac; return 1; }
 
+export HARNESS="${HARNESS:-claude}"
 cd "$PIN_DIR"
 if [ -n "$name" ]; then
   grep -q "^$name|" "$FLEET_STATE/roster" || fleet_die "no session named '$name' in the roster"

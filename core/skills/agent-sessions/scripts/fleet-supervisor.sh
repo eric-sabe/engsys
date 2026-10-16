@@ -226,6 +226,7 @@ trap 'rmdir "$LOCKDIR" 2>/dev/null || true' EXIT
 TMUX_SESSION="" LAUNCH_CMD="" DEFAULT_REPO="" ROTATE_GRACE_MIN=3 HOST_CHECK_CMD=""
 HOST_HEALTH_CMD="" HOST_HEALTH_INCIDENT="host-health" NOTIFY_CMD="" HEARTBEAT_CMD="" BATON_CMD="" INTEGRITY_CMD=""
 AUTH_PROBE=on AUTH_PROBE_TIMEOUT_SEC=90 AUTH_CHECK_WAIT_SEC=45 STATUS_URL=""
+HARNESS="${HARNESS:-${FLEET_HARNESS:-claude}}"
 SESSIONS=()
 while IFS= read -r line; do
   line="${line%%$'\r'}"
@@ -246,6 +247,7 @@ while IFS= read -r line; do
     AUTH_PROBE_TIMEOUT_SEC=*) AUTH_PROBE_TIMEOUT_SEC="${line#AUTH_PROBE_TIMEOUT_SEC=}" ;;
     AUTH_CHECK_WAIT_SEC=*) AUTH_CHECK_WAIT_SEC="${line#AUTH_CHECK_WAIT_SEC=}" ;;
     STATUS_URL=*) STATUS_URL="${line#STATUS_URL=}" ;;
+    HARNESS=*) HARNESS="${line#HARNESS=}" ;;
     *\|*) SESSIONS+=("$line") ;;
     *) echo "fleet-supervisor: bad conf line: $line" >&2; exit 1 ;;
   esac
@@ -296,7 +298,7 @@ pane_busy() {
   tmux capture-pane -p -t "${TMUX_SESSION}:$1" -S -15 2>/dev/null | grep -q 'esc to interrupt'
 }
 
-# --- Claude Code login (engsys#103; header) ------------------------------------------------------
+# --- Claude Code / Copilot CLI login (engsys#103; header) -----------------------------------------
 # Claude Code's own error lines for a login that no longer works: the ONE list. Each entry is an ERE
 # matched against a message's text (after its "⏺ " / "● " marker), anchored at the start of the
 # message; a trailing $ means the whole message. Taken from Claude Code 2.1.285, where they are
@@ -312,6 +314,8 @@ CLAUDE_AUTH_ERRORS=(
   '(API Error: 401 )?Invalid API key · Please run /login$'
   'Please run /login · API Error: 401'
   'Failed to authenticate\. API Error: 401'
+  'Failed to authenticate with GitHub Copilot'
+  'No Copilot subscription found'
 )
 AUTH_RE="^($(IFS='|'; printf '%s' "${CLAUDE_AUTH_ERRORS[*]}"))"
 AUTH_MSG_RE='^(⏺|●) '                      # a message line: the reply or tool-call marker
@@ -372,10 +376,16 @@ auth_add_lines() { # auth_add_lines <file> <lines> → appended, each line once
 auth_probe() {
   AUTH_PROBE_WHY=""
   [ "$AUTH_PROBE" = on ] || { AUTH_PROBE_WHY="no test request (AUTH_PROBE=off)"; return 1; }
-  command -v claude >/dev/null 2>&1 || { AUTH_PROBE_WHY="no test request (claude is not on PATH)"; return 1; }
+  local probe_bin="claude"
+  if [ "${HARNESS:-claude}" = "copilot" ]; then probe_bin="copilot"; fi
+  command -v "$probe_bin" >/dev/null 2>&1 || { AUTH_PROBE_WHY="no test request ($probe_bin is not on PATH)"; return 1; }
   local dir pid rc=0 waited=0 last
   dir="$(mktemp -d "${TMPDIR:-/tmp}/fleet-supervisor-auth.XXXXXX")"
-  (cd "$dir" && exec claude -p --setting-sources project --strict-mcp-config --no-session-persistence --model haiku 'Reply with the single word OK') </dev/null >"$dir.out" 2>&1 &
+  if [ "${HARNESS:-claude}" = "copilot" ]; then
+    (cd "$dir" && exec copilot -p 'Reply with the single word OK' -s --no-custom-instructions --disable-builtin-mcps --model claude-haiku-4.5) </dev/null >"$dir.out" 2>&1 &
+  else
+    (cd "$dir" && exec claude -p --setting-sources project --strict-mcp-config --no-session-persistence --model haiku 'Reply with the single word OK') </dev/null >"$dir.out" 2>&1 &
+  fi
   pid=$!
   while kill -0 "$pid" 2>/dev/null; do
     if [ "$waited" -ge $((AUTH_PROBE_TIMEOUT_SEC * 2)) ]; then kill "$pid" 2>/dev/null || true; break; fi
@@ -384,7 +394,10 @@ auth_probe() {
   wait "$pid" 2>/dev/null || rc=$?
   last="$(grep -v '^[[:space:]]*$' "$dir.out" | tail -n 1 | cut -c1-200 || true)"
   rm -rf "$dir" "$dir.out"
-  if [ "$rc" = 0 ]; then AUTH_PROBE_WHY="a test request through Claude Code succeeded"; return 0; fi
+  if [ "$rc" = 0 ]; then
+    if [ "${HARNESS:-claude}" = "copilot" ]; then AUTH_PROBE_WHY="a test request through Copilot CLI succeeded"; else AUTH_PROBE_WHY="a test request through Claude Code succeeded"; fi
+    return 0
+  fi
   if grep -Eq "$AUTH_RE" <<<"$last"; then AUTH_PROBE_WHY="the test request failed the same way: $last"
   else AUTH_PROBE_WHY="the test request did not succeed (exit $rc): ${last:-no output}"; fi
   return 1

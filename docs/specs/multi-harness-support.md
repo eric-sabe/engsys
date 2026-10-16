@@ -1,6 +1,6 @@
 ---
 spec_id: SPEC-2026-MULTI-HARNESS
-status: draft
+status: active
 tier: L
 epic: docs/specs/engsys-2026-unified-epic.md
 issues: [149, 152, 153, 154]

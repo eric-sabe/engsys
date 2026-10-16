@@ -81,7 +81,7 @@ The design, in five parts:
 
 | Term | Meaning |
 |---|---|
-| **Fleet** | One operator's set of always-on sessions on one host, with its own identities. Has a short id, for example `alice` or `bob` |
+| **Fleet** | One operator's set of always-on sessions on one host (`HARNESS=claude\|copilot\|antigravity`), with its own identities. Has a short id, for example `alice` or `bob` |
 | **Operator** | The human responsible for a fleet. One per fleet; a person can be on the operators team for several |
 | **Federation** | The fleets working one org's repos, listed in the instance repo's registry |
 | **Singleton role** | At most one holder per repo across the federation: merge, maintain |

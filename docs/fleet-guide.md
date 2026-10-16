@@ -31,7 +31,7 @@ keys, changing org settings).
 
 ## 1. What a fleet is
 
-A fleet is a set of named Claude Code sessions, each in its own tmux window, running on one machine
+A fleet is a set of named agent sessions (`HARNESS=claude` by default, or `HARNESS=copilot` for GitHub Copilot CLI / `HARNESS=antigravity` for interactive Antigravity workspaces; see [`docs/specs/multi-harness-support.md`](specs/multi-harness-support.md)), each in its own tmux window, running on one machine
 that stays on. Four kinds of thing make it up.
 
 **Monsters** are the unattended, ledger-bearing roles. Each holds a "baton" for one job and reports

@@ -1,6 +1,6 @@
 ---
 spec_id: EPIC-2026-ENGSYS-NEXT
-status: draft
+status: active
 tier: L
 epic_id: EPIC-2026-ENGSYS-NEXT
 owners: [melvin, nyx, gary, marcelo, otto, aaron, jody]

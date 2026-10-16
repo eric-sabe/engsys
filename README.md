@@ -113,6 +113,22 @@ Plugin artifacts are generated from the pack sources by `npm run build:plugins` 
 `.claude-plugin/` dirs plus pack-root `.mcp.json`, never copied by the installer); `npm test` fails if
 they're stale.
 
+## Multi-harness support: Claude Code, GitHub Copilot CLI, Google Antigravity
+
+engsys supports three host harnesses via `harness: claude | copilot | antigravity` (or a list of harnesses) in `engsys.config.yaml` for standalone installs and `HARNESS=claude|copilot|antigravity` in `fleet.conf` for fleet deployments (see [`docs/specs/multi-harness-support.md`](docs/specs/multi-harness-support.md)):
+
+- **`claude` (default):** Materializes `.claude/`, `CLAUDE.md`, `.claude/settings.json`, and `.mcp.json`.
+- **`copilot`:** Materializes `.github/copilot-instructions.md`, `.github/agents/*.agent.md`, `.github/skills/<name>/SKILL.md`, `.github/hooks/engsys-hooks.json`, and `.vscode/mcp.json`. Supports unattended headless monster execution via `copilot -p` with separate `COPILOT_HOME` identity (`core/fleet/identity/bin/gh`).
+- **`antigravity`:** Materializes `GEMINI.md`, `.agents/skills/<name>/SKILL.md`, `.agents/rules/*.md`, and `.agents/plugins/engsys/plugin.json` (excluding Claude/Copilot-only skills `agent-sessions` and `subagent-liveness`).
+
+## Adaptive Spec-Driven Development (`/design-change`)
+
+Every non-trivial change routes through `/design-change` (`core/commands/design-change.md`, spec in [`docs/specs/engsys-sdd-upgrade.md`](docs/specs/engsys-sdd-upgrade.md)):
+
+- **Risk-adaptive tiers (`Tier S | M | L`):** Classified deterministically by scope and 6 Escalation Tripwires (`TW-1` Data Model, `TW-2` Public Contract, `TW-3` Security/Trust Boundary, `TW-4` Concurrency/Leases, `TW-5` Performance/Scale, `TW-6` Cross-Boundary UX).
+- **Scoped spec slicing (`core/scripts/spec-slice.mjs`):** Extracts only the YAML frontmatter, Non-Negotiable Anchors, and issue-scoped contract slice (`<= 2,500` words) for subagent context.
+- **Executable contract verification (`core/scripts/contract-check.mjs`):** Verifies `touches` globs (or `### Co-commit justification`), `must_not_touch` globs, `Forbidden Patterns`, and `Verification Commands` at `/pre-push` and `/prep-review` time.
+
 ## Worker providers (optional): Codex, DeepSeek, Grok
 
 engsys can dispatch **implement / review / critique / investigate** work to

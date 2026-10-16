@@ -1,6 +1,6 @@
 ---
 spec_id: SPEC-2026-PERSONAS-SKILLS
-status: draft
+status: active
 tier: L
 epic: docs/specs/engsys-2026-unified-epic.md
 issues: [148, 149, 150, 151, 152]

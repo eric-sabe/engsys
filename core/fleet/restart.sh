@@ -107,7 +107,9 @@ status() {
     since="$(head -n 1 "$sup_state/auth.expired")"
     since="$(node "$FLEET_KIT_DIR/../lib/operator-time.mjs" "$since" 2>/dev/null || printf '%s' "$since")"
     [ ! -s "$sup_state/auth.held" ] || held="$(paste -sd, - <"$sup_state/auth.held" | sed 's/,/, /g')"
-    echo "auth: expired since $since. The supervisor relaunches and kills nothing until it works${held:+ (held: $held)}; run /login in any session, or claude /login"
+    local login_hint="claude /login"
+    [ "${HARNESS:-claude}" = copilot ] && login_hint="gh auth login"
+    echo "auth: expired since $since. The supervisor relaunches and kills nothing until it works${held:+ (held: $held)}; run /login in any session, or $login_hint"
   fi
   if [ "$LAST_CHANGE" != 0 ]; then
     echo "last host change: $(date -r "$LAST_CHANGE" '+%Y-%m-%d %H:%M' 2>/dev/null || date -d "@$LAST_CHANGE" '+%Y-%m-%d %H:%M')  ($(tail -1 "$FLEET_STATE/sync.log" 2>/dev/null | cut -d' ' -f2-))"
