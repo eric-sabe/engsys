@@ -4,8 +4,8 @@ Codex is available as a **worker** (implement / review / critique / investigate)
 under the engsys worker contract — see § Worker providers for routing and
 `.claude/workflows/worker-dispatch.md` for the procedure.
 
-- Default well-specified implementer (Terra-class) and strong independent
-  reviewer (Sol-class). **Never let Codex review Codex-authored work** when
+- Default well-specified implementer (`gpt-6.1-sol`) and strong independent
+  reviewer (`gpt-6-astra`). **Never let Codex review Codex-authored work** when
   another family is available — author family ≠ reviewer family.
 - Dispatch: `node .claude/scripts/worker-package.mjs …` then
   `node .claude/scripts/worker-run.mjs --package …`. Workers never push,

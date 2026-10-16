@@ -6,7 +6,7 @@
 //      inherited: the worker must not see the conductor's session, settings
 //      overrides, or credentials beyond the DeepSeek key.
 //   2. THE ALIAS TRAP. DeepSeek's compat endpoint silently maps unknown model
-//      names to deepseek-v4-flash. A Flash run billed as a Pro review is a
+//      names to deepseek-flash. A Flash run billed as a Pro review is a
 //      false green with extra steps, so the responding model is asserted, not
 //      assumed — and an unverifiable model is a refusal, not a shrug.
 
@@ -26,7 +26,7 @@ function childEnv(model) {
 	env.ANTHROPIC_BASE_URL = BASE_URL;
 	env.ANTHROPIC_AUTH_TOKEN = process.env.DEEPSEEK_API_KEY || '';
 	env.ANTHROPIC_MODEL = model;
-	env.ANTHROPIC_SMALL_FAST_MODEL = 'deepseek-v4-flash';
+	env.ANTHROPIC_SMALL_FAST_MODEL = 'deepseek-flash';
 	return env;
 }
 

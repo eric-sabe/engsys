@@ -386,7 +386,7 @@ auth_probe() {
   local dir pid rc=0 waited=0 last
   dir="$(mktemp -d "${TMPDIR:-/tmp}/fleet-supervisor-auth.XXXXXX")"
   if [ "$h" = "copilot" ]; then
-    (cd "$dir" && exec copilot -p 'Reply with the single word OK' -s --no-custom-instructions --disable-builtin-mcps --model claude-haiku-4.5) </dev/null >"$dir.out" 2>&1 &
+    (cd "$dir" && exec copilot -p 'Reply with the single word OK' -s --no-custom-instructions --disable-builtin-mcps --model claude-haiku-5.5) </dev/null >"$dir.out" 2>&1 &
   elif [ "$h" = "antigravity" ]; then
     (cd "$dir" && exec agy -p 'Reply with the single word OK') </dev/null >"$dir.out" 2>&1 &
   else

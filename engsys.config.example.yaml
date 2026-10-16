@@ -35,14 +35,14 @@ providers:
     codex:
       enabled: false
       models:
-        implement: gpt-5.6-terra
-        review: gpt-5.6-sol
-        critique: gpt-5.6-sol
-        investigate: gpt-5.6-terra
+        implement: gpt-6.1-sol
+        review: gpt-6-astra
+        critique: gpt-6-astra
+        investigate: gpt-6.1-sol
     deepseek:
       enabled: false          # requires DEEPSEEK_API_KEY in the environment
       models:
-        implement: deepseek-v4-flash
+        implement: deepseek-flash
         review: deepseek-v4-pro
         critique: deepseek-v4-pro
         investigate: deepseek-v4-pro
@@ -85,7 +85,7 @@ lessons:
   into: docs/agent-lessons/library  # where seeded lessons land (project-local lessons stay at docs/agent-lessons/)
 
 naturalize:
-  model_strategy: "Four tiers + security carve-out: Sonnet 5 (claude-sonnet-5) for execution; Opus 5.5 (claude-opus-5-5) for orchestration and judgement; escalate to Fable 5.1 (claude-fable-5-1) for the hardest architecture/concurrency/migration cases; Haiku 4.5 (claude-haiku-4-5) for fast probes; and Opus 4.8 (claude-opus-4-8) pinned for Nyx and security work."
+  model_strategy: "Four tiers + security carve-out: Sonnet 5.5 (claude-sonnet-5-5) for execution; Opus 5.5 (claude-opus-5-5) for orchestration and judgement; escalate to Fable 5.1 (claude-fable-5-1) for the hardest architecture/concurrency/migration cases; Haiku 5.5 (claude-haiku-5-5) for fast probes; and Opus 4.8 (claude-opus-4-8) pinned for Nyx and security work."
   hook_patterns:
     - glob: "*/schema.prisma"
       reminder: "Schema changed — regenerate the client and rebuild dependents before pushing."
@@ -97,16 +97,17 @@ naturalize:
 
 # Optional per-tier model overrides (defaults adapt automatically to `harness:`):
 # - claude:      judgement=opus, execution=sonnet, security=claude-opus-4-8, escalation=fable, fast=haiku
-# - copilot:     judgement=claude-opus-4.6, execution=claude-sonnet-4.6, security=claude-opus-4.6, fast=claude-haiku-4.5
-#                (or swap to OpenAI/Google: e.g. judgement=gpt-5.4, execution=gpt-5.3-codex, fast=gpt-5.4-mini, or gemini-4-argon / gemini-3.8-flash)
+#                (pinned in fleet.conf to claude-opus-5-5, claude-sonnet-5-5, claude-opus-4-8, claude-fable-5-1, claude-haiku-5-5)
+# - copilot:     judgement=claude-opus-5.5, execution=claude-sonnet-5.5, security=claude-opus-4.8, fast=claude-haiku-5.5
+#                (or swap to OpenAI/Google: e.g. judgement=gpt-6-astra, execution=gpt-6.1-sol, fast=gpt-6-luna, or gemini-4-argon / gemini-3.8-flash)
 # - antigravity: judgement=gemini-4-argon, execution=gemini-4-argon, security=gemini-4-argon, escalation=gemini-4-argon, fast=gemini-3.8-flash
 #                (Gemini 4 Argon is the premier model scaled via `effort: medium|high|max`; Gemini 3.8 Flash is the smaller/faster model)
 # models:
-#   judgement: claude-opus-4.6
-#   execution: claude-sonnet-4.6
-#   security: claude-opus-4.6
-#   escalation: claude-opus-4.6
-#   fast: claude-haiku-4.5
+#   judgement: claude-opus-5.5
+#   execution: claude-sonnet-5.5
+#   security: claude-opus-4.8
+#   escalation: claude-opus-5.5
+#   fast: claude-haiku-5.5
 
 # Cross-session & cross-fleet messaging (docs/agent-messaging.md, docs/multi-fleet.md).
 # For Claude Code (>= 2.1.232), sets `crossSessionInbound` in .claude/settings.local.json

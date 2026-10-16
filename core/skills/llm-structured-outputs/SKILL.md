@@ -1,6 +1,6 @@
 ---
 name: llm-structured-outputs
-description: "Cross-provider reference for LLM structured outputs with Claude Opus 5.5 / Sonnet 5 / Opus 4.8 / Fable 5.1, GPT-5.6 (Sol/Terra/Luna), Gemini 4 Argon / 3.8 Flash, DeepSeek V4, and Grok 4.7. Use when implementing json_schema constrained decoding, writing Zod 4 schemas for LLM APIs, building multi-provider abstractions, or debugging schema compliance failures."
+description: "Cross-provider reference for LLM structured outputs with Claude 5.5 (Opus 5.5 / Sonnet 5.5 / Haiku 5.5) + Opus 4.8 (security) + Fable 5.1, OpenAI GPT-6 / 6.1 (Astra / 6.1 Sol / Luna), Gemini 4 Argon / 3.8 Flash, DeepSeek V4 Pro / V4.1 Flash, and Grok 4.7. Use when implementing json_schema constrained decoding, writing Zod 4 schemas for LLM APIs, building multi-provider abstractions, or debugging schema compliance failures."
 ---
 
 # LLM Structured Outputs
@@ -23,22 +23,22 @@ All five frontier providers support **constrained decoding**: you send a JSON Sc
 
 | Provider                                         | Flagship Models (Oct 2026)                                       | API Field                             | Type Value          |
 | ------------------------------------------------ | ---------------------------------------------------------------- | ------------------------------------- | ------------------- |
-| Anthropic Claude 5.5 / 5 / 4.8                   | `claude-opus-5-5`, `claude-sonnet-5`, `claude-opus-4-8`, `claude-fable-5-1` | `output_config.format`     | `"json_schema"`     |
-| OpenAI GPT-5.6 (Responses API)                   | `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`                   | `text.format`                         | `"json_schema"`     |
-| OpenAI GPT-5.6 (Chat Completions)                | `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`                   | `response_format`                     | `"json_schema"`     |
+| Anthropic Claude 5.5 / 4.8 (security)            | `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`, `claude-opus-4-8`, `claude-fable-5-1` | `output_config.format` | `"json_schema"` |
+| OpenAI GPT-6 / 6.1 (Responses API)               | `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-luna`                       | `text.format`                         | `"json_schema"`     |
+| OpenAI GPT-6 / 6.1 (Chat Completions)            | `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-luna`                       | `response_format`                     | `"json_schema"`     |
 | Google Gemini 4 Argon / 3.8 Flash                | `gemini-4-argon`, `gemini-3.8-flash`                             | `generationConfig.responseJsonSchema` | N/A (schema object) |
-| DeepSeek V4                                      | `deepseek-v4-pro`, `deepseek-v4-flash`                           | `response_format`                     | `"json_schema"`     |
-| xAI Grok 4.7                                     | `grok-4.7`, `grok-4.7-build-fast`, `grok-4.5`                    | `response_format`                     | `"json_schema"`     |
+| DeepSeek V4 / V4.1                               | `deepseek-v4-pro`, `deepseek-flash`                              | `response_format`                     | `"json_schema"`     |
+| xAI Grok 4.7                                     | `grok-4.7`, `grok-4.7-build-fast`                                | `response_format`                     | `"json_schema"`     |
 
 ---
 
 ## Per-Vendor API Patterns
 
-### Anthropic Claude Opus 5.5, Sonnet 5 & Opus 4.8 (GA — no beta header needed)
+### Anthropic Claude 5.5 (`claude-opus-5-5` / `claude-sonnet-5-5` / `claude-haiku-5-5`) & Opus 4.8 (Security)
 
 ```typescript
 const response = await anthropic.messages.create({
-  model: "claude-sonnet-5", // or "claude-opus-5-5", "claude-opus-4-8", "claude-fable-5-1"
+  model: "claude-sonnet-5-5", // or "claude-opus-5-5", "claude-haiku-5-5", "claude-opus-4-8" (security), "claude-fable-5-1"
   max_tokens: 4096,
   messages: [{ role: "user", content: prompt }],
   output_config: {
@@ -58,13 +58,13 @@ Key facts:
 - Optional fields via `"type": ["string", "null"]` unions
 - **NOT supported:** `anyOf`, `oneOf`, `allOf`, `pattern`, min/max constraints, recursive schemas
 
-### OpenAI GPT-5.6 (`gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna`)
+### OpenAI GPT-6 / 6.1 (`gpt-6-astra` / `gpt-6.1-sol` / `gpt-6-luna`)
 
 **Responses API** (recommended):
 
 ```typescript
 const response = await openai.responses.create({
-  model: "gpt-5.6-terra", // "gpt-5.6-sol" for premier reasoning; "gpt-5.6-luna" for low-latency / high-throughput
+  model: "gpt-6.1-sol", // "gpt-6-astra" for premier flagship reasoning; "gpt-6-luna" for low-latency / high-throughput
   input: prompt,
   text: {
     format: {
@@ -79,7 +79,7 @@ const response = await openai.responses.create({
 
 ```typescript
 const response = await openai.chat.completions.create({
-  model: "gpt-5.6-terra",
+  model: "gpt-6.1-sol",
   messages: [{ role: "user", content: prompt }],
   response_format: {
     type: "json_schema",
@@ -112,7 +112,7 @@ const parsed = JSON.parse(response.text);
 - Broadest schema support: `anyOf`, `$ref` (recursive), `prefixItems`, `minimum`/`maximum`, `pattern`
 - **NOT supported:** `allOf`, `oneOf`, `not`, `if`/`then`/`else`
 
-### DeepSeek V4 (`deepseek-v4-pro` / `deepseek-v4-flash`)
+### DeepSeek V4 Pro & V4.1 Flash (`deepseek-v4-pro` / `deepseek-flash`)
 
 ```typescript
 import OpenAI from "openai";
@@ -122,7 +122,7 @@ const deepseek = new OpenAI({
 });
 
 const response = await deepseek.chat.completions.create({
-  model: "deepseek-v4-pro", // or "deepseek-v4-flash"
+  model: "deepseek-v4-pro", // or "deepseek-flash" (DeepSeek V4.1 Flash)
   max_tokens: 8192, // Include headroom for reasoning_content + JSON output
   messages: [{ role: "user", content: prompt }],
   response_format: {
@@ -146,7 +146,7 @@ const client = new OpenAI({
 });
 
 const response = await client.chat.completions.create({
-  model: "grok-4.7", // or "grok-4.7-build-fast" / "grok-4.5"
+  model: "grok-4.7", // or "grok-4.7-build-fast"
   messages: [{ role: "user", content: prompt }],
   response_format: {
     type: "json_schema",
@@ -160,14 +160,14 @@ const parsed = JSON.parse(response.choices[0].message.content);
 
 ## Cross-Provider Feature Matrix
 
-| Feature                       | Claude Opus 5.5 / Sonnet 5 | GPT-5.6 (`sol`/`terra`/`luna`) | Gemini 4 Argon / 3.8 Flash | DeepSeek V4 |   Grok 4.7    |
-| ----------------------------- | :------------------------: | :----------------------------: | :------------------------: | :---------: | :-----------: |
-| `anyOf`                       |             ❌             |               ✅               |             ✅             |     ✅      | ⚠️ flat only  |
-| `$ref` (recursive)            |       internal only        |            limited             |             ✅             |     ❌      |      ❌       |
-| `pattern`                     |             ❌             |               ✅               |             ✅             |     ❌      |      ❌       |
-| min/max constraints           |             ❌             |               ✅               |             ✅             |     ❌      |      ❌       |
-| `additionalProperties: false` |          required          |            required            |         supported          |  required   |   supported   |
-| Constrained decoding status   |             GA             |               GA               |             GA             |     GA      |      GA       |
+| Feature                       | Claude 5.5 / Opus 4.8 | GPT-6 / 6.1 (`astra`/`6.1-sol`/`luna`) | Gemini 4 Argon / 3.8 Flash | DeepSeek V4 / V4.1 |   Grok 4.7    |
+| ----------------------------- | :-------------------: | :------------------------------------: | :------------------------: | :----------------: | :-----------: |
+| `anyOf`                       |          ❌           |                   ✅                   |             ✅             |         ✅         | ⚠️ flat only  |
+| `$ref` (recursive)            |     internal only     |                limited                 |             ✅             |         ❌         |      ❌       |
+| `pattern`                     |          ❌           |                   ✅                   |             ✅             |         ❌         |      ❌       |
+| min/max constraints           |          ❌           |                   ✅                   |             ✅             |         ❌         |      ❌       |
+| `additionalProperties: false` |       required        |                required                |         supported          |      required      |   supported   |
+| Constrained decoding status   |          GA           |                   GA                   |             GA             |         GA         |      GA       |
 
 ---
 
@@ -193,7 +193,7 @@ const jsonSchema = z.toJSONSchema(MySchema);
 ### SDK Helpers
 
 ```typescript
-// OpenAI Responses API (GPT-5.6)
+// OpenAI Responses API (GPT-6 / 6.1)
 import { zodTextFormat } from "openai/helpers/zod";
 text: { format: zodTextFormat(MySchema, "result") }
 
@@ -201,10 +201,10 @@ text: { format: zodTextFormat(MySchema, "result") }
 import { zodResponseFormat } from "openai/helpers/zod";
 response_format: zodResponseFormat(MySchema, "result")
 
-// Anthropic SDK parse helper (Claude Opus 5.5 / Sonnet 5 / Opus 4.8)
+// Anthropic SDK parse helper (Claude 5.5 / Opus 4.8)
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 const response = await anthropic.messages.parse({
-  model: "claude-sonnet-5",
+  model: "claude-sonnet-5-5",
   max_tokens: 4096,
   messages: [{ role: "user", content: prompt }],
   output_config: { format: zodOutputFormat(MySchema, "result") },

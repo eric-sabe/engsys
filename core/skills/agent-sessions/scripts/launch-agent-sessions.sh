@@ -181,9 +181,10 @@ translate_copilot_flags() {
       --model)
         if [ $# -gt 0 ]; then
           case "$1" in
-            opus | fable | claude-opus-5* | claude-opus-4-8 | claude-fable-*) out+=(--model claude-opus-4.6) ;;
-            sonnet | claude-sonnet-5*) out+=(--model claude-sonnet-4.6) ;;
-            haiku | claude-haiku-*) out+=(--model claude-haiku-4.5) ;;
+            opus | fable | claude-opus-5* | claude-fable-*) out+=(--model claude-opus-5.5) ;;
+            claude-opus-4-8) out+=(--model claude-opus-4.8) ;;
+            sonnet | claude-sonnet-5*) out+=(--model claude-sonnet-5.5) ;;
+            haiku | claude-haiku-*) out+=(--model claude-haiku-5.5) ;;
             *) out+=(--model "$1") ;;
           esac
           shift
