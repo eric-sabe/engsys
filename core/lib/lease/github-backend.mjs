@@ -304,14 +304,42 @@ export function parseBatonMessage(text) {
  * `request(method, path, body?)` resolves `{status, json, headers}` (headers lower-cased) and throws
  * only on a transport failure. Built on global fetch; no `gh` process per call.
  */
-export function githubFetchClient({ token, baseUrl = "https://api.github.com", fetch: fetchImpl = globalThis.fetch, userAgent = "engsys-lease", timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS } = {}) {
+function validateGithubApiUrl(rawUrl, { allowLoopback = false } = {}) {
+  let u;
+  try { u = new URL(String(rawUrl)); } catch {
+    throw new LeaseUsageError(`invalid GITHUB_API_URL: ${rawUrl}`);
+  }
+  if (u.username || u.password) {
+    throw new LeaseUsageError(`refusing GITHUB_API_URL with credentials: ${rawUrl}`);
+  }
+  const host = u.hostname.toLowerCase();
+  const isLoopback = host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "[::1]";
+  if (allowLoopback && u.protocol === "http:" && isLoopback) {
+    return `${u.origin}${u.pathname}`.replace(/\/+$/, "");
+  }
+  if (u.protocol === "https:" && (host === "api.github.com" || (host.endsWith(".ghe.com") && (host.startsWith("api.") || u.pathname.startsWith("/api/v3"))))) {
+    return `${u.origin}${u.pathname}`.replace(/\/+$/, "");
+  }
+  throw new LeaseUsageError(`refusing untrusted GITHUB_API_URL host: ${rawUrl}`);
+}
+
+export function githubFetchClient({
+  token,
+  baseUrl = process.env.ENGSYS_ALLOW_CUSTOM_GITHUB_API_URL === "1" && process.env.GITHUB_API_URL ? process.env.GITHUB_API_URL : "https://api.github.com",
+  fetch: fetchImpl = globalThis.fetch,
+  userAgent = "engsys-lease",
+  timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+} = {}) {
   if (!token) throw new LeaseUsageError("githubFetchClient needs a token");
   if (typeof fetchImpl !== "function") throw new LeaseUsageError("no fetch implementation available");
+  const safeBaseUrl = validateGithubApiUrl(baseUrl, {
+    allowLoopback: process.env.ENGSYS_ALLOW_CUSTOM_GITHUB_API_URL === "1" || baseUrl !== (process.env.GITHUB_API_URL || "https://api.github.com"),
+  });
   return {
     async request(method, path, body) {
       // Every request is bounded: a hung socket or a stalled body read must surface as a transport
       // error (never as a late answer that the fence would treat as current).
-      const res = await fetchImpl(`${baseUrl}${path}`, {
+      const res = await fetchImpl(`${safeBaseUrl}${path}`, {
         method,
         signal: AbortSignal.timeout(timeoutMs),
         headers: {

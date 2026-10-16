@@ -262,13 +262,16 @@ export async function homeCheck({ env = process.env, repo, role, cwd = process.c
  *      held_self | held_elsewhere | not_home | error. `forfeited: true` marks an expired baton whose tip
  *      still names `ownHolder`: this session let it run out, so it can never act again (engsys#87).
  */
-export function supervisorDecision({ home, status, ownHolder }) {
+export function supervisorDecision({ home, status, ownHolder, rotationIdle = false }) {
   if (!home?.ok) return { relaunch: false, code: "error", reason: `registry: ${home?.reason ?? "unknown"}` };
   if (!home.isHome) return { relaunch: false, code: "not_home", reason: home.reason };
   if (!status || status.state === "error") return { relaunch: false, code: "error", reason: `baton unreadable: ${status?.failure?.message ?? status?.failure?.code ?? "no status"}` };
   if (status.state === "free") return { relaunch: true, code: "free", reason: status.released ? `baton released by ${status.releasedBy}` : "no baton" };
   if (status.state === "held") {
     const self = status.holder === ownHolder;
+    if (self && rotationIdle) {
+      return { relaunch: true, code: "forfeited_rotation", forfeited: true, holder: status.holder, reason: `baton held by ${status.holder} forfeited on rotation (session idle past grace)` };
+    }
     return { relaunch: false, code: self ? "held_self" : "held_elsewhere", holder: status.holder, reason: `baton held by ${status.holder} until ${status.expiresAt}` };
   }
   // unknown: expired or malformed
@@ -856,13 +859,62 @@ export function createBaton({ lease, repo, role, holder, run = null, store, home
     };
   }
 
-  async function supervise() {
+  async function supervise({ rotationIdle = false } = {}) {
     const h = await home();
-    if (!h.ok || !h.isHome) return { exit: h.ok ? EXIT.REFUSED : EXIT.ERROR, result: { role, holder, ...supervisorDecision({ home: h, status: null, ownHolder: holder }) } };
+    if (!h.ok || !h.isHome) return { exit: h.ok ? EXIT.REFUSED : EXIT.ERROR, result: { role, holder, ...supervisorDecision({ home: h, status: null, ownHolder: holder, rotationIdle }) } };
     await prepare?.();
-    const d = supervisorDecision({ home: h, status: await lease.status({ role }), ownHolder: holder });
+    const s = await lease.status({ role });
+    const d = supervisorDecision({ home: h, status: s, ownHolder: holder, rotationIdle });
+    if (d.code === "forfeited_rotation") {
+      const state = store.load();
+      let freed = false;
+      if (state && !state.corrupt && state.holder === holder && state.token) {
+        const rel = await lease.release({ role, token: state.token });
+        if (rel.ok && rel.released) {
+          store.update((cur) => (cur && cur.token === state.token ? { ...cur, token: null, releasedAt: iso(now()), releaseReason: "forfeited-on-rotation" } : null));
+          freed = true;
+        }
+      }
+      if (!freed && s?.sha && typeof lease.breakGlass === "function") {
+        const bg = await lease.breakGlass({ role, reason: "forfeited-on-rotation", expectSha: s.sha });
+        freed = Boolean(bg?.ok);
+      }
+      if (!freed) {
+        return { exit: EXIT.ERROR, result: { role, holder, relaunch: false, code: "error", reason: "could not release forfeited baton on rotation" } };
+      }
+    }
     return { exit: d.relaunch ? EXIT.OK : d.code === "error" ? EXIT.ERROR : EXIT.REFUSED, result: { role, holder, ...d } };
   }
+
+  /**
+   * Revoke a baton held by this session (engsys#96 M4: supervisor integrity mismatch).
+   * Releases via the local state token when available, else breaks glass on `s.sha` when the tip names `holder`.
+   */
+  async function revoke({ reason = "integrity-mismatch" } = {}) {
+    await prepare?.();
+    const state = store.load();
+    if (state && !state.corrupt && state.holder === holder && state.token) {
+      store.markLost({ at: iso(now()), code: "revoked", holder, where: reason });
+      const r = await lease.release({ role, token: state.token });
+      if (r.ok && r.released) {
+        store.update((cur) => (cur && cur.token === state.token ? { ...cur, token: null, releasedAt: iso(now()), releaseReason: reason } : null));
+        return { exit: EXIT.OK, result: { ok: true, revoked: true, code: "revoked", role, holder, reason } };
+      }
+    }
+    const s = await lease.status({ role });
+    if (s.state === "error") return { exit: EXIT.ERROR, result: { ok: false, revoked: false, code: "error", role, holder, reason: s.failure?.message ?? "status error" } };
+    if (s.state !== "held" || s.holder !== holder) {
+      return { exit: EXIT.OK, result: { ok: true, revoked: false, code: "not_held_self", role, holder, reason: "baton not held by this session" } };
+    }
+    store.markLost({ at: iso(now()), code: "revoked", holder, where: reason });
+    if (s.sha && typeof lease.breakGlass === "function") {
+      const bg = await lease.breakGlass({ role, reason, expectSha: s.sha });
+      if (bg.ok) return { exit: EXIT.OK, result: { ok: true, revoked: true, code: "revoked", role, holder, reason } };
+      return { exit: EXIT.ERROR, result: { ok: false, revoked: false, code: bg.code ?? "error", role, holder, reason: bg.reason ?? "breakGlass failed" } };
+    }
+    return { exit: EXIT.ERROR, result: { ok: false, revoked: false, code: "error", role, holder, reason: "cannot revoke baton without local token or tip sha" } };
+  }
+
 
   // -- keepalive -------------------------------------------------------------------------------
 
@@ -964,7 +1016,7 @@ export function createBaton({ lease, repo, role, holder, run = null, store, home
     });
   }
 
-  return { startup, renew, fence, merge, guard, release, status, supervise, keepalive, ensureKeepalive };
+  return { startup, renew, fence, merge, guard, release, status, supervise, revoke, keepalive, ensureKeepalive };
 }
 
 /** A renew error worth retrying soon: transport, timeout, 5xx, 429 or a secondary rate limit. */
@@ -1283,6 +1335,33 @@ function rootOwned(p, stat) {
 }
 
 /**
+ * Verify that `p` and every ancestor directory up to `/` are owned by root and not group/other-writable
+ * (#96 Comment 2 L1: so a writable parent directory on the resolved path cannot swap a subdir).
+ */
+export function rootOwnedChain(p, stat = statSync) {
+  if (typeof p !== "string" || !isAbsolute(p)) return null;
+  const target = rootOwned(p, stat);
+  if (!target) return null;
+  let cur = dirname(p);
+  for (let depth = 0; depth < 64; depth += 1) {
+    if (cur === "/Applications") {
+      try {
+        const st = stat(cur);
+        if (!st.isDirectory() || st.uid !== 0 || (st.mode & 0o002) !== 0) return null;
+      } catch {
+        return null;
+      }
+    } else if (!rootOwned(cur, stat)?.isDirectory()) {
+      return null;
+    }
+    const parent = dirname(cur);
+    if (parent === cur) break;
+    cur = parent;
+  }
+  return target;
+}
+
+/**
  * The candidate directories that are root-owned and not group/other-writable (#92 NF2). Homebrew's
  * /opt/homebrew/bin (and /usr/local/bin on an Intel Mac with Homebrew) belongs to the user, so a
  * planted `git`, `ssh` or `git-credential-*` there would run inside the fenced push: it is dropped.
@@ -1297,24 +1376,42 @@ export const PUSH_PATH = trustedPushDirs().join(":");
 export const NO_TRUSTED_GIT = "no working git in a root-owned directory (/usr/bin, /bin, /usr/local/bin …): the guarded push never runs a git a session could replace (Homebrew's is user-writable). On macOS install the Command Line Tools (xcode-select --install); elsewhere install git from the system package manager";
 
 /**
- * The git the guarded push runs, by absolute path (#92 NF2): the first root-owned, not group/other-
- * writable `git` in a trusted directory that answers `git --version` (on macOS /usr/bin/git is the
- * Command Line Tools shim, which fails until they are installed). null when there is none: the push
- * is refused rather than fall back to a user-writable git. Memoized for the default lookup.
+ * The git the guarded push runs, by absolute path (#92 NF2, #96 L1): on macOS, first resolves the real
+ * git binary behind the `/usr/bin/git` shim via `/usr/bin/xcrun --find git` and verifies the entire
+ * directory chain is root-owned and not group/other-writable; otherwise scans `trustedPushDirs`.
+ * null when there is none: the push is refused rather than fall back to a user-writable git.
  */
 let defaultGit;
-export function pushGit({ dirs, stat = statSync, run = execFileSync } = {}) {
-  const memo = dirs === undefined && stat === statSync && run === execFileSync;
+export function pushGit({ dirs, stat = statSync, run = execFileSync, xcrun = dirs === undefined } = {}) {
+  const memo = dirs === undefined && stat === statSync && run === execFileSync && xcrun === true;
   if (memo && defaultGit !== undefined) return defaultGit;
   let found = null;
-  for (const d of trustedPushDirs(dirs ?? PUSH_PATH_CANDIDATES, { stat })) {
-    const p = join(d, "git");
-    if (!rootOwned(p, stat)?.isFile()) continue;
+  let xcrunRejected = false;
+  if (xcrun && rootOwnedChain("/usr/bin/xcrun", stat)?.isFile()) {
     try {
-      run(p, ["--version"], { env: pushEnv(), timeout: 15_000, stdio: ["ignore", "pipe", "pipe"] });
-      found = p;
-      break;
-    } catch { /* not a working git: try the next directory */ }
+      const resolved = String(run("/usr/bin/xcrun", ["--find", "git"], { env: pushEnv(), timeout: 10_000, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }) ?? "").trim();
+      if (resolved && isAbsolute(resolved) && rootOwnedChain(resolved, stat)?.isFile()) {
+        run(resolved, ["--version"], { env: pushEnv(), timeout: 15_000, stdio: ["ignore", "pipe", "pipe"] });
+        found = resolved;
+      } else {
+        xcrunRejected = true;
+      }
+    } catch {
+      xcrunRejected = true;
+    }
+  }
+  if (!found) {
+    for (const d of trustedPushDirs(dirs ?? PUSH_PATH_CANDIDATES, { stat })) {
+      const p = join(d, "git");
+      if (xcrunRejected && p === "/usr/bin/git") continue;
+      const check = dirs === undefined ? rootOwnedChain(p, stat) : rootOwned(p, stat);
+      if (!check?.isFile()) continue;
+      try {
+        run(p, ["--version"], { env: pushEnv(), timeout: 15_000, stdio: ["ignore", "pipe", "pipe"] });
+        found = p;
+        break;
+      } catch { /* not a working git: try the next directory */ }
+    }
   }
   if (memo) defaultGit = found;
   return found;
@@ -1394,7 +1491,7 @@ export function pushConfigArgs(entries) {
     ...c("protocol.file.allow=never"),
     ...c("core.fsmonitor=false"),
     ...c("http.sslVerify=true"),
-    ...c(`core.sshCommand=${lastValue("core.sshcommand") ?? "ssh"}`),
+    ...c(`core.sshCommand=${lastValue("core.sshcommand") ?? "/usr/bin/ssh -F /dev/null"}`),
     ...c(`core.askPass=${lastValue("core.askpass") ?? ""}`),
     ...c("credential.helper="),
     ...helpers.flatMap((e) => c(`${e.key}=${e.value ?? ""}`)),
@@ -1448,7 +1545,7 @@ export function defaultSpawn(cmd, args, { timeout, env = process.env, input }) {
 
 // ---------------------------------------------------------------------------------------- CLI --
 
-const OPS = new Set(["startup", "renew", "keepalive", "fence", "guard", "merge", "release", "status", "supervise"]);
+const OPS = new Set(["startup", "renew", "keepalive", "fence", "guard", "merge", "release", "status", "supervise", "revoke"]);
 
 function usage() {
   return [
@@ -1463,7 +1560,8 @@ function usage() {
     "  merge      --pr N --sha <validated head> --method merge|squash|rebase",
     "  release    [--reason rotation|exit|handover]",
     "  status",
-    "  supervise                       relaunch decision for the fleet supervisor (no --state-dir)",
+    "  supervise  [--rotation-idle]    relaunch decision for the fleet supervisor (no --state-dir)",
+    "  revoke     [--reason text]      revoke a self-held baton on integrity mismatch",
     "env: ENGSYS_SESSION (session name), ENGSYS_SESSION_RUN (per launch), FLEET_ID, FEDERATION_FILE,",
     "     GH_TOKEN | GH_APP_ENV_FILE | gh auth token, BATON_NOTIFY_CMD | FLEET_BIN (default: this kit's core/fleet/bin/fleet notify),",
     "     ENGSYS_NEW_BRANCH_PREFIX (prefixes --new-branch may create; default agent/)",
@@ -1481,7 +1579,7 @@ function parseArgs(argv) {
     if (arg === "--") { command = rest.slice(i + 1); break; }
     if (!arg.startsWith("--")) throw new LeaseUsageError(`unexpected argument ${JSON.stringify(arg)}`);
     const name = arg.slice(2);
-    if (name === "pretty" || name === "new-branch" || name === "detach" || name === "detached-child" || name === "pulse") { flags[name] = true; continue; }
+    if (name === "pretty" || name === "new-branch" || name === "detach" || name === "detached-child" || name === "pulse" || name === "rotation-idle") { flags[name] = true; continue; }
     const value = rest[i + 1];
     if (value === undefined || value.startsWith("--")) throw new LeaseUsageError(`--${name} requires a value`);
     flags[name] = value;
@@ -1518,7 +1616,7 @@ export async function main(argv, deps = {}) {
     if (!ROLES.includes(flags.role)) throw new LeaseUsageError(`--role must be one of ${ROLES.join(", ")}`);
     const { holder } = holderFor({ env, session: flags.session, hostname: deps.hostname ?? osHostname() });
     const stateDir = flags["state-dir"] ? resolve(cwd, flags["state-dir"]) : null;
-    if (op !== "supervise" && !stateDir) throw new LeaseUsageError(`${op} needs --state-dir`);
+    if (op !== "supervise" && op !== "revoke" && !stateDir) throw new LeaseUsageError(`${op} needs --state-dir`);
     // The token is resolved once, by `prepare` (createBaton calls it only once an op is past its
     // offline checks, so a lost or tokenless session spends no request): minting one can take
     // seconds, and that time must never count against a fence read (5 s cap) or sit between a fence
@@ -1584,7 +1682,8 @@ export async function main(argv, deps = {}) {
       case "merge": r = await baton.merge({ pr: flags.pr, sha: flags.sha, method: flags.method }); break;
       case "release": r = await baton.release({ reason: flags.reason ?? "exit" }); break;
       case "status": r = await baton.status(); break;
-      case "supervise": r = await baton.supervise(); break;
+      case "supervise": r = await baton.supervise({ rotationIdle: flags["rotation-idle"] === true }); break;
+      case "revoke": r = await baton.revoke({ reason: flags.reason ?? "integrity-mismatch" }); break;
       case "guard": {
         r = await baton.guard(command, { pr: flags.pr, newBranch: flags["new-branch"] === true });
         if (r.stdout) out.write(r.stdout);

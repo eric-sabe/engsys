@@ -729,9 +729,12 @@ haven't written down:
 - **Prefer rotation over marathon compaction.** A voluntary restart at a
   quiet boundary beats an involuntary summarization at an arbitrary one.
   When context pressure is high (compaction warnings) and nothing is
-  `mm:active`: post a session-end digest to the ledger, final heartbeat with
-  status **"rotation requested"** (exact phrase — the fleet supervisor keys
-  on it), `mm-baton.sh release … --reason rotation`, and stop. No operator involved: the fleet supervisor (see the
+  `mm:active`: post a session-end digest to the ledger, run
+  `<skill-dir>/scripts/mm-baton.sh rotate --repo <repo> --state-dir <state_dir> --ledger <ledger_issue> --session <name>`
+  (which writes the final `"rotation requested"` heartbeat, releases the baton
+  with `--reason rotation`, and stops the keepalive in one call), and stop.
+  Never leave the baton for the next session — its token dies with you; an unreleased baton blocks your own relaunch until the lease expires.
+  No operator involved: the fleet supervisor (see the
   [agent-sessions](../agent-sessions/SKILL.md) skill) relaunches you within
   minutes, and startup reconcile recovers everything from durable state.
   The operator only appears when a relaunch fails or a stale-but-alive
@@ -748,8 +751,8 @@ haven't written down:
   itself, and every later heartbeat of this session repeats it (sticky), so
   the supervisor sees the request even if you never act on it. It prints
   `ROTATION_REQUESTED …` (the tick passes it on as a delta line): treat it
-  as the rotation above, now: digest, `mm-baton.sh release … --reason
-  rotation`, stop. The supervisor relaunches only once the baton is free.
+  as the rotation above, now: digest, `<skill-dir>/scripts/mm-baton.sh rotate --repo <repo> --state-dir <state_dir> --ledger <ledger_issue> --session <name>`, stop. The supervisor relaunches only once the baton is free (or forfeits a self-held baton once the session is idle past grace).
+
 
 ## Shutdown (`STOP` event, user interrupt, or pause request)
 

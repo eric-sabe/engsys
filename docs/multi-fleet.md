@@ -435,6 +435,8 @@ installation tokens, rotated cloud certificates).
 | **OS user** | The operator's own account | A dedicated OS user for the fleet on every host ([`fleet-guide.md` section 6.1](fleet-guide.md#61-dedicated-user-or-shared-account)) | A monster cannot reach the operator's personal `gh`, cloud CLI login or keychain |
 | **Upstream repos** (for example the engsys repo itself) | The fleet App installed where its owner allowed | Only fleets whose App the upstream owner chooses to install | Upstream access stays by invitation. Multi-installation support in `gh-app-token.mjs` (`GH_APP_INSTALLATIONS`, engsys v1.6.0) works per App |
 
+**Host credential-helper boundary (single-user host).** The git credential helper's `node` binary and `gh-app-token.mjs` live in user-owned paths on a single-user fleet host; `fleet verify` checks the kit and plugin files against the release tag and guarded `git push` verifies a root-owned `git` binary, while full OS-level isolation of the credential helper requires a root-owned managed install.
+
 **GitHub permission template for a fleet App.** Use the same set the single-fleet App has today
 (contents, pull requests, issues, actions, workflows, org projects and security events: write; checks,
 statuses, metadata and vulnerability alerts: read). Every fleet App gets the full set rather than a

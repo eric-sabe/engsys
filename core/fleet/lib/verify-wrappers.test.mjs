@@ -304,7 +304,7 @@ test('CT-11: Copilot JSONC config.json (leading // comments + installedPlugins[]
   assert.match(c.text(), /verify: MISMATCH/);
 });
 
-test('CT-12: Antigravity global plugin directory shadowing engsys reports shadowed MISMATCH (NA-4)', async () => {
+  test('CT-12: Antigravity global plugin directory shadowing engsys reports shadowed MISMATCH (NA-4)', async () => {
   const root = makeCache();
   const agyPlugins = pluginList([{ id: 'engsys@engsys', version: '9.9.9', enabled: true, installPath: root }]);
   const globalPluginsDir = tmp('verify-agy-global-');
@@ -320,4 +320,86 @@ test('CT-12: Antigravity global plugin directory shadowing engsys reports shadow
   );
   assert.match(c.text(), /^verify: MISMATCH/m);
   assert.match(c.text(), /shadowed\s+engsys@engsys is shadowed by/);
+});
+
+test('#88: --engsys-dir checks ENGSYS_HOST_PATHS against the release tree and invalidates the cache on host edits', async () => {
+  const root = makeCache();
+  const hostDir = tmp('verify-host-engsys-');
+  for (const p of FILES) {
+    const dest = path.join(hostDir, p);
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.copyFileSync(path.join(REPO, p), dest);
+  }
+  const plugins = pluginList([userEntry(root)]);
+  const cache = path.join(tmp('verify-host-cache-'), 'verify.json');
+  let calls = 0;
+  const fetch = async () => { calls++; return release; };
+
+  let c = capture();
+  assert.equal(await run(args(plugins, ['--engsys-dir', hostDir, '--cache', cache, '--max-age-min', '15']), { fetch, out: c.out }), 0);
+  assert.equal(calls, 1);
+
+  // Tamper with a host kit file in ENGSYS_HOST_PATHS (while plugin cache is untouched)
+  fs.appendFileSync(path.join(hostDir, 'core/fleet/identity/bin/gh'), '\n# tampered shim\n');
+  c = capture();
+  assert.equal(await run(args(plugins, ['--engsys-dir', hostDir, '--cache', cache, '--max-age-min', '15']), { fetch, out: c.out }), 1);
+  assert.equal(calls, 2, 'host file change invalidates the throttle cache');
+  assert.match(c.text(), /modified\s+\S+core\/fleet\/identity\/bin\/gh/);
+});
+
+test('#96 M3: --check-settings catches disableAllHooks, hooks, dangerous env keys, unpinned enabledPlugins, and pin settings SHA drift', async () => {
+  const root = makeCache();
+  const projDir = tmp('verify-settings-proj-');
+  const userDir = tmp('verify-settings-user-');
+  fs.mkdirSync(path.join(projDir, '.claude'), { recursive: true });
+  const pinRaw = JSON.stringify({ enabledPlugins: { 'engsys@engsys': true } });
+  fs.writeFileSync(path.join(projDir, '.claude', 'settings.json'), pinRaw);
+  const pinSha = blobSha(pinRaw);
+  const plugins = pluginList([userEntry(root)]);
+  const fetch = async () => release;
+  const runWith = async (extra = []) => {
+    const c = capture();
+    const code = await run([
+      '--repo', 'eric-sabe/engsys', '--tag', 'v9.9.9', '--plugin-id', 'engsys@engsys',
+      '--project-dir', projDir, '--plugins', plugins,
+      '--check-settings', '--user-settings-dir', userDir, '--pin-settings-sha', pinSha,
+      ...extra,
+    ], { fetch, out: c.out });
+    return { code, text: c.text() };
+  };
+
+  assert.equal((await runWith()).code, 0, 'clean settings pass');
+
+  // 1. disableAllHooks in user settings
+  fs.writeFileSync(path.join(userDir, 'settings.json'), JSON.stringify({ disableAllHooks: true }));
+  let r = await runWith();
+  assert.equal(r.code, 1);
+  assert.match(r.text, /sets disableAllHooks: true/);
+
+  // 2. hooks key in local settings
+  fs.rmSync(path.join(userDir, 'settings.json'));
+  fs.writeFileSync(path.join(projDir, '.claude', 'settings.local.json'), JSON.stringify({ hooks: {} }));
+  r = await runWith();
+  assert.equal(r.code, 1);
+  assert.match(r.text, /defines hooks/);
+
+  // 3. dangerous env key in user settings.local.json
+  fs.rmSync(path.join(projDir, '.claude', 'settings.local.json'));
+  fs.writeFileSync(path.join(userDir, 'settings.local.json'), JSON.stringify({ env: { NODE_OPTIONS: '--require /tmp/x.js' } }));
+  r = await runWith();
+  assert.equal(r.code, 1);
+  assert.match(r.text, /overrides protected env NODE_OPTIONS/);
+
+  // 4. unpinned plugin enabled in user settings
+  fs.writeFileSync(path.join(userDir, 'settings.local.json'), JSON.stringify({ enabledPlugins: { 'evil@other': true } }));
+  r = await runWith();
+  assert.equal(r.code, 1);
+  assert.match(r.text, /enables unpinned plugin evil@other/);
+
+  // 5. pin settings.json differs from origin SHA
+  fs.rmSync(path.join(userDir, 'settings.local.json'));
+  fs.writeFileSync(path.join(projDir, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { 'engsys@engsys': true, 'extra@x': true } }));
+  r = await runWith();
+  assert.equal(r.code, 1);
+  assert.match(r.text, /differs from origin/);
 });

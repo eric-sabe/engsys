@@ -138,6 +138,12 @@ main() {
       fi
     fi
   fi
+  if [ "$check" = 1 ] && [ -e "$engsys_target/.git" ]; then
+    local engsys_st=""
+    if ! engsys_st="$(git -c core.fsmonitor=false -c core.hooksPath=/dev/null -C "$engsys_target" status --porcelain 2>/dev/null)" || [ -n "$engsys_st" ]; then
+      say "engsys checkout ($engsys_target) has uncommitted or untracked changes"; drift=1
+    fi
+  fi
 
   # --- 4. user-level plugins ---------------------------------------------------------------------
   # Everything this step needs from PIN_SETTINGS is read into memory first and never re-read: a
