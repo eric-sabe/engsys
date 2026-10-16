@@ -196,7 +196,7 @@ lessons:
   into: docs/agent-lessons/library
 
 naturalize:
-  model_strategy: "Three tiers: Sonnet 5 for execution; Opus 4.8 for orchestration and judgement; escalate to Fable 5 for the hardest / highest-stakes / stuck cases."
+  model_strategy: "Four tiers + security carve-out: Sonnet 5 (claude-sonnet-5) for execution; Opus 5.5 (claude-opus-5-5) for orchestration and judgement; escalate to Fable 5.1 (claude-fable-5-1) for architecture, concurrency, and cross-cutting refactors; Haiku 4.5 (claude-haiku-4-5) for fast probes; and Opus 4.8 (claude-opus-4-8) pinned for Nyx and security work."
   hook_patterns:        # file globs -> post-edit reminder text
     - glob: "*/schema.prisma"
       reminder: "Schema changed — regenerate the client before pushing."

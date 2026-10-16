@@ -1,11 +1,11 @@
 ---
 name: llm-structured-outputs
-description: "Cross-provider reference for LLM structured outputs with Claude Sonnet 5 / Opus 4.8, GPT-5.6 (Terra/Sol), Gemini 4 Argon / 3.8 Flash, DeepSeek V4, and Grok 4.5. Use when implementing json_schema constrained decoding, writing Zod 4 schemas for LLM APIs, building multi-provider abstractions, or debugging schema compliance failures."
+description: "Cross-provider reference for LLM structured outputs with Claude Opus 5.5 / Sonnet 5 / Opus 4.8 / Fable 5.1, GPT-5.6 (Sol/Terra/Luna), Gemini 4 Argon / 3.8 Flash, DeepSeek V4, and Grok 4.7. Use when implementing json_schema constrained decoding, writing Zod 4 schemas for LLM APIs, building multi-provider abstractions, or debugging schema compliance failures."
 ---
 
 # LLM Structured Outputs
 
-Cross-provider reference for schema-constrained JSON decoding with all major frontier LLM APIs. Last updated: October 15, 2026.
+Cross-provider reference for schema-constrained JSON decoding with all major frontier LLM APIs. Last updated: October 16, 2026.
 
 ## When to Use This Skill
 
@@ -21,24 +21,24 @@ Cross-provider reference for schema-constrained JSON decoding with all major fro
 
 All five frontier providers support **constrained decoding**: you send a JSON Schema and the model is constrained at the token level to produce compliant JSON.
 
-| Provider                                         | Flagship Models (Oct 2026)                     | API Field                             | Type Value          |
-| ------------------------------------------------ | ---------------------------------------------- | ------------------------------------- | ------------------- |
-| Anthropic Claude 5 / 4.8                         | `claude-sonnet-5`, `claude-opus-4-8`           | `output_config.format`                | `"json_schema"`     |
-| OpenAI GPT-5.6 (Responses API)                   | `gpt-5.6-terra`, `gpt-5.6-sol`                 | `text.format`                         | `"json_schema"`     |
-| OpenAI GPT-5.6 (Chat Completions)                | `gpt-5.6-terra`, `gpt-5.6-sol`                 | `response_format`                     | `"json_schema"`     |
-| Google Gemini 4 Argon / 3.8 Flash                | `gemini-4-argon`, `gemini-3.8-flash`           | `generationConfig.responseJsonSchema` | N/A (schema object) |
-| DeepSeek V4                                      | `deepseek-v4-pro`, `deepseek-v4-flash`         | `response_format`                     | `"json_schema"`     |
-| xAI Grok 4.5                                     | `grok-4.5`, `grok-4.5-reasoning`               | `response_format`                     | `"json_schema"`     |
+| Provider                                         | Flagship Models (Oct 2026)                                       | API Field                             | Type Value          |
+| ------------------------------------------------ | ---------------------------------------------------------------- | ------------------------------------- | ------------------- |
+| Anthropic Claude 5.5 / 5 / 4.8                   | `claude-opus-5-5`, `claude-sonnet-5`, `claude-opus-4-8`, `claude-fable-5-1` | `output_config.format`     | `"json_schema"`     |
+| OpenAI GPT-5.6 (Responses API)                   | `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`                   | `text.format`                         | `"json_schema"`     |
+| OpenAI GPT-5.6 (Chat Completions)                | `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`                   | `response_format`                     | `"json_schema"`     |
+| Google Gemini 4 Argon / 3.8 Flash                | `gemini-4-argon`, `gemini-3.8-flash`                             | `generationConfig.responseJsonSchema` | N/A (schema object) |
+| DeepSeek V4                                      | `deepseek-v4-pro`, `deepseek-v4-flash`                           | `response_format`                     | `"json_schema"`     |
+| xAI Grok 4.7                                     | `grok-4.7`, `grok-4.7-build-fast`, `grok-4.5`                    | `response_format`                     | `"json_schema"`     |
 
 ---
 
 ## Per-Vendor API Patterns
 
-### Anthropic Claude Sonnet 5 & Opus 4.8 (GA — no beta header needed)
+### Anthropic Claude Opus 5.5, Sonnet 5 & Opus 4.8 (GA — no beta header needed)
 
 ```typescript
 const response = await anthropic.messages.create({
-  model: "claude-sonnet-5", // or "claude-opus-4-8"
+  model: "claude-sonnet-5", // or "claude-opus-5-5", "claude-opus-4-8", "claude-fable-5-1"
   max_tokens: 4096,
   messages: [{ role: "user", content: prompt }],
   output_config: {
@@ -58,13 +58,13 @@ Key facts:
 - Optional fields via `"type": ["string", "null"]` unions
 - **NOT supported:** `anyOf`, `oneOf`, `allOf`, `pattern`, min/max constraints, recursive schemas
 
-### OpenAI GPT-5.6 (`gpt-5.6-terra` / `gpt-5.6-sol`)
+### OpenAI GPT-5.6 (`gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna`)
 
 **Responses API** (recommended):
 
 ```typescript
 const response = await openai.responses.create({
-  model: "gpt-5.6-terra", // or "gpt-5.6-sol" for low-latency / high-throughput
+  model: "gpt-5.6-terra", // "gpt-5.6-sol" for premier reasoning; "gpt-5.6-luna" for low-latency / high-throughput
   input: prompt,
   text: {
     format: {
@@ -136,7 +136,7 @@ const parsed = JSON.parse(response.choices[0].message.content);
 - **Reasoning token headroom:** `deepseek-v4-pro` emits chain-of-thought in `message.reasoning_content` before writing constrained JSON to `message.content`. Always budget `max_tokens >= 8192` so reasoning does not truncate the JSON payload.
 - Requires `additionalProperties: false` and all properties in `required`.
 
-### xAI Grok 4.5
+### xAI Grok 4.7 (`grok-4.7` / `grok-4.7-build-fast`)
 
 ```typescript
 import OpenAI from "openai";
@@ -146,7 +146,7 @@ const client = new OpenAI({
 });
 
 const response = await client.chat.completions.create({
-  model: "grok-4.5-reasoning", // or "grok-4.5"
+  model: "grok-4.7", // or "grok-4.7-build-fast" / "grok-4.5"
   messages: [{ role: "user", content: prompt }],
   response_format: {
     type: "json_schema",
@@ -160,14 +160,14 @@ const parsed = JSON.parse(response.choices[0].message.content);
 
 ## Cross-Provider Feature Matrix
 
-| Feature                       | Claude Sonnet 5 / Opus 4.8 | GPT-5.6 (`terra`/`sol`) | Gemini 4 Argon / 3.8 Flash | DeepSeek V4 |   Grok 4.5    |
-| ----------------------------- | :------------------------: | :---------------------: | :------------------------: | :---------: | :-----------: |
-| `anyOf`                       |             ❌             |           ✅            |             ✅             |     ✅      | ⚠️ flat only  |
-| `$ref` (recursive)            |       internal only        |         limited         |             ✅             |     ❌      |      ❌       |
-| `pattern`                     |             ❌             |           ✅            |             ✅             |     ❌      |      ❌       |
-| min/max constraints           |             ❌             |           ✅            |             ✅             |     ❌      |      ❌       |
-| `additionalProperties: false` |          required          |        required         |         supported          |  required   |   supported   |
-| Constrained decoding status   |             GA             |           GA            |             GA             |     GA      |      GA       |
+| Feature                       | Claude Opus 5.5 / Sonnet 5 | GPT-5.6 (`sol`/`terra`/`luna`) | Gemini 4 Argon / 3.8 Flash | DeepSeek V4 |   Grok 4.7    |
+| ----------------------------- | :------------------------: | :----------------------------: | :------------------------: | :---------: | :-----------: |
+| `anyOf`                       |             ❌             |               ✅               |             ✅             |     ✅      | ⚠️ flat only  |
+| `$ref` (recursive)            |       internal only        |            limited             |             ✅             |     ❌      |      ❌       |
+| `pattern`                     |             ❌             |               ✅               |             ✅             |     ❌      |      ❌       |
+| min/max constraints           |             ❌             |               ✅               |             ✅             |     ❌      |      ❌       |
+| `additionalProperties: false` |          required          |            required            |         supported          |  required   |   supported   |
+| Constrained decoding status   |             GA             |               GA               |             GA             |     GA      |      GA       |
 
 ---
 
@@ -197,11 +197,11 @@ const jsonSchema = z.toJSONSchema(MySchema);
 import { zodTextFormat } from "openai/helpers/zod";
 text: { format: zodTextFormat(MySchema, "result") }
 
-// OpenAI Chat Completions / DeepSeek V4 / Grok 4.5
+// OpenAI Chat Completions / DeepSeek V4 / Grok 4.7
 import { zodResponseFormat } from "openai/helpers/zod";
 response_format: zodResponseFormat(MySchema, "result")
 
-// Anthropic SDK parse helper (Claude Sonnet 5 / Opus 4.8)
+// Anthropic SDK parse helper (Claude Opus 5.5 / Sonnet 5 / Opus 4.8)
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 const response = await anthropic.messages.parse({
   model: "claude-sonnet-5",
