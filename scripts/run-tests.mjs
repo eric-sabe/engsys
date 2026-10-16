@@ -81,7 +81,7 @@ const SUITES = [
 ];
 
 // Variables the kit reads from a fleet session's environment.
-const FLEET_ENV = /^(ENGSYS_|FLEET_|PIN_|INSTANCE_|GH_APP|GH_BOT_|GIT_CONFIG_|BATON_|NOTIFY_|SLACK_|HEARTBEAT_)|^(ENGSYS|INSTANCE|GH_TOKEN|GITHUB_TOKEN)$/;
+const FLEET_ENV = /^(ENGSYS_|FLEET_|PIN_|INSTANCE_|GH_APP|GH_BOT_|GIT_CONFIG_|BATON_|NOTIFY_|SLACK_|HEARTBEAT_|OPERATOR_|CLAUDE_CODE_)|^(ENGSYS|INSTANCE|GH_TOKEN|GITHUB_TOKEN)$/;
 
 export function cleanEnv(env = process.env) {
   return Object.fromEntries(Object.entries(env).filter(([k]) => !FLEET_ENV.test(k)));

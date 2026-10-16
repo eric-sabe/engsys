@@ -140,4 +140,27 @@ test('block C net for monsters: an INCOMPLETE hand-back in a fleet session is lo
   assert.equal(lines[0].remains, 'push  pending', 'control characters are stripped');
   recordHandback({ session_id: 'sess-net2', agent_id: 'n3', last_assistant_message: 'STATUS: INCOMPLETE — x' }, { ENGSYS_SESSIONS_DIR: sdir });
   assert.deepEqual(fs.readdirSync(sdir), ['acme-mm.handbacks.jsonl'], 'nothing logged outside a fleet session');
+  // Stale lock recovery (#138): a crashed holder's >30s `.lock` dir is stolen and cleaned up.
+  const staleLock = path.join(sdir, 'acme-mm.handbacks.jsonl.lock');
+  fs.mkdirSync(staleLock);
+  const past = new Date(Date.now() - 60_000);
+  fs.utimesSync(staleLock, past, past);
+  recordHandback({ session_id: 'sess-net', agent_id: 'n4', agent_type: 'engsys:isabelle', last_assistant_message: 'STATUS: INCOMPLETE — after stale lock' }, env);
+  assert.equal(fs.existsSync(staleLock), false, 'stale lock stolen and cleaned up');
+  const afterLines = fs.readFileSync(path.join(sdir, 'acme-mm.handbacks.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  assert.equal(afterLines.length, 2);
+  // Active lock timeout (#138): never append without the lock; preserve in `.pending.*` and drain once lock frees.
+  fs.mkdirSync(staleLock);
+  recordHandback(
+    { session_id: 'sess-net', agent_id: 'n5', agent_type: 'engsys:isabelle', last_assistant_message: 'STATUS: INCOMPLETE — queued while locked' },
+    { ...env, ENGSYS_HANDBACK_LOCK_TIMEOUT_MS: '15' }
+  );
+  const duringLockLines = fs.readFileSync(path.join(sdir, 'acme-mm.handbacks.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  assert.equal(duringLockLines.length, 2, 'did not append to handbacks.jsonl while lock was held');
+  assert.equal(fs.readdirSync(sdir).some((n) => n.startsWith('acme-mm.handbacks.jsonl.pending.')), true, 'saved in pending sidecar');
+  fs.rmdirSync(staleLock);
+  recordHandback({ session_id: 'sess-net', agent_id: 'n6', agent_type: 'engsys:isabelle', last_assistant_message: 'STATUS: INCOMPLETE — drains pending' }, env);
+  assert.equal(fs.readdirSync(sdir).some((n) => n.startsWith('acme-mm.handbacks.jsonl.pending.')), false, 'pending sidecar drained');
+  const drainedLines = fs.readFileSync(path.join(sdir, 'acme-mm.handbacks.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  assert.deepEqual(drainedLines.map((l) => l.agent_id), ['n1', 'n4', 'n5', 'n6']);
 });

@@ -334,10 +334,12 @@ export async function main({ argv = process.argv.slice(2), stdin = process.stdin
 	// PreToolUse (`Agent|Task`) mode (#142): stash the dispatch prompt, prompt path hints, and any
 	// target worktree path under `<cacheDir>/pending-dispatch/` so the immediately following
 	// SubagentStart hook can consume it. Always fails open with `{}`.
-	if (argv[0] === 'pre-agent' || input?.hook_event_name === 'PreToolUse') {
+	if (argv[0] === 'pre-agent' || input?.hook_event_name === 'PreToolUse' || input?.hookEventName === 'preToolUse') {
 		if (input) recordPendingDispatch(input, { cwd, now });
-		write('{}');
-		return 0;
+		if (!process.env.ENGSYS_HARNESS || process.env.ENGSYS_HARNESS === 'claude') {
+			write('{}');
+			return 0;
+		}
 	}
 
 	const agentType = extractAgentType(input);
@@ -388,7 +390,7 @@ export async function main({ argv = process.argv.slice(2), stdin = process.stdin
 		write('{}');
 		return 0;
 	}
-	write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'SubagentStart', additionalContext: briefText } }));
+	write(JSON.stringify({ additionalContext: briefText, hookSpecificOutput: { hookEventName: 'SubagentStart', additionalContext: briefText } }));
 	return 0;
 }
 

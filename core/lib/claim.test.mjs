@@ -456,10 +456,10 @@ describe('acquireClaim / releaseClaim: board sync is wired in and fails soft', (
 });
 
 describe('main (CLI)', () => {
-  function run(args, { env = {}, api } = {}) {
+  function run(args, { env = {}, api, now = NOW } = {}) {
     const out = { s: '' }; const err = { s: '' };
     const streams = { out: { write: (s) => (out.s += s) }, err: { write: (s) => (err.s += s) } };
-    return main(args, { api, env, cwd: '/tmp', ...streams }).then((code) => ({ code, out: out.s, err: err.s }));
+    return main(args, { api, env, cwd: '/tmp', now, ...streams }).then((code) => ({ code, out: out.s, err: err.s }));
   }
 
   test('single-fleet mode (no FLEET_ID): acquire/release are no-ops, exit 0', async () => {

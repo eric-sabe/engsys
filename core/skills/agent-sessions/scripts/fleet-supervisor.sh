@@ -822,7 +822,10 @@ done
 # re-entered at the same minute), after every session above has been classified. Fail soft and
 # cheap — this never blocks or repeats within the same tick.
 if [ -n "$HEARTBEAT_CMD" ] && [ $((UP + ROTATING + DOWN)) -gt 0 ]; then
-  MINUTE_NOW=$(date -u +%Y-%m-%dT%H:%M)
+  case "${SUPERVISOR_NOW_MINUTE:-}" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]) MINUTE_NOW="$SUPERVISOR_NOW_MINUTE" ;;
+    *) MINUTE_NOW="$(date -u +%Y-%m-%dT%H:%M)" ;;
+  esac
   MINUTE_LATCH="$STATE_DIR/heartbeat.last-minute"
   if [ ! -f "$MINUTE_LATCH" ] || [ "$(cat "$MINUTE_LATCH")" != "$MINUTE_NOW" ]; then
     SUMMARY="sessions: $UP up, $ROTATING rotating, $DOWN down"

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # fleet-supervisor.test.sh — decision-table tests with fake gh/tmux/launcher (run by `npm test`).
 set -euo pipefail
+unset OPERATOR_TIMEZONE OPERATOR_CLOCK
+export SUPERVISOR_NOW_MINUTE="2026-10-15T12:00"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 SUP="$HERE/fleet-supervisor.sh"
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT

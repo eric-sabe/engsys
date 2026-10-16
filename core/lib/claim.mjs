@@ -480,7 +480,7 @@ No FLEET_ID (env or --fleet-id): acquire/release are no-ops, exit 0 (single-flee
 CLAIM_PROJECT=<owner>/<number> + CLAIM_OWNER_FIELD (default "Owner"): also sync that board field
 on acquire/release. Unset means skip; a sync failure warns but never fails the claim.`;
 
-export async function main(argv, { api = ghApiClient(), env = process.env, cwd = process.cwd(), out = process.stdout, err = process.stderr } = {}) {
+export async function main(argv, { api = ghApiClient(), env = process.env, cwd = process.cwd(), now = Date.now(), out = process.stdout, err = process.stderr } = {}) {
   const say = (s) => out.write(`${s}\n`);
   const warn = (s) => err.write(`claim: ${s}\n`);
   const args = [];
@@ -515,7 +515,7 @@ export async function main(argv, { api = ghApiClient(), env = process.env, cwd =
     switch (cmd) {
       case 'acquire': {
         if (!fleetId) { say(`single-fleet mode: nothing to claim for ${repo}#${number}`); return EXIT.OK; }
-        const res = await acquireClaim(api, { repo, number, fleetId, takeover, env, cwd });
+        const res = await acquireClaim(api, { repo, number, fleetId, takeover, env, cwd, now });
         if (res.board?.status === 'warning') warn(`board: ${res.board.message}`);
         say(JSON.stringify(res));
         return EXIT.OK;
