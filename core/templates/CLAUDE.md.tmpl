@@ -138,7 +138,7 @@ How to dispatch and track subagents. This discipline lives in scattered memory f
 - **A hand-back is final — nothing wakes a finished subagent.** Not its own background review, build or CI finishing. So a subagent never hands back "still running, I'll continue once it finishes": it waits and finishes, or ends with `STATUS: INCOMPLETE — <what remains>`. engsys personas always end with `STATUS: COMPLETE` or `STATUS: INCOMPLETE — …`. When a hand-back is INCOMPLETE (or reads as unfinished), the dispatching session acts before ending its turn: resume the agent (SendMessage), take the work over, or arm a watchdog — never end the turn on it. Plugin installs enforce both sides with `SubagentStop` / `Stop` hooks (`handback-guard`).
 - **Long runners (> a few minutes)** — implementation, investigation, reviews, builds: use the `subagent-liveness` skill (register at spawn, watch for overdue/stale, probe before declaring death).
 - **Short, single-concern agents; verify state live.** Prefer several focused agents over one god-agent, and read PR / issue / CI / merge state from GitHub, not from memory — a merge can leave a PR OPEN; confirm it actually merged before "done".
-- **If a merge orchestrator owns the merge baton:** you don't merge. Finish the PR (local review clean + pre-push gate green, threads resolved), leave it a draft, and hand off per your merge-orchestration protocol.
+- **If a merge orchestrator owns the merge baton:** you don't merge. Finish the PR (local review clean + pre-push gate green, threads resolved), leave it a draft, and hand off per your merge-orchestration protocol.{{MESSAGING_NOTE}}
 
 ## Context compaction
 

@@ -78,8 +78,20 @@ test('route: anything that is not <session> or <fleet>:<session> throws', () => 
   }
 });
 
-test('routeLine: the two lines `fleet msg route` prints', () => {
+test('routeLine: the two lines `fleet msg route` prints (and harness-aware fallback for copilot/antigravity)', () => {
   assert.equal(routeLine(route('acme-build', { fleetId: 'alice' })), 'same fleet: use SendMessage to acme-build');
+  assert.equal(
+    routeLine(route('acme-build', { fleetId: 'alice' }), { harness: 'copilot' }),
+    'same fleet: SendMessage unavailable in copilot — skip peer nudge (GitHub state/comment is the notification)'
+  );
+  assert.equal(
+    routeLine(route('acme-build', { fleetId: 'alice' }), { harness: 'antigravity' }),
+    'same fleet: SendMessage unavailable in antigravity — skip peer nudge (GitHub state/comment is the notification)'
+  );
+  assert.equal(
+    routeLine(route('acme-build', { fleetId: 'alice' }), { harness: 'agy' }),
+    'same fleet: SendMessage unavailable in antigravity — skip peer nudge (GitHub state/comment is the notification)'
+  );
   assert.equal(routeLine(route('bob:acme-build', { fleetId: 'alice' })), 'other fleet: fleet msg send --to bob:acme-build');
 });
 
@@ -89,6 +101,8 @@ test('fleet msg route: exit 3 for the same fleet, 0 for another, 2 for a bad add
   const { env } = fixture();
   let r = cli(['route', 'alice:acme-build'], env);
   assert.deepEqual([r.rc, r.out], [EXIT.SAME_FLEET, 'same fleet: use SendMessage to acme-build\n']);
+  r = cli(['route', 'alice:acme-build'], { ...env, ENGSYS_HARNESS: 'copilot', HARNESS: 'claude' });
+  assert.deepEqual([r.rc, r.out], [EXIT.SAME_FLEET, 'same fleet: SendMessage unavailable in copilot — skip peer nudge (GitHub state/comment is the notification)\n']);
   r = cli(['route', 'bob:acme-build'], env);
   assert.deepEqual([r.rc, r.out], [EXIT.OK, 'other fleet: fleet msg send --to bob:acme-build\n']);
   r = cli(['route', 'bob:acme-build'], { ...env, FLEET_ID: '' });

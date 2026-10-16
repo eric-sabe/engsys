@@ -155,6 +155,18 @@
   },
 
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/subagent-memory-inject.mjs pre-agent",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Edit|Write|MultiEdit",
@@ -164,9 +176,89 @@
             "command": ".claude/hooks/post-edit-reminders.sh"
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "grep -Eqs '\"delivered_at\"[[:space:]]*:[[:space:]]*null' \"${FLEET_INBOX_DIR:-/nonexistent}/${ENGSYS_SESSION:-none}.jsonl\" && node .claude/hooks/fleet-inbox.mjs post-tool-use; exit 0",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/subagent-memory-inject.mjs",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/handback-guard.mjs subagent",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "grep -Eqs '\"delivered_at\"[[:space:]]*:[[:space:]]*null' \"${FLEET_INBOX_DIR:-/nonexistent}/${ENGSYS_SESSION:-none}.jsonl\" && node .claude/hooks/fleet-inbox.mjs prompt; exit 0",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/weather-check.mjs prompt",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/handback-guard.mjs stop",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "grep -Eqs '\"delivered_at\"[[:space:]]*:[[:space:]]*null' \"${FLEET_INBOX_DIR:-/nonexistent}/${ENGSYS_SESSION:-none}.jsonl\" && node .claude/hooks/fleet-inbox.mjs session-start; exit 0",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/weather-check.mjs session-start",
+            "timeout": 5
+          }
+        ]
+      },
       {
         "matcher": "compact",
         "hooks": [

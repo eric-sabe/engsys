@@ -57,7 +57,13 @@ export async function run(event, env = process.env) {
   const dir = env.FLEET_INBOX_DIR;
   const session = env.ENGSYS_SESSION;
   if (!dir || !session || !path.isAbsolute(dir) || path.basename(dir) !== 'inbox') return '';
-  const root = resolvePluginRoot(env, import.meta.url);
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(session)) return '';
+  const pluginRoot = resolvePluginRoot(env, import.meta.url);
+  const root = fs.existsSync(path.join(pluginRoot, 'fleet', 'lib', 'inbox.mjs'))
+    ? pluginRoot
+    : (env.ENGSYS_DIR && path.isAbsolute(env.ENGSYS_DIR) && fs.existsSync(path.join(env.ENGSYS_DIR, 'core', 'fleet', 'lib', 'inbox.mjs'))
+      ? path.join(env.ENGSYS_DIR, 'core')
+      : pluginRoot);
   const { trustedEntries, markDelivered, inboxLine, SESSION_NAME_RE } = await import(path.join(root, 'fleet', 'lib', 'inbox.mjs'));
   if (!SESSION_NAME_RE.test(session)) return '';
   if (!ownsPane(session, env)) return '';

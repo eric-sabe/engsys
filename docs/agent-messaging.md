@@ -299,7 +299,21 @@ is explicitly "last known" and re-checked against `ListAgents` before use.
 
 ## Config additions
 
-A `messaging:` section in `.claude/merge-monster.yml`, off by default so the
+### 1. Project-level (`engsys.config.yaml` — Claude Code interactive & copy-mode)
+
+In `engsys.config.yaml`, add a `messaging:` block to configure Claude Code's `crossSessionInbound` setting in `.claude/settings.local.json` and document your namespace convention in `CLAUDE.md`:
+
+```yaml
+messaging:
+  enabled: true
+  namespace: acme        # sessions launched as `claude --name acme-<role>`
+  inbound: accept        # accept | hold | refuse -> writes crossSessionInbound to .claude/settings.local.json
+  remote_control: true   # documents `--remote-control` for cross-machine Claude Code sessions
+```
+
+### 2. Monster-level (`.claude/merge-monster.yml` and `.claude/maintenance-monster.yml`)
+
+A `messaging:` section in `.claude/merge-monster.yml` (and `.claude/maintenance-monster.yml`), off by default so the
 absence of it is exactly today's behavior:
 
 ```yaml
@@ -311,6 +325,20 @@ messaging:
   operator_slack: # DEPRECATED, ignored (approval happens in GitHub; see gate-check.md)
     enabled: false
 ```
+
+### 3. Fleet Launcher (`launch-agent-sessions.sh`)
+
+When `HARNESS=claude`, [`launch-agent-sessions.sh`](../core/skills/agent-sessions/scripts/launch-agent-sessions.sh) automatically writes `~/.claude/<ns>-messaging-settings.json` (`{"crossSessionInbound": "accept"}`, mode `0600`) and launches every tmux window with `--name <ns>-<role> --settings ~/.claude/<ns>-messaging-settings.json --remote-control`.
+
+## Multi-Harness Behavior (`claude` vs. `copilot` vs. `antigravity`)
+
+`engsys` uses two distinct messaging layers whose behavior across coding harnesses differs intentionally:
+
+| Messaging Layer | Mechanism | Claude Code (`claude`) | GitHub Copilot CLI (`copilot`) | Google Antigravity (`antigravity`) |
+|---|---|---|---|---|
+| **1. Same-Fleet / Same-Host Peer Nudges** (`<ns>-<role>`, e.g. `acme-mm` → `acme-build`) | Claude Code per-user Unix socket (`SendMessage` & `ListAgents`) | **Active:** `fleet msg route` exits `3` (`same fleet: use SendMessage to <name>`), and the session nudges the peer directly over `SendMessage`. | **Graceful no-op fallback:** No cross-tmux `SendMessage` socket exists. `fleet msg route` (`HARNESS=copilot`) prints `same fleet: SendMessage unavailable in copilot — skip peer nudge (GitHub state/comment is the notification)`. | **Graceful no-op fallback:** Antigravity's native `send_message` tool only addresses child/peer subagents inside the same workspace process by `conversationId`. Across independent tmux sessions, `fleet msg route` (`HARNESS=antigravity`) prints `same fleet: SendMessage unavailable in antigravity — skip peer nudge`. |
+| **2. Cross-Fleet / Cross-Host Messaging** (`<fleet>:<session>`, e.g. `bob:acme-p70`) | GitHub App-signed `<!-- fleet-msg v1 -->` comments (`fleet msg send`) + `fleet relay poll` + `$FLEET_INBOX_DIR/<session>.jsonl` | **Active:** Monsters wake on `FLEET_MSG` (`mm-watch.sh`/`mnt-watch.sh`); interactive sessions receive pointers via `fleet-inbox.mjs` (`hookSpecificOutput.additionalContext`). | **Active:** Monsters wake on `FLEET_MSG`; interactive sessions receive pointers via `fleet-inbox.mjs` (`{ additionalContext }`). | **Active:** Monsters wake on `FLEET_MSG`; interactive sessions receive pointers via `fleet-inbox.mjs` (plain-text stdout context). |
+| **3. Subagent Coordinator ↔ Worker Messaging** (within one session) | Harness-native subagent tool | `Task` / `Agent` (`SendMessage` for background agents) | `task` subagent invocation | Native `invoke_subagent` + `send_message` (`Recipient: <conversationId>`) |
 
 ## Phase 2 — GitHub channel
 

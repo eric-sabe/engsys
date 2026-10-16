@@ -96,6 +96,14 @@ commands: all
 lessons:
   seed: true
   into: docs/agent-lessons/library
+
+# Optional: Claude Code cross-session peer messaging (`SendMessage` / `ListAgents`)
+# Writes `crossSessionInbound` to `.claude/settings.local.json` and adds namespace guidance to `CLAUDE.md`.
+# messaging:
+#   enabled: true
+#   namespace: acme
+#   inbound: accept          # accept | hold | refuse
+#   remote_control: true
 ```
 
 ### Step 1.4 — Materialize Into the Repository
@@ -327,3 +335,13 @@ When scaffolding a federated host's fleet config (pass `--force` if upgrading an
 ```
 
 - **Pass criteria:** Prints every federated fleet's heartbeat age, every singleton baton (`holder`, `expires_at`, and `holder == home`), and `0` integrity or auth holds.
+
+### Harness Messaging Matrix (`claude` vs. `copilot` vs. `antigravity`)
+
+`engsys` separates **same-fleet peer nudges** from **cross-fleet federation messaging** so every harness operates safely without requiring Claude Code's proprietary Unix socket:
+
+| Layer | Claude Code (`claude`) | GitHub Copilot CLI (`copilot`) | Google Antigravity (`antigravity`) |
+|---|---|---|---|
+| **Same-Fleet / Same-Host Peer Nudges** (`<ns>-<role>`, e.g. `acme-mm` → `acme-build`) | Uses native `SendMessage` & `ListAgents` (configured via `messaging:` in `engsys.config.yaml` / `merge-monster.yml` and `--name <ns>-<role> --settings ~/.claude/<ns>-messaging-settings.json --remote-control`). | No cross-tmux `SendMessage` socket exists. `fleet msg route` (`HARNESS=copilot`) reports `SendMessage unavailable in copilot — skip peer nudge`; GitHub PR comments & `mm:bounced`/`mm:escalated` labels serve as the notification. | Antigravity's `send_message` only addresses child/peer subagents inside one workspace process by `conversationId`. Across independent sessions, `fleet msg route` (`HARNESS=antigravity`) skips `SendMessage` and relies on GitHub PR state/comments. |
+| **Cross-Fleet / Cross-Host Messaging** (`<fleet>:<session>`, e.g. `bob:acme-p70`) | **Full support:** `fleet msg send` → App-signed `<!-- fleet-msg v1 -->` GitHub comment → `fleet relay poll` → `$FLEET_INBOX_DIR/<session>.jsonl` → `FLEET_MSG` watch event + `fleet-inbox.mjs` hook (`hookSpecificOutput.additionalContext`). | **Full support:** Same GitHub App-signed `fleet msg` / `fleet relay` pipeline + `fleet-inbox.mjs` hook (`{ additionalContext }`). | **Full support:** Same GitHub App-signed `fleet msg` / `fleet relay` pipeline + `fleet-inbox.mjs` hook (plain-text stdout context). |
+
