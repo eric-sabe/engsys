@@ -46,7 +46,9 @@ import { fileURLToPath } from 'node:url';
 import { createEnvelope } from '../lib/untrusted.mjs';
 import { isMainEntry } from '../lib/is-main.mjs';
 import {
+	coerceListField,
 	ensureIndex,
+	isRepoAllowlisted,
 	listEvents,
 	MARKER_SHAPE_RE,
 	queryIndex,
@@ -65,6 +67,8 @@ export const DEFAULTS = {
 	review_markers: [],
 	trusted_bot_user_ids: [],
 	operator_user_ids: [],
+	operator_emails: [],
+	operator_logins: [],
 	exclude_class_b_agents: [],
 	high_fanout_globs: [],
 	brief_bytes: 2048,
@@ -76,46 +80,68 @@ export const DEFAULTS = {
 // config
 // ---------------------------------------------------------------------------------------------
 
-/** Load `.claude/memory.yml` (or `memory.yml` directly, if `repoRoot` IS a fleet config dir)
- * merged over DEFAULTS. A missing/unreadable/malformed file is just "use the defaults" — never
- * throws. */
 /**
  * Load `.claude/memory.yml` — the trust allowlists and markers (docs/memory-spec.md §10) — from
- * the REVIEWED SHA, never the working tree (engsys#140 N5 — Nyx re-review): an attacker who could
- * edit an uncommitted/unreviewed `.claude/memory.yml` could otherwise hand themselves a trusted
- * author id or a marker to mine. Falls back to `memory.yml` in the FLEET config dir
- * (`CLAUDE_CONFIG_DIR`, a path genuinely outside the project's working tree — reading it from
- * disk is not a trust violation the way the working tree copy would be), then to defaults.
+ * the REVIEWED SHA, never the working tree (engsys#140 N5 — Nyx re-review), and ONLY when
+ * `repoRoot`'s `origin` remote is in the `repos` allowlist (#145). Merges with `memory.yml` in the
+ * fleet config dir (`CLAUDE_CONFIG_DIR`) and plugin config dir (`CLAUDE_PLUGIN_ROOT`), then
+ * defaults. Scalar list fields are coerced to one-item lists (#155).
  */
-// These fields are UNIONED across the repo config and the fleet config (docs/memory-spec.md §10)
-// rather than one replacing the other — a fleet-wide trust allowlist and a repo's own are both
-// meant to apply, not compete (round 4, Nyx L4). Every other field is a plain override, fleet wins.
-const UNION_FIELDS = ['exclude_class_b_agents', 'trusted_bot_user_ids', 'operator_user_ids', 'review_markers'];
+const UNION_FIELDS = ['exclude_class_b_agents', 'trusted_bot_user_ids', 'operator_user_ids', 'operator_emails', 'operator_logins', 'review_markers', 'high_fanout_globs'];
 
-export function loadConfig(repoRoot, { sha } = {}) {
-	const reviewedSha = sha ?? (repoRoot ? resolveReviewedSha(repoRoot) : null);
-	let repoConfig = null;
-	if (reviewedSha) {
+function isPlainObject(v) {
+	return Boolean(v) && typeof v === 'object' && !Array.isArray(v);
+}
+
+export function loadConfig(repoRoot, { sha, pluginRoot, allowedRepos, log = null } = {}) {
+	let pluginConfig = null;
+	const pRoot = pluginRoot ?? process.env.CLAUDE_PLUGIN_ROOT ?? null;
+	if (pRoot) {
 		try {
-			const out = execFileSync('git', ['-C', repoRoot, 'show', `${reviewedSha}:.claude/memory.yml`], { encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] });
-			repoConfig = parseYaml(out);
-		} catch { /* not committed there */ }
+			const raw = fs.readFileSync(path.join(pRoot, 'memory.yml'), 'utf8');
+			const parsed = parseYaml(raw);
+			if (isPlainObject(parsed)) pluginConfig = parsed;
+		} catch { /* no plugin config dir copy */ }
 	}
 	let fleetConfig = null;
 	if (process.env.CLAUDE_CONFIG_DIR) {
 		try {
 			const raw = fs.readFileSync(path.join(process.env.CLAUDE_CONFIG_DIR, 'memory.yml'), 'utf8');
-			fleetConfig = parseYaml(raw);
+			const parsed = parseYaml(raw);
+			if (isPlainObject(parsed)) fleetConfig = parsed;
 		} catch { /* no fleet config dir copy either */ }
 	}
-	// Scalars: the fleet value wins when both are present (last spread wins); UNION_FIELDS are
-	// re-merged below instead of just overwritten.
-	const merged = { ...DEFAULTS, ...(repoConfig ?? {}), ...(fleetConfig ?? {}) };
-	for (const field of UNION_FIELDS) {
-		const repoArr = Array.isArray(repoConfig?.[field]) ? repoConfig[field] : [];
-		const fleetArr = Array.isArray(fleetConfig?.[field]) ? fleetConfig[field] : [];
-		merged[field] = [...new Set([...repoArr, ...fleetArr])];
+	const allowlisted = repoRoot ? isRepoAllowlisted(repoRoot, { pluginRoot: pRoot, allowedRepos }) : false;
+	const reviewedSha = allowlisted ? (sha ?? resolveReviewedSha(repoRoot)) : null;
+	let repoConfig = null;
+	if (reviewedSha) {
+		try {
+			const out = execFileSync('git', ['-C', repoRoot, 'show', `${reviewedSha}:.claude/memory.yml`], { encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] });
+			const parsed = parseYaml(out);
+			if (isPlainObject(parsed)) repoConfig = parsed;
+		} catch { /* not committed there */ }
 	}
+	// Scalars: the fleet value wins when both are present (last spread wins); UNION_FIELDS are
+	// re-merged below instead of just overwritten, with scalar list values coerced (#155).
+	const merged = { ...DEFAULTS };
+	for (const src of [pluginConfig, repoConfig, fleetConfig]) {
+		if (!src) continue;
+		for (const [k, v] of Object.entries(src)) {
+			if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue;
+			if (k in DEFAULTS) merged[k] = v;
+		}
+	}
+	for (const field of UNION_FIELDS) {
+		const pluginArr = coerceListField(pluginConfig?.[field], { field, log });
+		const repoArr = coerceListField(repoConfig?.[field], { field, log });
+		const fleetArr = coerceListField(fleetConfig?.[field], { field, log });
+		merged[field] = [...new Set([...pluginArr, ...repoArr, ...fleetArr])];
+	}
+	// `repos` comes ONLY from fleet/plugin config (never repoConfig, so an unlisted repo cannot allowlist itself, #145).
+	merged.repos = [...new Set([
+		...coerceListField(pluginConfig?.repos, { field: 'repos', log }),
+		...coerceListField(fleetConfig?.repos, { field: 'repos', log }),
+	])];
 	return merged;
 }
 
@@ -329,8 +355,92 @@ export function allowedMarkerNames(config) {
 
 const OUTCOME_WEIGHT = { fixed: 1.0, unresolved: 0.5, disputed: 0.2, bounced: 0.3, merged: 0.8, none: 0.1 };
 
+/**
+ * Evaluate brief-time trust of a Class B event against `config` (docs/memory-spec.md §7.3, #132):
+ * removing a bot from `trusted_bot_user_ids` or an operator from `operator_user_ids` immediately
+ * drops its previously synced events at brief-build time. When `config` is omitted, returns `true`.
+ */
+export function isEventTrusted(event, config) {
+	if (!event || typeof event !== 'object') return false;
+	if (!config) return true;
+	if (event.kind === 'commit') {
+		if (event.author_kind === 'operator' && (event.author_email || event.author_login)) {
+			const opEmails = new Set((config.operator_emails ?? []).map((e) => String(e).toLowerCase()));
+			const opLogins = new Set((config.operator_logins ?? []).map((l) => String(l).toLowerCase()));
+			if (opEmails.size > 0 || opLogins.size > 0) {
+				const emailOk = event.author_email && opEmails.has(String(event.author_email).toLowerCase());
+				const loginOk = event.author_login && opLogins.has(String(event.author_login).toLowerCase());
+				if (!emailOk && !loginOk) return false;
+			}
+		}
+		return true;
+	}
+	const trustedBots = new Set((config.trusted_bot_user_ids ?? []).map(Number));
+	const operators = new Set((config.operator_user_ids ?? []).map(Number));
+	const kind = String(event.author_kind || '');
+	const authorId = event.author_id != null ? Number(event.author_id) : null;
+	if (kind === 'bot' && (authorId === null || !trustedBots.has(authorId))) return false;
+	if (kind === 'operator' && (authorId === null || !operators.has(authorId))) return false;
+	const wasEdited =
+		event.last_edited_at != null ||
+		event.was_edited === true ||
+		Boolean(event.created_at && event.updated_at && event.created_at !== event.updated_at);
+	if (wasEdited && event.editor_id == null) return false;
+	if (event.editor_id != null) {
+		const editorId = Number(event.editor_id);
+		if (authorId === null || editorId !== authorId) {
+			if (!trustedBots.has(editorId) && !operators.has(editorId)) return false;
+		}
+	}
+	return true;
+}
+
+/**
+ * Compute per-file PR fanout (`prCountsByFile` and `totalPrs`) from the indexed event corpus (#132).
+ * When fewer than 2 distinct PRs are present in `events`, returns `{ prCountsByFile: {}, totalPrs: 1 }`
+ * so `pointerScore` falls back to neutral `idf = 1`.
+ */
+export function computePrFanout(events = []) {
+	const prsByPath = new Map();
+	const allPrs = new Set();
+	for (const e of events) {
+		if (!e || !e.path || !e.number) continue;
+		const prId = `${e.repo ?? ''}:${e.number}`;
+		allPrs.add(prId);
+		let set = prsByPath.get(e.path);
+		if (!set) {
+			set = new Set();
+			prsByPath.set(e.path, set);
+		}
+		set.add(prId);
+	}
+	if (allPrs.size < 2) return { prCountsByFile: {}, totalPrs: 1 };
+	const prCountsByFile = {};
+	let maxFanout = 0;
+	for (const [p, set] of prsByPath.entries()) {
+		prCountsByFile[p] = set.size;
+		if (set.size > maxFanout) maxFanout = set.size;
+	}
+	return {
+		prCountsByFile,
+		totalPrs: Math.max(allPrs.size, maxFanout + 2),
+	};
+}
+
 /** docs/memory-spec.md §5's pointer score: anchor × idf(file) × recency × outcome. */
-export function pointerScore(event, { touchedPaths = [], touchedLines = {}, prCountsByFile = {}, totalPrs = 1, now = Date.now() } = {}) {
+export function pointerScore(
+	event,
+	{
+		touchedPaths = [],
+		touchedLines = {},
+		touchedSymbols = [],
+		promptTerms = [],
+		highFanoutGlobs = [],
+		prCountsByFile = {},
+		totalPrs = 1,
+		now = Date.now(),
+	} = {},
+) {
 	if (!event.path) return 0;
 	let anchor = 0;
 	const base = path.basename(event.path);
@@ -342,9 +452,33 @@ export function pointerScore(event, { touchedPaths = [], touchedLines = {}, prCo
 		anchor = 0.2;
 	}
 	if (anchor === 0) return 0;
-	// idf = log(N_prs / (1 + prs_touching_file)) (spec §5). Fanout data (totalPrs/prCountsByFile)
-	// comes from memory-sync, which ships in a later phase; absent that data, `idf` falls back to a
-	// neutral 1 rather than log(1/1)=0, which would zero out every pointer regardless of anchor.
+
+	// Files matching `high_fanout_globs` (e.g. schema.prisma, package.json) are keyed by symbol
+	// rather than path alone unless an exact nearby line is touched (docs/memory-spec.md §5, #132).
+	if (highFanoutGlobs?.length && globMatchesAny(highFanoutGlobs, [event.path]) && anchor < 1.0) {
+		const rawSym = event.symbol ? String(event.symbol) : '';
+		const sym = rawSym.toLowerCase();
+		if (!sym) return 0;
+		const symWords = new Set(
+			rawSym
+				.replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+				.split(/[^A-Za-z0-9]+/)
+				.map((w) => w.toLowerCase())
+				.filter((w) => w.length >= 3),
+		);
+		const symCandidates = [...(touchedSymbols ?? []), ...(promptTerms ?? [])].map((s) => String(s).toLowerCase());
+		if (
+			!symCandidates.some(
+				(c) => c === sym || symWords.has(c) || (c.length >= 6 && (sym.includes(c) || c.includes(sym))),
+			)
+		) {
+			return 0;
+		}
+		anchor = Math.max(anchor, 0.8);
+	}
+
+	// idf = log(N_prs / (1 + prs_touching_file)) (spec §5). Absent fanout data for `event.path`,
+	// `idf` falls back to a neutral 1 rather than log(1/1)=0.
 	const fanout = prCountsByFile[event.path];
 	const idf = fanout === undefined ? 1 : Math.log(Math.max(totalPrs, 1) / (1 + fanout));
 	const ageDays = event.updated_at ? Math.max(0, (now - new Date(event.updated_at).getTime()) / 86400000) : 365;
@@ -373,13 +507,23 @@ export function renderPointerLine(event) {
 }
 
 /** Top Class B pointers (up to 3 per spec §5), highest pointerScore first, ties broken by key for
- * determinism. */
+ * determinism. Evaluates brief-time author/editor trust against `opts.config` (§7.3) and computes
+ * PR fanout (`idf`) across `events` when `opts.prCountsByFile` is not explicitly provided (#132). */
 export function selectPointers(events, opts = {}, limit = 3) {
 	const valid = events
+		.filter((e) => isEventTrusted(e, opts.config))
 		.map((e) => validatePointerEvent(e, { allowedMarkers: opts.allowedMarkers }))
 		.filter(Boolean);
+	const hasExplicitFanout = opts.prCountsByFile && Object.keys(opts.prCountsByFile).length > 0;
+	const derivedFanout = hasExplicitFanout ? null : computePrFanout(valid);
+	const scoreOpts = {
+		...opts,
+		highFanoutGlobs: opts.highFanoutGlobs ?? opts.config?.high_fanout_globs ?? [],
+		prCountsByFile: hasExplicitFanout ? opts.prCountsByFile : (derivedFanout?.prCountsByFile ?? {}),
+		totalPrs: hasExplicitFanout ? (opts.totalPrs ?? 1) : (derivedFanout?.totalPrs ?? 1),
+	};
 	return valid
-		.map((e) => ({ e, score: pointerScore(e, opts) }))
+		.map((e) => ({ e, score: pointerScore(e, scoreOpts) }))
 		.filter((x) => x.score > 0)
 		.sort((a, b) => b.score - a.score || String(a.e.key).localeCompare(String(b.e.key)))
 		.slice(0, limit)
@@ -464,12 +608,16 @@ export function renderBrief({ overlay = '', lessons = [], pointers = [] } = {}, 
  * line made it fall through to matching the heading itself as "first content line".
  */
 function firstLine(body, title) {
-	const trigger = /^[\s\S]*?\*\*Trigger:\*\*\s*(.+)$/m.exec(body);
-	if (trigger) return trigger[1].split('\n')[0];
+	const triggerInline = /^(?:\*\*Trigger:\*\*|Trigger:)[ \t]*([^\r\n]+)$/m.exec(body);
+	if (triggerInline && triggerInline[1].trim()) return triggerInline[1].trim().slice(0, 160);
+	const triggerBare = /^(?:\*\*Trigger:\*\*|Trigger:)[ \t]*\r?\n+(?:[ \t]*\r?\n)*[ \t]*([^\r\n]+)/m.exec(body);
+	if (triggerBare && triggerBare[1].trim()) {
+		return triggerBare[1].trim().replace(/^[-*#]+\s*/, '').trim().slice(0, 160);
+	}
 	const normalizedTitle = title ? String(title).trim().toLowerCase() : null;
 	for (const raw of body.split('\n')) {
 		const line = raw.trim();
-		if (line === '') continue; // leading/interstitial blank lines
+		if (line === '' || /^(?:\*\*Trigger:\*\*|Trigger:)$/i.test(line)) continue; // leading/interstitial blank lines or bare Trigger: header
 		const stripped = line.replace(/^#+\s*/, '').trim(); // a Markdown heading, with or without blanks before it
 		if (normalizedTitle && stripped.toLowerCase() === normalizedTitle) continue; // the title itself — never the excerpt
 		return stripped.slice(0, 160);
@@ -512,12 +660,12 @@ export function buildBrief(opts = {}) {
 	const repoRoot = opts.repoRoot ?? process.cwd();
 	const empty = { text: '', lessonKeys: [], pointerKeys: [], bytes: 0 };
 	try {
-		const config = loadConfig(repoRoot);
+		const config = loadConfig(repoRoot, { pluginRoot: opts.pluginRoot, allowedRepos: opts.allowedRepos });
 		const budgetBytes = opts.budgetBytes ?? config.brief_bytes ?? DEFAULTS.brief_bytes;
 		const excluded = resolveExcludedAgents(config);
 		const classBAllowed = !isClassBExcluded(opts.agentType, excluded);
 
-		const handle = ensureIndex({ repoRoot, pluginRoot: opts.pluginRoot, cacheDir: opts.cacheDir, version: opts.version ?? 'dev', sqlite: opts.sqlite });
+		const handle = ensureIndex({ repoRoot, pluginRoot: opts.pluginRoot, allowedRepos: opts.allowedRepos, cacheDir: opts.cacheDir, version: opts.version ?? 'dev', sqlite: opts.sqlite });
 		if (!handle) return empty;
 
 		// Reviewed-ref content only, via `handle.docs` (loadClassADocs -> loadProjectClassADocs) — NOT
@@ -571,7 +719,20 @@ export function buildBrief(opts = {}) {
 		let pointers = [];
 		if (classBAllowed) {
 			const events = listEvents(handle.db);
-			pointers = selectPointers(events, { touchedPaths: opts.touchedPaths ?? [], now: opts.now ?? Date.now(), allowedMarkers: allowedMarkerNames(config) }, 3);
+			pointers = selectPointers(
+				events,
+				{
+					touchedPaths: opts.touchedPaths ?? [],
+					touchedLines: opts.touchedLines ?? {},
+					touchedSymbols: opts.touchedSymbols ?? [],
+					promptTerms: terms,
+					config,
+					highFanoutGlobs: config.high_fanout_globs ?? [],
+					now: opts.now ?? Date.now(),
+					allowedMarkers: allowedMarkerNames(config),
+				},
+				3,
+			);
 		}
 
 		// engsys#140 M1: render Class A title/body from the FRESHLY LOADED source docs
@@ -600,16 +761,32 @@ export function buildBrief(opts = {}) {
 
 /** `--evidence <key>`: the ONLY path a subagent can reach Class B free text, and only via a Bash
  * tool call (model authority), wrapped by untrusted.mjs. Returns null (not thrown) if the key is
- * unknown or anything fails. */
+ * unknown, fails brief-time trust against `config` (§7.3), or anything fails. */
 export function evidenceText(key, opts = {}) {
 	const repoRoot = opts.repoRoot ?? process.cwd();
 	try {
-		const handle = ensureIndex({ repoRoot, pluginRoot: opts.pluginRoot, cacheDir: opts.cacheDir, sqlite: opts.sqlite });
+		const config = opts.config ?? loadConfig(repoRoot, { pluginRoot: opts.pluginRoot, allowedRepos: opts.allowedRepos });
+		const handle = ensureIndex({ repoRoot, pluginRoot: opts.pluginRoot, allowedRepos: opts.allowedRepos, cacheDir: opts.cacheDir, sqlite: opts.sqlite });
 		if (!handle) return null;
 		const row = handle.db.prepare('SELECT * FROM events WHERE key = ?').get(key);
 		if (!row) return null;
+		if (!isEventTrusted(row, config)) return null;
+		let parsedFlags = [];
+		try { parsedFlags = JSON.parse(row.flags || '[]'); } catch { parsedFlags = []; }
 		const env = createEnvelope({ label: 'HISTORICAL REPO EVIDENCE' });
-		const header = `${row.kind ?? 'event'} ${row.url ?? ''} author_kind=${row.author_kind ?? 'unknown'} updated_at=${row.updated_at ?? 'unknown'}`;
+		const headerParts = [
+			`key=${row.key}`,
+			`kind=${row.kind ?? 'event'}`,
+			row.repo ? `repo=${row.repo}` : null,
+			row.number ? `number=#${row.number}` : null,
+			row.path ? `path=${row.path}${row.line ? `:${row.line}` : ''}` : null,
+			row.url ? `url=${row.url}` : null,
+			`author_kind=${row.author_kind ?? 'unknown'}`,
+			row.author_id != null ? `author_id=${row.author_id}` : null,
+			`updated_at=${row.updated_at ?? 'unknown'}`,
+			parsedFlags.length > 0 ? `flags=${parsedFlags.join(',')}` : null,
+		].filter(Boolean);
+		const header = headerParts.join(' ');
 		return env.wrap(row.text ?? '', { header });
 	} catch {
 		return null;

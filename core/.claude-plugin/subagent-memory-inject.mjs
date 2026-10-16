@@ -37,18 +37,183 @@ const TIMEOUT_MS = 2000;
 // spawning memory-brief anyway would only burn that startup cost en route to a guaranteed timeout.
 const MIN_SPAWN_MS = 300;
 
+const PENDING_TTL_MS = 30_000;
+
 function firstString(...candidates) {
 	for (const c of candidates) if (typeof c === 'string' && c.length) return c;
 	return null;
 }
 
+function bareAgent(agentType) {
+	if (typeof agentType !== 'string' || !agentType) return '';
+	const parts = agentType.split(':');
+	return parts[parts.length - 1];
+}
+
+function safeIdToken(s) {
+	return String(s ?? '').replace(/[^A-Za-z0-9_.-]/g, '_').slice(0, 64) || 'none';
+}
+
+/** Extract repo-relative file path hints mentioned in a task prompt (#142). Excludes URLs and
+ * bare words without a `/` + extension. */
+export function extractPathsFromPrompt(prompt) {
+	if (typeof prompt !== 'string' || !prompt) return [];
+	const withoutUrls = prompt.replace(/https?:\/\/\S+/g, ' ');
+	const matches = withoutUrls.match(/(?:^|[\s`"'([{])([A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+\.[A-Za-z0-9]{1,10})(?=$|[\s`"')\]}:,;])/g) ?? [];
+	const seen = new Set();
+	for (const raw of matches) {
+		const cleaned = raw.replace(/^[\s`"'([{]+/, '').replace(/^\.\//, '');
+		if (cleaned && !cleaned.startsWith('..') && !cleaned.includes('//')) seen.add(cleaned);
+	}
+	return [...seen];
+}
+
+/** Extract a candidate worktree path from `tool_input` (`worktree`/`cwd`) or an absolute path in
+ * `prompt` (#142). The candidate is only trusted later if `sharesGitCommonDir(parentCwd, candidate)`
+ * confirms it belongs to the same repository. */
+export function extractWorktreeFromInput(toolInput, prompt = '') {
+	const direct = firstString(toolInput?.worktree, toolInput?.cwd);
+	if (direct) return direct;
+	if (typeof prompt !== 'string' || !prompt) return null;
+	const absMatches = prompt.match(/(?:^|[\s`"'(])(\/[A-Za-z0-9_./-]+)(?=$|[\s`"')\]}:,;])/g) ?? [];
+	for (const raw of absMatches) {
+		const p = raw.replace(/^[\s`"'(]+/, '').replace(/\/+$/, '');
+		if (p && p.split('/').length >= 3) {
+			try {
+				if (fs.statSync(p).isDirectory()) return p;
+			} catch { /* ignore non-existent paths */ }
+		}
+	}
+	return null;
+}
+
+const GIT_CALL_OPTS = { encoding: 'utf8', timeout: 500, killSignal: 'SIGKILL', stdio: ['ignore', 'pipe', 'ignore'] };
+
+/**
+ * Resolve `candidateDir` to its registered git worktree root iff it is listed in
+ * `git -C trustedRepoDir worktree list --porcelain` (#142). Never runs `git -C` on
+ * `candidateDir` itself, preventing an unverified path from triggering a repo-local git config.
+ */
+export function resolveRegisteredWorktree(trustedRepoDir, candidateDir, { exec = execFileSync } = {}) {
+	if (!trustedRepoDir || !candidateDir) return null;
+	let realCandidate;
+	try {
+		realCandidate = fs.realpathSync(candidateDir);
+	} catch {
+		return null;
+	}
+	try {
+		const out = exec('git', ['-C', trustedRepoDir, 'worktree', 'list', '--porcelain'], GIT_CALL_OPTS);
+		for (const line of out.split('\n')) {
+			if (!line.startsWith('worktree ')) continue;
+			const wtPath = line.slice('worktree '.length).trim();
+			if (!wtPath) continue;
+			let realWt;
+			try {
+				realWt = fs.realpathSync(wtPath);
+			} catch {
+				continue;
+			}
+			if (realCandidate === realWt || realCandidate.startsWith(realWt + path.sep)) {
+				return realWt;
+			}
+		}
+		return null;
+	} catch {
+		return null;
+	}
+}
+
+/** True iff `dirB` is a registered worktree of `dirA` (#142). Prevents a prompt-mentioned path
+ * from pointing `resolveTouchedPaths` at an unrelated repo or running `git -C` on an untrusted dir. */
+export function sharesGitCommonDir(dirA, dirB, { exec = execFileSync } = {}) {
+	return Boolean(resolveRegisteredWorktree(dirA, dirB, { exec }));
+}
+
+function sweepExpiredDispatches(pendingDir, nowMs) {
+	let files;
+	try { files = fs.readdirSync(pendingDir); } catch { return; }
+	for (const f of files) {
+		if (!f.endsWith('.json')) continue;
+		const p = path.join(pendingDir, f);
+		try {
+			const st = fs.statSync(p);
+			if (nowMs - st.mtimeMs > PENDING_TTL_MS) fs.rmSync(p, { force: true });
+		} catch { /* best effort */ }
+	}
+}
+
+/** Stash a short-lived pending dispatch record at `PreToolUse` (`Agent|Task`) so the subsequent
+ * `SubagentStart` hook can recover the task prompt, prompt path hints, and target worktree (#142). */
+export function recordPendingDispatch(input, { cwd, now = () => Date.now() } = {}) {
+	try {
+		const cacheDir = resolveCacheDir(cwd);
+		if (!cacheDir) return null;
+		const pendingDir = path.join(cacheDir, 'pending-dispatch');
+		fs.mkdirSync(pendingDir, { recursive: true, mode: 0o700 });
+		try { fs.chmodSync(pendingDir, 0o700); } catch { /* best effort */ }
+		const ts = now();
+		sweepExpiredDispatches(pendingDir, ts);
+
+		const toolInput = input?.tool_input ?? {};
+		const sessionId = safeIdToken(firstString(input?.session_id) ?? 'default');
+		const rawAgent = firstString(toolInput?.subagent_type, toolInput?.agent_type, input?.agent_type) ?? 'any';
+		const agentKey = safeIdToken(bareAgent(rawAgent) || 'any');
+		const prompt = [firstString(toolInput?.description), firstString(toolInput?.prompt)].filter(Boolean).join('\n').slice(0, 8192);
+		const promptPaths = extractPathsFromPrompt(prompt);
+		const worktree = extractWorktreeFromInput(toolInput, prompt);
+		const record = { ts, sessionId, agentKey, prompt, promptPaths, worktree };
+		const file = path.join(pendingDir, `${sessionId}--${agentKey}--${ts}-${process.pid}-${Math.random().toString(36).slice(2, 8)}.json`);
+		fs.writeFileSync(file, JSON.stringify(record), { mode: 0o600 });
+		try { fs.chmodSync(file, 0o600); } catch { /* best effort */ }
+		return file;
+	} catch {
+		return null;
+	}
+}
+
+/** Pop the oldest non-expired pending dispatch matching `(session_id, bareAgent(agent_type))` (#142). */
+export function consumePendingDispatch(input, { cwd, now = () => Date.now() } = {}) {
+	try {
+		const cacheDir = resolveCacheDir(cwd);
+		if (!cacheDir) return null;
+		const pendingDir = path.join(cacheDir, 'pending-dispatch');
+		const ts = now();
+		sweepExpiredDispatches(pendingDir, ts);
+		let files;
+		try { files = fs.readdirSync(pendingDir).filter((f) => f.endsWith('.json')).sort(); } catch { return null; }
+		if (files.length === 0) return null;
+
+		const sessionId = safeIdToken(firstString(input?.session_id) ?? 'default');
+		const agentKey = safeIdToken(bareAgent(extractAgentType(input)) || 'any');
+		const sessionFiles = files.filter((f) => f.startsWith(`${sessionId}--`));
+		const hasTypedForSession = sessionFiles.some((f) => !f.startsWith(`${sessionId}--any--`));
+		const prefixes = agentKey === 'any' || !hasTypedForSession
+			? [`${sessionId}--${agentKey}--`, `${sessionId}--any--`]
+			: [`${sessionId}--${agentKey}--`];
+		for (const prefix of prefixes) {
+			const match = sessionFiles.find((f) => f.startsWith(prefix));
+			if (!match) continue;
+			const full = path.join(pendingDir, match);
+			let parsed = null;
+			try {
+				parsed = JSON.parse(fs.readFileSync(full, 'utf8'));
+			} catch { parsed = null; }
+			try { fs.rmSync(full, { force: true }); } catch { /* best effort */ }
+			if (parsed && ts - (parsed.ts ?? 0) <= PENDING_TTL_MS) return parsed;
+		}
+		return null;
+	} catch {
+		return null;
+	}
+}
+
 /** Best-effort `agent_type` extraction from a SubagentStart payload whose exact shape may vary. */
 // Verified against the Claude Code 2.1.285 binary (docs/memory-spec.md §12, engsys#140 W1): a
 // SubagentStart payload is `{...base, hook_event_name, agent_id, agent_type}` — `base` carries
-// `cwd` (read separately in main()). There is NO task-prompt field at this event; the earlier
-// multi-field guessing across `subagent_type`/`tool_input.*` never matched anything real and is
-// removed. Targeting at SubagentStart is therefore path-based (touched_paths / git diff) plus
-// role-based (agent_type), not prompt-text BM25 — §5 of the spec notes this.
+// `cwd` (read separately in main()). There is NO task-prompt field at this event; PreToolUse
+// (`subagent-memory-inject.mjs pre-agent`) stashes a short-lived pending dispatch record so
+// SubagentStart can recover the prompt, prompt path hints, and target worktree (#142).
 export function extractAgentType(input) {
 	return firstString(input?.agent_type);
 }
@@ -62,10 +227,6 @@ export function extractPrompt(input) {
 /** Touched paths: an explicit list on the payload, else `git diff --name-only <base>` in `cwd`
  * when a worktree/repo is resolvable. `base` tries HEAD first (uncommitted work), then
  * `origin/main`. Never throws; an unresolvable repo yields []. */
-// A short, hard timeout on every git call here — this must never eat into the hook's overall 2s
-// budget (a lock wait or a huge repo could otherwise block the dispatch before memory-brief runs).
-const GIT_CALL_OPTS = { encoding: 'utf8', timeout: 500, killSignal: 'SIGKILL', stdio: ['ignore', 'pipe', 'ignore'] };
-
 export function resolveTouchedPaths(input, { cwd, exec = execFileSync } = {}) {
 	if (Array.isArray(input?.touched_paths)) return input.touched_paths.filter((p) => typeof p === 'string');
 	try {
@@ -148,7 +309,7 @@ function logInjection(cwd, record) {
 	}
 }
 
-export async function main({ stdin = process.stdin, now = () => Date.now(), write = (s) => process.stdout.write(s), defaultCwd = process.cwd() } = {}) {
+export async function main({ argv = process.argv.slice(2), stdin = process.stdin, now = () => Date.now(), write = (s) => process.stdout.write(s), defaultCwd = process.cwd() } = {}) {
 	const t0 = now();
 	let input = null;
 	try {
@@ -169,6 +330,18 @@ export async function main({ stdin = process.stdin, now = () => Date.now(), writ
 		const top = execFileSync('git', ['-C', rawCwd, 'rev-parse', '--show-toplevel'], GIT_CALL_OPTS).trim();
 		if (top) cwd = top;
 	} catch { /* not a repo, or git unavailable — keep rawCwd; memory-brief fails open from there */ }
+
+	// PreToolUse (`Agent|Task`) mode (#142): stash the dispatch prompt, prompt path hints, and any
+	// target worktree path under `<cacheDir>/pending-dispatch/` so the immediately following
+	// SubagentStart hook can consume it. Always fails open with `{}`.
+	if (argv[0] === 'pre-agent' || input?.hook_event_name === 'PreToolUse' || input?.hookEventName === 'preToolUse') {
+		if (input) recordPendingDispatch(input, { cwd, now });
+		if (!process.env.ENGSYS_HARNESS || process.env.ENGSYS_HARNESS === 'claude') {
+			write('{}');
+			return 0;
+		}
+	}
+
 	const agentType = extractAgentType(input);
 
 	let briefText = '';
@@ -181,8 +354,15 @@ export async function main({ stdin = process.stdin, now = () => Date.now(), writ
 	let skippedBudget = false;
 	let spawnFailed = false;
 	try {
-		const prompt = extractPrompt(input);
-		const touchedPaths = resolveTouchedPaths(input, { cwd });
+		const pending = input ? consumePendingDispatch(input, { cwd, now }) : null;
+		const prompt = extractPrompt(input) || pending?.prompt || '';
+		let diffCwd = cwd;
+		if (pending?.worktree) {
+			const matchedWt = resolveRegisteredWorktree(cwd, pending.worktree);
+			if (matchedWt) diffCwd = matchedWt;
+		}
+		const gitTouched = resolveTouchedPaths(input, { cwd: diffCwd });
+		const touchedPaths = [...new Set([...gitTouched, ...(pending?.promptPaths ?? [])])];
 		// Give memory-brief only what's LEFT of the 2s total budget after resolveTouchedPaths' own
 		// (separately timed) git calls, so the two stages together can never exceed TIMEOUT_MS plus
 		// node startup — not TIMEOUT_MS on top of whatever resolveTouchedPaths already spent. Below
@@ -190,7 +370,7 @@ export async function main({ stdin = process.stdin, now = () => Date.now(), writ
 		// SKIPPED outright (saves that startup cost too) rather than launched to a guaranteed timeout.
 		const remainingMs = TIMEOUT_MS - (now() - t0);
 		skippedBudget = remainingMs < MIN_SPAWN_MS;
-		const result = skippedBudget ? null : runMemoryBrief({ agentType, prompt, touchedPaths, cwd, timeoutMs: remainingMs });
+		const result = skippedBudget ? null : runMemoryBrief({ agentType, prompt, touchedPaths, cwd: diffCwd, timeoutMs: remainingMs });
 		spawnFailed = !skippedBudget && !result;
 		if (result) {
 			briefText = result.text ?? '';
@@ -210,7 +390,7 @@ export async function main({ stdin = process.stdin, now = () => Date.now(), writ
 		write('{}');
 		return 0;
 	}
-	write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'SubagentStart', additionalContext: briefText } }));
+	write(JSON.stringify({ additionalContext: briefText, hookSpecificOutput: { hookEventName: 'SubagentStart', additionalContext: briefText } }));
 	return 0;
 }
 

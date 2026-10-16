@@ -507,6 +507,127 @@ function loadSingle(file, kind, docs, manifest) {
 	});
 }
 
+/**
+ * Coerce a config list field (#155): an array passes through, a non-empty string or number becomes
+ * a one-item array (logging via `log`), and anything else (null/undefined/empty/object/boolean)
+ * becomes `[]` (logging when a non-empty non-list value was dropped).
+ */
+export function coerceListField(val, { field = '', log = null } = {}) {
+	if (val === undefined || val === null) return [];
+	if (Array.isArray(val)) return val;
+	if (typeof val === 'string') {
+		const s = val.trim();
+		if (!s) return [];
+		if (log) log(`memory: coerced scalar ${field || 'field'} ${JSON.stringify(s)} to single-item list`);
+		return [s];
+	}
+	if (typeof val === 'number' && Number.isFinite(val)) {
+		if (log) log(`memory: coerced scalar ${field || 'field'} ${val} to single-item list`);
+		return [val];
+	}
+	if (log) log(`memory: ignored non-list ${field || 'field'}`);
+	return [];
+}
+
+/**
+ * Normalize a git remote URL (HTTPS, SSH, git://, SCP-style git@host:owner/repo, or bare
+ * `owner/repo`) to lowercase `owner/repo`, or `null` if it does not match a 2-segment repository
+ * slug (#145). Bare filesystem paths (`/tmp/foo/bar`, `./foo/bar`) never match.
+ */
+export function normalizeRepoUrl(url) {
+	if (typeof url !== 'string') return null;
+	const s = url.trim().replace(/\/+$/, '');
+	if (!s || s.startsWith('/') || s.startsWith('.')) return null;
+	const urlMatch = /^(?:https?|ssh|git):\/\/(?:[^@/\s]+@)?([^/:\s]+)(?::\d+)?\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?$/i.exec(s);
+	if (urlMatch) {
+		const host = urlMatch[1].toLowerCase();
+		if (host !== 'github.com') return null;
+		const slug = urlMatch[2].replace(/\.git$/i, '');
+		return REPO_RE.test(slug) ? slug.toLowerCase() : null;
+	}
+	const scpMatch = /^[^@/\s]+@([^:/\s]+):([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?$/i.exec(s);
+	if (scpMatch) {
+		const host = scpMatch[1].toLowerCase();
+		if (host !== 'github.com') return null;
+		const slug = scpMatch[2].replace(/\.git$/i, '');
+		return REPO_RE.test(slug) ? slug.toLowerCase() : null;
+	}
+	const bare = s.replace(/\.git$/i, '');
+	if (REPO_RE.test(bare)) return bare.toLowerCase();
+	return null;
+}
+
+/**
+ * Resolve `repoRoot`'s `origin` remote URL to normalized `owner/repo`, or `null` if `repoRoot` is
+ * a git submodule (`--show-superproject-working-tree` non-empty) or has no normalizable `origin`
+ * remote (#145).
+ */
+export function resolveOriginRepo(repoRoot) {
+	if (!repoRoot) return null;
+	try {
+		const superproj = execFileSync(
+			'git',
+			['-C', repoRoot, 'rev-parse', '--show-superproject-working-tree'],
+			{ encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] },
+		).trim();
+		if (superproj) return null; // a vendored submodule checkout is never trusted as the top-level project repo
+	} catch {
+		return null;
+	}
+	try {
+		const url = execFileSync(
+			'git',
+			['-C', repoRoot, 'remote', 'get-url', 'origin'],
+			{ encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] },
+		).trim();
+		return normalizeRepoUrl(url);
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Trusted `repos` allowlist (#145) from fleet config (`CLAUDE_CONFIG_DIR/memory.yml`), plugin
+ * config (`<pluginRoot>/memory.yml`), explicit `opts.allowedRepos`, or `ENGSYS_MEMORY_REPOS`.
+ * NEVER reads `repoRoot/.claude/memory.yml` — a third-party clone or submodule must not be able to
+ * allowlist itself.
+ */
+export function resolveAllowedRepos(opts = {}) {
+	const raw = [];
+	if (Array.isArray(opts.allowedRepos)) raw.push(...opts.allowedRepos);
+	if (process.env.ENGSYS_MEMORY_REPOS) {
+		raw.push(...process.env.ENGSYS_MEMORY_REPOS.split(',').map((s) => s.trim()).filter(Boolean));
+	}
+	const configDirs = [
+		process.env.CLAUDE_CONFIG_DIR ?? null,
+		opts.pluginRoot ?? process.env.CLAUDE_PLUGIN_ROOT ?? null,
+	].filter(Boolean);
+	for (const dir of configDirs) {
+		try {
+			const text = fs.readFileSync(path.join(dir, 'memory.yml'), 'utf8');
+			const parsed = parseYaml(text);
+			raw.push(...coerceListField(parsed?.repos));
+		} catch { /* absent or unreadable */ }
+	}
+	const set = new Set();
+	for (const entry of raw) {
+		const norm = normalizeRepoUrl(String(entry));
+		if (norm) set.add(norm);
+	}
+	return set;
+}
+
+/**
+ * True iff `repoRoot` is not a submodule and its `git remote get-url origin` normalizes to an
+ * `owner/repo` in the trusted `repos` allowlist (#145).
+ */
+export function isRepoAllowlisted(repoRoot, opts = {}) {
+	const allowed = opts.allowed instanceof Set ? opts.allowed : resolveAllowedRepos(opts);
+	if (allowed.size === 0) return false;
+	const originRepo = resolveOriginRepo(repoRoot);
+	return originRepo !== null && allowed.has(originRepo);
+}
+
 /** Load every Class A doc from `roots` (as returned by resolveClassARoots). Also fills `manifest`
  * (path -> sha1) in place for the watermark. Never throws. */
 export function loadClassADocs(roots, manifest = {}, opts = {}) {
@@ -521,10 +642,9 @@ export function loadClassADocs(roots, manifest = {}, opts = {}) {
 	// Everything else is PROJECT content. `opts.repoRoot` OMITTED entirely is a direct/unit-test
 	// call with no git context at all — falls back to reading the working tree (the pre-H3
 	// behavior), since there is no "reviewed ref" concept without a repo. `opts.repoRoot` GIVEN
-	// (the real path: `ensureIndex` always passes it) reads from `origin/<default>` instead, never
-	// the working tree (engsys#140 H3 — Nyx F3); if that ref can't be resolved at all (no network,
-	// no `origin`, a shallow clone with no remote HEAD symref), this degrades to "bundled lessons
-	// only" — a documented fail-safe, not a silent fall-through to the less-trusted working tree.
+	// (the real path: `ensureIndex` always passes it) requires BOTH that `repoRoot` is allowlisted
+	// via `repos` in fleet/plugin config (#145) AND reads from `origin/<default>` instead of the
+	// working tree (engsys#140 H3 — Nyx F3); otherwise this degrades to "bundled lessons only".
 	const repoRoot = opts.repoRoot;
 	if (repoRoot === undefined) {
 		loadMdDir(roots.agentLessonsDir, SOURCE_KIND.LESSON, raw, manifest, {
@@ -532,7 +652,7 @@ export function loadClassADocs(roots, manifest = {}, opts = {}) {
 		});
 		loadMdDir(roots.adrDir, SOURCE_KIND.ADR, raw, manifest, { provenanceFor: () => 'adr' });
 		loadSingle(roots.overlayFile, SOURCE_KIND.OVERLAY, raw, manifest);
-	} else {
+	} else if (opts.allowlisted ?? isRepoAllowlisted(repoRoot, { pluginRoot: opts.pluginRoot, allowedRepos: opts.allowedRepos })) {
 		// engsys#140 N1: resolve the reviewed commit ONCE, as a SHA — never a short ref name —
 		// and reuse it for every subsequent git call this function makes.
 		const sha = opts.reviewedSha ?? resolveReviewedSha(repoRoot, { defaultBranch: opts.defaultBranch });
@@ -592,30 +712,96 @@ export function loadClassADocs(roots, manifest = {}, opts = {}) {
 // `<cacheDir>/delta.jsonl` and `refs/engsys/memory/events`, is a later phase; see docs/memory-spec.md §7)
 // ---------------------------------------------------------------------------------------------
 
-/** Parse `<cacheDir>/delta.jsonl` (one JSON event record per line, docs/memory-spec.md §3.2) into
- * Event[]. A missing file, an unreadable file, or a malformed line are all "no events" — never thrown. */
-export function loadClassBEvents(cacheDir) {
-	if (!cacheDir) return [];
-	const file = path.join(cacheDir, 'delta.jsonl');
-	let text;
-	try { text = fs.readFileSync(file, 'utf8'); } catch { return []; }
-	// `events.key` is a SQLite PRIMARY KEY (§4); an append-only delta.jsonl can carry the same `k`
-	// more than once (an update re-emits the record) — last write wins, same as loadClassADocs'
-	// dedup, and a tombstone (deleted: true) removes whatever came before it rather than being
-	// filtered out unconditionally (§3.2: "last writer wins by updated_at").
-	const byKey = new Map();
-	for (const line of text.split('\n')) {
+/**
+ * List local `refs/engsys/memory/*` refs and their tip SHAs in `repoRoot` (#132).
+ * Returns `Array<{ ref: string, sha: string }>` sorted by `ref`. Never throws.
+ */
+export function listMemoryRefShas(repoRoot) {
+	if (!repoRoot) return [];
+	try {
+		const out = execFileSync(
+			'git',
+			['-C', repoRoot, 'for-each-ref', '--format=%(refname) %(objectname)', 'refs/engsys/memory'],
+			{ encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] },
+		);
+		const refs = [];
+		for (const line of out.split('\n')) {
+			const m = /^(refs\/engsys\/memory\/\S+)\s+([0-9a-f]{40})$/.exec(line.trim());
+			if (m) refs.push({ ref: m[1], sha: m[2] });
+		}
+		return refs.sort((a, b) => a.ref.localeCompare(b.ref));
+	} catch {
+		return [];
+	}
+}
+
+function eventUpdatedMs(e) {
+	if (!e || typeof e !== 'object') return 0;
+	if (typeof e.updated_at === 'string' && e.updated_at) {
+		const t = Date.parse(e.updated_at);
+		if (!Number.isNaN(t)) return t;
+	}
+	return 0;
+}
+
+function applyJsonlLinesToMap(text, byKey) {
+	if (!text) return;
+	for (const line of String(text).split('\n')) {
 		if (!line.trim()) continue;
 		try {
 			const e = JSON.parse(line);
 			if (!e || typeof e.k !== 'string') continue;
-			if (e.deleted) byKey.delete(e.k);
-			else byKey.set(e.k, e);
+			const prev = byKey.get(e.k);
+			if (!prev || eventUpdatedMs(e) >= eventUpdatedMs(prev)) {
+				byKey.set(e.k, e);
+			}
 		} catch {
 			/* one bad line never kills the rest */
 		}
 	}
-	return [...byKey.values()];
+}
+
+/**
+ * Parse synced `refs/engsys/memory/*` (`events.jsonl` blobs) plus `<cacheDir>/delta.jsonl`
+ * (docs/memory-spec.md §3.2, #132) into Event[], merging by `k` (last-writer-wins by `updated_at`)
+ * and dropping tombstones (`deleted: true`). Never throws.
+ */
+export function loadClassBEvents(cacheDir, { repoRoot = null, refShas = null, pluginRoot = undefined, allowedRepos = undefined } = {}) {
+	const byKey = new Map();
+	if (repoRoot) {
+		const refs = Array.isArray(refShas)
+			? refShas
+			: isRepoAllowlisted(repoRoot, { pluginRoot, allowedRepos })
+				? listMemoryRefShas(repoRoot)
+				: [];
+		for (const r of refs) {
+			try {
+				const blobText = execFileSync(
+					'git',
+					['-C', repoRoot, 'show', `${r.sha}:events.jsonl`],
+					{ encoding: 'utf8', timeout: 2000, maxBuffer: 32 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] },
+				);
+				applyJsonlLinesToMap(blobText, byKey);
+			} catch {
+				/* ref without events.jsonl or unreadable */
+			}
+		}
+	}
+	if (cacheDir) {
+		const file = path.join(cacheDir, 'delta.jsonl');
+		try {
+			const text = fs.readFileSync(file, 'utf8');
+			applyJsonlLinesToMap(text, byKey);
+		} catch {
+			/* missing or unreadable delta.jsonl */
+		}
+	}
+	const out = [];
+	for (const e of byKey.values()) {
+		if (e.deleted) continue;
+		out.push(e);
+	}
+	return out;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -648,6 +834,8 @@ const DDL = [
 	'CREATE TABLE watermark (id INTEGER PRIMARY KEY CHECK (id = 0), manifest TEXT)',
 ];
 
+const DDL_FALLBACK_DOCS = 'CREATE TABLE docs (key TEXT, class TEXT, kind TEXT, path TEXT, symbol TEXT, roles TEXT, globs TEXT, keywords TEXT, body TEXT)';
+
 function buildInto(dbPath, { sqlite, docs, events, manifest }) {
 	const { DatabaseSync } = sqlite;
 	const db = new DatabaseSync(dbPath);
@@ -659,7 +847,15 @@ function buildInto(dbPath, { sqlite, docs, events, manifest }) {
 		// need to create that sidecar itself on a filesystem that won't allow it. DELETE needs
 		// neither: every write before `close()` lands directly in the main file.
 		db.exec('PRAGMA journal_mode = DELETE');
-		for (const stmt of DDL) db.exec(stmt);
+		try {
+			db.exec(DDL[0]);
+		} catch (e) {
+			if (!/no such module:\s*fts5/i.test(String(e?.message ?? e))) throw e;
+			// Node 22.5–22.15 ships node:sqlite without SQLITE_ENABLE_FTS5; fall back to a plain
+			// table so the index still builds and queryIndex can rank rows in JS.
+			db.exec(DDL_FALLBACK_DOCS);
+		}
+		for (const stmt of DDL.slice(1)) db.exec(stmt);
 		const insDoc = db.prepare('INSERT INTO docs (key, class, kind, path, symbol, roles, globs, keywords, body) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
 		const insFm = db.prepare('INSERT INTO frontmatter (key, globs, stacks, roles, keywords, security, supersedes, path, title) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
 		for (const d of docs) {
@@ -717,14 +913,19 @@ export function ensureIndex(opts = {}) {
 
 	const roots = resolveClassARoots(repoRoot, { pluginRoot: opts.pluginRoot });
 	const manifest = {};
-	const { docs } = loadClassADocs(roots, manifest, { repoRoot });
-	const events = loadClassBEvents(cacheDir);
+	const allowlisted = isRepoAllowlisted(repoRoot, { pluginRoot: opts.pluginRoot, allowedRepos: opts.allowedRepos });
+	const { docs } = loadClassADocs(roots, manifest, { repoRoot, allowlisted, pluginRoot: opts.pluginRoot, allowedRepos: opts.allowedRepos, defaultBranch: opts.defaultBranch, reviewedSha: opts.reviewedSha });
+	const refShas = allowlisted ? listMemoryRefShas(repoRoot) : [];
+	const events = loadClassBEvents(cacheDir, { repoRoot, refShas });
 	let eventsFingerprint = 0;
 	try {
 		const st = fs.statSync(path.join(cacheDir, 'delta.jsonl'));
 		eventsFingerprint = `${st.size}:${st.mtimeMs}`;
 	} catch {
 		eventsFingerprint = 0;
+	}
+	if (refShas.length > 0) {
+		eventsFingerprint = `${eventsFingerprint}|refs:${refShas.map((r) => `${r.ref}=${r.sha}`).join(',')}`;
 	}
 	const watermark = computeWatermark(manifest, eventsFingerprint, opts.version ?? 'dev');
 	const watermarkJson = stableStringify(watermark);
@@ -798,6 +999,41 @@ export function closeIndex(handle) {
 // querying
 // ---------------------------------------------------------------------------------------------
 
+function simpleStem(word) {
+	const w = word.toLowerCase();
+	if (w.length > 5 && w.endsWith('ing')) return w.slice(0, -3);
+	if (w.length > 4 && w.endsWith('ed')) return w.slice(0, -2);
+	if (w.length > 4 && w.endsWith('es')) return w.slice(0, -2);
+	if (w.length > 3 && w.endsWith('s')) return w.slice(0, -1);
+	return w;
+}
+
+function fallbackRankDocs(db, terms, limit) {
+	try {
+		const allRows = db.prepare('SELECT key, class, kind, path, symbol, roles, globs, keywords, body FROM docs').all();
+		const qStems = [...new Set(terms.map(simpleStem))];
+		const scored = [];
+		for (const r of allRows) {
+			const hay = `${r.roles ?? ''} ${r.globs ?? ''} ${r.keywords ?? ''} ${r.symbol ?? ''} ${r.path ?? ''} ${r.body ?? ''}`;
+			const words = (hay.match(/[A-Za-z0-9_][A-Za-z0-9_-]*/g) || []).map(simpleStem);
+			if (words.length === 0) continue;
+			let hits = 0;
+			for (const qs of qStems) {
+				let tf = 0;
+				for (const w of words) if (w === qs) tf++;
+				if (tf > 0) hits += 1 + Math.log(1 + tf);
+			}
+			if (hits > 0) {
+				scored.push({ ...r, score: -(hits / (1 + 0.001 * words.length)) });
+			}
+		}
+		scored.sort((a, b) => a.score - b.score);
+		return scored.slice(0, limit);
+	} catch {
+		return [];
+	}
+}
+
 /**
  * BM25-rank `docs` FTS5 rows matching `text`, restricted to `class` ('A' or 'B', default both).
  * Returns `[{ key, class, kind, path, symbol, title, body, score, frontmatter }]`, best first.
@@ -815,7 +1051,7 @@ export function queryIndex(db, { text = '', limit = 20 } = {}) {
 			.prepare('SELECT key, class, kind, path, symbol, body, bm25(docs) AS score FROM docs WHERE docs MATCH ? ORDER BY score LIMIT ?')
 			.all(match, limit);
 	} catch {
-		return [];
+		rows = fallbackRankDocs(db, terms, limit);
 	}
 	return rows.map((r) => {
 		let fm = null;

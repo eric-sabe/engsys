@@ -24,8 +24,11 @@ import {
 	closeIndex,
 	computeWatermark,
 	ensureIndex,
+	isRepoAllowlisted,
+	listEvents,
 	loadClassADocs,
 	loadClassBEvents,
+	normalizeRepoUrl,
 	queryIndex,
 	readFrontmatter,
 	resolveCacheDir,
@@ -39,19 +42,23 @@ import {
 // rewrite the DEVELOPER'S real repo (core/lessons-library/git-core-bare-flip-breaks-all-worktrees.md)
 // — hermeticGit() scrubs that env, and identity goes in via -c instead of a `git config` write.
 const GIT_OPTS = ['-c', 'user.name=a', '-c', 'user.email=a@b.c'];
-// engsys#140 H3: project Class A (docs/agent-lessons/**, ADRs, the overlay) is read from
-// `origin/<default>`, not the working tree — so every fixture repo needs a real `origin` remote
-// with the fixture content actually pushed, or `loadClassADocs` correctly finds nothing there.
+process.env.ENGSYS_MEMORY_REPOS = 'fixture/repo';
+// engsys#140 H3 + #145: project Class A (docs/agent-lessons/**, ADRs, the overlay) is read from
+// `origin/<default>`, not the working tree, and only when `origin` normalizes to an allowlisted
+// `owner/repo` — so every fixture repo gets an allowlisted remote URL (`fixture/repo`) backed by a
+// local bare push target.
 function pushOrigin(dir) {
 	hermeticGit(dir, [...GIT_OPTS, 'push', '-q', '-f', 'origin', 'HEAD:main'], { isolateConfig: true });
+	hermeticGit(dir, [...GIT_OPTS, 'update-ref', 'refs/remotes/origin/main', 'HEAD'], { isolateConfig: true });
 }
 
-function makeRepo() {
+function makeRepo({ remoteUrl = 'https://github.com/fixture/repo.git' } = {}) {
 	const dir = mkdtempSync(join(tmpdir(), 'memory-idx-'));
 	const origin = mkdtempSync(join(tmpdir(), 'memory-idx-origin-'));
 	hermeticGit(origin, [...GIT_OPTS, 'init', '-q', '--bare'], { isolateConfig: true });
 	hermeticGit(dir, [...GIT_OPTS, 'init', '-q'], { isolateConfig: true });
-	hermeticGit(dir, [...GIT_OPTS, 'remote', 'add', 'origin', origin], { isolateConfig: true });
+	hermeticGit(dir, [...GIT_OPTS, 'remote', 'add', 'origin', remoteUrl], { isolateConfig: true });
+	hermeticGit(dir, [...GIT_OPTS, 'remote', 'set-url', '--push', 'origin', origin], { isolateConfig: true });
 	mkdirSync(join(dir, 'docs', 'agent-lessons'), { recursive: true });
 	writeFileSync(
 		join(dir, 'docs', 'agent-lessons', 'one.md'),
@@ -217,6 +224,79 @@ describe('loadClassADocs({ repoRoot }) reads project Class A from origin/<defaul
 			assert.ok(docs.some((d) => d.kind === 'lesson' && d.key !== 'lesson:x'), 'bundled lessons still load');
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe('scope project Class A to an allowlisted repo (#145)', () => {
+	test('normalizeRepoUrl parses HTTPS, SSH, SCP-style, and bare owner/repo, and rejects local filesystem paths', () => {
+		assert.equal(normalizeRepoUrl('https://github.com/Acme/App.git'), 'acme/app');
+		assert.equal(normalizeRepoUrl('git@github.com:Acme/App.git'), 'acme/app');
+		assert.equal(normalizeRepoUrl('ssh://git@github.com/Acme/App/'), 'acme/app');
+		assert.equal(normalizeRepoUrl('Acme/App'), 'acme/app');
+		assert.equal(normalizeRepoUrl('/tmp/local/repo'), null);
+		assert.equal(normalizeRepoUrl('../relative/repo'), null);
+	});
+
+	test('an unlisted third-party clone gets bundled lessons only; a listed repo gets project Class A (positive control)', () => {
+		const unlisted = makeRepo({ remoteUrl: 'https://github.com/third-party/unlisted.git' });
+		const listed = makeRepo({ remoteUrl: 'https://github.com/acme/listed-app.git' });
+		const fleetDir = mkdtempSync(join(tmpdir(), 'memory-idx-fleetcfg-'));
+		const prevConfigDir = process.env.CLAUDE_CONFIG_DIR;
+		const prevEnvRepos = process.env.ENGSYS_MEMORY_REPOS;
+		try {
+			delete process.env.ENGSYS_MEMORY_REPOS;
+			process.env.CLAUDE_CONFIG_DIR = fleetDir;
+			writeFileSync(join(fleetDir, 'memory.yml'), 'repos: [acme/listed-app]\n');
+
+			assert.equal(isRepoAllowlisted(unlisted), false);
+			const unlistedDocs = loadClassADocs(resolveClassARoots(unlisted), {}, { repoRoot: unlisted }).docs;
+			assert.ok(!unlistedDocs.some((d) => d.key === 'lesson:one'), 'unlisted clone must not load project Class A lessons');
+			assert.ok(unlistedDocs.some((d) => d.provenance === 'bundled'), 'bundled lessons still load for an unlisted clone');
+
+			assert.equal(isRepoAllowlisted(listed), true);
+			const listedDocs = loadClassADocs(resolveClassARoots(listed), {}, { repoRoot: listed }).docs;
+			assert.ok(listedDocs.some((d) => d.key === 'lesson:one'), 'positive control: allowlisted repo loads project Class A lessons');
+		} finally {
+			if (prevConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prevConfigDir;
+			if (prevEnvRepos === undefined) delete process.env.ENGSYS_MEMORY_REPOS; else process.env.ENGSYS_MEMORY_REPOS = prevEnvRepos;
+			rmSync(unlisted, { recursive: true, force: true });
+			rmSync(listed, { recursive: true, force: true });
+			rmSync(fleetDir, { recursive: true, force: true });
+		}
+	});
+
+	test('a submodule cwd gets bundled lessons only, even when its parent repo is allowlisted', () => {
+		const parent = makeRepo({ remoteUrl: 'https://github.com/fixture/repo.git' });
+		const subOrigin = mkdtempSync(join(tmpdir(), 'memory-idx-suborigin-'));
+		const subSrc = mkdtempSync(join(tmpdir(), 'memory-idx-subsrc-'));
+		try {
+			hermeticGit(subOrigin, [...GIT_OPTS, 'init', '-q', '--bare'], { isolateConfig: true });
+			hermeticGit(subSrc, [...GIT_OPTS, 'init', '-q'], { isolateConfig: true });
+			hermeticGit(subSrc, [...GIT_OPTS, 'remote', 'add', 'origin', subOrigin], { isolateConfig: true });
+			mkdirSync(join(subSrc, 'docs', 'agent-lessons'), { recursive: true });
+			writeFileSync(
+				join(subSrc, 'docs', 'agent-lessons', 'sub-lesson.md'),
+				'---\nglobs: []\nstacks: []\nroles: []\nkeywords: ["sub"]\nsecurity: false\nsupersedes: []\n---\n\n# Submodule lesson\n\nhostile submodule body\n',
+			);
+			hermeticGit(subSrc, [...GIT_OPTS, 'add', '-A'], { isolateConfig: true });
+			hermeticGit(subSrc, [...GIT_OPTS, 'commit', '-q', '-m', 'sub init'], { isolateConfig: true });
+			hermeticGit(subSrc, [...GIT_OPTS, 'push', '-q', '-f', 'origin', 'HEAD:main'], { isolateConfig: true });
+
+			hermeticGit(parent, [...GIT_OPTS, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', '-b', 'main', subOrigin, 'vendor/sub'], { isolateConfig: true });
+			const subCwd = join(parent, 'vendor', 'sub');
+			// Even if the submodule's remote URL were forged to match the allowlist, `--show-superproject-working-tree` catches that it is a submodule.
+			hermeticGit(subCwd, [...GIT_OPTS, 'remote', 'set-url', 'origin', 'https://github.com/fixture/repo.git'], { isolateConfig: true });
+			hermeticGit(subCwd, [...GIT_OPTS, 'update-ref', 'refs/remotes/origin/main', 'HEAD'], { isolateConfig: true });
+
+			assert.equal(isRepoAllowlisted(subCwd), false, 'submodule cwd must never pass isRepoAllowlisted');
+			const subDocs = loadClassADocs(resolveClassARoots(subCwd), {}, { repoRoot: subCwd }).docs;
+			assert.ok(!subDocs.some((d) => d.key === 'lesson:sub-lesson'), 'submodule lesson must not be injected');
+			assert.ok(subDocs.some((d) => d.provenance === 'bundled'), 'bundled lessons still load for a submodule cwd');
+		} finally {
+			rmSync(parent, { recursive: true, force: true });
+			rmSync(subOrigin, { recursive: true, force: true });
+			rmSync(subSrc, { recursive: true, force: true });
 		}
 	});
 });
@@ -674,4 +754,69 @@ describe('queryIndex', () => {
 	test('returns [] instead of throwing for a null db handle', () => {
 		assert.deepEqual(queryIndex(null, { text: 'anything' }), []);
 	});
+
+	test('ensureIndex loads Class B events from synced refs/engsys/memory/events, merges with delta.jsonl, and rebuilds when the ref moves (#132)', { skip: !SQLITE_AVAILABLE }, () => {
+		const dir = makeRepo();
+		try {
+			// Write an events.jsonl blob and commit it onto refs/engsys/memory/events
+			const writeMemoryRef = (events) => {
+				const jsonl = events.map((e) => JSON.stringify(e)).join('\n') + '\n';
+				const tmpBlob = join(dir, '_events_tmp.jsonl');
+				writeFileSync(tmpBlob, jsonl);
+				const blobSha = hermeticGit(dir, ['hash-object', '-w', tmpBlob]).trim();
+				rmSync(tmpBlob, { force: true });
+				const treeSha = hermeticGit(dir, ['mktree'], { input: `100644 blob ${blobSha}\tevents.jsonl\n` }).trim();
+				const commitSha = hermeticGit(dir, [...GIT_OPTS, 'commit-tree', treeSha, '-m', 'memory-sync']).trim();
+				hermeticGit(dir, ['update-ref', 'refs/engsys/memory/events', commitSha]);
+			};
+
+			writeMemoryRef([
+				{
+					k: 'acme/app:review_thread:1',
+					kind: 'review_thread',
+					repo: 'acme/app',
+					number: 10,
+					path: 'src/a.ts',
+					line: 12,
+					outcome: 'unresolved',
+					updated_at: '2026-05-01T00:00:00Z',
+					text: 'from synced ref v1',
+				},
+			]);
+
+			const h1 = ensureIndex({ repoRoot: dir, version: 'v1' });
+			assert.ok(h1);
+			const ev1 = listEvents(h1.db);
+			assert.equal(ev1.length, 1);
+			assert.equal(ev1[0].outcome, 'unresolved');
+			assert.equal(ev1[0].text, 'from synced ref v1');
+			closeIndex(h1);
+
+			// Advance refs/engsys/memory/events to v2 -> watermark must detect the ref SHA move and rebuild
+			writeMemoryRef([
+				{
+					k: 'acme/app:review_thread:1',
+					kind: 'review_thread',
+					repo: 'acme/app',
+					number: 10,
+					path: 'src/a.ts',
+					line: 12,
+					outcome: 'fixed',
+					updated_at: '2026-05-02T00:00:00Z',
+					text: 'from synced ref v2',
+				},
+			]);
+
+			const h2 = ensureIndex({ repoRoot: dir, version: 'v1' });
+			assert.ok(h2);
+			const ev2 = listEvents(h2.db);
+			assert.equal(ev2.length, 1);
+			assert.equal(ev2[0].outcome, 'fixed');
+			assert.equal(ev2[0].text, 'from synced ref v2');
+			closeIndex(h2);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
 });
+

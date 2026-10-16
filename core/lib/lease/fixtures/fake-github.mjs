@@ -33,7 +33,7 @@ export function prng(seed) {
 export function fakeGitApi({ now = T0, interleave = null, repo = REPO, clockAdvanceMs = 0, lagMs = 0 } = {}) {
   // refs: current tip per ref. history: every (sha, writtenAt) per ref, so a lagging replica can
   // serve the newest version that is at least `lagMs` old (`lagMs` applies to GETs of a ref only).
-  const state = { now, refs: new Map(), commits: new Map(), history: new Map(), log: [], faults: [], clockAdvanceMs, lagMs };
+  const state = { now, refs: new Map(), commits: new Map(), trees: new Map(), blobs: new Map(), history: new Map(), log: [], faults: [], clockAdvanceMs, lagMs };
   const rand = interleave ? prng(interleave) : null;
   const tick = async () => {
     if (!rand) return;
@@ -90,6 +90,29 @@ export function fakeGitApi({ now = T0, interleave = null, repo = REPO, clockAdva
       const c = state.commits.get(m[1]);
       if (!c) return reply(422, { message: "No commit found for SHA" });
       return reply(200, { sha: m[1], message: c.message, parents: c.parents.map((sha) => ({ sha })), tree: { sha: c.tree } });
+    }
+    if (method === "GET" && (m = new RegExp(`^${base}/trees/([0-9a-f]{40})$`).exec(path))) {
+      const t = state.trees.get(m[1]);
+      if (!t) return reply(404, { message: "Not Found" });
+      return reply(200, { sha: m[1], tree: t });
+    }
+    if (method === "POST" && path === `${base}/trees`) {
+      if (!Array.isArray(body?.tree)) return reply(422, { message: "Invalid tree" });
+      const sha = createHash("sha1").update(JSON.stringify(body.tree)).digest("hex");
+      state.trees.set(sha, body.tree.map((e) => ({ ...e })));
+      return reply(201, { sha, tree: state.trees.get(sha) });
+    }
+    if (method === "GET" && (m = new RegExp(`^${base}/blobs/([0-9a-f]{40})$`).exec(path))) {
+      const b = state.blobs.get(m[1]);
+      if (b === undefined) return reply(404, { message: "Not Found" });
+      return reply(200, { sha: m[1], content: Buffer.from(b, "utf8").toString("base64"), encoding: "base64" });
+    }
+    if (method === "POST" && path === `${base}/blobs`) {
+      if (typeof body?.content !== "string") return reply(422, { message: "Invalid blob" });
+      const raw = body.encoding === "base64" ? Buffer.from(body.content, "base64").toString("utf8") : body.content;
+      const sha = createHash("sha1").update(`blob:${raw}`).digest("hex");
+      state.blobs.set(sha, raw);
+      return reply(201, { sha });
     }
     if (method === "POST" && path === `${base}/commits`) {
       if (!Array.isArray(body?.parents) || typeof body?.message !== "string" || typeof body?.tree !== "string") return reply(422, { message: "Invalid request" });

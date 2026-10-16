@@ -1,0 +1,1413 @@
+#!/usr/bin/env node
+// memory-sync.mjs — historical ingestion, author/editor eligibility filter, boundary-spoofing
+// quarantine, anomaly flagging, incremental cursors + tombstones, and delta/publish modes.
+// Design: docs/memory-spec.md §7 (#131).
+//
+// Zero-dependency ESM, Node >= 20. External calls (`gh`, `git`, `refStore`) are injectable for
+// deterministic unit tests.
+
+import { execFile, execFileSync } from 'node:child_process';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { parseArgs, promisify } from 'node:util';
+import { isMainEntry } from '../lib/is-main.mjs';
+import { createMarkerRe, MARKER_RE, normalizeUntrusted } from '../lib/untrusted.mjs';
+import {
+  EVENTS_REF,
+  createMemoryRefStore,
+  mergeEvents,
+  parseEventsJsonl,
+  formatEventsJsonl,
+  tailRef,
+} from '../lib/memory/ref-store.mjs';
+import { ensureIndex, resolveCacheDir } from '../lib/memory/index-db.mjs';
+import { loadConfig } from './memory-brief.mjs';
+import { buildMarkerMatchers, isMarkerBody, parseFindingAcks } from './harvest-findings.mjs';
+import { parseReviewComment } from './review-bakeoff.mjs';
+
+const execFileP = promisify(execFile);
+
+export const OVERLAP_MS = 48 * 60 * 60 * 1000; // 48-hour overlap window (§7.5)
+export const INIT_CAPS = Object.freeze({
+  commits: 500,
+  prs: 250,
+  issues: 250,
+});
+
+const EVIDENCE_MARKER_RE = createMarkerRe('HISTORICAL REPO EVIDENCE');
+
+// ---------------------------------------------------------------------------
+// §7.4 Quarantine & Anomaly Tagging
+// ---------------------------------------------------------------------------
+
+const QUARANTINE_RULES = [
+  {
+    id: 'forged_untrusted_marker',
+    test(folded) {
+      const re = new RegExp(MARKER_RE.source, 'im');
+      return re.exec(folded);
+    },
+  },
+  {
+    id: 'forged_evidence_marker',
+    test(folded) {
+      const re = new RegExp(EVIDENCE_MARKER_RE.source, 'im');
+      return re.exec(folded);
+    },
+  },
+  {
+    id: 'system_tag_spoof',
+    test(folded) {
+      return /<\s*\/?\s*(?:system-reminder|system|command-name|command-message|command-args|user-prompt-submit-hook)\b[^>]*>/i.exec(
+        folded,
+      );
+    },
+  },
+  {
+    id: 'role_turn_spoof',
+    test(folded) {
+      return /(?:^|\n)\s*(?:Human|Assistant)\s*:/i.exec(folded);
+    },
+  },
+];
+
+const FLAG_RULES = [
+  {
+    id: 'imperative_override',
+    re: /\b(?:ignore|disregard|override|forget)\s+(?:all\s+)?(?:previous|prior|above|earlier|system)\s+(?:instructions|prompts|rules|directions|constraints)\b|\byou\s+are\s+now\s+(?:in\s+)?[a-z0-9_-]+\s+mode\b|\bnew\s+system\s+prompt\b/i,
+  },
+  {
+    id: 'shell_exfiltration',
+    re: /\b(?:curl|wget)\s+[^\n]*https?:\/\/|\bnc\s+-[a-z]*e\b|\|\s*(?:ba)?sh\b|\bbase64\s+(?:-d|--decode)\b[^\n]*\|\s*(?:ba)?sh\b|\b(?:GH_TOKEN|GITHUB_TOKEN|AWS_SECRET_ACCESS_KEY|ANTHROPIC_API_KEY)\b/i,
+  },
+];
+
+/**
+ * Inspect text under `normalizeUntrusted()` fold per §7.4.
+ * HTML comments (`<!-- ... -->`) are never a signal.
+ *
+ * @returns {{ quarantined: boolean, rule?: string, span?: string, flags: string[] }}
+ */
+export function classifyTextSafety(text) {
+  const raw = String(text ?? '');
+  if (!raw) return { quarantined: false, flags: [] };
+  const folded = normalizeUntrusted(raw);
+
+  for (const qRule of QUARANTINE_RULES) {
+    const m = qRule.test(folded) || qRule.test(raw);
+    if (m) {
+      return {
+        quarantined: true,
+        rule: qRule.id,
+        span: String(m[0]).slice(0, 120),
+        flags: [],
+      };
+    }
+  }
+
+  const flags = [];
+  for (const fRule of FLAG_RULES) {
+    if (fRule.re.test(folded) || fRule.re.test(raw)) {
+      flags.push(fRule.id);
+    }
+  }
+  return { quarantined: false, flags };
+}
+
+export function appendQuarantineLog(cacheDir, entry) {
+  if (!cacheDir) return;
+  try {
+    fs.mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
+    fs.appendFileSync(path.join(cacheDir, 'quarantine.jsonl'), JSON.stringify(entry) + '\n', { encoding: 'utf8', mode: 0o600 });
+  } catch {
+    // Best effort
+  }
+}
+
+// ---------------------------------------------------------------------------
+// §7.2 Author & Editor Eligibility Filter
+// ---------------------------------------------------------------------------
+
+const NOISY_BOT_LOGINS = new Set([
+  'dependabot',
+  'dependabot[bot]',
+  'github-actions',
+  'github-actions[bot]',
+]);
+
+const ELIGIBLE_HUMAN_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
+
+const INELIGIBLE_HUMAN_ASSOCIATIONS = new Set([
+  'NONE',
+  'CONTRIBUTOR',
+  'FIRST_TIME_CONTRIBUTOR',
+  'FIRST_TIMER',
+  'MANNEQUIN',
+]);
+
+/**
+ * Resolve a bot's numeric user `databaseId` from its slug via `GET /users/<slug>%5Bbot%5D`
+ * (never the App ID), caching in `<cacheDir>/bot-ids.json`.
+ */
+export async function resolveBotSlugUserId(slug, { gh, cacheDir } = {}) {
+  const cleanSlug = String(slug ?? '')
+    .trim()
+    .replace(/\[bot\]$/i, '');
+  if (!cleanSlug) return null;
+
+  const cacheFile = cacheDir ? path.join(cacheDir, 'bot-ids.json') : null;
+  let cache = {};
+  if (cacheFile && fs.existsSync(cacheFile)) {
+    try {
+      cache = JSON.parse(fs.readFileSync(cacheFile, 'utf8')) || {};
+      if (typeof cache[cleanSlug] === 'number') return cache[cleanSlug];
+    } catch {
+      cache = {};
+    }
+  }
+
+  if (typeof gh !== 'function') return null;
+  try {
+    const raw = await gh(['api', `/users/${encodeURIComponent(cleanSlug + '[bot]')}`]);
+    const parsed = JSON.parse(raw);
+    const id = typeof parsed?.id === 'number' ? parsed.id : null;
+    if (id !== null && cacheFile) {
+      try {
+        fs.mkdirSync(cacheDir, { recursive: true });
+        cache[cleanSlug] = id;
+        fs.writeFileSync(cacheFile, JSON.stringify(cache, null, 2), 'utf8');
+      } catch {
+        // Best effort
+      }
+    }
+    return id;
+  } catch {
+    return null;
+  }
+}
+
+function isBotActor(actor) {
+  if (!actor || typeof actor !== 'object') return false;
+  if (actor.__typename === 'Bot' || actor.type === 'Bot') return true;
+  const login = String(actor.login || '');
+  return login.endsWith('[bot]') || NOISY_BOT_LOGINS.has(login.toLowerCase());
+}
+
+/**
+ * Check whether a single actor (author or editor) passes §7.2 eligibility.
+ *
+ * @returns {{ eligible: boolean, kind: string | null, id: number | null, reason?: string }}
+ */
+export function evaluateActorEligibility(actor, authorAssociation, config = {}) {
+  if (!actor || typeof actor !== 'object') {
+    return { eligible: false, kind: null, id: null, reason: 'missing_actor' };
+  }
+
+  const dbId = typeof actor.databaseId === 'number' ? actor.databaseId : (typeof actor.id === 'number' ? actor.id : null);
+  const login = String(actor.login || '').toLowerCase();
+  const trustedBots = new Set((config.trusted_bot_user_ids ?? []).map(Number));
+  const operators = new Set((config.operator_user_ids ?? []).map(Number));
+
+  // Explicit operator allowlist by numeric databaseId
+  if (dbId !== null && operators.has(dbId)) {
+    return { eligible: true, kind: 'operator', id: dbId };
+  }
+
+  // Bot actors: must be in trusted_bot_user_ids; noisy bots dropped by default
+  if (isBotActor(actor)) {
+    if (dbId !== null && trustedBots.has(dbId)) {
+      return { eligible: true, kind: 'bot', id: dbId };
+    }
+    if (NOISY_BOT_LOGINS.has(login)) {
+      return { eligible: false, kind: 'bot', id: dbId, reason: 'noisy_bot' };
+    }
+    return { eligible: false, kind: 'bot', id: dbId, reason: 'untrusted_bot' };
+  }
+
+  if (NOISY_BOT_LOGINS.has(login)) {
+    return { eligible: false, kind: 'bot', id: dbId, reason: 'noisy_bot' };
+  }
+
+  // In case a bot comes through without __typename === 'Bot' but its ID is in trusted_bot_user_ids
+  if (dbId !== null && trustedBots.has(dbId)) {
+    return { eligible: true, kind: 'bot', id: dbId };
+  }
+
+  const assoc = String(authorAssociation || '').toUpperCase();
+  if (INELIGIBLE_HUMAN_ASSOCIATIONS.has(assoc)) {
+    return { eligible: false, kind: null, id: dbId, reason: `ineligible_association:${assoc}` };
+  }
+  if (ELIGIBLE_HUMAN_ASSOCIATIONS.has(assoc)) {
+    const kind = assoc === 'OWNER' ? 'owner' : 'member';
+    return { eligible: true, kind, id: dbId };
+  }
+
+  return { eligible: false, kind: null, id: dbId, reason: `unknown_association:${assoc || 'EMPTY'}` };
+}
+
+/**
+ * Evaluate a GitHub node (issue, PR, comment, review) for author AND editor eligibility (§7.2, #146).
+ * If `lastEditedAt` is set and `editor` differs from `author` (or is null):
+ *   - If `editor` is eligible, the node is eligible (recording `editor_id` and `editor_kind`).
+ *   - Otherwise, if `userContentEdits.nodes` has an pre-edit revision whose `editor` (or original
+ *     author) is eligible and `diff` is present, falls back to that revision; otherwise drops the node.
+ */
+export function evaluateNodeEligibility(node, config = {}) {
+  if (!node || typeof node !== 'object') {
+    return { eligible: false, reason: 'empty_node' };
+  }
+  const authorRes = evaluateActorEligibility(node.author, node.authorAssociation, config);
+  if (!authorRes.eligible) {
+    return { eligible: false, reason: `author_${authorRes.reason}` };
+  }
+
+  if (!node.lastEditedAt) {
+    return {
+      eligible: true,
+      author_id: authorRes.id,
+      author_kind: authorRes.kind,
+      editor_id: null,
+      editor_kind: null,
+      bodyText: String(node.body ?? ''),
+    };
+  }
+
+  // Node was edited: verify editor
+  if (node.editor) {
+    const sameActor =
+      node.editor.databaseId != null &&
+      authorRes.id != null &&
+      Number(node.editor.databaseId) === Number(authorRes.id);
+    if (sameActor) {
+      return {
+        eligible: true,
+        author_id: authorRes.id,
+        author_kind: authorRes.kind,
+        editor_id: authorRes.id,
+        editor_kind: authorRes.kind,
+        bodyText: String(node.body ?? ''),
+      };
+    }
+    // Editor is a different user: check if editor is in operator_user_ids or trusted_bot_user_ids
+    // or has an eligible association if provided
+    const editorAssoc = node.editorAssociation || (sameActor ? node.authorAssociation : null);
+    const editorRes = evaluateActorEligibility(node.editor, editorAssoc, config);
+    if (editorRes.eligible) {
+      return {
+        eligible: true,
+        author_id: authorRes.id,
+        author_kind: authorRes.kind,
+        editor_id: editorRes.id,
+        editor_kind: editorRes.kind,
+        bodyText: String(node.body ?? ''),
+      };
+    }
+  }
+
+  // Fallback: check pre-edit revisions in userContentEdits if available (must have an explicit edit.editor)
+  const edits = Array.isArray(node.userContentEdits?.nodes) ? node.userContentEdits.nodes : [];
+  for (const edit of edits) {
+    if (!edit || typeof edit.diff !== 'string' || !edit.diff.trim()) continue;
+    const editActor = edit.editor;
+    if (!editActor) continue;
+    const editAssoc =
+      authorRes.id != null && Number(editActor.databaseId) === Number(authorRes.id)
+        ? node.authorAssociation
+        : null;
+    const editRes = evaluateActorEligibility(editActor, editAssoc, config);
+    if (editRes.eligible) {
+      return {
+        eligible: true,
+        author_id: authorRes.id,
+        author_kind: authorRes.kind,
+        editor_id: editRes.id,
+        editor_kind: editRes.kind,
+        bodyText: edit.diff,
+      };
+    }
+  }
+
+  return { eligible: false, reason: 'ineligible_editor' };
+}
+
+/**
+ * Evaluate brief-time trust of a stored Class B event against the current `config` (§7.3, #132).
+ * Removing a bot ID from `trusted_bot_user_ids` or an operator from `operator_user_ids` immediately
+ * drops its previously synced records at brief-build time.
+ */
+export function isEventTrustedByConfig(event, config = {}) {
+  if (!event || typeof event !== 'object') return false;
+  if (event.kind === 'journal') return true;
+  if (event.kind === 'commit') {
+    if (event.author_kind === 'operator' && (event.author_email || event.author_login)) {
+      const opEmails = new Set((config.operator_emails ?? []).map((e) => String(e).toLowerCase()));
+      const opLogins = new Set((config.operator_logins ?? []).map((l) => String(l).toLowerCase()));
+      if (opEmails.size > 0 || opLogins.size > 0) {
+        const emailOk = event.author_email && opEmails.has(String(event.author_email).toLowerCase());
+        const loginOk = event.author_login && opLogins.has(String(event.author_login).toLowerCase());
+        if (!emailOk && !loginOk) return false;
+      }
+    }
+    return true;
+  }
+
+  const trustedBots = new Set((config.trusted_bot_user_ids ?? []).map(Number));
+  const operators = new Set((config.operator_user_ids ?? []).map(Number));
+  const authorKind = String(event.author_kind || '');
+  const authorId = event.author_id != null ? Number(event.author_id) : null;
+
+  function checkKindAndId(kind, id) {
+    if (kind === 'bot') {
+      return id !== null && trustedBots.has(id);
+    }
+    if (kind === 'operator') {
+      return id !== null && operators.has(id);
+    }
+    if (kind === 'owner' || kind === 'member') {
+      return true;
+    }
+    // Legacy events without author_kind (e.g. unit test fixtures): allow unless author_kind is explicitly set to an unknown value
+    if (!kind && id === null) return true;
+    return false;
+  }
+
+  if (!checkKindAndId(authorKind, authorId)) return false;
+
+  const wasEdited =
+    event.last_edited_at != null ||
+    event.was_edited === true ||
+    Boolean(event.created_at && event.updated_at && event.created_at !== event.updated_at);
+  if (wasEdited && event.editor_id == null) return false;
+
+  if (event.editor_kind || event.editor_id != null) {
+    const editorKind = String(event.editor_kind || '');
+    const editorId = event.editor_id != null ? Number(event.editor_id) : null;
+    if (!checkKindAndId(editorKind, editorId)) return false;
+  }
+
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Event extraction from PRs, Issues, Commits, and Monster Journals
+// ---------------------------------------------------------------------------
+
+function extractIssueRefs(text) {
+  const refs = new Set();
+  const s = String(text ?? '');
+  for (const m of s.matchAll(/(?:\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)|(?:^|[\s([,;])#(\d+)\b)/gi)) {
+    const n = Number(m[1] || m[2]);
+    if (Number.isFinite(n) && n > 0) refs.add(n);
+  }
+  return [...refs];
+}
+
+function sanitizeEventWithQuarantine(event, { cacheDir, now = () => Date.now() } = {}) {
+  if (event.deleted === true) return event;
+  const textToScan = [event.summary || '', event.text || ''].filter(Boolean).join('\n');
+  const safety = classifyTextSafety(textToScan);
+  if (safety.quarantined) {
+    appendQuarantineLog(cacheDir, {
+      ts: new Date(now()).toISOString(),
+      k: event.k,
+      url: event.url || '',
+      author_id: event.author_id ?? null,
+      rule: safety.rule,
+      span: safety.span,
+    });
+    return null;
+  }
+  const mergedFlags = new Set([...(Array.isArray(event.flags) ? event.flags : []), ...safety.flags]);
+  return {
+    ...event,
+    flags: [...mergedFlags],
+  };
+}
+
+function normalizeOptionalPath(p) {
+  const s = String(p ?? '').trim();
+  return s ? s : null;
+}
+
+function normalizeOptionalRepo(r) {
+  const s = String(r ?? '').trim();
+  return s && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(s) ? s : null;
+}
+
+function normalizeSafeKeySegment(seg) {
+  return String(seg ?? '')
+    .trim()
+    .replace(/[^A-Za-z0-9_./-]/g, '_');
+}
+
+/**
+ * Extract normalized memory events (and tombstones for minimized/deleted items) from a GraphQL PR node.
+ */
+export function extractEventsFromPrNode(pr, { repo, config = {}, cacheDir = null, now = () => Date.now() } = {}) {
+  const out = [];
+  if (!pr || typeof pr.number !== 'number') return out;
+  const prNum = pr.number;
+  const normRepo = normalizeOptionalRepo(repo);
+  const keyPrefix = normRepo || 'local';
+  const matchers = buildMarkerMatchers(config);
+  const updatedAt = pr.updatedAt || pr.mergedAt || pr.createdAt || new Date(now()).toISOString();
+
+  const touchedPaths = Array.isArray(pr.files?.nodes)
+    ? pr.files.nodes.map((f) => f?.path).filter(Boolean)
+    : [];
+  const primaryPath = normalizeOptionalPath(touchedPaths[0]);
+  const prPaginatedTruncated =
+    Boolean(pr.comments?.pageInfo?.hasNextPage) ||
+    Boolean(pr.reviews?.pageInfo?.hasNextPage) ||
+    Boolean(pr.reviewThreads?.pageInfo?.hasNextPage) ||
+    Boolean(pr.files?.pageInfo?.hasNextPage);
+  const baseFlags = prPaginatedTruncated ? ['truncated'] : [];
+
+  // Collect FINDING-ACK lines across eligible PR body, comments, and reviews
+  const ackById = new Map();
+  const collectAcks = (text) => {
+    for (const ack of parseFindingAcks(text)) {
+      ackById.set(ack.id, ack.outcome);
+    }
+  };
+
+  const prElig = evaluateNodeEligibility(pr, config);
+  if (prElig.eligible) {
+    collectAcks(prElig.bodyText);
+    const prKey = `${keyPrefix}:pr:${prNum}`;
+    const ev = sanitizeEventWithQuarantine(
+      {
+        k: prKey,
+        id: prKey,
+        kind: 'pr',
+        repo: normRepo,
+        number: prNum,
+        path: primaryPath,
+        paths: touchedPaths,
+        line: null,
+        symbol: null,
+        marker: null,
+        outcome: pr.mergedAt ? 'merged' : 'none',
+        date: (pr.mergedAt || updatedAt).slice(0, 10),
+        updated_at: updatedAt,
+        author_id: prElig.author_id,
+        author_kind: prElig.author_kind,
+        editor_id: prElig.editor_id,
+        editor_kind: prElig.editor_kind,
+        url: pr.url || (normRepo ? `https://github.com/${normRepo}/pull/${prNum}` : ''),
+        summary: String(pr.title || '').slice(0, 200),
+        text: `${pr.title || ''}\n\n${prElig.bodyText}`.trim(),
+        issue_refs: extractIssueRefs(`${pr.title || ''}\n${prElig.bodyText}`),
+        flags: [...baseFlags],
+      },
+      { cacheDir, now },
+    );
+    if (ev) out.push(ev);
+  }
+
+  // Pre-scan comments & reviews for FINDING-ACKs from eligible authors
+  for (const c of pr.comments?.nodes ?? []) {
+    if (!c || c.isMinimized) continue;
+    const elig = evaluateNodeEligibility(c, config);
+    if (elig.eligible) collectAcks(elig.bodyText);
+  }
+  for (const r of pr.reviews?.nodes ?? []) {
+    if (!r || r.isMinimized) continue;
+    const elig = evaluateNodeEligibility(r, config);
+    if (elig.eligible) collectAcks(elig.bodyText);
+  }
+
+  // Process PR comments & review bodies (marker findings vs general comments, plus tombstones for isMinimized)
+  const reviewLikeNodes = [
+    ...(pr.comments?.nodes ?? []).map((n, idx) => ({ node: n, fallbackId: String(idx) })),
+    ...(pr.reviews?.nodes ?? []).map((n, idx) => ({ node: n, fallbackId: `r-${idx}` })),
+  ];
+  for (const { node: c, fallbackId } of reviewLikeNodes) {
+    if (!c) continue;
+    const cid = normalizeSafeKeySegment(c.id || fallbackId);
+    const cUpdated = c.updatedAt || c.createdAt || updatedAt;
+    if (c.isMinimized) {
+      const tk = `${keyPrefix}:pr_review:${prNum}:${cid}`;
+      out.push({
+        k: tk,
+        id: tk,
+        deleted: true,
+        updated_at: cUpdated,
+      });
+      const emittedFindingKeys = new Set();
+      if (isMarkerBody(c.body, matchers)) {
+        const parsedHidden = parseReviewComment(String(c.body ?? ''));
+        const hiddenFindings = Array.isArray(parsedHidden) ? parsedHidden : (parsedHidden?.findings ?? []);
+        for (const [fIdx, f] of hiddenFindings.entries()) {
+          const fk = `${keyPrefix}:marker_finding:${prNum}:${cid}:${normalizeSafeKeySegment(f.id || `F${fIdx + 1}`)}`;
+          emittedFindingKeys.add(fk);
+          out.push({ k: fk, id: fk, deleted: true, updated_at: cUpdated });
+        }
+      }
+      if (emittedFindingKeys.size === 0) {
+        for (let i = 1; i <= 10; i++) {
+          const fk = `${keyPrefix}:marker_finding:${prNum}:${cid}:F${i}`;
+          out.push({ k: fk, id: fk, deleted: true, updated_at: cUpdated });
+        }
+      }
+      continue;
+    }
+    const elig = evaluateNodeEligibility(c, config);
+    if (!elig.eligible) continue;
+    if (!String(elig.bodyText || '').trim()) continue;
+
+    // Structured finding lines are extracted ONLY from comments/reviews with a leading configured marker (§7.2)
+    if (isMarkerBody(elig.bodyText, matchers)) {
+      const mMatch = String(elig.bodyText).trimStart().match(/^<!--\s*([a-z0-9-]+)\s*-->/i);
+      const markerName = mMatch ? mMatch[1].toLowerCase() : 'local-review-findings';
+      const parsed = parseReviewComment(elig.bodyText);
+      const findings = Array.isArray(parsed) ? parsed : (parsed?.findings ?? []);
+      for (const [fIdx, f] of findings.entries()) {
+        const findingId = normalizeSafeKeySegment(f.id || `F${fIdx + 1}`);
+        const outcome = ackById.get(findingId) || 'unresolved';
+        const fk = `${keyPrefix}:marker_finding:${prNum}:${cid}:${findingId}`;
+        const fPath = normalizeOptionalPath(f.file) || primaryPath;
+        const ev = sanitizeEventWithQuarantine(
+          {
+            k: fk,
+            id: fk,
+            kind: 'marker_finding',
+            repo: normRepo,
+            number: prNum,
+            path: fPath,
+            paths: fPath ? [fPath] : touchedPaths,
+            line: typeof f.line === 'number' && f.line > 0 ? f.line : null,
+            symbol: normalizeOptionalPath(f.symbol),
+            marker: markerName,
+            severity: f.severity || 'medium',
+            category: f.category || '',
+            outcome,
+            date: cUpdated.slice(0, 10),
+            updated_at: cUpdated,
+            author_id: elig.author_id,
+            author_kind: elig.author_kind,
+            editor_id: elig.editor_id,
+            editor_kind: elig.editor_kind,
+            url: c.url || pr.url || '',
+            summary: String(f.title || '').slice(0, 200),
+            text: `${f.title || ''}\n\n${f.body || elig.bodyText}`.trim(),
+            flags: [...baseFlags],
+          },
+          { cacheDir, now },
+        );
+        if (ev) out.push(ev);
+      }
+    } else {
+      const ck = `${keyPrefix}:pr_review:${prNum}:${cid}`;
+      const ev = sanitizeEventWithQuarantine(
+        {
+          k: ck,
+          id: ck,
+          kind: 'pr_review',
+          repo: normRepo,
+          number: prNum,
+          path: primaryPath,
+          paths: touchedPaths,
+          line: null,
+          symbol: null,
+          marker: null,
+          outcome: pr.mergedAt ? 'merged' : 'none',
+          date: cUpdated.slice(0, 10),
+          updated_at: cUpdated,
+          author_id: elig.author_id,
+          author_kind: elig.author_kind,
+          editor_id: elig.editor_id,
+          editor_kind: elig.editor_kind,
+          url: c.url || pr.url || '',
+          summary: String(elig.bodyText).split('\n')[0].slice(0, 200),
+          text: elig.bodyText,
+          flags: [...baseFlags],
+        },
+        { cacheDir, now },
+      );
+      if (ev) out.push(ev);
+    }
+  }
+
+  // Process review threads (isResolved -> fixed, else unresolved, #143)
+  for (const [tIdx, thread] of (pr.reviewThreads?.nodes ?? []).entries()) {
+    if (!thread) continue;
+    const threadTruncated = Boolean(thread.comments?.pageInfo?.hasNextPage);
+    const threadFlags = threadTruncated ? [...new Set([...baseFlags, 'truncated'])] : [...baseFlags];
+    const comments = [...(thread.comments?.nodes ?? [])].sort((a, b) =>
+      String(a?.createdAt ?? '').localeCompare(String(b?.createdAt ?? '')),
+    );
+    const opener = comments[0];
+    if (!opener) continue;
+    const tid = normalizeSafeKeySegment(thread.id || opener.id || String(tIdx));
+    const tUpdated = opener.updatedAt || opener.createdAt || updatedAt;
+    const tk = `${keyPrefix}:review_thread:${prNum}:${tid}`;
+    if (opener.isMinimized) {
+      out.push({
+        k: tk,
+        id: tk,
+        deleted: true,
+        updated_at: tUpdated,
+      });
+      continue;
+    }
+    const elig = evaluateNodeEligibility(opener, config);
+    if (!elig.eligible) continue;
+
+    const outcome = thread.isResolved ? 'fixed' : 'unresolved';
+    const tPath = normalizeOptionalPath(thread.path) || primaryPath;
+    const ev = sanitizeEventWithQuarantine(
+      {
+        k: tk,
+        id: tk,
+        kind: 'review_thread',
+        repo: normRepo,
+        number: prNum,
+        path: tPath,
+        paths: tPath ? [tPath] : touchedPaths,
+        line: typeof thread.line === 'number' && thread.line > 0 ? thread.line : null,
+        symbol: null,
+        marker: null,
+        outcome,
+        date: tUpdated.slice(0, 10),
+        updated_at: tUpdated,
+        author_id: elig.author_id,
+        author_kind: elig.author_kind,
+        editor_id: elig.editor_id,
+        editor_kind: elig.editor_kind,
+        url: opener.url || pr.url || '',
+        summary: String(elig.bodyText).split('\n')[0].slice(0, 200),
+        text: elig.bodyText,
+        flags: threadFlags,
+      },
+      { cacheDir, now },
+    );
+    if (ev) out.push(ev);
+  }
+
+  return out;
+}
+
+/**
+ * Extract normalized memory events from a GraphQL Issue node.
+ */
+export function extractEventsFromIssueNode(
+  issue,
+  { repo, config = {}, cacheDir = null, now = () => Date.now() } = {},
+) {
+  const out = [];
+  if (!issue || typeof issue.number !== 'number') return out;
+  const num = issue.number;
+  const normRepo = normalizeOptionalRepo(repo);
+  const keyPrefix = normRepo || 'local';
+  const updatedAt = issue.updatedAt || issue.createdAt || new Date(now()).toISOString();
+  const truncated = Boolean(issue.comments?.pageInfo?.hasNextPage);
+  const baseFlags = truncated ? ['truncated'] : [];
+  const issueOutcome = String(issue.state || '').toUpperCase() === 'CLOSED' ? 'fixed' : 'none';
+
+  const elig = evaluateNodeEligibility(issue, config);
+  if (elig.eligible) {
+    const ik = `${keyPrefix}:issue:${num}`;
+    const ev = sanitizeEventWithQuarantine(
+      {
+        k: ik,
+        id: ik,
+        kind: 'issue',
+        repo: normRepo,
+        number: num,
+        path: null,
+        paths: [],
+        line: null,
+        symbol: null,
+        marker: null,
+        outcome: issueOutcome,
+        date: updatedAt.slice(0, 10),
+        updated_at: updatedAt,
+        author_id: elig.author_id,
+        author_kind: elig.author_kind,
+        editor_id: elig.editor_id,
+        editor_kind: elig.editor_kind,
+        url: issue.url || (normRepo ? `https://github.com/${normRepo}/issues/${num}` : ''),
+        summary: String(issue.title || '').slice(0, 200),
+        text: `${issue.title || ''}\n\n${elig.bodyText}`.trim(),
+        flags: [...baseFlags],
+      },
+      { cacheDir, now },
+    );
+    if (ev) out.push(ev);
+  }
+
+  for (const [idx, c] of (issue.comments?.nodes ?? []).entries()) {
+    if (!c) continue;
+    const cid = normalizeSafeKeySegment(c.id || String(idx));
+    const cUpdated = c.updatedAt || c.createdAt || updatedAt;
+    const ck = `${keyPrefix}:issue_comment:${num}:${cid}`;
+    if (c.isMinimized) {
+      out.push({
+        k: ck,
+        id: ck,
+        deleted: true,
+        updated_at: cUpdated,
+      });
+      continue;
+    }
+    const cElig = evaluateNodeEligibility(c, config);
+    if (!cElig.eligible) continue;
+    const ev = sanitizeEventWithQuarantine(
+      {
+        k: ck,
+        id: ck,
+        kind: 'issue_comment',
+        repo: normRepo,
+        number: num,
+        path: null,
+        paths: [],
+        line: null,
+        symbol: null,
+        marker: null,
+        outcome: issueOutcome,
+        date: cUpdated.slice(0, 10),
+        updated_at: cUpdated,
+        author_id: cElig.author_id,
+        author_kind: cElig.author_kind,
+        editor_id: cElig.editor_id,
+        editor_kind: cElig.editor_kind,
+        url: c.url || issue.url || '',
+        summary: String(cElig.bodyText).split('\n')[0].slice(0, 200),
+        text: cElig.bodyText,
+        flags: [...baseFlags],
+      },
+      { cacheDir, now },
+    );
+    if (ev) out.push(ev);
+  }
+
+  return out;
+}
+
+/**
+ * Extract a normalized memory event from a git commit record per §7.2 commit-ingest filter:
+ *   - Skip commits authored or co-authored by Dependabot.
+ *   - Always index commit subject + `#123` / `Closes #123` references + touched files.
+ *   - Index commit body ONLY when author matches an operator in `config.operator_emails` or `config.operator_logins`.
+ */
+export function extractEventFromCommit(
+  commit,
+  { repo = '', config = {}, cacheDir = null, now = () => Date.now() } = {},
+) {
+  if (!commit || !commit.sha) return null;
+  const authorName = String(commit.authorName || '').toLowerCase();
+  const authorEmail = String(commit.authorEmail || '').toLowerCase();
+  const body = String(commit.body || '');
+
+  if (
+    authorName.includes('dependabot') ||
+    authorEmail.includes('dependabot') ||
+    /co-authored-by:[^\n]*dependabot/i.test(body)
+  ) {
+    return null;
+  }
+
+  const operatorEmails = new Set((config.operator_emails ?? []).map((e) => String(e).toLowerCase()));
+  const operatorLogins = new Set((config.operator_logins ?? []).map((l) => String(l).toLowerCase()));
+  const isOperatorCommit =
+    operatorEmails.has(authorEmail) ||
+    operatorLogins.has(authorName) ||
+    Boolean(commit.isOperator);
+
+  const subject = String(commit.subject || '').trim();
+  const issueRefs = extractIssueRefs(`${subject}\n${body}`);
+  const refSuffix = issueRefs.length > 0 ? ` (refs: ${issueRefs.map((n) => `#${n}`).join(', ')})` : '';
+  const textContent = isOperatorCommit && body.trim()
+    ? `${subject}\n\n${body.trim()}`
+    : `${subject}${refSuffix}`;
+
+  const paths = Array.isArray(commit.files) ? commit.files.filter(Boolean) : [];
+  const dateIso = commit.date || new Date(now()).toISOString();
+  const normRepo = normalizeOptionalRepo(repo);
+  const keyPrefix = normRepo || 'local';
+  const shortSha = normalizeSafeKeySegment(commit.sha.slice(0, 12));
+  const ck = `${keyPrefix}:commit:${shortSha}`;
+
+  return sanitizeEventWithQuarantine(
+    {
+      k: ck,
+      id: ck,
+      kind: 'commit',
+      repo: normRepo,
+      number: issueRefs[0] || null,
+      path: normalizeOptionalPath(paths[0]),
+      paths,
+      line: null,
+      symbol: null,
+      marker: null,
+      outcome: 'merged',
+      date: dateIso.slice(0, 10),
+      updated_at: dateIso,
+      author_id: null,
+      author_kind: isOperatorCommit ? 'operator' : 'member',
+      author_email: isOperatorCommit ? authorEmail : null,
+      author_login: isOperatorCommit ? authorName : null,
+      url: normRepo ? `https://github.com/${normRepo}/commit/${commit.sha}` : '',
+      summary: subject.slice(0, 200),
+      text: textContent,
+      issue_refs: issueRefs,
+      flags: [],
+    },
+    { cacheDir, now },
+  );
+}
+
+/**
+ * Parse local git log commits (`--max-count`, optional `--since`).
+ */
+export function ingestLocalCommits(
+  repoRoot,
+  { repo = '', config = {}, cacheDir = null, maxCount = INIT_CAPS.commits, since = null, exec = execFileSync, now = () => Date.now() } = {},
+) {
+  const nonce = crypto.randomBytes(8).toString('hex');
+  const recSep = `__REC_${nonce}__`;
+  const fldSep = `__FLD_${nonce}__`;
+  const endSep = `__END_${nonce}__`;
+  const args = [
+    '-C',
+    repoRoot,
+    'log',
+    `--max-count=${maxCount}`,
+    `--format=${recSep}%H${fldSep}%an${fldSep}%ae${fldSep}%aI${fldSep}%s${fldSep}%b${endSep}`,
+    '--name-only',
+  ];
+  if (since) args.push(`--since=${since}`);
+  let raw = '';
+  try {
+    raw = exec('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 });
+  } catch {
+    return [];
+  }
+
+  const useNonce = raw.includes(recSep);
+  const rSep = useNonce ? recSep : '\x1e';
+  const fSep = useNonce ? fldSep : '\x1f';
+  const eSep = useNonce ? endSep : '\x1d';
+
+  const events = [];
+  for (const record of raw.split(rSep)) {
+    if (!record.trim()) continue;
+    const [headerPart, filesPart = ''] = record.split(eSep);
+    const [sha, authorName, authorEmail, date, subject, body] = headerPart.split(fSep);
+    if (!sha || !/^[0-9a-f]{7,40}$/i.test(sha.trim())) continue;
+    const files = filesPart
+      .split('\n')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const ev = extractEventFromCommit(
+      {
+        sha: sha.trim(),
+        authorName: authorName?.trim() || '',
+        authorEmail: authorEmail?.trim() || '',
+        date: date?.trim() || '',
+        subject: subject?.trim() || '',
+        body: body?.trim() || '',
+        files,
+      },
+      { repo, config, cacheDir, now },
+    );
+    if (ev) events.push(ev);
+  }
+  return events;
+}
+
+// ---------------------------------------------------------------------------
+// §7.5 Cursors & Delta Storage
+// ---------------------------------------------------------------------------
+
+export function readCursors(cacheDir) {
+  if (!cacheDir) return {};
+  const file = path.join(cacheDir, 'cursors.json');
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8')) || {};
+  } catch {
+    return {};
+  }
+}
+
+export function writeCursors(cacheDir, cursors) {
+  if (!cacheDir) return;
+  fs.mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(cacheDir, 'cursors.json'), JSON.stringify(cursors, null, 2), { encoding: 'utf8', mode: 0o600 });
+}
+
+/**
+ * Compute the effective query watermark timestamp with the 48-hour overlap window (§7.5).
+ */
+export function computeOverlapSince(cursorIso, overlapMs = OVERLAP_MS) {
+  if (!cursorIso) return null;
+  const ms = Date.parse(cursorIso);
+  if (Number.isNaN(ms)) return null;
+  return new Date(Math.max(0, ms - overlapMs)).toISOString();
+}
+
+export function readDeltaEvents(cacheDir) {
+  if (!cacheDir) return [];
+  const file = path.join(cacheDir, 'delta.jsonl');
+  if (!fs.existsSync(file)) return [];
+  try {
+    return parseEventsJsonl(fs.readFileSync(file, 'utf8')).events;
+  } catch {
+    return [];
+  }
+}
+
+export function writeDeltaEvents(cacheDir, incomingEvents) {
+  if (!cacheDir) return [];
+  fs.mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
+  const existing = readDeltaEvents(cacheDir);
+  const merged = mergeEvents(existing, incomingEvents);
+  fs.writeFileSync(path.join(cacheDir, 'delta.jsonl'), formatEventsJsonl(merged), { encoding: 'utf8', mode: 0o600 });
+  return merged;
+}
+
+// ---------------------------------------------------------------------------
+// §7.6 Sync Modes: --init, --delta, --publish
+// ---------------------------------------------------------------------------
+
+async function defaultGh(args) {
+  const { stdout } = await execFileP('gh', args, { maxBuffer: 64 * 1024 * 1024 });
+  return stdout;
+}
+
+const SYNC_REPO_GQL_QUERY = `
+query($owner: String!, $name: String!, $prCount: Int!, $issueCount: Int!, $prAfter: String, $issueAfter: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(first: $prCount, after: $prAfter, orderBy: { field: UPDATED_AT, direction: DESC }) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        number
+        title
+        body
+        url
+        createdAt
+        updatedAt
+        mergedAt
+        lastEditedAt
+        authorAssociation
+        author { __typename login ... on User { databaseId } ... on Bot { databaseId } }
+        editor { __typename login ... on User { databaseId } ... on Bot { databaseId } }
+        files(first: 50) { pageInfo { hasNextPage } nodes { path } }
+        comments(first: 50) {
+          pageInfo { hasNextPage }
+          nodes {
+            id
+            databaseId
+            body
+            url
+            createdAt
+            updatedAt
+            lastEditedAt
+            isMinimized
+            authorAssociation
+            author { __typename login ... on User { databaseId } ... on Bot { databaseId } }
+            editor { __typename login ... on User { databaseId } ... on Bot { databaseId } }
+          }
+        }
+        reviews(first: 50) {
+          pageInfo { hasNextPage }
+          nodes {
+            id
+            databaseId
+            body
+            url
+            createdAt
+            updatedAt
+            lastEditedAt
+            isMinimized
+            authorAssociation
+            author { __typename login ... on User { databaseId } ... on Bot { databaseId } }
+            editor { __typename login ... on User { databaseId } ... on Bot { databaseId } }
+          }
+        }
+        reviewThreads(first: 50) {
+          pageInfo { hasNextPage }
+          nodes {
+            id
+            isResolved
+            path
+            line
+            comments(first: 30) {
+              pageInfo { hasNextPage }
+              nodes {
+                id
+                databaseId
+                body
+                url
+                createdAt
+                updatedAt
+                lastEditedAt
+                isMinimized
+                authorAssociation
+                author { __typename login ... on User { databaseId } ... on Bot { databaseId } }
+                editor { __typename login ... on User { databaseId } ... on Bot { databaseId } }
+              }
+            }
+          }
+        }
+      }
+    }
+    issues(first: $issueCount, after: $issueAfter, orderBy: { field: UPDATED_AT, direction: DESC }) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        number
+        title
+        body
+        state
+        url
+        createdAt
+        updatedAt
+        lastEditedAt
+        authorAssociation
+        author { __typename login ... on User { databaseId } ... on Bot { databaseId } }
+        editor { __typename login ... on User { databaseId } ... on Bot { databaseId } }
+        comments(first: 50) {
+          pageInfo { hasNextPage }
+          nodes {
+            id
+            databaseId
+            body
+            url
+            createdAt
+            updatedAt
+            lastEditedAt
+            isMinimized
+            authorAssociation
+            author { __typename login ... on User { databaseId } ... on Bot { databaseId } }
+            editor { __typename login ... on User { databaseId } ... on Bot { databaseId } }
+          }
+        }
+      }
+    }
+  }
+}`;
+
+/**
+ * Fetch recent PRs and Issues for `repo` (`owner/name`) via GitHub GraphQL (`gh api graphql`),
+ * paging until `sinceIso` is reached or `INIT_CAPS` (`prs: 250`, `issues: 250`) are met.
+ * Fails open (`{ prs: [], issues: [] }`) if `gh` fails or `repo` is not `owner/name`.
+ */
+export async function fetchRepoPrsAndIssues(
+  repo,
+  { gh = defaultGh, isInit = false, sinceIso = null } = {},
+) {
+  const normRepo = normalizeOptionalRepo(repo);
+  if (!normRepo || typeof gh !== 'function') {
+    return { prs: [], issues: [], ok: false, complete: false };
+  }
+  const [owner, name] = normRepo.split('/');
+  const maxPrs = isInit ? INIT_CAPS.prs : 100;
+  const maxIssues = isInit ? INIT_CAPS.issues : 100;
+  const sinceMs = sinceIso ? Date.parse(sinceIso) : null;
+
+  const prs = [];
+  const issues = [];
+  let prAfter = null;
+  let issueAfter = null;
+  let fetchMorePrs = true;
+  let fetchMoreIssues = true;
+  let ok = true;
+  let hitPrCap = false;
+  let hitIssueCap = false;
+
+  while ((fetchMorePrs && prs.length < maxPrs) || (fetchMoreIssues && issues.length < maxIssues)) {
+    const prPageSize = fetchMorePrs ? Math.min(50, maxPrs - prs.length) : 0;
+    const issuePageSize = fetchMoreIssues ? Math.min(50, maxIssues - issues.length) : 0;
+    if (prPageSize <= 0 && issuePageSize <= 0) break;
+
+    const gqlArgs = [
+      'api',
+      'graphql',
+      '-f',
+      `query=${SYNC_REPO_GQL_QUERY}`,
+      '-F',
+      `owner=${owner}`,
+      '-F',
+      `name=${name}`,
+      '-F',
+      `prCount=${Math.max(1, prPageSize)}`,
+      '-F',
+      `issueCount=${Math.max(1, issuePageSize)}`,
+    ];
+    if (prAfter) gqlArgs.push('-F', `prAfter=${prAfter}`);
+    if (issueAfter) gqlArgs.push('-F', `issueAfter=${issueAfter}`);
+
+    let repoData = null;
+    try {
+      const raw = await gh(gqlArgs);
+      repoData = JSON.parse(raw)?.data?.repository ?? null;
+    } catch {
+      ok = false;
+      break;
+    }
+    if (!repoData) {
+      ok = false;
+      break;
+    }
+
+    if (fetchMorePrs) {
+      const prConn = repoData.pullRequests;
+      const nodes = Array.isArray(prConn?.nodes) ? prConn.nodes : [];
+      for (const n of nodes) {
+        if (!n) continue;
+        if (sinceMs != null && n.updatedAt && Date.parse(n.updatedAt) < sinceMs) {
+          fetchMorePrs = false;
+          break;
+        }
+        if (prs.length < maxPrs) {
+          prs.push(n);
+        } else {
+          hitPrCap = true;
+          fetchMorePrs = false;
+          break;
+        }
+      }
+      if (!prConn?.pageInfo?.hasNextPage || !prConn?.pageInfo?.endCursor || nodes.length === 0) {
+        fetchMorePrs = false;
+      } else if (prs.length >= maxPrs) {
+        hitPrCap = true;
+        fetchMorePrs = false;
+      } else {
+        prAfter = prConn.pageInfo.endCursor;
+      }
+    }
+
+    if (fetchMoreIssues) {
+      const issueConn = repoData.issues;
+      const nodes = Array.isArray(issueConn?.nodes) ? issueConn.nodes : [];
+      for (const n of nodes) {
+        if (!n) continue;
+        if (sinceMs != null && n.updatedAt && Date.parse(n.updatedAt) < sinceMs) {
+          fetchMoreIssues = false;
+          break;
+        }
+        if (issues.length < maxIssues) {
+          issues.push(n);
+        } else {
+          hitIssueCap = true;
+          fetchMoreIssues = false;
+          break;
+        }
+      }
+      if (!issueConn?.pageInfo?.hasNextPage || !issueConn?.pageInfo?.endCursor || nodes.length === 0) {
+        fetchMoreIssues = false;
+      } else if (issues.length >= maxIssues) {
+        hitIssueCap = true;
+        fetchMoreIssues = false;
+      } else {
+        issueAfter = issueConn.pageInfo.endCursor;
+      }
+    }
+  }
+
+  const complete = ok && (isInit || (!hitPrCap && !hitIssueCap));
+  return { prs, issues, ok, complete };
+}
+
+/**
+ * Run a sync pass (`init`, `delta`, or `publish`).
+ */
+export async function runMemorySync({
+  mode = 'delta',
+  repo = '',
+  repoRoot = process.cwd(),
+  cacheDir = resolveCacheDir(repoRoot),
+  config = null,
+  gh = null,
+  exec = execFileSync,
+  refStore = null,
+  ref = EVENTS_REF,
+  prNodes = null,
+  issueNodes = null,
+  deletedKeys = [],
+  now = () => Date.now(),
+  rebuildIndex = true,
+} = {}) {
+  const cfg = config || loadConfig(repoRoot);
+  const cursors = readCursors(cacheDir);
+  const repoCursor = cursors[repo || '_local'] || {};
+  const isInit = mode === 'init';
+  const hasGhRepo = Boolean(normalizeOptionalRepo(repo));
+
+  const prevCommitCursor = repoCursor.commitUpdatedAt ?? (!hasGhRepo ? repoCursor.updatedAt : null) ?? '';
+  const prevGhCursor = repoCursor.ghUpdatedAt ?? (hasGhRepo ? repoCursor.updatedAt : null) ?? '';
+
+  const commitSinceIso = isInit ? null : computeOverlapSince(prevCommitCursor);
+  const ghSinceIso = isInit ? null : computeOverlapSince(prevGhCursor);
+  const collected = [];
+
+  // 1. Local git commits (capped at 500 on --init)
+  const commitEvents = ingestLocalCommits(repoRoot, {
+    repo,
+    config: cfg,
+    cacheDir,
+    maxCount: INIT_CAPS.commits,
+    since: commitSinceIso,
+    exec,
+    now,
+  });
+  collected.push(...commitEvents);
+
+  // 2. PRs & Issues (injected nodes or fetched via GraphQL when `repo` is provided on init/delta)
+  let resolvedPrNodes = prNodes;
+  let resolvedIssueNodes = issueNodes;
+  let ghFetchComplete = true;
+  if (resolvedPrNodes !== null || resolvedIssueNodes !== null) {
+    resolvedPrNodes = resolvedPrNodes ?? [];
+    resolvedIssueNodes = resolvedIssueNodes ?? [];
+  } else if (mode !== 'publish' && hasGhRepo) {
+    const fetched = await fetchRepoPrsAndIssues(repo, {
+      gh: gh || defaultGh,
+      isInit,
+      sinceIso: ghSinceIso,
+    });
+    resolvedPrNodes = fetched.prs;
+    resolvedIssueNodes = fetched.issues;
+    ghFetchComplete = Boolean(fetched.complete);
+  }
+
+  const ghEvents = [];
+  const prs = Array.isArray(resolvedPrNodes)
+    ? resolvedPrNodes.slice(0, isInit ? INIT_CAPS.prs : resolvedPrNodes.length)
+    : [];
+  for (const pr of prs) {
+    if (ghSinceIso && pr.updatedAt && Date.parse(pr.updatedAt) < Date.parse(ghSinceIso)) continue;
+    ghEvents.push(...extractEventsFromPrNode(pr, { repo, config: cfg, cacheDir, now }));
+  }
+
+  const issues = Array.isArray(resolvedIssueNodes)
+    ? resolvedIssueNodes.slice(0, isInit ? INIT_CAPS.issues : resolvedIssueNodes.length)
+    : [];
+  for (const issue of issues) {
+    if (ghSinceIso && issue.updatedAt && Date.parse(issue.updatedAt) < Date.parse(ghSinceIso)) continue;
+    ghEvents.push(...extractEventsFromIssueNode(issue, { repo, config: cfg, cacheDir, now }));
+  }
+  collected.push(...ghEvents);
+
+  // 3. Explicit tombstones for deleted sources (§7.5)
+  const nowIso = new Date(now()).toISOString();
+  for (const k of deletedKeys) {
+    if (!k) continue;
+    collected.push({ k, id: k, deleted: true, updated_at: nowIso });
+  }
+
+  // 4. Merge into delta.jsonl and advance cursors independently for local commits vs GitHub PRs/issues
+  const mergedDelta = writeDeltaEvents(cacheDir, collected);
+  let nextCommitCursor = prevCommitCursor;
+  for (const ev of commitEvents) {
+    if (ev.updated_at && String(ev.updated_at) > nextCommitCursor) {
+      nextCommitCursor = String(ev.updated_at);
+    }
+  }
+  let nextGhCursor = prevGhCursor;
+  if (ghFetchComplete) {
+    for (const ev of ghEvents) {
+      if (ev.updated_at && String(ev.updated_at) > nextGhCursor) {
+        nextGhCursor = String(ev.updated_at);
+      }
+    }
+  }
+  const effectiveUpdatedAt = hasGhRepo
+    ? nextGhCursor || (ghFetchComplete ? nextCommitCursor || nowIso : prevGhCursor)
+    : nextCommitCursor || prevCommitCursor || nowIso;
+
+  cursors[repo || '_local'] = {
+    updatedAt: effectiveUpdatedAt,
+    ghUpdatedAt: nextGhCursor || null,
+    commitUpdatedAt: nextCommitCursor || null,
+    lastMode: mode,
+    syncedAt: nowIso,
+  };
+  writeCursors(cacheDir, cursors);
+
+  // 5. Rebuild local SQLite FTS index if requested
+  if (rebuildIndex) {
+    try {
+      ensureIndex({ repoRoot, cacheDir });
+    } catch {
+      // Fail-open
+    }
+  }
+
+  // 6. Publish to refs/engsys/memory/* if mode === 'publish'
+  let publishResult = null;
+  if (mode === 'publish') {
+    const store =
+      refStore ||
+      createMemoryRefStore({
+        repo,
+        maxEvents: cfg.max_events || 20_000,
+        now,
+      });
+    publishResult = await store.writeEvents({
+      ref,
+      events: mergedDelta,
+      message: `memory-sync: publish ${mergedDelta.length} events`,
+      cacheDir,
+    });
+  }
+
+  return {
+    ok: publishResult ? Boolean(publishResult.ok) : true,
+    mode,
+    collectedCount: collected.length,
+    deltaCount: mergedDelta.length,
+    sinceIso: hasGhRepo ? ghSinceIso : commitSinceIso,
+    ghSinceIso,
+    commitSinceIso,
+    cursorUpdatedAt: effectiveUpdatedAt,
+    publishResult,
+  };
+}
+
+export async function main(argv = process.argv.slice(2), { out = process.stdout, err = process.stderr } = {}) {
+  const { values } = parseArgs({
+    args: argv,
+    options: {
+      init: { type: 'boolean', default: false },
+      delta: { type: 'boolean', default: false },
+      publish: { type: 'boolean', default: false },
+      repo: { type: 'string', default: '' },
+      'repo-root': { type: 'string', default: process.cwd() },
+      'cache-dir': { type: 'string', default: '' },
+      ref: { type: 'string', default: EVENTS_REF },
+      role: { type: 'string', default: '' },
+      fleet: { type: 'string', default: '' },
+    },
+    strict: false,
+  });
+
+  const mode = values.publish ? 'publish' : values.init ? 'init' : 'delta';
+  const repoRoot = path.resolve(String(values['repo-root'] || process.cwd()));
+  const cacheDir = values['cache-dir']
+    ? path.resolve(String(values['cache-dir']))
+    : resolveCacheDir(repoRoot);
+  const targetRef =
+    values.role && values.fleet ? tailRef(String(values.role), String(values.fleet)) : String(values.ref || EVENTS_REF);
+
+  try {
+    const res = await runMemorySync({
+      mode,
+      repo: String(values.repo || ''),
+      repoRoot,
+      cacheDir,
+      ref: targetRef,
+    });
+    out.write(JSON.stringify(res) + '\n');
+    return res.ok ? 0 : 1;
+  } catch (e) {
+    err.write(`memory-sync error: ${e?.message || e}\n`);
+    return 1;
+  }
+}
+
+if (isMainEntry(import.meta.url)) {
+  main().then((code) => process.exit(code));
+}

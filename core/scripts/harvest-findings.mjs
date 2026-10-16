@@ -150,24 +150,40 @@ export function sanitizeTitle(title) {
 }
 
 /**
- * True iff `source`'s numeric author id is in `trustedIds` (engsys#140 M2 — Nyx F5). `source` is
- * a comment/review (GraphQL shape: `authorId` attached by `harvest()`'s login->id resolution) or
- * a REST review-thread comment (`user.id` is already numeric). An unresolved author id is NEVER
- * trusted — fail toward excluding, the same direction as every other trust gate in this system.
+ * True iff `source`'s numeric author id is in `trustedIds` (engsys#140 M2 — Nyx F5) AND, if the
+ * comment/review was edited (`lastEditedAt` or `editor`/`editorId` present), the editor's numeric
+ * user id is ALSO in `trustedIds` (#146). An unresolved author id or an edited comment with a
+ * missing/untrusted editor id is NEVER trusted — fail toward excluding.
  */
 export function isTrustedAuthor(source, trustedIds) {
-	const id = source?.authorId ?? source?.user?.id ?? null;
-	return id != null && trustedIds.has(id);
+	const id = source?.authorId ?? source?.author?.databaseId ?? source?.user?.id ?? null;
+	if (id == null || !trustedIds.has(id)) return false;
+	if (source?.editProvenanceUnverified === true) return false;
+	const created = source?.createdAt ?? source?.created_at ?? source?.submittedAt ?? source?.submitted_at ?? null;
+	const updated = source?.updatedAt ?? source?.updated_at ?? null;
+	const restShowsEdited = Boolean(created && updated && created !== updated);
+	const wasEdited =
+		restShowsEdited ||
+		source?.lastEditedAt != null ||
+		source?.editorId != null ||
+		source?.editor_id != null ||
+		source?.editor != null;
+	if (wasEdited) {
+		const editorId = source?.editorId ?? source?.editor_id ?? source?.editor?.databaseId ?? null;
+		if (editorId == null || !trustedIds.has(editorId)) return false;
+	}
+	return true;
 }
 
 export function extractFromPr(pr, matchers, { trustedIds = null } = {}) {
 	const records = [];
 	const withTime = (s) => s.createdAt ?? s.submittedAt ?? null;
-	// engsys#140 M2: an untrusted commenter's marker findings and FINDING-ACK lines are dropped
-	// before anything else touches them — anyone who can comment on a PR could otherwise seed
-	// fabricated "findings" straight into a proposed lesson's title. `trustedIds === null` means
-	// "no filtering configured" (only reachable via a caller that bypassed `harvest()`'s own
-	// refuse-to-run gate, e.g. a direct unit test of this pure function).
+	// engsys#140 M2 + #146: an untrusted commenter's (or untrusted editor's) marker findings and
+	// FINDING-ACK lines are dropped before anything else touches them — anyone who can comment on
+	// (or edit a comment on) a PR could otherwise seed fabricated "findings" straight into a
+	// proposed lesson's title. `trustedIds === null` means "no filtering configured" (only
+	// reachable via a caller that bypassed `harvest()`'s own refuse-to-run gate, e.g. a direct unit
+	// test of this pure function).
 	const trustFilter = trustedIds ? (s) => isTrustedAuthor(s, trustedIds) : () => true;
 	const allSources = [...(pr.comments ?? []), ...(pr.reviews ?? [])]
 		.filter(trustFilter)
@@ -206,22 +222,49 @@ export function extractFromPr(pr, matchers, { trustedIds = null } = {}) {
 		});
 	}
 
-	// Inline review-thread comments (REST `pulls/{n}/comments`): each one anchors a path+line
-	// directly, so it is itself a one-finding record (no marker/ack correlation needed or expected).
+	// Inline review threads (#143): supports both GraphQL `reviewThreads` nodes
+	// (`{ isResolved, path, line, comments: { nodes: [...] } }`, where `isResolved` maps to
+	// `'fixed'` / `'unresolved'` and only the thread-opening comment is harvested) and the flat
+	// REST `pulls/{n}/comments` fallback shape (where `outcome` is `null` unless `isResolved` is
+	// explicitly boolean).
 	for (const t of pr.reviewThreads ?? []) {
+		const threadNodes = Array.isArray(t?.comments?.nodes)
+			? t.comments.nodes
+			: (Array.isArray(t?.comments) ? t.comments : null);
+		if (threadNodes) {
+			if (threadNodes.length === 0) continue;
+			const sorted = threadNodes.slice().sort((a, b) => String(a?.createdAt ?? '').localeCompare(String(b?.createdAt ?? '')));
+			const first = sorted[0];
+			if (!first || first.replyTo || first.isReply || first.in_reply_to_id) continue;
+			const file = t.path ?? first.path;
+			if (!file) continue;
+			if (!trustFilter(first)) continue;
+			const outcome = typeof t.isResolved === 'boolean' ? (t.isResolved ? 'fixed' : 'unresolved') : null;
+			records.push({
+				finding: {
+					file,
+					line: t.line ?? first.line ?? first.originalLine ?? first.original_line ?? null,
+					severity: 'warning',
+					category: 'review-thread',
+					title: sanitizeTitle((first.body ?? '').split('\n')[0].slice(0, 160)),
+				},
+				prNumber: pr.number,
+				url: first.url ?? first.html_url ?? pr.url ?? null,
+				source: 'review_thread',
+				outcome,
+			});
+			continue;
+		}
 		if (!t.path) continue;
-		if (t.in_reply_to_id) continue; // a reply, not the thread's own comment — skip, or every reply inflates the record count
+		if (t.in_reply_to_id || t.replyTo || t.isReply) continue; // a reply, not the thread's own comment — skip, or every reply inflates the record count
 		if (!trustFilter(t)) continue;
+		const outcome = typeof t.isResolved === 'boolean' ? (t.isResolved ? 'fixed' : 'unresolved') : null;
 		records.push({
 			finding: { file: t.path, line: t.line ?? t.original_line ?? null, severity: 'warning', category: 'review-thread', title: sanitizeTitle((t.body ?? '').split('\n')[0].slice(0, 160)) },
 			prNumber: pr.number,
-			url: t.html_url ?? pr.url ?? null,
+			url: t.html_url ?? t.url ?? pr.url ?? null,
 			source: 'review_thread',
-			// The REST `pulls/{n}/comments` endpoint this is fetched from has no resolution state —
-			// that's only `reviewThreads.isResolved` over GraphQL, not implemented here. Tracked as
-			// a follow-up (eric-sabe/engsys#143), not a correctness bug: an honest `null` just
-			// means this source never ranks as "fixed".
-			outcome: null,
+			outcome,
 		});
 	}
 	return records;
@@ -281,25 +324,60 @@ export async function resolvePrNumbers(opts, { gh = defaultGh } = {}) {
 	return list.map((p) => p.number);
 }
 
-/** Fetch one PR's comments, reviews, and inline review-thread comments. Inline threads use the
- * REST endpoint (`gh api repos/.../pulls/{n}/comments`) rather than GraphQL — simpler, and every
- * thread's first comment already carries the path/line/resolved-ish fields this harvester needs. */
+const PR_GRAPHQL_QUERY = `
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      comments(first: 100) {
+        nodes {
+          databaseId
+          lastEditedAt
+          editor { ... on User { databaseId } ... on Bot { databaseId } }
+        }
+      }
+      reviews(first: 100) {
+        nodes {
+          databaseId
+          lastEditedAt
+          editor { ... on User { databaseId } ... on Bot { databaseId } }
+        }
+      }
+      reviewThreads(first: 100) {
+        nodes {
+          isResolved
+          path
+          line
+          comments(first: 50) {
+            nodes {
+              databaseId
+              body
+              path
+              line
+              originalLine
+              url
+              createdAt
+              lastEditedAt
+              replyTo { id }
+              author { login ... on User { databaseId } ... on Bot { databaseId } }
+              editor { ... on User { databaseId } ... on Bot { databaseId } }
+            }
+          }
+        }
+      }
+    }
+  }
+}`;
+
 /**
- * Fetch one PR's metadata plus comments/reviews/inline-thread-comments — ALL THREE via the REST
- * API, never `gh pr view --json comments,reviews` (engsys#140 P5 — Nyx N4). The REST endpoints
- * each carry a real numeric `user.id` directly on every comment/review; the GraphQL shape `gh
- * --json` uses only exposes `author.login`, and GitHub reports a bot's login WITHOUT its `[bot]`
- * suffix in some contexts, so mapping that login back to an id via `users/<login>` 404s for every
- * bot — and worse, a human user can share a login string with a bot in a different namespace, so
- * a login-based lookup can silently resolve to the WRONG account's id. Reading the id straight off
- * the comment/review object sidesteps both problems entirely.
+ * Fetch one PR's metadata plus comments/reviews/reviewThreads.
+ * - Issue comments and PR reviews are fetched via REST (which carries numeric `user.id` directly on
+ *   every comment/review, engsys#140 P5 — Nyx N4) and enriched via GraphQL with `lastEditedAt` +
+ *   `editor.databaseId` so comments edited by non-allowlisted users are distrusted (#146).
+ * - Inline review threads are fetched via GraphQL `pullRequest.reviewThreads` so `isResolved` can
+ *   populate `'fixed'` / `'unresolved'` outcomes (#143), falling back to REST `pulls/{n}/comments`
+ *   when GraphQL is unavailable.
  */
 export async function fetchPr(number, opts, { gh = defaultGh, log = () => {} } = {}) {
-	// `opts.repo` not given doesn't mean "skip REST collection" -- it means "resolve it from the
-	// current directory's repo", same as `gh pr view` itself already does implicitly. Silently
-	// collecting zero comments/reviews/threads here was producing a silent false-clean harvest
-	// (cr review, round 3): `run` would print "nothing recurred" with exit 0 even though the real
-	// problem was simply never asking the API for anything.
 	let repo = opts.repo;
 	if (!repo) {
 		try {
@@ -312,24 +390,91 @@ export async function fetchPr(number, opts, { gh = defaultGh, log = () => {} } =
 	let reviews = [];
 	let reviewThreads = [];
 	if (repo) {
-		// --paginate alone prints each page as its own top-level JSON array back to back
-		// ([...][...], no separator) -- ghJson's single JSON.parse rejects that the moment a PR
-		// has more than one page (REST's default is 30 items/page), and the catch below then
-		// silently drops ALL of that source's comments/reviews/threads for exactly the busiest,
-		// most valuable PRs (cr review, round 3). --slurp wraps the pages into one JSON array of
-		// per-page arrays instead; per_page=100 just cuts how often that's even needed.
 		try {
 			const raw = await ghJson(gh, ['api', `repos/${repo}/issues/${number}/comments?per_page=100`, '--paginate', '--slurp'], `reading PR #${number} comments`);
-			comments = raw.flat().map((c) => ({ body: c.body, createdAt: c.created_at, authorId: c.user?.id ?? null, authorType: c.user?.type ?? null, author: { login: c.user?.login ?? null } }));
+			comments = raw.flat().map((c) => ({
+				id: c.id ?? null,
+				body: c.body,
+				createdAt: c.created_at ?? null,
+				updatedAt: c.updated_at ?? null,
+				authorId: c.user?.id ?? null,
+				authorType: c.user?.type ?? null,
+				author: { login: c.user?.login ?? null },
+				lastEditedAt: c.last_edited_at ?? null,
+				editorId: c.editor?.id ?? c.editor_id ?? null,
+			}));
 		} catch (err) { log(`harvest-findings: PR #${number} comments fetch failed, continuing without them: ${err?.message ?? err}`); }
 		try {
 			const raw = await ghJson(gh, ['api', `repos/${repo}/pulls/${number}/reviews?per_page=100`, '--paginate', '--slurp'], `reading PR #${number} reviews`);
-			reviews = raw.flat().map((r) => ({ body: r.body, submittedAt: r.submitted_at, authorId: r.user?.id ?? null, authorType: r.user?.type ?? null, author: { login: r.user?.login ?? null } }));
+			reviews = raw.flat().map((r) => ({
+				id: r.id ?? null,
+				body: r.body,
+				submittedAt: r.submitted_at ?? null,
+				updatedAt: r.updated_at ?? null,
+				authorId: r.user?.id ?? null,
+				authorType: r.user?.type ?? null,
+				author: { login: r.user?.login ?? null },
+				lastEditedAt: r.last_edited_at ?? null,
+				editorId: r.editor?.id ?? r.editor_id ?? null,
+			}));
 		} catch (err) { log(`harvest-findings: PR #${number} reviews fetch failed, continuing without them: ${err?.message ?? err}`); }
-		try {
-			const raw = await ghJson(gh, ['api', `repos/${repo}/pulls/${number}/comments?per_page=100`, '--paginate', '--slurp'], `reading PR #${number} review comments`);
-			reviewThreads = raw.flat().map((t) => ({ ...t, authorId: t.user?.id ?? null }));
-		} catch (err) { log(`harvest-findings: PR #${number} review comments fetch failed, continuing without them: ${err?.message ?? err}`); }
+
+		let graphqlThreadsLoaded = false;
+		const [owner, name] = String(repo).split('/');
+		if (owner && name) {
+			try {
+				const gql = await ghJson(
+					gh,
+					['api', 'graphql', '-F', `owner=${owner}`, '-F', `name=${name}`, '-F', `number=${Number(number)}`, '-f', `query=${PR_GRAPHQL_QUERY}`],
+					`reading PR #${number} GraphQL metadata`,
+				);
+				const prNode = gql?.data?.repository?.pullRequest;
+				if (prNode) {
+					if (Array.isArray(prNode.comments?.nodes)) {
+						const commentEdits = new Map();
+						for (const n of prNode.comments.nodes) {
+							if (n && n.databaseId != null) commentEdits.set(n.databaseId, { lastEditedAt: n.lastEditedAt ?? null, editorId: n.editor?.databaseId ?? null });
+						}
+						comments = comments.map((c) => {
+							if (c.id == null) return c;
+							const edit = commentEdits.get(c.id);
+							if (!edit) return { ...c, editProvenanceUnverified: true };
+							return { ...c, lastEditedAt: edit.lastEditedAt ?? c.lastEditedAt, editorId: edit.editorId ?? c.editorId };
+						});
+					}
+					if (Array.isArray(prNode.reviews?.nodes)) {
+						const reviewEdits = new Map();
+						for (const n of prNode.reviews.nodes) {
+							if (n && n.databaseId != null) reviewEdits.set(n.databaseId, { lastEditedAt: n.lastEditedAt ?? null, editorId: n.editor?.databaseId ?? null });
+						}
+						reviews = reviews.map((r) => {
+							if (r.id == null) return r;
+							const edit = reviewEdits.get(r.id);
+							if (!edit) return { ...r, editProvenanceUnverified: true };
+							return { ...r, lastEditedAt: edit.lastEditedAt ?? r.lastEditedAt, editorId: edit.editorId ?? r.editorId };
+						});
+					}
+					if (Array.isArray(prNode.reviewThreads?.nodes)) {
+						reviewThreads = prNode.reviewThreads.nodes;
+						graphqlThreadsLoaded = true;
+					}
+				}
+			} catch (err) {
+				log(`harvest-findings: PR #${number} GraphQL fetch failed, falling back to REST review comments: ${err?.message ?? err}`);
+			}
+		}
+
+		if (!graphqlThreadsLoaded) {
+			try {
+				const raw = await ghJson(gh, ['api', `repos/${repo}/pulls/${number}/comments?per_page=100`, '--paginate', '--slurp'], `reading PR #${number} review comments`);
+				reviewThreads = raw.flat().map((t) => ({
+					...t,
+					createdAt: t.created_at ?? t.createdAt ?? null,
+					updatedAt: t.updated_at ?? t.updatedAt ?? null,
+					authorId: t.user?.id ?? null,
+				}));
+			} catch (err) { log(`harvest-findings: PR #${number} review comments fetch failed, continuing without them: ${err?.message ?? err}`); }
+		}
 	} else {
 		log(`harvest-findings: PR #${number} -- could not resolve a repo (no --repo and \`gh repo view\` failed); comments/reviews/threads will be empty`);
 	}

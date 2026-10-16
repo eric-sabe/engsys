@@ -27,6 +27,15 @@
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/singleton-write-guard.mjs\""
           }
         ]
+      },
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/subagent-memory-inject.mjs\" pre-agent"
+          }
+        ]
       }
     ],
     "PostToolUse": [

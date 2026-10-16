@@ -92,6 +92,8 @@ out.set('core/.claude-plugin/hooks.json', json({
       // …and its settings/plugin-file and GitHub-MCP checks (#69 review N1, L-c), and CronCreate: a
       // singleton paces itself with ScheduleWakeup, never a cron job that outlives it (#119).
       { matcher: 'Write|Edit|MultiEdit|NotebookEdit|CronCreate|mcp__.*', hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/singleton-write-guard.mjs"' }] },
+      // Stash pending subagent dispatch prompt + worktree for SubagentStart correlation (#142).
+      { matcher: 'Agent|Task', hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/subagent-memory-inject.mjs" pre-agent' }] },
     ],
     // …and feedback when an Edit leaves a monster's state.md over its 4 KB limit (#120; a Write over it is
     // denied above).
