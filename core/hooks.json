@@ -86,6 +86,14 @@
             "command": "grep -qs '\"delivered_at\":null' \"${FLEET_INBOX_DIR:-/nonexistent}/${ENGSYS_SESSION:-none}.jsonl\" && node \"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/fleet-inbox.mjs\" prompt; exit 0"
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/weather-check.mjs\" prompt"
+          }
+        ]
       }
     ],
     "Stop": [
@@ -120,6 +128,14 @@
           {
             "type": "command",
             "command": "grep -qs '\"delivered_at\":null' \"${FLEET_INBOX_DIR:-/nonexistent}/${ENGSYS_SESSION:-none}.jsonl\" && node \"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/fleet-inbox.mjs\" session-start; exit 0"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/.claude-plugin/weather-check.mjs\" session-start"
           }
         ]
       },
