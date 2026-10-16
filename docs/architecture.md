@@ -1,14 +1,17 @@
 # engsys — Architecture
 
-> The engineering system for Claude Code: agent personas, slash commands, skills,
-> hooks, workflow docs, lessons, and the templates that wire them together.
-> Defined once here; installed faithfully into any project with one command.
+> **The meta-harness for AI software engineering**: 15 specialist personas, 24 detachable stack packs, Adaptive Spec-Driven Development (`/design-change`), a compounding Agentic Memory Engine, and an optional always-on autonomous fleet — materialized faithfully into **Claude Code**, **GitHub Copilot CLI**, and **Google Antigravity** from one config file.
+> For step-by-step progressive deployment (Stages 1–4), see [`DEPLOY.md`](../DEPLOY.md).
 
-## 1. What this solves
+## 1. What this solves (Model vs. Coding Harness vs. Meta-Harness)
 
-A mature Claude Code setup — specialized agent personas, a spec→plan→implement→
-review→closeout workflow, skills, hooks, and hard-won lessons — is valuable but
-hard to share across projects. Two problems recur when it's copy-pasted:
+Three layers exist in modern agentic software engineering:
+
+1. **The Model (The Brain)** — Claude Opus/Sonnet, GPT/Codex, Gemini, Grok, DeepSeek. Stateless reasoning that starts every session with amnesia and no house rules.
+2. **The Coding Harness (The Workbench)** — **Claude Code**, **GitHub Copilot CLI**, **Google Antigravity**. Wraps a model with bash execution, file editing, subagents, MCP servers, and lifecycle hooks (`PreToolUse`, `PostToolUse`, `SubagentStart`, `SessionStart`). Out of the box, however, a coding harness still gives you **one generalist assistant** with no organizational roles, no stack modularity, and no cross-PR memory.
+3. **The Meta-Harness (`engsys` — The Engineering Organization)** — Sits *above* the coding harnesses and *across* models. You declare your stack and target harness(es) once in `engsys.config.yaml`, and `engsys` compiles a complete engineering organization into whichever harness you use.
+
+When a mature setup is copy-pasted across projects by hand instead of managed by a meta-harness, two problems recur:
 
 1. **Re-naturalization tax.** Agent profiles get hand-edited for each project's
    stack — a cloud architect rewritten as AWS vs Azure vs GCP, conventions swapped
@@ -32,9 +35,9 @@ separate is the entire design.
 
 | Layer | Question it answers | Stability | Where it lives |
 |-------|--------------------|-----------|----------------|
-| **Persona** | *Who* is doing the work | Stable across all projects | `core/agents/` |
+| **Persona** | *Who* is doing the work | Stable across all projects | `core/agents/` & `optional-agents/` |
 | **Capability** | *Which stack/tech* the work targets | Chosen per project | `stacks/**/skills/` |
-| **Project facts** | What's true about *this* repo | Unique per project | generated `CLAUDE.md` |
+| **Project facts** | What's true about *this* repo | Unique per project | generated `CLAUDE.md` / `GEMINI.md` / `.github/copilot-instructions.md` |
 
 ### Worked example: the cloud architect
 
@@ -69,10 +72,13 @@ test-plan format, the librarian's ADR template).
 ```
 engsys/
   README.md
+  DEPLOY.md               # standalone LLM & human progressive deployment playbook (Stages 1–4)
   docs/
     architecture.md       # this file
     naturalization.md     # the model-side bring-into-a-project playbook
     fleet-guide.md        # running an always-on fleet with the fleet kit
+    fleet-health-desk.md  # Fleet Health Desk architecture & operations
+    memory-spec.md        # Class A & Class B Agentic Memory Engine specification
   install                 # deterministic installer (Node.js CLI entry point)
   .claude-plugin/         # the marketplace manifest (generated)
   scripts/build-plugins.mjs  # generates every plugin artifact from the pack sources
@@ -90,30 +96,33 @@ engsys/
       design-audit.md      design-audit-local.md design-critique.md
       prep-review.md       prep-review-publish.md prep-review-collect.md
       prep-review-finalize.md  naturalize.md
-      merge-monster.md  maintenance-monster.md  fleet-prime.md  fleet-bootstrap.md
-    skills/               # stack-agnostic skills
-      git-workflow-agents/ code-review/ gh-cli/ github-issues/ github-actions/
+      merge-monster.md  maintenance-monster.md  resource-broker.md  fleet-prime.md  fleet-bootstrap.md
+    skills/               # stack-agnostic skills (all <= 200 lines progressive disclosure)
+      git-workflow-agents/ code-review/ gh-cli/ github-actions/
       pre-push/ refactor/ llm-structured-outputs/ web-design-reviewer/
-      webapp-testing/ chrome-devtools/ agentic-eval/ git-commit/
+      webapp-testing/ chrome-devtools/ agentic-eval/
       interactive-explainer/ subagent-liveness/ untrusted-input/ hermetic-git-tests/
-      merge-monster/ maintenance-monster/ agent-sessions/   # the always-on fleet (§10)
+      merge-monster/ maintenance-monster/ mnt-watch/ resource-broker/ durable-lease/ agent-sessions/
     fleet/                # the fleet kit: host scripts for running a fleet (§10)
       bin/fleet  lib/fleet-env.sh  launch.sh sync.sh restart.sh pin.sh
-      supervise.sh  install-jobs.sh  jobs/launchd/  identity/  test/
-    lib/                  # runtime libraries (untrusted.mjs, git-env.mjs, hook-adapter.mjs)
-    scripts/              # multi-provider worker layer + SDD tools (spec-slice.mjs, contract-check.mjs)
-    workflows/            # long-form prompt docs the commands reference (incl. adaptive-sdd.md)
+      supervise.sh  verify.sh  install-jobs.sh  health.sh  health/  jobs/launchd/  identity/  test/
+    lib/                  # runtime libraries (harness-io.mjs, sdd-validator.mjs, untrusted.mjs, git-env.mjs,
+                          #   monster.sh, claim.mjs, lease/baton.mjs, memory/{index-db,ref-store}.mjs)
+    scripts/              # memory engine (memory-brief.mjs, memory-sync.mjs, harvest-findings.mjs,
+                          #   validate-lessons.mjs), SDD tools (sdd-check.mjs, spec-slice.mjs, contract-check.mjs),
+                          #   and multi-provider worker layer (worker-run.mjs, worker-package.mjs)
+    workflows/            # long-form prompt docs the commands reference
     templates/            # rendered by the installer (CLAUDE.md, GEMINI.md, copilot-instructions.md,
-                          #   settings, post-edit reminder hook scripts)
-      CLAUDE.md.tmpl  GEMINI.md.tmpl  copilot-instructions.md.tmpl
+                          #   spec.md.tmpl, settings, post-edit reminder hook scripts)
+      CLAUDE.md.tmpl  GEMINI.md.tmpl  copilot-instructions.md.tmpl  spec.md.tmpl
       settings.json.tmpl  settings.local.json.tmpl  copilot-hooks.json.tmpl  agy-hooks.json.tmpl
       post-edit-reminders.sh.tmpl  post-clear-reground.sh.tmpl
       post-compact-reground.sh.tmpl  adr-template.md  gh-issue-templates/
     .claude-plugin/       # plugin-mode manifest and hook scripts (GENERATED by
                           #   `npm run build:plugins`; never copied by the installer)
-    lessons-library/      # curated, generalized cross-project lessons (plugin mode reads it in place)
+    lessons-library/      # 51 curated, frontmatter-validated cross-project lessons
 
-  stacks/                 # detachable packs, chosen per project (scalar OR list)
+  stacks/                 # 24 detachable packs, chosen per project (scalar OR list)
     cloud/    aws/ azure/ gcp/ cloudflare/
     iac/      terraform/ bicep/ cdk/
     lang/     typescript/ python/ shell/
@@ -126,11 +135,12 @@ engsys/
     domain/   mobile-growth/ { apple-ads, google-play-growth }
     tooling/  issue-tracker-github/   { issue-tracker-github }   # default
               issue-tracker-linear/   { issue-tracker-linear, mcp: linear }
+              provider-anthropic/  provider-codex/  provider-deepseek/  provider-grok/
 
   optional-agents/        # opt-in personas, not part of core
     sandy.md    # marketing site design / conversion copy / SEO
     jos.md      # monetization / business strategy
-    deandre.md  # analytics, experimentation, event taxonomy & North Star metrics
+    deandre.md  # independent tutor & plain-language session explainer
     steve.md    # the scapegoat (morale)
 ```
 
@@ -253,46 +263,33 @@ plumbing: the model is never *asked* to do plumbing, so it can't skip it. See
 
 ### Agents (core, all stack-agnostic)
 
-A product/UX designer, a planner, a feature implementer, a bug investigator, a
-performance/scale architect, an IaC specialist, a testing strategist, a project
-librarian (ADRs), an offensive-security specialist, and an LLM-optimization
-specialist. Opt-in personas (mobile architect, marketing, monetization, plus a
-morale "scapegoat") live in `optional-agents/`.
+Eleven core specialists: a product/UX designer (`leith`), a planner (`jody`), a feature implementer (`isabelle`), a bug investigator (`bert`), a performance/scale architect (`melvin`), an IaC specialist (`aaron`), a testing strategist (`marcelo`), a project librarian/ADR author (`patricia`), an offensive-security specialist (`nyx`, pinned to `claude-opus-4-8`), an LLM-optimization specialist (`otto`), and a design critic (`gary`). Four opt-in personas — marketing/SEO (`sandy`), monetization (`jos`), independent tutor/explainer (`deandre`), plus a morale "scapegoat" (`steve`) — live in `optional-agents/`.
 
 ### Commands (core, stack-agnostic)
 
-`generate-project` → `implement-project` / `implement-issue` → `file-issue` →
+`generate-project`, `design-change` (Adaptive SDD) → `implement-project` / `implement-issue` → `file-issue` →
 `project-closeout` → `pre-push`, plus `design-audit`/`-local`/`design-critique`,
 the `prep-review*` review-package flow, and `naturalize`; and for an always-on fleet,
-`merge-monster`, `maintenance-monster`, `fleet-prime` and `fleet-bootstrap`. Commands invoke agents
+`merge-monster`, `maintenance-monster`, `resource-broker`, `fleet-prime` and `fleet-bootstrap`. Commands invoke agents
 by name and reference long-form procedure in `core/workflows/`.
 
 ### Skills
 
-- **Core (agnostic):** git-workflow-agents, code-review, gh-cli, github-issues,
+- **Core (agnostic):** git-workflow-agents, code-review, gh-cli,
   github-actions, pre-push, refactor, llm-structured-outputs, web-design-reviewer,
-  webapp-testing, chrome-devtools, agentic-eval, git-commit, interactive-explainer.
+  webapp-testing, chrome-devtools, agentic-eval, interactive-explainer,
+  subagent-liveness, untrusted-input, hermetic-git-tests, merge-monster,
+  maintenance-monster, mnt-watch, resource-broker, durable-lease, agent-sessions.
 - **Stack packs:** the cloud/iac/lang/platform/db/domain/tooling skills listed in §3.
 
-## 7. Lessons
+## 7. Lessons & the Agentic Memory Engine
 
-Two tiers, kept distinct:
+Two trust classes ([`docs/memory-spec.md`](memory-spec.md)), kept strictly separate:
 
-1. **Project-local** — each project's `docs/agent-lessons/`, written during
-   `/project-closeout` by mining that project's local-review findings.
-2. **Generalized** — `core/lessons-library/` here: curated, stack-agnostic lessons
-   that recur across projects (verification & review, concurrency & safety, data &
-   identity, workflow & git, ops & deploy, tooling). The installer seeds these
-   into a project (managed, so `verify`/`update` keep them current); plugin mode
-   reads the same directory in place, from the plugin root, with no copy. Every
-   lesson carries YAML frontmatter (`globs`, `stacks`, `roles`, `keywords`,
-   `security`, `supersedes` — docs/memory-spec.md §2) validated by
-   `core/scripts/validate-lessons.mjs`. Stack-specific lessons instead live inside
-   the relevant pack's skill, so they install with the capability.
+1. **Class A (Trusted Instructions)** — `core/lessons-library/` (51 curated cross-project lessons) plus each project's `docs/agent-lessons/*.md` and `docs/agent-lessons-overlay.yml`, loaded strictly from reviewed git refs (`origin/HEAD`). Every lesson carries YAML frontmatter (`id`, `title`, `severity`, `security`, `applies_to.{stacks,paths,agents,roles}`, `triggers`, `summary`) validated by `core/scripts/validate-lessons.mjs`.
+2. **Class B (Historical Repo Evidence)** — merged PR summaries, review findings, and issue outcomes stored on an append-only custom Git ref (`refs/engsys/memory/events/v1` via `core/lib/memory/ref-store.mjs`) and synced by `core/scripts/memory-sync.mjs` with secret scanning, bot `databaseId` verification, and prompt-boundary spoofing quarantine.
 
-`project-closeout` ends by promoting any generalizable lesson back to
-`lessons-library/` via PR — the feedback loop that keeps this the source of truth
-rather than a fork point.
+At `SubagentStart`, `core/.claude-plugin/subagent-memory-inject.mjs` and `core/scripts/memory-brief.mjs` query a host-local `node:sqlite` FTS5 index (`core/lib/memory/index-db.mjs`) to inject a `<= 2 KB` brief containing mandatory `security: true` lessons, BM25/path-matched Class A lessons, and compact Class B pointers (`nyx` receives Class A only). `project-closeout` runs `core/scripts/harvest-findings.mjs` to cluster recurring PR review findings into new Class A lesson candidates.
 
 ## 8. Configurability
 

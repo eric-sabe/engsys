@@ -3,13 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>engsys — An AI Engineering Team for Claude Code</title>
-<meta name="description" content="Install a full AI engineering team into any project with one command. 14 specialized agents for Claude Code — swap stack packs, not prompts.">
+<title>engsys — The Meta-Harness for AI Engineering Teams</title>
+<meta name="description" content="A portable AI engineering organization for Claude Code, GitHub Copilot CLI, and Google Antigravity. 15 specialist personas, 24 stack packs, Adaptive SDD, compounding memory, and an optional autonomous fleet.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%230a0e14'/%3E%3Ccircle cx='8' cy='8' r='3.4' fill='none' stroke='%2334e0d2' stroke-width='1.6'/%3E%3C/svg%3E">
 <style>
   :root{
     --bg:#0a0e14; --panel:#111824; --panel-2:#0e141d; --line:#1f2a38;
-    --ink:#e6edf3; --muted:#8a97a8; --dim:#5c6a7a;
+    --ink:#e6edf3; --muted:#8a97a8; --dim:#7c8b9e;
     --cyan:#34e0d2; --cyan-dim:#176f6a;
     --amber:#f5b13d; --amber-dim:#6e4f17;
     --red:#ff6b6b; --green:#46d39a; --green-dim:#235a45;
@@ -29,12 +29,12 @@
   .wrap{max-width:1140px;margin:0 auto;padding:0 22px}
 
   #bar{position:fixed;top:0;left:0;height:3px;width:0;background:linear-gradient(90deg,var(--cyan),var(--violet));z-index:60;transition:width .1s linear}
-  nav{position:sticky;top:0;z-index:50;background:rgba(10,14,20,.82);backdrop-filter:blur(9px);border-bottom:1px solid var(--line)}
-  nav .wrap{display:flex;align-items:center;gap:14px;min-height:54px;padding:8px 22px;flex-wrap:wrap}
+  nav{position:sticky;top:0;z-index:50;background:rgba(10,14,20,.86);backdrop-filter:blur(9px);border-bottom:1px solid var(--line)}
+  nav .wrap{display:flex;align-items:center;gap:12px;min-height:54px;padding:8px 22px;flex-wrap:wrap}
   nav .brand{font-family:var(--mono);font-size:14px;color:var(--cyan);letter-spacing:.5px;white-space:nowrap}
   nav .brand b{color:var(--ink)}
-  nav .links{display:flex;gap:3px;flex-wrap:wrap;margin-left:auto}
-  nav .links a{font-size:12.5px;color:var(--muted);padding:5px 9px;border-radius:6px}
+  nav .links{display:flex;gap:2px;flex-wrap:wrap;margin-left:auto}
+  nav .links a{font-size:12.5px;color:var(--muted);padding:5px 8px;border-radius:6px}
   nav .links a:hover{color:var(--ink);background:var(--panel);text-decoration:none}
   nav .menu-btn{display:none;background:none;border:1px solid var(--line);color:var(--muted);
     cursor:pointer;padding:5px 9px;border-radius:6px;font-size:16px;line-height:1;margin-left:auto}
@@ -43,31 +43,36 @@
   .mobile-menu a{display:block;padding:11px 22px;font-size:15px;color:var(--muted);text-decoration:none}
   .mobile-menu a:hover,.mobile-menu a.active{color:var(--ink)}
   nav.open .mobile-menu{display:block}
-  @media(max-width:820px){nav .links{display:none}nav .menu-btn{display:block}}
+  @media(max-width:900px){nav .links{display:none}nav .menu-btn{display:block}}
 
-  section{padding:74px 0;border-bottom:1px solid var(--line)}
+  section{padding:72px 0;border-bottom:1px solid var(--line)}
   #cta{border-bottom:none}
   .kicker{font-family:var(--mono);font-size:12px;letter-spacing:2px;text-transform:uppercase;color:var(--cyan)}
-  h1{font-size:clamp(32px,5.4vw,58px);line-height:1.04;margin:.3em 0 .25em;letter-spacing:-1px}
+  h1{font-size:clamp(32px,5.2vw,56px);line-height:1.05;margin:.3em 0 .25em;letter-spacing:-1px}
   h2{font-size:clamp(24px,3.4vw,38px);line-height:1.08;margin:.2em 0 .3em;letter-spacing:-.5px}
   h3{font-size:18px;margin:0 0 .3em}
-  p.lede{font-size:clamp(15px,2vw,18px);color:#c7d2de;max-width:64ch}
+  p.lede{font-size:clamp(15px,2vw,18px);color:#c7d2de;max-width:68ch}
   .muted{color:var(--muted)} .small{font-size:13px}
 
   /* hero */
-  .hero{padding-top:78px}
+  .hero{padding-top:74px}
   .hero h1 span{color:var(--cyan)}
-  .hero .thesis{max-width:60ch;font-size:clamp(16px,2.1vw,20px);color:#cfd9e4;margin-top:14px}
+  .hero .thesis{max-width:64ch;font-size:clamp(16px,2vw,19.5px);color:#cfd9e4;margin-top:14px}
   .hero .thesis b{color:#fff}
-  .cmd-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:26px}
-  .cmdbox{display:flex;align-items:center;gap:12px;background:#070b11;border:1px solid var(--cyan-dim);border-radius:10px;padding:11px 14px;font-family:var(--mono);font-size:13.5px}
+  .pill-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px}
+  .hpill{font-family:var(--mono);font-size:11.5px;color:var(--ink);background:rgba(52,224,210,.07);border:1px solid var(--cyan-dim);border-radius:999px;padding:4px 11px}
+  .hpill.v{background:rgba(157,140,255,.08);border-color:var(--violet-dim);color:#dcd6ff}
+  .cmd-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:24px}
+  .cmdbox{display:flex;align-items:center;gap:12px;background:#070b11;border:1px solid var(--cyan-dim);border-radius:10px;padding:11px 14px;font-family:var(--mono);font-size:13.5px;max-width:100%;overflow-x:auto}
   .cmdbox .pr{color:var(--cyan)} .cmdbox .tx{color:var(--ink)}
-  .cmdbox button{background:none;border:0;color:var(--muted);cursor:pointer;font-family:var(--mono);font-size:11px;border-left:1px solid var(--line);padding-left:12px}
+  .cmdbox button{background:none;border:0;color:var(--muted);cursor:pointer;font-family:var(--mono);font-size:11px;border-left:1px solid var(--line);padding-left:12px;white-space:nowrap}
   .cmdbox button:hover{color:var(--cyan)}
-  .btn{display:inline-block;font-size:13px;padding:11px 16px;border-radius:10px;border:1px solid var(--line);color:var(--ink)}
+  .btn{display:inline-block;font-size:13px;padding:11px 16px;border-radius:10px;border:1px solid var(--line);color:var(--ink);background:var(--panel-2)}
+  .btn.pri{border-color:var(--cyan-dim);background:rgba(52,224,210,.08);color:var(--cyan);font-weight:600}
   .btn:hover{border-color:var(--cyan);text-decoration:none}
-  .faces{display:flex;margin-top:34px}
+  .faces{display:flex;margin-top:32px}
   .faces img,.faces .ph{width:46px;height:46px;border-radius:50%;border:2px solid var(--bg);margin-left:-12px;object-fit:cover;background:var(--panel);box-shadow:0 2px 8px rgba(0,0,0,.4)}
+  .faces img:first-child,.faces .ph:first-child{margin-left:0}
   .faces .more{display:flex;align-items:center;justify-content:center;width:46px;height:46px;border-radius:50%;border:2px solid var(--bg);margin-left:-12px;background:var(--panel);color:var(--muted);font-family:var(--mono);font-size:12px}
   .faces-note{font-size:12.5px;color:var(--muted);margin-top:12px}
 
@@ -75,12 +80,14 @@
   .av{width:100%;aspect-ratio:1;border-radius:50%;object-fit:cover;background:var(--panel-2);display:block}
   .av-ph{width:100%;aspect-ratio:1;border-radius:50%;display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-weight:700;font-size:26px;color:var(--bg)}
 
-  /* three layers */
+  /* three layers & mental model cards */
   .layers3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:26px}
-  .lay{background:linear-gradient(180deg,var(--panel),var(--panel-2));border:1px solid var(--line);border-radius:14px;padding:18px 18px;border-top:3px solid var(--c)}
+  .lay{background:linear-gradient(180deg,var(--panel),var(--panel-2));border:1px solid var(--line);border-radius:14px;padding:18px 18px;border-top:3px solid var(--c);display:flex;flex-direction:column}
   .lay .t{font-family:var(--mono);font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--c)}
   .lay h3{margin-top:6px}
-  .lay p{font-size:13.5px;color:#c2cdd9;margin:.3em 0 0}
+  .lay p{font-size:13.5px;color:#c2cdd9;margin:.3em 0 14px}
+  .lay .ex{margin-top:auto;padding-top:12px;font-family:var(--mono);font-size:11.5px;color:var(--muted);border-top:1px dashed var(--line)}
+  .lay .ex b{color:var(--ink)}
   .demo{margin-top:22px;background:linear-gradient(180deg,var(--panel),var(--panel-2));border:1px solid var(--line);border-radius:14px;padding:20px 22px;display:grid;grid-template-columns:auto 1fr;gap:22px;align-items:center}
   .demo .who{display:flex;align-items:center;gap:14px}
   .demo .who img,.demo .who .av-ph{width:74px;height:74px;border-radius:50%}
@@ -88,15 +95,35 @@
   .demo .pick .small{color:var(--muted);margin-bottom:8px}
   .chips{display:flex;gap:8px;flex-wrap:wrap}
   .chip{font-family:var(--mono);font-size:12px;color:var(--muted);background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:6px 13px;cursor:pointer;transition:.12s}
-  .chip.on{color:var(--bg);background:var(--cyan);border-color:var(--cyan)}
+  .chip.on{color:var(--bg);background:var(--cyan);border-color:var(--cyan);font-weight:600}
   .demo .out{margin-top:12px;font-size:13px;color:#cdd7e2}
   .demo .out code{color:var(--cyan)}
-  @media(max-width:720px){.layers3{grid-template-columns:1fr}.demo{grid-template-columns:1fr}}
+  @media(max-width:760px){.layers3{grid-template-columns:1fr}.demo{grid-template-columns:1fr}}
+
+  /* graduation ladder */
+  .grad-tabs{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:24px}
+  .gtab{background:linear-gradient(180deg,var(--panel),var(--panel-2));border:1px solid var(--line);border-top:3px solid var(--c);border-radius:12px;padding:14px 15px;text-align:left;color:var(--ink);cursor:pointer;font:inherit;transition:.15s}
+  .gtab:hover{border-color:var(--c)}
+  .gtab.on{border-color:var(--c);box-shadow:0 0 0 1px var(--c),0 6px 20px rgba(0,0,0,.35)}
+  .gtab .st{font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--c);display:flex;justify-content:space-between;align-items:center}
+  .gtab .st span{color:var(--muted);font-size:10.5px}
+  .gtab b{display:block;font-size:15px;margin-top:5px}
+  .gtab .gp{display:block;margin:4px 0 0;font-size:12.5px;color:var(--muted);line-height:1.4}
+  .grad-box{margin-top:16px;background:linear-gradient(180deg,var(--panel),var(--panel-2));border:1px solid var(--line);border-radius:14px;padding:22px 24px;display:grid;grid-template-columns:1.15fr .85fr;gap:22px;align-items:start}
+  .grad-box h3{margin:0 0 6px;font-size:20px}
+  .grad-badges{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 12px}
+  .gbadge{font-family:var(--mono);font-size:11px;padding:3px 9px;border-radius:999px;border:1px solid var(--line);background:var(--panel-2);color:var(--muted)}
+  .gbadge.ok{color:var(--green);border-color:var(--green-dim);background:rgba(70,211,154,.07)}
+  .gbadge.warn{color:var(--amber);border-color:var(--amber-dim);background:rgba(245,177,61,.07)}
+  .grad-box ul{margin:8px 0 0;padding-left:18px}
+  .grad-box li{margin:6px 0;font-size:13.8px;color:#cdd7e2}
+  @media(max-width:860px){.grad-tabs{grid-template-columns:1fr 1fr}.grad-box{grid-template-columns:1fr}}
+  @media(max-width:520px){.grad-tabs{grid-template-columns:1fr}}
 
   /* team */
   .filters{display:flex;gap:8px;flex-wrap:wrap;margin:20px 0 18px}
   .fbtn{font-family:var(--mono);font-size:12px;color:var(--muted);background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:6px 13px;cursor:pointer}
-  .fbtn.on{color:var(--bg);background:var(--cyan);border-color:var(--cyan)}
+  .fbtn.on{color:var(--bg);background:var(--cyan);border-color:var(--cyan);font-weight:600}
   .team{display:grid;grid-template-columns:repeat(auto-fill,minmax(216px,1fr));gap:14px}
   .mem{position:relative;background:linear-gradient(180deg,var(--panel),var(--panel-2));border:1px solid var(--line);border-radius:14px;padding:16px;text-align:center;transition:.16s}
   .mem:hover{border-color:var(--cyan);transform:translateY(-3px)}
@@ -108,7 +135,7 @@
   .mem .bl{font-size:12.5px;color:#bcc8d6;margin-top:9px;border-top:1px dashed var(--line);padding-top:9px;min-height:54px}
   .mem .pill{position:absolute;top:10px;left:10px;font-family:var(--mono);font-size:9px;letter-spacing:.5px;text-transform:uppercase;color:var(--dim);background:var(--panel-2);border:1px solid var(--line);border-radius:999px;padding:1px 7px}
 
-  /* pipeline — stations on the line, plus the two loops a straight line can't draw */
+  /* pipeline — stations on the line, plus the three loops */
   .track{margin:26px 0 6px;position:relative}
   .track svg{width:100%;height:auto;display:block}
   .station{cursor:pointer}
@@ -124,7 +151,6 @@
   .station.active .core{fill:var(--cyan)}
   .station.active .lbl{fill:#fff}
   .station.active .cmd{fill:var(--cyan)}
-  /* explicit navigation — clicking the dots is never the only way through */
   .trackNav{display:flex;align-items:center;gap:12px;margin:6px 0 4px}
   .trackNav .fbtn:disabled{opacity:.35;cursor:default}
   .trackPos{font-family:var(--mono);font-size:12px;color:var(--muted)}
@@ -176,8 +202,9 @@
   .flow .nd rect{fill:var(--panel);stroke:var(--line);stroke-width:1.2;rx:10}
   .flow .nd.mm rect{stroke:var(--cyan-dim)}
   .flow .nd.mnt rect{stroke:var(--amber-dim)}
+  .flow .nd.fhd rect{stroke:var(--violet-dim)}
   .flow .nd.sup rect{stroke:var(--green-dim);stroke-dasharray:5 4}
-  .flow .nd .t{fill:var(--ink);font-size:14px;font-weight:700;font-family:var(--sans)}
+  .flow .nd .t{fill:var(--ink);font-size:13.5px;font-weight:700;font-family:var(--sans)}
   .flow .nd .u{fill:var(--muted);font-family:var(--mono);font-size:10px}
   .flow .ed{fill:none;stroke-width:1.8}
   .flow .ed.ship{stroke:var(--cyan)}
@@ -191,7 +218,7 @@
   @media(max-width:820px){.flow{overflow-x:auto}.flow svg{min-width:720px}}
 
   /* packs */
-  .packgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(168px,1fr));gap:12px;margin-top:24px}
+  .packgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(158px,1fr));gap:12px;margin-top:20px}
   .pk{background:linear-gradient(180deg,var(--panel),var(--panel-2));border:1px solid var(--line);border-radius:12px;padding:14px 15px}
   .pk .h{font-family:var(--mono);font-size:11px;color:var(--amber);text-transform:uppercase;letter-spacing:1px}
   .pk .v{font-size:13px;color:#cdd7e2;margin-top:6px;line-height:1.7}
@@ -208,12 +235,12 @@
     .cmdbox{font-size:12px;padding:10px 12px}
     .demo .who img,.demo .who .av-ph{width:60px;height:60px}
   }
-  .code{background:#070b11;border:1px solid var(--line);border-radius:13px;padding:16px 18px;font-family:var(--mono);font-size:12.5px;line-height:1.7;overflow:auto}
+  .code{background:#070b11;border:1px solid var(--line);border-radius:13px;padding:16px 18px;font-family:var(--mono);font-size:12.5px;line-height:1.65;overflow:auto;white-space:pre}
   .code .cm{color:var(--dim)} .code .k{color:var(--violet)} .code .s{color:var(--cyan)} .code .a{color:var(--amber)}
-  .code .hd{color:var(--muted);font-size:11px;letter-spacing:1px;text-transform:uppercase;margin-bottom:8px}
+  .code .hd{color:var(--muted);font-size:11px;letter-spacing:1px;text-transform:uppercase;margin-bottom:8px;white-space:normal}
 
   /* usage steps */
-  .steps{counter-reset:s;display:grid;gap:10px;margin:26px 0 4px}
+  .steps{counter-reset:s;display:grid;gap:10px;margin:22px 0 4px}
   .step{position:relative;background:linear-gradient(180deg,var(--panel),var(--panel-2));border:1px solid var(--line);border-radius:12px;padding:14px 16px 15px 54px}
   .step:before{counter-increment:s;content:counter(s);position:absolute;left:15px;top:14px;width:26px;height:26px;border-radius:50%;background:rgba(52,224,210,.1);border:1px solid var(--cyan-dim);color:var(--cyan);font-family:var(--mono);font-size:13px;display:flex;align-items:center;justify-content:center}
   .step b{font-size:14.5px}
@@ -223,7 +250,9 @@
   .cmds code{font-family:var(--mono);color:var(--cyan);white-space:nowrap}
   .cmds span{color:var(--muted)}
   .callout{margin-top:20px;background:var(--panel-2);border:1px solid var(--line);border-left:3px solid var(--amber);border-radius:10px;padding:14px 16px;font-size:13.5px;color:#cdd7e2}
+  .callout.cyan{border-left-color:var(--cyan)}
   .callout .h{font-family:var(--mono);font-size:11px;color:var(--amber);text-transform:uppercase;letter-spacing:1px;margin-bottom:6px}
+  .callout.cyan .h{color:var(--cyan)}
   .callout code,.cmds code{font-family:var(--mono)}
   .repo-cta{margin-top:22px;display:flex;gap:12px;flex-wrap:wrap;align-items:center}
   nav .gh{font-family:var(--mono);font-size:12px;color:var(--ink);border:1px solid var(--cyan-dim);background:rgba(52,224,210,.07);padding:5px 11px;border-radius:7px;white-space:nowrap}
@@ -249,50 +278,96 @@
 <nav><div class="wrap">
   <a class="brand" href="https://github.com/eric-sabe/engsys" target="_blank" rel="noopener">▢ <b>engsys</b></a>
   <div class="links">
-    <a href="#layers">Three layers</a>
+    <a href="#mental-model">Mental model</a>
+    <a href="#layers">Core design</a>
     <a href="#team">The team</a>
     <a href="#pipeline">Pipeline</a>
+    <a href="#memory">Memory</a>
+    <a href="#graduation">Start &amp; scale</a>
     <a href="#fleet">Fleet</a>
-    <a href="#packs">Packs</a>
-    <a href="#installer">Install &amp; use</a>
-    <a href="#lessons">Lessons</a>
+    <a href="#installer">Install</a>
     <a href="dashboard.html">Dashboard</a>
   </div>
   <button class="menu-btn" aria-expanded="false" aria-label="Open menu">☰</button>
   <a class="gh" href="https://github.com/eric-sabe/engsys" target="_blank" rel="noopener">GitHub ↗</a>
 </div>
 <div class="mobile-menu">
-  <a href="#layers">Three layers</a>
+  <a href="#mental-model">Mental model</a>
+  <a href="#layers">Core design</a>
   <a href="#team">The team</a>
   <a href="#pipeline">Pipeline</a>
+  <a href="#memory">Memory</a>
+  <a href="#graduation">Start &amp; scale</a>
   <a href="#fleet">Fleet</a>
-  <a href="#packs">Packs</a>
-  <a href="#installer">Install &amp; use</a>
-  <a href="#lessons">Lessons</a>
+  <a href="#installer">Install</a>
   <a href="dashboard.html">Dashboard</a>
 </div></nav>
 
 <header class="hero"><div class="wrap">
-  <div class="kicker">A portable engineering org for Claude Code</div>
-  <h1>Stop using AI to write code.<br><span>Install an engineering team instead.</span></h1>
-  <p class="thesis">engsys is a full team of specialized AI agents — designer, planner, implementer, reviewer, security, architect, tester, librarian — that you install into any project with one command. <b>The personas stay the same everywhere; you swap stack "packs," not prompts.</b> And an always-on fleet — a merge orchestrator and a security watchdog — keeps shipping while you sleep.</p>
+  <div class="kicker">The meta-harness for AI software engineering</div>
+  <h1>Stop prompting one assistant.<br><span>Install an engineering organization.</span></h1>
+  <p class="thesis">A model gives you raw intelligence. A coding harness gives you one generalist assistant. <b>engsys is the meta-harness above both</b> — installing 15 specialized agents, 24 stack packs, Adaptive Spec-Driven Development, compounding repo memory, and an optional autonomous fleet into <b>Claude Code</b>, <b>GitHub Copilot CLI</b>, or <b>Google Antigravity</b>.</p>
+  <div class="pill-row">
+    <span class="hpill">Claude Code · Copilot CLI · Antigravity</span>
+    <span class="hpill v">15 Specialists · 24 Stack Packs · 51 Curated Lessons</span>
+    <span class="hpill">Start in 3 min — no daemons required</span>
+  </div>
   <div class="cmd-row">
     <div class="cmdbox"><span class="pr">$</span> <span class="tx" id="cmd">engsys install --into .</span><button id="copy">copy</button></div>
-    <a class="btn" href="#installer">Install &amp; use →</a>
-    <a class="btn" href="https://github.com/eric-sabe/engsys" target="_blank" rel="noopener">GitHub ↗</a>
+    <a class="btn pri" href="#graduation">Pick your stage (1–4) →</a>
+    <a class="btn" href="https://github.com/eric-sabe/engsys/blob/main/DEPLOY.md" target="_blank" rel="noopener">LLM Deploy Playbook ↗</a>
   </div>
   <div class="faces" id="faces"></div>
-  <div class="faces-note">Fourteen specialists. One install.</div>
+  <div class="faces-note">Fifteen specialists. Three coding harnesses. One declarative install.</div>
 </div></header>
 
-<section id="layers"><div class="wrap">
-  <div class="kicker">The core idea</div>
-  <h2>Persona, pack, project facts</h2>
-  <p class="lede">One split runs the whole system: <i>who</i> does the work, <i>which</i> stack they work on, and what's true about <i>this</i> repo — kept ruthlessly separate.</p>
+<section id="mental-model"><div class="wrap">
+  <div class="kicker">1 · The Mental Model</div>
+  <h2>Model vs. Coding Harness vs. Meta-Harness</h2>
+  <p class="lede">When people talk about &ldquo;AI coding agents,&rdquo; three completely different layers get blurred together. Understanding where each stops is the whole story of <code>engsys</code>.</p>
+
   <div class="layers3">
-    <div class="lay" style="--c:var(--violet)"><div class="t">Persona — who</div><h3>Stable everywhere</h3><p>Voice, values, and decision discipline that never change from project to project. Edited once, here.</p></div>
-    <div class="lay" style="--c:var(--cyan)"><div class="t">Capability — which stack</div><h3>Detachable packs</h3><p>Adapting means picking the AWS pack over the Azure one — not editing a prompt. Mixed stacks just compose.</p></div>
-    <div class="lay" style="--c:var(--amber)"><div class="t">Project facts — this repo</div><h3>Generated</h3><p>Services, toolchain, invariants — written into your CLAUDE.md. The one layer unique to you.</p></div>
+    <div class="lay" style="--c:var(--amber)">
+      <div class="t">Layer 1 · The Brain</div>
+      <h3>The Model</h3>
+      <p>Raw reasoning and code generation. Brilliant in a single turn, but stateless &mdash; it wakes up with amnesia, has no terminal or filesystem on its own, and knows nothing about your team&rsquo;s engineering process.</p>
+      <div class="ex"><b>Examples:</b> Claude Opus 4.8 &amp; Sonnet · GPT / Codex · Gemini · Grok · DeepSeek</div>
+    </div>
+    <div class="lay" style="--c:var(--violet)">
+      <div class="t">Layer 2 · The Workbench</div>
+      <h3>The Coding Harness</h3>
+      <p>Wraps a model in an interactive CLI or IDE runtime with bash execution, file editing, subagents, MCP servers, and lifecycle hooks. Great for driving <i>one</i> assistant &mdash; but out of the box it has no org chart, no role boundaries, and no cross-PR memory.</p>
+      <div class="ex"><b>Supported Harnesses:</b> Claude Code (<code>claude</code>) · GitHub Copilot CLI (<code>copilot</code>) · Google Antigravity (<code>agy</code>)</div>
+    </div>
+    <div class="lay" style="--c:var(--cyan)">
+      <div class="t">Layer 3 · The Engineering Org</div>
+      <h3>The Meta-Harness (<code>engsys</code>)</h3>
+      <p>Sits <b>above</b> your coding harness and <b>across</b> models. Defines <i>who</i> does the work (15 personas), <i>which</i> stack rules apply (24 packs), <i>how</i> work moves (spec &rarr; worktree &rarr; review &rarr; merge), and <i>what the team remembers</i> &mdash; then compiles that system into whichever harness you run.</p>
+      <div class="ex"><b>One config:</b> <code>engsys.config.yaml</code> &rarr; materializes into Claude Code, Copilot CLI, or Antigravity</div>
+    </div>
+  </div>
+
+  <div class="demo">
+    <div class="who">
+      <div class="av-ph" style="width:68px;height:68px;font-size:20px;background:linear-gradient(140deg,var(--cyan),#0e141d)">⇄</div>
+      <div><b>One team, three harnesses</b><span>Universal hook adapter (<code>harness-io.mjs</code>)</span></div>
+    </div>
+    <div class="pick">
+      <div class="small">Switch the target harness &rarr; see what <code>engsys install --into .</code> materializes:</div>
+      <div class="chips" id="harnessChips"></div>
+      <div class="out" id="harnessOut"></div>
+    </div>
+  </div>
+</div></section>
+
+<section id="layers"><div class="wrap">
+  <div class="kicker">2 · The Core Design (3-Part File Taxonomy)</div>
+  <h2>Persona, capability pack, project facts</h2>
+  <p class="lede">Inside <code>engsys</code>, a three-part file taxonomy keeps your setup portable across every repository: <i>who</i> does the work, <i>which</i> stack they target, and what is true about <i>this</i> repo &mdash; kept ruthlessly separate so you swap packs instead of rewriting prompts.</p>
+  <div class="layers3">
+    <div class="lay" style="--c:var(--violet)"><div class="t">Persona — who</div><h3>Stable everywhere</h3><p>Voice, first-principles diagnostic checklists, least-privilege tool allowlists, and handback schemas that never change from repo to repo.</p></div>
+    <div class="lay" style="--c:var(--cyan)"><div class="t">Capability — which stack</div><h3>24 detachable packs</h3><p>Adapting to a repo means selecting <code>aws</code> vs <code>azure</code> or <code>typescript</code> vs <code>swift</code> in YAML &mdash; never hand-editing agent prose. Mixed stacks compose cleanly.</p></div>
+    <div class="lay" style="--c:var(--amber)"><div class="t">Project facts — this repo</div><h3>Generated + naturalized</h3><p>Services, build commands, and house invariants rendered into your harness instructions (<code>CLAUDE.md</code> / <code>GEMINI.md</code>) and filled once via <code>/naturalize</code>.</p></div>
   </div>
 
   <div class="demo">
@@ -301,29 +376,31 @@
       <div><b>Melvin</b><span>Cloud architect — same person, every cloud</span></div>
     </div>
     <div class="pick">
-      <div class="small">Pick the project's cloud → he loads the matching pack. His persona file never changes.</div>
+      <div class="small">Pick the project&rsquo;s cloud &rarr; he loads the matching capability pack. His persona file never changes.</div>
       <div class="chips" id="cloudChips"></div>
       <div class="out" id="cloudOut"></div>
     </div>
   </div>
+
+  <div class="packgrid" id="packGrid"></div>
 </div></section>
 
 <section id="team"><div class="wrap">
-  <div class="kicker">The roster</div>
-  <h2>Fourteen specialists, one install</h2>
-  <p class="lede">Not one assistant wearing hats — distinct agents with distinct jobs, voices, and standards.</p>
+  <div class="kicker">3 · The Roster</div>
+  <h2>Fifteen specialists, one install</h2>
+  <p class="lede">Not one generalist prompt wearing hats &mdash; fifteen distinct specialists with scoped tool permissions, domain skills, and structured handback contracts.</p>
   <div class="filters" id="teamFilters">
-    <button class="fbtn on" data-f="all">All 14</button>
-    <button class="fbtn" data-f="core">Core (always installed)</button>
-    <button class="fbtn" data-f="optional">Opt-in</button>
+    <button class="fbtn on" data-f="all">All 15</button>
+    <button class="fbtn" data-f="core">Core (11 — always installed)</button>
+    <button class="fbtn" data-f="optional">Opt-in (4)</button>
   </div>
   <div class="team" id="teamGrid"></div>
 </div></section>
 
 <section id="pipeline"><div class="wrap">
-  <div class="kicker">How work moves</div>
-  <h2>Spec to closeout, on rails</h2>
-  <p class="lede">Slash commands call the agents by name, so the process runs the same way every time. Review findings loop a phase back, the merge orchestrator pilots ready&thinsp;→&thinsp;CI&thinsp;→&thinsp;merge, and closeout lessons loop into your next project.</p>
+  <div class="kicker">4 · How Work Moves</div>
+  <h2>Adaptive Spec to Closeout, on rails</h2>
+  <p class="lede">Workflows route work through the specialists in order: risk-adaptive specs (<code>/design-change</code>), isolated worktree implementation, cross-family code &amp; security review, preflighted merge, and automated lesson harvesting.</p>
   <div class="track" id="track"></div>
   <div class="trackNav">
     <button class="fbtn" id="trackPrev" aria-label="Previous stage">&larr; Prev</button>
@@ -333,10 +410,46 @@
   <div class="detail" id="stationDetail"></div>
 </div></section>
 
+<section id="memory"><div class="wrap">
+  <div class="kicker">5 · Compounding Agentic Memory</div>
+  <h2>It gets smarter every PR &mdash; without prompt-injection risk</h2>
+  <p class="lede">Dumping raw GitHub comments into an agent&rsquo;s prompt wastes context and invites prompt injection. <code>engsys</code> separates trusted instructions from untrusted repo evidence and compiles a targeted <code>&le; 2 KB</code> brief at every <code>SubagentStart</code>.</p>
+
+  <div class="layers3">
+    <div class="lay" style="--c:var(--cyan)">
+      <div class="t">Class A · Trusted Instructions</div>
+      <h3>Curated Lessons (<code>origin/HEAD</code>)</h3>
+      <p>51 bundled cross-project lessons plus your repo&rsquo;s local lessons, each tagged with YAML frontmatter (<code>stacks</code>, <code>paths</code>, <code>roles</code>, <code>security: true</code>). Loaded strictly from reviewed git refs &mdash; never unreviewed working-tree edits.</p>
+      <div class="ex"><b>Guarantee:</b> <code>security: true</code> lessons are always injected first and never dropped by token budgets.</div>
+    </div>
+    <div class="lay" style="--c:var(--amber)">
+      <div class="t">Class B · Historical Repo Evidence</div>
+      <h3>Git Ref Store (<code>refs/engsys/memory/*</code>)</h3>
+      <p>Merged PR outcomes, review findings, and issue history synced via <code>memory-sync</code> into an append-only custom Git ref with CAS retry, mandatory secret scanning, bot <code>databaseId</code> verification, and spoofing quarantine.</p>
+      <div class="ex"><b>Safety:</b> Only compact 1-line pointers are pushed at startup; full text is fetched on demand inside an untrusted envelope.</div>
+    </div>
+    <div class="lay" style="--c:var(--violet)">
+      <div class="t">Runtime · Subagent Injection</div>
+      <h3>SQLite FTS5 + <code>PreToolUse</code> Stash</h3>
+      <p>When an orchestrator dispatches a subagent, <code>PreToolUse</code> stashes the task prompt and target file paths. At <code>SubagentStart</code>, <code>memory-brief</code> scores Class A lessons (BM25 + path/role) and Class B pointers in milliseconds.</p>
+      <div class="ex"><b>Loop closure:</b> At <code>/project-closeout</code>, <code>harvest-findings</code> clusters recurring PR review comments into new Class A lesson drafts.</div>
+    </div>
+  </div>
+</div></section>
+
+<section id="graduation"><div class="wrap">
+  <div class="kicker">6 · Start Small, Graduate When Ready</div>
+  <h2>How do you deploy this without the complexity?</h2>
+  <p class="lede"><b>90% of users start at Stage 1 in under 3 minutes.</b> You do <i>not</i> need background &ldquo;monsters,&rdquo; an always-on machine, or a GitHub App to get the team, the stack packs, Adaptive SDD, and the memory library. Click a stage to see how adoption scales from a solo laptop to an organization-wide fleet:</p>
+
+  <div class="grad-tabs" id="gradTabs"></div>
+  <div class="grad-box" id="gradDetail"></div>
+</div></section>
+
 <section id="fleet"><div class="wrap">
-  <div class="kicker">The always-on layer</div>
-  <h2>A team that doesn&rsquo;t log off</h2>
-  <p class="lede">Two long-running &ldquo;monsters&rdquo; own the loops humans drop: one pilots every PR through ready&thinsp;&rarr;&thinsp;CI&thinsp;&rarr;&thinsp;merge, the other watches the security and dependency surface. What makes that safe to run unattended is a stack, not a prompt &mdash; click a layer.</p>
+  <div class="kicker">7 · Stage 3 &amp; 4 Deep Dive: The Always-On Fleet</div>
+  <h2>When you want the team to keep shipping while you sleep</h2>
+  <p class="lede">Once you graduate to Stage 3 or 4, long-running &ldquo;monsters&rdquo; own the loops humans drop: <b>Merge Monster</b> pilots every ready PR through CI to merge, <b>Maintenance Monster</b> triages Dependabot/CodeQL and operates the <b>Fleet Health Desk</b>, and <b>Resource Broker</b> pools heavy host hardware. Click any layer of the safety stack:</p>
 
   <div class="stackwrap">
     <div class="rail left"><span>each layer trusts only the one below</span></div>
@@ -345,116 +458,103 @@
   </div>
   <div class="detail" id="stackDetail"></div>
 
-  <h3 style="margin-top:38px">How the monsters compose</h3>
-  <p class="muted" style="font-size:14px;max-width:70ch">Producer / consumer with separate batons: the watchdog triages and hands over already-reviewed fix PRs; the orchestrator is the only thing that merges. Underneath both, a cron-driven supervisor relaunches whichever one rotates or crashes &mdash; recovery works with the whole fleet dark.</p>
+  <h3 style="margin-top:38px">How the autonomous roles compose</h3>
+  <p class="muted" style="font-size:14px;max-width:74ch">Producer / consumer with separate GitHub-ref CAS batons (<code>refs/engsys/leases/baton-*</code>): Maintenance Monster triages alerts, tracks upstream outages on the Fleet Health Desk board, and hands verified fix PRs to Merge Monster. Underneath, a deterministic <code>launchd</code> supervisor relaunches rotated or crashed sessions and verifies host &amp; plugin integrity against GitHub.</p>
   <div class="flow" id="fleetFlow"></div>
   <div class="legend">
-    <span class="l1"><i></i>ship flow</span>
-    <span class="l2"><i></i>security flow</span>
-    <span class="l3"><i></i>deterministic recovery (no LLM)</span>
+    <span class="l1"><i></i>ship flow (Merge Monster)</span>
+    <span class="l2"><i></i>security &amp; weather flow (Maintenance Monster + Fleet Health Desk)</span>
+    <span class="l3"><i></i>deterministic supervision &amp; integrity verification (no LLM)</span>
   </div>
-</div></section>
-
-<section id="packs"><div class="wrap">
-  <div class="kicker">Adapt by choosing, not rewriting</div>
-  <h2>Same expert, different stack</h2>
-  <p class="lede">Capability lives in detachable packs. Install the ones a project uses; the agnostic personas load whatever is present.</p>
-  <div class="packgrid" id="packGrid"></div>
 </div></section>
 
 <section id="installer"><div class="wrap">
-  <div class="kicker">Install &amp; use</div>
-  <h2>A script lays the foundation</h2>
-  <p class="lede">A real installer — not a model — writes the folders, faithfully, every time. The model only fills in project facts afterward, so plumbing can't be silently skipped. Five steps, start to finish.</p>
+  <div class="kicker">8 · Install &amp; Use</div>
+  <h2>Deploy by hand &mdash; or hand <code>DEPLOY.md</code> to your agent</h2>
+  <p class="lede">A deterministic zero-dependency Node CLI writes the folders and merges settings faithfully. Your model only fills in project facts afterward via <code>/naturalize</code>.</p>
 
-  <div class="steps">
-    <div class="step"><b>Get engsys</b>
-      <p>Install the CLI from npm — or <code>git clone</code> the repo (you'll want it anyway, to fork packs and PR lessons back). Zero-dependency Node (≥18); adds nothing to your project, same on macOS, Windows, and Linux.</p>
-      <code>npm install -g engsys</code></div>
-    <div class="step"><b>Configure your project</b>
-      <p>Scaffold the config, then pick your cloud / iac / lang / platform / db, issue tracker, and which agents you want. (From a clone instead: <code>cp engsys/engsys.config.example.yaml engsys.config.yaml</code>.)</p>
-      <code>engsys init</code></div>
-    <div class="step"><b>Install</b>
-      <p>Materializes <code>.claude/</code>, renders <code>CLAUDE.md</code> + settings, and seeds the lessons library. Already have a setup? It adopts it — merges your settings, preserves your agents — and snapshots the originals so it's reversible. (From a clone: <code>node engsys/install install --into .</code>.)</p>
-      <code>engsys install --into .</code></div>
-    <div class="step"><b>Naturalize</b>
-      <p>Open the project in Claude Code and run the command. It fills the project-facts region of <code>CLAUDE.md</code> and folds in any imported Copilot/Cursor rules. The one model-driven step — never plumbing.</p>
-      <code>/naturalize</code></div>
-    <div class="step"><b>Live with it</b>
-      <p>Confirm nothing drifted, pull engsys improvements or change packs later, or roll all the way back.</p>
-      <code>engsys verify · update · uninstall --into .</code></div>
+  <div class="callout cyan">
+    <div class="h">Fastest path: let your coding harness deploy Stage 1 for you</div>
+    Paste this prompt into <b>Claude Code</b>, <b>GitHub Copilot CLI</b>, or <b>Google Antigravity</b>:<br>
+    <code style="display:inline-block;margin-top:8px;padding:6px 10px;background:#070b11;border:1px solid var(--cyan-dim);border-radius:6px;color:var(--cyan);max-width:100%;white-space:normal;word-break:break-word">Read https://raw.githubusercontent.com/eric-sabe/engsys/main/DEPLOY.md and deploy Stage 1 into this repository.</code>
   </div>
 
-  <p class="muted small" style="margin-top:8px">A config like the left produces the tree on the right:</p>
+  <div class="steps">
+    <div class="step"><b>Get the CLI</b>
+      <p>Install globally from npm &mdash; or <code>git clone https://github.com/eric-sabe/engsys</code>. Zero-dependency Node (&ge;20.11); runs identically on macOS, Linux, and Windows.</p>
+      <code>npm install -g engsys</code></div>
+    <div class="step"><b>Scaffold <code>engsys.config.yaml</code></b>
+      <p>Pick your coding harness (<code>claude | copilot | antigravity | all</code>), stack packs (<code>cloud / iac / lang / platform / db</code>), and optional specialists.</p>
+      <code>engsys init</code></div>
+    <div class="step"><b>Materialize into your project</b>
+      <p>Writes your harness directories, renders instructions + settings, and seeds the 51-lesson library. Existing setup? It adopts and backs it up so <code>engsys uninstall</code> can restore byte-for-byte.</p>
+      <code>engsys install --into .</code></div>
+    <div class="step"><b>Naturalize project facts</b>
+      <p>Open the repo in your harness and run <code>/naturalize</code>. It fills the fenced <code>PROJECT-FACTS</code> region and <code>project-brief-overlay.md</code> &mdash; the one model-driven step.</p>
+      <code>/naturalize</code></div>
+    <div class="step"><b>Verify &amp; evolve</b>
+      <p>Check drift against the lockfile, enable external review providers (<code>codex,grok,deepseek</code>), update packs, or roll back cleanly.</p>
+      <code>engsys verify --into . &nbsp;·&nbsp; engsys update --into . &nbsp;·&nbsp; engsys uninstall --into .</code></div>
+  </div>
+
+  <p class="muted small" style="margin-top:14px">A config like the left materializes the multi-harness surface on the right:</p>
   <div class="install">
     <div class="code" id="cfgCode"></div>
     <div class="code" id="treeCode"></div>
   </div>
 
-  <div class="cmds">
-    <code>install</code><span>materialize, or adopt an existing setup, into a project</span>
-    <code>update</code><span>re-render; prune deselected packs; preserve your project facts + agents</span>
-    <code>verify</code><span>check installed files against the lockfile (drift detection)</span>
-    <code>uninstall</code><span>remove everything engsys added and restore the prior setup</span>
-    <code>--dry-run</code><span>preview the full plan, write nothing &nbsp;·&nbsp; <code>--force</code> overwrite instead of merge</span>
-  </div>
-
   <div class="callout">
     <div class="h">Dropping into an existing repo?</div>
-    engsys <b>adopts</b> your <code>CLAUDE.md</code>, settings, and agents instead of overwriting them, imports Copilot/Cursor config for <code>/naturalize</code> to fold in, and <code>uninstall</code> restores everything byte-for-byte. Full walkthrough in <a href="https://github.com/eric-sabe/engsys/blob/main/docs/install-scenarios.md" target="_blank" rel="noopener">install-scenarios.md</a>.
+    <code>engsys install</code> <b>adopts</b> your existing <code>CLAUDE.md</code>, <code>GEMINI.md</code>, settings, and custom agents instead of overwriting them, snapshots Copilot/Cursor rules for <code>/naturalize</code> to fold in, and <code>engsys uninstall --into .</code> restores everything byte-for-byte. Full details in <a href="https://github.com/eric-sabe/engsys/blob/main/docs/install-scenarios.md" target="_blank" rel="noopener">install-scenarios.md</a> and <a href="https://github.com/eric-sabe/engsys/blob/main/DEPLOY.md" target="_blank" rel="noopener">DEPLOY.md</a>.
   </div>
 
   <div class="repo-cta">
-    <a class="btn" href="https://github.com/eric-sabe/engsys" target="_blank" rel="noopener">Browse the source on GitHub ↗</a>
+    <a class="btn pri" href="https://github.com/eric-sabe/engsys/blob/main/DEPLOY.md" target="_blank" rel="noopener">Open DEPLOY.md Playbook ↗</a>
+    <a class="btn" href="https://github.com/eric-sabe/engsys" target="_blank" rel="noopener">Browse Source on GitHub ↗</a>
     <span class="muted small">MIT licensed · zero-dependency installer · <a href="https://github.com/eric-sabe/engsys/blob/main/README.md" target="_blank" rel="noopener">README</a></span>
   </div>
 </div></section>
 
-<section id="lessons"><div class="wrap">
-  <div class="kicker">It gets smarter across projects</div>
-  <h2>Every closeout feeds the next install</h2>
-  <p class="lede">Hard-won lessons get mined per project, generalized, and seeded into every new one. The system compounds instead of forking.</p>
-  <div class="take" id="lessonLoop"></div>
-</div></section>
-
 <section id="steal"><div class="wrap">
-  <div class="kicker">Steal this</div>
-  <h2>Principles that transfer to any project</h2>
+  <div class="kicker">9 · Design Principles</div>
+  <h2>Architectural rules you can steal for any agent system</h2>
   <div class="take" id="take"></div>
 </div></section>
 
 <section id="cta"><div class="wrap">
-  <div class="kicker">Your next project already has a team waiting</div>
-  <h2>One command installs it.</h2>
-  <div class="sub">Define a config, run the installer, naturalize the project facts. That's it.</div>
+  <div class="kicker">Your next project already has an engineering org waiting</div>
+  <h2>Start at Stage 1 in three minutes.</h2>
+  <div class="sub">Pick your harness and stack packs, run the installer, naturalize the project facts. Scale to autonomous fleets only when you need them.</div>
   <div class="cmd-row" style="justify-content:center">
     <div class="cmdbox"><span class="pr">$</span> <span class="tx">engsys install --into .</span></div>
+    <a class="btn pri" href="https://github.com/eric-sabe/engsys/blob/main/DEPLOY.md" target="_blank" rel="noopener">DEPLOY.md Runbook ↗</a>
   </div>
 </div></section>
 
 <footer><div class="wrap">
-  <span>engsys — a portable engineering system for Claude Code</span>
-  <span class="mono">persona · capability · project facts</span>
+  <span>engsys v2.0 — the meta-harness for Claude Code, GitHub Copilot CLI &amp; Google Antigravity</span>
+  <span class="mono">model · coding harness · meta-harness</span>
 </div></footer>
 
 <script>
 const TEAM = [
   {id:'melvin', name:'Melvin', role:'Architect', tier:'core', bl:'Cloud architect & performance scientist. Reasons about p99, blast radius, and cost curves before he picks a service.'},
   {id:'aaron', name:'Aaron', role:'IaC & deploys', tier:'core', bl:'Owns the pipeline, the state, and every "it worked yesterday" infra mystery.'},
-  {id:'isabelle', name:'Isabelle', role:'Implementer', tier:'core', bl:'Reads the spec, matches your patterns, tests her work, ships a clean PR.'},
+  {id:'isabelle', name:'Isabelle', role:'Implementer', tier:'core', bl:'Reads the spec, works in an isolated worktree, matches your patterns, tests her work, ships a clean PR.'},
   {id:'bert', name:'Bert', role:'Bug hunter', tier:'core', bl:'Traces the error to its real source and files the issue. He investigates, he doesn’t guess.'},
   {id:'jody', name:'Jody', role:'Planner', tier:'core', bl:'Turns a goal into a dependency-mapped batch of issues Isabelle can actually work.'},
-  {id:'leith', name:'Leith', role:'Product / UX', tier:'core', bl:'Turns "make it better" into specs with acceptance criteria you can build against.'},
+  {id:'leith', name:'Leith', role:'Product / UX', tier:'core', bl:'Turns "make it better" into risk-tiered specs with acceptance criteria you can build against.'},
   {id:'marcelo', name:'Marcelo', role:'Testing', tier:'core', bl:'Designs the test plan and the quality gate before the bug ships, not after.'},
-  {id:'patricia', name:'Patricia', role:'Librarian', tier:'core', bl:'Records the decision, writes the ADR, and keeps the docs from going stale.'},
-  {id:'nyx', name:'Nyx', role:'Security', tier:'core', bl:'Asks "is this actually secure?" — then breaks it to find out.'},
-  {id:'otto', name:'Otto', role:'LLM optimization', tier:'core', bl:'Finds where your tokens are going and stops the bleeding.'},
-  {id:'gary', name:'Gary', role:'Design expert', tier:'core', bl:'The reader’s advocate — four schools of design doctrine.'},
+  {id:'patricia', name:'Patricia', role:'Librarian', tier:'core', bl:'Records the decision, writes the ADR, and keeps the architecture docs from going stale.'},
+  {id:'nyx', name:'Nyx', role:'Security', tier:'core', bl:'Pinned to the frontier security model. Asks "is this actually secure?" — then breaks it to find out.'},
+  {id:'otto', name:'Otto', role:'LLM optimization', tier:'core', bl:'Finds where your tokens, latency, and structured-output schemas are bleeding and fixes them.'},
+  {id:'gary', name:'Gary', role:'Design expert', tier:'core', bl:'The reader’s advocate — critiques hierarchy, comprehension, and visual craft across four schools of design.'},
   {id:'sandy', name:'Sandy', role:'Marketing / SEO', tier:'optional', bl:'Makes skeptics understand — and want — what the engineers built. Clear over clever.'},
   {id:'jos', name:'Jos', role:'Monetization', tier:'optional', bl:'Pricing, ASO, CAC/LTV math, and the App Store policy call before it bites you.'},
+  {id:'deandre', name:'DeAndre', role:'Tutor / Explainer', tier:'optional', bl:'Retired CS professor who translates complex multi-agent sessions into clear teaching summaries and interactive explainers.'},
   {id:'steve', name:'Steve', role:'The scapegoat', tier:'optional', pill:'inevitable', bl:'Officially responsible for phantom config, ghost resources, and IAM nobody admits creating. (Not real. Morale only.)'},
 ];
-const TIER_COLORS = {melvin:'#34e0d2',aaron:'#46d39a',isabelle:'#9d8cff',bert:'#f5b13d',jody:'#34e0d2',leith:'#9d8cff',marcelo:'#46d39a',patricia:'#f5b13d',nyx:'#ff6b6b',otto:'#34e0d2',gary:'#9d8cff',sandy:'#f5b13d',jos:'#46d39a',steve:'#5c6a7a'};
+const TIER_COLORS = {melvin:'#34e0d2',aaron:'#46d39a',isabelle:'#9d8cff',bert:'#f5b13d',jody:'#34e0d2',leith:'#9d8cff',marcelo:'#46d39a',patricia:'#f5b13d',nyx:'#ff6b6b',otto:'#34e0d2',gary:'#9d8cff',sandy:'#f5b13d',jos:'#46d39a',deandre:'#34e0d2',steve:'#5c6a7a'};
 
 function avatar(m, cls){
   const c = TIER_COLORS[m.id]||'#34e0d2';
@@ -464,12 +564,28 @@ function avatar(m, cls){
 
 // hero faces
 const faces = document.getElementById('faces');
-TEAM.slice(0,9).forEach(m=>{
+TEAM.slice(0,10).forEach(m=>{
   const c=TIER_COLORS[m.id];
   faces.insertAdjacentHTML('beforeend',
     `<img src="team-images/${m.id}.png" alt="${m.name}" title="${m.name}" onerror="this.outerHTML='<span class=\\'ph\\' style=\\'background:linear-gradient(140deg,${c},#0e141d)\\'></span>'">`);
 });
 faces.insertAdjacentHTML('beforeend','<span class="more">+5</span>');
+
+// harness switcher demo
+const HARNESSES=[
+  {id:'claude',label:'Claude Code',out:'Materializes <code>CLAUDE.md</code>, <code>.claude/{agents,commands,skills,hooks,workflows}/</code>, <code>.claude/settings.json</code>, and <code>.mcp.json</code> (or runs zero-copy from the Claude Code plugin marketplace).'},
+  {id:'copilot',label:'GitHub Copilot CLI',out:'Materializes <code>.github/copilot-instructions.md</code>, <code>.github/agents/*.agent.md</code>, <code>.github/skills/*/SKILL.md</code>, <code>.github/hooks/engsys-hooks.json</code>, and <code>.vscode/mcp.json</code>.'},
+  {id:'antigravity',label:'Google Antigravity',out:'Materializes <code>GEMINI.md</code>, <code>AGENTS.md</code>, <code>.agents/{agents,skills,rules,workflows}/</code>, <code>.agents/hooks.json</code>, and <code>.agents/plugins/engsys/plugin.json</code>.'},
+  {id:'all',label:'All Three (hybrid team)',out:'Materializes <code>claude</code> + <code>copilot</code> + <code>antigravity</code> surfaces simultaneously from one <code>engsys.config.yaml</code>, sharing the same <code>harness-io.mjs</code> hook guards and memory index.'},
+];
+const hChips=document.getElementById('harnessChips'), hOut=document.getElementById('harnessOut');
+function pickHarness(i){
+  [...hChips.children].forEach((c,j)=>c.classList.toggle('on',j===i));
+  const h=HARNESSES[i];
+  hOut.innerHTML=`<code>harness: ${h.id}</code> &rarr; ${h.out}`;
+}
+HARNESSES.forEach((h,i)=>{const b=document.createElement('button');b.className='chip';b.textContent=h.label;b.onclick=()=>pickHarness(i);hChips.appendChild(b);});
+pickHarness(0);
 
 // team grid
 const grid = document.getElementById('teamGrid');
@@ -494,40 +610,51 @@ document.getElementById('teamFilters').addEventListener('click',e=>{
 // three-layer cloud demo
 document.getElementById('melvinAv').outerHTML = avatar({id:'melvin',name:'Melvin'},'');
 const CLOUDS=[
-  {id:'aws',label:'AWS',pack:'cloud-architecture-aws'},
-  {id:'azure',label:'Azure',pack:'cloud-architecture-azure'},
-  {id:'gcp',label:'GCP',pack:'cloud-architecture-gcp'},
-  {id:'cloudflare',label:'Cloudflare',pack:'cloud-architecture-cloudflare'},
+  {id:'aws',label:'AWS',pack:'cloud-architecture-aws + aws-deployment-preflight'},
+  {id:'azure',label:'Azure',pack:'cloud-architecture-azure + azure-deployment-preflight'},
+  {id:'gcp',label:'GCP',pack:'cloud-architecture-gcp + gcp-deployment-preflight'},
+  {id:'cloudflare',label:'Cloudflare',pack:'cloud-architecture-cloudflare + cloudflare-deployment-preflight'},
 ];
 const chips=document.getElementById('cloudChips'), cloudOut=document.getElementById('cloudOut');
 function pickCloud(i){
   [...chips.children].forEach((c,j)=>c.classList.toggle('on',j===i));
   const c=CLOUDS[i];
-  cloudOut.innerHTML=`Project declares <code>cloud: ${c.id}</code> → Melvin loads <code>${c.pack}</code>. <span class="muted">His profile is untouched.</span>`;
+  cloudOut.innerHTML=`Project declares <code>cloud: ${c.id}</code> (the <b>${c.id}</b> pack) &rarr; Melvin auto-loads <code>${c.pack}</code>. <span class="muted">His persona file is untouched.</span>`;
 }
 CLOUDS.forEach((c,i)=>{const b=document.createElement('button');b.className='chip';b.textContent=c.label;b.onclick=()=>pickCloud(i);chips.appendChild(b);});
 pickCloud(0);
 
+// packs
+const PACKS=[
+  {h:'cloud (4)',v:'<b>aws</b> · <b>azure</b> · <b>gcp</b> · <b>cloudflare</b>'},
+  {h:'iac (3)',v:'<b>terraform</b> · <b>bicep</b> · <b>cdk</b>'},
+  {h:'lang (5)',v:'<b>typescript</b> · <b>python</b> · <b>swift</b> · <b>kotlin</b> · <b>shell</b>'},
+  {h:'platform (3)',v:'<b>web</b> · <b>ios</b> · <b>android</b>'},
+  {h:'db (2)',v:'<b>prisma</b> · <b>mongo</b>'},
+  {h:'domain & tooling (7)',v:'<b>mobile-growth</b> · <b>github</b> &amp; <b>linear</b> trackers · <b>anthropic</b>, <b>codex</b>, <b>deepseek</b> &amp; <b>grok</b>'},
+];
+document.getElementById('packGrid').innerHTML=PACKS.map(p=>`<div class="pk"><div class="h">${p.h}</div><div class="v">${p.v}</div></div>`).join('');
+
 // pipeline
 const STATIONS=[
-  {lbl:'Design + plan',cmd:'/generate-project',pts:['Leith turns the goal into a spec with testable acceptance criteria.','Melvin, Nyx, and Gary pressure-test architecture, security, and comprehension; Marcelo adds the test strategy.','Jody breaks it into a dependency-ordered board of issues.']},
-  {lbl:'Implement',cmd:'/implement-project',pts:['Isabelle works each issue in an isolated worktree, one phase = one PR.','Matches existing patterns, writes tests, runs the pre-push gate before pushing.','Opens the PR already locally reviewed.']},
-  {lbl:'Review',cmd:'objective gate',pts:['A fresh reviewer with no stake re-runs the gate and checks each acceptance criterion.','Binary verdict: clean, or findings with file:line.','No merge without a clean independent pass.']},
-  {lbl:'Merge',cmd:'/merge-monster',pts:['Authors never mark ready or merge — finish the PR, label it mm:ready, hand off.','The orchestrator preflights the enqueuer\'s claims, then pilots ready → CI → merge, one active PR at a time.','Bounced PRs come back with exactly what\'s missing; a red default branch outranks everything.']},
-  {lbl:'Close out',cmd:'/project-closeout',pts:['Verify everything merged, clean up worktrees and branches.','Mine the review findings; generalize recurring ones into lessons.','Promote durable lessons back to the shared library.']},
+  {lbl:'Adaptive Spec',cmd:'/design-change',fullCmd:'/design-change · /generate-project',pts:['Classifies every change into Tier 0 (skip), Tier 1 (inline micro-spec), or Tier 2 (full spec in <code>docs/specs/&lt;slug&gt;.md</code>) using 6 escalation tripwires.','Leith writes testable acceptance criteria; Melvin, Nyx, Gary, and Marcelo pressure-test architecture, security, UX, and test strategy.','Jody breaks the approved spec into a dependency-ordered board of issues with explicit file-touch contracts (<code>/generate-project</code>).']},
+  {lbl:'Implement',cmd:'/implement-issue',fullCmd:'/implement-project · /implement-issue',pts:['Isabelle works each issue in an isolated git worktree; <code>PreToolUse &rarr; SubagentStart</code> injects a <code>&le; 2 KB</code> path-scoped memory brief.','<code>sdd-spec-guard</code> watches for scope creep against the spec; Isabelle writes tests and runs <code>/pre-push</code> contract checks before pushing.','Every specialist finishes with a machine-checked <code>HANDBACK: COMPLETE / INCOMPLETE</code> block.']},
+  {lbl:'Cross-Family Review',cmd:'cross-family gate',fullCmd:'cross-family + Nyx security gate',pts:['A reviewer from a different model family (Codex, Grok, DeepSeek, or an independent session) + Nyx security review (pinned to <code>claude-opus-4-8</code>) audits the diff.','Binary verdict: <code>CLEAN</code>, or <code>FINDINGS</code> citing exact <code>file:line</code> and severity.','No merge without a clean independent pass and verified contract-check.']},
+  {lbl:'Merge',cmd:'/merge-monster',fullCmd:'/merge-monster (or human merge)',pts:['In Stage 1–2, you merge once review is green. In Stage 3–4, authors label PRs <code>mm:ready</code> and hand off to Merge Monster.','Merge Monster preflights review markers and <code>FINDING-ACK</code>s, then pilots <code>ready &rarr; CI &rarr; merge</code> one active PR at a time.','Bounced PRs return with exact diagnosis; a broken default branch outranks every queued PR.']},
+  {lbl:'Compound',cmd:'/project-closeout',fullCmd:'/project-closeout',pts:['Verifies all issues merged and cleans up worktrees and branches.','<code>harvest-findings</code> mines recurring review comments across PRs into candidate Class A lessons; <code>memory-sync</code> records Class B outcomes on <code>refs/engsys/memory/events/v1</code>.','Generalizable lessons are promoted upstream so every project starts smarter than the last.']},
 ];
 const LOOPS=[
-  {from:2,to:1,label:'findings loop back'},
+  {from:2,to:1,label:'review findings loop back'},
   {from:3,to:1,label:'bounced PRs loop back'},
-  {from:4,to:0,label:'lessons seed the next project'},
+  {from:4,to:0,label:'memory & lessons seed the next spec'},
 ];
 const track=document.getElementById('track'), sd=document.getElementById('stationDetail');
 (function(){
   const NS='http://www.w3.org/2000/svg', TW=1100, TY=40, TPAD=80;
-  const TH=TY+64+LOOPS.length*30+8;
+  const TH=TY+84+LOOPS.length*30+8;
   const tx=i=>TPAD+i*((TW-2*TPAD)/(STATIONS.length-1));
   function tel(t,a,p){const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);(p)&&p.appendChild(e);return e;}
-  const svg=tel('svg',{viewBox:`0 0 ${TW} ${TH}`,role:'group','aria-label':'The pipeline, including its two loops'});
+  const svg=tel('svg',{viewBox:`0 0 ${TW} ${TH}`,role:'group','aria-label':'The pipeline, including its feedback loops'});
   track.appendChild(svg);
   const defs=tel('defs',{},svg);
   const grad=tel('linearGradient',{id:'trgrad',x1:0,y1:0,x2:1,y2:0},defs);
@@ -538,19 +665,17 @@ const track=document.getElementById('track'), sd=document.getElementById('statio
   tel('path',{d:'M0,0.5 L7.5,4 L0,7.5 z',fill:'#55606c'},arr);
   const arrLit=tel('marker',{id:'trarr-lit',viewBox:'0 0 8 8',refX:7,refY:4,markerWidth:7,markerHeight:7,orient:'auto-start-reverse'},defs);
   tel('path',{d:'M0,0.5 L7.5,4 L0,7.5 z',fill:'#34e0d2'},arrLit);
-  // the main line, same gradient as before
   const mainG=tel('g',{class:'tredge'},svg);
   tel('path',{d:`M ${tx(0)} ${TY} L ${tx(STATIONS.length-1)} ${TY}`,stroke:'url(#trgrad)'},mainG);
-  // the two loops the straight line couldn't draw
   const loopEls=LOOPS.map((L,i)=>{
     const g=tel('g',{class:'tredge loop'},svg);
-    const x1=tx(L.from), x2=tx(L.to), dip=TY+64+i*30;
-    const p=tel('path',{d:`M ${x1} ${TY+12} C ${x1} ${dip}, ${x2} ${dip}, ${x2} ${TY+14}`,'marker-end':'url(#trarr)'},g);
+    const x1=tx(L.from), x2=tx(L.to), dip=TY+82+i*30;
+    const p=tel('path',{d:`M ${x1} ${TY+38} C ${x1} ${dip}, ${x2} ${dip}, ${x2} ${TY+40}`,'marker-end':'url(#trarr)'},g);
     const t=tel('text',{x:(x1+x2)/2,y:dip-7,'text-anchor':'middle'},g); t.textContent=L.label;
     return {L,g,p};
   });
   const stEls=STATIONS.map((s,i)=>{
-    const g=tel('g',{class:'station'+(i===0?' active':''),tabindex:0,role:'button','aria-label':s.lbl+' — '+s.cmd},svg);
+    const g=tel('g',{class:'station'+(i===0?' active':''),tabindex:0,role:'button','aria-label':s.lbl+' — '+(s.fullCmd||s.cmd)},svg);
     tel('circle',{class:'ring',cx:tx(i),cy:TY,r:11},g);
     tel('circle',{class:'core',cx:tx(i),cy:TY,r:5},g);
     const l=tel('text',{class:'lbl',x:tx(i),y:TY-24,'text-anchor':'middle'},g); l.textContent=s.lbl;
@@ -560,8 +685,6 @@ const track=document.getElementById('track'), sd=document.getElementById('statio
     return {s,g};
   });
 
-  // explicit Prev/Next — the dots are never the only way through, and the
-  // active station is always scrolled into view (mobile overflows horizontally)
   const reduced=matchMedia('(prefers-reduced-motion: reduce)').matches;
   const prevBtn=document.getElementById('trackPrev'), nextBtn=document.getElementById('trackNext'), posEl=document.getElementById('trackPos');
   let current=0;
@@ -587,41 +710,136 @@ const track=document.getElementById('track'), sd=document.getElementById('statio
   nextBtn.addEventListener('click',()=>{if(current<STATIONS.length-1)goTo(current+1);});
   goTo(0);
 })();
-function paintStation(i){const s=STATIONS[i];sd.innerHTML=`<div class="top"><span class="cmd">${s.cmd}</span><h3 style="margin:0">${s.lbl}</h3></div><ul>${s.pts.map(p=>`<li>${p}</li>`).join('')}</ul>`;}
+function paintStation(i){const s=STATIONS[i];sd.innerHTML=`<div class="top"><span class="cmd">${s.fullCmd||s.cmd}</span><h3 style="margin:0">${s.lbl}</h3></div><ul>${s.pts.map(p=>`<li>${p}</li>`).join('')}</ul>`;}
 paintStation(0);
+
+// ---- 4-stage graduation ladder ----
+const STAGES=[
+  {st:'Stage 1',time:'~3 min',c:'var(--cyan)',title:'Interactive Team (Start Here)',
+   sub:'11 core + 4 opt-in specialists, stack packs & SDD in your harness. Zero daemons.',
+   badges:[{t:'No monsters needed',k:'ok'},{t:'No always-on host',k:'ok'},{t:'No GitHub App',k:'ok'}],
+   pts:[
+     '<b>Who it is for:</b> Any developer or team with an active repository and Claude Code, GitHub Copilot CLI, or Google Antigravity.',
+     '<b>What you get immediately:</b> 11 core specialists (plus up to 4 opt-in personas), your chosen stack packs, Adaptive Spec-Driven Development (<code>/design-change</code>), isolated worktree implementation (<code>/implement-issue</code>), <code>/pre-push</code> verification, and 51 curated lessons injected at <code>SubagentStart</code>.',
+     '<b>Zero background infrastructure:</b> Everything runs interactively inside your existing coding harness session.'
+   ],
+   cmd:[
+     '# 1. Scaffold & install in your shell:',
+     'npm install -g engsys',
+     'engsys init',
+     'engsys install --into .',
+     'engsys verify --into .',
+     '',
+     '# 2. Inside Claude Code, Copilot CLI, or Antigravity:',
+     '/naturalize'
+   ]},
+  {st:'Stage 2',time:'~10 min',c:'var(--violet)',title:'Cross-Family Review & Memory',
+   sub:'Add external review models (Codex, Grok, DeepSeek) + Git-ref memory sync.',
+   badges:[{t:'No monsters needed',k:'ok'},{t:'Node >= 22.5 (SQLite FTS5)',k:'ok'},{t:'1+ external model key/CLI',k:'warn'}],
+   pts:[
+     '<b>When to graduate here:</b> When you want code written by one model family reviewed by a different model family before merge, and want PR review history indexed for future subagents.',
+     '<b>Cross-family review gate:</b> Dispatches machine-checked review packages to OpenAI Codex, xAI Grok Build, or DeepSeek with a hard rule: <code>reviewer family != author family</code>.',
+     '<b>Phase T2B Memory:</b> Syncs merged PRs, reviews, and issues into <code>refs/engsys/memory/events/v1</code> (secret-scanned, bot-verified) so subagents get ranked historical pointers alongside Class A lessons.'
+   ],
+   cmd:[
+     '# Enable your chosen external review/worker providers',
+     'engsys enable-providers codex,grok --into .',
+     'engsys verify --into .',
+     '',
+     '# Backfill 90 days of PR/issue memory into refs/engsys/memory/events/v1',
+     'ENGSYS_ROOT="$(node -e \'const fs=require("fs"),p=require("path");console.log(p.dirname(fs.realpathSync(process.argv[1])))\' "$(command -v engsys)")"',
+     'node "$ENGSYS_ROOT/core/scripts/memory-sync.mjs" --init --days 90',
+     'node "$ENGSYS_ROOT/core/scripts/memory-brief.mjs" --agent isabelle --role implementer --paths src/'
+   ]},
+  {st:'Stage 3',time:'~30 min',c:'var(--amber)',title:'Single-Host Autonomous Fleet',
+   sub:'Merge Monster + Maintenance Monster + Fleet Health Desk on 1 machine.',
+   badges:[{t:'Merge & Maintenance Monsters',k:'warn'},{t:'1 always-on macOS host (tmux + launchd)',k:'warn'},{t:'GitHub App bot identity',k:'warn'}],
+   pts:[
+     '<b>When to graduate here:</b> When PR volume and Dependabot/CodeQL churn make human merge-babysitting the bottleneck, and you have one always-on macOS workstation.',
+     '<b>Merge Monster &amp; Maintenance Monster:</b> One pilots <code>mm:ready &rarr; CI &rarr; merge</code>; the other triages security alerts and runs the <b>Fleet Health Desk</b> (probing upstream statuspages &amp; CI weather with hysteresis).',
+     '<b>Single-watcher efficiency &amp; deterministic recovery:</b> Quiet 30m windows cost 1 tool call. An interval-driven <code>launchd</code> supervisor relaunches crashed or context-rotated sessions with zero LLM in the restart path.'
+   ],
+   cmd:[
+     '# Scaffold an instance repo on your always-on host',
+     'engsys fleet init --into ~/git/acme-fleet \\',
+     '  --org acme --namespace acme \\',
+     '  --pin-repo owner/repo --pin-dir ~/git/repo \\',
+     '  --harness claude --identity github-app',
+     '',
+     '~/git/acme-fleet/scripts/fleet sync && ~/git/acme-fleet/scripts/fleet verify',
+     '~/git/acme-fleet/scripts/fleet launch && ~/git/acme-fleet/scripts/fleet install-jobs'
+   ]},
+  {st:'Stage 4',time:'~60 min',c:'var(--green)',title:'Multi-Repo / Multi-Host Federation',
+   sub:'Cross-host CAS batons, Resource Broker hardware pools & cryptographic trust.',
+   badges:[{t:'Multi-repo / Multi-host',k:'warn'},{t:'GitHub-ref CAS batons',k:'ok'},{t:'Cryptographic host verification',k:'ok'}],
+   pts:[
+     '<b>When to graduate here:</b> When multiple repositories or multiple machines share work, or when concurrent subagents contend for heavy local resources (simulators, Docker stacks, e2e suites).',
+     '<b>GitHub-ref CAS Batons &amp; Resource Broker:</b> Custom Git refs (<code>refs/engsys/leases/baton-*</code>) fence singleton monsters across hosts with automatic forfeiture on idle rotation; <code>/resource-broker</code> leases local hardware slots.',
+     '<b>Closed-loop host trust:</b> <code>fleet verify</code> checks singleton guard scripts, host <code>ENGSYS_DIR</code>, and settings against GitHub release trees, revoking batons immediately on any integrity mismatch.'
+   ],
+   cmd:[
+     '# Initialize with --fleet <id> and --resource-broker',
+     'engsys fleet init --into ~/git/acme-fleet \\',
+     '  --org acme --namespace acme \\',
+     '  --pin-repo owner/repo --pin-dir ~/git/repo \\',
+     '  --fleet west --resource-broker --identity github-app',
+     '',
+     '~/git/acme-fleet/scripts/fleet federation validate',
+     '~/git/acme-fleet/scripts/fleet status --federation'
+   ]}
+];
+const gradTabs=document.getElementById('gradTabs'), gradDetail=document.getElementById('gradDetail');
+gradTabs.innerHTML=STAGES.map((S,i)=>`<button class="gtab" style="--c:${S.c}" data-i="${i}">
+  <span class="st">${S.st}<span>${S.time}</span></span>
+  <b>${S.title}</b>
+  <span class="gp">${S.sub}</span>
+</button>`).join('');
+function pickStage(i){
+  [...gradTabs.children].forEach((b,j)=>b.classList.toggle('on',j===i));
+  const S=STAGES[i];
+  gradDetail.innerHTML=`<div>
+    <div class="kicker" style="color:${S.c}">${S.st} · ${S.time} setup</div>
+    <h3>${S.title}</h3>
+    <div class="grad-badges">${S.badges.map(b=>`<span class="gbadge ${b.k}">${b.t}</span>`).join('')}</div>
+    <ul>${S.pts.map(p=>`<li>${p}</li>`).join('')}</ul>
+  </div>
+  <div class="code"><div class="hd">${S.st} Commands</div>${S.cmd.map(l=>l.startsWith('#')?`<span class="cm">${l}</span>`:`<span class="s">${l}</span>`).join('<br>')}</div>`;
+}
+gradTabs.addEventListener('click',e=>{const b=e.target.closest('.gtab');if(b)pickStage(+b.dataset.i);});
+pickStage(0);
 
 // ---- runtime stack (fleet) ----
 const LAYERS=[
   {t:'Layer 5 · Operator',c:'var(--violet)',h:'You, on any device',sub:'only judgment escalates',
-   chips:['remote control','escalations','kill switches','risk sign-off'],
+   chips:['remote control','GitHub gate-check','kill switches','calm Slack alerts'],
    pts:['Every session runs with remote control: transcripts and permission prompts follow you to whatever device you\u2019re near.',
-        'Only judgment reaches you \u2014 a stale-but-alive session that needs a probe, a failed relaunch, a suppression that needs risk sign-off, a migration ack.',
-        'Kill switches stay yours: close a monster\u2019s ledger issue and it stands down. Automation never overrides an intentional stop.']},
-  {t:'Layer 4 · Judgment',c:'var(--cyan)',h:'The sessions',sub:'LLM where it earns its keep \u2014 context is cache',
-   chips:['merge orchestrator','security watchdog','build / investigate / design','subagents'],
-   pts:['A named, namespaced fleet on an always-on machine \u2014 monsters run unattended; interactive roles stay permission-gated.',
-        'Context is cache: sessions flush what they learn to durable state the moment they learn it, and rotate at pressure instead of enduring lossy compaction.',
-        'Heavy reading goes to dispatched subagents that return conclusions \u2014 a session\u2019s context holds decisions, never logs.']},
-  {t:'Layer 3 · Durable truth',c:'var(--amber)',h:'GitHub + state files',sub:'what survives any death',
-   chips:['ledgers + heartbeats','labels + PRs','state.md + journals','spawn registry'],
-   pts:['GitHub is the source of truth: pinned ledger issues with heartbeats, mm:*/mnt:* labels as live pipeline state, PRs and issues as the durable record.',
-        'Per-session files \u2014 the queue table, decision journals, the subagent spawn registry \u2014 are rewritten every wake.',
-        'Any session can die at any moment; a replacement reconciles from this layer in one startup cycle. Signals only decide when to reconcile, never what is true.']},
-  {t:'Layer 2 · Substrate',c:'var(--green)',h:'Deterministic scripts',sub:'no LLM in the guarantee path',
-   chips:['installer','watch scripts','liveness watchdog','fleet supervisor · launchd'],
-   pts:['The installer materializes the system faithfully; watch scripts turn GitHub churn into one-line events so sessions sleep free between them.',
-        'The liveness watchdog catches quietly-dead subagents (registry + transcript staleness); generations are fenced before any respawn.',
-        'The fleet supervisor relaunches a rotated or crashed monster under launchd \u2014 it keeps working when every session is dark. Models judge; scripts guarantee.']},
-  {t:'Layer 1 · Identity',c:'var(--dim)',h:'Persona \u00b7 packs \u00b7 project facts',sub:'the install-time split everything stands on',
+        'Only judgment reaches you \u2014 a stale-but-alive session, a 9-question /mnt-watch-add spec gate, a risk sign-off, or a confirmed upstream outage.',
+        'Kill switches stay yours: close a monster\u2019s ledger issue on GitHub and it stands down cleanly.']},
+  {t:'Layer 4 · Judgment',c:'var(--cyan)',h:'The sessions & monsters',sub:'single-watcher ticks \u2014 context is cache',
+   chips:['merge monster','maintenance monster','resource broker','build / investigate / design'],
+   pts:['Each monster runs one unified watcher (mm-watch, mnt-watch, broker-watch) and single-call ticks \u2014 a quiet 30-minute window costs 1 tool call.',
+        'Context is cache: sessions write overwrite-only state.md (\u2264 4 KB) every wake, and run mm-baton.sh rotate when idle context crosses 70% of the compaction window.',
+        'Weather hooks (weather-check.mjs) inject 1\u20132 lines of Fleet Health Desk guidance only when upstream dependencies are degraded or down.']},
+  {t:'Layer 3 · Durable truth',c:'var(--amber)',h:'GitHub refs, ledgers & memory',sub:'what survives any death',
+   chips:['CAS lease batons','fhd status board','refs/engsys/memory/*','state.md + journals'],
+   pts:['Singleton roles hold compare-and-swap batons on custom Git refs (refs/engsys/leases/baton-*) with session-bound keepalives.',
+        'Pinned ledger issues, the <code>&lt;!-- fleet-health --&gt;</code> weather board, and append-only memory refs (<code>refs/engsys/memory/events/v1</code>) live in GitHub.',
+        'Any session or host can die at any moment; a replacement reconciles from durable truth in one startup cycle.']},
+  {t:'Layer 2 · Substrate',c:'var(--green)',h:'Deterministic scripts & supervisor',sub:'no LLM in the guarantee path',
+   chips:['fleet supervisor','forfeited-on-rotation','auth-expiry hold','subagent liveness'],
+   pts:['The launchd supervisor checks panes every 5 minutes: if a rotated session sits idle holding its own baton, the supervisor forfeits the baton and relaunches immediately.',
+        'If harness OAuth login expires, the supervisor holds all relaunches and pages once instead of looping.',
+        'The singleton write guard blocks unfenced mutations, CronCreate, oversized state.md writes, and untrusted git/ssh paths.']},
+  {t:'Layer 1 · Cryptographic Trust',c:'var(--dim)',h:'Verified pins, host ENGSYS_DIR & settings',sub:'tamper-evident foundation',
    base:true,
-   pts:['The original three-layer split (above): who does the work, which stack they work on, and what\u2019s true about this repo \u2014 kept ruthlessly separate.',
-        'Laid down deterministically by the installer; personas never change per project, packs swap instead of prompts being rewritten.',
-        'Everything higher in the stack \u2014 sessions, monsters, supervision \u2014 assumes this layer is exactly what the lockfile says it is (engsys verify).']},
+   pts:['fleet verify compares singleton plugin scripts, host ENGSYS_DIR files, and .claude/settings.json against the pinned GitHub release tree.',
+        'checkSettings rejects disableAllHooks, rogue hooks, dangerous env overrides (PATH, NODE_OPTIONS), or unapproved plugins.',
+        'If integrity verification fails on a running singleton row, the supervisor immediately revokes its baton lease (--reason integrity-mismatch).']},
 ];
 const bandsEl=document.getElementById('stackBands'), stackDetail=document.getElementById('stackDetail');
 bandsEl.innerHTML=LAYERS.map((L,i)=>{
   const chips=L.base
-    ? '<span class="bchip c1">persona \u2014 who</span><span class="bchip c2">packs \u2014 which stack</span><span class="bchip c3">facts \u2014 this repo</span>'
+    ? '<span class="bchip c1">GitHub Trees SHA check</span><span class="bchip c2">settings &amp; plugin guard</span><span class="bchip c3">baton revocation on drift</span>'
     : L.chips.map(c=>`<span class="bchip">${c}</span>`).join('');
   return `<button class="band" style="--c:${L.c}" data-i="${i}" aria-pressed="false">
     <span class="bt">${L.t}</span>
@@ -642,7 +860,7 @@ pickLayer(1);
   const NS='http://www.w3.org/2000/svg';
   function fel(t,a,p){const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);(p)&&p.appendChild(e);return e;}
   const W=1100,H=330;
-  const svg=fel('svg',{viewBox:`0 0 ${W} ${H}`,role:'img','aria-label':'Merge Monster and Maintenance Monster compose as producer and consumer, with a deterministic fleet supervisor relaunching either one'},document.getElementById('fleetFlow'));
+  const svg=fel('svg',{viewBox:`0 0 ${W} ${H}`,role:'img','aria-label':'Merge Monster, Maintenance Monster, Fleet Health Desk, and the deterministic Fleet Supervisor'},document.getElementById('fleetFlow'));
   const defs=fel('defs',{},svg);
   [['fa-ship','#34e0d2'],['fa-sec','#f5b13d'],['fa-sup','#46d39a']].forEach(([id,c])=>{
     const m=fel('marker',{id,viewBox:'0 0 8 8',refX:7,refY:4,markerWidth:7,markerHeight:7,orient:'auto-start-reverse'},defs);
@@ -656,74 +874,55 @@ pickLayer(1);
     return {x,y,w,h};
   }
   function edge(d,cls,marker){fel('path',{class:'ed '+cls,d,'marker-end':`url(#${marker})`},svg);}
-  function elabel(x,y,cls,txt,anchor){const t=fel('text',{class:'el '+cls,x,y,'text-anchor':anchor||'middle'},svg);t.textContent=txt;}
+  function elabel(x,y,cls,txt,anchor){const t=fel('text',{class:'el '+cls,x,y,'text-anchor':'middle'},svg);if(anchor)t.setAttribute('text-anchor',anchor);t.textContent=txt;}
 
-  const A=node(28,58,196,54,'','Your PRs','finished \u00b7 draft \u00b7 mm:ready');
-  const B=node(420,44,260,72,'mm','\ud83e\uddcc Merge Monster','own ledger \u00b7 one mm:active');
-  const C=node(886,58,186,54,'','Merged','labels stripped \u00b7 cleaned');
-  const D=node(28,196,196,58,'','Security surface','Dependabot \u00b7 CodeQL \u00b7 scans');
-  const E=node(420,190,260,72,'mnt','\ud83d\udd27 Maintenance Monster','own ledger \u00b7 sole Dependabot owner');
-  const F=node(760,196,240,58,'sup','Fleet supervisor','launchd \u00b7 every 5 min \u00b7 no LLM');
+  const A=node(24,54,200,56,'','Your PRs','reviewed \u00b7 draft \u00b7 mm:ready');
+  const B=node(405,40,275,74,'mm','Merge Monster','CAS baton \u00b7 one mm:active \u00b7 preflight');
+  const C=node(874,54,196,56,'','Merged + Indexed','memory-sync \u00b7 labels stripped');
+  const D=node(24,194,200,60,'','Security & Weather','Dependabot \u00b7 CodeQL \u00b7 Statuspages');
+  const E=node(405,188,275,74,'mnt','Maintenance Monster + FHD','sole Dependabot owner \u00b7 weather board');
+  const F=node(774,194,296,60,'sup','Fleet Supervisor + Verify','launchd \u00b7 CAS forfeiture \u00b7 integrity check');
 
-  edge(`M ${A.x+A.w} 85 L ${B.x-8} 85`,'ship','fa-ship');            elabel(322,76,'ship','hand off');
-  edge(`M ${B.x+B.w} 85 L ${C.x-8} 85`,'ship','fa-ship');            elabel(783,76,'ship','ready \u2192 CI \u2192 merge');
-  edge(`M ${D.x+D.w} 225 L ${E.x-8} 225`,'sec','fa-sec');            elabel(322,216,'sec','watch \u2192 triage');
-  edge(`M ${E.x+E.w/2+40} ${E.y} C ${E.x+E.w/2+40} 150, ${B.x+B.w/2+40} 160, ${B.x+B.w/2+40} ${B.y+B.h+8}`,'sec','fa-sec');
-  elabel(608,158,'sec','triaged fix PRs \u00b7 mm:ready','start');
-  edge(`M ${F.x+60} ${F.y} C ${F.x+30} 140, ${B.x+B.w+40} 120, ${B.x+B.w+8} 96`,'sup','fa-sup');
-  edge(`M ${F.x-8} 225 L ${E.x+E.w+8} 225`,'sup','fa-sup');
-  elabel(F.x+120,F.y+80,'sup','relaunch on \u201crotation requested\u201d or crash');
-  elabel(553,306,'', 'both heartbeat their own pinned ledger issue \u2014 close it and that monster stands down');
+  edge(`M ${A.x+A.w} 82 L ${B.x-8} 82`,'ship','fa-ship');            elabel(314,73,'ship','hand off');
+  edge(`M ${B.x+B.w} 82 L ${C.x-8} 82`,'ship','fa-ship');            elabel(776,73,'ship','ready \u2192 CI \u2192 merge');
+  edge(`M ${D.x+D.w} 224 L ${E.x-8} 224`,'sec','fa-sec');           elabel(314,215,'sec','watch \u2192 triage & probe');
+  edge(`M ${E.x+E.w/2+40} ${E.y} C ${E.x+E.w/2+40} 148, ${B.x+B.w/2+40} 158, ${B.x+B.w/2+40} ${B.y+B.h+8}`,'sec','fa-sec');
+  elabel(598,156,'sec','verified fix PRs + weather advice','start');
+  edge(`M ${F.x+60} ${F.y} C ${F.x+30} 140, ${B.x+B.w+40} 120, ${B.x+B.w+8} 94`,'sup','fa-sup');
+  edge(`M ${F.x-8} 224 L ${E.x+E.w+8} 224`,'sup','fa-sup');
+  elabel(F.x+145,F.y+80,'sup','relaunch on rotation / crash \u00b7 revoke baton on drift');
+  elabel(550,308,'', 'both hold GitHub-ref CAS batons and heartbeat pinned ledger issues \u2014 close a ledger issue to stand that monster down');
   svg.lastChild.setAttribute('fill','var(--dim)');
 })();
-
-// packs
-const PACKS=[
-  {h:'cloud',v:'<b>aws</b> · <b>azure</b> · <b>gcp</b> · <b>cloudflare</b>'},
-  {h:'iac',v:'<b>terraform</b> · <b>bicep</b> · <b>cdk</b>'},
-  {h:'lang',v:'<b>typescript</b> · <b>python</b> · <b>swift</b> · <b>kotlin</b> · <b>shell</b>'},
-  {h:'platform',v:'<b>web</b> · <b>ios</b> · <b>android</b>'},
-  {h:'db',v:'<b>prisma</b> · <b>mongo</b>'},
-  {h:'tooling',v:'<b>github</b> · <b>linear</b> issue trackers'},
-];
-document.getElementById('packGrid').innerHTML=PACKS.map(p=>`<div class="pk"><div class="h">${p.h}/</div><div class="v">${p.v}</div></div>`).join('');
 
 // installer code blocks
 document.getElementById('cfgCode').innerHTML=
 `<div class="hd">engsys.config.yaml</div>`+
-[`<span class="k">stack</span>:`,
+[`<span class="k">harness</span>: <span class="a">all</span> <span class="cm"># claude | copilot | antigravity | all</span>`,
+ `<span class="k">stack</span>:`,
  `  <span class="k">cloud</span>: <span class="a">aws</span>`,
+ `  <span class="k">iac</span>: <span class="a">terraform</span>`,
  `  <span class="k">lang</span>: [<span class="a">typescript</span>]`,
  `  <span class="k">platform</span>: [<span class="a">web</span>]`,
- `<span class="k">issue_tracker</span>: <span class="a">linear</span>`,
- `<span class="k">agents</span>: { <span class="k">core</span>: <span class="a">all</span>, <span class="k">extra</span>: [<span class="a">gary</span>] }`,
- `<span class="cm"># PRs/CI stay on GitHub regardless</span>`].join('<br>');
+ `<span class="k">issue_tracker</span>: <span class="a">github</span>`,
+ `<span class="k">agents</span>: { <span class="k">core</span>: <span class="a">all</span>, <span class="k">extra</span>: [<span class="a">deandre</span>, <span class="a">sandy</span>] }`,
+ `<span class="k">lessons</span>: { <span class="k">seed</span>: <span class="a">true</span> }`].join('<br>');
 document.getElementById('treeCode').innerHTML=
 `<div class="hd">$ engsys install --into .</div>`+
-[`<span class="s">.claude/</span>`,
- `  <span class="s">agents/</span>      <span class="cm"># personas (untouched per project)</span>`,
- `  <span class="s">commands/</span>    <span class="cm"># the workflow</span>`,
- `  <span class="s">skills/</span>      <span class="cm"># core + the aws/ts/web/linear packs</span>`,
- `  <span class="s">hooks/</span>       <span class="cm"># generated from your config</span>`,
- `  <span class="s">settings.json</span> <span class="cm"># merged permissions + MCP</span>`,
- `<span class="s">CLAUDE.md</span>       <span class="cm"># + project-facts region (you fill)</span>`,
- `<span class="s">.claude/engsys.lock</span> <span class="cm"># verify drift anytime</span>`].join('<br>');
-
-// lessons loop
-document.getElementById('lessonLoop').innerHTML=[
-  {b:'Mine',p:'Closeout pulls the review findings from every PR in the project.'},
-  {b:'Generalize',p:'Recurring, stack-independent ones become a curated library lesson.'},
-  {b:'Seed',p:'The installer drops the library into every new project on day one.'},
-  {b:'Compound',p:'Each project starts smarter than the last. The system doesn’t fork.'},
-].map(x=>`<div class="tk"><b>${x.b}</b><p>${x.p}</p></div>`).join('');
+[`<span class="s">.claude/</span> <span class="cm">&amp;</span> <span class="s">CLAUDE.md</span>          <span class="cm"># Claude Code surface</span>`,
+ `<span class="s">.github/agents/</span> <span class="cm">&amp;</span> <span class="s">hooks/</span>     <span class="cm"># GitHub Copilot CLI surface</span>`,
+ `<span class="s">.agents/</span> <span class="cm">&amp;</span> <span class="s">GEMINI.md</span>          <span class="cm"># Google Antigravity surface</span>`,
+ `<span class="s">docs/agent-lessons/library/</span> <span class="cm"># 51 frontmatter-validated lessons</span>`,
+ `<span class="s">docs/project-brief-overlay.md</span> <span class="cm"># house invariants &amp; verify cmds</span>`,
+ `<span class="s">.claude/engsys.lock</span>         <span class="cm"># cryptographic drift lockfile</span>`].join('<br>');
 
 // steal
 document.getElementById('take').innerHTML=[
-  {b:'Separate the stable from the swappable',p:'Keep identity in one place and tech in another, and adapting stops meaning rewriting.'},
-  {b:'Make the boring part deterministic',p:'If a step can be skipped, don’t ask a model to do it — let a script. Save the model for judgment.'},
-  {b:'Compose, don’t fork',p:'Mixed stacks should add up, not branch off. Detachable packs beat copy-paste every time.'},
-  {b:'Close the loop',p:'Mine what you learned, generalize it, seed it forward. A system that doesn’t compound is just a snapshot.'},
-  {b:'No LLM in the guarantee path',p:'Watchdogs, supervisors, and installers are scripts under cron. Models judge; scripts guarantee. A dead fleet still restarts.'},
+  {b:'Separate Model, Harness, and Meta-Harness',p:'Treat models as replaceable brains and coding harnesses as workbenches. Keep your org chart, stack packs, and memory in the meta-harness above both.'},
+  {b:'Swap capability packs, never rewrite personas',p:'Melvin is the same cloud architect on AWS, Azure, GCP, and Cloudflare. Moving across stacks is a 1-line YAML change.'},
+  {b:'Make plumbing deterministic, save models for judgment',p:'An installer script creates folders and merges settings; launchd restarts dead sessions. Models only run where judgment is required.'},
+  {b:'Separate Class A instructions from Class B evidence',p:'Never inject raw GitHub comments into a subagent system prompt. Load lessons from reviewed git refs and push only scored pointers to historical evidence.'},
+  {b:'Enforce cross-family review & cryptographic trust',p:'Never let a model grade its own homework, and verify singleton guard scripts against GitHub release trees on every supervisor tick.'},
 ].map(x=>`<div class="tk"><b>${x.b}</b><p>${x.p}</p></div>`).join('');
 
 // scroll progress + copy

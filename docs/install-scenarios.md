@@ -1,5 +1,7 @@
 # Install scenarios
 
+> For the complete step-by-step deployment playbook (Stages 1–4, for both humans and LLM coding harnesses), see [`DEPLOY.md`](../DEPLOY.md).
+
 The installer adopts whatever a project already has rather than overwriting it.
 Same split as everywhere: **the installer does deterministic plumbing; the model
 (`/naturalize`) does the semantic merge.**
