@@ -182,7 +182,7 @@ engsys verify --into .
 
 ### Step 2.3 — Initialize the Agentic Memory Engine
 
-Run from `<REPO_DIR>` (requires Node.js `>= 22.5` for `node:sqlite`). Resolve `ENGSYS_ROOT` via Node's `fs.realpathSync` so it resolves npm global symlinks cleanly on both macOS and Linux:
+Run from `<REPO_DIR>` (requires Node.js `>= 22.5` for `node:sqlite`). Use the trusted `ENGSYS_ROOT` package checkout (or `.claude/scripts` / `.agents/scripts` in a verified copy-mode install after `engsys verify`):
 
 ```bash
 cd <REPO_DIR>
@@ -199,7 +199,7 @@ ENGSYS_ROOT="${ENGSYS_ROOT:-$(node -e 'const fs=require("fs"),path=require("path
    ```
 3. Smoke-test a subagent memory brief:
    ```bash
-   node "$ENGSYS_ROOT/core/scripts/memory-brief.mjs" --agent isabelle --role implementer --paths README.md
+   node "$ENGSYS_ROOT/core/scripts/memory-brief.mjs" --agent-type isabelle --paths README.md
    ```
 - **Pass criteria:** Outputs a `< 2048`-byte brief containing mandatory `security: true` lessons plus path-matched lessons/pointers.
 
