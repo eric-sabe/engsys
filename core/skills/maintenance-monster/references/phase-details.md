@@ -612,17 +612,20 @@ final heartbeat with status "session end", `mnt-baton.sh release …
 
 ## Fleet Health Desk (FHD)
 
-When `fleet-health.yml` (or `fhd_config` / `fhd_board_issue` in `maintenance-monster.yml`) is configured, Maintenance Monster owns the **Fleet Health Desk** (`<engsys-root>/fleet/health.sh` / `fleet health`) while holding the `maintain` baton:
+When a trusted `fleet-health.yml` exists, Maintenance Monster owns the **Fleet Health Desk** (`<engsys-root>/fleet/health.sh` / `fleet health`) while holding the `maintain` baton:
+
+The registry is loaded only from the fleet instance repo or `FLEET_STATE` (both set by the launcher), never from the project repo or `maintenance-monster.yml` (`fhd_config` is ignored). No trusted registry means no probes and no desk. `fhd_board_issue` still names the board to watch, but a fetched board is accepted only when its last editor is in the registry's `board.trusted_editor_ids`.
 
 1. **Probe & Hysteresis Engine (`mnt-watch.sh` -> `fleet health tick`)**:
    - Evaluates watched services (`statuspage`, `observed`, `http-health`, `synthetic-command`, `fleet-report-only`) with asymmetric hysteresis (`trip_fails` consecutive failures to trip `degraded`/`down`; `recover_clean` consecutive clean probes + statuspage clear to recover to `healthy`).
    - Enforces dependency DAG (`depends_on`) so an upstream outage (`github-api`) sets `suppressed_by` on downstream services (`github-actions`) and suppresses duplicate alarms.
-   - Splits `synthetic-command` failures from host-local missing auth/context (`auth_check`), surfacing local config issues without tripping a false vendor-wide outage.
+   - `synthetic-command` probes run a fixed check kind (`probe.check` + typed `probe.params`, `core/fleet/health/probe-kinds.mjs`) as an argv array with a scrubbed env, never a shell command; failures are split from host-local missing auth/context (`auth_check`), surfacing local config issues without tripping a false vendor-wide outage.
    - Treats broken probes (`statuspage` non-200 or malformed JSON) as `unknown`, preserving `last_known_state` rather than silently reporting `healthy`.
 2. **Status Board & Broadcast (`board.mjs` / `weather-check.mjs`)**:
    - Renders `<!-- fleet-health --> ... <!-- /fleet-health -->` (including machine-readable `<!-- fleet-health-json: {...} -->` and dual UTC + operator-time timestamps) onto the status board issue via fenced `mnt-act.sh guard`.
    - Fires `fleet notify --incident fhd-<service>` only on confirmed, non-suppressed transitions (`--level action` when `down` or `hold_merges`, `--level info` when `degraded`, and `--resolve` on recovery).
-   - Feeds `mm-watch.sh` and `mnt-watch.sh` (`FHD_CHANGE <service> <state> — <advice>`) and the `SessionStart` / `UserPromptSubmit` hook (`weather-check.mjs`).
+   - Feeds `mm-watch.sh` and `mnt-watch.sh` (`FHD_CHANGE <service> <state>`, plus `— hold merges, pause claims` when set) and the `SessionStart` / `UserPromptSubmit` hook (`weather-check.mjs`, which reads `<FLEET_STATE>/fhd/board-cache.json` and injects only service ids, states and those two gates, never advice text).
+   - `fleet health invoke` runs a fixed invoke kind and always needs an approved operator gate (`--approved-gate`); a registry `requires_gate: false` can't remove it.
 3. **Structured Friction Reporting & Correlation (`incidents.mjs`)**:
    - Sessions report repeated dependency friction via `fleet health report --service <id> --symptom "<text>"` (sanitized with `defang`; never accepts `PUSH_OVERRIDE`).
    - Correlator collapses `N` reports within the window into one incident, triggers a rate-limited verification probe, and classifies `vendor-wide` (`FHD_REPORT_CORRELATED`) vs `session-local` (`FHD_LOCAL_GUIDANCE`).
