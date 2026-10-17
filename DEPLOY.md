@@ -239,6 +239,16 @@ Graduate to **Stage 3** when you have an always-on macOS host (e.g., a Mac mini 
 - **Maintenance Monster (`/maintenance-monster`)**: Owns the security and dependency surface (Dependabot, CodeQL, secret/image scanning) and runs the **Fleet Health Desk** (`fleet health`).
 - **Deterministic Fleet Supervisor (`fleet supervise`)**: Runs under `launchd` every 5 minutes with **zero LLM in the restart path** — relaunches crashed or context-rotated sessions, enforces singleton git-ref batons, and holds relaunches if harness auth expires.
 
+### Upgrade notes (v2.0.1): launcher model policy
+
+Check hand-edited rosters before you upgrade. `launch-agent-sessions.sh` now refuses some lines that launched before:
+
+- **On Claude:** a maintenance-monster line, or any line whose env file is the security lane (`security.env` or `nyx.env`, any case), launches only when **every** `--model` on it is `claude-opus-4-8`. A line with `--model opus`, the bare `security` alias, a second `--model`, or no `--model` at all no longer launches. Set `--model __MAINTAIN_MODEL__` / `claude-opus-4-8` on those lines. The `fleet init` scaffold already does this.
+- **On a non-Claude harness** (`HARNESS=copilot` or `antigravity`): merge and maintenance monsters, any session the host classifies as a monster or a supervised session (supervisor.conf), and security-tier lines are refused. The fleet's monsters run only on Claude.
+- A refused line is skipped with a `SKIPPED:` error. The rest of the roster still launches, and the launcher exits non-zero.
+- The Antigravity remote-control daemon is no longer started automatically. Set `AGY_REMOTE_CONTROL_AUTOSTART=1` to opt in.
+- `engsys.config` `models.security`, or a `models` key naming nyx or another `security: true` agent, set to anything but `claude-opus-4-8` now fails install.
+
 ### Step 3.1 — Host Prerequisites
 
 Verify the always-on host has the required binaries and Node.js `>= 22.5`:

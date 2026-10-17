@@ -335,6 +335,11 @@ prompt_role() {
   esac
   return 0
 }
+# 0 when a prompt runs the resource broker (the third monster), with the same tolerance as prompt_role.
+prompt_is_broker() {
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr '_ ' '--')" in *resource-broker*) return 0 ;; esac
+  return 1
+}
 # 0 when the host (fleet launch) classified this session as a monster or a supervised session.
 is_supervised_session() {
   case " ${ENGSYS_SUPERVISED_SESSIONS:-} " in *" $1 "*) return 0 ;; esac
@@ -378,6 +383,10 @@ launch_one() {
   if [ "$HARNESS" != "claude" ]; then
     if [ -n "$role" ]; then
       echo "error: refusing to launch '$name' (role=$role) on HARNESS=$HARNESS: merge and maintenance monsters run only on HARNESS=claude" >&2
+      return 1
+    fi
+    if prompt_is_broker "$prompt"; then
+      echo "error: refusing to launch '$name' (resource broker) on HARNESS=$HARNESS: monsters run only on HARNESS=claude" >&2
       return 1
     fi
     if is_supervised_session "$name"; then

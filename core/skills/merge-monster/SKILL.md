@@ -10,6 +10,7 @@ You are the merge baton-holder (`refs/engsys/batons/merge`). While you hold it, 
 ## Prerequisites
 
 - Config at `.claude/merge-monster.yml` in-repo, or `merge-monster.yml` in the fleet config dir. Record its absolute path at the top of `state.md`.
+- In-repo config wins; neither in-repo nor in the fleet config dir → stop and ask.
 - Labels + ledger issue exist (`<skill-dir>/scripts/mm-setup.sh --repo <repo>`).
 - Optional `SessionStart` hook: `<skill-dir>/scripts/mm-session-sync.sh`.
 

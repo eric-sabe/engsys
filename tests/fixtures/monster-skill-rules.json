@@ -62,7 +62,8 @@
       "Escalate a `CONFIG_WARNING` line once",
       "A result with `wasExpired: true` means you overran the TTL",
       "Nudge only on those transitions",
-      "Never append to `state.md` with Bash"
+      "Never append to `state.md` with Bash",
+      "neither in-repo nor in the fleet config dir → stop and ask"
     ],
     "moved_to_references_ok": [
       {
@@ -187,6 +188,11 @@
       },
       {
         "unit": "both hold only when stale_lock_minutes ≥ 1.75 × heartbeat_minutes + 13",
+        "section": "Session startup",
+        "reason": "Startup mechanics and keepalive/pulse invariants; SKILL.md § Session startup keeps every decision (standby, not_home, re-arm, tick results), references keep the explanation."
+      },
+      {
+        "unit": "given stale_lock_minutes, the bus clamps pulse_max into that window and says so in a config_warning line; escalate a config_warning once (the config needs fixing)",
         "section": "Session startup",
         "reason": "Startup mechanics and keepalive/pulse invariants; SKILL.md § Session startup keeps every decision (standby, not_home, re-arm, tick results), references keep the explanation."
       },
@@ -568,6 +574,11 @@
         "reason": "Lease internals, guard-hook allowlist and refusal-code table; SKILL.md § The baton keeps fence-before-every-act, do-not-act-on-refusal, lost-baton, release/wasExpired and token rules."
       },
       {
+        "unit": "the fleet supervisor relaunches the role where its fleet is home once the lease is free: within a tick when the lease ran out still naming this session (an idle session + a forfeited baton, engsys#87), else on staleness",
+        "section": "The baton (lease, fence, handover)",
+        "reason": "Lease internals, guard-hook allowlist and refusal-code table; SKILL.md § The baton keeps fence-before-every-act, do-not-act-on-refusal, lost-baton, release/wasExpired and token rules."
+      },
+      {
         "unit": "then: start no new pr; finish the mm:active pr or park it (never between \"marked ready\" and \"merge decision\" without a comment, never mid-merge); post a handover digest on the ledger (queue, parked prs, open gates, session: <fleet_id>:<session> of the new home if known); final heartbeat with status handover to <fleet> (the word handover is what the new home's supervisor keys on); release --reason handover; stop as in § lost baton, without the alert",
         "section": "The baton (lease, fence, handover)",
         "reason": "Lease internals, guard-hook allowlist and refusal-code table; SKILL.md § The baton keeps fence-before-every-act, do-not-act-on-refusal, lost-baton, release/wasExpired and token rules."
@@ -803,12 +814,27 @@
         "reason": "Reworded in SKILL.md § Escalation (label, diagnosis, fleet notify incident, never silent, never stall, resolve)."
       },
       {
+        "unit": "resolve the incident (fleet notify ... --resolve) once the pr merges, bounces back to the author, or the escalation otherwise clears",
+        "section": "Escalation",
+        "reason": "Reworded in SKILL.md § Escalation (label, diagnosis, fleet notify incident, never silent, never stall, resolve)."
+      },
+      {
         "unit": "every act that needs a human's say-so is a gate, and a gate opens only when gate-check verifies a qualifying operator approved it on github",
         "section": "Operator gates (approval happens in GitHub)",
         "reason": "Reworded in SKILL.md § Operator gates (request/nudge/verify/record, exit codes 0/3/4/1, self_is_operator, no operators → no gate)."
       },
       {
         "unit": "| merge a never-auto dependabot pr | merge | the pr | review approve on the head |",
+        "section": "Operator gates (approval happens in GitHub)",
+        "reason": "Reworded in SKILL.md § Operator gates (request/nudge/verify/record, exit codes 0/3/4/1, self_is_operator, no operators → no gate)."
+      },
+      {
+        "unit": "request (once per act and head sha), as its own bash call, fenced",
+        "section": "Operator gates (approval happens in GitHub)",
+        "reason": "Reworded in SKILL.md § Operator gates (request/nudge/verify/record, exit codes 0/3/4/1, self_is_operator, no operators → no gate)."
+      },
+      {
+        "unit": "nudge the operator once, with the request url",
         "section": "Operator gates (approval happens in GitHub)",
         "reason": "Reworded in SKILL.md § Operator gates (request/nudge/verify/record, exit codes 0/3/4/1, self_is_operator, no operators → no gate)."
       },
@@ -1134,7 +1160,11 @@
       "Escalate a `CONFIG_WARNING` line once",
       "`wasExpired: true`",
       "Nudge only on transitions",
-      "never append to it with Bash"
+      "never append to it with Bash",
+      "neither in-repo nor in the fleet config dir → stop and ask",
+      "**Labels, in every phase:** never apply a `mnt:*` or `mm:*` label to a PR you didn't open",
+      "never pass another state dir, and never `--no-baton`",
+      "**Escalate once** per policy"
     ],
     "moved_to_references_ok": [
       {
@@ -1214,6 +1244,11 @@
       },
       {
         "unit": "exit 1 with \"single-fleet mode\" means there is no inbox: go on",
+        "section": "Session startup",
+        "reason": "Startup mechanics; SKILL.md § Session startup keeps every decision (standby, re-arm, tick results, slow-surface sweep, escalate credential expiry)."
+      },
+      {
+        "unit": "with fp_policies: configured, run mnt-fp-candidates.sh … --state-dir <state_dir> --all once (§ standing false-positive policies, the latch)",
         "section": "Session startup",
         "reason": "Startup mechanics; SKILL.md § Session startup keeps every decision (standby, re-arm, tick results, slow-surface sweep, escalate credential expiry)."
       },
@@ -1460,6 +1495,11 @@
         "reason": "Fence/act table detail; SKILL.md § The baton keeps the act table, fix agents never push, handover, release/wasExpired and token rules."
       },
       {
+        "unit": "later pushes, once the pr exists",
+        "section": "The baton (lease, fence, handover)",
+        "reason": "Fence/act table detail; SKILL.md § The baton keeps the act table, fix agents never push, handover, release/wasExpired and token rules."
+      },
+      {
         "unit": "a fix agent commits in its worktree and hands the push back; it never pushes |",
         "section": "The baton (lease, fence, handover)",
         "reason": "Fence/act table detail; SKILL.md § The baton keeps the act table, fix agents never push, handover, release/wasExpired and token rules."
@@ -1490,6 +1530,11 @@
         "reason": "Fence/act table detail; SKILL.md § The baton keeps the act table, fix agents never push, handover, release/wasExpired and token rules."
       },
       {
+        "unit": "the fleet supervisor relaunches the role where it is home once the lease is free: within a tick when the lease ran out still naming this session (engsys#87)",
+        "section": "The baton (lease, fence, handover)",
+        "reason": "Fence/act table detail; SKILL.md § The baton keeps the act table, fix agents never push, handover, release/wasExpired and token rules."
+      },
+      {
         "unit": "release (mnt-baton.sh release … --reason rotation|exit|handover) after the final heartbeat on rotation, clean exit and handover",
         "section": "The baton (lease, fence, handover)",
         "reason": "Fence/act table detail; SKILL.md § The baton keeps the act table, fix agents never push, handover, release/wasExpired and token rules."
@@ -1511,6 +1556,11 @@
       },
       {
         "unit": "anything that does not clearly match a class escalates — it never falls through to auto-fix; unknown_disposition in the config is escalate for exactly this reason",
+        "section": "Triage + disposition",
+        "reason": "Class definitions; SKILL.md loop step 3 keeps the four classes, unclear → escalate, and suppression only behind a verified gate."
+      },
+      {
+        "unit": "auto-fix (drive without a human, once phase 2 is armed): patch/minor dev-dep bumps, the npm patch-group, scoped pnpm.overrides for transitive cves (selector and target bounded to the vulnerable range), pure ci-action majors, lockfile-noise cleanup",
         "section": "Triage + disposition",
         "reason": "Class definitions; SKILL.md loop step 3 keeps the four classes, unclear → escalate, and suppression only behind a verified gate."
       },
@@ -1561,6 +1611,11 @@
       },
       {
         "unit": "judge each line the run it first appears and journal the judgment; that journal line, not a re-print, is the record",
+        "section": "Standing false-positive policies",
+        "reason": "fp_policies mechanics; SKILL.md § Guardrails keeps unsure → do not dismiss, tripwire_failed → no dismissals, never edit a policy; hard rules keep dismiss-only-through-policy."
+      },
+      {
+        "unit": "--all prints every line once more (to re-judge)",
         "section": "Standing false-positive policies",
         "reason": "fp_policies mechanics; SKILL.md § Guardrails keeps unsure → do not dismiss, tripwire_failed → no dismissals, never edit a policy; hard rules keep dismiss-only-through-policy."
       },
@@ -1685,12 +1740,12 @@
         "reason": "Reworded in SKILL.md § Guardrails and hard rules."
       },
       {
-        "unit": "never apply a mnt: or mm: label to a pr you didn't open, merge anything, or run a migration/deploy — those stay merge monster's and the operator's respectively",
-        "section": "Guardrails",
-        "reason": "Reworded in SKILL.md § Guardrails and hard rules."
+        "unit": "| hand off a never-auto dependency update | dependency | the pr | /approve <gate-id> |",
+        "section": "Operator gates (approval happens in GitHub)",
+        "reason": "Reworded in SKILL.md § Operator gates."
       },
       {
-        "unit": "| hand off a never-auto dependency update | dependency | the pr | /approve <gate-id> |",
+        "unit": "request once per act, nudge once with the link (\"approve on github\"), and verify on each wake and tick, as its own bash call, with every pin",
         "section": "Operator gates (approval happens in GitHub)",
         "reason": "Reworded in SKILL.md § Operator gates."
       },

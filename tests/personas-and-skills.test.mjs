@@ -72,8 +72,8 @@ describe('Personas & Skills Contract Suite (CT-PS-01..CT-PS-09)', () => {
     assert.equal(personaFiles.length, 15, 'Expected exactly 15 persona markdown files');
     const allSkills = collectAllSkillNames();
     // Read-only design/critic personas per #150 (NA-PS-1). nyx and marcelo are NOT read-only: nyx runs
-    // repros and posts review comments through Bash `gh` (an explicit list without send-capable MCP
-    // tools), marcelo runs suites and keeps the full v1.16.0 tool set (no `tools:` line).
+    // repros and posts review comments through Bash `gh`, marcelo runs suites. Both carry an explicit
+    // allowlist with Bash and without MCP or other send-capable tools.
     const readOnlyCritics = new Set([
       'gary',
       'melvin',
@@ -84,7 +84,7 @@ describe('Personas & Skills Contract Suite (CT-PS-01..CT-PS-09)', () => {
       'deandre',
       'steve',
     ]);
-    const fullToolPersonas = new Set(['marcelo']);
+    const fullToolPersonas = new Set();
 
     for (const file of personaFiles) {
       const stem = path.basename(file, '.md');
@@ -116,6 +116,10 @@ describe('Personas & Skills Contract Suite (CT-PS-01..CT-PS-09)', () => {
       if (stem === 'steve') {
         assert.equal(frontmatter.model, 'haiku', 'steve.md must use model: haiku');
         assert.deepEqual(frontmatter.tools, ['Read'], 'steve.md must only have Read tool');
+      }
+
+      if (stem === 'marcelo') {
+        assert.deepEqual(frontmatter.tools, ['Read', 'Grep', 'Glob', 'Bash', 'Edit', 'Write'], 'marcelo tool set');
       }
 
       if (stem === 'nyx') {

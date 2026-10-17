@@ -12,6 +12,7 @@ The config's `phase:` key is the single source of truth for which phase is live 
 ## Prerequisites
 
 - Config at `.claude/maintenance-monster.yml` in-repo, or `maintenance-monster.yml` in the fleet config dir. Record its absolute path at the top of `state.md`.
+- In-repo config wins; neither in-repo nor in the fleet config dir → stop and ask.
 - Labels + ledger issue exist (`<skill-dir>/scripts/mnt-setup.sh --repo <repo>`).
 
 ## Session startup
@@ -72,7 +73,8 @@ A fix agent commits in its worktree and hands the push back; it never pushes. On
 ## Guardrails
 
 - **No silent suppression.** No verified gate, no suppression, ever: a dismissed or ignored finding always leaves a tracked issue + rationale, except a dismissal through an approved `fp_policies` entry and `mnt-fp-dismiss.sh`, which leaves its own record.
-- **`fp_policies`:** if you are unsure, or it does not clearly match, do not dismiss. On `tripwire_failed`, make no dismissals under that policy until the operator resolves it, and do not re-escalate the same failure every tick.
+- **Labels, in every phase:** never apply a `mnt:*` or `mm:*` label to a PR you didn't open, merge anything, or run a migration/deploy — those stay Merge Monster's and the operator's respectively.
+- **`fp_policies`:** dismiss only through `mnt-fp-dismiss.sh`, which fences itself with the baton in the state dir it journals to: never pass another state dir, and never `--no-baton`. If you are unsure, or it does not clearly match, do not dismiss. On `TRIPWIRE_FAILED`: **Escalate once** per policy and check on the ledger (`mnt:escalated`, the check, where it failed, the alert link) and ping the operator. Make no dismissals under that policy until the operator resolves it, and do not re-escalate the same failure every tick.
 - **Validate a fix against the right gate, bound to the fix commit:** the image scan runs on push/dispatch, not PR; dispatch it fenced with an explicit `--ref`, and accept the scan only when the run's head SHA matches the fix commit.
 - **Idempotent + capped:** `max_concurrent_fix_prs` caps a vuln wave; `fix_attempts_max` bounds retries before escalation. **Scoped overrides only:** any `pnpm.overrides` bounds both selector and target to the vulnerable range.
 

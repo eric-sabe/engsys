@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { normalize, ruleUnits } from './lib/rule-units.mjs';
+import { allSentences, normalize, ruleUnits } from './lib/rule-units.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const FIXTURE = JSON.parse(fs.readFileSync(path.join(ROOT, 'tests/fixtures/monster-skill-rules.json'), 'utf8'));
@@ -66,6 +66,18 @@ describe('monster SKILL.md carries every rule (no rule lives only in references/
         assert.ok(base.has(u), `fixture lists a unit that is not in the v1.16.0 baseline: ${u}`);
         assert.ok(!body.includes(u), `fixture lists a unit that SKILL.md carries again; drop it from the list: ${u}`);
       }
+    });
+
+    test(`${skill}: every v1.16.0 sentence with once/only/exactly/at most is a checked rule unit`, () => {
+      const text = read(spec.baseline);
+      const units = new Set(ruleUnits(text));
+      const quantified = allSentences(text).filter((x) => x.length >= 12 && /\b(once|only|exactly|at most)\b/.test(x));
+      assert.ok(quantified.length > 20, 'the baseline has quantified rules');
+      assert.deepEqual(quantified.filter((x) => !units.has(x)), [], 'quantified sentences the extractor drops');
+      const all = [...units].join('\n');
+      assert.match(all, /escalate[^\n]*once/, 'an "escalate … once" rule is checked');
+      if (skill === 'merge-monster') assert.match(all, /nudge[^\n]*once/, 'a "nudge … once" rule is checked');
+      if (skill === 'maintenance-monster') assert.match(all, /escalate once per policy/, 'the TRIPWIRE_FAILED once-per-policy rule is checked');
     });
 
     test(`${skill}: dropping a carried rule from SKILL.md is caught (negative control)`, () => {

@@ -234,20 +234,25 @@ describe('M2: persona tool sets', () => {
     }
   });
 
-  test('marcelo has Bash', () => {
+  test('marcelo has Bash, and no send-capable MCP tools (explicit allowlist)', () => {
     const tools = toolsOf(MARCELO);
-    assert.ok(tools === null || tools.includes('Bash'), `marcelo tools: ${tools}`);
+    assert.deepEqual(tools, ['Read', 'Grep', 'Glob', 'Bash', 'Edit', 'Write']);
+    assert.ok(!tools.some((t) => t.startsWith('mcp__')), 'no MCP tools');
   });
 
   test('a read-only critic still lacks Bash (positive control for the parser)', () => {
     assert.deepEqual(toolsOf(MELVIN), ['Read', 'Grep', 'Glob', 'Write']);
   });
 
-  test('rendering keeps the full tool set: Claude/Copilot add no tools line; Antigravity enables write tools', () => {
+  test('rendering keeps the tool sets: Claude/Copilot keep the allowlist; Antigravity write flag follows Bash/Edit', () => {
     for (const h of ['claude', 'copilot']) {
-      assert.equal(toolsOf(render.renderAgentForHarness(MARCELO, h, { models: { opus: 'm' } })), null, h);
+      assert.deepEqual(toolsOf(render.renderAgentForHarness(MARCELO, h, { models: { opus: 'm' } })), toolsOf(MARCELO), h);
     }
-    assert.match(render.renderAntigravityAgent(MARCELO, {}), /^enable_write_tools: true$/m);
+    assert.match(render.renderAntigravityAgent(MARCELO, {}), /^enable_write_tools: true$/m, 'marcelo (Bash, Edit) can write');
+    const bashOnly = '---\nname: b\ndescription: d\nmodel: opus\ntools: Read, Bash\n---\n\nx\n';
+    assert.match(render.renderAntigravityAgent(bashOnly, {}), /^enable_write_tools: true$/m, 'Bash alone enables writes');
+    const noTools = '---\nname: f\ndescription: d\nmodel: opus\n---\n\nx\n';
+    assert.match(render.renderAntigravityAgent(noTools, {}), /^enable_write_tools: true$/m, 'no tools: line = full tool set');
     assert.match(render.renderAntigravityAgent(MELVIN, {}), /^enable_write_tools: false$/m, 'positive control');
   });
 });

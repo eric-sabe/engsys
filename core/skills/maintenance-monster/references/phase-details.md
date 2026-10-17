@@ -344,7 +344,10 @@ Three pieces, each with one job:
   precondition still holds; it cannot prove a given alert is a false positive.
 - **You** make the per-alert judgment by reading the code.
 - **`scripts/mnt-fp-dismiss.sh`** (mutating, **not** auto-approved) re-runs the
-  evaluation for that one alert and only then dismisses.
+  evaluation for that one alert and only then dismisses. It fences itself right
+  before its PATCH, with the baton in the state dir it journals to (the config's
+  `state_dir`, or `--state-dir`): never pass another state dir, and never
+  `--no-baton` (it is for an operator outside a session and is refused in yours).
 
 Run it on each CodeQL tick (a matching `CODEQL_ALERT` event, and the fallback
 tick), from the repo clone, as its own Bash call by literal path:

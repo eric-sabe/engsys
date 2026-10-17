@@ -16,7 +16,7 @@ export function normalize(text) {
     .toLowerCase();
 }
 
-const RULE_WORD = /\b(never|always|must|only|do not|don't|not|no|exactly|stop|refuse[sd]?|before|after|until|unless|at most|at once|first|then|immediately|require[sd]?)\b|→/i;
+const RULE_WORD = /\b(never|always|must|only|once|do not|don't|not|no|exactly|stop|refuse[sd]?|before|after|until|unless|at most|at once|first|then|immediately|require[sd]?)\b|→/i;
 
 /** Blocks: paragraphs and list items (continuation lines joined), table rows; code fences dropped. */
 function blocks(markdown) {
@@ -54,6 +54,13 @@ function sentences(block) {
   }
   res.push(block.slice(start));
   return res.map((s) => s.trim()).filter(Boolean);
+}
+
+/** Every normalized sentence of a SKILL.md (before the rule filter), in document order. */
+export function allSentences(markdown) {
+  const out = [];
+  for (const b of blocks(markdown)) for (const s of sentences(b)) out.push(normalize(s).replace(/[.:;]$/, ''));
+  return out;
 }
 
 /** The normalized rule units of a SKILL.md, deduplicated, in document order. */
