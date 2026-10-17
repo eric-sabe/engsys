@@ -88,6 +88,57 @@ for h in copilot antigravity agy; do
   acts="$(cat "$T/actions")"; refused "$h: roster-level MODEL=claude-opus-4-8"
 done
 
+echo "security matching is normalized (case, [..] suffix, quotes, date stamp, --model=)"
+for m in 'CLAUDE-OPUS-4-8' 'claude-opus-4-8[1m]' '"claude-opus-4.8"' 'claude-opus-4-8-20261001' 'Claude-Opus-4.8@20261001' 'security'; do
+  run copilot "acme-sec|$W||--model $m"; refused "copilot: --model $m"
+done
+run copilot "acme-sec|$W||--model=claude-opus-4-8"; refused "copilot: --model=claude-opus-4-8"
+for e in Security.env nyx.env NYX.ENV; do
+  : >"$W/$e"; run copilot "acme-sec|$W||--model opus|$W/$e"; refused "copilot: env file $e is the security lane"
+done
+: >"$W/session.env"; run copilot "acme-x|$W||--model opus|$W/session.env"
+[ "$rc" -eq 0 ] && ok "copilot: an ordinary env file is not the security lane (positive control)" || no "copilot: ordinary env file" "$err"
+
+echo "role inference is case- and separator-insensitive"
+for p in '/engsys:Merge-Monster' '/engsys:merge_monster' 'run the merge monster' '/engsys:MAINTENANCE_MONSTER'; do
+  run copilot "acme-r|$W|$p|--model opus"; refused "copilot: prompt '$p'"
+done
+
+echo "host-classified monsters and supervised sessions are refused off Claude"
+BROKER="acme-broker|$W|/engsys:resource-broker|--model opus"
+run copilot "$BROKER" ENGSYS_SUPERVISED_SESSIONS="acme-mm acme-broker"; refused "copilot: supervised acme-broker"
+run antigravity "$BROKER" ENGSYS_SUPERVISED_SESSIONS="acme-broker"; refused "antigravity: supervised acme-broker"
+run copilot "$BROKER" ENGSYS_SUPERVISED_SESSIONS="acme-mm"
+[ "$rc" -eq 0 ] && ok "copilot: an unsupervised session launches (positive control)" || no "copilot: unsupervised" "$err"
+run claude "$BROKER" ENGSYS_SUPERVISED_SESSIONS="acme-broker"
+[ "$rc" -eq 0 ] && ok "claude: supervised sessions launch on Claude (positive control)" || no "claude: supervised" "$err"
+
+echo "Claude: the maintain and security.env lanes must run on claude-opus-4-8"
+run claude "acme-maintain|$W|/engsys:maintenance-monster|--model opus --effort high|$W/security.env"; refused "claude: maintain on --model opus"
+run claude "acme-maintain|$W|/engsys:maintenance-monster|--effort high"; refused "claude: maintain with no --model"
+run claude "acme-sec|$W||--model claude-opus-5-5|$W/security.env"; refused "claude: security.env on claude-opus-5-5"
+run claude "acme-sec|$W||--model security|$W/security.env"; refused "claude: security.env on the bare security alias"
+run claude "acme-sec|$W||--model claude-opus-4-8 --model opus|$W/security.env"; refused "claude: a second --model overriding the security model"
+run claude "acme-sec|$W||--model claude-opus-4-8|$W/security.env"
+[ "$rc" -eq 0 ] && ok "claude: security.env on claude-opus-4-8 launches (positive control)" || no "claude: security.env on opus-4-8" "$err"
+
+echo "a refused line is skipped; the rest of the roster still launches"
+run copilot "$MM
+$BUILD"
+if [ "$rc" -ne 0 ]; then ok "roster: exits non-zero when a line is refused"; else no "roster: exits non-zero" "rc=$rc"; fi
+has "roster: names the skipped line" "$err" "SKIPPED: acme-mm"
+has "roster: the next line still launches" "$acts" "copilot --name acme-build"
+lacks "roster: the refused line launches nothing" "$acts" "acme-mm"
+
+echo "translate_antigravity_flags fails hard on the security model"
+eval "$(sed -n -e '/^norm_model()/,/^}/p' -e '/^is_security_model()/,/^}/p' -e '/^translate_antigravity_flags()/,/^}/p' "$LAUNCH")"
+for m in claude-opus-4-8 claude-opus-4.8 'CLAUDE-OPUS-4-8[1m]' security; do
+  set +e; out="$(translate_antigravity_flags "--model $m" 2>/dev/null)"; trc=$?; set -e
+  if [ "$trc" -ne 0 ] && [ -z "$out" ]; then ok "agy translate: --model $m fails, nothing mapped"; else no "agy translate: --model $m" "rc=$trc out=$out"; fi
+done
+set +e; out="$(translate_antigravity_flags "--model opus" 2>/dev/null)"; trc=$?; set -e
+[ "$trc" -eq 0 ] && [ "$out" = "--model gemini-4-argon" ] && ok "agy translate: opus → gemini-4-argon (positive control)" || no "agy translate opus" "rc=$trc out=$out"
+
 echo "copilot flag translation (interactive line)"
 run copilot "$BUILD"
 [ "$rc" -eq 0 ] && ok "copilot: interactive line launches" || no "copilot: interactive line launches" "$err"

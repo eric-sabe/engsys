@@ -117,7 +117,7 @@ cat >"$I/fleet/roster.tmpl" <<'EOF'
 NAMESPACE=acme
 ENV_FILE=__ENV_DIR__/session.env
 acme-mm|__PIN_DIR__|/engsys:merge-monster|--dangerously-skip-permissions
-acme-maintain|__PIN_DIR__|/engsys:maintenance-monster|--dangerously-skip-permissions
+acme-maintain|__PIN_DIR__|/engsys:maintenance-monster|--model claude-opus-4-8 --dangerously-skip-permissions
 acme-broker|__PIN_DIR__|/engsys:resource-broker|--dangerously-skip-permissions
 acme-odd|__PIN_DIR__|/custom-watch|--dangerously-skip-permissions
 acme-build|__PIN_DIR__||--remote-control
@@ -172,6 +172,16 @@ run fleet launch
 rc_is "launch exits 0" 0
 hasnt "nothing is skipped" "$OUT" "skip: "
 eq "all six sessions launched" "$(windows)" "acme-broker acme-build acme-design acme-maintain acme-mm acme-odd"
+
+echo "== A2. a non-Claude harness: every monster or supervised session is refused, the rest still launch"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$T/bin/copilot"; chmod +x "$T/bin/copilot"
+conf "HARNESS=copilot"; reset_tmux
+run fleet launch
+rc_is "launch exits non-zero when lines are refused" 1
+eq "only the interactive roles launched" "$(windows)" "acme-build acme-design"
+has "acme-odd (supervised, no monster prompt) is refused" "$OUT" "SKIPPED: acme-odd"
+has "acme-broker (supervised) is refused" "$OUT" "SKIPPED: acme-broker"
+conf; reset_tmux
 run fleet restart --status
 hasnt "status: no 'not on this host'" "$OUT" "not on this host"
 hasnt "status: no warnings" "$OUT" "WARNING"

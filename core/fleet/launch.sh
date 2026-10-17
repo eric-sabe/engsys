@@ -145,6 +145,10 @@ singleton_integrity_ok() { # → 0 when merge/maintain sessions may start
 is_singleton() { case "$(fleet_host_kind_of "$1")" in merge | maintain) return 0 ;; esac; return 1; }
 
 export HARNESS="${HARNESS:-claude}"
+# Sessions this host classifies as a monster or a supervised session (fleet_host_kind, supervisor.conf
+# membership). The launcher refuses them on a non-Claude harness, whatever their prompt says.
+ENGSYS_SUPERVISED_SESSIONS="$(printf '%s' "$FLEET_HOST_TABLE" | awk -F'|' '$2 ~ /^(merge|maintain|broker|monster)$/ { printf "%s ", $1 }')"
+export ENGSYS_SUPERVISED_SESSIONS
 cd "$PIN_DIR"
 if [ -n "$name" ]; then
   grep -q "^$name|" "$FLEET_STATE/roster" || fleet_die "no session named '$name' in the roster"

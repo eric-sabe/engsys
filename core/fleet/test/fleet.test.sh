@@ -178,7 +178,7 @@ WORKTREES_DIR=~/git/worktrees
 GH_APP_ENV=~/.config/acme/gh-app.env
 MERGE_MODEL=model-m
 BUILD_MODEL=model-b
-SEC_MODEL=model-s
+SEC_MODEL=claude-opus-4-8
 EOF
 cat >"$I/fleet/roster.tmpl" <<'EOF'
 # acme roster
@@ -477,21 +477,21 @@ has "session env gets the identity lines" "$S_ENV" "GIT_AUTHOR_NAME=fleet-bot"
 has "session env puts the gh shim first on PATH" "$S_ENV" "core/fleet/identity/bin"
 has "session env drops an inherited GH_TOKEN" "$S_ENV" "unset GH_TOKEN GITHUB_TOKEN"
 has "security env sources the session env" "$X_ENV" ". \"$STATE/env/session.env\""
-has "security env overrides the model" "$X_ENV" 'MODEL_ALIAS="model-s"'
+has "security env overrides the model" "$X_ENV" 'MODEL_ALIAS="claude-opus-4-8"'
 has "every rendered env gets the identity lines" "$X_ENV" "GIT_AUTHOR_NAME=fleet-bot"
 has "…even the relative-path lane" "$(cat "$STATE/env/rel.env")" "GIT_AUTHOR_NAME=fleet-bot"
 eq "env files are 0600" "$(mode_of "$STATE/env/session.env")" 600
 ROSTER_OUT="$(cat "$STATE/roster")"
 has "roster: tmux session rendered" "$ROSTER_OUT" "TMUX_SESSION=acme"
 has "roster: ENV_FILE points at the rendered lane env" "$ROSTER_OUT" "ENV_FILE=$STATE/env/session.env"
-has "roster: 5th field rendered" "$ROSTER_OUT" "acme-security|$HOME/git/app|/maintenance-monster|--model model-s|$STATE/env/security.env"
+has "roster: 5th field rendered" "$ROSTER_OUT" "acme-security|$HOME/git/app|/maintenance-monster|--model claude-opus-4-8|$STATE/env/security.env"
 has "roster: monster line" "$ROSTER_OUT" "acme-mm|$HOME/git/app|/merge-monster|--model model-m --dangerously-skip-permissions"
 tl() { grep -F "[send-keys] [-t] [acme:$1]" "$FAKE/tmux.log" | head -1; } # the launch command line for a window
 has "mm: default env (roster ENV_FILE)" "$(tl acme-mm)" "cd $HOME/git/app && set -a && . $STATE/env/session.env && set +a && claude --name acme-mm"
 has "mm: prompt before the extra flags" "$(tl acme-mm)" "/merge-monster --model model-m --dangerously-skip-permissions"
 has "security: the 5th field replaces ENV_FILE" "$(tl acme-security)" "set -a && . $STATE/env/security.env && set +a && claude --name acme-security"
 hasnt "security: the roster-level env is NOT used" "$(tl acme-security)" "session.env"
-has "security: prompt before the extra flags" "$(tl acme-security)" "/maintenance-monster --model model-s"
+has "security: prompt before the extra flags" "$(tl acme-security)" "/maintenance-monster --model claude-opus-4-8"
 has "rel: a relative 5th field resolves against the roster's directory" "$(tl acme-rel)" "set -a && . $STATE/env/rel.env && set +a"
 has "build: empty workdir runs from PIN_DIR" "$(tl acme-build)" "cd $HOME/git/app && set -a && . $STATE/env/session.env"
 has "build: --add-dir from WORKTREES_DIR" "$(tl acme-build)" "--add-dir $HOME/git/worktrees --model model-b"
