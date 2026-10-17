@@ -359,6 +359,16 @@ describe('isClassBExcluded', () => {
 });
 
 describe('resolveExcludedAgents', () => {
+	test('engsys v2.0.1 round 2 (Nyx F7): nyx is ALWAYS excluded, even with no matching agent file anywhere and an otherwise-empty config', () => {
+		const dir = mkdtempSync(join(tmpdir(), 'memory-brief-noagents-'));
+		try {
+			const excluded = resolveExcludedAgents({ exclude_class_b_agents: [] }, { agentsRoot: dir });
+			assert.ok(excluded.has('nyx'), 'nyx must be seeded unconditionally, independent of every scan');
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	test('security:true agent frontmatter is excluded even with an empty config list (repo/dev layout: <root>/core/agents)', () => {
 		const dir = makeRepo({ agentsSecurityTrue: ['nyx'] });
 		try {
