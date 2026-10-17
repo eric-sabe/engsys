@@ -650,23 +650,7 @@ qconf; qreset; ledger 90 "ok — merging #12"; echo zsh >"$T/pane-acme-mm"; run
 expect "no fallback config: a stale exited monster is relaunched as before" "^launch acme-mm harness=claude"
 rm -f "$T"/pane-* "$T"/capture-*
 
-# CT-14: launch-agent-sessions.sh with HARNESS=copilot translates flags and invokes copilot --name ... -i ...
-cat >"$T/bin/tmux" <<'SH'
-#!/usr/bin/env bash
-echo "tmux-launch $*" >>"$FAKE/actions"
-exit 0
-SH
-chmod +x "$T/bin/tmux"
-printf 'NAMESPACE=acme\nacme-mm|%s|/engsys:merge-monster|--model opus --effort high --remote-control --dangerously-skip-permissions\n' "$T/w" >"$T/w/copilot.roster"
-: >"$T/actions"
-(cd "$T/w" && HARNESS=copilot bash "$HERE/launch-agent-sessions.sh" --roster "$T/w/copilot.roster" >/dev/null 2>&1)
-expect "CT-14: launch-agent-sessions.sh with HARNESS=copilot invokes copilot --name acme-mm -i /engsys:merge-monster" "copilot --name acme-mm -i /engsys:merge-monster --model claude-opus-5.5 --reasoning-effort high --remote --yolo --mode autopilot --no-ask-user"
-
-# CT-14b: launch-agent-sessions.sh with HARNESS=antigravity auto-starts agy remote-control daemon and translates flags
-: >"$T/actions"
-(cd "$T/w" && HARNESS=antigravity bash "$HERE/launch-agent-sessions.sh" --roster "$T/w/copilot.roster" >/dev/null 2>&1)
-expect "CT-14b: launch-agent-sessions.sh with HARNESS=antigravity auto-starts agy remote-control daemon" "^agy-rc remote-control start --name acme-"
-expect "CT-14b: launch-agent-sessions.sh with HARNESS=antigravity invokes agy with translated flags" "agy .* -i /engsys:merge-monster --model gemini-4-argon --effort high --remote-control --dangerously-skip-permissions"
+# launch-agent-sessions.sh harness policy and flag translation: launch-agent-sessions.test.sh.
 
 echo "$pass passed, $fail failed."
 [ "$fail" = 0 ]

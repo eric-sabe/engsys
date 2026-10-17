@@ -1292,3 +1292,74 @@ test('#96 Comment 2: partially-quoted/escaped heredoc delimiters, <<-, numbered 
     assert.equal(deniedIn(c), false, `should allow: ${JSON.stringify(c)}`);
   }
 });
+
+// ------------------------------------------------- engsys v2.0.1 (L1): Flight Recorder never logs raw command text --
+
+test('engsys v2.0.1 round 2 (F8): an ALLOWED command\'s secret never reaches the Flight Recorder log — only tool name + byte length, no digest at all', () => {
+  const tmpLog = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'engsys-telemetry-')), 'hook-events.jsonl');
+  const secretCmd = 'curl -u admin:S3cr3tDbPassw0rd https://internal.example.com/health';
+  const env = {
+    ...process.env,
+    CLAUDE_PLUGIN_ROOT: ROOT,
+    ENGSYS_SINGLETON_ROLE: 'merge',
+    ENGSYS_HOOK_TELEMETRY: '1',
+    ENGSYS_HOOK_TELEMETRY_FILE: tmpLog,
+  };
+  const res = spawnSync(process.execPath, [HOOK], {
+    input: JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: secretCmd } }),
+    env,
+    encoding: 'utf8',
+  });
+  assert.equal(res.status, 0);
+  const logged = fs.readFileSync(tmpLog, 'utf8');
+  assert.ok(!logged.includes('S3cr3tDbPassw0rd'), 'the secret must never appear in the persisted log');
+  assert.ok(!logged.includes('admin:'), 'no fragment of the raw command must appear either');
+  const rec = JSON.parse(logged.trim().split('\n').pop());
+  assert.equal(rec.hook, 'singleton-write-guard');
+  assert.equal(rec.decision, 'allow');
+  assert.equal(rec.detail, `Bash (${Buffer.byteLength(secretCmd, 'utf8')}b)`, 'detail is tool name + byte length only — round 2 dropped the digest entirely as still fingerprintable');
+});
+
+test('engsys v2.0.1 round 2 (F8): a DENIED command also never leaks its raw text (or a digest of it) into the Flight Recorder log', () => {
+  const tmpLog = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'engsys-telemetry-deny-')), 'hook-events.jsonl');
+  const secretCmd = 'gh pr merge 5 --body "token=ghp_SuperSecretValue1234567890"';
+  const env = {
+    ...process.env,
+    CLAUDE_PLUGIN_ROOT: ROOT,
+    ENGSYS_SINGLETON_ROLE: 'merge',
+    ENGSYS_HOOK_TELEMETRY: '1',
+    ENGSYS_HOOK_TELEMETRY_FILE: tmpLog,
+  };
+  const res = spawnSync(process.execPath, [HOOK], {
+    input: JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: secretCmd } }),
+    env,
+    encoding: 'utf8',
+  });
+  assert.equal(res.status, 0);
+  const logged = fs.readFileSync(tmpLog, 'utf8');
+  assert.ok(!logged.includes('ghp_SuperSecretValue1234567890'));
+  const rec = JSON.parse(logged.trim().split('\n').pop());
+  assert.equal(rec.hook, 'singleton-write-guard');
+  assert.equal(rec.detail, `Bash (${Buffer.byteLength(secretCmd, 'utf8')}b): denied`);
+});
+
+test('engsys v2.0.1 round 2 (F8) positive control: two DIFFERENT commands of the same tool produce DIFFERENT byte lengths in the log (the field still carries real, non-constant signal)', () => {
+  const tmpLog = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'engsys-telemetry-len-')), 'hook-events.jsonl');
+  const env = {
+    ...process.env,
+    CLAUDE_PLUGIN_ROOT: ROOT,
+    ENGSYS_SINGLETON_ROLE: 'merge',
+    ENGSYS_HOOK_TELEMETRY: '1',
+    ENGSYS_HOOK_TELEMETRY_FILE: tmpLog,
+  };
+  for (const cmd of ['ls', 'ls -la /some/much/longer/path/here']) {
+    spawnSync(process.execPath, [HOOK], {
+      input: JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: cmd } }),
+      env,
+      encoding: 'utf8',
+    });
+  }
+  const recs = fs.readFileSync(tmpLog, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  assert.equal(recs.length, 2);
+  assert.notEqual(recs[0].detail, recs[1].detail);
+});

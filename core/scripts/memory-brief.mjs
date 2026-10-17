@@ -57,6 +57,7 @@ import {
 	resolveReviewedSha,
 	validatePointerEvent,
 } from '../lib/memory/index-db.mjs';
+import { isEventTrusted } from '../lib/memory/trust.mjs';
 import { parseYaml } from '../lib/yaml.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -67,8 +68,10 @@ export const DEFAULTS = {
 	review_markers: [],
 	trusted_bot_user_ids: [],
 	operator_user_ids: [],
-	operator_emails: [],
-	operator_logins: [],
+	// engsys v2.0.1 round 2 (F1): operator_emails/operator_logins are gone — trust is numeric-ID
+	// only, everywhere. trusted_member_user_ids (F4) is the allowlist owner/member Class B events
+	// are gated on at brief time (union'd with operator_user_ids).
+	trusted_member_user_ids: [],
 	exclude_class_b_agents: [],
 	high_fanout_globs: [],
 	brief_bytes: 2048,
@@ -87,7 +90,7 @@ export const DEFAULTS = {
  * fleet config dir (`CLAUDE_CONFIG_DIR`) and plugin config dir (`CLAUDE_PLUGIN_ROOT`), then
  * defaults. Scalar list fields are coerced to one-item lists (#155).
  */
-const UNION_FIELDS = ['exclude_class_b_agents', 'trusted_bot_user_ids', 'operator_user_ids', 'operator_emails', 'operator_logins', 'review_markers', 'high_fanout_globs'];
+const UNION_FIELDS = ['exclude_class_b_agents', 'trusted_bot_user_ids', 'operator_user_ids', 'trusted_member_user_ids', 'review_markers', 'high_fanout_globs'];
 
 function isPlainObject(v) {
 	return Boolean(v) && typeof v === 'object' && !Array.isArray(v);
@@ -155,7 +158,10 @@ export function loadConfig(repoRoot, { sha, pluginRoot, allowedRepos, log = null
 export function bareAgentType(agentType) {
 	if (typeof agentType !== 'string' || !agentType) return '';
 	const parts = agentType.split(':');
-	return parts[parts.length - 1];
+	// engsys v2.0.1 (L6): lowercased — every frontmatter-derived comparison site (excluded-agent
+	// filenames, lesson `roles`) is case-sensitive `Set.has`/`Array.includes`, so an agent_type
+	// spelled with different casing (`Nyx`, `NYX`) previously missed its own exclusion/role match.
+	return parts[parts.length - 1].toLowerCase();
 }
 
 /**
@@ -166,8 +172,36 @@ export function bareAgentType(agentType) {
  * (`<repoRoot>/core/agents/`, `<repoRoot>/optional-agents/`) — never the task prompt or any
  * ingested text. Never throws. Returned set holds BARE agent names (no namespace prefix).
  */
-export function resolveExcludedAgents(config, { agentsRoot = process.env.CLAUDE_PLUGIN_ROOT ?? REPO_ROOT_DEFAULT } = {}) {
-	const excluded = new Set((config?.exclude_class_b_agents ?? []).map((a) => bareAgentType(String(a)) || String(a)));
+export function resolveExcludedAgents(config, { agentsRoot = process.env.CLAUDE_PLUGIN_ROOT ?? REPO_ROOT_DEFAULT, repoRoot = REPO_ROOT_DEFAULT } = {}) {
+	// engsys v2.0.1 (L6): lowercased — the set is keyed on bare agent names that are then compared
+	// case-insensitively by `isClassBExcluded`/`lessonMatchScore`.
+	const excluded = new Set((config?.exclude_class_b_agents ?? []).map((a) => (bareAgentType(String(a)) || String(a).toLowerCase())));
+	// engsys v2.0.1 round 2 (Nyx F7): nyx is ALWAYS excluded, unconditionally — whatever every
+	// scan below does or doesn't find. The scans are defense in depth for every OTHER
+	// security-flagged agent; the one this module's own trust model is built around is seeded
+	// directly, so a broken/renamed/missing nyx.md can never accidentally hand it Class B.
+	excluded.add('nyx');
+	// engsys v2.0.1 round 2 (Nyx F7): the plugin-cache ("copy layout") scan below now prefers
+	// reading each agent file via `git show <reviewedSha>:<path>` when `agentsRoot` is itself a
+	// git checkout (true for a normal plugin-cache install, synced via git) — same Class A trust
+	// root as the repo-local scan already uses — falling back to the live filesystem only when
+	// `agentsRoot` isn't a git repo at all (e.g. a unit-test fixture directory).
+	const agentsRootReviewedSha = resolveReviewedSha(agentsRoot);
+	const readAgentFile = (dir, file) => {
+		if (agentsRootReviewedSha) {
+			const relFromRoot = path.relative(agentsRoot, path.join(dir, file));
+			if (!relFromRoot.startsWith('..')) {
+				try {
+					return execFileSync(
+						'git',
+						['-C', agentsRoot, 'show', `${agentsRootReviewedSha}:${relFromRoot.split(path.sep).join('/')}`],
+						{ encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] },
+					);
+				} catch { /* fall through to the live-filesystem read below */ }
+			}
+		}
+		return fs.readFileSync(path.join(dir, file), 'utf8');
+	};
 	const candidateDirs = [
 		path.join(agentsRoot, 'core', 'agents'), // repo/dev layout
 		path.join(agentsRoot, 'agents'), // plugin layout, when CLAUDE_PLUGIN_ROOT IS set correctly
@@ -185,14 +219,48 @@ export function resolveExcludedAgents(config, { agentsRoot = process.env.CLAUDE_
 		try { files = fs.readdirSync(dir).filter((f) => f.endsWith('.md')); } catch { continue; }
 		for (const f of files) {
 			let text;
-			try { text = fs.readFileSync(path.join(dir, f), 'utf8'); } catch { continue; }
+			try { text = readAgentFile(dir, f); } catch { continue; }
 			const { fm } = readFrontmatter(text);
 			if (fm.security === true) {
-				excluded.add(f.replace(/\.md$/, ''));
+				excluded.add(f.replace(/\.md$/, '').toLowerCase());
 				foundAnySecurityAgent = true;
 			}
 		}
 	}
+	// engsys v2.0.1 (L6): also scan this REPO's own `.claude/agents/*.md` — a project can ship its
+	// own `security: true` agent definitions on top of the plugin-bundled ones (e.g. keystone's
+	// Nyx override), and the plugin-root scan above never sees them. Read via `git show
+	// <reviewedSha>:.claude/agents/<file>` (the Class A trust root — `resolveReviewedSha`), never
+	// the live filesystem: a worktree on an unreviewed branch could otherwise strip `security: true`
+	// from its own copy of an agent file to smuggle it out of the exclusion set.
+	try {
+		const reviewedSha = resolveReviewedSha(repoRoot);
+		if (reviewedSha) {
+			const listing = execFileSync(
+				'git',
+				['-C', repoRoot, 'ls-tree', '--name-only', '-z', `${reviewedSha}:.claude/agents`],
+				{ encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] },
+			);
+			const repoAgentFiles = listing.split('\0').filter((f) => f.endsWith('.md'));
+			for (const f of repoAgentFiles) {
+				let text;
+				try {
+					text = execFileSync(
+						'git',
+						['-C', repoRoot, 'show', `${reviewedSha}:.claude/agents/${f}`],
+						{ encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] },
+					);
+				} catch { continue; }
+				const { fm } = readFrontmatter(text);
+				// Deliberately does NOT set foundAnySecurityAgent (cr review finding): that flag
+				// calibrates the N3 "exclude everything" fallback for the PLUGIN-root scan above. A
+				// repo that ships its own reviewed security:true agent must not be able to silently
+				// disable that fallback for the plugin's own security agents (e.g. nyx) if the
+				// plugin-root scan itself is broken (wrong root, packaging change).
+				if (fm.security === true) excluded.add(f.replace(/\.md$/, '').toLowerCase());
+			}
+		}
+	} catch { /* no repo-local .claude/agents — not an error */ }
 	// engsys#140 N3: if NO security:true agent definition was found in ANY scanned directory, the
 	// scan itself is almost certainly broken (wrong root, agents/ missing, a packaging change) —
 	// failing toward "nobody is excluded" would then silently hand Class B to every agent,
@@ -203,7 +271,7 @@ export function resolveExcludedAgents(config, { agentsRoot = process.env.CLAUDE_
 		for (const dir of [...new Set(candidateDirs)]) {
 			let files;
 			try { files = fs.readdirSync(dir).filter((f) => f.endsWith('.md')); } catch { continue; }
-			for (const f of files) excluded.add(f.replace(/\.md$/, ''));
+			for (const f of files) excluded.add(f.replace(/\.md$/, '').toLowerCase());
 		}
 	}
 	return excluded;
@@ -211,11 +279,16 @@ export function resolveExcludedAgents(config, { agentsRoot = process.env.CLAUDE_
 
 /** Is `agentType` excluded from Class B (fails toward EXCLUDED — less privilege — on a
  * null/empty/unresolved agent type, per engsys#140 H1: "a null agent type fails toward allowing
- * Class B" was the finding; the fix is the opposite default). */
+ * Class B" was the finding; the fix is the opposite default).
+ *
+ * engsys v2.0.1 (L6): both sides of the comparison are lowercased — `bareAgentType` already
+ * lowercases its output, and `excludedSet` is built from lowercased names, so only the raw
+ * (non-bare) fallback comparison needs an explicit `.toLowerCase()` here. */
 export function isClassBExcluded(agentType, excludedSet) {
 	const bare = bareAgentType(agentType);
 	if (!bare) return true; // no agent type at all — least privilege
-	return excludedSet.has(bare) || excludedSet.has(agentType);
+	const rawLower = typeof agentType === 'string' ? agentType.toLowerCase() : '';
+	return excludedSet.has(bare) || (rawLower && excludedSet.has(rawLower));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -250,7 +323,7 @@ export function lessonMatchScore(fm, { touchedPaths = [], agentType = null, stac
 	// Roles in frontmatter are bare names ("nyx", "aaron"); agentType may carry an `engsys:`
 	// namespace prefix (engsys#140 H1) — compare bare-to-bare.
 	const bareAgent = bareAgentType(agentType);
-	if (bareAgent && fm.roles?.length && fm.roles.includes(bareAgent)) score += 2;
+	if (bareAgent && fm.roles?.length && fm.roles.some((r) => String(r).toLowerCase() === bareAgent)) score += 2;
 	if (fm.stacks?.length) {
 		const normalizedStacks = new Set(stacks.map(normalizeStackId));
 		if (fm.stacks.some((s) => normalizedStacks.has(normalizeStackId(s)))) score += 1;
@@ -355,45 +428,11 @@ export function allowedMarkerNames(config) {
 
 const OUTCOME_WEIGHT = { fixed: 1.0, unresolved: 0.5, disputed: 0.2, bounced: 0.3, merged: 0.8, none: 0.1 };
 
-/**
- * Evaluate brief-time trust of a Class B event against `config` (docs/memory-spec.md §7.3, #132):
- * removing a bot from `trusted_bot_user_ids` or an operator from `operator_user_ids` immediately
- * drops its previously synced events at brief-build time. When `config` is omitted, returns `true`.
- */
-export function isEventTrusted(event, config) {
-	if (!event || typeof event !== 'object') return false;
-	if (!config) return true;
-	if (event.kind === 'commit') {
-		if (event.author_kind === 'operator' && (event.author_email || event.author_login)) {
-			const opEmails = new Set((config.operator_emails ?? []).map((e) => String(e).toLowerCase()));
-			const opLogins = new Set((config.operator_logins ?? []).map((l) => String(l).toLowerCase()));
-			if (opEmails.size > 0 || opLogins.size > 0) {
-				const emailOk = event.author_email && opEmails.has(String(event.author_email).toLowerCase());
-				const loginOk = event.author_login && opLogins.has(String(event.author_login).toLowerCase());
-				if (!emailOk && !loginOk) return false;
-			}
-		}
-		return true;
-	}
-	const trustedBots = new Set((config.trusted_bot_user_ids ?? []).map(Number));
-	const operators = new Set((config.operator_user_ids ?? []).map(Number));
-	const kind = String(event.author_kind || '');
-	const authorId = event.author_id != null ? Number(event.author_id) : null;
-	if (kind === 'bot' && (authorId === null || !trustedBots.has(authorId))) return false;
-	if (kind === 'operator' && (authorId === null || !operators.has(authorId))) return false;
-	const wasEdited =
-		event.last_edited_at != null ||
-		event.was_edited === true ||
-		Boolean(event.created_at && event.updated_at && event.created_at !== event.updated_at);
-	if (wasEdited && event.editor_id == null) return false;
-	if (event.editor_id != null) {
-		const editorId = Number(event.editor_id);
-		if (authorId === null || editorId !== authorId) {
-			if (!trustedBots.has(editorId) && !operators.has(editorId)) return false;
-		}
-	}
-	return true;
-}
+// engsys v2.0.1 round 2 (F1): isEventTrusted now lives in ../lib/memory/trust.mjs — the ONE
+// brief-time Class B trust gate, shared with memory-sync.mjs. Re-exported here (and used below,
+// at the two real call sites) so every existing import of `isEventTrusted` from this module
+// keeps working.
+export { isEventTrusted };
 
 /**
  * Compute per-file PR fanout (`prCountsByFile` and `totalPrs`) from the indexed event corpus (#132).
@@ -662,7 +701,7 @@ export function buildBrief(opts = {}) {
 	try {
 		const config = loadConfig(repoRoot, { pluginRoot: opts.pluginRoot, allowedRepos: opts.allowedRepos });
 		const budgetBytes = opts.budgetBytes ?? config.brief_bytes ?? DEFAULTS.brief_bytes;
-		const excluded = resolveExcludedAgents(config);
+		const excluded = resolveExcludedAgents(config, { repoRoot });
 		const classBAllowed = !isClassBExcluded(opts.agentType, excluded);
 
 		const handle = ensureIndex({ repoRoot, pluginRoot: opts.pluginRoot, allowedRepos: opts.allowedRepos, cacheDir: opts.cacheDir, version: opts.version ?? 'dev', sqlite: opts.sqlite });

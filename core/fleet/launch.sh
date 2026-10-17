@@ -183,6 +183,10 @@ record_panes() { # record_panes <name>...
 }
 
 export HARNESS="${HARNESS:-claude}"
+# Sessions this host classifies as a monster or a supervised session (fleet_host_kind, supervisor.conf
+# membership). The launcher refuses them on a non-Claude harness, whatever their prompt says.
+ENGSYS_SUPERVISED_SESSIONS="$(printf '%s' "$FLEET_HOST_TABLE" | awk -F'|' '$2 ~ /^(merge|maintain|broker|monster)$/ { printf "%s ", $1 }')"
+export ENGSYS_SUPERVISED_SESSIONS
 cd "$PIN_DIR"
 if [ -n "$name" ]; then
   grep -q "^$name|" "$FLEET_STATE/roster" || fleet_die "no session named '$name' in the roster"

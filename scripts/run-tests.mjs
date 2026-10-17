@@ -59,6 +59,7 @@ const SUITES = [
   ["NODE_NO_WARNINGS=1 node --test core/scripts/memory-brief.test.mjs"],
   ["NODE_NO_WARNINGS=1 node --test core/scripts/memory-sync.test.mjs"],
   ["NODE_NO_WARNINGS=1 node --test core/.claude-plugin/subagent-memory-inject.test.mjs"],
+  ["node --test lib/commands.test.mjs"],
   ["bash core/fleet/identity/git-env.test.sh"],
   ["bash core/fleet/identity/gh-shim.test.sh"],
   ["bash core/fleet/test/fleet.test.sh"],
@@ -84,6 +85,10 @@ const SUITES = [
   ["node --test core/fleet/health/health.test.mjs"],
   ["node --test core/.claude-plugin/weather-check.test.mjs"],
   ["node --test core/fleet/lib/xray.test.mjs"],
+  ["node --test tests/personas-and-skills.test.mjs"],
+  ["node --test tests/monster-skill-rules.test.mjs"],
+  ["node --test tests/model-policy.test.mjs"],
+  ["bash core/skills/agent-sessions/scripts/launch-agent-sessions.test.sh"],
 ];
 
 // Variables the kit reads from a fleet session's environment.

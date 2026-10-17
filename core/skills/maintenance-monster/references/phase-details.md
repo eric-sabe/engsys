@@ -344,7 +344,10 @@ Three pieces, each with one job:
   precondition still holds; it cannot prove a given alert is a false positive.
 - **You** make the per-alert judgment by reading the code.
 - **`scripts/mnt-fp-dismiss.sh`** (mutating, **not** auto-approved) re-runs the
-  evaluation for that one alert and only then dismisses.
+  evaluation for that one alert and only then dismisses. It fences itself right
+  before its PATCH, with the baton in the state dir it journals to (the config's
+  `state_dir`, or `--state-dir`): never pass another state dir, and never
+  `--no-baton` (it is for an operator outside a session and is refused in yours).
 
 Run it on each CodeQL tick (a matching `CODEQL_ALERT` event, and the fallback
 tick), from the repo clone, as its own Bash call by literal path:
@@ -503,7 +506,7 @@ request link back and you keep waiting.
 ## Subagent liveness (optional — `liveness:` config block)
 
 Same substrate as Merge Monster — follow **§ Subagent liveness in
-[<engsys-root>/skills/merge-monster/SKILL.md](../merge-monster/SKILL.md)** with
+[<engsys-root>/skills/merge-monster/references/runbook-details.md](../../merge-monster/references/runbook-details.md)** with
 `<state_dir>` = this config's `state_dir` and the shared scripts at
 `<engsys-root>/skills/merge-monster/scripts/mm-agent-{reg,watch}.sh`. Applies to
 every expert agent you dispatch (§ Expert routing): register on spawn with

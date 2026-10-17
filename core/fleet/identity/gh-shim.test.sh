@@ -65,8 +65,33 @@ chmod +x "$T/copilotps/ps"
 
 check "CT-09: child bash calling gh auth token gets App token" tok_default "$(run "$T/norepo" auth token)"
 check "CT-09: copilot parent without GH_TOKEN_COPILOT_CLI still gets App token (never operator keychain)" tok_default "$(cd "$T/norepo" && env -u GH_TOKEN PATH="$HERE/bin:$T/copilotps:$T/realbin:$PATH" GH_APP_ENV_FILE="$T/gh-app.env" "$SHIM" auth token)"
-check "CT-09: copilot parent calling gh auth status with GH_TOKEN_COPILOT_CLI gets seat token" "gho_seat" "$(cd "$T/norepo" && env -u GH_TOKEN GH_TOKEN_COPILOT_CLI=gho_seat PATH="$HERE/bin:$T/copilotps:$T/realbin:$PATH" GH_APP_ENV_FILE="$T/gh-app.env" "$SHIM" auth status)"
-check "CT-09: mismatched ENGSYS_COPILOT_CLI_PID rejects spoofed copilot child process" tok_default "$(cd "$T/norepo" && env -u GH_TOKEN GH_TOKEN_COPILOT_CLI=gho_seat ENGSYS_COPILOT_CLI_PID=999999 PATH="$HERE/bin:$T/copilotps:$T/realbin:$PATH" GH_APP_ENV_FILE="$T/gh-app.env" "$SHIM" auth token)"
+# engsys v2.0.1 round 2 (F5, Nyx F3): the Copilot seat-token relay is REMOVED entirely — the fleet
+# is Claude-only, and the relay was dead code that could still be bypassed. The shim must now
+# return the App token for `gh auth token`/`gh auth status` under EVERY circumstance that used to
+# trigger the relay, including a correctly PID-matched one.
+check "v2.0.1 round 2 F5: copilot-named parent with GH_TOKEN_COPILOT_CLI set still gets the App token, never the seat token" tok_default "$(cd "$T/norepo" && env -u GH_TOKEN GH_TOKEN_COPILOT_CLI=gho_seat PATH="$HERE/bin:$T/copilotps:$T/realbin:$PATH" GH_APP_ENV_FILE="$T/gh-app.env" "$SHIM" auth status)"
+check "CT-09: mismatched ENGSYS_COPILOT_CLI_PID (now-irrelevant leftover env var) still gets the App token" tok_default "$(cd "$T/norepo" && env -u GH_TOKEN GH_TOKEN_COPILOT_CLI=gho_seat ENGSYS_COPILOT_CLI_PID=999999 PATH="$HERE/bin:$T/copilotps:$T/realbin:$PATH" GH_APP_ENV_FILE="$T/gh-app.env" "$SHIM" auth token)"
+# Positive control for the removal: even a PID that WOULD have matched under the old (now-deleted)
+# relay logic still gets the App token, never the seat token. A tiny relay wrapper reads its OWN
+# $PPID (its parent, i.e. the process about to become the shim's parent too) and exports it as
+# ENGSYS_COPILOT_CLI_PID before `exec`'ing the shim in its place — exec never changes PPID, so the
+# shim would have seen an exact PID match under the old code.
+cat >"$T/relay.sh" <<'SH'
+#!/usr/bin/env bash
+export ENGSYS_COPILOT_CLI_PID="$PPID"
+exec "$@"
+SH
+chmod +x "$T/relay.sh"
+check "v2.0.1 round 2 F5: a PID that would have matched the old relay still gets the App token (relay fully removed)" tok_default "$(cd "$T/norepo" && env -u GH_TOKEN GH_TOKEN_COPILOT_CLI=gho_seat PATH="$HERE/bin:$T/copilotps:$T/realbin:$PATH" GH_APP_ENV_FILE="$T/gh-app.env" "$T/relay.sh" "$SHIM" auth status)"
+# The seat token must never ride along into an agent-visible env for ANY gh invocation — a
+# dedicated "real gh" stub reports whether it inherited GH_TOKEN_COPILOT_CLI at all.
+mkdir -p "$T/envbin"
+cat >"$T/envbin/gh" <<'SH'
+#!/usr/bin/env bash
+printf 'seen=%s\n' "${GH_TOKEN_COPILOT_CLI+yes}"
+SH
+chmod +x "$T/envbin/gh"
+check "v2.0.1 round 2 F5: GH_TOKEN_COPILOT_CLI is unset before every gh invocation (auth status included — no relay branch exists any more)" "seen=" "$(cd "$T/norepo" && env -u GH_TOKEN GH_TOKEN_COPILOT_CLI=gho_seat PATH="$HERE/bin:$T/envbin:$PATH" GH_APP_ENV_FILE="$T/gh-app.env" "$T/relay.sh" "$SHIM" auth status)"
 check "CT-09: copilot parent calling gh pr list still gets App token (NA-6)" tok_pat "$(cd "$T/repo-pat" && env -u GH_TOKEN GH_TOKEN_COPILOT_CLI=gho_seat PATH="$HERE/bin:$T/copilotps:$T/realbin:$PATH" GH_APP_ENV_FILE="$T/gh-app.env" "$SHIM" pr list)"
 
 if [ "$FAILS" -gt 0 ]; then echo "gh-shim.test.sh: $FAILS failure(s)" >&2; exit 1; fi

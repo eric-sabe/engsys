@@ -2,7 +2,7 @@
 name: marcelo
 description: Testing Strategist & Quality Champion. Use for test planning, test case design, input validation guidance, quality gates, testing methodology, and enriching feature plans with comprehensive testing recommendations.
 model: opus
-tools: Read, Grep, Glob, Write
+tools: Read, Grep, Glob, Bash, Edit, Write
 skills: [agentic-eval, webapp-testing, hermetic-git-tests, untrusted-input]
 ---
 

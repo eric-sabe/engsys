@@ -58,8 +58,12 @@ refs/engsys/memory/<role>/<fleet-id>   a monster's journal tail (one writer per 
   re-read, merge by key and retry. Factor the CAS into a shared helper; `ref-store.mjs` allows a
   non-empty tree, while batons keep requiring the empty tree.
 - **Each repo's events live in that repo**, so read access follows that repo's access control.
-- **Reads:** `git fetch origin '+refs/engsys/memory/*:refs/engsys/memory/*'`, then `git show <ref>:events.jsonl`.
-  Clones and worktrees never fetch these refs by default.
+- **Reads:** `git fetch origin 'refs/engsys/memory/*:refs/engsys/memory/*'` (engsys v2.0.1 M4: NOT
+  forced — a forced (`+`) refspec lets `git fetch` silently clobber a local ref tip with whatever
+  the remote currently has, defeating any after-the-fact trust check on it; a non-fast-forward
+  fetch now fails closed instead), then `git show <ref>:events.jsonl`. Clones and worktrees never
+  fetch these refs by default, and any event read back this way is untrusted (`author_kind`/
+  `author_id` stripped) until `verifyMemoryRefTip` is wired into the reader.
 - **Secret scan before every write.** Branch-filtered CI scanners don't cover custom refs. Any match
   rejects the record and logs it.
 - **Compaction:** when the blob passes `max_events` (default 20000), the writer keeps the latest
@@ -232,13 +236,34 @@ Fold the text with `normalizeUntrusted()` first; the strip uses `\p{Default_Igno
 repos: [owner/repo]                     # indexed repos; events are read from each repo's own refs
 review_markers: ["<!-- local-review-findings -->"]   # extra markers to parse; default regex also applies
 trusted_bot_user_ids: []                # numeric bot USER ids (not App ids)
-operator_user_ids: []                   # numeric user ids; added to MEMBER/OWNER humans
+operator_user_ids: []                   # numeric user ids; commit/MEMBER/OWNER operator trust
+trusted_member_user_ids: []             # numeric user ids; MEMBER/OWNER trust (union'd with operator_user_ids)
 exclude_class_b_agents: []              # agent types that get Class A only (security agents are always excluded)
 high_fanout_globs: []                   # files keyed by symbol instead of path
 brief_bytes: 2048
 max_events: 20000
 publish_role: maintain                  # which singleton publishes refs/engsys/memory/events
 ```
+
+### Commit operator trust, and the real boundary it rests on
+
+A commit is `author_kind: 'operator'` only when ALL of: the commit carries a cryptographically
+verified signature (`commit.verification.verified`, resolved via one batched GraphQL `history`
+query, never per-commit); the **committer's** (never the author's — GitHub derives `.author.id`/
+the author identity from the commit's author EMAIL, which anyone can set locally) numeric id is
+in `operator_user_ids`; and the commit message carries no agent co-author trailer
+(`Co-Authored-By:`/`Assisted-by:`/`Generated-by:`, matching Claude, Copilot, Gemini, Antigravity,
+Codex, GPT, Opus, Sonnet, DeepSeek, Grok, `noreply@anthropic.com`, or an `@openai.com`/
+`@google.com` address). A commit failing any of these is an unlabeled pointer — subject + `#refs`
+only, no body.
+
+**The agent-trailer match is defense-in-depth, not the real boundary, and it can never be
+exhaustive** against every agent/provider name that exists or will exist. The real boundary is
+**key custody**: no operator's commit-signing key (GPG or SSH) may ever be reachable from a
+session an agent can drive, and GitHub Codespaces' automatic commit signing must stay **off** for
+every operator account — a Codespace that auto-signs commits as the operator would hand an agent
+session running inside it a path to a genuinely "verified" signature with no human behind it. If
+either of those holds, this trailer regex is unnecessary; if neither holds, it's not sufficient.
 
 `loadConfig()` reads BOTH the repo's own `.claude/memory.yml` (from the reviewed SHA, never the
 working tree — §2 rule 4) and the fleet config dir's `memory.yml` (`CLAUDE_CONFIG_DIR`), and
