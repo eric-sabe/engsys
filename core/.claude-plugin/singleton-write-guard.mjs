@@ -62,6 +62,7 @@
 // and the sha-pinned merge. When active and unsure (an unparseable command that mentions gh, git or
 // GitHub, or an internal error), it denies.
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -1000,6 +1001,17 @@ export function decide({
   return null;
 }
 
+// engsys v2.0.1 (L1): the Hook Flight Recorder (`recordHookTelemetry`, `core/lib/harness-io.mjs`)
+// persists its `detail` field to a durable JSONL log file under `~/.local/state/engsys/...`. A
+// monster session's Bash commands routinely embed real secrets (DB connection strings, tokens in
+// a curl header, …), so `detail` here must NEVER carry raw command text — only the tool name, the
+// guard's decision, and a short SHA-256 PREFIX of the command (enough to correlate two log lines
+// as "the same command" without the log itself becoming a secret store).
+function commandDigest(cmd) {
+  if (typeof cmd !== 'string' || !cmd) return null;
+  return crypto.createHash('sha256').update(cmd, 'utf8').digest('hex').slice(0, 12);
+}
+
 async function main() {
   let raw = '';
   for await (const chunk of process.stdin) raw += chunk;
@@ -1030,19 +1042,24 @@ async function main() {
   }
   if (!d) {
     if (ROLES.has(process.env.ENGSYS_SINGLETON_ROLE)) {
+      const digest = commandDigest(parsed.command);
       recordHookTelemetry({
         hook: 'singleton-write-guard',
         event: 'PreToolUse',
         decision: 'allow',
-        detail: `${parsed.toolName}${parsed.command ? `: ${String(parsed.command).slice(0, 80)}` : ''}`,
+        detail: `${parsed.toolName}${digest ? ` (${digest})` : ''}`,
       });
     }
     return 0;
   }
+  // `d.deny` is shown to the AGENT via emitPreToolDeny (guard feedback, unchanged) but must never
+  // be persisted to the Flight Recorder verbatim — some denial messages echo a matched token out
+  // of the command itself (engsys v2.0.1 L1).
+  const denyDigest = commandDigest(parsed.command);
   return writeHookResult(emitPreToolDeny(parsed.harness, d.deny), {
     hook: 'singleton-write-guard',
     event: 'PreToolUse',
-    detail: d.deny,
+    detail: `${parsed.toolName}${denyDigest ? ` (${denyDigest})` : ''}: denied`,
   });
 }
 
