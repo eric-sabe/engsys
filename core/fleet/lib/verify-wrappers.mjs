@@ -126,8 +126,13 @@ export const MODEL_SETTINGS_ENV_RE = /^(CLAUDE_CODE_SUBAGENT_MODEL|CLAUDE_CODE_S
  */
 export const ENDPOINT_SETTINGS_ENV_RE = /^(ANTHROPIC_BASE_URL|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_API_KEY|ANTHROPIC_CUSTOM_HEADERS|CLAUDE_CODE_USE_BEDROCK|CLAUDE_CODE_USE_VERTEX|CLAUDE_CODE_USE_FOUNDRY|[A-Za-z0-9_]*_BASE_URL)$/;
 const PROXY_ENV_RE = /^(http_proxy|https_proxy|all_proxy|no_proxy)$/i;
+/**
+ * Settings `env` keys that make a shell, git, the dynamic loader or another interpreter load code: Claude
+ * Code applies a settings env to the session, its hooks and its Bash tool.
+ */
+export const CODE_INJECTION_ENV_RE = /^(BASH_ENV|ENV|ZDOTDIR|SHELLOPTS|BASHOPTS|PROMPT_COMMAND|GIT_[A-Z0-9_]*|DYLD_[A-Z0-9_]*|LD_[A-Z0-9_]*|PYTHONPATH|PYTHONSTARTUP|PYTHONHOME|PYTHONUSERBASE|PERL5LIB|PERL5OPT|PERLLIB|RUBYOPT|RUBYLIB)$/;
 export const isProtectedEnvKey = (k) => DANGEROUS_SETTINGS_ENV_KEYS.includes(k) || DANGEROUS_SETTINGS_ENV_RE.test(k)
-  || MODEL_SETTINGS_ENV_RE.test(k) || ENDPOINT_SETTINGS_ENV_RE.test(k) || PROXY_ENV_RE.test(k);
+  || MODEL_SETTINGS_ENV_RE.test(k) || ENDPOINT_SETTINGS_ENV_RE.test(k) || PROXY_ENV_RE.test(k) || CODE_INJECTION_ENV_RE.test(k);
 
 /** Claude Code's PID-marker directory at the top of an install root: written by Claude Code, never loaded. */
 export const IN_USE = '.in_use';

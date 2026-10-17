@@ -224,7 +224,8 @@ When a seat hits its usage or rate limit (`You've hit your limit · resets …`,
 supervisor does not move any supervised session to another harness: the fleet is Claude-only, whatever
 `HARNESS_FALLBACK` says. It posts one `fleet notify --level alert --incident seat-limit`, resolved once no
 supervised pane shows the limit, and every relaunch stays on the primary harness. Only Claude Code's own
-limit line, as the last message of a pane the supervisor launched, counts: text in tool output or in
+limit line, as the last message of a pane the fleet launched (`fleet launch` and the supervisor record
+each supervised session's pane), counts: text in tool output or in
 another pane never does. (`HARNESS_FALLBACK` only makes `fleet sync` pre-stage those harnesses' plugin
 caches; starting an interactive session on one is an operator's decision at the terminal.)
 
@@ -1263,7 +1264,9 @@ on their own agents, skills and MCP servers: that is what a separate `FLEET_CLAU
 `CLAUDE_PLUGIN_ROOT`, `CLAUDE_CONFIG_DIR`, `PATH`, `GH_*`, `GITHUB_*`) in any settings file, and the
 endpoint, credential and provider keys (`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`,
 `ANTHROPIC_CUSTOM_HEADERS`, `CLAUDE_CODE_USE_BEDROCK` / `_VERTEX` / `_FOUNDRY`, any `*_BASE_URL`, and
-`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY` in any case). So is a model
+`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY` in any case), and keys that make a shell, git, the
+loader or an interpreter load code (`BASH_ENV`, `ENV`, `ZDOTDIR`, `SHELLOPTS`, `BASHOPTS`, `PROMPT_COMMAND`,
+`GIT_*`, `DYLD_*`, `LD_*`, `PYTHONPATH`, `PYTHONSTARTUP`, `PYTHONHOME`, `PERL5LIB`, `PERL5OPT`, `RUBYOPT`, …). So is a model
 override: `CLAUDE_CODE_SUBAGENT_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL_FORCE`, `ANTHROPIC_MODEL`,
 `ANTHROPIC_SMALL_FAST_MODEL` or any `ANTHROPIC_*_MODEL` in an `env`, or a top-level `model`,
 `availableModels`, `fallbackModel`, `advisorModel`, `modelOverrides`, `deniedModels`,

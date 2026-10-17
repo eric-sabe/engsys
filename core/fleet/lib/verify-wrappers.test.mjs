@@ -949,6 +949,12 @@ test('settings env: endpoint, credential, provider and proxy keys are protected'
     assert.ok(isProtectedEnvKey(k), k);
   }
   for (const k of ['BASE_URLS', 'MY_URL', 'CLAUDE_CODE_USE_POWERSHELL_TOOL', 'PROXY']) assert.ok(!isProtectedEnvKey(k), `${k} is ordinary`);
+  for (const k of ['BASH_ENV', 'ENV', 'ZDOTDIR', 'SHELLOPTS', 'BASHOPTS', 'GIT_SSH_COMMAND', 'GIT_CONFIG_COUNT', 'GIT_EXEC_PATH', 'GIT_DIR',
+    'DYLD_INSERT_LIBRARIES', 'LD_PRELOAD', 'PYTHONPATH', 'PYTHONSTARTUP', 'PERL5LIB', 'PERL5OPT', 'RUBYOPT']) assert.ok(isProtectedEnvKey(k), k);
+  for (const k of ['ENVIRONMENT', 'GITHUB_X_NOT', 'LDAP_HOST', 'PYTHON_VERSION']) {
+    if (k === 'GITHUB_X_NOT') continue; // GITHUB_* is protected on its own
+    assert.ok(!isProtectedEnvKey(k), `${k} is ordinary`);
+  }
 });
 
 test('user-scope config: agents, commands, skills, rules, memory and MCP servers need VERIFY_ALLOWED_USER_FILES', () => {

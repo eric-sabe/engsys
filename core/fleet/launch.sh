@@ -170,6 +170,17 @@ claude_only() { # claude_only <name> → 0 when <name> may only run on Claude
   return 1
 }
 harness_refused() { [ "$launch_harness" != claude ] && claude_only "$1"; }
+# The supervisor reads a seat-limit line only from a pane it knows it launched: record the pane of every
+# supervised session started here (the supervisor's own relaunches come through here too).
+record_panes() { # record_panes <name>...
+  local n id sd="$FLEET_REPO/logs/fleet-supervisor"
+  for n in "$@"; do
+    fleet_ledger_sessions | grep -Fxq -- "$n" || continue
+    id="$(tmux list-panes -t "${TMUX_SESSION}:$n" -F '#{pane_id}' 2>/dev/null | head -1 || true)"
+    [ -n "$id" ] || continue
+    mkdir -p "$sd" && printf '%s\n' "$id" >"$sd/$n.pane"
+  done
+}
 
 export HARNESS="${HARNESS:-claude}"
 cd "$PIN_DIR"
@@ -189,7 +200,9 @@ if [ -n "$name" ]; then
   elif is_singleton "$name" && ! singleton_integrity_ok; then
     fleet_die "not launching $name: $why_held (above). Check the running sessions, fix or reinstall the plugin, then: fleet verify"
   fi
-  exec bash "$LAUNCHER" --roster "$FLEET_STATE/roster" "$name"
+  lrc=0; bash "$LAUNCHER" --roster "$FLEET_STATE/roster" "$name" || lrc=$?
+  [ "$lrc" != 0 ] || record_panes "$name"
+  exit "$lrc"
 fi
 
 # The host roster: the rendered roster minus the sessions that are not on this host.
@@ -223,7 +236,9 @@ if [ "$kept" = 0 ]; then
   [ "$refused" = 0 ] || fleet_die "$refused Claude-only session(s) refused on HARNESS=$launch_harness (SKIPPED above); nothing else to launch"
   echo "fleet: no roster session runs on this host; nothing to launch"; exit 0
 fi
-[ "$refused" != 0 ] || exec bash "$LAUNCHER" --roster "$host_roster"
 lrc=0; bash "$LAUNCHER" --roster "$host_roster" || lrc=$?
+# shellcheck disable=SC2046 # names are [a-z0-9-] only
+record_panes $(awk -F'|' '/^[a-z0-9][a-z0-9-]*\|/ { print $1 }' "$host_roster")
+[ "$refused" != 0 ] || exit "$lrc"
 echo "fleet: $refused Claude-only session(s) refused on HARNESS=$launch_harness (SKIPPED above)" >&2
 exit $(( lrc != 0 ? lrc : 1 ))

@@ -92,6 +92,7 @@ case "$sub" in
   list-panes)
     case "$fmt" in
       *pane_pid*) cat "$F/pid-$w" 2>/dev/null || exit 1 ;;
+      *pane_id*) [ -f "$F/cmd-$w" ] || exit 1; echo "%pane-$w" ;;
       *) cat "$F/cmd-$w" 2>/dev/null || exit 1 ;;
     esac ;;
   capture-pane) cat "$F/cap-$w" 2>/dev/null || true ;;
@@ -498,6 +499,8 @@ echo "== E. launch: rendering, the 5th roster field, the launcher command lines"
 rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"
 run fleet launch
 rc_is "launch exits 0" 0
+eq "fleet launch records each supervised session's pane (the supervisor reads seat limits only there)" "$(cat "$INST/logs/fleet-supervisor/acme-mm.pane" 2>/dev/null)" "%pane-acme-mm"
+[ ! -f "$INST/logs/fleet-supervisor/acme-build.pane" ] && ok "…and not an interactive one's" || bad "…and not an interactive one's"
 has "preflight ran" "$OUT" "preflight-ok"
 [ -d "$HOME/git/worktrees" ] && ok "WORKTREES_DIR created" || bad "WORKTREES_DIR created"
 S_ENV="$(cat "$STATE/env/session.env")"; X_ENV="$(cat "$STATE/env/security.env")"
@@ -605,6 +608,7 @@ has "conf: …and the maintenance monster too" "$SUP" "acme-security|12|60|||mai
 has "conf: HEARTBEAT_CMD defaulted to the dispatcher" "$SUP" "HEARTBEAT_CMD=bash $ENGSYS_HOST/core/fleet/bin/fleet --instance $INST heartbeat"
 has "conf: INTEGRITY_CMD defaulted to fleet verify, throttled to 15 min (engsys#70)" "$SUP" "INTEGRITY_CMD=bash $ENGSYS_HOST/core/fleet/bin/fleet --instance $INST verify --alert --auto-sync --max-age 15"
 has "the integrity check ran in the tick and passed" "$(cat "$INST/logs/fleet-supervisor/supervisor.log")" "integrity: ok"
+eq "the relaunched supervised session's pane is recorded (seat-limit evidence)" "$(cat "$INST/logs/fleet-supervisor/acme-mm.pane" 2>/dev/null)" "%pane-acme-mm"
 hasnt "supervisor conf: no harness fallback is handed to the supervisor (Claude-only)" "$(cat "$STATE/supervisor.conf")" "HARNESS_FALLBACK"
 has "stale monster with no window is relaunched through the kit" "$(grep -F '[new-session]' "$FAKE/tmux.log" | grep -F '[acme-mm]' || true)" "[acme-mm]"
 hasnt "closed ledger (kill switch) is left alone" "$(cat "$FAKE/tmux.log")" "[acme-security]"
@@ -625,6 +629,11 @@ rc_is "behind main with a changed .claude file: a stale mismatch" 1
 has "…named stale" "$OUT" "stale      .claude/agents/helper.md differs from main"
 h0="$(git -C "$APPD" rev-parse HEAD)"; run fleet verify
 eq "…and plain verify doesn't touch the checkout" "$(git -C "$APPD" rev-parse HEAD)" "$h0"
+run fleet verify --alert
+has "…its alert says behind main, not tampering" "$OUT" "is behind main, and files the sessions load changed there"
+has "…and, without --auto-sync, asks for fleet sync instead of claiming it runs" "$OUT" "Run fleet sync (a supervised host also does it on its own"
+hasnt "…" "$OUT" "Auto-syncing: fleet sync is running"
+rm -f "$STATE/verify-wrappers.alerted"
 : >"$FAKE/launchctl.log"
 run fleet verify --auto-sync
 rc_is "--auto-sync on a clean checkout of main: syncs and passes" 0
