@@ -32,12 +32,16 @@
 # `fleet notify --level action --incident claude-auth-expired` links STATUS_URL, set here to this fleet's
 # status issue in multi-fleet mode (single-fleet mode: the first session's ledger issue).
 #
-# It also gets INTEGRITY_CMD (`fleet verify --alert --max-age $VERIFY_MAX_AGE_MIN`, default 15): once
+# It also gets INTEGRITY_CMD (`fleet verify --alert --auto-sync --max-age $VERIFY_MAX_AGE_MIN`, default 15): once
 # per tick the supervisor checks that the plugin files guarding the merge and maintain monsters match
 # the pinned engsys release on GitHub (engsys#70). GitHub is asked at most once per VERIFY_MAX_AGE_MIN
 # minutes while the local files are unchanged. Anything but a pass (a mismatch, or a check that can't
 # run) alerts once per incident and holds every relaunch of those sessions (engsys#86 review H1);
-# running ones are left alone.
+# running ones are left alone: never killed, and their batons are never revoked or broken for it.
+#
+# The fleet is Claude-only: the supervisor relaunches every supervised session on the primary harness
+# and never fails one over to another, whatever HARNESS_FALLBACK says; a seat limit is only alerted
+# (fleet-supervisor.sh "Seat limit").
 #
 # Merge and maintain monsters (by their roster prompt, lib/host-roles.sh) get their role appended as
 # the 6th field (`acme-mm|7|60|||merge`): the supervisor then reads the role's holder from the github
@@ -108,15 +112,9 @@ grep -q '^HOST_CHECK_CMD=' "$conf" || printf 'HOST_CHECK_CMD=bash %s/bin/fleet -
 grep -q '^HOST_HEALTH_CMD=' "$conf" || printf 'HOST_HEALTH_CMD=bash %s/bin/fleet --instance %s launch --host-health\n' "$FLEET_KIT_DIR" "$FLEET_REPO" >>"$conf"
 grep -q '^HOST_HEALTH_INCIDENT=' "$conf" || printf 'HOST_HEALTH_INCIDENT=fleet-registry-unreadable\n' >>"$conf"
 grep -q '^NOTIFY_CMD=' "$conf" || printf 'NOTIFY_CMD=bash %s/bin/fleet --instance %s notify\n' "$FLEET_KIT_DIR" "$FLEET_REPO" >>"$conf"
-grep -q '^INTEGRITY_CMD=' "$conf" || printf 'INTEGRITY_CMD=bash %s/bin/fleet --instance %s verify --alert --max-age %s\n' "$FLEET_KIT_DIR" "$FLEET_REPO" "$VERIFY_MAX_AGE_MIN" >>"$conf"
+grep -q '^INTEGRITY_CMD=' "$conf" || printf 'INTEGRITY_CMD=bash %s/bin/fleet --instance %s verify --alert --auto-sync --max-age %s\n' "$FLEET_KIT_DIR" "$FLEET_REPO" "$VERIFY_MAX_AGE_MIN" >>"$conf"
 grep -q '^HEARTBEAT_CMD=' "$conf" || printf 'HEARTBEAT_CMD=bash %s/bin/fleet --instance %s heartbeat\n' "$FLEET_KIT_DIR" "$FLEET_REPO" >>"$conf"
 grep -q '^HARNESS=' "$conf" || printf 'HARNESS=%s\n' "${PRIMARY_HARNESS:-$HARNESS}" >>"$conf"
-if [ -n "${HARNESS_FALLBACK:-}" ] && ! grep -q '^HARNESS_FALLBACK=' "$conf"; then
-  printf 'HARNESS_FALLBACK=%s\n' "$HARNESS_FALLBACK" >>"$conf"
-fi
-if [ -n "${QUOTA_COOLDOWN_MIN:-}" ] && ! grep -q '^QUOTA_COOLDOWN_MIN=' "$conf"; then
-  printf 'QUOTA_COOLDOWN_MIN=%s\n' "$QUOTA_COOLDOWN_MIN" >>"$conf"
-fi
 # The expired-login alert (engsys#103) links the fleet's status issue, where the heartbeat says the same.
 if [ -n "$status_target" ] && ! grep -q '^STATUS_URL=' "$conf"; then
   printf 'STATUS_URL=https://github.com/%s/issues/%s\n' "${status_target%%#*}" "${status_target##*#}" >>"$conf"

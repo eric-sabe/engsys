@@ -10,11 +10,30 @@
 # When ENGSYS_REF is forced (fleet.local.conf or the environment) to something other than the pin in
 # PIN_SETTINGS, it says so: a forced older tag is a way back to a weaker guard.
 #
+# Also checked (lib/verify-wrappers.mjs): the pin checkout's .claude/ tree and every script its settings
+# hooks run, against PIN_REPO's default branch on GitHub (PIN_DIR's HEAD must be that tip or behind it;
+# behind is a warning to run fleet sync), and the user-scope settings of the Claude config dir the
+# sessions use: FLEET_CLAUDE_CONFIG_DIR when fleet.conf sets it, else ~/.claude. A user-scope plugin the
+# pin repo doesn't enable is a mismatch unless VERIFY_ALLOWED_USER_PLUGINS (fleet.conf, space-separated
+# name@marketplace) lists it, and so is a user-scope hook or settings command (statusLine, *Helper, ...)
+# unless VERIFY_ALLOWED_USER_HOOKS (fleet.conf, space-separated sha256 content hashes, printed in the
+# mismatch line) lists it; listed ones are reported as `allowed`. The pin checkout's auto-loaded files
+# (.claude/, CLAUDE.md files, .mcp.json, settings-command targets) must also be identical at the tip.
+# User-scope agents, commands, skills, rules, CLAUDE.md and MCP server definitions in that config dir (and
+# its .claude.json) are a mismatch unless VERIFY_ALLOWED_USER_FILES (fleet.conf, sha256 per item, printed
+# in the mismatch line) lists them, and so is any CLAUDE.md / CLAUDE.local.md above PIN_DIR up to $HOME.
+#
 #   --alert          post `fleet notify --level alert` once per incident, and resolve it on the next pass:
 #                      wrapper-integrity             a mismatch (latch: .fleet/verify-wrappers.alerted, holding
 #                                                    the mismatch's fingerprint: a different mismatch alerts again)
 #                      wrapper-integrity-unverified  the check could not run (latch: .fleet/verify-wrappers.unverified)
 #                      engsys-ref-forced             ENGSYS_REF forced away from the pin (latch: .fleet/verify-ref-forced.alerted)
+#   --auto-sync      (the supervisor's tick) when the only problems are `stale` (the pin checkout is behind
+#                    the default branch and files the sessions load changed there) and PIN_DIR is on the
+#                    default branch with a clean tracked tree, run `fleet sync --no-jobs` once (fast-forward +
+#                    plugin reconcile, no restarts, never a launchd reload: changed job files are alerted)
+#                    and verify again. Dirty, diverged or another branch: the
+#                    mismatch stands, alerted as "behind main", not as tampering.
 #   --max-age <min>  reuse a pass from the last <min> minutes while the local files are unchanged (the
 #                    supervisor's throttle; cache: .fleet/verify-wrappers.json). `fleet launch` never
 #                    passes it, so a launch always asks GitHub.
@@ -22,13 +41,14 @@
 # Exit: 0 match | 1 MISMATCH | 3 not verified (GitHub unreachable, no pin or not a tag, nothing installed)
 #       | 2 usage. Merge and maintain sessions start only on 0 (engsys#86 review H1).
 #
-# Usage: verify.sh [--instance <dir>] [--alert] [--max-age <minutes>]
+# Usage: verify.sh [--instance <dir>] [--alert] [--auto-sync] [--max-age <minutes>]
 set -euo pipefail
 if [ "${1:-}" = --instance ]; then FLEET_INSTANCE="${2:?--instance needs a directory}"; export FLEET_INSTANCE; shift 2; fi
-alert=0 max_age=""
+alert=0 max_age="" auto_sync=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --alert) alert=1 ;;
+    --auto-sync) auto_sync=1 ;;
     --max-age) max_age="${2:?--max-age needs minutes}"; shift ;;
     -h | --help) sed -n '2,/^set -/{/^set -/!p;}' "$0"; exit 0 ;;
     *) echo "fleet verify: unknown arg: $1" >&2; exit 2 ;;
@@ -67,6 +87,11 @@ elif [ "$alert" = 1 ] && [ -f "$FORCED_LATCH" ]; then
 fi
 
 rc=0 out="" plist=""
+# The Claude Code config dir the fleet's sessions run with: FLEET_CLAUDE_CONFIG_DIR (fleet-env.sh exports
+# it as CLAUDE_CONFIG_DIR for every fleet command and session, so `claude plugin list` below reads it
+# too), else the account's ~/.claude. Its user-scope settings and plugins load in every fleet session.
+claude_cfg="${FLEET_CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+echo "fleet verify: Claude config dir: $claude_cfg${FLEET_CLAUDE_CONFIG_DIR:+ (FLEET_CLAUDE_CONFIG_DIR)}"
 if [ -z "$repo" ] || [ -z "$ref" ]; then
   out="fleet verify: not verified: no '$ENGSYS_MARKETPLACE' marketplace with a repo and ref in $PIN_SETTINGS"; rc=3
 elif ! [[ "$ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -77,6 +102,12 @@ elif [ "${HARNESS:-claude}" = "claude" ] && ! command -v claude >/dev/null; then
   out="fleet verify: not verified: claude not found, so the installed plugin can't be located"; rc=3
 elif ! [ -d "$PIN_DIR" ]; then
   out="fleet verify: not verified: PIN_DIR not found: $PIN_DIR"; rc=3
+elif [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] && ! [ -d "$FLEET_CLAUDE_CONFIG_DIR" ]; then
+  out="fleet verify: not verified: FLEET_CLAUDE_CONFIG_DIR not found: $FLEET_CLAUDE_CONFIG_DIR (see the fleet guide: a separate Claude config dir)"; rc=3
+elif [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] && [ "${HARNESS:-claude}" = claude ] \
+  && [ "$( (cd "${TMPDIR:-/tmp}" && CLAUDE_CONFIG_DIR="$FLEET_CLAUDE_CONFIG_DIR" claude auth status --json) 2>/dev/null | jq -r 'if .loggedIn == false then "false" else "" end' 2>/dev/null || true)" = false ]; then
+  # A rotation must not relaunch a monster into a login prompt: hold until the fleet seat is logged in.
+  out="fleet verify: not verified: the fleet's Claude config dir $FLEET_CLAUDE_CONFIG_DIR is not logged in (CLAUDE_CONFIG_DIR=$FLEET_CLAUDE_CONFIG_DIR claude, then /login)"; rc=3
 else
   plist="$(mktemp "$FLEET_STATE/plugin-list.XXXXXX")"
   if [ "${HARNESS:-claude}" = "copilot" ]; then
@@ -101,18 +132,24 @@ else
     fi
   fi
   if [ "$rc" = 0 ]; then
-    args=(--repo "$repo" --tag "$ref" --plugin-id "engsys@$ENGSYS_MARKETPLACE" --project-dir "$PIN_DIR" --plugins "$plist" --harness "${HARNESS:-claude}" --check-settings --user-settings-dir "$HOME/.claude")
+    args=(--repo "$repo" --tag "$ref" --plugin-id "engsys@$ENGSYS_MARKETPLACE" --project-dir "$PIN_DIR" --plugins "$plist" --harness "${HARNESS:-claude}" --check-settings --user-settings-dir "$claude_cfg")
+    [ -z "${VERIFY_ALLOWED_USER_PLUGINS:-}" ] || args+=(--allowed-user-plugins "$VERIFY_ALLOWED_USER_PLUGINS")
+    [ -z "${VERIFY_ALLOWED_USER_HOOKS:-}" ] || args+=(--allowed-user-hooks "$VERIFY_ALLOWED_USER_HOOKS")
+    # User-scope config besides settings (agents, commands, skills, rules, memory, MCP servers) and memory
+    # files above PIN_DIR: each must be on VERIFY_ALLOWED_USER_FILES. The user state file is
+    # <dir>/.claude.json with a fleet config dir, else ~/.claude.json.
+    args+=(--check-user-config --claude-json "${FLEET_CLAUDE_CONFIG_DIR:+$FLEET_CLAUDE_CONFIG_DIR/.claude.json}")
+    [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] || args[${#args[@]}-1]="$HOME/.claude.json"
+    [ -z "${VERIFY_ALLOWED_USER_FILES:-}" ] || args+=(--allowed-user-files "$VERIFY_ALLOWED_USER_FILES")
     if [ -e "$ENGSYS_DIR" ] || [ -L "$ENGSYS_DIR" ]; then
       args+=(--engsys-dir "$ENGSYS_DIR")
     fi
-    if git -C "$PIN_DIR" rev-parse --git-dir >/dev/null 2>&1; then
-      pin_origin_ref="$(git -C "$PIN_DIR" symbolic-ref --short -q refs/remotes/origin/HEAD 2>/dev/null || true)"
-      [ -n "$pin_origin_ref" ] || { git -C "$PIN_DIR" rev-parse --verify -q refs/remotes/origin/main >/dev/null 2>&1 && pin_origin_ref="origin/main"; }
-      [ -n "$pin_origin_ref" ] || { git -C "$PIN_DIR" rev-parse --verify -q refs/remotes/origin/master >/dev/null 2>&1 && pin_origin_ref="origin/master"; }
-      if [ -n "$pin_origin_ref" ]; then
-        pin_sha="$(git -C "$PIN_DIR" rev-parse -q --verify "refs/remotes/${pin_origin_ref}:.claude/settings.json" 2>/dev/null || true)"
-        [ -z "$pin_sha" ] || args+=(--pin-settings-sha "$pin_sha")
-      fi
+    # Project settings and hooks: checked against PIN_REPO's default branch on GitHub (never a local
+    # ref). A PIN_DIR that is not a git checkout can't be: its settings hooks are then a mismatch.
+    if [ "$(git -C "$PIN_DIR" rev-parse --is-inside-work-tree 2>/dev/null || true)" = true ]; then
+      args+=(--pin-repo "$PIN_REPO")
+    else
+      echo "fleet verify: WARNING PIN_DIR ($PIN_DIR) is not a git checkout, so its .claude/ can't be checked against $PIN_REPO; any settings hook there is a mismatch"
     fi
     [ -z "$max_age" ] || args+=(--cache "$FLEET_STATE/verify-wrappers.json" --max-age-min "$max_age")
     out="$(node "$FLEET_KIT_DIR/lib/verify-wrappers.mjs" "${args[@]}" 2>&1)" || rc=$?
@@ -122,6 +159,40 @@ else
     fi
     case "$rc" in 0 | 1 | 3) ;; *) out="$out"$'\n'"fleet verify: not verified: the verifier exited $rc"; rc=3 ;; esac
   fi
+fi
+
+# Only `stale` problems: the checkout is behind main and an auto-loaded file moved there. Not tampering.
+only_stale=0
+if [ "$rc" = 1 ]; then
+  probs="$(sed -n 's/^  \(.*\)$/\1/p' <<<"$out")"
+  if [ -n "$probs" ] && ! grep -qv '^stale ' <<<"$probs"; then only_stale=1; fi
+fi
+sync_why=""
+if [ "$only_stale" = 1 ] && [ "$auto_sync" = 1 ]; then
+  # Full ref names, never --short: a local branch or tag named origin/<x> makes --short ambiguous.
+  pin_branch="$(git -C "$PIN_DIR" symbolic-ref -q HEAD 2>/dev/null || true)"
+  case "$pin_branch" in refs/heads/*) pin_branch="${pin_branch#refs/heads/}" ;; *) pin_branch="" ;; esac
+  def_branch="$(git -C "$PIN_DIR" symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null || true)"
+  case "$def_branch" in refs/remotes/origin/?*) def_branch="${def_branch#refs/remotes/origin/}" ;; *) def_branch="" ;; esac
+  : "${def_branch:=main}"
+  if [ "$pin_branch" != "$def_branch" ]; then sync_why="the pin checkout is on '${pin_branch:-a detached HEAD}', not $def_branch"
+  elif [ -n "$(git -C "$PIN_DIR" status --porcelain --untracked-files=no 2>/dev/null || echo dirty)" ]; then sync_why="the pin checkout has uncommitted changes to tracked files"
+  elif [ -n "$(git -C "$PIN_DIR" status --porcelain -- .claude ':(exclude,icase).claude/settings.local.json' \
+      ':(exclude,icase).claude/scheduled_tasks.lock' ':(exclude,icase).claude/worktrees' ':(exclude,icase).claude/checkpoints' \
+      ':(exclude,icase).claude/mailbox' ':(exclude,icase).claude/routines/.state' ':(exclude,icase).claude/agent-registry.json' \
+      ':(exclude,icase).claude/agent-memory-local' ':(exclude,icase).claude/first-run' \
+      ':(exclude,icase).claude/assistant-daemon-state.json' 2>/dev/null || echo dirty)" ]; then sync_why="the pin checkout's .claude/ has untracked files"
+  else
+    echo "fleet verify: the pin checkout is behind $def_branch and files the sessions load changed there: auto-syncing (fleet sync, no restarts)"
+    # --no-jobs: this runs inside the supervisor's own launchd job, which a job reload would kill.
+    if bash "$FLEET_KIT_DIR/sync.sh" --instance "$FLEET_REPO" --no-jobs </dev/null >&2; then
+      [ -z "${plist:-}" ] || rm -f "$plist"
+      reargs=(--instance "$FLEET_REPO"); [ "$alert" = 0 ] || reargs+=(--alert); [ -z "$max_age" ] || reargs+=(--max-age "$max_age")
+      exec bash "$FLEET_KIT_DIR/verify.sh" "${reargs[@]}"   # once: the re-run has no --auto-sync
+    fi
+    sync_why="fleet sync failed (above)"
+  fi
+  out="$out"$'\n'"fleet verify: could not auto-sync: $sync_why"
 fi
 printf '%s\n' "$out"
 
@@ -136,9 +207,16 @@ if [ "$alert" = 1 ]; then
       fi ;;
     1)
       fp="$(sed -n 's/^fingerprint: //p' <<<"$out" | tail -1)"
-      if [ "$(cat "$LATCH" 2>/dev/null)" != "$fp" ]; then
-        lines="$(sed -n 's/^  \(.*\)$/\1/p' <<<"$out" | head -n 8)"
-        notify --level alert --incident wrapper-integrity "Plugin check on $host: the engsys plugin that the merge and maintain monsters load does not match $repo@$ref, so it may have been changed on this host. Merge and maintain sessions will not be launched or relaunched here until it matches. Running sessions were left as they are: please check them and stop any you don't trust, then reinstall the plugin (from a directory outside any project: claude plugin uninstall --scope user engsys@$ENGSYS_MARKETPLACE, delete its cache directory, then fleet sync). What differs:
+      if [ "$only_stale" = 1 ] && [ "$(cat "$LATCH" 2>/dev/null)" != "$fp|$auto_sync|$sync_why" ]; then
+        lines="$(sed -n 's/^  \(.*\)$/\1/p' <<<"$out" | awk 'NR <= 8')"
+        notify --level alert --incident wrapper-integrity "Plugin check on $host: the pin checkout ($PIN_DIR) is behind main, and files the sessions load changed there. $(if [ -n "$sync_why" ]; then printf 'Auto-sync could not fast-forward it: %s. Please bring the checkout back to main and run fleet sync.' "$sync_why"; elif [ "$auto_sync" = 1 ]; then printf 'Auto-syncing: fleet sync is running for it now.'; else printf 'Run fleet sync (a supervised host also does it on its own, through fleet verify --auto-sync).'; fi) Merge and maintain sessions are held until it matches; running sessions are left as they are. This is not a sign of tampering. Behind on:
+$lines
+Details: fleet verify" && printf '%s\n' "$fp|$auto_sync|$sync_why" >"$LATCH"
+      elif [ "$only_stale" = 0 ] && [ "$(cat "$LATCH" 2>/dev/null)" != "$fp" ]; then
+        summary="$(sed -n 's/^summary: //p' <<<"$out" | tail -1)"
+        hint="$(sed -n 's/^hint: //p' <<<"$out" | tail -1)"
+        lines="$(sed -n 's/^  \(.*\)$/\1/p' <<<"$out" | awk 'NR <= 5')"
+        notify --level alert --incident wrapper-integrity "Plugin check on $host: ${summary:-a mismatch}. What the merge and maintain monsters load does not match $repo@$ref (the engsys plugin and host kit), $PIN_REPO's default branch on GitHub (the pin checkout), or the allowed Claude settings in $claude_cfg. Merge and maintain sessions will not be launched or relaunched here until it matches; running sessions and their batons were left as they are.${hint:+ For the user-scope items: $hint.} To fix: for plugin files, reinstall (claude plugin uninstall --scope user engsys@$ENGSYS_MARKETPLACE from outside any project, delete its cache directory, fleet sync); for the pin checkout, restore it to GitHub's main and check who changed it; for a user-scope item, remove it or allowlist it (VERIFY_ALLOWED_USER_PLUGINS / _HOOKS / _FILES). First of them:
 $lines
 Details: fleet verify" && printf '%s\n' "$fp" >"$LATCH"
       fi ;;

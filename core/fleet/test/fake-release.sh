@@ -8,7 +8,8 @@
 # puts two front stubs first on PATH, ahead of the test's own stubs (which still get everything else):
 #   gh      answers the release calls `fleet verify` makes (the tag ref, the default branch, the compare,
 #           the tree), from the sandbox engsys repo at that tag. The tag's commit is reported on the
-#           default branch.
+#           default branch. Any other repo with a sandbox remote ($T/remotes/<owner>/<repo>.git, the pin
+#           repo) is answered from that remote (fake-github.sh), so the pin checkout's .claude/ verifies.
 #   claude  `plugin list --json` run in a directory whose .claude/settings.json pins the marketplace to a
 #           tag: the test stub's list plus an enabled engsys@<marketplace> install at that version,
 #           materialized under $HOME/.claude/plugins/cache/ from the tag's core/ (exactly what the
@@ -20,6 +21,8 @@ fake_release() {
   mkdir -p "$dir"
   printf '%s\n' "$1" >"$dir/gitdir"
   printf '%s\n' "${2:-engsys}" >"$dir/marketplace"
+  printf '%s\n' "$T" >"$dir/troot"
+  cp "$(dirname "${BASH_SOURCE[0]}")/fake-github.sh" "$dir/fake-github.sh"
   cat >"$dir/next.sh" <<'SH'
 # next_bin <name>: the first <name> on PATH AFTER this directory. (Not "the first one that isn't me": a
 # pass-through shim earlier on PATH does that, and the two would hand the call back and forth forever.)
@@ -39,6 +42,13 @@ SH
 #!/usr/bin/env bash
 D="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"; . "$D/next.sh"
 G="$(cat "$D/gitdir")"
+# Any other repo with a sandbox remote (the pin repo): served from that remote, the way GitHub would.
+if [ "${1:-}" = api ] && [ $# = 2 ] && [[ "$2" =~ ^repos/([^/]+)/([^/?]+)/?(.*)$ ]]; then
+  R="$(cat "$D/troot")/remotes/${BASH_REMATCH[1]}/${BASH_REMATCH[2]}.git" rest="${BASH_REMATCH[3]}"
+  if [ -d "$R" ] && [ "$(cd "$R" && pwd -P)" != "$(cd "$G" 2>/dev/null && pwd -P)" ]; then
+    . "$D/fake-github.sh"; fake_github_api "$R" "$rest"; exit
+  fi
+fi
 if [ "${1:-}" = api ] && [ $# = 2 ]; then
   case "$2" in
     repos/*/git/ref/tags/*)

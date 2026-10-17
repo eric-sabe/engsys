@@ -414,7 +414,12 @@ launch_one() {
   local root
   root="$(cd "$workdir" && pwd -P)" || { echo "error: cannot resolve workdir for '$name': $workdir" >&2; return 1; }
   cmd="export ENGSYS_SESSION=$(printf %q "$name") ENGSYS_SESSION_RUN=$(printf %q "$run") ENGSYS_SESSION_ROOT=$(printf %q "$root")"
+  # The Claude Code config dir comes from the launcher's own environment (the fleet kit sets it from
+  # FLEET_CLAUDE_CONFIG_DIR), never from the tmux server's, which may predate it: set means every
+  # session gets it, unset means none inherits a stale one.
+  if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then cmd+=" CLAUDE_CONFIG_DIR=$(printf %q "$CLAUDE_CONFIG_DIR")"; fi
   if [ -n "$role" ]; then cmd+=" ENGSYS_SINGLETON_ROLE=$role && "; else cmd+=" && unset ENGSYS_SINGLETON_ROLE && "; fi
+  [ -n "${CLAUDE_CONFIG_DIR:-}" ] || cmd+="unset CLAUDE_CONFIG_DIR && "
   cmd+="cd $(printf %q "$workdir") && "
   if [ -n "$session_env" ]; then
     cmd+="set -a && . $(printf %q "$session_env") && set +a && "

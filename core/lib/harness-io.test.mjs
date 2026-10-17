@@ -136,9 +136,39 @@ describe('core/lib/harness-io.mjs', () => {
     assert.equal(detectHarness({ AGY_PLUGIN_ROOT: '/p/agy' }), 'antigravity');
     assert.equal(detectHarness({}), 'claude');
 
-    assert.equal(resolvePluginRoot({ ENGSYS_PLUGIN_ROOT: '/p/engsys', CLAUDE_PLUGIN_ROOT: '/p/claude' }), '/p/engsys');
     assert.equal(resolvePluginRoot({ COPILOT_PLUGIN_ROOT: '/p/copilot' }), '/p/copilot');
     assert.equal(resolvePluginRoot({ AGY_PLUGIN_ROOT: '/p/agy' }), '/p/agy');
+  });
+
+  test('resolvePluginRoot under Claude Code takes only CLAUDE_PLUGIN_ROOT or the module location', () => {
+    const meta = new URL('./sub/hook.mjs', 'file:///opt/plugin/core/').href;
+    // another harness's root, or the engsys override, never moves a Claude hook's root
+    assert.equal(resolvePluginRoot({ ENGSYS_PLUGIN_ROOT: '/p/engsys', CLAUDE_PLUGIN_ROOT: '/p/claude' }), '/p/claude');
+    assert.equal(resolvePluginRoot({ COPILOT_PLUGIN_ROOT: '/p/copilot', CLAUDE_PLUGIN_ROOT: '/p/claude' }), '/p/claude');
+    assert.equal(resolvePluginRoot({ AGY_PLUGIN_ROOT: '/p/agy', ENGSYS_PLUGIN_ROOT: '/p/e', CLAUDE_PLUGIN_ROOT: '/p/claude' }), '/p/claude');
+    assert.equal(resolvePluginRoot({ ENGSYS_PLUGIN_ROOT: '/p/engsys' }, meta, 'claude'), '/opt/plugin/core');
+    assert.equal(resolvePluginRoot({ ENGSYS_HARNESS: 'claude', COPILOT_PLUGIN_ROOT: '/p/copilot' }, meta), '/opt/plugin/core');
+    // a harness-naming env var never moves a Claude hook's root while CLAUDE_PLUGIN_ROOT is set
+    for (const k of ['ENGSYS_HARNESS', 'FLEET_ACTIVE_HARNESS', 'FLEET_HARNESS', 'HARNESS']) {
+      assert.equal(resolvePluginRoot({ [k]: 'copilot', CLAUDE_PLUGIN_ROOT: '/p/claude', ENGSYS_PLUGIN_ROOT: '/p/e', COPILOT_PLUGIN_ROOT: '/p/c' }, meta), '/p/claude', k);
+    }
+    // positive control: without CLAUDE_PLUGIN_ROOT the env selector still picks the harness
+    assert.equal(resolvePluginRoot({ ENGSYS_HARNESS: 'copilot', COPILOT_PLUGIN_ROOT: '/p/c' }, meta), '/p/c');
+    // positive controls: each override counts under its own harness
+    assert.equal(resolvePluginRoot({ ENGSYS_PLUGIN_ROOT: '/p/engsys', CLAUDE_PLUGIN_ROOT: '/p/claude' }, null, 'copilot'), '/p/engsys');
+    assert.equal(resolvePluginRoot({ COPILOT_PLUGIN_ROOT: '/p/copilot', ENGSYS_PLUGIN_ROOT: '/p/engsys' }, null, 'copilot'), '/p/copilot');
+    assert.equal(resolvePluginRoot({ AGY_PLUGIN_ROOT: '/p/agy' }, null, 'antigravity'), '/p/agy');
+    assert.equal(resolvePluginRoot({ CLAUDE_PLUGIN_ROOT: '/p/claude' }, meta, 'claude'), '/p/claude');
+  });
+
+  test('parseHookInput never takes cwd from model-controlled tool_input', () => {
+    const r = parseHookInput({ hook_event_name: 'PreToolUse', tool_name: 'run_command', cwd: '/work/repo', tool_input: { CommandLine: 'ls', Cwd: '/elsewhere' } }, {});
+    assert.equal(r.cwd, '/work/repo');
+    assert.equal(r.toolInput.Cwd, '/elsewhere', 'still readable as tool input');
+    const noCwd = parseHookInput({ toolCall: { name: 'run_command', args: { CommandLine: 'ls', Cwd: '/elsewhere' } }, workspacePaths: ['file:///ws'] }, {});
+    assert.equal(noCwd.cwd, '/ws', 'the harness workspace, not the tool argument');
+    // positive control: the harness's own cwd field is used
+    assert.equal(parseHookInput({ hook_event_name: 'PreToolUse', tool_name: 'Bash', cwd: '/w2', tool_input: { command: 'ls' } }, {}).cwd, '/w2');
   });
 
   test('CT-02, CT-04, CT-06, CT-07: emitPreToolDeny, emitPostToolContext, emitSessionStartContext, emitStopBlock, writeHookResult', () => {

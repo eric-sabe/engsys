@@ -26,6 +26,11 @@
 # (and refuses when the alert can't be delivered).
 # No config file or environment variable turns it on, and the supervisor never passes it.
 #
+# Claude-only: a merge, maintain, broker (any monster), supervised or security-lane session (5th field
+# security*) is refused when HARNESS is anything but claude, whether it came from fleet.conf,
+# fleet.local.conf, the environment or a HARNESS= line in the roster. A whole-roster launch starts the
+# rest, prints `SKIPPED: <name>` for each refused one, and exits non-zero: a refusal is an error.
+#
 # Usage: launch.sh [--instance <dir>]                              # every session that runs on this host
 #        launch.sh [--instance <dir>] <name> [--force-excluded]    # just one (the supervisor relaunches this way)
 #        launch.sh [--instance <dir>] <name> --skip-verify         # a merge/maintain session without the plugin
@@ -100,6 +105,9 @@ for tmpl in "$FLEET_REPO"/fleet/env/*.env.tmpl; do
   # (weather cache, trusted fleet-health.yml) only from here, never from the session's working tree.
   printf 'FLEET_STATE=%q\n' "$FLEET_STATE" >>"$dest"
   if [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ]; then printf 'CLAUDE_CONFIG_DIR=%q\n' "$FLEET_CLAUDE_CONFIG_DIR" >>"$dest"; fi
+  # The security lane never inherits a subagent model override: it would move pinned security agents
+  # (model: claude-opus-4-8) onto another model. (fleet verify flags the same keys in settings files.)
+  case "$(basename "$dest")" in security*) printf '# Security lane: no inherited subagent model override.\nunset CLAUDE_CODE_SUBAGENT_MODEL CLAUDE_CODE_SUBAGENT_MODEL_FORCE\n' >>"$dest" ;; esac
   if [ "${HARNESS:-claude}" != claude ]; then printf 'HARNESS=%q\n' "$HARNESS" >>"$dest"; fi
   if [ "${HARNESS:-claude}" = copilot ] && [ -n "${COPILOT_HOME:-}" ]; then printf 'COPILOT_HOME=%q\n' "$COPILOT_HOME" >>"$dest"; fi
   if [ -n "$FLEET_ID" ]; then
@@ -147,6 +155,33 @@ singleton_integrity_ok() { # → 0 when merge/maintain sessions may start
 }
 is_singleton() { case "$(fleet_host_kind_of "$1")" in merge | maintain) return 0 ;; esac; return 1; }
 
+# Claude-only: merge, maintain, broker (and any other monster) and security-lane sessions never start on
+# another harness, wherever HARNESS came from (fleet.conf, fleet.local.conf, the environment, or a
+# HARNESS= line in the roster).
+launch_harness="$(sed -n 's/^HARNESS=//p' "$FLEET_STATE/roster" | tail -n 1 | tr -d '\r' | sed -e 's/[[:space:]][[:space:]]*#.*$//' -e 's/[[:space:]]*$//')"
+launch_harness="${launch_harness:-${HARNESS:-claude}}"
+case "$launch_harness" in agy) launch_harness=antigravity ;; esac
+claude_only() { # claude_only <name> → 0 when <name> may only run on Claude
+  case "$(fleet_host_kind_of "$1")" in merge | maintain | broker | monster) return 0 ;; esac
+  fleet_ledger_sessions | grep -Fxq -- "$1" && return 0   # any supervised session
+  local envf
+  envf="$(awk -F'|' -v n="$1" '$1 == n { print $5; exit }' "$FLEET_STATE/roster")"
+  case "${envf##*/}" in security*) return 0 ;; esac
+  return 1
+}
+harness_refused() { [ "$launch_harness" != claude ] && claude_only "$1"; }
+# The supervisor reads a seat-limit line only from a pane it knows it launched: record the pane of every
+# supervised session started here (the supervisor's own relaunches come through here too).
+record_panes() { # record_panes <name>...
+  local n id sd="$FLEET_REPO/logs/fleet-supervisor"
+  for n in "$@"; do
+    fleet_ledger_sessions | grep -Fxq -- "$n" || continue
+    id="$(tmux list-panes -t "${TMUX_SESSION}:$n" -F '#{pane_id}' 2>/dev/null | head -1 || true)"
+    [ -n "$id" ] || continue
+    mkdir -p "$sd" && printf '%s\n' "$id" >"$sd/$n.pane"
+  done
+}
+
 export HARNESS="${HARNESS:-claude}"
 # Sessions this host classifies as a monster or a supervised session (fleet_host_kind, supervisor.conf
 # membership). The launcher refuses them on a non-Claude harness, whatever their prompt says.
@@ -155,6 +190,7 @@ export ENGSYS_SUPERVISED_SESSIONS
 cd "$PIN_DIR"
 if [ -n "$name" ]; then
   grep -q "^$name|" "$FLEET_STATE/roster" || fleet_die "no session named '$name' in the roster"
+  harness_refused "$name" && fleet_die "not launching $name on HARNESS=$launch_harness: merge, maintain, broker and security sessions run on Claude only"
   if is_singleton "$name" && [ "$skip_verify" = 1 ]; then
     {
       echo "fleet: ################################################################################"
@@ -168,11 +204,13 @@ if [ -n "$name" ]; then
   elif is_singleton "$name" && ! singleton_integrity_ok; then
     fleet_die "not launching $name: $why_held (above). Check the running sessions, fix or reinstall the plugin, then: fleet verify"
   fi
-  exec bash "$LAUNCHER" --roster "$FLEET_STATE/roster" "$name"
+  lrc=0; bash "$LAUNCHER" --roster "$FLEET_STATE/roster" "$name" || lrc=$?
+  [ "$lrc" != 0 ] || record_panes "$name"
+  exit "$lrc"
 fi
 
 # The host roster: the rendered roster minus the sessions that are not on this host.
-host_roster="$FLEET_STATE/roster.host" kept=0
+host_roster="$FLEET_STATE/roster.host" kept=0 refused=0
 : >"$host_roster"; chmod 600 "$host_roster"
 while IFS= read -r line; do
   case "$line" in
@@ -181,6 +219,12 @@ while IFS= read -r line; do
       if why="$(fleet_host_excluded "$n")"; then
         echo "skip: $n is not on this host ($why)"
         printf '# not on this host: %s (%s)\n' "$n" "$why" >>"$host_roster"
+        continue
+      fi
+      if harness_refused "$n"; then
+        echo "SKIPPED: $n (a Claude-only session, and HARNESS=$launch_harness)" >&2
+        printf '# claude-only: %s (HARNESS=%s)\n' "$n" "$launch_harness" >>"$host_roster"
+        refused=$((refused + 1))
         continue
       fi
       if is_singleton "$n" && ! singleton_integrity_ok; then
@@ -192,5 +236,13 @@ while IFS= read -r line; do
   esac
   printf '%s\n' "$line" >>"$host_roster"
 done <"$FLEET_STATE/roster"
-if [ "$kept" = 0 ]; then echo "fleet: no roster session runs on this host; nothing to launch"; exit 0; fi
-exec bash "$LAUNCHER" --roster "$host_roster"
+if [ "$kept" = 0 ]; then
+  [ "$refused" = 0 ] || fleet_die "$refused Claude-only session(s) refused on HARNESS=$launch_harness (SKIPPED above); nothing else to launch"
+  echo "fleet: no roster session runs on this host; nothing to launch"; exit 0
+fi
+lrc=0; bash "$LAUNCHER" --roster "$host_roster" || lrc=$?
+# shellcheck disable=SC2046 # names are [a-z0-9-] only
+record_panes $(awk -F'|' '/^[a-z0-9][a-z0-9-]*\|/ { print $1 }' "$host_roster")
+[ "$refused" != 0 ] || exit "$lrc"
+echo "fleet: $refused Claude-only session(s) refused on HARNESS=$launch_harness (SKIPPED above)" >&2
+exit $(( lrc != 0 ? lrc : 1 ))

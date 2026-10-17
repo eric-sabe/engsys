@@ -239,7 +239,7 @@ For organizations running multiple repositories or multiple always-on hosts ([`d
 | `fleet sync [--check]` | Sync host checkouts and plugins (including `HARNESS_FALLBACK` caches) to pinned tags using per-instance worktree isolation. |
 | `fleet verify [--alert]` | Verify singleton guard scripts, host `ENGSYS_DIR`, and settings against GitHub release tree SHAs. |
 | `fleet launch` / `fleet restart [--stale]` | Start missing sessions or cycle stale sessions onto newly synced pins. |
-| `fleet supervise` / `fleet install-jobs` | Run one deterministic supervisor tick (including seat-quota `HARNESS_FALLBACK` failover) or load the recurring `launchd` jobs. |
+| `fleet supervise` / `fleet install-jobs` | Run one deterministic supervisor tick (relaunches stay on the primary Claude harness; a seat limit is alerted, never failed over) or load the recurring `launchd` jobs. |
 | `fleet health <subcommand>` | Operate the Fleet Health Desk (`validate`, `status`, `tick`, `check`, `report`, `simulate`, `invoke`, `self-probe`, `digest`, `watch-add`). |
 | `fleet msg <route\|send\|inbox>` / `fleet relay` | Send, route, and poll cross-fleet messages. |
 | `fleet pin` | Verify tag/manifest version alignment (`package.json`, `marketplace.json`, `plugin.json`) and open a pin bump PR. |

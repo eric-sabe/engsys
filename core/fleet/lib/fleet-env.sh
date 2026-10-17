@@ -42,6 +42,13 @@ unset TMUX_SESSION LOG_DIR
 # The fleet's identity comes only from its own config files, never from a caller's environment (a
 # session env carries FLEET_ID too). The same goes for the per-host role filter (lib/host-roles.sh).
 unset FLEET_ID FEDERATION_FILE FLEET_INSTANCE_REPO ROLES ROSTER_EXCLUDE OPERATOR_TIMEZONE OPERATOR_CLOCK
+# So do the fleet's Claude config dir and the integrity check's user-plugin allowlist: what `fleet verify`
+# accepts must come from the operator's config files, never from whoever ran the command.
+unset FLEET_CLAUDE_CONFIG_DIR VERIFY_ALLOWED_USER_PLUGINS VERIFY_ALLOWED_USER_HOOKS VERIFY_ALLOWED_USER_FILES
+# PIN_SETTINGS (where the pins are read) too: only a conf file, or sync's own pins copy in .fleet/
+# (FLEET_SYNC_PINS, set by sync.sh across its re-execs), may point it somewhere else.
+_pin_settings_sync="${FLEET_SYNC_RESUMED:+${PIN_SETTINGS:-}}"
+unset PIN_SETTINGS
 fleet_load_conf "$FLEET_REPO/fleet/fleet.conf"
 [ -n "${FLEET_ORG:-}" ] || fleet_die "FLEET_ORG is not set in $FLEET_REPO/fleet/fleet.conf"
 [ -f "$HOME/.config/$FLEET_ORG/fleet.local.conf" ] && fleet_load_conf "$HOME/.config/$FLEET_ORG/fleet.local.conf"
@@ -81,13 +88,9 @@ if [ -n "${FLEET_ACTIVE_HARNESS:-}" ]; then
     agy) HARNESS=antigravity; FLEET_ACTIVE_HARNESS=antigravity ;;
     *) fleet_die "FLEET_ACTIVE_HARNESS must be claude, copilot, or antigravity (got '$FLEET_ACTIVE_HARNESS')" ;;
   esac
-elif [ -n "$HARNESS_FALLBACK" ] && [ -f "$FLEET_REPO/logs/fleet-supervisor/harness.fallback" ]; then
-  _active_fb="$(head -n 1 "$FLEET_REPO/logs/fleet-supervisor/harness.fallback" 2>/dev/null || true)"
-  case "$_active_fb" in
-    claude | copilot | antigravity) HARNESS="$_active_fb"; FLEET_ACTIVE_HARNESS="$_active_fb" ;;
-  esac
-  unset _active_fb
 fi
+# (No state file on the host selects a harness: the supervisor never fails over, and a file a session
+# can write must never move the fleet off Claude.)
 FLEET_HARNESS="$HARNESS"
 : "${COPILOT_HOME:=$FLEET_STATE/copilot-home}"
 : "${ENGSYS_MARKETPLACE:=engsys}"
@@ -156,6 +159,11 @@ fleet_render() { # fleet_render <template> <dest> [mode]
 # --- Pins --------------------------------------------------------------------------------------
 # Single source of truth: the pin repo's .claude/settings.json (the working tree of PIN_DIR — what
 # the sessions load). Either ref may be forced through the environment or fleet.local.conf.
+# A sync re-exec may carry its own pins copy, and only one under this instance's .fleet/.
+if [ -z "${PIN_SETTINGS:-}" ] && [ -n "$_pin_settings_sync" ] && [ "$_pin_settings_sync" = "$FLEET_STATE/pins.settings.json" ]; then
+  PIN_SETTINGS="$_pin_settings_sync"
+fi
+unset _pin_settings_sync
 PIN_SETTINGS="${PIN_SETTINGS:-$PIN_DIR/.claude/settings.json}"
 export PIN_SETTINGS
 
@@ -243,6 +251,16 @@ if [ -n "${GH_APP_ENV:-}" ]; then
     echo "fleet: WARNING GH_APP_ENV is set but $ENGSYS_DIR/core/fleet/identity/git-env.sh is missing — git identity not applied" >&2
   fi
 fi
-# Optional separate Claude Code config dir for the fleet (a machine shared with a person's own
-# Claude use). Unset = the account's default ~/.claude.
-if [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ]; then export CLAUDE_CONFIG_DIR="$FLEET_CLAUDE_CONFIG_DIR"; fi
+# Optional separate Claude Code config dir for the fleet (a machine shared with a person's own Claude
+# use): its own login (the fleet's seat), user settings and plugin installs. Set = every fleet command
+# (`claude plugin` in sync, `claude plugin list` in verify, the supervisor's login probe) and every
+# session the fleet launches run with CLAUDE_CONFIG_DIR=<it>. Unset = the account's default ~/.claude,
+# and an inherited CLAUDE_CONFIG_DIR is dropped so what verify checks is what the sessions load.
+: "${VERIFY_ALLOWED_USER_PLUGINS:=}" "${VERIFY_ALLOWED_USER_HOOKS:=}" "${VERIFY_ALLOWED_USER_FILES:=}"
+export VERIFY_ALLOWED_USER_PLUGINS VERIFY_ALLOWED_USER_HOOKS VERIFY_ALLOWED_USER_FILES
+if [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ]; then
+  case "$FLEET_CLAUDE_CONFIG_DIR" in /*) ;; *) fleet_die "FLEET_CLAUDE_CONFIG_DIR must be an absolute path (or start with ~), got '$FLEET_CLAUDE_CONFIG_DIR'" ;; esac
+  export FLEET_CLAUDE_CONFIG_DIR CLAUDE_CONFIG_DIR="$FLEET_CLAUDE_CONFIG_DIR"
+else
+  unset CLAUDE_CONFIG_DIR
+fi

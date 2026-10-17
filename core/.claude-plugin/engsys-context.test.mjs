@@ -3,6 +3,8 @@
 // Run: node --test core/.claude-plugin/engsys-context.test.mjs (part of `npm test`).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -61,4 +63,24 @@ test('session start: Co-Authored-By trailer matches the active harness (claude, 
 
 test('session start: includes host toolchain OS and userland context line', () => {
   assert.match(context({}), /Host toolchain: (macOS|Linux|Windows)/);
+});
+
+test('re-ground hooks: under Claude Code an ENGSYS_PLUGIN_ROOT elsewhere never runs that tree\'s code', () => {
+  const evil = fs.mkdtempSync(path.join(os.tmpdir(), 'engsys-reground-root-'));
+  const marker = path.join(evil, 'ran');
+  fs.mkdirSync(path.join(evil, 'lib'));
+  fs.writeFileSync(path.join(evil, 'lib', 'operator-time.mjs'), `import fs from 'node:fs'; fs.writeFileSync(${JSON.stringify(marker)}, '1'); console.log('FOREIGN LINE');\n`);
+  try {
+    for (const t of ['post-compact-reground.sh.tmpl', 'post-clear-reground.sh.tmpl']) {
+      const out = reground(t, { ...ET, ENGSYS_PLUGIN_ROOT: evil });
+      assert.ok(!fs.existsSync(marker), `${t}: the foreign tree's code did not run`);
+      assert.match(out, LINE, `${t}: the plugin's own time line is there`);
+      assert.doesNotMatch(out, /FOREIGN LINE/);
+      // positive control: with no harness root at all, ENGSYS_PLUGIN_ROOT is the only root and is used
+      const env = { PATH: process.env.PATH, ...ET, ENGSYS_PLUGIN_ROOT: evil };
+      execFileSync('bash', [path.join(ROOT, 'templates', t)], { env, encoding: 'utf8' });
+      assert.ok(fs.existsSync(marker), `${t}: positive control (the test can see a foreign run)`);
+      fs.rmSync(marker);
+    }
+  } finally { fs.rmSync(evil, { recursive: true, force: true }); }
 });
