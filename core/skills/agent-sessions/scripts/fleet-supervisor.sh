@@ -160,17 +160,11 @@
 #   AUTH_PROBE_TIMEOUT_SEC=<s> optional (default 90): the test request's time limit; a timeout is not a pass
 #   AUTH_CHECK_WAIT_SEC=<s>    optional (default 45): how long to watch a freshly relaunched pane for its
 #                              first message (a login error holds the rest of the tick); 0 = don't watch
-#   HARNESS / HARNESS_FALLBACK / QUOTA_COOLDOWN_MIN
-#                              optional: the primary harness, the comma-separated fallbacks, and how long a
-#                              fallback lasts before the primary is probed again. HARNESS_FALLBACK unset (the
-#                              default) = no harness switch ever happens. See "Seat quota" below.
-#   SECURITY_SESSIONS=<names>  optional, space-separated: security-tier sessions (the fleet kit derives them
-#                              from the roster: a 5th-field env file named security*). Like merge and maintain
-#                              monsters they never move off the primary harness.
-#   GATE_ISSUE=<owner/repo#N>  where a harness-fallback gate request is posted; GATE_OPERATORS_TEAM=<org/slug>
-#   GATE_OPERATORS_TEAM=...    or GATE_OPERATORS=<login:id,...> is the operator source gate-check verifies the
-#   GATE_OPERATORS=...         approval against. Unset = a switch to a non-Claude harness never happens.
-#   GATE_CMD=<command>         optional: the gate-check CLI (default: node core/lib/gate-check.mjs)
+#   HARNESS=<harness>          optional: the primary harness. Every supervised session is relaunched on it,
+#                              always: the fleet is Claude-only, and the supervisor never moves a supervised
+#                              session to another harness (HARNESS_FALLBACK, QUOTA_COOLDOWN_MIN and the
+#                              older SECURITY_SESSIONS / GATE_* / BATON_REVOKE_CMD lines are accepted and
+#                              ignored). A seat limit is reported once (see "Seat limit" below).
 #   STATUS_URL=<url>           optional: the link the login alert carries (`--re`; the fleet kit: its status
 #                              issue). Unset = the first session's ledger issue
 #   <session-name>|<ledger-issue>|<stale-minutes>[|<owner/name>[|<marker>[|<role>]]]
@@ -239,10 +233,7 @@ trap 'rmdir "$LOCKDIR" 2>/dev/null || true' EXIT
 TMUX_SESSION="" LAUNCH_CMD="" DEFAULT_REPO="" ROTATE_GRACE_MIN=3 HOST_CHECK_CMD=""
 HOST_HEALTH_CMD="" HOST_HEALTH_INCIDENT="host-health" NOTIFY_CMD="" HEARTBEAT_CMD="" BATON_CMD="" INTEGRITY_CMD=""
 AUTH_PROBE=on AUTH_PROBE_TIMEOUT_SEC=90 AUTH_CHECK_WAIT_SEC=45 STATUS_URL=""
-SECURITY_SESSIONS="" GATE_ISSUE="" GATE_OPERATORS_TEAM="" GATE_OPERATORS="" GATE_CMD=""
 HARNESS="${HARNESS:-${FLEET_HARNESS:-claude}}"
-HARNESS_FALLBACK="${HARNESS_FALLBACK:-}"
-QUOTA_COOLDOWN_MIN="${QUOTA_COOLDOWN_MIN:-60}"
 SESSIONS=()
 while IFS= read -r line; do
   line="${line%%$'\r'}"
@@ -265,13 +256,8 @@ while IFS= read -r line; do
     AUTH_CHECK_WAIT_SEC=*) AUTH_CHECK_WAIT_SEC="${line#AUTH_CHECK_WAIT_SEC=}" ;;
     STATUS_URL=*) STATUS_URL="${line#STATUS_URL=}" ;;
     HARNESS=*) HARNESS="${line#HARNESS=}" ;;
-    HARNESS_FALLBACK=*) HARNESS_FALLBACK="${line#HARNESS_FALLBACK=}" ;;
-    QUOTA_COOLDOWN_MIN=*) QUOTA_COOLDOWN_MIN="${line#QUOTA_COOLDOWN_MIN=}" ;;
-    SECURITY_SESSIONS=*) SECURITY_SESSIONS="${SECURITY_SESSIONS:+$SECURITY_SESSIONS }${line#SECURITY_SESSIONS=}" ;; # adds up
-    GATE_ISSUE=*) GATE_ISSUE="${line#GATE_ISSUE=}" ;;
-    GATE_OPERATORS_TEAM=*) GATE_OPERATORS_TEAM="${line#GATE_OPERATORS_TEAM=}" ;;
-    GATE_OPERATORS=*) GATE_OPERATORS="${line#GATE_OPERATORS=}" ;;
-    GATE_CMD=*) GATE_CMD="${line#GATE_CMD=}" ;;
+    # Accepted from older confs and ignored: the supervisor never fails a supervised session over.
+    HARNESS_FALLBACK=* | QUOTA_COOLDOWN_MIN=* | SECURITY_SESSIONS=* | GATE_ISSUE=* | GATE_OPERATORS_TEAM=* | GATE_OPERATORS=* | GATE_CMD=*) ;;
     *\|*) SESSIONS+=("$line") ;;
     *) echo "fleet-supervisor: bad conf line: $line" >&2; exit 1 ;;
   esac
@@ -279,7 +265,7 @@ done < "$CONF"
 PRIMARY_HARNESS="${PRIMARY_HARNESS:-$HARNESS}"
 [ -n "$TMUX_SESSION" ] && [ -n "$LAUNCH_CMD" ] || { echo "fleet-supervisor: conf must set TMUX_SESSION and LAUNCH_CMD" >&2; exit 1; }
 case "$AUTH_PROBE" in on | off) ;; *) echo "fleet-supervisor: AUTH_PROBE must be on or off" >&2; exit 1 ;; esac
-for v in AUTH_PROBE_TIMEOUT_SEC AUTH_CHECK_WAIT_SEC QUOTA_COOLDOWN_MIN; do
+for v in AUTH_PROBE_TIMEOUT_SEC AUTH_CHECK_WAIT_SEC; do
   case "${!v}" in '' | *[!0-9]*) echo "fleet-supervisor: $v must be a whole number" >&2; exit 1 ;; esac
 done
 
@@ -399,7 +385,7 @@ auth_add_lines() { # auth_add_lines <file> <lines> → appended, each line once
 
 # The test request: does a login/seat work right now? Accepts optional target harness $1. Sets AUTH_PROBE_WHY.
 auth_probe() {
-  AUTH_PROBE_WHY="" AUTH_PROBE_LAST=""
+  AUTH_PROBE_WHY=""
   [ "$AUTH_PROBE" = on ] || { AUTH_PROBE_WHY="no test request (AUTH_PROBE=off)"; return 1; }
   local probe_bin="claude" h="${1:-${HARNESS:-claude}}"
   case "$h" in
@@ -423,7 +409,6 @@ auth_probe() {
   done
   wait "$pid" 2>/dev/null || rc=$?
   last="$(grep -v '^[[:space:]]*$' "$dir.out" | tail -n 1 | cut -c1-200 || true)"
-  AUTH_PROBE_LAST="$last"
   rm -rf "$dir" "$dir.out"
   if [ "$rc" = 0 ]; then
     case "$h" in
@@ -438,19 +423,15 @@ auth_probe() {
   return 1
 }
 
-# --- Seat quota / rate-limit fallback (HARNESS_FALLBACK) ------------------------------------------
-# Off unless HARNESS_FALLBACK is set; unset, a seat-limit line is logged and acknowledged, nothing else.
-# Set, a switch happens only on all of:
-#   evidence  the LAST message of a pane the supervisor itself launched for a supervised session
-#             (logs/fleet-supervisor/<name>.pane) is Claude Code's own limit line: a reply-marker line
-#             whose text starts with one of HARNESS_QUOTA_ERRORS. Tool output (`⎿` lines) and any other
-#             pane text never count, and no other pane is read;
-#   probe     a direct test request on the exhausted harness (AUTH_PROBE) fails with a limit line too;
-#   gate      a switch to any harness but claude needs an operator's approval in GitHub: a gate request
-#             (core/lib/gate-check.mjs, kind harness-fallback) on GATE_ISSUE, and the switch waits until
-#             `gate-check check` exits 0. No GATE_ISSUE or operator source configured = never switches;
-#   eligible  merge and maintain sessions (6th field) and SECURITY_SESSIONS never move to a fallback,
-#             whatever the config says: they are relaunched on PRIMARY_HARNESS only.
+# --- Seat limit (Claude-only) ------------------------------------------------------------------------
+# The fleet is Claude-only: no supervised session (merge, maintain, broker, any monster) ever moves to
+# another harness, whatever HARNESS_FALLBACK says. A seat limit is only reported: once per incident
+# (NOTIFY_CMD --level alert --incident seat-limit), when the LAST message of a pane the supervisor itself
+# launched for a supervised session (logs/fleet-supervisor/<name>.pane) is Claude Code's own limit line
+# (a reply-marker line whose text starts with one of HARNESS_QUOTA_ERRORS). Tool output (`⎿` lines),
+# other pane text and panes the supervisor didn't launch never count. The pane is acknowledged so the
+# same line doesn't alert again; the alert resolves once no supervised pane shows a limit. A
+# harness.fallback file left by an older version is removed: every relaunch uses the primary harness.
 HARNESS_QUOTA_ERRORS=(
   "You've hit your limit · resets"
   'Claude usage limit reached'
@@ -463,14 +444,10 @@ HARNESS_QUOTA_ERRORS=(
   'Copilot rate limit exceeded'
 )
 QUOTA_RE="^($(IFS='|'; printf '%s' "${HARNESS_QUOTA_ERRORS[*]}"))"
-FALLBACK_FILE="$STATE_DIR/harness.fallback"       # line 1: active fallback, 2: since ISO, 3: primary, 4: where, 5: until epoch
-FALLBACK_ALERTED="$STATE_DIR/harness-fallback.alerted"
-FALLBACK_GATE="$STATE_DIR/harness-fallback.gate"  # a pending gate: id, requester, from, to, where, posted ISO
-FALLBACK_GATE_ALERTED="$STATE_DIR/harness-fallback-gate.alerted"
+FALLBACK_FILE="$STATE_DIR/harness.fallback"       # written by older versions only; removed on sight
+QUOTA_ALERTED="$STATE_DIR/seat-limit.alerted"
 QUOTA_ACKED="$STATE_DIR/quota.acked"
-FALLBACK_INCIDENT="harness-fallback"
-GATE_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/gate-check.mjs"
-[ -n "$GATE_CMD" ] || GATE_CMD="node $GATE_LIB"
+QUOTA_INCIDENT="seat-limit"
 QUOTA_BLOCKED=""
 
 # quota_state_of <pane text> → quota | ok | none: what the pane's LAST message (a reply-marker line) says.
@@ -492,9 +469,9 @@ launched_pane_of() {
 }
 
 # QUOTA_BLOCKED: <name>|<pane> of each supervised session whose supervisor-launched pane, idle, shows a
-# limit line as its last message (minus acknowledged ones).
+# limit line as its last message (minus acknowledged ones). QUOTA_ANY: any such pane, acknowledged or not.
 quota_scan() {
-  QUOTA_BLOCKED=""
+  QUOTA_BLOCKED="" QUOTA_ANY=0
   local s n id text keep=""
   for s in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
     IFS='|' read -r n _ <<<"$s"
@@ -503,6 +480,7 @@ quota_scan() {
     text="$(tmux capture-pane -p -t "$id" -S -60 2>/dev/null || true)"
     grep -q 'esc to interrupt' <<<"$(tail -n 15 <<<"$text")" && continue
     if [ "$(quota_state_of "$text")" = quota ]; then
+      QUOTA_ANY=1
       if [ -f "$QUOTA_ACKED" ] && grep -Fxq "$n|$id" "$QUOTA_ACKED"; then keep="$keep$n|$id"$'\n'
       else QUOTA_BLOCKED="$QUOTA_BLOCKED$n|$id"$'\n'; fi
     fi
@@ -510,141 +488,6 @@ quota_scan() {
   if [ -f "$QUOTA_ACKED" ]; then
     if [ -n "$keep" ]; then printf '%s' "$keep" >"$QUOTA_ACKED"; else rm -f "$QUOTA_ACKED"; fi
   fi
-}
-
-# fallback_refused <name> → 0 when <name> may never move off PRIMARY_HARNESS: a merge or maintain
-# monster (6th field) or a security-tier session (SECURITY_SESSIONS).
-fallback_refused() {
-  local s s_name s_role
-  case " $SECURITY_SESSIONS " in *" $1 "*) return 0 ;; esac
-  for s in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
-    IFS='|' read -r s_name _ _ _ _ s_role <<<"$s"
-    [ "$s_name" = "$1" ] || continue
-    [ -n "$s_role" ] && return 0
-    return 1
-  done
-  return 1
-}
-
-pick_fallback_harness() { # pick_fallback_harness <exhausted_harness> → prints next available fallback harness
-  [ -n "$HARNESS_FALLBACK" ] || return 1
-  local exhausted="$1" raw_list=() item bin past=0
-  IFS=',' read -r -a raw_list <<<"$HARNESS_FALLBACK"
-  if [ "$exhausted" = "$PRIMARY_HARNESS" ]; then past=1; fi
-  for item in ${raw_list[@]+"${raw_list[@]}"}; do
-    item="${item//[[:space:]]/}"
-    [ -n "$item" ] || continue
-    case "$item" in agy) item="antigravity" ;; esac
-    [ "$item" != "$PRIMARY_HARNESS" ] || continue
-    if [ "$past" = 0 ]; then
-      [ "$item" = "$exhausted" ] && past=1
-      continue
-    fi
-    [ "$item" != "$exhausted" ] || continue
-    bin="claude"
-    case "$item" in copilot) bin="copilot" ;; antigravity) bin="agy" ;; esac
-    if command -v "$bin" >/dev/null 2>&1; then
-      printf '%s' "$item"
-      return 0
-    fi
-  done
-  return 1
-}
-
-quota_activate_fallback() { # quota_activate_fallback <next_harness> <where_seen> <now_epoch> [exhausted_harness]
-  local next_h="$1" where="$2" now_s="$3" exhausted_h="${4:-$PRIMARY_HARNESS}" since until_s
-  since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  until_s=$((now_s + QUOTA_COOLDOWN_MIN * 60))
-  printf '%s\n%s\n%s\n%s\n%s\n' "$next_h" "$since" "$PRIMARY_HARNESS" "$where" "$until_s" >"$FALLBACK_FILE"
-  HARNESS="$next_h"
-  FLEET_ACTIVE_HARNESS="$next_h"
-  export HARNESS FLEET_ACTIVE_HARNESS
-  log "quota: seat limit reached on $exhausted_h (seen in $where); activating fallback HARNESS=$HARNESS (cooldown ${QUOTA_COOLDOWN_MIN}m); merge, maintain and security sessions stay on $PRIMARY_HARNESS"
-  if [ ! -f "$FALLBACK_ALERTED" ]; then
-    if notify --level info --incident "$FALLBACK_INCIDENT" "Seat limit reached on \`$exhausted_h\` on $HOST_NAME (seen in \`$where\` at $since). Failing over eligible supervised sessions to \`HARNESS=$HARNESS\` (cooldown ${QUOTA_COOLDOWN_MIN}m); merge, maintain and security sessions stay on \`$PRIMARY_HARNESS\`."; then
-      printf '%s\n' "$since" >"$FALLBACK_ALERTED"
-    fi
-  fi
-}
-
-# fallback_gate <from> <to> <where> → 0 once an operator approved the switch in GitHub (gate-check exit 0).
-# Opens the gate request the first time; waiting, denied or unreadable is 1. A denial acknowledges the
-# panes, so the same evidence never asks again.
-fallback_gate() {
-  local from="$1" to="$2" where="$3" target gid greq out rc=0 g_repo g_issue
-  target="harness-fallback:$from-to-$to@$(printf '%s' "$HOST_NAME" | tr -c 'A-Za-z0-9._-' '-')"
-  g_repo="${GATE_ISSUE%%#*}" g_issue="${GATE_ISSUE##*#}"
-  if [ -z "$GATE_ISSUE" ] || [ "$g_repo" = "$GATE_ISSUE" ] || { [ -z "$GATE_OPERATORS_TEAM" ] && [ -z "$GATE_OPERATORS" ]; }; then
-    log "quota: a switch from $from to $to needs an operator gate, and GATE_ISSUE or the operator source (GATE_OPERATORS_TEAM / GATE_OPERATORS) is not configured: not switching"
-    if [ ! -f "$FALLBACK_GATE_ALERTED" ] && notify --level alert --incident "$FALLBACK_INCIDENT-gate" "Seat limit reached on \`$from\` on $HOST_NAME (seen in \`$where\`). A fallback to \`$to\` needs an operator gate in GitHub, but no gate issue or operator source is configured, so the fleet stays on \`$from\`."; then
-      date -u +%Y-%m-%dT%H:%M:%SZ >"$FALLBACK_GATE_ALERTED"
-    fi
-    return 1
-  fi
-  local ops=()
-  if [ -n "$GATE_OPERATORS_TEAM" ]; then ops=(--operators-team "$GATE_OPERATORS_TEAM"); else ops=(--operators "$GATE_OPERATORS"); fi
-  if [ -f "$FALLBACK_GATE" ] && [ "$(sed -n 3p "$FALLBACK_GATE")|$(sed -n 4p "$FALLBACK_GATE")" = "$from|$to" ]; then
-    gid="$(sed -n 1p "$FALLBACK_GATE")" greq="$(sed -n 2p "$FALLBACK_GATE")"
-    # shellcheck disable=SC2086 # GATE_CMD is a command line, like LAUNCH_CMD
-    out="$($GATE_CMD check --repo "$g_repo" --issue "$g_issue" --gate "$gid" "${ops[@]}" --requester "$greq" --target "$target" --kind harness-fallback 2>&1 </dev/null)" || rc=$?
-    case "$rc" in
-      0) rm -f "$FALLBACK_GATE" "$FALLBACK_GATE_ALERTED"; log "quota: gate $gid approved in GitHub: switching from $from to $to"; return 0 ;;
-      3) log "quota: gate $gid (switch $from → $to) is waiting for an operator in GitHub"; return 1 ;;
-      4) rm -f "$FALLBACK_GATE"; auth_add_lines "$QUOTA_ACKED" "$QUOTA_BLOCKED"
-         log "quota: gate $gid denied: staying on $from"; return 1 ;;
-      *) log "quota: gate $gid could not be checked (exit $rc): $(printf '%s' "$out" | tail -n 1 | cut -c1-200)"; return 1 ;;
-    esac
-  fi
-  # shellcheck disable=SC2086
-  out="$($GATE_CMD request --repo "$g_repo" --issue "$g_issue" --kind harness-fallback --target "$target" "${ops[@]}" \
-    --what "Seat limit reached on $from on $HOST_NAME (seen in $where, confirmed by a test request). Approve to fail eligible supervised sessions over to $to for ${QUOTA_COOLDOWN_MIN}m; merge, maintain and security sessions stay on $from." 2>&1 </dev/null)" || rc=$?
-  gid="$(printf '%s' "$out" | jq -r '.id // empty' 2>/dev/null || true)"
-  greq="$(printf '%s' "$out" | jq -r '.author // empty' 2>/dev/null || true)"
-  if [ "$rc" != 0 ] || [ -z "$gid" ] || [ -z "$greq" ]; then
-    log "quota: could not open the harness-fallback gate request on $GATE_ISSUE (exit $rc): $(printf '%s' "$out" | tail -n 1 | cut -c1-200)"
-    return 1
-  fi
-  printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$gid" "$greq" "$from" "$to" "$where" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$FALLBACK_GATE"
-  log "quota: opened gate $gid on $GATE_ISSUE for a switch from $from to $to; waiting for an operator"
-  notify --level alert --incident "$FALLBACK_INCIDENT-gate" "Seat limit reached on \`$from\` on $HOST_NAME (seen in \`$where\`). Switching eligible sessions to \`$to\` needs an operator: gate \`$gid\` on $GATE_ISSUE." || true
-  return 1
-}
-
-# quota_consider <where> <exhausted> → switch only on evidence + probe + gate (header of this section).
-quota_consider() {
-  local where="$1" exhausted="$2" next l n any=0
-  if [ -z "$HARNESS_FALLBACK" ]; then
-    auth_add_lines "$QUOTA_ACKED" "$QUOTA_BLOCKED"
-    log "quota: seat limit reached in \`$where\`, but no available HARNESS_FALLBACK is configured"
-    return 0
-  fi
-  if ! next="$(pick_fallback_harness "$exhausted")"; then
-    auth_add_lines "$QUOTA_ACKED" "$QUOTA_BLOCKED"
-    log "quota: seat limit reached on $exhausted in \`$where\`, and no further HARNESS_FALLBACK is available"
-    return 0
-  fi
-  while IFS= read -r l; do
-    [ -n "$l" ] || continue
-    n="${l%%|*}"
-    if fallback_refused "$n"; then auth_add_lines "$QUOTA_ACKED" "$l"; log "quota: \`$n\` shows a seat limit, but merge, maintain and security sessions never fail over to another harness; it stays on $PRIMARY_HARNESS"
-    else any=1; fi
-  done <<<"$QUOTA_BLOCKED"
-  [ "$any" = 1 ] || return 0
-  # A pending gate for this same switch: just ask it again (no new test request each tick).
-  if ! { [ -f "$FALLBACK_GATE" ] && [ "$(sed -n 3p "$FALLBACK_GATE")|$(sed -n 4p "$FALLBACK_GATE")" = "$exhausted|$next" ]; }; then
-    if auth_probe "$exhausted"; then
-      auth_add_lines "$QUOTA_ACKED" "$QUOTA_BLOCKED"
-      log "quota: \`$where\` shows a seat limit, but $AUTH_PROBE_WHY: an old line, ignored until that pane shows something else"
-      return 0
-    fi
-    if ! grep -Eq "$QUOTA_RE" <<<"$(sed -E "s/$AUTH_MSG_RE//" <<<"$AUTH_PROBE_LAST")"; then
-      auth_add_lines "$QUOTA_ACKED" "$QUOTA_BLOCKED"
-      log "quota: \`$where\` shows a seat limit, but the test request did not confirm it ($AUTH_PROBE_WHY): not switching"
-      return 0
-    fi
-  fi
-  if [ "$next" != claude ] && ! fallback_gate "$exhausted" "$next" "$where"; then return 0; fi
-  quota_activate_fallback "$next" "$where" "$NOW" "$exhausted"
 }
 
 auth_alert() { # the incident's one alert; retried each tick while held until it is posted
@@ -736,10 +579,9 @@ relaunch() { # relaunch <name> <ledger> <repo> <reason>
   log "$name: relaunching — $reason"
   tmux kill-window -t "${TMUX_SESSION}:$name" 2>/dev/null || true
   out="$(mktemp "${TMPDIR:-/tmp}/fleet-supervisor.XXXXXX")"
-  # Merge, maintain and security sessions run on PRIMARY_HARNESS only, whatever fallback is active
-  # (the launcher honours FLEET_ACTIVE_HARNESS over the fallback file).
-  local use_h="$HARNESS"
-  if [ "$use_h" != "$PRIMARY_HARNESS" ] && fallback_refused "$name"; then use_h="$PRIMARY_HARNESS"; fi
+  # Every supervised session runs on PRIMARY_HARNESS (Claude-only; "Seat limit" above). The launcher
+  # honours FLEET_ACTIVE_HARNESS over any fallback state on the host.
+  local use_h="$PRIMARY_HARNESS"
   # LAUNCH_CMD is intentionally word-split (it is a command line, not a path)
   # shellcheck disable=SC2086
   if FLEET_ACTIVE_HARNESS="$use_h" HARNESS="$use_h" $LAUNCH_CMD "$name" >"$out" 2>&1; then
@@ -817,60 +659,24 @@ baton_allows() { # baton_allows <name> <repo> <role> [rotation_idle] → 0 may r
 
 NOW=$(date +%s)
 
-# Seat-quota fallback (HARNESS_FALLBACK): evaluate before INTEGRITY_CMD so `fleet verify` checks
-# the active fallback harness's plugin cache before any singleton monster relaunches.
-quota_scan
+# Seat limit (Claude-only, header of that section): report it, never switch harness.
+HARNESS="$PRIMARY_HARNESS"; unset FLEET_ACTIVE_HARNESS; export HARNESS
 if [ -f "$FALLBACK_FILE" ]; then
-  FB_HARNESS="$(sed -n 1p "$FALLBACK_FILE")"
-  FB_SINCE="$(sed -n 2p "$FALLBACK_FILE")"
-  FB_PRIMARY="$(sed -n 3p "$FALLBACK_FILE")"
-  FB_WHERE="$(sed -n 4p "$FALLBACK_FILE")"
-  FB_UNTIL="$(sed -n 5p "$FALLBACK_FILE")"
-  [ -n "$FB_PRIMARY" ] || FB_PRIMARY="$PRIMARY_HARNESS"
-  if [ -n "$FB_HARNESS" ]; then
-    HARNESS="$FB_HARNESS"
-    FLEET_ACTIVE_HARNESS="$FB_HARNESS"
-    export HARNESS FLEET_ACTIVE_HARNESS
-  fi
-  if [ -n "$FB_UNTIL" ] && [[ "$FB_UNTIL" =~ ^[0-9]+$ ]] && [ "$NOW" -ge "$FB_UNTIL" ]; then
-    FB_RECOVERED=0
-    if [ "$AUTH_PROBE" = on ]; then
-      if auth_probe "$FB_PRIMARY"; then FB_RECOVERED=1; fi
-    elif [ -z "$QUOTA_BLOCKED" ]; then
-      FB_RECOVERED=1
-      AUTH_PROBE_WHY="cooldown ${QUOTA_COOLDOWN_MIN}m elapsed"
-    fi
-    if [ "$FB_RECOVERED" = 1 ]; then
-      rm -f "$FALLBACK_FILE"
-      HARNESS="$FB_PRIMARY"
-      unset FLEET_ACTIVE_HARNESS
-      export HARNESS
-      log "quota: primary harness $HARNESS recovered ($AUTH_PROBE_WHY; had been on fallback $FB_HARNESS since $FB_SINCE); returning to HARNESS=$HARNESS"
-      if [ -f "$FALLBACK_ALERTED" ]; then
-        if notify --level info --incident "$FALLBACK_INCIDENT" --resolve "Resolved: primary harness \`$HARNESS\` recovered on $HOST_NAME ($AUTH_PROBE_WHY; had been on fallback \`$FB_HARNESS\` since $FB_SINCE). Subsequent monster launches and rotations return to \`HARNESS=$HARNESS\`."; then
-          rm -f "$FALLBACK_ALERTED"
-        fi
-      fi
-    else
-      FB_UNTIL=$((NOW + QUOTA_COOLDOWN_MIN * 60))
-      printf '%s\n%s\n%s\n%s\n%s\n' "$FB_HARNESS" "$FB_SINCE" "$FB_PRIMARY" "$FB_WHERE" "$FB_UNTIL" >"$FALLBACK_FILE"
-      log "quota: primary harness $FB_PRIMARY still unavailable after cooldown ($AUTH_PROBE_WHY); extending fallback HARNESS=$FB_HARNESS by ${QUOTA_COOLDOWN_MIN}m"
-    fi
-  fi
+  log "quota: removing a harness.fallback left by an older version ($(head -n 1 "$FALLBACK_FILE")): supervised sessions run on $PRIMARY_HARNESS only"
+  rm -f "$FALLBACK_FILE"
 fi
-
+quota_scan
 if [ -n "$QUOTA_BLOCKED" ]; then
-  if [ ! -f "$FALLBACK_FILE" ]; then
-    QUOTA_FIRST="${QUOTA_BLOCKED%%$'\n'*}"
-    quota_consider "${QUOTA_FIRST%%|*}" "$HARNESS"
-  else
-    # already on a fallback: only a session running on it can say that it ran out too
-    while IFS='|' read -r q_w _; do
-      [ -n "$q_w" ] || continue
-      q_h="$(cat "$STATE_DIR/$q_w.harness" 2>/dev/null || printf '%s' "$PRIMARY_HARNESS")"
-      if [ "$q_h" = "$HARNESS" ]; then quota_consider "$q_w" "$HARNESS"; break; fi
-    done <<<"$QUOTA_BLOCKED"
+  QUOTA_FIRST="${QUOTA_BLOCKED%%$'\n'*}"
+  auth_add_lines "$QUOTA_ACKED" "$QUOTA_BLOCKED"
+  log "quota: seat limit reached in \`${QUOTA_FIRST%%|*}\`; supervised sessions never fail over to another harness (Claude-only), so it stays on $PRIMARY_HARNESS"
+  if [ ! -f "$QUOTA_ALERTED" ]; then
+    if notify --level alert --incident "$QUOTA_INCIDENT" "Seat limit reached on \`$PRIMARY_HARNESS\` on $HOST_NAME (seen in \`${QUOTA_FIRST%%|*}\`). The fleet is Claude-only, so no session is moved to another harness: the sessions wait for the limit to reset, or for an operator."; then
+      date -u +%Y-%m-%dT%H:%M:%SZ >"$QUOTA_ALERTED"
+    fi
   fi
+elif [ "$QUOTA_ANY" = 0 ] && [ -f "$QUOTA_ALERTED" ]; then
+  if notify --level info --incident "$QUOTA_INCIDENT" --resolve "Resolved: no supervised session on $HOST_NAME shows a seat limit any more."; then rm -f "$QUOTA_ALERTED"; fi
 fi
 
 # Singleton monsters: the integrity check (INTEGRITY_CMD, once per tick) and then the lease. Sets BATON_WHY.
@@ -1050,20 +856,10 @@ for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
   LATCH="$STATE_DIR/$name.escalated"
   ROTATED="$STATE_DIR/$name.rotated" # the rotation heartbeat we already relaunched for
   MARKED=0; [ -f "$ROTATED" ] && [ "$(cat "$ROTATED")" = "$HB_TS" ] && MARKED=1
-  SESSION_HARNESS="$(cat "$STATE_DIR/$name.harness" 2>/dev/null || printf '%s' "$PRIMARY_HARNESS")"
 
   if [ "$ALIVE" = "1" ]; then
-    if [ -f "$FALLBACK_FILE" ] && [ "$HARNESS" != "$SESSION_HARNESS" ] && grep -q "^${name}|" <<<"$QUOTA_BLOCKED" \
-      && ! fallback_refused "$name" && ! pane_busy "$name"; then
-      ROTATING=$((ROTATING + 1))
-      rm -f "$LATCH"
-      if [ "$AUTH_HELD" = 1 ]; then
-        auth_hold "$name" "seat quota reached on $SESSION_HARNESS, fallback HARNESS=$HARNESS ready"
-      else
-        relaunch "$name" "$ledger" "$REPO_SLUG" "seat quota reached on $SESSION_HARNESS; failing over to HARNESS=$HARNESS"
-      fi
     # (relaunched for this rotation but the new session never heartbeated → falls to the stale branch)
-    elif [ "$ROTATION" = "1" ] && ! { [ "$MARKED" = "1" ] && [ "$STALE" = "1" ]; }; then
+    if [ "$ROTATION" = "1" ] && ! { [ "$MARKED" = "1" ] && [ "$STALE" = "1" ]; }; then
       ROTATING=$((ROTATING + 1))
       rm -f "$LATCH"
       AGE=$(( (NOW - ${HB_EPOCH:-$NOW}) / 60 ))
@@ -1163,12 +959,7 @@ if [ -n "$HEARTBEAT_CMD" ] && [ $((UP + ROTATING + DOWN)) -gt 0 ]; then
   MINUTE_LATCH="$STATE_DIR/heartbeat.last-minute"
   if [ ! -f "$MINUTE_LATCH" ] || [ "$(cat "$MINUTE_LATCH")" != "$MINUTE_NOW" ]; then
     SUMMARY="sessions: $UP up, $ROTATING rotating, $DOWN down"
-    if [ -f "$FALLBACK_FILE" ]; then
-      FB_ACTIVE="$(sed -n 1p "$FALLBACK_FILE")"
-      FB_SINCE="$(sed -n 2p "$FALLBACK_FILE")"
-      FB_PRIM="$(sed -n 3p "$FALLBACK_FILE")"
-      SUMMARY="$SUMMARY; harness: $FB_ACTIVE (fallback from ${FB_PRIM:-$PRIMARY_HARNESS} since $FB_SINCE)"
-    fi
+    if [ -f "$QUOTA_ALERTED" ]; then SUMMARY="$SUMMARY; seat limit reached since $(head -n 1 "$QUOTA_ALERTED")"; fi
     set -- "$SUMMARY"
     if [ "$AUTH_HELD" = 1 ]; then
       # the summary keeps machine fields in ISO UTC; the second line is for people (operator's time, #89)

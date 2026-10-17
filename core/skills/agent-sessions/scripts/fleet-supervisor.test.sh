@@ -593,115 +593,62 @@ expect "CT-14b: HARNESS=antigravity auth_probe runs agy -p" "^agy-probe -p Reply
 expect "CT-14b: HARNESS=antigravity probe ok → relaunch proceeds" "^launch acme-rel"
 rm -f "$T"/pane-* "$T"/capture-* "$T/probe-ok"
 
-# Seat-quota fallback (HARNESS_FALLBACK=copilot,antigravity). A switch needs: Claude Code's own limit line
-# as the LAST message of a pane the supervisor launched, a test request that hits the limit too, and (for a
-# non-Claude harness) an operator's approval through gate-check. Merge, maintain and security sessions never
-# switch. The fake gate-check answers `check` from $FAKE/gate (0 approved | 3 waiting | 4 denied).
-cat >"$T/gate.sh" <<'SH'
-#!/usr/bin/env bash
-echo "gate $*" >>"$FAKE/actions"
-case "$1" in
-  request) echo '{"id":"harness-fallback-20261015120000-abcd","url":"https://github.com/o/r/issues/9#c","comment_id":7,"author":"fleet-bot[bot]"}' ;;
-  check) exit "$(cat "$FAKE/gate" 2>/dev/null || echo 3)" ;;
-esac
-SH
-cat >"$T/bin/claude" <<'SH'
-#!/usr/bin/env bash
-echo "probe $*" >>"$FAKE/actions"
-if [ -f "$FAKE/probe-ok" ]; then echo OK; exit 0; fi
-if [ -f "$FAKE/probe-quota" ]; then echo "Claude usage limit reached · resets 9pm"; exit 1; fi
-echo "Login expired · Please run /login"; exit 1
-SH
+# Seat limit: the fleet is Claude-only. Whatever HARNESS_FALLBACK says, no supervised session (merge,
+# broker, any monster, an unclassified one) is ever moved to another harness; a limit line that Claude
+# Code itself printed as the last message of a pane the supervisor launched is alerted once.
 cat >"$T/launch.sh" <<'SH'
 #!/usr/bin/env bash
 if [ -f "$FAKE/launch-fail" ]; then echo "attempt $1" >>"$FAKE/actions"; echo "error: claude not found on PATH" >&2; exit 1; fi
 echo "launch $1 harness=${FLEET_ACTIVE_HARNESS:-unset}" >>"$FAKE/actions"; echo "2.1.300" >"$FAKE/pane-$1"
-if [ -f "$FAKE/auth-expired" ]; then cp "$FAKE/fixture-login-expired" "$FAKE/capture-$1"; else printf '⏺ Reading the ledger first.\n' >"$FAKE/capture-$1"; fi
+printf '⏺ Reading the ledger first.\n' >"$FAKE/capture-$1"
 SH
-chmod +x "$T/gate.sh" "$T/bin/claude" "$T/launch.sh"
+chmod +x "$T/launch.sh"
 qconf() { # qconf [extra conf lines...]
-  { printf 'TMUX_SESSION=acme\nLAUNCH_CMD=bash %s/launch.sh\nBATON_CMD=bash %s/baton.sh\nNOTIFY_CMD=bash %s/notify.sh\nHEARTBEAT_CMD=bash %s/heartbeat.sh\nAUTH_CHECK_WAIT_SEC=0\nHARNESS=claude\nQUOTA_COOLDOWN_MIN=60\nGATE_CMD=bash %s/gate.sh\nREPO=o/r\n' "$T" "$T" "$T" "$T" "$T"
+  { printf 'TMUX_SESSION=acme\nLAUNCH_CMD=bash %s/launch.sh\nBATON_CMD=bash %s/baton.sh\nNOTIFY_CMD=bash %s/notify.sh\nHEARTBEAT_CMD=bash %s/heartbeat.sh\nAUTH_CHECK_WAIT_SEC=0\nAUTH_PROBE=off\nHARNESS=claude\nREPO=o/r\n' "$T" "$T" "$T" "$T"
     for l in "$@"; do printf '%s\n' "$l"; done
-    printf 'acme-mm|1|60|||merge\nacme-rel|2|60\nacme-sec|3|60\n'; } >"$T/w/sup.conf"
+    printf 'acme-mm|1|60|||merge\nacme-rel|2|60\nacme-broker|3|60\n'; } >"$T/w/sup.conf"
 }
-GATED=("HARNESS_FALLBACK=copilot,antigravity" "GATE_ISSUE=o/r#9" "GATE_OPERATORS=op:1" "SECURITY_SESSIONS=acme-sec")
 ledger3() { jq -n --arg b "last: $(iso "$1") — status: $2" '{state:"OPEN", body:$b}' >"$T/ledger-3.json"; }
-launched_by_sup() { mkdir -p "$SLOG"; printf '%%%s\n' "$1" >"$SLOG/$1.pane"; echo claude >"$SLOG/$1.harness"; } # as relaunch() records it
+launched_by_sup() { mkdir -p "$SLOG"; printf '%%%s\n' "$1" >"$SLOG/$1.pane"; } # as relaunch() records it
 live() { echo "2.1.290" >"$T/pane-$1"; printf '%s\n' "$2" >"$T/capture-$1"; } # live <window> <last lines>
-qreset() { reset; rm -f "$T"/pane-* "$T"/capture-* "$T/probe-ok" "$T/probe-quota" "$T/gate"; baton free; ledger 2 "ok — merging #12"; ledger2 2 "ok"; ledger3 2 "ok"; }
+qreset() { reset; rm -f "$T"/pane-* "$T"/capture-*; baton free; ledger 2 "ok — merging #12"; ledger2 2 "ok"; ledger3 2 "ok"; }
 LIMIT="⏺ You've hit your limit · resets 9pm (America/New_York)"
+ALL_FB=("HARNESS_FALLBACK=copilot,antigravity" "QUOTA_COOLDOWN_MIN=1" "GATE_ISSUE=o/r#9" "GATE_OPERATORS=op:1" "SECURITY_SESSIONS=acme-sec")
 
-# H5 evidence: a limit phrase in tool output (⎿), or in a pane the supervisor didn't launch, is not a seat limit.
-qconf "${GATED[@]}"; qreset; touch "$T/probe-quota"; launched_by_sup acme-rel
+# A real limit line in supervisor-launched panes of every kind of supervised session: alerted, never switched.
+qconf "${ALL_FB[@]}"; qreset; launched_by_sup acme-mm; launched_by_sup acme-rel; launched_by_sup acme-broker
+live acme-mm "$LIMIT"; live acme-rel "$LIMIT"; live acme-broker "$LIMIT"; run
+expect "seat limit: alerted once" "^notify --level alert --incident seat-limit .*Claude-only"
+expect "  …no session relaunched onto another harness" "!^launch"
+expect "  …no gate request" "!gate"
+expect "  …no fallback probe" "!^probe"
+if [ ! -f "$SLOG/harness.fallback" ]; then pass=$((pass + 1)); echo "  ok    …no fallback state written"; else fail=$((fail + 1)); echo "  FAIL  …no fallback state written"; fi
+grep -q "never fail over to another harness (Claude-only)" "$SLOG/supervisor.log" && { pass=$((pass + 1)); echo "  ok    …logged as Claude-only"; } || { fail=$((fail + 1)); echo "  FAIL  …logged as Claude-only"; }
+run
+expect "seat limit next tick: no repeated alert" "!^notify --level alert --incident seat-limit"
+live acme-mm "⏺ All checks green."; live acme-rel "⏺ ok"; live acme-broker "⏺ ok"; run
+expect "seat limit gone: the alert resolves" "^notify --level info --incident seat-limit --resolve"
+
+# Evidence: a limit phrase in tool output (⎿), or in a pane the supervisor didn't launch, is no seat limit.
+qconf "${ALL_FB[@]}"; qreset; launched_by_sup acme-rel
 live acme-rel "$(printf '⏺ Bash(cat notes.txt)\n  ⎿  Usage limit reached · resets 9pm\n⏺ Done reading.')"
-live acme-other "$LIMIT"
+live acme-other "$LIMIT"; live acme-broker "$LIMIT"
 run
-expect "quota evidence: tool output (⎿) and an unlaunched pane never count" "!^probe"
-expect "  …no gate request" "!^gate"
-expect "  …nobody relaunched" "!^launch"
-qreset; touch "$T/probe-quota"; live acme-rel "$LIMIT"; run   # a real limit line, but not in a pane the supervisor launched
-expect "quota evidence: a pane with no supervisor launch record is not read" "!^probe"
+expect "seat limit evidence: tool output and unlaunched panes never count" "!^notify --level alert --incident seat-limit"
 
-# H5 refusal: merge (6th field) and security-tier sessions never move off the primary harness.
-qreset; touch "$T/probe-quota"; launched_by_sup acme-mm; launched_by_sup acme-sec; live acme-mm "$LIMIT"; live acme-sec "$LIMIT"; run
-expect "quota refusal: a merge or security session's limit opens no gate" "!^gate"
-expect "  …is not probed for a switch" "!^probe"
-expect "  …and neither session is relaunched" "!^launch"
-if [ ! -f "$SLOG/harness.fallback" ]; then pass=$((pass + 1)); echo "  ok    …no fallback activated"; else fail=$((fail + 1)); echo "  FAIL  …no fallback activated"; fi
-grep -q "never fail over to another harness" "$SLOG/supervisor.log" && { pass=$((pass + 1)); echo "  ok    …logged as refused"; } || { fail=$((fail + 1)); echo "  FAIL  …logged as refused"; }
+# Relaunches always run on the primary harness, even with a fallback file left by an older version.
+qconf "${ALL_FB[@]}"; qreset; mkdir -p "$SLOG"; printf 'copilot\n2026-10-15T10:00:00Z\nclaude\nacme-rel\n9999999999\n' >"$SLOG/harness.fallback"
+ledger 90 "ok — merging #12"; ledger3 90 "ok"; echo zsh >"$T/pane-acme-mm"; echo zsh >"$T/pane-acme-broker"
+FLEET_ACTIVE_HARNESS=copilot run
+expect "old fallback state: the merge monster is relaunched on claude" "^launch acme-mm harness=claude"
+expect "  …the broker too" "^launch acme-broker harness=claude"
+expect "  …never on the fallback" "!harness=copilot"
+if [ ! -f "$SLOG/harness.fallback" ]; then pass=$((pass + 1)); echo "  ok    …the leftover fallback file is removed"; else fail=$((fail + 1)); echo "  FAIL  …the leftover fallback file is removed"; fi
 
-# H5 positive control: an eligible session's real limit, confirmed by the probe, opens a gate and waits.
-qreset; touch "$T/probe-quota"; launched_by_sup acme-rel; live acme-rel "$LIMIT"; echo zsh >"$T/pane-acme-mm"; : >"$T/capture-acme-mm"; run
-expect "quota: an eligible session's limit line is confirmed by a test request" "^probe -p"
-expect "  …and a harness-fallback gate request is opened in GitHub" "^gate request --repo o/r --issue 9 --kind harness-fallback --target harness-fallback:claude-to-copilot@"
-expect "  …but nothing switches before an operator approves" "!^launch acme-rel"
-if [ ! -f "$SLOG/harness.fallback" ]; then pass=$((pass + 1)); echo "  ok    …no fallback while the gate waits"; else fail=$((fail + 1)); echo "  FAIL  …no fallback while the gate waits"; fi
-echo 3 >"$T/gate"; run
-expect "quota gate waiting: gate-check asked with the request author pinned" "^gate check --repo o/r --issue 9 --gate harness-fallback-20261015120000-abcd --operators op:1 --requester fleet-bot\[bot\]"
-expect "  …no new test request while it waits" "!^probe"
-expect "  …still no switch" "!^launch acme-rel"
-echo 0 >"$T/gate"; run
-expect "quota gate approved (gate-check exit 0) → the eligible session fails over" "^launch acme-rel harness=copilot"
-expect "  …the merge monster is never moved to the fallback" "!^launch acme-mm harness=copilot"
-expect "  …the alert says merge/maintain/security stay on claude" "^notify --level info --incident harness-fallback .*merge, maintain and security sessions stay on"
-if [ "$(head -n 1 "$SLOG/harness.fallback" 2>/dev/null)" = "copilot" ]; then pass=$((pass + 1)); echo "  ok    …harness.fallback records copilot"; else fail=$((fail + 1)); echo "  FAIL  …harness.fallback records copilot"; fi
-# While the fallback is active, a merge monster that needs a relaunch is relaunched on the primary harness.
-ledger 90 "ok — merging #12"; echo zsh >"$T/pane-acme-mm"; run
-expect "fallback active: a relaunched merge monster still runs on claude" "^launch acme-mm harness=claude"
-expect "  …never on the fallback" "!^launch acme-mm harness=copilot"
-
-# A denied gate: no switch, and the same evidence doesn't ask again.
-qreset; touch "$T/probe-quota"; launched_by_sup acme-rel; live acme-rel "$LIMIT"; run
-echo 4 >"$T/gate"; run
-expect "quota gate denied → no switch" "!^launch acme-rel"
-run
-expect "  …and the acknowledged evidence opens no new request" "!^gate request"
-
-# The probe says the seat works: an old line, ignored.
-qreset; touch "$T/probe-ok"; launched_by_sup acme-rel; live acme-rel "$LIMIT"; run
-expect "quota: probe succeeds → no gate" "!^gate"
-
-# No gate configured: never switches to a non-Claude harness.
-qconf "HARNESS_FALLBACK=copilot,antigravity"; qreset; touch "$T/probe-quota"; launched_by_sup acme-rel; live acme-rel "$LIMIT"; run
-expect "quota: no gate issue/operators configured → no request, no switch" "!^gate"
-expect "  …nobody relaunched" "!^launch"
-expect "  …and the operator is told once" "^notify --level alert --incident harness-fallback-gate"
-
-# HARNESS_FALLBACK unset: unchanged, nothing happens beyond a log line.
-qconf; qreset; touch "$T/probe-quota"; launched_by_sup acme-rel; live acme-rel "$LIMIT"; run
-expect "quota with HARNESS_FALLBACK unset: no probe" "!^probe"
-expect "  …no gate, no relaunch" "!^gate"
-expect "  …no relaunch" "!^launch"
-grep -q "no available HARNESS_FALLBACK is configured" "$SLOG/supervisor.log" && { pass=$((pass + 1)); echo "  ok    …logged as before"; } || { fail=$((fail + 1)); echo "  FAIL  …logged as before"; }
-
-# Cooldown expires + the primary Claude seat probe succeeds → clears the fallback and resolves the alert.
-qconf "${GATED[@]}"; qreset
-mkdir -p "$SLOG"; printf 'copilot\n2026-10-15T10:00:00Z\nclaude\nacme-rel\n1\n' >"$SLOG/harness.fallback"; date -u +%FT%TZ >"$SLOG/harness-fallback.alerted"
-touch "$T/probe-ok"; run
-expect "quota failback: probes primary claude harness after cooldown" "^probe -p"
-expect "  …resolves harness-fallback incident" "^notify --level info --incident harness-fallback --resolve Resolved: primary harness \`claude\` recovered"
-if [ ! -f "$SLOG/harness.fallback" ]; then pass=$((pass + 1)); echo "  ok    …harness.fallback removed on recovery"; else fail=$((fail + 1)); echo "  FAIL  …harness.fallback removed on recovery"; fi
-rm -f "$T"/pane-* "$T"/capture-* "$T/probe-ok" "$T/probe-quota"
+# Positive control: without any fallback config, a crashed session is still relaunched normally.
+qconf; qreset; ledger 90 "ok — merging #12"; echo zsh >"$T/pane-acme-mm"; run
+expect "no fallback config: a stale exited monster is relaunched as before" "^launch acme-mm harness=claude"
+rm -f "$T"/pane-* "$T"/capture-*
 
 # CT-14: launch-agent-sessions.sh with HARNESS=copilot translates flags and invokes copilot --name ... -i ...
 cat >"$T/bin/tmux" <<'SH'
