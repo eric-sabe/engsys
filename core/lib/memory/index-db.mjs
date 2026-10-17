@@ -744,6 +744,33 @@ function eventUpdatedMs(e) {
 	return 0;
 }
 
+/**
+ * engsys v2.0.1 round 2 (F3): strip `author_kind`/`author_id`/`editor_kind`/`editor_id` from
+ * every event line in a `refs/engsys/memory/*` tip's `events.jsonl` blob and stamp
+ * `author_kind: 'untrusted_ref'` instead — the shared trust gate (`core/lib/memory/trust.mjs`)
+ * rejects that kind unconditionally, so a ref-sourced event never rides in on a label it claimed
+ * for itself. Lives here, not in ref-store.mjs, to avoid a circular import (ref-store.mjs already
+ * imports from this module). Malformed lines are left untouched; `applyJsonlLinesToMap`'s own
+ * per-line try/catch drops them the same way it always has.
+ */
+function stripRefEventTrustLabels(text) {
+	if (!text) return text;
+	return String(text)
+		.split('\n')
+		.map((line) => {
+			if (!line.trim()) return line;
+			try {
+				const e = JSON.parse(line);
+				if (!e || typeof e !== 'object') return line;
+				const { author_kind: _ak, author_id: _aid, editor_kind: _ek, editor_id: _eid, ...rest } = e;
+				return JSON.stringify({ ...rest, author_kind: 'untrusted_ref', author_id: null });
+			} catch {
+				return line;
+			}
+		})
+		.join('\n');
+}
+
 function applyJsonlLinesToMap(text, byKey) {
 	if (!text) return;
 	for (const line of String(text).split('\n')) {
@@ -781,7 +808,11 @@ export function loadClassBEvents(cacheDir, { repoRoot = null, refShas = null, pl
 					['-C', repoRoot, 'show', `${r.sha}:events.jsonl`],
 					{ encoding: 'utf8', timeout: 2000, maxBuffer: 32 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] },
 				);
-				applyJsonlLinesToMap(blobText, byKey);
+				// engsys v2.0.1 round 2 (F3): events read from a `refs/engsys/memory/*` tip NEVER
+				// keep their embedded trust label, until `verifyMemoryRefTip` is wired into this path
+				// (it is not yet — see ref-store.mjs). Stamped `author_kind: 'untrusted_ref'`, which
+				// the shared trust gate (core/lib/memory/trust.mjs) rejects unconditionally.
+				applyJsonlLinesToMap(stripRefEventTrustLabels(blobText), byKey);
 			} catch {
 				/* ref without events.jsonl or unreadable */
 			}

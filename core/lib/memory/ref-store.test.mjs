@@ -319,19 +319,33 @@ describe('ref-store (#130)', () => {
   });
 
   describe('verifyMemoryRefTip (engsys v2.0.1 M4) — NOT wired into any consumer; unit-tested in isolation', () => {
-    it('rejects a tip whose committer/author numeric ID does not match the publisher user ID', async () => {
+    it('rejects a tip whose committer numeric ID does not match the publisher user ID', async () => {
       const res = await verifyMemoryRefTip('/repo', {
         sha: 'cafed00dcafed00dcafed00dcafed00dcafed00d',
         repo: 'owner/repo',
         publisherUserId: 999,
         events: [{ k: 'x', path: 'docs/agent-lessons/a.md' }],
-        fetchCommitIdentity: async () => ({ authorId: 123, committerId: 123, verified: true }),
+        fetchCommitIdentity: async () => ({ committerId: 123, verified: true }),
         resolveSha: () => 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
         exec: () => { throw new Error('should not be called'); },
       });
       assert.equal(res.ok, false);
       assert.equal(res.reason, 'untrusted_publisher');
       assert.deepEqual(res.events, []);
+    });
+
+    it('v2.0.1 round 2 (F3): rejects a tip whose AUTHOR id matches the publisher but the COMMITTER id does not — author.id is never an alternate match', async () => {
+      const res = await verifyMemoryRefTip('/repo', {
+        sha: 'cafed00dcafed00dcafed00dcafed00dcafed00d',
+        repo: 'owner/repo',
+        publisherUserId: 999,
+        events: [{ k: 'x', path: 'docs/agent-lessons/a.md' }],
+        fetchCommitIdentity: async () => ({ authorId: 999, committerId: 1, verified: true }),
+        resolveSha: () => 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
+        exec: () => { throw new Error('should not be called'); },
+      });
+      assert.equal(res.ok, false);
+      assert.equal(res.reason, 'untrusted_publisher');
     });
 
     it('cr review (round 1): rejects a tip whose committer/author ID MATCHES but the commit has no verified signature — author.id/committer.id alone are derived from the (self-settable) commit email, not proof of the publisher', async () => {

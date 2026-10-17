@@ -58,8 +58,12 @@ refs/engsys/memory/<role>/<fleet-id>   a monster's journal tail (one writer per 
   re-read, merge by key and retry. Factor the CAS into a shared helper; `ref-store.mjs` allows a
   non-empty tree, while batons keep requiring the empty tree.
 - **Each repo's events live in that repo**, so read access follows that repo's access control.
-- **Reads:** `git fetch origin '+refs/engsys/memory/*:refs/engsys/memory/*'`, then `git show <ref>:events.jsonl`.
-  Clones and worktrees never fetch these refs by default.
+- **Reads:** `git fetch origin 'refs/engsys/memory/*:refs/engsys/memory/*'` (engsys v2.0.1 M4: NOT
+  forced — a forced (`+`) refspec lets `git fetch` silently clobber a local ref tip with whatever
+  the remote currently has, defeating any after-the-fact trust check on it; a non-fast-forward
+  fetch now fails closed instead), then `git show <ref>:events.jsonl`. Clones and worktrees never
+  fetch these refs by default, and any event read back this way is untrusted (`author_kind`/
+  `author_id` stripped) until `verifyMemoryRefTip` is wired into the reader.
 - **Secret scan before every write.** Branch-filtered CI scanners don't cover custom refs. Any match
   rejects the record and logs it.
 - **Compaction:** when the blob passes `max_events` (default 20000), the writer keeps the latest
