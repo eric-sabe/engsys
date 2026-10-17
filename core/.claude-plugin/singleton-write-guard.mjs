@@ -1000,6 +1000,21 @@ export function decide({
   return null;
 }
 
+// engsys v2.0.1 (L1, round 2 F8): the Hook Flight Recorder (`recordHookTelemetry`,
+// `core/lib/harness-io.mjs`) persists its `detail` field to a durable JSONL log file under
+// `~/.local/state/engsys/...`. A monster session's Bash commands routinely embed real secrets (DB
+// connection strings, tokens in a curl header, …), so `detail` here must NEVER carry raw command
+// text. Round 1 used a short SHA-256 prefix to let two log lines be correlated as "the same
+// command" — round 2's review dropped that too: a digest is still a stable fingerprint of the
+// exact command, and a small/guessable command space (a short, common Bash one-liner) makes it
+// dictionary-attackable back to the plaintext. `detail` now carries only the tool name and the
+// command's byte length — enough to see "this was a big one" vs "this was tiny", nothing that
+// identifies WHICH command it was.
+function commandByteLength(cmd) {
+  if (typeof cmd !== 'string' || !cmd) return null;
+  return Buffer.byteLength(cmd, 'utf8');
+}
+
 async function main() {
   let raw = '';
   for await (const chunk of process.stdin) raw += chunk;
@@ -1030,19 +1045,24 @@ async function main() {
   }
   if (!d) {
     if (ROLES.has(process.env.ENGSYS_SINGLETON_ROLE)) {
+      const len = commandByteLength(parsed.command);
       recordHookTelemetry({
         hook: 'singleton-write-guard',
         event: 'PreToolUse',
         decision: 'allow',
-        detail: `${parsed.toolName}${parsed.command ? `: ${String(parsed.command).slice(0, 80)}` : ''}`,
+        detail: `${parsed.toolName}${len != null ? ` (${len}b)` : ''}`,
       });
     }
     return 0;
   }
+  // `d.deny` is shown to the AGENT via emitPreToolDeny (guard feedback, unchanged) but must never
+  // be persisted to the Flight Recorder verbatim — some denial messages echo a matched token out
+  // of the command itself (engsys v2.0.1 L1).
+  const denyLen = commandByteLength(parsed.command);
   return writeHookResult(emitPreToolDeny(parsed.harness, d.deny), {
     hook: 'singleton-write-guard',
     event: 'PreToolUse',
-    detail: d.deny,
+    detail: `${parsed.toolName}${denyLen != null ? ` (${denyLen}b)` : ''}: denied`,
   });
 }
 

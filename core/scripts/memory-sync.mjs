@@ -21,7 +21,8 @@ import {
   formatEventsJsonl,
   tailRef,
 } from '../lib/memory/ref-store.mjs';
-import { ensureIndex, resolveCacheDir } from '../lib/memory/index-db.mjs';
+import { ensureIndex, resolveCacheDir, resolveReviewedSha } from '../lib/memory/index-db.mjs';
+import { isEventTrusted as sharedIsEventTrusted } from '../lib/memory/trust.mjs';
 import { loadConfig } from './memory-brief.mjs';
 import { buildMarkerMatchers, isMarkerBody, parseFindingAcks } from './harvest-findings.mjs';
 import { parseReviewComment } from './review-bakeoff.mjs';
@@ -36,6 +37,18 @@ export const INIT_CAPS = Object.freeze({
 });
 
 const EVIDENCE_MARKER_RE = createMarkerRe('HISTORICAL REPO EVIDENCE');
+
+// engsys v2.0.1 round 3 (F4): a commit carrying any of these trailers is agent-authored — its
+// rationale is the agent's own text, never a human operator's, regardless of who it was
+// committed as. Matches three trailer names (`Co-Authored-By:`/`Assisted-by:`/`Generated-by:`,
+// whitespace-tolerant before the colon, case-insensitive throughout) followed anywhere on the
+// same line by a known agent name/provider identifier or email domain. This is explicitly
+// defense-in-depth, NOT the real trust boundary: the real boundary is key custody (see
+// docs/memory-spec.md) — no operator signing key reachable from an agent session, and GitHub
+// Codespaces GPG auto-signing turned off for operator accounts. A trailer match can never be
+// exhaustive against every current and future agent/provider name.
+const AGENT_TRAILER_RE =
+  /(?:co-authored-by|assisted-by|generated-by)\s*:[^\n]*(?:\bclaude\b|\bcopilot\b|\bgemini\b|\bantigravity\b|\bcodex\b|\bgpt\b|\bopus\b|\bsonnet\b|\bdeepseek\b|\bgrok\b|noreply@anthropic\.com|@openai\.com|@google\.com|google\s*ai)/i;
 
 // ---------------------------------------------------------------------------
 // §7.4 Quarantine & Anomaly Tagging
@@ -239,6 +252,15 @@ export function evaluateActorEligibility(actor, authorAssociation, config = {}) 
     return { eligible: false, kind: null, id: dbId, reason: `ineligible_association:${assoc}` };
   }
   if (ELIGIBLE_HUMAN_ASSOCIATIONS.has(assoc)) {
+    // engsys v2.0.1 (L5): `authorAssociation` (OWNER/MEMBER) alone no longer grants trust — it's
+    // GitHub's own self-reported, point-in-time label and can drift (org membership changes,
+    // org/repo transfers) without this config ever being touched. Trust comes from the SAME
+    // numeric-ID allowlists everything else in this module uses: the actor's `databaseId` must
+    // also be present in `trusted_member_user_ids` (new) or `operator_user_ids`.
+    const trustedMembers = new Set((config.trusted_member_user_ids ?? []).map(Number));
+    if (dbId === null || !(trustedMembers.has(dbId) || operators.has(dbId))) {
+      return { eligible: false, kind: null, id: dbId, reason: `unallowlisted_member:${assoc}` };
+    }
     const kind = assoc === 'OWNER' ? 'owner' : 'member';
     return { eligible: true, kind, id: dbId };
   }
@@ -336,57 +358,13 @@ export function evaluateNodeEligibility(node, config = {}) {
  * Removing a bot ID from `trusted_bot_user_ids` or an operator from `operator_user_ids` immediately
  * drops its previously synced records at brief-build time.
  */
+// engsys v2.0.1 round 2 (F1): this is now a thin delegate to the ONE shared brief-time trust
+// gate in ../lib/memory/trust.mjs (imported as `sharedIsEventTrusted` above), kept under its
+// original name for every existing caller/test of this module. There is no more
+// memory-sync-specific trust logic here — the gate memory-brief.mjs actually runs at brief-build
+// time and this one are now, by construction, the same function.
 export function isEventTrustedByConfig(event, config = {}) {
-  if (!event || typeof event !== 'object') return false;
-  if (event.kind === 'journal') return true;
-  if (event.kind === 'commit') {
-    if (event.author_kind === 'operator' && (event.author_email || event.author_login)) {
-      const opEmails = new Set((config.operator_emails ?? []).map((e) => String(e).toLowerCase()));
-      const opLogins = new Set((config.operator_logins ?? []).map((l) => String(l).toLowerCase()));
-      if (opEmails.size > 0 || opLogins.size > 0) {
-        const emailOk = event.author_email && opEmails.has(String(event.author_email).toLowerCase());
-        const loginOk = event.author_login && opLogins.has(String(event.author_login).toLowerCase());
-        if (!emailOk && !loginOk) return false;
-      }
-    }
-    return true;
-  }
-
-  const trustedBots = new Set((config.trusted_bot_user_ids ?? []).map(Number));
-  const operators = new Set((config.operator_user_ids ?? []).map(Number));
-  const authorKind = String(event.author_kind || '');
-  const authorId = event.author_id != null ? Number(event.author_id) : null;
-
-  function checkKindAndId(kind, id) {
-    if (kind === 'bot') {
-      return id !== null && trustedBots.has(id);
-    }
-    if (kind === 'operator') {
-      return id !== null && operators.has(id);
-    }
-    if (kind === 'owner' || kind === 'member') {
-      return true;
-    }
-    // Legacy events without author_kind (e.g. unit test fixtures): allow unless author_kind is explicitly set to an unknown value
-    if (!kind && id === null) return true;
-    return false;
-  }
-
-  if (!checkKindAndId(authorKind, authorId)) return false;
-
-  const wasEdited =
-    event.last_edited_at != null ||
-    event.was_edited === true ||
-    Boolean(event.created_at && event.updated_at && event.created_at !== event.updated_at);
-  if (wasEdited && event.editor_id == null) return false;
-
-  if (event.editor_kind || event.editor_id != null) {
-    const editorKind = String(event.editor_kind || '');
-    const editorId = event.editor_id != null ? Number(event.editor_id) : null;
-    if (!checkKindAndId(editorKind, editorId)) return false;
-  }
-
-  return true;
+  return sharedIsEventTrusted(event, config);
 }
 
 // ---------------------------------------------------------------------------
@@ -790,7 +768,8 @@ export function extractEventsFromIssueNode(
  * Extract a normalized memory event from a git commit record per §7.2 commit-ingest filter:
  *   - Skip commits authored or co-authored by Dependabot.
  *   - Always index commit subject + `#123` / `Closes #123` references + touched files.
- *   - Index commit body ONLY when author matches an operator in `config.operator_emails` or `config.operator_logins`.
+ *   - Index commit body ONLY when the commit's numeric authorId is in `config.operator_user_ids`
+ *     (engsys v2.0.1 M3 — never by author name/email, and never by signature alone).
  */
 export function extractEventFromCommit(
   commit,
@@ -809,12 +788,30 @@ export function extractEventFromCommit(
     return null;
   }
 
-  const operatorEmails = new Set((config.operator_emails ?? []).map((e) => String(e).toLowerCase()));
-  const operatorLogins = new Set((config.operator_logins ?? []).map((l) => String(l).toLowerCase()));
+  // engsys v2.0.1 round 2 (F2): a commit is "operator" only when ALL three hold:
+  //   1. a cryptographically verified signature on the commit (`commit.verified === true`,
+  //      GitHub's `history().signature.isValid`, fetched in ONE batched GraphQL call per 100
+  //      commits by `ingestLocalCommits` — never per-commit REST);
+  //   2. the COMMITTER's numeric id (never the author's — GitHub derives `author.id` from the
+  //      author EMAIL, which the publisher sets locally; the committer identity from a signed,
+  //      GraphQL-verified commit is a materially stronger root) is in `operator_user_ids`;
+  //   3. the commit message carries no agent co-author trailer (`Co-Authored-By:` naming
+  //      Claude, Copilot, Gemini, or Antigravity) — an agent-authored commit's rationale is the
+  //      agent's own text, not a human operator's, regardless of who it was committed as.
+  // A commit that fails ANY of these is ingested as an UNLABELED pointer: no author_kind at all,
+  // author_id: null, subject + #refs only, no body — exactly the shape a benign non-operator
+  // commit always had. It is never `author_kind: 'member'` (round 1 had this wrong): the shared
+  // trust gate's member/owner path now requires a trusted_member_user_ids/operator_user_ids ID
+  // match, and commits were never meant to carry that burden — they fall through the gate's
+  // legacy/unlabeled allowance instead, same as before, carrying nothing sensitive to protect.
+  const operators = new Set((config.operator_user_ids ?? []).map(Number));
+  const committerId = commit.committerId != null ? Number(commit.committerId) : null;
+  const hasAgentCoAuthor = AGENT_TRAILER_RE.test(body);
   const isOperatorCommit =
-    operatorEmails.has(authorEmail) ||
-    operatorLogins.has(authorName) ||
-    Boolean(commit.isOperator);
+    commit.verified === true &&
+    committerId != null &&
+    operators.has(committerId) &&
+    !hasAgentCoAuthor;
 
   const subject = String(commit.subject || '').trim();
   const issueRefs = extractIssueRefs(`${subject}\n${body}`);
@@ -845,8 +842,8 @@ export function extractEventFromCommit(
       outcome: 'merged',
       date: dateIso.slice(0, 10),
       updated_at: dateIso,
-      author_id: null,
-      author_kind: isOperatorCommit ? 'operator' : 'member',
+      author_id: isOperatorCommit ? committerId : null,
+      author_kind: isOperatorCommit ? 'operator' : null,
       author_email: isOperatorCommit ? authorEmail : null,
       author_login: isOperatorCommit ? authorName : null,
       url: normRepo ? `https://github.com/${normRepo}/commit/${commit.sha}` : '',
@@ -859,13 +856,106 @@ export function extractEventFromCommit(
   );
 }
 
+const COMMIT_TRUST_GQL = `query($owner:String!,$name:String!,$expr:String!,$first:Int!,$after:String,$since:GitTimestamp){
+  repository(owner:$owner,name:$name){
+    object(expression:$expr){
+      ... on Commit{
+        history(first:$first,after:$after,since:$since){
+          pageInfo{hasNextPage endCursor}
+          nodes{oid signature{isValid} committer{user{databaseId}}}
+        }
+      }
+    }
+  }
+}`;
+
+/**
+ * Resolve signature validity + the COMMITTER's numeric id for up to `maxCount` commits reachable
+ * from `sha`, via `history`, in batches of (at most) 100 — ONE or a handful of GraphQL calls
+ * total, never one REST call per commit (cr review round 2, F2/F5: the per-commit REST lookup
+ * this replaced made --init do up to 500 sequential network round-trips, and it ran inside the
+ * maintenance heartbeat). Returns a `Map<sha, { verified: boolean, committerId: number|null }>`.
+ * Fails closed: any error/missing `repo` stops pagination and returns whatever was already
+ * fetched (possibly empty) — never retries into a hang.
+ *
+ * cr review (round 2): pass `since` (the SAME watermark `ingestLocalCommits`' `git log --since`
+ * uses) so a `--delta` run — a handful of commits — doesn't still page through up to `maxCount`
+ * (500) commits' worth of GraphQL history on every heartbeat.
+ */
+export function fetchCommitTrustBatch(repo, sha, { maxCount = INIT_CAPS.commits, since = null, exec = execFileSync } = {}) {
+  const result = new Map();
+  const normRepo = normalizeOptionalRepo(repo);
+  if (!normRepo || !sha) return result;
+  const [owner, name] = normRepo.split('/');
+  let after = null;
+  let fetched = 0;
+  while (fetched < maxCount) {
+    const first = Math.min(100, maxCount - fetched);
+    const args = [
+      'api', 'graphql',
+      '-f', `query=${COMMIT_TRUST_GQL}`,
+      '-F', `owner=${owner}`,
+      '-F', `name=${name}`,
+      '-F', `expr=${sha}`,
+      '-F', `first=${first}`,
+    ];
+    if (after) args.push('-F', `after=${after}`);
+    if (since) args.push('-f', `since=${since}`);
+    let out;
+    try {
+      out = exec('gh', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10000, maxBuffer: 16 * 1024 * 1024 });
+    } catch {
+      break;
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(out);
+    } catch {
+      break;
+    }
+    const history = parsed?.data?.repository?.object?.history;
+    const nodes = Array.isArray(history?.nodes) ? history.nodes : [];
+    for (const n of nodes) {
+      if (!n || typeof n.oid !== 'string') continue;
+      result.set(n.oid, {
+        verified: n.signature?.isValid === true,
+        committerId: n.committer?.user?.databaseId != null ? Number(n.committer.user.databaseId) : null,
+      });
+    }
+    fetched += nodes.length;
+    if (nodes.length === 0 || !history?.pageInfo?.hasNextPage) break;
+    after = history.pageInfo.endCursor;
+  }
+  return result;
+}
+
 /**
  * Parse local git log commits (`--max-count`, optional `--since`).
+ *
+ * engsys v2.0.1 (M3): this always logs the **resolved reviewed SHA** (`resolveReviewedSha`,
+ * `refs/remotes/origin/<default-branch>`), never the checked-out `HEAD` — a worktree can be on an
+ * unreviewed branch or an attacker-controlled checkout. When no reviewed SHA can be resolved
+ * (e.g. no `origin` remote), this fails closed and returns no commit events rather than falling
+ * back to `HEAD`. Pass `ref` to pin an explicit SHA (tests only).
  */
 export function ingestLocalCommits(
   repoRoot,
-  { repo = '', config = {}, cacheDir = null, maxCount = INIT_CAPS.commits, since = null, exec = execFileSync, now = () => Date.now() } = {},
+  {
+    repo = '',
+    config = {},
+    cacheDir = null,
+    maxCount = INIT_CAPS.commits,
+    since = null,
+    ref = null,
+    exec = execFileSync,
+    resolveSha = resolveReviewedSha,
+    fetchTrustBatch = fetchCommitTrustBatch,
+    now = () => Date.now(),
+  } = {},
 ) {
+  const effectiveRef = ref || resolveSha(repoRoot);
+  if (!effectiveRef) return [];
+
   const nonce = crypto.randomBytes(8).toString('hex');
   const recSep = `__REC_${nonce}__`;
   const fldSep = `__FLD_${nonce}__`;
@@ -874,6 +964,7 @@ export function ingestLocalCommits(
     '-C',
     repoRoot,
     'log',
+    effectiveRef,
     `--max-count=${maxCount}`,
     `--format=${recSep}%H${fldSep}%an${fldSep}%ae${fldSep}%aI${fldSep}%s${fldSep}%b${endSep}`,
     '--name-only',
@@ -891,6 +982,13 @@ export function ingestLocalCommits(
   const fSep = useNonce ? fldSep : '\x1f';
   const eSep = useNonce ? endSep : '\x1d';
 
+  // engsys v2.0.1 round 2 (F2/F5): ONE batched GraphQL `history` call (paginated at 100/page, not
+  // one REST call per commit) resolves signature validity + the committer's numeric id for every
+  // commit in this batch at once. Skipped entirely when no operator_user_ids are configured —
+  // there's nothing for the result to be matched against either way.
+  const wantTrust = (config.operator_user_ids ?? []).length > 0 && normalizeOptionalRepo(repo);
+  const trustBySha = wantTrust ? fetchTrustBatch(repo, effectiveRef, { maxCount, since, exec }) : new Map();
+
   const events = [];
   for (const record of raw.split(rSep)) {
     if (!record.trim()) continue;
@@ -901,15 +999,19 @@ export function ingestLocalCommits(
       .split('\n')
       .map((s) => s.trim())
       .filter(Boolean);
+    const trimmedSha = sha.trim();
+    const trust = trustBySha.get(trimmedSha);
     const ev = extractEventFromCommit(
       {
-        sha: sha.trim(),
+        sha: trimmedSha,
         authorName: authorName?.trim() || '',
         authorEmail: authorEmail?.trim() || '',
         date: date?.trim() || '',
         subject: subject?.trim() || '',
         body: body?.trim() || '',
         files,
+        committerId: trust?.committerId ?? null,
+        verified: trust?.verified === true,
       },
       { repo, config, cacheDir, now },
     );

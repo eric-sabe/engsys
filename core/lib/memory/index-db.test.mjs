@@ -23,6 +23,7 @@ try { require('node:sqlite'); } catch { SQLITE_AVAILABLE = false; }
 import {
 	closeIndex,
 	computeWatermark,
+	TRUST_SCHEMA,
 	ensureIndex,
 	isRepoAllowlisted,
 	listEvents,
@@ -576,6 +577,38 @@ describe('loadClassBEvents', () => {
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
+
+	test('engsys v2.0.1 round 2 (F3): an event read from a refs/engsys/memory/* tip has its author_kind/author_id (and editor_kind/editor_id) stripped and replaced with the untrusted_ref sentinel', () => {
+		const dir = mkdtempSync(join(tmpdir(), 'index-db-refsrc-'));
+		try {
+			const GIT_OPTS = ['-c', 'user.name=a', '-c', 'user.email=a@b.c'];
+			hermeticGit(dir, [...GIT_OPTS, 'init', '-q'], { isolateConfig: true });
+			const refEvent = {
+				k: 'owner/repo:commit:abc123',
+				kind: 'commit',
+				author_kind: 'operator',
+				author_id: 999,
+				editor_kind: 'operator',
+				editor_id: 999,
+				text: 'claimed operator rationale from a ref tip',
+			};
+			writeFileSync(join(dir, 'events.jsonl'), JSON.stringify(refEvent) + '\n');
+			hermeticGit(dir, [...GIT_OPTS, 'add', '-A'], { isolateConfig: true });
+			hermeticGit(dir, [...GIT_OPTS, 'commit', '-q', '-m', 'ref tip'], { isolateConfig: true });
+			const sha = require('node:child_process').execFileSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+
+			const events = loadClassBEvents(null, { repoRoot: dir, refShas: [{ sha }] });
+			assert.equal(events.length, 1);
+			assert.equal(events[0].author_kind, 'untrusted_ref');
+			assert.equal(events[0].author_id, null);
+			assert.equal(events[0].editor_kind, undefined, 'editor_kind must also be stripped');
+			assert.equal(events[0].editor_id, undefined, 'editor_id must also be stripped');
+			// The rest of the event (text, k, kind) is preserved — only the trust label changes.
+			assert.equal(events[0].text, 'claimed operator rationale from a ref tip');
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
 });
 
 describe('computeWatermark', () => {
@@ -589,6 +622,16 @@ describe('computeWatermark', () => {
 		const w1 = computeWatermark({ a: '1', b: '2' }, 0, 'v1');
 		const w2 = computeWatermark({ b: '2', a: '1' }, 0, 'v1');
 		assert.deepEqual(w1, w2);
+	});
+
+	test('engsys v2.0.1 round 3 (F3): bakes TRUST_SCHEMA in, independent of `version` — a trust-logic bump is detected even when every caller still passes the same (often literal "dev") version', () => {
+		const w = computeWatermark({ 'a.md': 'sha-1' }, 0, 'dev');
+		assert.equal(typeof w.trustSchema, 'number', 'trustSchema must be present and numeric');
+		assert.equal(w.trustSchema, TRUST_SCHEMA, 'must be the exported constant, not a copy that can drift');
+		// Positive control: identical files/events/version still produce byte-identical watermarks
+		// (trustSchema doesn't introduce nondeterminism) — only TRUST_SCHEMA itself changing moves it.
+		const w2 = computeWatermark({ 'a.md': 'sha-1' }, 0, 'dev');
+		assert.deepEqual(w, w2);
 	});
 });
 
