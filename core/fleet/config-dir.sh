@@ -4,10 +4,12 @@
 # permission dialog. The dir is FLEET_CLAUDE_CONFIG_DIR (fleet.conf / fleet.local.conf), or --dir.
 #
 # Seeded, from the operator's ~/.claude/settings.json (an explicit allowlist; anything absent is skipped):
-#   skipDangerousModePermissionPrompt, skipAutoPermissionPrompt, autoMode, effortLevel,
+#   skipDangerousModePermissionPrompt, skipAutoPermissionPrompt, effortLevel,
 #   env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS
 # and hasCompletedOnboarding into <dir>/.claude.json (where Claude Code keeps it). Never copied: plugins,
-# marketplaces, hooks, statusLine or other commands, MCP servers, permissions, models, any other env.
+# marketplaces, hooks, statusLine or other commands, MCP servers, permissions, models, autoMode (the
+# monsters run with --dangerously-skip-permissions; add a fleet-specific one by hand if ever needed), any
+# other env.
 # An existing settings.json or .claude.json is left alone unless --force.
 #
 # Then (fleet-guide.md § 6.1): log in with the fleet seat, accept workspace trust in PIN_DIR once, run
@@ -41,7 +43,7 @@ mkdir -p "$dir" && chmod 700 "$dir"
 src="$HOME/.claude/settings.json" srcj="$HOME/.claude.json"
 seed_settings() {
   if [ -f "$src" ]; then
-    jq '{skipDangerousModePermissionPrompt, skipAutoPermissionPrompt, autoMode, effortLevel,
+    jq '{skipDangerousModePermissionPrompt, skipAutoPermissionPrompt, effortLevel,
          env: ({CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: (.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS // null)})}
         | .env |= with_entries(select(.value != null)) | with_entries(select(.value != null and .value != {}))' "$src"
   else

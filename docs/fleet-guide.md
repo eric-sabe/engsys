@@ -404,10 +404,12 @@ reports them as a mismatch until the fleet has its own directory (or you allow t
 
 1. Create and seed it: `fleet config-dir init --dir ~/.config/acme/claude`. It makes the directory
    (mode 700) and writes a `settings.json` with only the keys unattended sessions need, copied from your
-   `~/.claude/settings.json`: `skipDangerousModePermissionPrompt`, `skipAutoPermissionPrompt`, `autoMode`,
+   `~/.claude/settings.json`: `skipDangerousModePermissionPrompt`, `skipAutoPermissionPrompt`,
    `effortLevel` and the `env` key `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, plus `hasCompletedOnboarding`
-   in its `.claude.json`. No plugins, hooks, MCP servers, permissions or models are copied. Without these a
-   relaunched monster can stop at a first-run or permission dialog.
+   in its `.claude.json`. No plugins, hooks, MCP servers, permissions, models or `autoMode` are copied.
+   Without these a relaunched monster can stop at a first-run or permission dialog. The monsters run with
+   `--dangerously-skip-permissions`, so auto-mode classifier config doesn't apply to them; if the fleet's
+   interactive sessions ever need one, add a fleet-specific `autoMode` to `<dir>/settings.json` by hand.
 2. Log in with the fleet's seat: `CLAUDE_CONFIG_DIR=~/.config/acme/claude claude`, then `/login` and
    `/exit`. Check it with `CLAUDE_CONFIG_DIR=~/.config/acme/claude claude auth status --text`.
 3. Accept workspace trust for the pin checkout once, with the monsters' flags:

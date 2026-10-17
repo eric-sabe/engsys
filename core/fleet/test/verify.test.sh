@@ -541,7 +541,7 @@ echo '{"hasCompletedOnboarding": true, "mcpServers": {"s": {}}, "oauthAccount": 
 CD="$T/fleet-cfg-init"
 run fleet config-dir init --dir "$CD"
 rc_is "config-dir init exits 0" 0
-eq "settings: exactly the allowlisted keys" "$(jq -c 'keys' "$CD/settings.json")" '["autoMode","effortLevel","env","skipAutoPermissionPrompt","skipDangerousModePermissionPrompt"]'
+eq "settings: exactly the allowlisted keys (no autoMode, plugins, hooks, MCP, models)" "$(jq -c 'keys' "$CD/settings.json")" '["effortLevel","env","skipAutoPermissionPrompt","skipDangerousModePermissionPrompt"]'
 eq "…env: only the agent-teams flag" "$(jq -c '.env' "$CD/settings.json")" '{"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS":"1"}'
 eq ".claude.json: only onboarding (no MCP servers, no account)" "$(jq -c . "$CD/.claude.json")" '{"hasCompletedOnboarding":true}'
 eq "the dir is private" "$(stat -f %Lp "$CD" 2>/dev/null || stat -c %a "$CD")" 700
@@ -554,7 +554,7 @@ rc_is "refuses the operator's own ~/.claude" 1
 printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\n' "$CONF0" "$CD" >"$I/fleet/fleet.conf"
 echo '{"x":1}' >"$CD/settings.json"; run fleet config-dir init --force
 rc_is "with FLEET_CLAUDE_CONFIG_DIR set, --force reseeds it" 0
-eq "…from the allowlist again" "$(jq -c 'keys' "$CD/settings.json")" '["autoMode","effortLevel","env","skipAutoPermissionPrompt","skipDangerousModePermissionPrompt"]'
+eq "…from the allowlist again" "$(jq -c 'keys' "$CD/settings.json")" '["effortLevel","env","skipAutoPermissionPrompt","skipDangerousModePermissionPrompt"]'
 printf '%s\n' "$CONF0" >"$I/fleet/fleet.conf"; rm -f "$HOME/.claude/settings.json" "$HOME/.claude.json"
 
 finish verify.test.sh
