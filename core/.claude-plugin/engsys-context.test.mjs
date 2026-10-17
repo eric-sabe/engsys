@@ -11,7 +11,10 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const HOOK = path.join(ROOT, '.claude-plugin', 'engsys-context.mjs');
 const base = { PATH: process.env.PATH, CLAUDE_PLUGIN_ROOT: ROOT };
 
-const context = (env) => JSON.parse(execFileSync(process.execPath, [HOOK], { env: { ...base, ...env }, encoding: 'utf8' })).hookSpecificOutput.additionalContext;
+const context = (env) => {
+  const out = execFileSync(process.execPath, [HOOK], { env: { ...base, ...env }, encoding: 'utf8' });
+  return out.trimStart().startsWith('{') ? JSON.parse(out).hookSpecificOutput.additionalContext : out;
+};
 const reground = (tmpl, env) => execFileSync('bash', [path.join(ROOT, 'templates', tmpl)], { env: { ...base, ...env }, encoding: 'utf8' });
 
 const ET = { OPERATOR_TIMEZONE: 'America/New_York', OPERATOR_CLOCK: '12h' };
@@ -49,4 +52,11 @@ test('CT-07: engsys-context.mjs and re-ground templates emit valid single-object
     assert.equal(obj.additionalContext, obj.hookSpecificOutput.additionalContext);
   }
 });
+
+test('session start: Co-Authored-By trailer matches the active harness (claude, copilot, antigravity)', () => {
+  assert.match(context({ HARNESS: 'claude' }), /Co-Authored-By: Claude <noreply@anthropic\.com>/);
+  assert.match(context({ HARNESS: 'copilot' }), /Co-Authored-By: GitHub Copilot <noreply@github\.com>/);
+  assert.match(context({ HARNESS: 'antigravity' }), /Co-Authored-By: Google Antigravity <noreply@google\.com>/);
+});
+
 

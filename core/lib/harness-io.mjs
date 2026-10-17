@@ -60,7 +60,9 @@ function normalizeHarnessName(raw) {
  * Detect active harness ('claude' | 'copilot' | 'antigravity') from environment or hook stdin payload.
  */
 export function detectHarness(env = process.env, rawStdinObj = null) {
-  const explicit = normalizeHarnessName(env?.ENGSYS_HARNESS || env?.FLEET_HARNESS);
+  const explicit = normalizeHarnessName(
+    env?.ENGSYS_HARNESS || env?.FLEET_ACTIVE_HARNESS || env?.FLEET_HARNESS || env?.HARNESS,
+  );
   if (explicit) return explicit;
 
   if (rawStdinObj && typeof rawStdinObj === 'object') {

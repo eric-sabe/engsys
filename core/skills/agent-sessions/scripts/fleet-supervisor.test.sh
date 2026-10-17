@@ -592,6 +592,43 @@ expect "CT-14b: HARNESS=antigravity auth_probe runs agy -p" "^agy-probe -p Reply
 expect "CT-14b: HARNESS=antigravity probe ok → relaunch proceeds" "^launch acme-rel"
 rm -f "$T"/pane-* "$T"/capture-* "$T/probe-ok"
 
+# Seat-quota fallback (HARNESS_FALLBACK=copilot,antigravity):
+# 1) Live singleton monster hits Claude seat limit → revokes baton (quota-fallback), activates copilot, and relaunches immediately.
+printf 'TMUX_SESSION=acme\nLAUNCH_CMD=bash %s/launch.sh\nBATON_CMD=bash %s/baton.sh\nBATON_REVOKE_CMD=bash %s/revoke.sh\nNOTIFY_CMD=bash %s/notify.sh\nHEARTBEAT_CMD=bash %s/heartbeat.sh\nAUTH_CHECK_WAIT_SEC=0\nHARNESS=claude\nHARNESS_FALLBACK=copilot,antigravity\nQUOTA_COOLDOWN_MIN=60\nREPO=o/r\nacme-mm|1|60|||merge\nacme-rel|2|60\n' "$T" "$T" "$T" "$T" "$T" >"$T/w/sup.conf"
+reset; rm -f "$T"/pane-* "$T"/capture-*; baton free; ledger 2 "ok — merging #12"; ledger2 2 "ok"; pane idle; echo "2.1.290" >"$T/pane-acme-rel"; : >"$T/capture-acme-rel"
+wpane acme-mm "⏺ You've hit your limit · resets 9pm (America/New_York)"
+run
+expect "quota fallback: notifies once on harness-fallback incident" "^notify --level info --incident harness-fallback .*Failing over supervised monster sessions to \`HARNESS=copilot\`"
+expect "  …revokes the singleton baton lease with quota-fallback" "^revoke --repo o/r --role merge --session acme-mm --reason quota-fallback"
+expect "  …relaunches the quota-blocked monster immediately" "^launch acme-mm"
+expect "  …announces the harness failover on the monster ledger" "comment 1: .*seat quota reached on claude; failing over to HARNESS=copilot"
+expect "  …status-issue heartbeat records active fallback harness" "^heartbeat .*harness: copilot (fallback from claude since"
+if [ "$(head -n 1 "$SLOG/harness.fallback" 2>/dev/null)" = "copilot" ]; then pass=$((pass + 1)); echo "  ok    …harness.fallback records copilot"; else fail=$((fail + 1)); echo "  FAIL  …harness.fallback records copilot"; fi
+
+# 2) Next tick with acme-mm healthy on copilot → nothing relaunched, no duplicate alert.
+run
+expect "quota fallback next tick: no duplicate relaunch" "!^launch acme-mm"
+expect "  …no duplicate alert" "!^notify"
+
+# 3) Cascade: acme-mm (now on copilot) hits Copilot quota → cascades to antigravity.
+wpane acme-mm "● Copilot rate limit exceeded"
+run
+expect "quota cascade: revokes baton again for second failover" "^revoke --repo o/r --role merge --session acme-mm --reason quota-fallback"
+expect "  …relaunches monster onto second fallback (antigravity)" "^launch acme-mm"
+expect "  …ledger comment names cascade from copilot to antigravity" "comment 1: .*seat quota reached on copilot; failing over to HARNESS=antigravity"
+if [ "$(head -n 1 "$SLOG/harness.fallback" 2>/dev/null)" = "antigravity" ]; then pass=$((pass + 1)); echo "  ok    …harness.fallback updated to antigravity"; else fail=$((fail + 1)); echo "  FAIL  …harness.fallback updated to antigravity"; fi
+
+# 4) Cooldown expires + primary Claude seat probe succeeds → clears fallback and resolves alert.
+printf 'antigravity\n2026-10-15T10:00:00Z\nclaude\nacme-mm\n1\n' >"$SLOG/harness.fallback"
+rm -f "$SLOG/heartbeat.last-minute"
+touch "$T/probe-ok"
+wpane acme-mm "⏺ All checks green."
+run
+expect "quota failback: probes primary claude harness after cooldown" "^probe -p"
+expect "  …resolves harness-fallback incident" "^notify --level info --incident harness-fallback --resolve Resolved: primary harness \`claude\` recovered"
+if [ ! -f "$SLOG/harness.fallback" ]; then pass=$((pass + 1)); echo "  ok    …harness.fallback removed on recovery"; else fail=$((fail + 1)); echo "  FAIL  …harness.fallback removed on recovery"; fi
+rm -f "$T"/pane-* "$T"/capture-* "$T/probe-ok"
+
 # CT-14: launch-agent-sessions.sh with HARNESS=copilot translates flags and invokes copilot --name ... -i ...
 cat >"$T/bin/tmux" <<'SH'
 #!/usr/bin/env bash

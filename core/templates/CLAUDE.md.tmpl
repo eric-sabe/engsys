@@ -69,7 +69,7 @@ Local review first, then the project's pre-push check (`/pre-push`; the exact co
 - Lockfile conflicts: regenerate with the package manager and `git add` the result — never hand-merge a lockfile.
 - Post-merge cleanup: `git checkout main && git pull --ff-only origin main`; `git worktree remove <path>` + `git worktree prune`; delete the merged local branch.
 - Write PR/issue/commit bodies to a file under `tmp/` with the Write tool, then pass `--body-file`/`--file`. **No heredocs** — they mangle newlines.
-- Commit/push only when the user asks. End commit messages with the `Co-Authored-By: Claude` trailer.
+- Commit/push only when the user asks. End commit messages with the harness-matched `Co-Authored-By` trailer (`Co-Authored-By: Claude <noreply@anthropic.com>` in Claude Code, `Co-Authored-By: GitHub Copilot <noreply@github.com>` in Copilot CLI, or `Co-Authored-By: Google Antigravity <noreply@google.com>` in Antigravity).
 
 ## Deferring work
 

@@ -32,6 +32,7 @@ You are the security/dependency baton-holder (`refs/engsys/batons/maintain`) for
    ```bash
    <skill-dir>/scripts/mnt-tick.sh --repo <repo> --state-dir <state_dir> --issue <ledger_issue> --default-branch <default_branch> --config <config>
    ```
+   - **Non-Claude harnesses (`HARNESS=copilot` or `HARNESS=antigravity`)**: if `Monitor` / `ScheduleWakeup` are unavailable, drive the loop directly by running `mnt-tick.sh` every `poll_interval` seconds (via Antigravity's `schedule` tool or `sleep <poll_interval>` between foreground `mnt-tick.sh` calls) and `mnt-baton.sh renew` every 2.5 minutes.
 
 ## The loop — on every wake (event or tick)
 

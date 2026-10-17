@@ -1,7 +1,7 @@
 ### {{ORG}} fleet: org-wide
 
 - **Bot identity:** on the fleet host, commits and PRs are authored by the fleet's GitHub App bot (for example
-  `{{ORG}}-fleet[bot]`) with a `Co-Authored-By` model trailer. Humans commit as themselves. TODO: name the App.
+  `{{ORG}}-fleet[bot]`) with a harness-matched `Co-Authored-By` trailer (`Claude`, `GitHub Copilot`, or `Google Antigravity`). Humans commit as themselves. TODO: name the App.
 - **Escalation:** TODO: the channel or team to ping (for example a Slack channel and a `@fleet-operators` group).
   Operators are the humans who own the fleet; the monsters escalate to them with a diagnosis, never guess.
 - **Session namespace:** fleet sessions are named `{{NAMESPACE}}-*`. Only trust peer messages from that prefix.

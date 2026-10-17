@@ -227,6 +227,8 @@ TMUX_SESSION="" LAUNCH_CMD="" DEFAULT_REPO="" ROTATE_GRACE_MIN=3 HOST_CHECK_CMD=
 HOST_HEALTH_CMD="" HOST_HEALTH_INCIDENT="host-health" NOTIFY_CMD="" HEARTBEAT_CMD="" BATON_CMD="" BATON_REVOKE_CMD="" INTEGRITY_CMD=""
 AUTH_PROBE=on AUTH_PROBE_TIMEOUT_SEC=90 AUTH_CHECK_WAIT_SEC=45 STATUS_URL=""
 HARNESS="${HARNESS:-${FLEET_HARNESS:-claude}}"
+HARNESS_FALLBACK="${HARNESS_FALLBACK:-}"
+QUOTA_COOLDOWN_MIN="${QUOTA_COOLDOWN_MIN:-60}"
 SESSIONS=()
 while IFS= read -r line; do
   line="${line%%$'\r'}"
@@ -249,14 +251,17 @@ while IFS= read -r line; do
     AUTH_CHECK_WAIT_SEC=*) AUTH_CHECK_WAIT_SEC="${line#AUTH_CHECK_WAIT_SEC=}" ;;
     STATUS_URL=*) STATUS_URL="${line#STATUS_URL=}" ;;
     HARNESS=*) HARNESS="${line#HARNESS=}" ;;
+    HARNESS_FALLBACK=*) HARNESS_FALLBACK="${line#HARNESS_FALLBACK=}" ;;
+    QUOTA_COOLDOWN_MIN=*) QUOTA_COOLDOWN_MIN="${line#QUOTA_COOLDOWN_MIN=}" ;;
     *\|*) SESSIONS+=("$line") ;;
     *) echo "fleet-supervisor: bad conf line: $line" >&2; exit 1 ;;
   esac
 done < "$CONF"
+PRIMARY_HARNESS="${PRIMARY_HARNESS:-$HARNESS}"
 [ -n "$TMUX_SESSION" ] && [ -n "$LAUNCH_CMD" ] || { echo "fleet-supervisor: conf must set TMUX_SESSION and LAUNCH_CMD" >&2; exit 1; }
 case "$AUTH_PROBE" in on | off) ;; *) echo "fleet-supervisor: AUTH_PROBE must be on or off" >&2; exit 1 ;; esac
-for v in AUTH_PROBE_TIMEOUT_SEC AUTH_CHECK_WAIT_SEC; do
-  case "${!v}" in '' | *[!0-9]*) echo "fleet-supervisor: $v must be a whole number of seconds" >&2; exit 1 ;; esac
+for v in AUTH_PROBE_TIMEOUT_SEC AUTH_CHECK_WAIT_SEC QUOTA_COOLDOWN_MIN; do
+  case "${!v}" in '' | *[!0-9]*) echo "fleet-supervisor: $v must be a whole number" >&2; exit 1 ;; esac
 done
 
 # Backward-compatible fallback: the repo the cwd belongs to (resolved lazily,
@@ -373,11 +378,11 @@ auth_add_lines() { # auth_add_lines <file> <lines> → appended, each line once
   done <<<"$2"
 }
 
-# The test request: does a login work right now? Runs only when a pane shows a login error. Sets AUTH_PROBE_WHY.
+# The test request: does a login/seat work right now? Accepts optional target harness $1. Sets AUTH_PROBE_WHY.
 auth_probe() {
   AUTH_PROBE_WHY=""
   [ "$AUTH_PROBE" = on ] || { AUTH_PROBE_WHY="no test request (AUTH_PROBE=off)"; return 1; }
-  local probe_bin="claude" h="${HARNESS:-claude}"
+  local probe_bin="claude" h="${1:-${HARNESS:-claude}}"
   case "$h" in
     copilot) probe_bin="copilot" ;;
     antigravity | agy) h="antigravity"; probe_bin="agy" ;;
@@ -411,6 +416,123 @@ auth_probe() {
   if grep -Eq "$AUTH_RE" <<<"$last"; then AUTH_PROBE_WHY="the test request failed the same way: $last"
   else AUTH_PROBE_WHY="the test request did not succeed (exit $rc): ${last:-no output}"; fi
   return 1
+}
+
+# --- Seat quota / rate-limit fallback (HARNESS_FALLBACK) ------------------------------------------
+HARNESS_QUOTA_ERRORS=(
+  "You've hit your limit · resets"
+  'Claude usage limit reached'
+  'Usage limit reached'
+  'Session limit reached'
+  'Weekly limit reached'
+  '(API Error: 429 )?Rate limit reached'
+  'API Error: 429 .*rate_limit_error'
+  'You have exceeded your Copilot .*quota'
+  'Copilot rate limit exceeded'
+)
+QUOTA_RE="^($(IFS='|'; printf '%s' "${HARNESS_QUOTA_ERRORS[*]}"))"
+QUOTA_PFX_RE='^(⏺ |● | *⎿ +)'
+FALLBACK_FILE="$STATE_DIR/harness.fallback"       # line 1: active fallback, 2: since ISO, 3: primary, 4: where, 5: until epoch
+FALLBACK_ALERTED="$STATE_DIR/harness-fallback.alerted"
+QUOTA_ACKED="$STATE_DIR/quota.acked"
+FALLBACK_INCIDENT="harness-fallback"
+QUOTA_BLOCKED=""
+
+quota_state_of() {
+  QUOTA_RE="$QUOTA_RE" MSG_RE="$AUTH_MSG_RE" PFX_RE="$QUOTA_PFX_RE" awk '
+    { sub(/\r$/, ""); sub(/ +$/, "") }
+    $0 ~ ENVIRON["MSG_RE"] {
+      m = $0; sub(ENVIRON["MSG_RE"], "", m)
+      s = (m ~ ENVIRON["QUOTA_RE"]) ? "quota" : "ok"
+      next
+    }
+    {
+      m = $0; sub(ENVIRON["PFX_RE"], "", m)
+      if (m ~ ENVIRON["QUOTA_RE"]) s = "quota"
+    }
+    END { print (s == "" ? "none" : s) }' <<<"$1"
+}
+
+quota_scan() {
+  QUOTA_BLOCKED=""
+  local panes w id cmd text keep=""
+  panes="$(tmux list-panes -s -t "$TMUX_SESSION" -F '#{window_name}|#{pane_id}|#{pane_current_command}' 2>/dev/null || true)"
+  while IFS='|' read -r w id cmd; do
+    [ -n "$id" ] || continue
+    case "$cmd" in '' | zsh | -zsh | bash | -bash | sh | -sh | fish | -fish) continue ;; esac
+    text="$(tmux capture-pane -p -t "$id" -S -60 2>/dev/null || true)"
+    grep -q 'esc to interrupt' <<<"$(tail -n 15 <<<"$text")" && continue
+    case "$(quota_state_of "$text")" in
+      quota)
+        if [ -f "$QUOTA_ACKED" ] && grep -Fxq "$w|$id" "$QUOTA_ACKED"; then keep="$keep$w|$id"$'\n'
+        else QUOTA_BLOCKED="$QUOTA_BLOCKED$w|$id"$'\n'; fi ;;
+    esac
+  done <<<"$panes"
+  if [ -f "$QUOTA_ACKED" ]; then
+    if [ -n "$keep" ]; then printf '%s' "$keep" >"$QUOTA_ACKED"; else rm -f "$QUOTA_ACKED"; fi
+  fi
+}
+
+is_supervised_session() {
+  local target="$1" s s_name
+  for s in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
+    IFS='|' read -r s_name _ <<<"$s"
+    [ "$s_name" = "$target" ] && return 0
+  done
+  return 1
+}
+
+pick_fallback_harness() { # pick_fallback_harness <exhausted_harness> → prints next available fallback harness
+  [ -n "$HARNESS_FALLBACK" ] || return 1
+  local exhausted="$1" raw_list=() item bin past=0
+  IFS=',' read -r -a raw_list <<<"$HARNESS_FALLBACK"
+  if [ "$exhausted" = "$PRIMARY_HARNESS" ]; then past=1; fi
+  for item in ${raw_list[@]+"${raw_list[@]}"}; do
+    item="${item//[[:space:]]/}"
+    [ -n "$item" ] || continue
+    case "$item" in agy) item="antigravity" ;; esac
+    [ "$item" != "$PRIMARY_HARNESS" ] || continue
+    if [ "$past" = 0 ]; then
+      [ "$item" = "$exhausted" ] && past=1
+      continue
+    fi
+    [ "$item" != "$exhausted" ] || continue
+    bin="claude"
+    case "$item" in copilot) bin="copilot" ;; antigravity) bin="agy" ;; esac
+    if command -v "$bin" >/dev/null 2>&1; then
+      printf '%s' "$item"
+      return 0
+    fi
+  done
+  return 1
+}
+
+quota_ack_non_supervised() {
+  local line w
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    w="${line%%|*}"
+    if ! is_supervised_session "$w"; then
+      auth_add_lines "$QUOTA_ACKED" "$line"
+    fi
+  done <<<"$1"
+}
+
+quota_activate_fallback() { # quota_activate_fallback <next_harness> <where_seen> <now_epoch> [exhausted_harness]
+  local next_h="$1" where="$2" now_s="$3" exhausted_h="${4:-$PRIMARY_HARNESS}" since until_s
+  since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  until_s=$((now_s + QUOTA_COOLDOWN_MIN * 60))
+  printf '%s\n%s\n%s\n%s\n%s\n' "$next_h" "$since" "$PRIMARY_HARNESS" "$where" "$until_s" >"$FALLBACK_FILE"
+  HARNESS="$next_h"
+  FLEET_ACTIVE_HARNESS="$next_h"
+  export HARNESS FLEET_ACTIVE_HARNESS
+  quota_ack_non_supervised "$QUOTA_BLOCKED"
+  log "quota: seat limit reached on $exhausted_h (seen in $where); activating fallback HARNESS=$HARNESS (cooldown ${QUOTA_COOLDOWN_MIN}m)"
+  if [ ! -f "$FALLBACK_ALERTED" ]; then
+    if notify --level info --incident "$FALLBACK_INCIDENT" "Seat limit reached on \`$exhausted_h\` on $HOST_NAME (seen in \`$where\` at $since). Failing over supervised monster sessions to \`HARNESS=$HARNESS\` (cooldown ${QUOTA_COOLDOWN_MIN}m)."; then
+      printf '%s\n' "$since" >"$FALLBACK_ALERTED"
+    fi
+  fi
 }
 
 auth_alert() { # the incident's one alert; retried each tick while held until it is posted
@@ -471,7 +593,7 @@ auth_hold() { # auth_hold <name> <what the table would have done> → logged and
 }
 
 auth_after_launch() { # auth_after_launch <name> → watch the fresh pane for its first message
-  local waited=0 text
+  local waited=0 text next_fb
   while :; do
     text="$(tmux capture-pane -p -t "${TMUX_SESSION}:$1" -S -60 2>/dev/null || true)"
     case "$(auth_state_of "$text")" in
@@ -479,8 +601,20 @@ auth_after_launch() { # auth_after_launch <name> → watch the fresh pane for it
         AUTH_PROBE_WHY="its first reply was a login error"
         auth_begin "\`$1\`, right after its relaunch" "$1|$(tmux list-panes -t "${TMUX_SESSION}:$1" -F '#{pane_id}' 2>/dev/null | head -1 || true)"
         return 0 ;;
-      ok) return 0 ;;
+      ok)
+        if [ "$(quota_state_of "$text")" = "quota" ] && [ -n "$HARNESS_FALLBACK" ]; then
+          if next_fb="$(pick_fallback_harness "$HARNESS")"; then
+            quota_activate_fallback "$next_fb" "$1 (right after relaunch)" "$(date +%s)" "$HARNESS"
+          fi
+        fi
+        return 0 ;;
     esac
+    if [ "$(quota_state_of "$text")" = "quota" ] && [ -n "$HARNESS_FALLBACK" ]; then
+      if next_fb="$(pick_fallback_harness "$HARNESS")"; then
+        quota_activate_fallback "$next_fb" "$1 (right after relaunch)" "$(date +%s)" "$HARNESS"
+      fi
+      return 0
+    fi
     [ "$waited" -lt "$AUTH_CHECK_WAIT_SEC" ] || return 0
     sleep 2; waited=$((waited + 2))
   done
@@ -508,6 +642,7 @@ relaunch() { # relaunch <name> <ledger> <repo> <reason>
     cat "$out" >>"$LOG"; rm -f "$out"
     log "$name: relaunched"
     printf '%s|%s\n' "${CUR_TARGET:-$repo|$ledger|}" "$(date +%s)" >"$STATE_DIR/$name.target"
+    printf '%s\n' "$HARNESS" >"$STATE_DIR/$name.harness"
     if [ -f "$failed" ]; then
       gh issue comment "$ledger" -R "$repo" --body "✅ fleet-supervisor: \`$name\` relaunched after failed attempts since $(human_text "$(cat "$failed")") ($reason_h, $(human_text "$(date -u +%Y-%m-%dT%H:%M:%SZ)")). Startup reconcile recovers state from this ledger + state.md." >/dev/null || true
       rm -f "$failed"
@@ -582,6 +717,77 @@ baton_allows() { # baton_allows <name> <repo> <role> [rotation_idle] → 0 may r
   fi
   return 2
 }
+
+NOW=$(date +%s)
+
+# Seat-quota fallback (HARNESS_FALLBACK): evaluate before INTEGRITY_CMD so `fleet verify` checks
+# the active fallback harness's plugin cache before any singleton monster relaunches.
+quota_scan
+if [ -f "$FALLBACK_FILE" ]; then
+  FB_HARNESS="$(sed -n 1p "$FALLBACK_FILE")"
+  FB_SINCE="$(sed -n 2p "$FALLBACK_FILE")"
+  FB_PRIMARY="$(sed -n 3p "$FALLBACK_FILE")"
+  FB_WHERE="$(sed -n 4p "$FALLBACK_FILE")"
+  FB_UNTIL="$(sed -n 5p "$FALLBACK_FILE")"
+  [ -n "$FB_PRIMARY" ] || FB_PRIMARY="$PRIMARY_HARNESS"
+  if [ -n "$FB_HARNESS" ]; then
+    HARNESS="$FB_HARNESS"
+    FLEET_ACTIVE_HARNESS="$FB_HARNESS"
+    export HARNESS FLEET_ACTIVE_HARNESS
+  fi
+  if [ -n "$FB_UNTIL" ] && [[ "$FB_UNTIL" =~ ^[0-9]+$ ]] && [ "$NOW" -ge "$FB_UNTIL" ]; then
+    FB_RECOVERED=0
+    if [ "$AUTH_PROBE" = on ]; then
+      if auth_probe "$FB_PRIMARY"; then FB_RECOVERED=1; fi
+    elif [ -z "$QUOTA_BLOCKED" ]; then
+      FB_RECOVERED=1
+      AUTH_PROBE_WHY="cooldown ${QUOTA_COOLDOWN_MIN}m elapsed"
+    fi
+    if [ "$FB_RECOVERED" = 1 ]; then
+      rm -f "$FALLBACK_FILE"
+      HARNESS="$FB_PRIMARY"
+      unset FLEET_ACTIVE_HARNESS
+      export HARNESS
+      log "quota: primary harness $HARNESS recovered ($AUTH_PROBE_WHY; had been on fallback $FB_HARNESS since $FB_SINCE); returning to HARNESS=$HARNESS"
+      if [ -f "$FALLBACK_ALERTED" ]; then
+        if notify --level info --incident "$FALLBACK_INCIDENT" --resolve "Resolved: primary harness \`$HARNESS\` recovered on $HOST_NAME ($AUTH_PROBE_WHY; had been on fallback \`$FB_HARNESS\` since $FB_SINCE). Subsequent monster launches and rotations return to \`HARNESS=$HARNESS\`."; then
+          rm -f "$FALLBACK_ALERTED"
+        fi
+      fi
+    else
+      FB_UNTIL=$((NOW + QUOTA_COOLDOWN_MIN * 60))
+      printf '%s\n%s\n%s\n%s\n%s\n' "$FB_HARNESS" "$FB_SINCE" "$FB_PRIMARY" "$FB_WHERE" "$FB_UNTIL" >"$FALLBACK_FILE"
+      log "quota: primary harness $FB_PRIMARY still unavailable after cooldown ($AUTH_PROBE_WHY); extending fallback HARNESS=$FB_HARNESS by ${QUOTA_COOLDOWN_MIN}m"
+    fi
+  fi
+fi
+
+if [ -n "$QUOTA_BLOCKED" ]; then
+  if [ ! -f "$FALLBACK_FILE" ]; then
+    QUOTA_FIRST="${QUOTA_BLOCKED%%$'\n'*}"
+    if [ -n "$HARNESS_FALLBACK" ] && NEXT_FB="$(pick_fallback_harness "$HARNESS")"; then
+      quota_activate_fallback "$NEXT_FB" "${QUOTA_FIRST%%|*}" "$NOW" "$HARNESS"
+    else
+      auth_add_lines "$QUOTA_ACKED" "$QUOTA_BLOCKED"
+      log "quota: seat limit reached in \`${QUOTA_FIRST%%|*}\`, but no available HARNESS_FALLBACK is configured"
+    fi
+  else
+    quota_ack_non_supervised "$QUOTA_BLOCKED"
+    while IFS='|' read -r q_w q_id; do
+      [ -n "$q_w" ] || continue
+      q_h="$(cat "$STATE_DIR/$q_w.harness" 2>/dev/null || printf '%s' "$PRIMARY_HARNESS")"
+      if [ "$q_h" = "$HARNESS" ]; then
+        if NEXT_FB="$(pick_fallback_harness "$HARNESS")"; then
+          quota_activate_fallback "$NEXT_FB" "$q_w" "$NOW" "$HARNESS"
+        else
+          auth_add_lines "$QUOTA_ACKED" "$q_w|$q_id"
+          log "quota: fallback harness $HARNESS also hit seat limit in \`$q_w\`, and no further HARNESS_FALLBACK is available"
+        fi
+        break
+      fi
+    done <<<"$QUOTA_BLOCKED"
+  fi
+fi
 
 # Singleton monsters: the integrity check (INTEGRITY_CMD, once per tick) and then the lease. Sets BATON_WHY.
 # A relaunch held by the integrity check is said once on the session's ledger (latch:
@@ -681,8 +887,6 @@ else
   auth_resolve_post # a resolve that failed to post on the tick the hold ended
 fi
 
-NOW=$(date +%s)
-
 # Tallied as each session is classified below, for the once-per-tick heartbeat summary. A session
 # skipped before classification (bad conf line, not on this host, closed/unreadable ledger) is left
 # out of the tally entirely — it was never actually weighed.
@@ -770,10 +974,26 @@ for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
   LATCH="$STATE_DIR/$name.escalated"
   ROTATED="$STATE_DIR/$name.rotated" # the rotation heartbeat we already relaunched for
   MARKED=0; [ -f "$ROTATED" ] && [ "$(cat "$ROTATED")" = "$HB_TS" ] && MARKED=1
+  SESSION_HARNESS="$(cat "$STATE_DIR/$name.harness" 2>/dev/null || printf '%s' "$PRIMARY_HARNESS")"
 
   if [ "$ALIVE" = "1" ]; then
+    if [ -f "$FALLBACK_FILE" ] && grep -q "^${name}|" <<<"$QUOTA_BLOCKED" && ! pane_busy "$name"; then
+      ROTATING=$((ROTATING + 1))
+      rm -f "$LATCH"
+      if [ "$AUTH_HELD" = 1 ]; then
+        auth_hold "$name" "seat quota reached on $SESSION_HARNESS, fallback HARNESS=$HARNESS ready"
+      else
+        if [ -n "$role" ]; then
+          revoke_singleton_baton "$name" "$REPO_SLUG" "$role" "quota-fallback" || true
+        fi
+        if [ -n "$role" ] && ! singleton_allows "$name" "$REPO_SLUG" "$role" "$ledger"; then
+          log "$name: seat quota reached on $SESSION_HARNESS, but fallback relaunch to HARNESS=$HARNESS is held (baton or integrity) — waiting ($BATON_WHY)"
+        else
+          relaunch "$name" "$ledger" "$REPO_SLUG" "seat quota reached on $SESSION_HARNESS; failing over to HARNESS=$HARNESS"
+        fi
+      fi
     # (relaunched for this rotation but the new session never heartbeated → falls to the stale branch)
-    if [ "$ROTATION" = "1" ] && ! { [ "$MARKED" = "1" ] && [ "$STALE" = "1" ]; }; then
+    elif [ "$ROTATION" = "1" ] && ! { [ "$MARKED" = "1" ] && [ "$STALE" = "1" ]; }; then
       ROTATING=$((ROTATING + 1))
       rm -f "$LATCH"
       AGE=$(( (NOW - ${HB_EPOCH:-$NOW}) / 60 ))
@@ -873,6 +1093,12 @@ if [ -n "$HEARTBEAT_CMD" ] && [ $((UP + ROTATING + DOWN)) -gt 0 ]; then
   MINUTE_LATCH="$STATE_DIR/heartbeat.last-minute"
   if [ ! -f "$MINUTE_LATCH" ] || [ "$(cat "$MINUTE_LATCH")" != "$MINUTE_NOW" ]; then
     SUMMARY="sessions: $UP up, $ROTATING rotating, $DOWN down"
+    if [ -f "$FALLBACK_FILE" ]; then
+      FB_ACTIVE="$(sed -n 1p "$FALLBACK_FILE")"
+      FB_SINCE="$(sed -n 2p "$FALLBACK_FILE")"
+      FB_PRIM="$(sed -n 3p "$FALLBACK_FILE")"
+      SUMMARY="$SUMMARY; harness: $FB_ACTIVE (fallback from ${FB_PRIM:-$PRIMARY_HARNESS} since $FB_SINCE)"
+    fi
     set -- "$SUMMARY"
     if [ "$AUTH_HELD" = 1 ]; then
       # the summary keeps machine fields in ISO UTC; the second line is for people (operator's time, #89)
