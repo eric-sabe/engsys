@@ -8,15 +8,18 @@
 //   - observed          Derive health from recent real execution records (CI conclusions, tool runs).
 //   - http-health       HTTP GET/HEAD endpoint probe (2xx -> healthy, 429 -> degraded, 5xx -> down,
 //                       401/403 -> session-local auth failure).
-//   - synthetic-command Execute a configured command from fleet-health.yml (splits vendor outage from
-//                       host-local missing auth/context via auth_check and output classification).
+//   - synthetic-command Run one of the fixed read-only check kinds in probe-kinds.mjs (argv array, no
+//                       shell, scrubbed env); splits vendor outage from host-local missing auth/context
+//                       via auth_check and output classification.
 //   - fleet-report-only Passive adapter whose health comes purely from correlated session reports.
 //
 // Zero dependencies: node builtins only.
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { PROBE_KINDS, buildKindCommand, scrubEnv } from './probe-kinds.mjs';
 
 export const VALID_STATUSES = new Set(['healthy', 'degraded', 'down', 'unknown']);
 
@@ -417,20 +420,14 @@ export async function probeHttpHealth(probeCfg, { fetchFn = globalThis.fetch, no
 }
 
 /**
- * Split a command string or array into `{ file, args, useShell }`.
+ * Normalize an `auth_check` (a kind name, or `{ check, params }`) to `{ check, params }`.
  */
-export function parseCommandSpec(cmd, extraArgs = []) {
-  if (Array.isArray(cmd)) {
-    return { file: cmd[0], args: [...cmd.slice(1), ...extraArgs], useShell: false };
+export function normalizeAuthCheck(authCheck) {
+  if (typeof authCheck === 'string') return { check: authCheck, params: {} };
+  if (authCheck && typeof authCheck === 'object' && !Array.isArray(authCheck)) {
+    return { check: authCheck.check, params: authCheck.params || {} };
   }
-  const s = String(cmd ?? '').trim();
-  // If the command has shell operators, run via /bin/sh -c; otherwise split simple tokens safely.
-  if (/[|&;<>()$`\\"'\n]/.test(s)) {
-    const full = extraArgs.length ? `${s} ${extraArgs.map((a) => `'${String(a).replace(/'/g, "'\\''")}'`).join(' ')}` : s;
-    return { file: '/bin/sh', args: ['-c', full], useShell: true };
-  }
-  const parts = s.split(/\s+/).filter(Boolean);
-  return { file: parts[0], args: [...parts.slice(1), ...extraArgs], useShell: false };
+  return null;
 }
 
 /**
@@ -442,14 +439,16 @@ export function isAuthOrContextFailure(outputText, errCode = null) {
   return AUTH_FAILURE_PATTERNS.some((re) => re.test(text));
 }
 
-function runCommandSafe(cmdSpec, { timeoutMs = 10000, env = process.env, cwd = process.cwd(), execFn = execFileSync } = {}) {
+function runCommandSafe(cmdSpec, { timeoutMs = 10000, env = process.env, cwd = os.tmpdir(), execFn = execFileSync } = {}) {
   try {
+    // argv array, no shell, and only the variables this kind needs (probe-kinds.mjs).
     const stdout = execFn(cmdSpec.file, cmdSpec.args, {
       encoding: 'utf8',
       timeout: timeoutMs,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env,
+      env: scrubEnv(env, cmdSpec.envGroups),
       cwd,
+      shell: false,
     });
     return { ok: true, code: 0, stdout: String(stdout ?? ''), stderr: '' };
   } catch (e) {
@@ -469,15 +468,29 @@ function runCommandSafe(cmdSpec, { timeoutMs = 10000, env = process.env, cwd = p
  * Splits "service down" from "this host's auth or context is missing":
  *   1. If `probeCfg.auth_check` is set, runs it first. If it fails, returns `status: 'healthy'`
  *      with `authLocalFailure: true` so a local auth issue never causes a false fleet outage.
- *   2. Runs `probeCfg.command`. If exit is non-zero and output matches `isAuthOrContextFailure`,
+ *   2. Runs the `probeCfg.check` kind. If exit is non-zero and output matches `isAuthOrContextFailure`,
  *      returns `status: 'healthy'` with `authLocalFailure: true`.
  */
-export function probeSyntheticCommand(probeCfg, { env = process.env, cwd = process.cwd(), execFn = execFileSync, now = new Date() } = {}) {
+export function probeSyntheticCommand(probeCfg, { env = process.env, execFn = execFileSync, now = new Date() } = {}) {
+  // A neutral working directory: no kind should pick up project config (.npmrc, .git/config, ...)
+  // from the repo the monster happens to run in.
+  const cwd = os.tmpdir();
   const checkedAt = nowIsoStr(now);
   const timeoutMs = probeCfg?.timeout_ms || 10000;
 
-  if (probeCfg?.auth_check) {
-    const authSpec = parseCommandSpec(probeCfg.auth_check);
+  let cmdSpec;
+  let authSpec = null;
+  try {
+    cmdSpec = buildKindCommand(PROBE_KINDS, probeCfg?.check, probeCfg?.params);
+    if (probeCfg?.auth_check) {
+      const ac = normalizeAuthCheck(probeCfg.auth_check);
+      authSpec = buildKindCommand(PROBE_KINDS, ac?.check, ac?.params);
+    }
+  } catch (e) {
+    return { status: 'unknown', detail: `synthetic-command ${e.message}`, rawStatus: 'config_error', checkedAt };
+  }
+
+  if (authSpec) {
     const authRes = runCommandSafe(authSpec, { timeoutMs, env, cwd, execFn });
     if (!authRes.ok) {
       const msg = (authRes.stderr || authRes.stdout || 'auth_check failed').trim().split('\n')[0].slice(0, 160);
@@ -489,11 +502,6 @@ export function probeSyntheticCommand(probeCfg, { env = process.env, cwd = proce
         checkedAt,
       };
     }
-  }
-
-  const cmdSpec = parseCommandSpec(probeCfg?.command, Array.isArray(probeCfg?.args) ? probeCfg.args : []);
-  if (!cmdSpec.file) {
-    return { status: 'unknown', detail: 'synthetic-command missing executable', rawStatus: 'config_error', checkedAt };
   }
 
   const res = runCommandSafe(cmdSpec, { timeoutMs, env, cwd, execFn });

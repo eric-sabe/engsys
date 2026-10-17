@@ -18,6 +18,11 @@ export const BOARD_END = '<!-- /fleet-health -->';
 export const BOARD_JSON_PREFIX = '<!-- fleet-health-json: ';
 export const BOARD_JSON_SUFFIX = ' -->';
 export const DEFAULT_STALE_MINUTES = 30;
+/** How far ahead of this host's clock a board timestamp may be before it counts as invalid. */
+export const MAX_CLOCK_SKEW_MS = 60_000;
+/** Service ids and state words that may leave the board for a session or a watch bus. */
+export const SAFE_SERVICE_ID_RE = /^[a-z0-9-]{1,40}$/;
+export const BOARD_STATES = Object.freeze(['healthy', 'up', 'degraded', 'down', 'unknown']);
 
 const STATE_ICON = Object.freeze({
   healthy: '🟢 healthy',
@@ -305,13 +310,15 @@ export function updateIssueBodyWithBoard(existingBody, renderedBlock) {
 }
 
 /**
- * True when boardData is missing `last_updated` or is older than `staleMinutes`.
+ * True when boardData is missing `last_updated`, is older than `staleMinutes`, or claims a time more
+ * than MAX_CLOCK_SKEW_MS in the future (a future stamp would otherwise never go stale).
  */
 export function isBoardStale(boardData, { now = new Date(), staleMinutes } = {}) {
   if (!boardData || typeof boardData !== 'object' || !boardData.last_updated) return true;
   const updatedMs = Date.parse(boardData.last_updated);
   if (!Number.isFinite(updatedMs)) return true;
   const nowMs = (now instanceof Date ? now : new Date(now)).getTime();
+  if (updatedMs - nowMs > MAX_CLOCK_SKEW_MS) return true;
   const limitMin = staleMinutes ?? boardData.stale_minutes ?? DEFAULT_STALE_MINUTES;
   return (nowMs - updatedMs) > limitMin * 60_000;
 }
@@ -420,6 +427,77 @@ export function readBoardCache(stateDirOrFile) {
   }
 }
 
+/**
+ * `<id> <state>[ — hold merges][, pause claims]` for a diffBoards change, built only from the
+ * validated id, the state enum and the two booleans; `''` when the id or state isn't valid.
+ */
+export function boardBusSuffix(change) {
+  const id = change?.service;
+  const state = change?.to;
+  if (typeof id !== 'string' || !SAFE_SERVICE_ID_RE.test(id) || !BOARD_STATES.includes(state)) return '';
+  const gates = [];
+  if (change.hold_merges === true) gates.push('hold merges');
+  if (change.pause_claims === true) gates.push('pause claims');
+  return `${id} ${state}${gates.length ? ` — ${gates.join(', ')}` : ''}`;
+}
+
+/**
+ * The fleet-wide weather cache the session hook reads: `<FLEET_STATE>/fhd/board-cache.json`.
+ * `null` unless the launcher set an absolute FLEET_STATE.
+ */
+export function weatherCacheFile(env = process.env) {
+  const st = env?.FLEET_STATE;
+  if (typeof st !== 'string' || !st || !path.isAbsolute(st)) return null;
+  return path.join(path.resolve(st), 'fhd', 'board-cache.json');
+}
+
+/**
+ * Mirror a board this host built (tick/simulate) or verified (watch-board) into the fleet-wide
+ * weather cache, so sessions see it whatever state dir the desk itself runs with. No-op without
+ * FLEET_STATE, or when `skipFile` already is that file.
+ */
+export function publishWeatherCache(boardData, { env = process.env, skipFile = null, fetchedAt = new Date().toISOString() } = {}) {
+  const file = weatherCacheFile(env);
+  if (!file || !boardData) return null;
+  if (skipFile && path.resolve(skipFile) === file) return null;
+  try {
+    return writeBoardCache(file, boardData, { fetchedAt });
+  } catch {
+    return null;
+  }
+}
+
+const BOARD_ISSUE_QUERY =
+  'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){' +
+  'body lastEditedAt editor{__typename ... on User{databaseId} ... on Bot{databaseId}} ' +
+  'author{__typename ... on User{databaseId} ... on Bot{databaseId}}}}}';
+
+/**
+ * Read the board issue's body together with the numeric ID of whoever last wrote it, in one GraphQL
+ * query (so the body and the editor belong to the same revision). The last writer is `editor` when
+ * the body was ever edited, else the author.
+ */
+export function fetchBoardIssueWithEditor({ repo, issueNum, ghExec = defaultGhExec }) {
+  const [owner, name] = String(repo).split('/');
+  const raw = ghExec([
+    'api',
+    'graphql',
+    '-f',
+    `query=${BOARD_ISSUE_QUERY}`,
+    '-f',
+    `owner=${owner}`,
+    '-f',
+    `name=${name}`,
+    '-F',
+    `number=${Number(issueNum)}`,
+  ]);
+  const issue = JSON.parse(String(raw))?.data?.repository?.issue;
+  if (!issue || typeof issue !== 'object') throw new Error(`issue ${repo}#${issueNum} not found`);
+  const actor = issue.lastEditedAt ? issue.editor : issue.author;
+  const id = Number.isSafeInteger(actor?.databaseId) ? actor.databaseId : null;
+  return { body: typeof issue.body === 'string' ? issue.body : '', editorId: id };
+}
+
 function defaultGhExec(args) {
   try {
     return execFileSync('gh', args, {
@@ -445,6 +523,7 @@ export function fetchBoardCached({
   maxAgeMs = 60_000,
   now = new Date(),
   ghExec = defaultGhExec,
+  trustedEditorIds = [],
 } = {}) {
   const nowDate = now instanceof Date ? now : new Date(now);
   const nowMs = nowDate.getTime();
@@ -534,9 +613,41 @@ export function fetchBoardCached({
     return { ok: false, source: 'http-error', status, error: `HTTP ${status}` };
   }
 
+  // A changed body is accepted only when its last writer is on the trusted numeric-ID allowlist. An
+  // empty allowlist accepts nothing; a rejected body never reaches the cache (the last verified board,
+  // if any, stays in place).
+  const trusted = new Set((trustedEditorIds || []).map(Number).filter(Number.isSafeInteger));
+  let verifiedBody;
+  try {
+    const rev = fetchBoardIssueWithEditor({ repo, issueNum, ghExec });
+    if (rev.editorId === null || !trusted.has(rev.editorId)) {
+      return {
+        ok: false,
+        source: 'untrusted-editor',
+        error: trusted.size === 0
+          ? 'no trusted board editors configured (board.trusted_editor_ids)'
+          : `board issue ${repo}#${issueNum} was last written by an account outside board.trusted_editor_ids`,
+      };
+    }
+    verifiedBody = rev.body;
+  } catch (err) {
+    if (cached?.board) {
+      return {
+        ok: true,
+        source: 'cache-stale-on-error',
+        etag: cached.etag,
+        board: cached.board,
+        prevBoard: cached.board,
+        changes: [],
+        warning: err.message,
+      };
+    }
+    return { ok: false, source: 'error', error: err.message };
+  }
+
   let board;
   try {
-    board = parseBoardBlock(json.body || '');
+    board = parseBoardBlock(verifiedBody);
   } catch (err) {
     if (cached?.board) {
       return {

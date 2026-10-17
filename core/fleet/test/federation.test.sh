@@ -154,6 +154,9 @@ run fleet launch
 rc_is "single-fleet launch exits 0" 0
 hasnt "single-fleet: no FLEET_ID in the env" "$(cat "$I/.fleet/env/session.env")" "FLEET_ID"
 hasnt "single-fleet: no inbox dir either" "$(cat "$I/.fleet/env/session.env")" "FLEET_INBOX_DIR"
+has "single-fleet: the env still carries the fleet state dir (hooks read fleet state only there)" "$(cat "$I/.fleet/env/session.env")" "FLEET_STATE=$I/.fleet"
+got="$(env -i PATH=/usr/bin:/bin sh -c "set -a; . '$I/.fleet/env/session.env'; set +a; echo \"\$FLEET_STATE\"")"
+eq "sourcing the env exports FLEET_STATE" "$got" "$I/.fleet"
 hasnt "…and no registry warning" "$OUT" "federation"
 conf FLEET_ID=alice
 run fleet launch
