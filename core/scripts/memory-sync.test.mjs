@@ -15,6 +15,7 @@ import {
   extractEventsFromPrNode,
   extractEventsFromIssueNode,
   extractEventFromCommit,
+  ingestLocalCommits,
   computeOverlapSince,
   runMemorySync,
 } from './memory-sync.mjs';
@@ -24,6 +25,9 @@ describe('memory-sync (#131)', () => {
     const config = {
       trusted_bot_user_ids: [41898282],
       operator_user_ids: [999],
+      // engsys v2.0.1 (L5): MEMBER/OWNER association no longer grants trust by itself — the actor's
+      // numeric databaseId must ALSO appear here (or in operator_user_ids).
+      trusted_member_user_ids: [101, 102],
     };
 
     // Ineligible human associations dropped
@@ -32,7 +36,14 @@ describe('memory-sync (#131)', () => {
       assert.equal(res.eligible, false, `expected ${assoc} to be dropped`);
     }
 
-    // Eligible human associations kept
+    // v2.0.1 (L5) negative control: MEMBER/OWNER association with a databaseId that is NOT in
+    // trusted_member_user_ids (or operator_user_ids) is NOT eligible — association alone is no
+    // longer sufficient.
+    assert.equal(evaluateActorEligibility({ databaseId: 9001, login: 'unlisted-member' }, 'MEMBER', config).eligible, false);
+    assert.equal(evaluateActorEligibility({ databaseId: 9002, login: 'unlisted-owner' }, 'OWNER', config).eligible, false);
+    assert.equal(evaluateActorEligibility({ databaseId: null, login: 'no-id' }, 'MEMBER', config).eligible, false);
+
+    // Eligible human associations kept — but ONLY because 101/102 are in trusted_member_user_ids.
     assert.deepEqual(evaluateActorEligibility({ databaseId: 101, login: 'dev' }, 'MEMBER', config), {
       eligible: true,
       kind: 'member',
@@ -42,6 +53,13 @@ describe('memory-sync (#131)', () => {
       eligible: true,
       kind: 'owner',
       id: 102,
+    });
+    // An operator_user_ids member also satisfies the allowlist for a MEMBER/OWNER association
+    // (not just the dedicated operator-kind short-circuit above).
+    assert.deepEqual(evaluateActorEligibility({ databaseId: 999, login: 'op-as-member' }, 'MEMBER', config), {
+      eligible: true,
+      kind: 'operator', // the operator short-circuit above still wins on kind
+      id: 999,
     });
 
     // Operator allowlist overrides association
@@ -194,7 +212,11 @@ describe('memory-sync (#131)', () => {
   });
 
   it('enforces commit-ingest filter: skips Dependabot, indexes subject + #refs only by default, includes body only for operators (§7.2)', () => {
-    const config = { operator_emails: ['operator@example.com'] };
+    // engsys v2.0.1 (M3): operator trust is NEVER derived from the commit's author name/email —
+    // only from a numeric `operator_user_ids` match against `commit.authorId` (cr review, round 1:
+    // a verified signature alone, `commit.signatureVerified`, was dropped as a trust path — see
+    // below). `operator_emails` below is now ignored entirely.
+    const config = { operator_emails: ['operator@example.com'], operator_user_ids: [777] };
 
     // Dependabot author or co-author -> skipped
     assert.equal(
@@ -245,12 +267,34 @@ describe('memory-sync (#131)', () => {
     assert.ok(memberCommit.text.includes('#85'));
     assert.ok(memberCommit.text.includes('#86'));
 
-    // Operator commit -> includes body
-    const opCommit = extractEventFromCommit(
+    // v2.0.1 (M3) negative control: a commit whose author NAME/EMAIL matches the (now-ignored)
+    // `operator_emails` config, but carries no numeric authorId match and no verified signature,
+    // is NOT treated as an operator — spoofing `git config user.email operator@example.com`
+    // locally must not grant operator trust.
+    const spoofedCommit = extractEventFromCommit(
+      {
+        sha: '5555555555555555',
+        authorName: 'eric',
+        authorEmail: 'operator@example.com',
+        date: '2026-05-02T10:00:00Z',
+        subject: 'feat(memory): add ref-store (#130)',
+        body: 'Spoofed rationale that must NOT be indexed.',
+        files: ['core/lib/memory/ref-store.mjs'],
+      },
+      { repo: 'owner/repo', config },
+    );
+    assert.ok(spoofedCommit);
+    assert.equal(spoofedCommit.author_kind, 'member');
+    assert.ok(!spoofedCommit.text.includes('Spoofed rationale'));
+
+    // Positive control: a numeric authorId match against operator_user_ids DOES grant operator
+    // trust and includes the body.
+    const opCommitById = extractEventFromCommit(
       {
         sha: '4444444444444444',
         authorName: 'eric',
         authorEmail: 'operator@example.com',
+        authorId: 777,
         date: '2026-05-02T10:00:00Z',
         subject: 'feat(memory): add ref-store (#130)',
         body: 'Operator rationale preserved in commit body.',
@@ -258,8 +302,127 @@ describe('memory-sync (#131)', () => {
       },
       { repo: 'owner/repo', config },
     );
-    assert.ok(opCommit);
-    assert.ok(opCommit.text.includes('Operator rationale preserved in commit body.'));
+    assert.ok(opCommitById);
+    assert.equal(opCommitById.author_kind, 'operator');
+    assert.equal(opCommitById.author_id, 777);
+    assert.ok(opCommitById.text.includes('Operator rationale preserved in commit body.'));
+
+    // Negative control (cr review, round 1): a verified signature alone (git's own %G? === 'G')
+    // does NOT grant operator trust — a "good" signature only means the key is in the local
+    // keyring/allowed_signers, with no tie to operator_user_ids at all. Any contributor who signs
+    // their own commits must NOT thereby become an operator.
+    const signedNonOperatorCommit = extractEventFromCommit(
+      {
+        sha: '6666666666666666',
+        authorName: 'eric',
+        authorEmail: 'operator@example.com',
+        signatureVerified: true,
+        date: '2026-05-02T10:00:00Z',
+        subject: 'feat(memory): signed commit (#130)',
+        body: 'Signed rationale that must NOT be indexed on signature alone.',
+        files: ['core/lib/memory/ref-store.mjs'],
+      },
+      { repo: 'owner/repo', config },
+    );
+    assert.ok(signedNonOperatorCommit);
+    assert.equal(signedNonOperatorCommit.author_kind, 'member');
+    assert.ok(!signedNonOperatorCommit.text.includes('Signed rationale'));
+  });
+
+  it('v2.0.1 (M3): isEventTrustedByConfig gives kind:"commit" no automatic trust — gated by the same numeric author_id check as every other kind', () => {
+    const config = { operator_user_ids: [777] };
+    // A commit claiming author_kind: 'operator' with an author_id NOT in operator_user_ids is
+    // untrusted (no more blanket `return true` for kind: 'commit').
+    assert.equal(
+      isEventTrustedByConfig({ kind: 'commit', author_kind: 'operator', author_id: 1 }, config),
+      false,
+    );
+    // Positive control: the real operator id passes.
+    assert.equal(
+      isEventTrustedByConfig({ kind: 'commit', author_kind: 'operator', author_id: 777 }, config),
+      true,
+    );
+    // A non-operator ("member") commit is still trusted, same as before.
+    assert.equal(
+      isEventTrustedByConfig({ kind: 'commit', author_kind: 'member', author_id: null }, config),
+      true,
+    );
+  });
+
+  it('v2.0.1 (M3): ingestLocalCommits logs the resolved reviewed SHA, never the checked-out HEAD, and fails closed when no reviewed SHA resolves', () => {
+    const calls = [];
+    const fakeExec = (cmd, args) => {
+      calls.push({ cmd, args });
+      return '';
+    };
+    // No reviewed SHA resolvable (e.g. no origin remote) -> fails closed to no commits, and `git
+    // log` is never invoked at all (positive control: HEAD is never silently used as a fallback).
+    const eventsNoSha = ingestLocalCommits('/repo', {
+      exec: fakeExec,
+      resolveSha: () => null,
+      fetchAuthorId: () => null,
+    });
+    assert.deepEqual(eventsNoSha, []);
+    assert.equal(calls.length, 0);
+
+    // A resolved reviewed SHA is passed to `git log` as the explicit ref (not bare HEAD, and not
+    // omitted so git would default to HEAD).
+    const calls2 = [];
+    const fakeExec2 = (cmd, args) => {
+      calls2.push({ cmd, args });
+      if (cmd === 'git' && args.includes('log')) return '';
+      return '';
+    };
+    ingestLocalCommits('/repo', {
+      exec: fakeExec2,
+      resolveSha: () => 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
+      fetchAuthorId: () => null,
+    });
+    const logCall = calls2.find((c) => c.cmd === 'git' && c.args.includes('log'));
+    assert.ok(logCall, 'expected a git log call');
+    assert.ok(logCall.args.includes('deadbeefdeadbeefdeadbeefdeadbeefdeadbeef'));
+    assert.ok(!logCall.args.includes('HEAD'));
+  });
+
+  it('v2.0.1 (M3, cr review round 1): ingestLocalCommits skips the per-commit REST author-ID lookup when no operator_user_ids are configured, and stops issuing further lookups after the first failure', () => {
+    const makeRaw = (shas) =>
+      shas.map((sha) => `${sha}\x1fname\x1femail@example.com\x1f2026-01-01T00:00:00Z\x1f\x1fsubject\x1fbody\x1d\n`).join('\x1e');
+
+    // No operator_user_ids at all -> fetchAuthorId must never be called (the lookup can only ever
+    // be ignored downstream, so it's skipped entirely).
+    let calls1 = 0;
+    ingestLocalCommits('/repo', {
+      exec: () => makeRaw(['1111111111111111', '2222222222222222']),
+      resolveSha: () => 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
+      fetchAuthorId: () => { calls1 += 1; return 777; },
+      config: {},
+      repo: 'owner/repo',
+    });
+    assert.equal(calls1, 0, 'fetchAuthorId must not be called when operator_user_ids is empty');
+
+    // operator_user_ids configured, but the lookup fails on the FIRST commit -> no further
+    // lookups are attempted for the remaining commits in this batch.
+    let calls2 = 0;
+    ingestLocalCommits('/repo', {
+      exec: () => makeRaw(['3333333333333333', '4444444444444444', '5555555555555555']),
+      resolveSha: () => 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
+      fetchAuthorId: () => { calls2 += 1; return null; }, // every call "fails"
+      config: { operator_user_ids: [777] },
+      repo: 'owner/repo',
+    });
+    assert.equal(calls2, 1, 'exactly one lookup attempt, then stop after the first failure');
+
+    // Positive control: with operator_user_ids configured AND lookups succeeding, every commit
+    // still gets a lookup (the gating above does not suppress the legitimate case).
+    let calls3 = 0;
+    ingestLocalCommits('/repo', {
+      exec: () => makeRaw(['6666666666666666', '7777777777777777']),
+      resolveSha: () => 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
+      fetchAuthorId: () => { calls3 += 1; return 777; },
+      config: { operator_user_ids: [777] },
+      repo: 'owner/repo',
+    });
+    assert.equal(calls3, 2);
   });
 
   it('extracts structured findings only from leading marker comments, emits tombstones for isMinimized, and sets truncated flag on paginated connections', () => {

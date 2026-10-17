@@ -21,7 +21,7 @@ import {
   formatEventsJsonl,
   tailRef,
 } from '../lib/memory/ref-store.mjs';
-import { ensureIndex, resolveCacheDir } from '../lib/memory/index-db.mjs';
+import { ensureIndex, resolveCacheDir, resolveReviewedSha } from '../lib/memory/index-db.mjs';
 import { loadConfig } from './memory-brief.mjs';
 import { buildMarkerMatchers, isMarkerBody, parseFindingAcks } from './harvest-findings.mjs';
 import { parseReviewComment } from './review-bakeoff.mjs';
@@ -239,6 +239,15 @@ export function evaluateActorEligibility(actor, authorAssociation, config = {}) 
     return { eligible: false, kind: null, id: dbId, reason: `ineligible_association:${assoc}` };
   }
   if (ELIGIBLE_HUMAN_ASSOCIATIONS.has(assoc)) {
+    // engsys v2.0.1 (L5): `authorAssociation` (OWNER/MEMBER) alone no longer grants trust — it's
+    // GitHub's own self-reported, point-in-time label and can drift (org membership changes,
+    // org/repo transfers) without this config ever being touched. Trust comes from the SAME
+    // numeric-ID allowlists everything else in this module uses: the actor's `databaseId` must
+    // also be present in `trusted_member_user_ids` (new) or `operator_user_ids`.
+    const trustedMembers = new Set((config.trusted_member_user_ids ?? []).map(Number));
+    if (dbId === null || !(trustedMembers.has(dbId) || operators.has(dbId))) {
+      return { eligible: false, kind: null, id: dbId, reason: `unallowlisted_member:${assoc}` };
+    }
     const kind = assoc === 'OWNER' ? 'owner' : 'member';
     return { eligible: true, kind, id: dbId };
   }
@@ -339,18 +348,11 @@ export function evaluateNodeEligibility(node, config = {}) {
 export function isEventTrustedByConfig(event, config = {}) {
   if (!event || typeof event !== 'object') return false;
   if (event.kind === 'journal') return true;
-  if (event.kind === 'commit') {
-    if (event.author_kind === 'operator' && (event.author_email || event.author_login)) {
-      const opEmails = new Set((config.operator_emails ?? []).map((e) => String(e).toLowerCase()));
-      const opLogins = new Set((config.operator_logins ?? []).map((l) => String(l).toLowerCase()));
-      if (opEmails.size > 0 || opLogins.size > 0) {
-        const emailOk = event.author_email && opEmails.has(String(event.author_email).toLowerCase());
-        const loginOk = event.author_login && opLogins.has(String(event.author_login).toLowerCase());
-        if (!emailOk && !loginOk) return false;
-      }
-    }
-    return true;
-  }
+  // engsys v2.0.1 (M3): `kind: 'commit'` is no longer an automatic-trust early return. A commit
+  // event is routed through the same numeric-author-ID gate as every other event kind below —
+  // `author_kind: 'operator'` only survives the gate when `author_id` is a numeric GitHub user ID
+  // present in `operator_user_ids` (see `extractEventFromCommit`'s REST-`id` derivation). A
+  // non-operator commit still passes as `member`, same as before.
 
   const trustedBots = new Set((config.trusted_bot_user_ids ?? []).map(Number));
   const operators = new Set((config.operator_user_ids ?? []).map(Number));
@@ -790,7 +792,8 @@ export function extractEventsFromIssueNode(
  * Extract a normalized memory event from a git commit record per §7.2 commit-ingest filter:
  *   - Skip commits authored or co-authored by Dependabot.
  *   - Always index commit subject + `#123` / `Closes #123` references + touched files.
- *   - Index commit body ONLY when author matches an operator in `config.operator_emails` or `config.operator_logins`.
+ *   - Index commit body ONLY when the commit's numeric authorId is in `config.operator_user_ids`
+ *     (engsys v2.0.1 M3 — never by author name/email, and never by signature alone).
  */
 export function extractEventFromCommit(
   commit,
@@ -809,12 +812,21 @@ export function extractEventFromCommit(
     return null;
   }
 
-  const operatorEmails = new Set((config.operator_emails ?? []).map((e) => String(e).toLowerCase()));
-  const operatorLogins = new Set((config.operator_logins ?? []).map((l) => String(l).toLowerCase()));
-  const isOperatorCommit =
-    operatorEmails.has(authorEmail) ||
-    operatorLogins.has(authorName) ||
-    Boolean(commit.isOperator);
+  // engsys v2.0.1 (M3): "operator" trust for a commit is never derived from the author name or
+  // email in the commit metadata (both are attacker-controllable via `git config`/`--author`).
+  // It comes ONLY from the commit's numeric GitHub author ID (resolved out-of-band via the REST
+  // API for this exact SHA, see `ingestLocalCommits`) matched against `operator_user_ids`.
+  //
+  // cr review (round 1): `commit.signatureVerified` (git's own `%G?` === 'G') was dropped as an
+  // independent criterion here — a "good" GPG/SSH signature only means the key is in the LOCAL
+  // keyring/allowed_signers, with no tie to `operator_user_ids` at all. That let any contributor
+  // who signs their own commits earn `author_kind: 'operator'` (and have their full commit body
+  // indexed) regardless of who they are. `ingestLocalCommits` still records `signatureVerified` on
+  // the raw commit (available for a future, properly scoped check — e.g. requiring the signing key
+  // fingerprint, `%GF`, to ALSO appear in an operator-key allowlist), but it is not read here.
+  const operators = new Set((config.operator_user_ids ?? []).map(Number));
+  const authorId = commit.authorId != null ? Number(commit.authorId) : null;
+  const isOperatorCommit = authorId != null && operators.has(authorId);
 
   const subject = String(commit.subject || '').trim();
   const issueRefs = extractIssueRefs(`${subject}\n${body}`);
@@ -845,7 +857,7 @@ export function extractEventFromCommit(
       outcome: 'merged',
       date: dateIso.slice(0, 10),
       updated_at: dateIso,
-      author_id: null,
+      author_id: authorId,
       author_kind: isOperatorCommit ? 'operator' : 'member',
       author_email: isOperatorCommit ? authorEmail : null,
       author_login: isOperatorCommit ? authorName : null,
@@ -860,12 +872,54 @@ export function extractEventFromCommit(
 }
 
 /**
+ * Resolve a commit's numeric GitHub author ID via the REST API (`gh api
+ * repos/<repo>/commits/<sha>`, `.author.id`). Fails closed to `null` (never operator) on any
+ * error, missing `repo`, or an unauthenticated/anonymous author.
+ */
+export function fetchCommitAuthorId(repo, sha, { exec = execFileSync } = {}) {
+  const normRepo = normalizeOptionalRepo(repo);
+  if (!normRepo || !sha) return null;
+  try {
+    const out = exec(
+      'gh',
+      ['api', `repos/${normRepo}/commits/${sha}`, '--jq', '.author.id // empty'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 },
+    );
+    const trimmed = String(out || '').trim();
+    if (!/^\d+$/.test(trimmed)) return null;
+    return Number(trimmed);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Parse local git log commits (`--max-count`, optional `--since`).
+ *
+ * engsys v2.0.1 (M3): this always logs the **resolved reviewed SHA** (`resolveReviewedSha`,
+ * `refs/remotes/origin/<default-branch>`), never the checked-out `HEAD` — a worktree can be on an
+ * unreviewed branch or an attacker-controlled checkout. When no reviewed SHA can be resolved
+ * (e.g. no `origin` remote), this fails closed and returns no commit events rather than falling
+ * back to `HEAD`. Pass `ref` to pin an explicit SHA (tests only).
  */
 export function ingestLocalCommits(
   repoRoot,
-  { repo = '', config = {}, cacheDir = null, maxCount = INIT_CAPS.commits, since = null, exec = execFileSync, now = () => Date.now() } = {},
+  {
+    repo = '',
+    config = {},
+    cacheDir = null,
+    maxCount = INIT_CAPS.commits,
+    since = null,
+    ref = null,
+    exec = execFileSync,
+    resolveSha = resolveReviewedSha,
+    fetchAuthorId = fetchCommitAuthorId,
+    now = () => Date.now(),
+  } = {},
 ) {
+  const effectiveRef = ref || resolveSha(repoRoot);
+  if (!effectiveRef) return [];
+
   const nonce = crypto.randomBytes(8).toString('hex');
   const recSep = `__REC_${nonce}__`;
   const fldSep = `__FLD_${nonce}__`;
@@ -874,8 +928,9 @@ export function ingestLocalCommits(
     '-C',
     repoRoot,
     'log',
+    effectiveRef,
     `--max-count=${maxCount}`,
-    `--format=${recSep}%H${fldSep}%an${fldSep}%ae${fldSep}%aI${fldSep}%s${fldSep}%b${endSep}`,
+    `--format=${recSep}%H${fldSep}%an${fldSep}%ae${fldSep}%aI${fldSep}%G?${fldSep}%s${fldSep}%b${endSep}`,
     '--name-only',
   ];
   if (since) args.push(`--since=${since}`);
@@ -891,25 +946,44 @@ export function ingestLocalCommits(
   const fSep = useNonce ? fldSep : '\x1f';
   const eSep = useNonce ? endSep : '\x1d';
 
+  // cr review (round 1): fetchAuthorId is one blocking `gh api` call per commit. On --init
+  // (INIT_CAPS.commits = 500) that's up to 500 sequential network round-trips. Two guards keep
+  // this bounded: (1) skip the REST lookup entirely when no operator_user_ids are configured —
+  // there's nothing to match against, so authorId can only ever be ignored; (2) stop issuing
+  // further lookups after the first one fails (network/auth/rate-limit), rather than retrying the
+  // same failure up to `maxCount` times. A legitimately-anonymous commit author also reads as a
+  // "failure" here and stops the lookups for the rest of this batch — acceptable, since it can
+  // never match operator_user_ids either way, and a left-over commit from here on just gets
+  // treated as a non-operator (member) event, same as a confirmed non-operator would.
+  const wantAuthorIds = (config.operator_user_ids ?? []).length > 0 && normalizeOptionalRepo(repo);
+  let authorIdLookupFailed = false;
   const events = [];
   for (const record of raw.split(rSep)) {
     if (!record.trim()) continue;
     const [headerPart, filesPart = ''] = record.split(eSep);
-    const [sha, authorName, authorEmail, date, subject, body] = headerPart.split(fSep);
+    const [sha, authorName, authorEmail, date, gpgStatus, subject, body] = headerPart.split(fSep);
     if (!sha || !/^[0-9a-f]{7,40}$/i.test(sha.trim())) continue;
     const files = filesPart
       .split('\n')
       .map((s) => s.trim())
       .filter(Boolean);
+    const trimmedSha = sha.trim();
+    let authorId = null;
+    if (wantAuthorIds && !authorIdLookupFailed) {
+      authorId = fetchAuthorId(repo, trimmedSha, { exec });
+      if (authorId === null) authorIdLookupFailed = true;
+    }
     const ev = extractEventFromCommit(
       {
-        sha: sha.trim(),
+        sha: trimmedSha,
         authorName: authorName?.trim() || '',
         authorEmail: authorEmail?.trim() || '',
         date: date?.trim() || '',
         subject: subject?.trim() || '',
         body: body?.trim() || '',
         files,
+        authorId,
+        signatureVerified: String(gpgStatus || '').trim() === 'G',
       },
       { repo, config, cacheDir, now },
     );
