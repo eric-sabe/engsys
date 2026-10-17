@@ -1263,11 +1263,13 @@ export async function runLiveHookSelfTest(ctx) {
       };
       const rPre = spawnSync(
         process.execPath,
-        [path.join(pluginDir, 'subagent-memory-inject.mjs'), 'pre-tool-use'],
+        [path.join(pluginDir, 'subagent-memory-inject.mjs'), 'pre-agent'],
         {
           env: memEnv,
           input: JSON.stringify({
+            hook_event_name: 'PreToolUse',
             session_id: 'xray-s1',
+            cwd: ctx.engsysDir,
             tool_name: 'Agent',
             tool_input: { subagent_type: 'engsys:isabelle', prompt: 'Review core/fleet/verify.sh bash quoting and git locks' },
           }),
@@ -1277,10 +1279,11 @@ export async function runLiveHookSelfTest(ctx) {
       );
       const rSub = spawnSync(
         process.execPath,
-        [path.join(pluginDir, 'subagent-memory-inject.mjs'), 'subagent-start'],
+        [path.join(pluginDir, 'subagent-memory-inject.mjs')],
         {
           env: memEnv,
           input: JSON.stringify({
+            hook_event_name: 'SubagentStart',
             session_id: 'xray-s1',
             agent_id: 'xray-a1',
             agent_type: 'engsys:isabelle',
