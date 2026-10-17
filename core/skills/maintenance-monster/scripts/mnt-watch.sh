@@ -45,7 +45,8 @@
 #   --stale-lock-minutes      with heartbeat_minutes, bounds pulse_max so the lease always lapses before
 #                             the heartbeat reads stale (a CONFIG_WARNING line says when it clamps)
 #   --config                  the monster's yml, read for pulse_max, heartbeat_minutes and stale_lock_minutes only
-#   --health-config           optional fleet-health.yml path for Fleet Health Desk probe ticks
+#   --health-config           optional fleet-health.yml path for Fleet Health Desk probe ticks (must be
+#                             inside the fleet instance repo or FLEET_STATE; default: the trusted one there)
 #
 # Baton keepalive (engsys#62, #87): while <state-dir>/baton-maintain.json carries this session's token,
 # a `baton.mjs keepalive` renews the lease every 2.5 min (the caller rule: TTL 10 min, renew <= 3m20s;
@@ -91,8 +92,6 @@ done
 [ -n "$REPO" ] && [ -n "$DIR" ] || { echo "usage: mnt-watch.sh --repo owner/name --state-dir DIR" >&2; exit 2; }
 [ -n "$HB_MIN" ] || HB_MIN="$(monster_cfg_scalar "$CONFIG" heartbeat_minutes)"
 [ -n "$STALE_LOCK" ] || STALE_LOCK="$(monster_cfg_scalar "$CONFIG" stale_lock_minutes)"
-[ -n "$HEALTH_CFG" ] || HEALTH_CFG="$(monster_cfg_scalar "$CONFIG" fhd_config)"
-[ -n "$HEALTH_CFG" ] || { [ -f "$DIR/fleet-health.yml" ] && HEALTH_CFG="$DIR/fleet-health.yml"; }
 FHD_BOARD_ISSUE="${ENGSYS_FHD_BOARD_ISSUE:-$(monster_cfg_scalar "$CONFIG" fhd_board_issue)}"
 PULSE_OUT="$(monster_pulse_max "${PULSE_MAX:-$(monster_cfg_scalar "$CONFIG" pulse_max)}" "$HB_MIN" "$STALE_LOCK")"
 PULSE_MAX="${PULSE_OUT%%$'\t'*}" PULSE_WARN="${PULSE_OUT#*$'\t'}"
@@ -233,6 +232,10 @@ agents_event() {
 # Runs probe ticks + report correlation when fleet-health.yml is configured on this maintainer,
 # and watches the status board (with conditional ETag caching) to emit FHD_CHANGE lines.
 FHD_CLI="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../fleet/health" 2>/dev/null && pwd -P)/cli.mjs"
+# The registry comes only from the fleet instance repo or FLEET_STATE (the launcher sets both); never
+# from the repo's monster config or this state dir. An explicit --health-config / FLEET_HEALTH_FILE is
+# still checked against those roots by the CLI. No trusted registry: no probe ticks.
+if [ -z "$HEALTH_CFG" ] && [ -f "$FHD_CLI" ]; then HEALTH_CFG="$(node "$FHD_CLI" registry-path 2>/dev/null || true)"; fi
 fhd_event() {
   [ -f "$FHD_CLI" ] || return 0
   if [ -n "$HEALTH_CFG" ] && [ -f "$HEALTH_CFG" ]; then

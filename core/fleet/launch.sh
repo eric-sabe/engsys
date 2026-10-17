@@ -7,7 +7,7 @@
 #                                                          on PATH, and GH_TOKEN/GITHUB_TOKEN unset)
 #   fleet/roster.tmpl          → .fleet/roster            (the launcher's roster; a session line's
 #                                                          optional 5th field names a per-session env)
-# Each env also gets FLEET_ID (and FEDERATION_FILE, when that file exists, FLEET_INSTANCE_REPO, when
+# Each env also gets FLEET_STATE (this instance's .fleet dir), and FLEET_ID (and FEDERATION_FILE, when that file exists, FLEET_INSTANCE_REPO, when
 # set, and FLEET_INBOX_DIR, the relay's per-session inbox) when fleet.conf sets FLEET_ID, and
 # OPERATOR_TIMEZONE / OPERATOR_CLOCK when the fleet sets a time format.
 # then runs the launcher from PIN_DIR (the sessions' default workdir). Identity preflights belong in
@@ -96,6 +96,9 @@ for tmpl in "$FLEET_REPO"/fleet/env/*.env.tmpl; do
       printf 'PATH=%q:"$PATH"\n' "$ENGSYS_DIR/core/fleet/identity/bin"
     } >>"$dest"
   fi
+  # The fleet state dir (<instance>/.fleet): hooks and the Fleet Health Desk read fleet-owned state
+  # (weather cache, trusted fleet-health.yml) only from here, never from the session's working tree.
+  printf 'FLEET_STATE=%q\n' "$FLEET_STATE" >>"$dest"
   if [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ]; then printf 'CLAUDE_CONFIG_DIR=%q\n' "$FLEET_CLAUDE_CONFIG_DIR" >>"$dest"; fi
   # The security lane never inherits a subagent model override: it would move pinned security agents
   # (model: claude-opus-4-8) onto another model. (fleet verify flags the same keys in settings files.)

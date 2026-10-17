@@ -10,11 +10,15 @@
 //     probe.tier (passive|on-ambiguity), thresholds (trip_fails >= 1, recover_clean >= 1),
 //     and checks depends_on for unknown services, self-dependencies, or cycles (DAG check).
 //   - Enforces the #99 rule: no PUSH_OVERRIDE advice in any impact or runbook string.
+//   - synthetic-command probes and invoke entries name a fixed kind from probe-kinds.mjs with typed
+//     params; a free-form command line is rejected.
+//   - resolveRegistryFile only returns a registry from the fleet instance repo or the fleet state dir.
 //
 // Zero dependencies: node builtins only (self-contained inside core/ for plugin-mode installs).
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { PROBE_KINDS, INVOKE_KINDS, validateKindParams } from './probe-kinds.mjs';
 
 export const SERVICE_ID_RE = /^[a-z0-9][a-z0-9_-]*$/;
 export const REPO_RE = /^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/;
@@ -36,7 +40,7 @@ const TOP_KEYS = new Set([
   'correlation_window_minutes',
   'services',
 ]);
-const BOARD_KEYS = new Set(['repo', 'issue', 'stale_minutes']);
+const BOARD_KEYS = new Set(['repo', 'issue', 'stale_minutes', 'trusted_editor_ids']);
 const SLACK_KEYS = new Set(['channel']);
 const SERVICE_KEYS = new Set([
   'id',
@@ -57,8 +61,8 @@ const PROBE_KEYS = new Set([
   'url',
   'component',
   'components',
-  'command',
-  'args',
+  'check',
+  'params',
   'tier',
   'timeout_ms',
   'auth_check',
@@ -84,7 +88,9 @@ const PROBE_KEYS = new Set([
   'source_file',
 ]);
 const THRESHOLD_KEYS = new Set(['trip_fails', 'recover_clean']);
-const INVOKE_KEYS = new Set(['command', 'args', 'timeout_ms', 'allow_args', 'description', 'requires_gate']);
+const INVOKE_KEYS = new Set(['kind', 'params', 'timeout_ms', 'description', 'requires_gate']);
+// Keys of the old free-form command schema, rejected with a pointer to the kind/params replacement.
+const LEGACY_COMMAND_KEYS = new Set(['command', 'args', 'allow_args']);
 const RESERVED_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 export class RegistryError extends Error {
@@ -484,7 +490,7 @@ export function validateRegistry(doc, { file = '' } = {}) {
 
   const out = {
     version: 1,
-    board: { repo: null, issue: null, stale_minutes: 30 },
+    board: { repo: null, issue: null, stale_minutes: 30, trusted_editor_ids: [] },
     slack: { channel: null },
     correlation_window_minutes: 15,
     services: {},
@@ -508,6 +514,12 @@ export function validateRegistry(doc, { file = '' } = {}) {
       if (doc.board.stale_minutes !== undefined && doc.board.stale_minutes !== null) {
         if (!isPosInt(doc.board.stale_minutes)) err(`board.stale_minutes: must be a positive integer, got ${show(doc.board.stale_minutes)}`);
         else out.board.stale_minutes = doc.board.stale_minutes;
+      }
+      // Numeric GitHub user IDs (the fleet App bot's) whose edits to the board issue are accepted.
+      if (doc.board.trusted_editor_ids !== undefined && doc.board.trusted_editor_ids !== null) {
+        if (!Array.isArray(doc.board.trusted_editor_ids) || doc.board.trusted_editor_ids.some((v) => !isPosInt(v))) {
+          err(`board.trusted_editor_ids: must be a list of numeric GitHub user IDs, got ${show(doc.board.trusted_editor_ids)}`);
+        } else out.board.trusted_editor_ids = [...new Set(doc.board.trusted_editor_ids)];
       }
     }
   }
@@ -592,7 +604,9 @@ export function validateRegistry(doc, { file = '' } = {}) {
       err(`${at}.probe: required and must be a map`);
     } else {
       for (const k of Object.keys(s.probe)) {
-        if (!PROBE_KEYS.has(k)) err(`${at}.probe: unknown key ${show(k)}`);
+        if (k === 'command' || k === 'args') {
+          err(`${at}.probe.${k}: free-form commands are not supported; name a check kind (probe.check: ${Object.keys(PROBE_KINDS).join(' | ')}) with probe.params`);
+        } else if (!PROBE_KEYS.has(k)) err(`${at}.probe: unknown key ${show(k)}`);
       }
       const adapter = s.probe.adapter;
       if (!ADAPTERS.includes(adapter)) {
@@ -611,11 +625,25 @@ export function validateRegistry(doc, { file = '' } = {}) {
       }
 
       if (adapter === 'synthetic-command') {
-        const hasCmd = (typeof s.probe.command === 'string' && s.probe.command.trim() !== '')
-          || (Array.isArray(s.probe.command) && s.probe.command.length > 0 && s.probe.command.every((x) => typeof x === 'string'));
-        if (!hasCmd) {
-          err(`${at}.probe.command: required non-empty string or string array for synthetic-command`);
+        if (s.probe.check === undefined) {
+          err(`${at}.probe.check: required for synthetic-command (one of ${Object.keys(PROBE_KINDS).join(', ')})`);
+        } else {
+          for (const e of validateKindParams(PROBE_KINDS, s.probe.check, s.probe.params)) err(`${at}.probe: ${e}`);
         }
+        if (s.probe.auth_check !== undefined && s.probe.auth_check !== null) {
+          const ac = s.probe.auth_check;
+          const kind = typeof ac === 'string' ? ac : (isMap(ac) ? ac.check : undefined);
+          const params = isMap(ac) ? ac.params : undefined;
+          if (isMap(ac)) {
+            for (const k of Object.keys(ac)) {
+              if (k !== 'check' && k !== 'params') err(`${at}.probe.auth_check: unknown key ${show(k)} (allowed: check, params)`);
+            }
+          }
+          if (typeof kind !== 'string') err(`${at}.probe.auth_check: must be a check kind or { check, params }`);
+          else for (const e of validateKindParams(PROBE_KINDS, kind, params)) err(`${at}.probe.auth_check: ${e}`);
+        }
+      } else if (s.probe.check !== undefined || s.probe.params !== undefined) {
+        err(`${at}.probe: check/params apply only to adapter synthetic-command`);
       }
 
       const timeoutMs = s.probe.timeout_ms ?? 10000;
@@ -700,25 +728,26 @@ export function validateRegistry(doc, { file = '' } = {}) {
         err(`${at}.invoke: must be a map ({ command, args, timeout_ms })`);
       } else {
         for (const k of Object.keys(s.invoke)) {
-          if (!INVOKE_KEYS.has(k)) err(`${at}.invoke: unknown key ${show(k)}`);
+          if (LEGACY_COMMAND_KEYS.has(k)) {
+            err(`${at}.invoke.${k}: free-form commands are not supported; name an invoke kind (invoke.kind: ${Object.keys(INVOKE_KINDS).join(' | ')}) with invoke.params`);
+          } else if (!INVOKE_KEYS.has(k)) err(`${at}.invoke: unknown key ${show(k)}`);
         }
-        const hasCmd = (typeof s.invoke.command === 'string' && s.invoke.command.trim() !== '')
-          || (Array.isArray(s.invoke.command) && s.invoke.command.length > 0 && s.invoke.command.every((x) => typeof x === 'string'));
-        if (!hasCmd) err(`${at}.invoke.command: required non-empty string or string array`);
+        const kindErrs = s.invoke.kind === undefined
+          ? [`kind is required (one of ${Object.keys(INVOKE_KINDS).join(', ')})`]
+          : validateKindParams(INVOKE_KINDS, s.invoke.kind, s.invoke.params);
+        for (const e of kindErrs) err(`${at}.invoke: ${e}`);
         const invTimeout = s.invoke.timeout_ms ?? 60000;
         if (!isPosInt(invTimeout)) err(`${at}.invoke.timeout_ms: must be a positive integer, got ${show(s.invoke.timeout_ms)}`);
-        if (s.invoke.allow_args !== undefined && typeof s.invoke.allow_args !== 'boolean') {
-          err(`${at}.invoke.allow_args: must be boolean, got ${show(s.invoke.allow_args)}`);
-        }
         if (s.invoke.requires_gate !== undefined && typeof s.invoke.requires_gate !== 'boolean') {
           err(`${at}.invoke.requires_gate: must be boolean, got ${show(s.invoke.requires_gate)}`);
         }
+        // The kind defines the minimum gate; requires_gate can raise it, never lower it.
+        const kindGate = kindErrs.length === 0 && INVOKE_KINDS[s.invoke.kind].gate === true;
         invoke = {
-          command: s.invoke.command,
-          args: Array.isArray(s.invoke.args) ? s.invoke.args.map(String) : [],
+          kind: s.invoke.kind,
+          params: isMap(s.invoke.params) ? { ...s.invoke.params } : {},
           timeout_ms: invTimeout,
-          allow_args: s.invoke.allow_args === true,
-          requires_gate: Boolean(s.invoke.requires_gate),
+          requires_gate: kindGate || s.invoke.requires_gate === true,
           description: typeof s.invoke.description === 'string' ? s.invoke.description : null,
         };
       }
@@ -769,19 +798,73 @@ export function parseRegistry(text, { file = '' } = {}) {
   return validateRegistry(parseYaml(text, { file }), { file });
 }
 
+// --- Trusted location -----------------------------------------------------------------------------
+
+function realOrNull(p) {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Resolve where `fleet-health.yml` lives: `FLEET_HEALTH_FILE` (or `ENGSYS_FHD_REGISTRY`),
- * else `<FLEET_REPO || FLEET_INSTANCE || cwd>/fleet-health.yml`, else `<cwd>/.claude/fleet-health.yml`.
+ * The directories a registry may be loaded from: the fleet state dir (`FLEET_STATE`, which the fleet
+ * launcher writes into every session's env) and the fleet instance repo (`FLEET_INSTANCE`, or the
+ * parent of a `FLEET_STATE` named `.fleet`, which is how the launcher lays it out). Only absolute
+ * paths count, so a relative value can't point back into the working tree. The project repo, its
+ * `.claude/` directory and its monster config are never on this list.
  */
-export function resolveRegistryFile(env = process.env, cwd = process.cwd()) {
-  const explicit = env.FLEET_HEALTH_FILE || env.ENGSYS_FHD_REGISTRY;
-  const base = env.FLEET_REPO || env.FLEET_INSTANCE || cwd;
-  if (explicit) return path.resolve(base, explicit);
-  const primary = path.resolve(base, 'fleet-health.yml');
-  if (fs.existsSync(primary)) return primary;
-  const dotClaude = path.resolve(base, '.claude', 'fleet-health.yml');
-  if (fs.existsSync(dotClaude)) return dotClaude;
-  return primary;
+export function trustedRegistryRoots(env = process.env) {
+  const instance = [];
+  const state = [];
+  const abs = (v) => (typeof v === 'string' && v && path.isAbsolute(v) ? path.resolve(v) : null);
+  const fleetState = abs(env.FLEET_STATE);
+  if (fleetState) {
+    state.push(fleetState);
+    if (path.basename(fleetState) === '.fleet') instance.push(path.dirname(fleetState));
+  }
+  const fleetInstance = abs(env.FLEET_INSTANCE);
+  if (fleetInstance && !instance.includes(fleetInstance)) instance.push(fleetInstance);
+  return { instance, state };
+}
+
+function within(root, file) {
+  const rel = path.relative(root, file);
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
+/**
+ * True when `file` exists and its real path lies inside one of the trusted roots' real paths.
+ */
+export function isTrustedRegistryPath(file, env = process.env) {
+  if (typeof file !== 'string' || !path.isAbsolute(file)) return false;
+  const real = realOrNull(file);
+  if (!real) return false;
+  const { instance, state } = trustedRegistryRoots(env);
+  return [...instance, ...state].some((root) => {
+    const r = realOrNull(root);
+    return r !== null && within(r, real);
+  });
+}
+
+/**
+ * Resolve the trusted `fleet-health.yml`, or `null` when there is none (the desk then does nothing).
+ *
+ * An explicit path (`explicit`, else `FLEET_HEALTH_FILE` / `ENGSYS_FHD_REGISTRY`) is used only when it
+ * is absolute and inside a trusted root. Otherwise the first existing of
+ * `<instance>/fleet-health.yml`, `<instance>/config/fleet-health.yml` and `<FLEET_STATE>/fleet-health.yml`.
+ * The working directory is never consulted.
+ */
+export function resolveRegistryFile(env = process.env, { explicit } = {}) {
+  const named = explicit || env.FLEET_HEALTH_FILE || env.ENGSYS_FHD_REGISTRY;
+  if (named) return isTrustedRegistryPath(named, env) ? path.resolve(named) : null;
+  const { instance, state } = trustedRegistryRoots(env);
+  const candidates = [
+    ...instance.flatMap((d) => [path.join(d, 'fleet-health.yml'), path.join(d, 'config', 'fleet-health.yml')]),
+    ...state.map((d) => path.join(d, 'fleet-health.yml')),
+  ];
+  return candidates.find((f) => isTrustedRegistryPath(f, env)) || null;
 }
 
 /**

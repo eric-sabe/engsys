@@ -17,6 +17,7 @@
 //   watch-remove Check reverse dependencies and prepare removal of a watched service
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -30,7 +31,8 @@ import {
   TIERS,
   SERVICE_ID_RE,
 } from './registry.mjs';
-import { runProbe, parseCommandSpec } from './adapters.mjs';
+import { runProbe } from './adapters.mjs';
+import { PROBE_KINDS, INVOKE_KINDS, buildKindCommand, scrubEnv } from './probe-kinds.mjs';
 import {
   loadEngineState,
   runEngineTick,
@@ -49,6 +51,8 @@ import {
   writeBoardCache,
   readBoardCache,
   fetchBoardCached,
+  publishWeatherCache,
+  boardBusSuffix,
   applyBoardToGitHub,
   notifyTransitions,
   isBoardStale,
@@ -93,14 +97,23 @@ function resolveStateDir(flags, env = process.env) {
   if (env.ENGSYS_FHD_STATE_DIR) return path.resolve(env.ENGSYS_FHD_STATE_DIR);
   if (env.FLEET_STATE) return path.resolve(env.FLEET_STATE);
   if (env.FLEET_INSTANCE) return path.resolve(env.FLEET_INSTANCE, '.fleet');
-  return path.resolve(process.cwd(), '.fleet');
+  // Never the working tree: desk state belongs to the fleet, not to the repo a session runs in.
+  throw new Error('no state dir: pass --state-dir <dir> or run from a fleet session (FLEET_STATE)');
 }
 
-function loadRegistryOrThrow(flags, env = process.env) {
-  const fileOpt = typeof flags.file === 'string' ? path.resolve(flags.file) : resolveRegistryFile(env, process.cwd());
+/**
+ * Load the registry. Anything that runs a probe, invokes a command or publishes the board takes it
+ * only from a trusted location (registry.mjs resolveRegistryFile); `validate` and `watch-remove`,
+ * which only read it, accept any --file.
+ */
+function loadRegistryOrThrow(flags, { trusted = true, env = process.env } = {}) {
+  const explicit = typeof flags.file === 'string' ? path.resolve(flags.file) : undefined;
+  const fileOpt = trusted || !explicit ? resolveRegistryFile(env, { explicit }) : explicit;
   if (!fileOpt || !fs.existsSync(fileOpt)) {
     throw new Error(
-      `fleet-health.yml not found${flags.file ? ` at ${flags.file}` : ''} (pass --file <path> or set FLEET_HEALTH_FILE)`,
+      explicit && trusted
+        ? `${flags.file} is not a trusted fleet-health.yml (it must live in the fleet instance repo or FLEET_STATE)`
+        : `no fleet-health.yml${flags.file ? ` at ${flags.file}` : ''} (the desk reads it only from the fleet instance repo or FLEET_STATE)`,
     );
   }
   const registry = loadRegistry(fileOpt);
@@ -117,6 +130,7 @@ function printUsage() {
       '',
       'Commands:',
       '  validate [--file <path>] [--json]',
+      '  registry-path                     print the trusted fleet-health.yml path (exit 1 when there is none)',
       '  status|list [--file <path>] [--state-dir <dir>] [--render-board] [--json]',
       '  tick [--file <path>] [--state-dir <dir>] [--repo <o/r>] [--issue <N>] [--publish-github] [--notify] [--correlate] [--json]',
       '  watch-board [--repo <o/r>] [--issue <N>] [--state-dir <dir>] [--cache-file <path>] [--role <role>] [--max-age-sec <N>] [--json]',
@@ -124,10 +138,10 @@ function printUsage() {
       '  report --service <id> --symptom "<text>" [--session <s>] [--fleet <id>] [--correlate] [--json]',
       '  correlate [--file <path>] [--state-dir <dir>] [--json]',
       '  simulate <service> --state <healthy|up|degraded|down|clear> [--notify] [--json]',
-      '  invoke <service> [args...] [--file <path>] [--approved-gate <id>] [--json]',
+      '  invoke <service> [--file <path>] [--approved-gate <id>] [--json]',
       '  self-probe [--file <path>] [--state-dir <dir>] [--stale-minutes <N>] [--json]',
       '  digest [--days <N>] [--file <path>] [--state-dir <dir>] [--json]',
-      '  watch-add <service> [--adapter <type>] [--tier <tier>] [--observability <green|yellow|red>] [--url <u>] [--command <c>] [--json]',
+      '  watch-add <service> [--adapter <type>] [--tier <tier>] [--observability <green|yellow|red>] [--url <u>] [--check <kind>] [--json]',
       '  watch-remove <service> [--file <path>] [--json]',
       '',
     ].join('\n'),
@@ -138,9 +152,16 @@ function printUsage() {
 // Subcommand implementations
 // ---------------------------------------------------------------------------
 
+function cmdRegistryPath() {
+  const file = resolveRegistryFile(process.env);
+  if (!file) return 1;
+  process.stdout.write(`${file}\n`);
+  return 0;
+}
+
 function cmdValidate(flags) {
   try {
-    const { file, registry } = loadRegistryOrThrow(flags);
+    const { file, registry } = loadRegistryOrThrow(flags, { trusted: false });
     const serviceIds = Object.keys(registry.services);
     const out = {
       ok: true,
@@ -222,6 +243,7 @@ async function cmdTick(flags) {
   const incidentsState = syncIncidentsWithEngineState(registry, { stateDir, engineState });
   const boardData = buildBoardData(registry, engineState, incidentsState);
   writeBoardCache(stateDir, boardData, { fetchedAt: new Date().toISOString() });
+  publishWeatherCache(boardData, { env: process.env });
 
   const renderedBlock = renderBoardBlock(registry, engineState, incidentsState, { env: process.env });
   const fhdDir = path.join(stateDir, 'fhd');
@@ -306,17 +328,21 @@ function cmdWatchBoard(flags) {
     process.env.ENGSYS_FHD_BOARD_ISSUE ||
     null;
 
-  if (!issue) {
-    try {
-      const candidateFile = typeof flags.file === 'string' ? path.resolve(flags.file) : resolveRegistryFile(process.env, process.cwd());
-      if (candidateFile && fs.existsSync(candidateFile)) {
-        const reg = loadRegistry(candidateFile);
-        if (reg?.board?.issue) issue = reg.board.issue;
-        if (reg?.board?.repo && !repo) repo = reg.board.repo;
-      }
-    } catch {
-      // ignore if registry is absent on a remote watcher
+  // The trusted registry names the board and the numeric IDs allowed to edit it. Without one, no
+  // fetched board body is accepted (fetchBoardCached fails closed on an empty allowlist).
+  let trustedEditorIds = [];
+  try {
+    const candidateFile = resolveRegistryFile(process.env, {
+      explicit: typeof flags.file === 'string' ? path.resolve(flags.file) : undefined,
+    });
+    if (candidateFile) {
+      const reg = loadRegistry(candidateFile);
+      trustedEditorIds = reg?.board?.trusted_editor_ids || [];
+      if (!issue && reg?.board?.issue) issue = reg.board.issue;
+      if (reg?.board?.repo && !repo) repo = reg.board.repo;
     }
+  } catch {
+    // no trusted registry on this host: cache-only
   }
 
   if (typeof issue === 'string' && issue.includes('#')) {
@@ -330,6 +356,7 @@ function cmdWatchBoard(flags) {
     issue,
     cacheFile,
     maxAgeMs,
+    trustedEditorIds,
   });
 
   if (!fetched.ok || !fetched.board) {
@@ -361,10 +388,15 @@ function cmdWatchBoard(flags) {
     );
   }
 
+  if (fetched.source === '200') publishWeatherCache(fetched.board, { env: process.env, skipFile: cacheFile });
+
+  // Board-sourced lines carry only the service id, the state enum and the fixed gate words: never
+  // the board's advice/name text (boardBusSuffix in board.mjs).
   const busLines = [];
   for (const ch of changes) {
     if (ch.suppressed_by) continue;
-    busLines.push(`FHD_CHANGE ${ch.service} ${ch.to}${ch.advice ? ` — ${ch.advice}` : ''}`);
+    const line = boardBusSuffix(ch);
+    if (line) busLines.push(`FHD_CHANGE ${line}`);
   }
 
   if (flags.json) {
@@ -567,6 +599,7 @@ async function cmdSimulate(positionals, flags) {
   const incidentsState = syncIncidentsWithEngineState(registry, { stateDir, engineState });
   const boardData = buildBoardData(registry, engineState, incidentsState);
   writeBoardCache(stateDir, boardData, { fetchedAt: new Date().toISOString() });
+  publishWeatherCache(boardData, { env: process.env });
 
   const renderedBlock = renderBoardBlock(registry, engineState, incidentsState, { env: process.env });
   const fhdDir = path.join(stateDir, 'fhd');
@@ -606,11 +639,15 @@ async function cmdSimulate(positionals, flags) {
   return 0;
 }
 
-function cmdInvoke(positionals, flags) {
+function cmdInvoke(positionals, flags, { execFile = execFileSync } = {}) {
   const serviceId = positionals[0] || flags.service;
-  const extraArgs = positionals.slice(1);
   if (!serviceId) {
-    process.stderr.write('fleet health invoke: usage: fleet health invoke <service> [args...]\n');
+    process.stderr.write('fleet health invoke: usage: fleet health invoke <service>\n');
+    return 2;
+  }
+  if (positionals.length > 1) {
+    // Parameters come only from the registry's typed invoke.params, never from the command line.
+    process.stderr.write('fleet health invoke: extra arguments are not accepted (set invoke.params in fleet-health.yml)\n');
     return 2;
   }
 
@@ -624,13 +661,16 @@ function cmdInvoke(positionals, flags) {
     process.stderr.write(`fleet health invoke: service '${serviceId}' has no invoke command configured\n`);
     return 1;
   }
-  if (extraArgs.length > 0 && svc.invoke.allow_args !== true) {
-    process.stderr.write(`fleet health invoke: service '${serviceId}' does not allow extra arguments\n`);
-    return 2;
+  const kindDef = Object.prototype.hasOwnProperty.call(INVOKE_KINDS, svc.invoke.kind) ? INVOKE_KINDS[svc.invoke.kind] : null;
+  if (!kindDef) {
+    process.stderr.write(`fleet health invoke: service '${serviceId}' names an unknown invoke kind\n`);
+    return 1;
   }
 
+  // The gate is the kind's, whatever the registry entry says; requires_gate can only add one.
   const approvedGate = flags['approved-gate'];
-  if (svc.invoke.requires_gate && !approvedGate) {
+  const needsGate = kindDef.gate === true || svc.invoke.requires_gate === true;
+  if (needsGate && !approvedGate) {
     const msg = `service '${serviceId}' requires an operator approval gate (--approved-gate <id>)`;
     if (flags.json) process.stdout.write(`${JSON.stringify({ ok: false, service: serviceId, error: msg })}\n`);
     else process.stderr.write(`fleet health invoke: ${msg}\n`);
@@ -656,8 +696,9 @@ function cmdInvoke(positionals, flags) {
       registry.board?.issue ||
       '';
     const requester = (typeof flags.requester === 'string' && flags.requester) || process.env.ENGSYS_GATE_REQUESTER || '';
-    const target = (typeof flags.target === 'string' && flags.target) || `fleet-health:invoke:${serviceId}`;
-    const kind = (typeof flags.kind === 'string' && flags.kind) || 'config';
+    // The approval must be for exactly this invoke: the target and kind are fixed, not caller flags.
+    const target = `fleet-health:invoke:${serviceId}`;
+    const kind = 'config';
     const opTeam = (typeof flags['operators-team'] === 'string' && flags['operators-team']) || process.env.FLEET_OPERATORS_TEAM || '';
     const ops = (typeof flags.operators === 'string' && flags.operators) || process.env.FLEET_OPERATORS || '';
     const checkArgs = [
@@ -679,7 +720,7 @@ function cmdInvoke(positionals, flags) {
     if (opTeam) checkArgs.push('--operators-team', String(opTeam));
     else if (ops) checkArgs.push('--operators', String(ops));
     try {
-      execFileSync(process.execPath, checkArgs, {
+      execFile(process.execPath, checkArgs, {
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'pipe'],
       });
@@ -691,12 +732,15 @@ function cmdInvoke(positionals, flags) {
     }
   }
 
-  const cmdSpec = parseCommandSpec(svc.invoke.command, [...(svc.invoke.args || []), ...extraArgs]);
   try {
-    const output = execFileSync(cmdSpec.file, cmdSpec.args, {
+    const cmdSpec = buildKindCommand(INVOKE_KINDS, svc.invoke.kind, svc.invoke.params);
+    const output = execFile(cmdSpec.file, cmdSpec.args, {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: svc.invoke.timeout_ms || 60_000,
+      env: scrubEnv(process.env, cmdSpec.envGroups),
+      cwd: os.tmpdir(),
+      shell: false,
     });
     if (flags.json) {
       process.stdout.write(
@@ -827,7 +871,11 @@ function cmdWatchAdd(positionals, flags) {
 
   const name = typeof flags.name === 'string' ? flags.name : serviceId;
   const url = typeof flags.url === 'string' ? flags.url : 'https://status.example.com/api/v2/summary.json';
-  const command = typeof flags.command === 'string' ? flags.command : 'true';
+  const check = typeof flags.check === 'string' ? flags.check : 'tool-version';
+  if (adapter === 'synthetic-command' && !Object.prototype.hasOwnProperty.call(PROBE_KINDS, check)) {
+    process.stderr.write(`fleet health watch-add: invalid --check '${check}' (allowed: ${Object.keys(PROBE_KINDS).join(', ')})\n`);
+    return 2;
+  }
   const dependsOn = typeof flags['depends-on'] === 'string'
     ? flags['depends-on'].split(',').map((s) => s.trim()).filter(Boolean)
     : [];
@@ -838,7 +886,7 @@ function cmdWatchAdd(positionals, flags) {
     q1_service: `${serviceId} (${name})`,
     q2_failure_modes: flags['failure-modes'] || 'API 5xx, rate-limit exhaustion, or upstream outage',
     q3_observability: `${obsClass} (registry observability: ${registryObs})`,
-    q4_adapter_and_probe: adapter === 'statuspage' || adapter === 'http-health' ? `${adapter} (${url})` : `${adapter} (${command})`,
+    q4_adapter_and_probe: adapter === 'statuspage' || adapter === 'http-health' ? `${adapter} (${url})` : `${adapter} (check: ${check})`,
     q5_tier_and_cadence: `${tier} (poll_seconds: 90)`,
     q6_hysteresis: 'trip_fails: 2, recover_clean: 3',
     q7_dependencies: dependsOn.length ? dependsOn.join(', ') : 'none',
@@ -857,7 +905,9 @@ function cmdWatchAdd(positionals, flags) {
   if (adapter === 'statuspage' || adapter === 'http-health') {
     yamlLines.push(`      url: "${url}"`);
   } else if (adapter === 'synthetic-command') {
-    yamlLines.push(`      command: "${command}"`);
+    yamlLines.push(`      check: ${check}`);
+    if (check === 'tool-version') yamlLines.push(`      params: { tool: gh }`);
+    else if (check === 'gh-api-get') yamlLines.push(`      params: { path: /rate_limit }`);
   }
   yamlLines.push(`    poll_seconds: 90`);
   yamlLines.push(`    thresholds:`);
@@ -929,7 +979,7 @@ function cmdWatchRemove(positionals, flags) {
     process.stderr.write('fleet health watch-remove: <service> is required\n');
     return 2;
   }
-  const { registry } = loadRegistryOrThrow(flags);
+  const { registry } = loadRegistryOrThrow(flags, { trusted: false });
   if (!registry.services[serviceId]) {
     process.stderr.write(`fleet health watch-remove: service '${serviceId}' is not in registry\n`);
     return 1;
@@ -964,7 +1014,10 @@ function cmdWatchRemove(positionals, flags) {
   return 0;
 }
 
-export async function runCli(argv = process.argv.slice(2)) {
+/**
+ * `deps.execFile` replaces `execFileSync` for `invoke` (its gate check and its command); tests only.
+ */
+export async function runCli(argv = process.argv.slice(2), deps = {}) {
   const { positionals, flags } = parseFlags(argv);
   const cmd = positionals[0] || (flags.help ? 'help' : 'status');
   const restPos = positionals.slice(1);
@@ -978,6 +1031,8 @@ export async function runCli(argv = process.argv.slice(2)) {
     switch (cmd) {
       case 'validate':
         return cmdValidate(flags);
+      case 'registry-path':
+        return cmdRegistryPath();
       case 'status':
       case 'list':
         return cmdStatus(flags);
@@ -994,7 +1049,7 @@ export async function runCli(argv = process.argv.slice(2)) {
       case 'simulate':
         return await cmdSimulate(restPos, flags);
       case 'invoke':
-        return cmdInvoke(restPos, flags);
+        return cmdInvoke(restPos, flags, deps);
       case 'self-probe':
         return cmdSelfProbe(flags);
       case 'digest':
