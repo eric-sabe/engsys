@@ -219,6 +219,18 @@ export function extractAgentType(input) {
 	return firstString(input?.agent_type);
 }
 
+/** engsys v2.0.1 (M5): in pre-agent (PreToolUse `Agent|Task`) mode, the Class B exclusion check
+ * must key off the agent ABOUT TO BE DISPATCHED (`tool_input.subagent_type`/`tool_input.agent_type`
+ * — same fields `recordPendingDispatch` reads), never `input.agent_type`, which at this event is
+ * the CALLING session's own agent type. Using the caller would let a non-excluded session (e.g.
+ * the orchestrator) dispatch an excluded agent (Nyx, any `security: true` agent) and have the
+ * exclusion check pass on the wrong identity. Fails closed: an unresolvable target returns ''
+ * (empty string), which callers must treat as "unknown — exclude", never as "no agent — allow". */
+export function extractTargetAgentType(input) {
+	const toolInput = input?.tool_input ?? {};
+	return firstString(toolInput?.subagent_type, toolInput?.agent_type) ?? '';
+}
+
 /** No verified prompt field exists at SubagentStart (see the note above) — reads `input.prompt`
  * only in case a future payload adds one; never guesses through a nested `tool_input`. */
 export function extractPrompt(input) {
@@ -335,13 +347,14 @@ export async function main({ argv = process.argv.slice(2), stdin = process.stdin
 	// PreToolUse (`Agent|Task`) mode (#142): stash the dispatch prompt, prompt path hints, and any
 	// target worktree path under `<cacheDir>/pending-dispatch/` so the immediately following
 	// SubagentStart hook can consume it. Always fails open with `{}`.
-	if (argv[0] === 'pre-agent' || input?.hook_event_name === 'PreToolUse' || input?.hookEventName === 'preToolUse') {
+	const isPreAgent = argv[0] === 'pre-agent' || input?.hook_event_name === 'PreToolUse' || input?.hookEventName === 'preToolUse';
+	if (isPreAgent) {
 		if (input) recordPendingDispatch(input, { cwd, now });
 		recordHookTelemetry({
 			hook: 'subagent-memory-inject',
 			event: 'PreToolUse',
 			decision: 'stashed',
-			detail: `agent=${extractAgentType(input) || 'any'}`,
+			detail: `agent=${extractTargetAgentType(input) || 'unknown'}`,
 		});
 		if (!process.env.ENGSYS_HARNESS || process.env.ENGSYS_HARNESS === 'claude') {
 			write('{}');
@@ -349,7 +362,21 @@ export async function main({ argv = process.argv.slice(2), stdin = process.stdin
 		}
 	}
 
-	const agentType = extractAgentType(input);
+	// engsys v2.0.1 (M5): on a non-Claude harness, PreToolUse is the only dispatch-time hook, so a
+	// brief may be built here too. The exclusion/selection decision must be keyed on the agent
+	// ABOUT TO BE DISPATCHED (`tool_input.subagent_type`), never the calling session's own
+	// `agent_type` — see `extractTargetAgentType`. Fails CLOSED on a MISSING/EMPTY target only (no
+	// `subagent_type`/`agent_type` at all on `tool_input`): returns `{}` immediately rather than
+	// falling through with an agentType of `null`/`'any'`, which `resolveExcludedAgents`/
+	// `isClassBExcluded` would otherwise treat as "no agent to exclude" and hand Class B content
+	// to. An UNRECOGNIZED (but non-empty) target still reaches the ordinary allow-unless-excluded
+	// path below, same as any other agent name `isClassBExcluded` doesn't know — that's the
+	// existing policy, not something this fix changes.
+	const agentType = isPreAgent ? extractTargetAgentType(input) : extractAgentType(input);
+	if (isPreAgent && !agentType) {
+		write('{}');
+		return 0;
+	}
 
 	let briefText = '';
 	let logKeys = { lesson_keys: [], pointer_keys: [], bytes: 0 };

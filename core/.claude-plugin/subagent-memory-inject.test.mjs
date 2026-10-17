@@ -4,7 +4,7 @@
 import { after, test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -20,6 +20,7 @@ import { hermeticGit } from '../lib/git-env.mjs';
 import {
 	extractAgentType,
 	extractPrompt,
+	extractTargetAgentType,
 	main,
 	resolveTouchedPaths,
 	runMemoryBrief,
@@ -46,6 +47,83 @@ describe('extractAgentType / extractPrompt', () => {
 	test('extractPrompt is always the empty string on the real (promptless) payload shape', () => {
 		assert.equal(extractPrompt({}), '');
 		assert.equal(extractPrompt({ tool_input: { description: 'desc' } }), '', 'tool_input is not nested under a SubagentStart payload — must not be guessed');
+	});
+});
+
+describe('extractTargetAgentType (engsys v2.0.1 M5)', () => {
+	test('reads tool_input.subagent_type — the agent ABOUT TO BE DISPATCHED — never the caller\'s own top-level agent_type', () => {
+		assert.equal(
+			extractTargetAgentType({ agent_type: 'isabelle', tool_input: { subagent_type: 'engsys:nyx' } }),
+			'engsys:nyx',
+			'must resolve the target (nyx), not the caller (isabelle)',
+		);
+	});
+	test('falls back to tool_input.agent_type, then fails closed to the empty string', () => {
+		assert.equal(extractTargetAgentType({ tool_input: { agent_type: 'engsys:bert' } }), 'engsys:bert');
+		assert.equal(extractTargetAgentType({ tool_input: {} }), '');
+		assert.equal(extractTargetAgentType({}), '');
+		assert.equal(extractTargetAgentType(null), '');
+	});
+});
+
+describe('main — pre-agent mode on a non-Claude harness (engsys v2.0.1 M5)', () => {
+	const prevHarness = process.env.ENGSYS_HARNESS;
+	after(() => {
+		if (prevHarness === undefined) delete process.env.ENGSYS_HARNESS;
+		else process.env.ENGSYS_HARNESS = prevHarness;
+	});
+
+	test('fails closed to {} when the dispatch carries no resolvable tool_input.subagent_type, even though the caller agent_type IS resolvable (the exact M5 bug: using the caller instead of the target)', async () => {
+		process.env.ENGSYS_HARNESS = 'copilot';
+		let written = '';
+		const code = await main({
+			argv: ['pre-agent'],
+			stdin: stdinOf(JSON.stringify({
+				hook_event_name: 'PreToolUse',
+				agent_type: 'engsys:isabelle', // the CALLING session — must be ignored for this decision
+				tool_input: {}, // no subagent_type at all — the target is unresolvable
+			})),
+			write: (s) => { written += s; },
+			defaultCwd: tmpdir(),
+		});
+		assert.equal(code, 0);
+		assert.equal(written, '{}');
+	});
+
+	test('positive control: a resolvable target agent_type proceeds past the fail-closed gate (does not short-circuit to {} before even trying)', { skip: !SQLITE_AVAILABLE }, () => {
+		process.env.ENGSYS_HARNESS = 'copilot';
+		const cwd = mkdtempSync(join(tmpdir(), 'inject-m5-'));
+		try {
+			// A real (if minimal) git repo, so resolveCacheDir resolves and logInjection actually
+			// writes a line — the `{}` fail-closed branch returns BEFORE logInjection is ever
+			// called, so a line landing here (with the TARGET's agent_type on it) is direct proof
+			// the gate was passed, not just that the output happened to parse as JSON.
+			const GIT_OPTS = ['-c', 'user.name=a', '-c', 'user.email=a@b.c'];
+			hermeticGit(cwd, [...GIT_OPTS, 'init', '-q'], { isolateConfig: true });
+			writeFileSync(join(cwd, 'README.md'), 'init\n');
+			hermeticGit(cwd, [...GIT_OPTS, 'add', '-A'], { isolateConfig: true });
+			hermeticGit(cwd, [...GIT_OPTS, 'commit', '-q', '-m', 'init'], { isolateConfig: true });
+
+			const out = execFileSync('node', [SCRIPT, 'pre-agent'], {
+				input: JSON.stringify({
+					hook_event_name: 'PreToolUse',
+					agent_type: 'engsys:nyx', // caller — irrelevant to this decision
+					tool_input: { subagent_type: 'engsys:isabelle' }, // resolvable target
+				}),
+				encoding: 'utf8',
+				env: { ...process.env, ENGSYS_HARNESS: 'copilot', NODE_NO_WARNINGS: '1' },
+				cwd,
+			});
+			assert.doesNotThrow(() => JSON.parse(out));
+
+			const common = execFileSync('git', ['-C', cwd, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { encoding: 'utf8' }).trim();
+			const injectionsLog = join(common, 'engsys-memory', 'injections.jsonl');
+			const lastLine = readFileSync(injectionsLog, 'utf8').trim().split('\n').pop();
+			const record = JSON.parse(lastLine);
+			assert.equal(record.agent_type, 'engsys:isabelle', 'the gate must have passed using the TARGET agent_type, not the caller (engsys:nyx)');
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
 	});
 });
 
