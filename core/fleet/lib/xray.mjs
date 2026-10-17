@@ -27,7 +27,7 @@ import { fileURLToPath } from 'node:url';
 import { detectHostToolchain } from '../../lib/host-toolchain.mjs';
 import { hookTelemetryPath } from '../../lib/harness-io.mjs';
 import { fleetIdProblems, loadFederation, registryWarnings } from './federation.mjs';
-import { checkSettings } from './verify-wrappers.mjs';
+import { checkSettingsDetailed, ENGSYS_HOST_FILES, ENGSYS_HOST_PATHS, ENGSYS_HOST_TREES, parseAllowedPlugins } from './verify-wrappers.mjs';
 
 export const DEFAULT_CLAUDE_TIERS = Object.freeze({
   opus: 'claude-opus-5-5',
@@ -544,6 +544,39 @@ export function resolveContext(options = {}) {
   };
 }
 
+/** A child env for git that ignores inherited repo-location variables. */
+function gitEnv(env) {
+  const e = { ...(env || process.env) };
+  for (const k of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_COMMON_DIR']) delete e[k];
+  return e;
+}
+
+/** The Claude Code config dir the fleet's sessions use: FLEET_CLAUDE_CONFIG_DIR (fleet.conf), else ~/.claude. */
+export function claudeConfigDir(ctx) {
+  const set = ctx.fleetConf?.FLEET_CLAUDE_CONFIG_DIR || '';
+  return { dir: set ? expandHome(set, ctx.home) : path.join(ctx.home, '.claude'), fromConf: Boolean(set) };
+}
+
+/** Which config dir is in use and whether it is logged in (`claude auth status`: loggedIn only, nothing else). */
+function claudeConfigItem(ctx, cfg) {
+  const exists = fs.existsSync(cfg.dir);
+  let login = 'unknown';
+  if (exists) {
+    const r = runCmd('claude', ['auth', 'status', '--json'], { cwd: os.tmpdir(), env: { ...ctx.env, CLAUDE_CONFIG_DIR: cfg.dir }, timeout: 15000 });
+    try {
+      const j = JSON.parse(r.stdout || 'null');
+      if (j && j.loggedIn === true) login = 'logged in';
+      else if (j && j.loggedIn === false) login = 'NOT logged in';
+    } catch { /* unknown */ }
+  }
+  return {
+    name: 'Claude config dir (fleet sessions)',
+    status: !exists && cfg.fromConf ? 'fail' : login === 'logged in' ? 'pass' : 'warn',
+    detail: `${cfg.dir}${cfg.fromConf ? ' (FLEET_CLAUDE_CONFIG_DIR)' : ' (default; set FLEET_CLAUDE_CONFIG_DIR to separate the fleet from the operator)'} — ${exists ? login : 'missing'}`,
+    meta: { dir: cfg.dir, fromConf: cfg.fromConf, exists, login },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // [1/10] Pins, Checkouts & Wrapper Trust Closure
 // ---------------------------------------------------------------------------
@@ -567,22 +600,15 @@ export function inspectPinsAndTrust(ctx) {
   const versionsMatch = pkgVer === pluginVer && pkgVer === marketVer;
   const isClean = dirtyRes.ok && dirtyRes.stdout === '';
 
-  const hostRequired = [
-    'core/fleet/identity/bin/gh',
-    'core/fleet/verify.sh',
-    'core/fleet/lib/verify-wrappers.mjs',
-    'core/fleet/launch.sh',
-    'core/fleet/supervise.sh',
-    'core/fleet/lib/fleet-env.sh',
-    'core/fleet/bin/fleet',
-    'core/skills/agent-sessions/scripts/fleet-supervisor.sh',
-  ];
+  // The trust closure `fleet verify --engsys-dir` hashes: the whole core/fleet and core/lib trees plus the
+  // kit files outside them (verify-wrappers.mjs ENGSYS_HOST_TREES / ENGSYS_HOST_FILES). Here: presence only.
+  const hostRequired = [...new Set([...ENGSYS_HOST_TREES, ...ENGSYS_HOST_FILES, ...ENGSYS_HOST_PATHS])];
   const missingHost = hostRequired.filter((rel) => !fs.existsSync(path.join(engsysDir, rel)));
 
   items.push({
     name: 'engsys checkout',
     status: versionsMatch && isClean && missingHost.length === 0 ? 'pass' : 'warn',
-    detail: `v${pkgVer} (${headRes.stdout || '?'}${tagRes.stdout ? `, tags: ${tagRes.stdout.split('\n').join(',')}` : ''}) — manifests=${versionsMatch ? 'synced' : 'MISMATCH'}, tree=${isClean ? 'clean' : 'dirty'}, host-closure=${8 - missingHost.length}/8`,
+    detail: `v${pkgVer} (${headRes.stdout || '?'}${tagRes.stdout ? `, tags: ${tagRes.stdout.split('\n').join(',')}` : ''}) — manifests=${versionsMatch ? 'synced' : 'MISMATCH'}, tree=${isClean ? 'clean' : 'dirty'}, host-closure=${hostRequired.length - missingHost.length}/${hostRequired.length}`,
     meta: { versionsMatch, isClean, missingHost, pkgVer },
   });
 
@@ -602,29 +628,28 @@ export function inspectPinsAndTrust(ctx) {
       meta: { pinDir, isClean: pinDirty.stdout === '', engsysPinRef, instPinRef },
     });
 
+    // Only the fully qualified remote-tracking ref, and never HEAD: this is a hint, not the trust root
+    // (`fleet verify` checks .claude/ and every hook target against GitHub). No ref = hooks unverified.
     let pinSettingsSha = '';
-    const originShaRes = runCmd('git', ['-C', pinDir, 'rev-parse', 'origin/main:.claude/settings.json']);
+    const originShaRes = runCmd('git', ['--no-replace-objects', '-C', pinDir, 'rev-parse', '--verify', '-q', 'refs/remotes/origin/main:.claude/settings.json'], { env: gitEnv(ctx.env) });
     if (originShaRes.ok && /^[0-9a-f]{40}$/.test(originShaRes.stdout)) {
       pinSettingsSha = originShaRes.stdout;
-    } else {
-      const headShaRes = runCmd('git', ['-C', pinDir, 'rev-parse', 'HEAD:.claude/settings.json']);
-      if (headShaRes.ok && /^[0-9a-f]{40}$/.test(headShaRes.stdout)) {
-        pinSettingsSha = headShaRes.stdout;
-      }
     }
-    const settingsDrifts = checkSettings({
+    const cfg = claudeConfigDir(ctx);
+    const { problems: settingsDrifts, info: settingsInfo } = checkSettingsDetailed({
       projectDir: pinDir,
-      userSettingsDir: path.join(ctx.home, '.claude'),
+      userSettingsDir: cfg.dir,
       pinSettingsSha,
+      allowedUserPlugins: parseAllowedPlugins(ctx.fleetConf.VERIFY_ALLOWED_USER_PLUGINS || ''),
     });
     items.push({
       name: 'Claude settings trust closure',
       status: settingsDrifts.length === 0 ? 'pass' : 'fail',
       detail:
         settingsDrifts.length === 0
-          ? 'No hook bypasses, dangerous env overrides, or unapproved plugins in user/local settings'
+          ? `No hook bypasses, dangerous env overrides, or unapproved plugins in user/local settings${settingsInfo.length ? ` (${settingsInfo.length} allowed by VERIFY_ALLOWED_USER_PLUGINS)` : ''}`
           : `Settings drift detected: ${settingsDrifts.join('; ')}`,
-      meta: { settingsDrifts },
+      meta: { settingsDrifts, settingsInfo },
     });
   } else {
     items.push({
@@ -633,6 +658,8 @@ export function inspectPinsAndTrust(ctx) {
       detail: pinDir ? `${pinDir} (not found on this host)` : 'PIN_DIR not configured in current env',
     });
   }
+
+  items.push(claudeConfigItem(ctx, claudeConfigDir(ctx)));
 
   // 1c. FLEET_REPO
   if (fleetRepo && fs.existsSync(fleetRepo)) {
@@ -2060,7 +2087,7 @@ export function synthesizeDiagnoses(ctx, sections, sessionDeepDive) {
           severity: 'fail',
           symptom: item.detail,
           cause: 'User or local settings contain disableAllHooks, dangerous env overrides (PATH, NODE_OPTIONS, CLAUDE_PLUGIN_ROOT, ENGSYS_SINGLETON_ROLE), or unapproved plugins (#96 M3).',
-          remediation: `Inspect ~/.claude/settings.json, ~/.claude/settings.local.json, and "${ctx.pinDir || '.'}/.claude/settings.local.json" and remove the offending keys.`,
+          remediation: `Inspect settings.json and settings.local.json in the fleet's Claude config dir (${claudeConfigDir(ctx).dir}), and "${ctx.pinDir || '.'}/.claude/settings.local.json", and remove the offending keys (or, for an operator-approved user-scope plugin, list it in VERIFY_ALLOWED_USER_PLUGINS).`,
         });
       } else if (item.name.startsWith('Azure SP Cert')) {
         diagnoses.push({

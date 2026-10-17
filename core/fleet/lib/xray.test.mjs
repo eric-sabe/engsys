@@ -15,6 +15,21 @@ import { hookTelemetryPath, recordHookTelemetry } from '../../lib/harness-io.mjs
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ENGSYS_DIR = path.resolve(__dirname, '..', '..', '..');
 
+/**
+ * A hermetic environment for runXray: a throwaway HOME (so no real ~/.claude, ~/.config/<org> or
+ * ~/Library/Logs is read) and LOG_DIR, no fleet variables from the caller, and only PATH/TMPDIR kept so
+ * node, git and the hook self-test still run.
+ */
+function hermeticEnv(tmpDir, extra = {}) {
+  const home = path.join(tmpDir, 'home');
+  const logDir = path.join(tmpDir, 'logs');
+  fs.mkdirSync(home, { recursive: true });
+  fs.mkdirSync(logDir, { recursive: true });
+  const env = { PATH: process.env.PATH, HOME: home, LOG_DIR: logDir, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
+  if (process.env.TMPDIR) env.TMPDIR = process.env.TMPDIR;
+  return { ...env, ...extra };
+}
+
 test('Hook Flight Recorder (hookTelemetryPath & recordHookTelemetry) writes when configured and skips unconfigured unit tests', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'engsys-telemetry-test-'));
   try {
@@ -78,14 +93,17 @@ test('runXray executes all 10 subsystem checks and passes the live 9-hook synthe
     const report = await runXray({
       engsysDir: ENGSYS_DIR,
       pinDir: path.join(tmpDir, 'nonexistent-pin'),
-      env: {
-        ...process.env,
+      env: hermeticEnv(tmpDir, {
         ENGSYS_HOOK_TELEMETRY_FILE: tFile,
         ENGSYS_MEMORY_CACHE_DIR: path.join(tmpDir, 'mem-cache'),
-      },
+      }),
     });
 
     assert.equal(report.sections.length, 10, 'must report all 10 subsystem sections');
+    const cfgItem = report.sections.flatMap((sec) => sec.items).find((i) => i.name === 'Claude config dir (fleet sessions)');
+    assert.ok(cfgItem, 'reports the Claude config dir the fleet sessions use');
+    assert.equal(cfgItem.meta.dir, path.join(tmpDir, 'home', '.claude'), 'the hermetic HOME, never the real ~/.claude');
+    assert.equal(cfgItem.meta.fromConf, false);
     assert.equal(report.summary.ok, true, `expected 0 failures, got: ${JSON.stringify(report.sections, null, 2)}`);
     assert.equal(report.summary.fail, 0);
 
@@ -125,6 +143,7 @@ test('runXray deep-dives into sessions, parses transcripts/agents.tsv/federation
         'FLEET_ID=eric',
         'PIN_REPO=FeedFrwd/keystone',
         `PIN_DIR=${pinDir}`,
+        `FLEET_CLAUDE_CONFIG_DIR=${path.join(tmpDir, 'fleet-claude')}`,
         'OPUS_MODEL=claude-opus-5-5',
         'SONNET_MODEL=claude-sonnet-5-5',
         'HAIKU_MODEL=claude-haiku-5-5',
@@ -293,13 +312,18 @@ test('runXray deep-dives into sessions, parses transcripts/agents.tsv/federation
       role: 'merge',
       diagnose: true,
       skipSelfTest: true,
-      env: {
-        ...process.env,
+      env: hermeticEnv(tmpDir, {
         ENGSYS_SESSIONS_DIR: sessDir,
         ENGSYS_HOOK_TELEMETRY_FILE: tFile,
         ENGSYS_MEMORY_CACHE_DIR: memCacheDir,
-      },
+      }),
     });
+
+    const cfgItem2 = report.sections.flatMap((sec) => sec.items).find((i) => i.name === 'Claude config dir (fleet sessions)');
+    assert.ok(cfgItem2, 'reports the Claude config dir');
+    assert.equal(cfgItem2.meta.dir, path.join(tmpDir, 'fleet-claude'), 'FLEET_CLAUDE_CONFIG_DIR from fleet.conf');
+    assert.equal(cfgItem2.status, 'fail', 'a configured dir that does not exist fails');
+    assert.doesNotMatch(JSON.stringify(cfgItem2), /token|oauth/i, 'no credential material in the report');
 
     // Must flag state.md > 4096B as a failure
     assert.equal(report.summary.ok, false);
