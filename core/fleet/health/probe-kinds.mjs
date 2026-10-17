@@ -43,6 +43,8 @@ export const ENV_GROUPS = Object.freeze({
   }),
   // az CLI config and login context.
   azure: Object.freeze({ names: [], prefixes: ['AZURE_'] }),
+  // docker CLI daemon selection and client config (DOCKER_HOST, DOCKER_CONTEXT, DOCKER_CONFIG, ...).
+  docker: Object.freeze({ names: [], prefixes: ['DOCKER_'] }),
 });
 
 const enumParam = (values) => ({ type: 'enum', values: Object.freeze(values) });
@@ -99,7 +101,7 @@ export const PROBE_KINDS = Object.freeze({
   'docker-info': {
     description: 'docker info --format {{.ServerVersion}}',
     params: {},
-    env: [],
+    env: ['docker'],
     argv: () => ['docker', 'info', '--format', '{{.ServerVersion}}'],
   },
   'tool-version': {
@@ -205,19 +207,23 @@ export function buildKindCommand(table, kind, params) {
 /**
  * Copy only the base allowlist plus the named credential groups out of `env`.
  */
-export function scrubEnv(env = process.env, groups = []) {
+export function scrubEnv(env = process.env, groups = [], { platform = process.platform } = {}) {
+  // Windows env names are case-insensitive (`Path`, `SystemRoot`); match them that way there, keeping
+  // each variable's own spelling in the output.
+  const fold = platform === 'win32' ? (k) => k.toUpperCase() : (k) => k;
   const out = {};
-  const names = new Set(BASE_ENV);
+  const names = new Set(BASE_ENV.map(fold));
   const prefixes = [];
   for (const g of groups) {
     const def = ENV_GROUPS[g];
     if (!def) continue;
-    for (const n of def.names) names.add(n);
-    prefixes.push(...def.prefixes);
+    for (const n of def.names) names.add(fold(n));
+    prefixes.push(...def.prefixes.map(fold));
   }
   for (const [k, v] of Object.entries(env || {})) {
     if (typeof v !== 'string') continue;
-    if (names.has(k) || prefixes.some((p) => k.startsWith(p))) out[k] = v;
+    const key = fold(k);
+    if (names.has(key) || prefixes.some((p) => key.startsWith(p))) out[k] = v;
   }
   return out;
 }

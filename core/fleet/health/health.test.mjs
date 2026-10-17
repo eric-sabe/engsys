@@ -1108,8 +1108,12 @@ describe('Trust boundary (engsys v2.0.1): registry location, probe execution, ga
     }
     // Every declared group exists, so no kind silently loses (or gains) its credentials.
     for (const def of [...Object.values(PROBE_KINDS), ...Object.values(INVOKE_KINDS)]) {
-      for (const g of def.env) assert.ok(Object.keys(scrubEnv({ GH_X: '1', AZURE_X: '1' }, [g])).length > 0, g);
+      for (const g of def.env) assert.ok(Object.keys(scrubEnv({ GH_X: '1', AZURE_X: '1', DOCKER_X: '1' }, [g])).length > 0, g);
     }
+    // docker-info keeps daemon selection; Windows matches names case-insensitively, keeping spelling.
+    assert.equal(scrubEnv({ DOCKER_HOST: 'tcp://d', GH_TOKEN: 'x' }, PROBE_KINDS['docker-info'].env).DOCKER_HOST, 'tcp://d');
+    assert.deepEqual(scrubEnv({ Path: 'C:\\bin', gh_token: 'x' }, [], { platform: 'win32' }), { Path: 'C:\\bin' });
+    assert.deepEqual(scrubEnv({ Path: '/bin' }, [], { platform: 'linux' }), {});
   });
 
   test('invoke always needs the gate its kind defines, whatever requires_gate says', async () => {

@@ -29,7 +29,7 @@ The desk loads `fleet-health.yml` only from the fleet instance repo (`<instance>
 
 ### Commands: kinds, not command lines
 
-A `synthetic-command` probe and an `invoke` entry never carry a command line. Each names a kind from [`probe-kinds.mjs`](../core/fleet/health/probe-kinds.mjs), which builds a literal argv array from typed params. Nothing reaches a shell, and every run gets a scrubbed environment: `PATH`, `HOME`, locale and temp variables, plus only the credential group its kind needs (`GH_*`/`GITHUB_TOKEN` for the `gh-*` kinds, `AZURE_*` for `az-account-show`). Runs start in the OS temp dir, not the repo.
+A `synthetic-command` probe and an `invoke` entry never carry a command line. Each names a kind from [`probe-kinds.mjs`](../core/fleet/health/probe-kinds.mjs), which builds a literal argv array from typed params. Nothing reaches a shell, and every run gets a scrubbed environment: `PATH`, `HOME`, locale and temp variables, plus only the credential group its kind needs (`GH_*`/`GITHUB_TOKEN` for the `gh-*` kinds, `AZURE_*` for `az-account-show`, `DOCKER_*` for `docker-info`). Runs start in the OS temp dir, not the repo.
 
 | Probe check (`probe.check`) | Runs | Params |
 | --- | --- | --- |
