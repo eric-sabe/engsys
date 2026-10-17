@@ -49,10 +49,11 @@ plugins() { # plugins <jq program producing the list> — what `claude plugin li
 DEFAULT_PLUGINS='[{id: "engsys@engsys", version: "1.0.0", scope: "user", enabled: true, installPath: $c}, {id: "other@engsys", version: "1.0.0", scope: "user", enabled: true, installPath: "/nowhere"}]'
 plugins "$DEFAULT_PLUGINS"
 
+cp "$HERE/fake-github.sh" "$FAKE/fake-github.sh"
 cat >"$T/bin/claude" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
-  "plugin list --json") pwd -P >"$FAKE/claude.cwd"; cat "$FAKE/plugins.json" ;;
+  "plugin list --json") pwd -P >"$FAKE/claude.cwd"; printf '%s\n' "${CLAUDE_CONFIG_DIR:-unset}" >"$FAKE/claude.cfg"; cat "$FAKE/plugins.json" ;;
   *) echo "stub claude: unsupported: $*" >&2; exit 2 ;;
 esac
 SH
@@ -66,6 +67,8 @@ case "${1:-} ${2:-}" in
   "api repos/vendor/engsys") echo '{"default_branch":"main"}' ;;
   "api repos/vendor/engsys/compare/$c...main?per_page=1") printf '{"status":"%s"}\n' "$(cat "$FAKE/compare-status")" ;;
   "api repos/vendor/engsys/git/trees/$c?recursive=1") cat "$FAKE/tree.json" ;;
+  "api repos/acme/app"*) [ -d "$FAKE/app-origin.git" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+    . "$FAKE/fake-github.sh"; p="${2#repos/acme/app}"; fake_github_api "$FAKE/app-origin.git" "${p#/}" ;;
   "api "*) echo '{"message":"Not Found"}'; echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
   "issue comment"*) [ ! -f "$FAKE/comment-fail" ] || { echo "gh: HTTP 502" >&2; exit 1; } ;;
   *) echo "stub gh: unexpected: $*" >&2; exit 1 ;;
@@ -390,5 +393,84 @@ has "…named" "$OUT" "enables unpinned plugin unpinned@evil"
 rm -f "$APP/.claude/settings.local.json"
 run fleet verify
 rc_is "clean settings pass again" 0
+
+echo "== the operator's own user-scope plugins (R1): FLEET_CLAUDE_CONFIG_DIR and VERIFY_ALLOWED_USER_PLUGINS"
+CONF0="$(cat "$I/fleet/fleet.conf")"
+echo '{"enabledPlugins":{"codex@openai-codex":true,"apple-container@apple-container-skill":true}}' >"$HOME/.claude/settings.json"
+run fleet verify
+rc_is "the operator's user-scope plugins in ~/.claude are a mismatch" 1
+has "…naming the first" "$OUT" "enables unpinned plugin codex@openai-codex"
+has "…and the second" "$OUT" "enables unpinned plugin apple-container@apple-container-skill"
+has "…and the config dir it checked" "$OUT" "Claude config dir: $HOME/.claude"
+eq "…and claude plugin list ran with no CLAUDE_CONFIG_DIR" "$(cat "$FAKE/claude.cfg")" unset
+VERIFY_ALLOWED_USER_PLUGINS="codex@openai-codex apple-container@apple-container-skill" run fleet verify
+rc_is "an allowlist from the environment is ignored: only the operator's config files set it" 1
+printf '%s\nVERIFY_ALLOWED_USER_PLUGINS=codex@openai-codex apple-container@apple-container-skill\n' "$CONF0" >"$I/fleet/fleet.conf"
+run fleet verify
+rc_is "both plugins listed in fleet.conf → passes" 0
+has "…each reported as allowed" "$OUT" "verify: info allowed"
+has "…codex" "$OUT" "user-scope plugin codex@openai-codex"
+has "…apple-container" "$OUT" "user-scope plugin apple-container@apple-container-skill"
+printf '%s\nVERIFY_ALLOWED_USER_PLUGINS=codex@openai-codex\n' "$CONF0" >"$I/fleet/fleet.conf"
+run fleet verify
+rc_is "one listed → the unlisted one still mismatches" 1
+has "…named" "$OUT" "enables unpinned plugin apple-container@apple-container-skill"
+hasnt "…the listed one isn't" "$OUT" "unpinned plugin codex@openai-codex"
+# The fleet's own config dir: verify checks it (and claude plugin list runs against it), not ~/.claude.
+FCFG="$T/fleet-claude"
+mkdir -p "$FCFG"
+printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\n' "$CONF0" "$FCFG" >"$I/fleet/fleet.conf"
+run fleet verify
+rc_is "FLEET_CLAUDE_CONFIG_DIR set: the operator's ~/.claude no longer matters" 0
+has "…it says which dir it checked" "$OUT" "Claude config dir: $FCFG (FLEET_CLAUDE_CONFIG_DIR)"
+eq "…and claude plugin list ran against it" "$(cat "$FAKE/claude.cfg")" "$FCFG"
+echo '{"enabledPlugins":{"stray@market":true}}' >"$FCFG/settings.json"
+run fleet verify
+rc_is "an unpinned plugin in the fleet's own config dir is a mismatch" 1
+has "…named" "$OUT" "$FCFG/settings.json enables unpinned plugin stray@market"
+rm -f "$FCFG/settings.json"
+CLAUDE_CONFIG_DIR="$T/elsewhere" FLEET_CLAUDE_CONFIG_DIR="$T/elsewhere" run fleet verify
+rc_is "the environment can't move the config dir: fleet.conf decides" 0
+eq "…claude plugin list still ran against fleet.conf's dir" "$(cat "$FAKE/claude.cfg")" "$FCFG"
+printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\n' "$CONF0" "$T/no-such-dir" >"$I/fleet/fleet.conf"
+run fleet verify
+rc_is "a FLEET_CLAUDE_CONFIG_DIR that doesn't exist is 'not verified'" 3
+printf '%s\n' "$CONF0" >"$I/fleet/fleet.conf"
+rm -f "$HOME/.claude/settings.json"
+
+echo "== the pin checkout's .claude/ and hooks against the pin repo's default branch on GitHub (R3, H1)"
+# PIN_DIR becomes a git checkout of a sandbox remote that the stub gh serves as acme/app on GitHub.
+mkdir -p "$APP/.claude/hooks"
+printf 'echo remind\n' >"$APP/.claude/hooks/remind.sh"
+jq '. + {hooks: {PostToolUse: [{matcher: "Edit", hooks: [{type: "command", command: "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/remind.sh\""}]}]}}' \
+  "$APP/.claude/settings.json" >"$APP/.claude/s.tmp" && mv "$APP/.claude/s.tmp" "$APP/.claude/settings.json"
+git init -q "$APP"; commit_all "$APP" "app"
+git clone -q --bare "$APP" "$FAKE/app-origin.git"
+git -C "$APP" remote add origin "$FAKE/app-origin.git"; git -C "$APP" fetch -q origin
+run fleet verify
+rc_is "a clean pin checkout at the tip passes, hooks and all" 0
+has "…checked against GitHub" "$OUT" "acme/app checkout"
+has "…the tip came from the API" "$(cat "$FAKE/gh.log")" "repos/acme/app/git/ref/heads/main"
+# origin moves ahead (e.g. the pin PR merges): the reviewed older commit still verifies, with a warning
+W="$T/app-work"; git clone -q "$FAKE/app-origin.git" "$W"; printf 'more\n' >"$W/README"; commit_all "$W" "ahead"; git -C "$W" push -q origin HEAD:main
+run fleet verify
+rc_is "origin ahead of the pin checkout: no false mismatch" 0
+has "…warns to run fleet sync" "$OUT" "pin checkout behind main"
+git -C "$APP" pull -q --ff-only origin main
+printf 'echo pwned\n' >>"$APP/.claude/hooks/remind.sh"
+run fleet verify
+rc_is "a changed hook script (settings.json untouched) is a mismatch" 1
+has "…naming it" "$OUT" "modified   .claude/hooks/remind.sh"
+git -C "$APP" checkout -q -- .claude/hooks/remind.sh
+# a local commit + every local ref repointed at it: still not the trust root
+printf 'echo local\n' >>"$APP/.claude/hooks/remind.sh"; commit_all "$APP" "local"
+git -C "$APP" update-ref refs/remotes/origin/main HEAD
+git -C "$APP" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+run fleet verify
+rc_is "a local commit with origin/main and origin/HEAD repointed at it is a mismatch" 1
+has "…the checkout is not on GitHub's main" "$OUT" "is not main or an ancestor of it"
+git -C "$APP" reset -q --hard HEAD~1; git -C "$APP" fetch -q origin "+refs/heads/main:refs/remotes/origin/main"
+run fleet verify
+rc_is "back on GitHub's main: passes" 0
 
 finish verify.test.sh

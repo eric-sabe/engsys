@@ -397,7 +397,9 @@ jq -n '{extraKnownMarketplaces: {
   engsys: {source: {source: "github", repo: "vendor/engsys", ref: "v1.2.0"}},
   acme: {source: {source: "github", repo: "acme/acme-fleet", ref: "v0.1.0"}}},
   enabledPlugins: {"engsys@engsys": true, "acme@acme": true}}' >"$P/.claude/settings.json"
-git -C "$P" init -q && git -C "$P" add -A && git -C "$P" commit -q -m "pins"
+# Pushed to its sandbox remote, which the fake GitHub serves: `fleet verify` checks the checkout's .claude/
+# against the pin repo's default branch there.
+seed_repo acme/app "$P" && commit_all "$P" "pins" && push_all "$P"
 printf 'GH_APP_ID=1\nGH_APP_INSTALLATION_ID=2\nGH_APP_PEM=%s/none.pem\nGH_BOT_AUTHOR_NAME=acme-fleet[bot]\nGH_BOT_AUTHOR_EMAIL=1+acme-fleet[bot]@users.noreply.github.com\n' "$HOME" >"$HOME/.config/acme/gh-app.env"
 printf 'AZURE_CLIENT_ID=00000000-0000-0000-0000-000000000000\n' >"$HOME/.config/acme/azure-sp.env"
 

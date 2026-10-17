@@ -34,7 +34,15 @@
 //
 //   verify-wrappers.mjs --repo <owner/repo> --tag vX.Y.Z --plugin-id engsys@<marketplace>
 //                       --project-dir <PIN_DIR> --plugins <`claude plugin list --json` output file>
+//                       [--engsys-dir <ENGSYS_DIR>] [--check-settings] [--user-settings-dir <claude config dir>]
+//                       [--allowed-user-plugins "<name@mkt> ..."] [--pin-repo <owner/repo>]
 //                       [--cache <file> --max-age-min <n>]
+//
+// --engsys-dir: the host kit (ENGSYS_HOST_TREES, ENGSYS_HOST_FILES) against the same release tree.
+// --user-settings-dir: the Claude config dir the sessions use (FLEET_CLAUDE_CONFIG_DIR, else ~/.claude);
+//   a user-scope plugin the project doesn't enable is a mismatch unless --allowed-user-plugins lists it.
+// --pin-repo: PIN_DIR's .claude/ tree and every settings-hook target against that repo's default branch
+//   on GitHub (projectLocalState + verifyProjectTrust, below). A pin checkout behind the tip passes with a WARNING line.
 //
 // Exit: 0 everything matches | 1 MISMATCH (a definite difference) | 3 not verified (GitHub unreachable,
 //       API error, truncated tree, nothing installed) | 2 usage. Callers hold merge/maintain sessions on
@@ -54,25 +62,36 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { hermeticGit } from '../../lib/git-env.mjs';
 
 /** The repo directory the engsys core plugin is built from (its marketplace `source`). */
 export const PLUGIN_SUBDIR = 'core';
 const P = (rel) => `${PLUGIN_SUBDIR}/${rel}`;
 
 /**
- * Host ENGSYS_DIR files that run outside the plugin cache (engsys#88): the identity shim, the fleet
- * kit entry points, and the supervisor script. Checked against the same release tree when --engsys-dir
- * is given.
+ * Host ENGSYS_DIR code that runs outside the plugin cache (engsys#88): the fleet kit, which holds the
+ * identity shim, git-env.sh, the launcher wrapper and the verifier itself, and the shared libraries
+ * it loads. Whole trees, not a hand-picked list: every regular file under each tree must be a blob of
+ * the release with the same content, every release file under it must be on disk, and any symlink is
+ * `not-a-file`. Checked against the same release tree when --engsys-dir is given.
  */
+export const ENGSYS_HOST_TREES = ['core/fleet', 'core/lib'];
+/** Single host files outside those trees that the kit runs from ENGSYS_DIR. */
+export const ENGSYS_HOST_FILES = [
+  'core/skills/agent-sessions/scripts/fleet-supervisor.sh',
+  'core/skills/agent-sessions/scripts/launch-agent-sessions.sh',
+];
+/** Back-compat name: the single files plus the trees' entry points callers used to list. */
 export const ENGSYS_HOST_PATHS = [
   'core/fleet/identity/bin/gh',
+  'core/fleet/identity/git-env.sh',
   'core/fleet/verify.sh',
   'core/fleet/lib/verify-wrappers.mjs',
   'core/fleet/launch.sh',
   'core/fleet/supervise.sh',
   'core/fleet/lib/fleet-env.sh',
   'core/fleet/bin/fleet',
-  'core/skills/agent-sessions/scripts/fleet-supervisor.sh',
+  ...ENGSYS_HOST_FILES,
 ];
 
 /** Settings env keys that can hijack hook execution or singleton fencing (engsys#96 M3). */
@@ -80,11 +99,19 @@ export const DANGEROUS_SETTINGS_ENV_KEYS = [
   'PATH',
   'NODE_OPTIONS',
   'CLAUDE_PLUGIN_ROOT',
+  'CLAUDE_CONFIG_DIR',
   'ENGSYS_SINGLETON_ROLE',
   'GITHUB_API_URL',
   'ENGSYS_ALLOW_CUSTOM_GITHUB_API_URL',
   'GH_HOST',
 ];
+/**
+ * Every settings `env` key in these families is protected: the kit's own switches (ENGSYS_, FLEET_,
+ * HARNESS*), other harnesses' plugin roots and homes (COPILOT_, AGY_), the Node runtime (NODE_), the
+ * plugin and config roots, PATH, and the GitHub identity / endpoint (GH_, GITHUB_).
+ */
+export const DANGEROUS_SETTINGS_ENV_RE = /^(ENGSYS_|FLEET_|HARNESS|COPILOT_|AGY_|NODE_|CLAUDE_PLUGIN_ROOT|CLAUDE_CONFIG_DIR|PATH$|GH_|GITHUB_)/;
+export const isProtectedEnvKey = (k) => DANGEROUS_SETTINGS_ENV_KEYS.includes(k) || DANGEROUS_SETTINGS_ENV_RE.test(k);
 
 /** Claude Code's PID-marker directory at the top of an install root: written by Claude Code, never loaded. */
 export const IN_USE = '.in_use';
@@ -132,77 +159,116 @@ export function localState(roots) {
 }
 
 /**
- * Scan the protected host kit paths under engsysDir (engsys#88).
- * → { [repoPath]: sha | 'missing' | 'not-a-file' }. Any symlink along the path (including engsysDir
- * itself) is 'not-a-file'.
+ * lstat each component of <engsysDir>/<rel> (engsysDir included). → 'missing' | 'not-a-file' |
+ * 'dir' | 'file': a symlink anywhere along the path is 'not-a-file' (it could be repointed after the
+ * check).
+ */
+function hostPathKind(engsysDir, rel) {
+  let cur = engsysDir;
+  const parts = rel ? rel.split('/') : [];
+  for (let i = -1; i < parts.length; i++) {
+    if (i >= 0) cur = path.join(cur, parts[i]);
+    let st;
+    try { st = fs.lstatSync(cur); } catch (e) {
+      if (e && e.code === 'ENOENT') return 'missing';
+      throw e;
+    }
+    if (st.isSymbolicLink()) return 'not-a-file';
+    if (i < parts.length - 1 && !st.isDirectory()) return 'not-a-file';
+    if (i === parts.length - 1) return st.isDirectory() ? 'dir' : st.isFile() ? 'file' : 'not-a-file';
+  }
+  return 'dir';
+}
+
+/**
+ * Scan the protected host kit under engsysDir (engsys#88): every file of ENGSYS_HOST_TREES and each
+ * of ENGSYS_HOST_FILES. → { [repoPath]: sha | 'missing' | 'not-a-file' }. A tree that is absent is
+ * recorded as `<tree>/` 'missing' (compareHost then lists the release files it lacks); a symlinked
+ * tree or path component is 'not-a-file'. .DS_Store is skipped, nothing else.
  */
 export function scanHost(engsysDir) {
   const out = {};
-  let rootSt = null;
-  try {
-    rootSt = fs.lstatSync(engsysDir);
-  } catch (e) {
-    if (e && e.code === 'ENOENT') {
-      for (const rel of ENGSYS_HOST_PATHS) out[rel] = 'missing';
-      return out;
-    }
-    throw e;
-  }
-  if (rootSt.isSymbolicLink() || !rootSt.isDirectory()) {
-    for (const rel of ENGSYS_HOST_PATHS) out[rel] = 'not-a-file';
-    return out;
-  }
-  for (const rel of ENGSYS_HOST_PATHS) {
-    const parts = rel.split('/');
-    let cur = engsysDir;
-    let state = null;
-    for (let i = 0; i < parts.length; i++) {
-      cur = path.join(cur, parts[i]);
-      let st;
-      try {
-        st = fs.lstatSync(cur);
-      } catch (e) {
-        if (e && e.code === 'ENOENT') state = 'missing';
-        else throw e;
-        break;
+  for (const tree of ENGSYS_HOST_TREES) {
+    const kind = hostPathKind(engsysDir, tree);
+    if (kind === 'missing') { out[`${tree}/`] = 'missing'; continue; }
+    if (kind !== 'dir') { out[`${tree}/`] = 'not-a-file'; continue; }
+    const visit = (absDir, relDir) => {
+      for (const e of fs.readdirSync(absDir, { withFileTypes: true })) {
+        if (e.name === '.DS_Store') continue;
+        const abs = path.join(absDir, e.name);
+        const rel = `${relDir}/${e.name}`;
+        if (e.isDirectory()) visit(abs, rel);
+        else if (e.isFile()) out[rel] = blobSha(fs.readFileSync(abs));
+        else out[rel] = 'not-a-file';
       }
-      if (st.isSymbolicLink()) { state = 'not-a-file'; break; }
-      if (i < parts.length - 1 && !st.isDirectory()) { state = 'not-a-file'; break; }
-      if (i === parts.length - 1 && !st.isFile()) { state = 'not-a-file'; break; }
-    }
-    out[rel] = state ?? blobSha(fs.readFileSync(cur));
+    };
+    visit(path.join(engsysDir, tree), tree);
+  }
+  for (const rel of ENGSYS_HOST_FILES) {
+    const kind = hostPathKind(engsysDir, rel);
+    out[rel] = kind === 'file' ? blobSha(fs.readFileSync(path.join(engsysDir, rel))) : kind === 'dir' ? 'not-a-file' : kind;
   }
   return out;
 }
 
 /**
  * Compare scanHost(engsysDir) with the release tree (engsys#88).
- * → [{ root, path, absPath, kind, have }]
+ * → [{ root, path, absPath, kind, have }]: modified | missing (in the release, not on disk) |
+ * unexpected (on disk under a protected tree, not in the release) | not-a-file | missing-in-release
+ * (a protected single file the release doesn't have).
  */
 export function compareHost(tree, hostState, engsysDir) {
   const diffs = [];
+  const push = (p, kind, have) => diffs.push({ root: engsysDir, path: p, absPath: path.join(engsysDir, p), kind, have });
+  for (const t of ENGSYS_HOST_TREES) {
+    const marker = hostState[`${t}/`];
+    if (marker === 'not-a-file') { push(`${t}/`, 'not-a-file', marker); continue; }
+    for (const p of tree.keys()) {
+      if (p.startsWith(`${t}/`) && !(p in hostState)) push(p, 'missing', '-');
+    }
+  }
   for (const [p, have] of Object.entries(hostState)) {
+    if (p.endsWith('/')) continue;
     const want = tree.get(p) ?? null;
-    const absPath = path.join(engsysDir, p);
-    if (want === null) diffs.push({ root: engsysDir, path: p, absPath, kind: 'missing-in-release', have });
-    else if (have === 'missing') diffs.push({ root: engsysDir, path: p, absPath, kind: 'missing', have: '-' });
-    else if (have === 'not-a-file') diffs.push({ root: engsysDir, path: p, absPath, kind: 'not-a-file', have });
-    else if (want !== have) diffs.push({ root: engsysDir, path: p, absPath, kind: 'modified', have });
+    const inTree = ENGSYS_HOST_TREES.some((t) => p.startsWith(`${t}/`));
+    if (have === 'missing') { if (want !== null || !inTree) push(p, 'missing', '-'); }
+    else if (have === 'not-a-file') push(p, 'not-a-file', have);
+    else if (want === null) push(p, inTree ? 'unexpected' : 'missing-in-release', have);
+    else if (want !== have) push(p, 'modified', have);
   }
   return diffs;
+}
+
+/** Parse VERIFY_ALLOWED_USER_PLUGINS: space-separated name@marketplace. → Set (invalid entries dropped). */
+export function parseAllowedPlugins(text) {
+  return new Set(String(text || '').split(/\s+/).filter((t) => ID_RE.test(t)));
 }
 
 /**
  * Check Claude Code settings files for hook/env/plugin overrides or pin drift (engsys#96 M3).
  * Inspects:
- *   - <projectDir>/.claude/settings.json (disableAllHooks, hooks, protected env, and optional blob SHA match vs origin)
- *   - <projectDir>/.claude/settings.local.json
- *   - <userSettingsDir>/settings.json and <userSettingsDir>/settings.local.json
+ *   - <projectDir>/.claude/settings.json: disableAllHooks, protected env keys; its hooks count as
+ *     verified only when projectVerified (verifyProjectTrust compared the whole .claude/ tree and every
+ *     hook target with the reviewed commit) or its blob matches pinSettingsSha;
+ *   - <projectDir>/.claude/settings.local.json;
+ *   - <userSettingsDir>/settings.json and settings.local.json (the fleet's CLAUDE_CONFIG_DIR, else
+ *     ~/.claude). A user-scope plugin the project doesn't enable is a mismatch unless it is in
+ *     allowedUserPlugins (VERIFY_ALLOWED_USER_PLUGINS), which reports it as `allowed` in info instead:
+ *     its hooks still run in fleet sessions, so allowing one is an operator decision.
+ * → { problems: [...], info: [...] }
  */
-export function checkSettings({ projectDir, userSettingsDir = '', pinSettingsSha = '' }) {
+export function checkSettingsDetailed({ projectDir, userSettingsDir = '', pinSettingsSha = '', projectVerified = false, allowedUserPlugins = new Set() }) {
   const problems = [];
+  const info = [];
+  const allowed = allowedUserPlugins instanceof Set ? allowedUserPlugins : parseAllowedPlugins(allowedUserPlugins);
+  const envProblems = (f, cfg) => {
+    if (cfg.env && typeof cfg.env === 'object' && !Array.isArray(cfg.env)) {
+      for (const k of Object.keys(cfg.env).sort()) {
+        if (isProtectedEnvKey(k)) problems.push(`settings   ${f} overrides protected env ${k}`);
+      }
+    }
+  };
   const pinFile = path.join(projectDir, '.claude', 'settings.json');
-  let pinCfg = null;
   let pinEnabled = new Set();
   if (fs.existsSync(pinFile)) {
     let st;
@@ -218,23 +284,17 @@ export function checkSettings({ projectDir, userSettingsDir = '', pinSettingsSha
         }
       }
       try {
-        pinCfg = JSON.parse(raw.toString('utf8'));
+        const pinCfg = JSON.parse(raw.toString('utf8'));
         if (!pinCfg || typeof pinCfg !== 'object' || Array.isArray(pinCfg)) {
           problems.push(`settings   ${pinFile} is not a JSON object`);
         } else {
           if (pinCfg.disableAllHooks === true) {
             problems.push(`settings   ${pinFile} sets disableAllHooks: true`);
           }
-          if (!pinSettingsSha && pinCfg.hooks !== undefined) {
+          if (!pinSettingsSha && !projectVerified && pinCfg.hooks !== undefined) {
             problems.push(`settings   ${pinFile} defines hooks (unverified against origin)`);
           }
-          if (pinCfg.env && typeof pinCfg.env === 'object' && !Array.isArray(pinCfg.env)) {
-            for (const k of DANGEROUS_SETTINGS_ENV_KEYS) {
-              if (Object.prototype.hasOwnProperty.call(pinCfg.env, k)) {
-                problems.push(`settings   ${pinFile} overrides protected env ${k}`);
-              }
-            }
-          }
+          envProblems(pinFile, pinCfg);
           pinEnabled = new Set(
             pinCfg.enabledPlugins && typeof pinCfg.enabledPlugins === 'object' && !Array.isArray(pinCfg.enabledPlugins)
               ? Object.entries(pinCfg.enabledPlugins)
@@ -251,14 +311,14 @@ export function checkSettings({ projectDir, userSettingsDir = '', pinSettingsSha
     problems.push(`settings   ${pinFile} is missing (expected ${pinSettingsSha})`);
   }
 
-  const overlayFiles = [path.join(projectDir, '.claude', 'settings.local.json')];
+  const overlayFiles = [{ f: path.join(projectDir, '.claude', 'settings.local.json'), user: false }];
   if (userSettingsDir) {
     overlayFiles.push(
-      path.join(userSettingsDir, 'settings.json'),
-      path.join(userSettingsDir, 'settings.local.json'),
+      { f: path.join(userSettingsDir, 'settings.json'), user: true },
+      { f: path.join(userSettingsDir, 'settings.local.json'), user: true },
     );
   }
-  for (const f of overlayFiles) {
+  for (const { f, user } of overlayFiles) {
     let st;
     try { st = fs.lstatSync(f); } catch (e) {
       if (e && e.code === 'ENOENT') continue;
@@ -289,24 +349,312 @@ export function checkSettings({ projectDir, userSettingsDir = '', pinSettingsSha
     if (cfg.hooks !== undefined && f.endsWith('.local.json')) {
       problems.push(`settings   ${f} defines hooks`);
     }
-    if (cfg.env && typeof cfg.env === 'object' && !Array.isArray(cfg.env)) {
-      for (const k of DANGEROUS_SETTINGS_ENV_KEYS) {
-        if (Object.prototype.hasOwnProperty.call(cfg.env, k)) {
-          problems.push(`settings   ${f} overrides protected env ${k}`);
-        }
-      }
-    }
+    envProblems(f, cfg);
     if (cfg.enabledPlugins && typeof cfg.enabledPlugins === 'object' && !Array.isArray(cfg.enabledPlugins)) {
       for (const [plugin, enabled] of Object.entries(cfg.enabledPlugins)) {
         if (enabled === true && !pinEnabled.has(plugin)) {
-          problems.push(`settings   ${f} enables unpinned plugin ${plugin}`);
+          if (user && allowed.has(plugin)) info.push(`allowed    ${f} enables user-scope plugin ${plugin} (VERIFY_ALLOWED_USER_PLUGINS)`);
+          else problems.push(`settings   ${f} enables unpinned plugin ${plugin}`);
         } else if (enabled === false && pinEnabled.has(plugin)) {
           problems.push(`settings   ${f} disables pinned plugin ${plugin}`);
         }
       }
     }
   }
-  return problems;
+  return { problems, info };
+}
+
+/** checkSettingsDetailed's problems only (the original API). */
+export function checkSettings(opts) {
+  return checkSettingsDetailed(opts).problems;
+}
+
+// --- Project settings and hooks (the pin checkout) ------------------------------------------------
+// Claude Code loads PIN_DIR/.claude/ (settings.json, its hooks, agents, commands, skills) into every
+// fleet session, and a settings hook runs whatever script it names. The trust root is the pin repo's
+// default branch as GitHub reports it, never a local ref (origin/HEAD and refs/remotes/* can be
+// repointed by anything that runs as this user):
+//   1. the default branch's tip SHA, from the API;
+//   2. PIN_DIR's HEAD must be that tip or an ancestor of it: compare/<tip>...<HEAD> is `identical`
+//      (ok) or `behind` (ok, with a warning to run fleet sync). `ahead`, `diverged`, or a commit GitHub
+//      doesn't have is a mismatch;
+//   3. every file under .claude/ on disk must be a blob of HEAD's .claude/ tree (from the API) with the
+//      same content, and every blob of that tree must be on disk: nothing modified, missing or
+//      untracked. Claude Code's own runtime state there is skipped (PROJECT_RUNTIME_EXEMPT);
+//   4. every script a settings.json hook command names ($CLAUDE_PROJECT_DIR resolved) must lie inside
+//      the repo, be a regular file, be tracked at HEAD and match it.
+
+/** Paths under .claude/ that Claude Code itself writes and never loads as configuration. */
+export const PROJECT_RUNTIME_EXEMPT = {
+  files: ['.claude/settings.local.json', '.claude/scheduled_tasks.lock'],
+  dirs: ['.claude/worktrees/'],
+};
+/** Interpreters and devices a hook command may name outside the repo. */
+const SYSTEM_PATH_RE = /^\/(dev\/null$|bin\/|sbin\/|usr\/bin\/|usr\/sbin\/)/;
+
+/** Split a shell command into words: quotes and backslashes removed, nothing expanded. */
+export function shellWords(cmd) {
+  const words = [];
+  let cur = '', inWord = false, q = '';
+  const s = String(cmd ?? '');
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (q === "'") { if (c === "'") q = ''; else cur += c; continue; }
+    if (q === '"') {
+      if (c === '"') q = '';
+      else if (c === '\\' && i + 1 < s.length && '"\\$`'.includes(s[i + 1])) cur += s[++i];
+      else cur += c;
+      continue;
+    }
+    if (c === "'" || c === '"') { q = c; inWord = true; continue; }
+    if (c === '\\' && i + 1 < s.length) { cur += s[++i]; inWord = true; continue; }
+    if (/\s/.test(c) || ';|&()<>'.includes(c)) {
+      if (inWord) { words.push(cur); cur = ''; inWord = false; }
+      continue;
+    }
+    cur += c; inWord = true;
+  }
+  if (inWord) words.push(cur);
+  return words;
+}
+
+/** Every `type: command` hook command in a settings object. */
+export function hookCommands(cfg) {
+  const out = [];
+  const hooks = cfg && typeof cfg === 'object' ? cfg.hooks : null;
+  if (!hooks || typeof hooks !== 'object') return out;
+  for (const groups of Object.values(hooks)) {
+    if (!Array.isArray(groups)) continue;
+    for (const g of groups) {
+      for (const h of Array.isArray(g?.hooks) ? g.hooks : []) {
+        if (h && typeof h.command === 'string') out.push(h.command);
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * The repo files a hook command names. → { targets: [repo-relative posix path], problems: [] }.
+ * A word with a `/` is a path once $CLAUDE_PROJECT_DIR is resolved: it must stay inside projectDir
+ * (system interpreters and /dev/null aside). Any other expansion left in a path can't be verified and
+ * is a problem. A word that is itself a command line (bash -c "...") is split again.
+ */
+export function hookTargets(command, projectDir, depth = 0) {
+  const targets = [];
+  const problems = [];
+  const root = path.resolve(projectDir);
+  for (let w of shellWords(command)) {
+    w = w.replace(/\$\{CLAUDE_PROJECT_DIR\}|\$CLAUDE_PROJECT_DIR(?![A-Za-z0-9_])/g, root);
+    if (/[\s;|&]/.test(w) && depth < 2) {
+      const sub = hookTargets(w, projectDir, depth + 1);
+      targets.push(...sub.targets); problems.push(...sub.problems);
+      continue;
+    }
+    if (!w.includes('/')) continue;
+    if (/[$`]/.test(w)) { problems.push(`hook       settings.json hook command names a path that can't be resolved: ${w}`); continue; }
+    const abs = path.resolve(root, w);
+    if (SYSTEM_PATH_RE.test(abs)) continue;
+    const rel = path.relative(root, abs);
+    if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) { problems.push(`hook       settings.json hook command runs ${abs}, outside the repo`); continue; }
+    targets.push(rel.split(path.sep).join('/'));
+  }
+  return { targets: [...new Set(targets)], problems };
+}
+
+function isExempt(rel) {
+  return PROJECT_RUNTIME_EXEMPT.files.includes(rel) || PROJECT_RUNTIME_EXEMPT.dirs.some((d) => rel.startsWith(d));
+}
+
+/**
+ * What the pin checkout has on disk: HEAD, every file under .claude/ (exempt paths aside), and each
+ * hook target. → { head, files: {rel: sha|'not-a-file'}, targets: {rel: sha|'missing'|'not-a-file'|'outside'}, problems }
+ */
+export function projectLocalState(projectDir, { git = hermeticGit } = {}) {
+  const problems = [];
+  const root = path.resolve(projectDir);
+  let head = '';
+  try { head = git(root, ['--no-replace-objects', 'rev-parse', '--verify', '-q', 'HEAD^{commit}']).trim(); } catch { head = ''; }
+  if (!/^[0-9a-f]{40}$/.test(head)) throw new Unverified(`can't read HEAD of the pin checkout ${root}`);
+  const files = {};
+  const links = {}; // a symlink under .claude/ → the repo path it points at, or 'outside'
+  const linked = {}; // the files under each such target: {rel: sha | 'not-a-file' | 'missing'}
+  const claudeDir = path.join(root, '.claude');
+  const realRootEarly = (() => { try { return fs.realpathSync(root); } catch { return root; } })();
+  const inRepo = (abs) => {
+    let real = abs;
+    try { real = fs.realpathSync(abs); } catch { /* lexical */ }
+    const r = path.relative(realRootEarly, real);
+    return r && !r.startsWith('..') && !path.isAbsolute(r) ? r.split(path.sep).join('/') : null;
+  };
+  // Files under a directory, no symlinks followed: what a symlinked .claude/ entry brings in.
+  const walk = (abs, rel, out) => {
+    let st2 = null;
+    try { st2 = fs.lstatSync(abs); } catch { st2 = null; }
+    if (!st2) { out[rel] = 'missing'; return; }
+    if (st2.isSymbolicLink()) { out[rel] = 'not-a-file'; return; }
+    if (st2.isFile()) { out[rel] = blobSha(fs.readFileSync(abs)); return; }
+    if (!st2.isDirectory()) { out[rel] = 'not-a-file'; return; }
+    for (const e of fs.readdirSync(abs)) { if (e !== '.DS_Store') walk(path.join(abs, e), `${rel}/${e}`, out); }
+  };
+  let st = null;
+  try { st = fs.lstatSync(claudeDir); } catch { st = null; }
+  if (st && (st.isSymbolicLink() || !st.isDirectory())) files['.claude/'] = 'not-a-file';
+  else if (st) {
+    const visit = (absDir, relDir) => {
+      for (const e of fs.readdirSync(absDir, { withFileTypes: true })) {
+        if (e.name === '.DS_Store') continue;
+        const rel = `${relDir}/${e.name}`;
+        const abs = path.join(absDir, e.name);
+        if (e.isDirectory()) { if (!isExempt(`${rel}/`)) visit(abs, rel); }
+        else if (isExempt(rel)) continue;
+        else if (e.isFile()) files[rel] = blobSha(fs.readFileSync(abs));
+        else if (e.isSymbolicLink()) {
+          // A tracked symlink (git stores its target as the blob): compared with HEAD like any file,
+          // and what it points at must be in the repo and match HEAD too.
+          files[rel] = `symlink:${blobSha(fs.readlinkSync(abs))}`;
+          const target = inRepo(path.resolve(absDir, fs.readlinkSync(abs)));
+          if (!target) links[rel] = 'outside';
+          else {
+            links[rel] = target;
+            if (!target.startsWith('.claude/')) walk(path.join(root, target), target, linked);
+          }
+        } else files[rel] = 'not-a-file';
+      }
+    };
+    visit(claudeDir, '.claude');
+  }
+  const targets = {};
+  let cfg = null;
+  try { cfg = JSON.parse(fs.readFileSync(path.join(claudeDir, 'settings.json'), 'utf8')); } catch { cfg = null; }
+  const realRoot = (() => { try { return fs.realpathSync(root); } catch { return root; } })();
+  for (const cmd of hookCommands(cfg)) {
+    const t = hookTargets(cmd, root);
+    problems.push(...t.problems);
+    for (const rel of t.targets) {
+      const abs = path.join(root, rel);
+      let s2 = null;
+      try { s2 = fs.lstatSync(abs); } catch { s2 = null; }
+      if (!s2) { targets[rel] = 'missing'; continue; }
+      if (s2.isSymbolicLink() || !s2.isFile()) { targets[rel] = 'not-a-file'; continue; }
+      let real = abs;
+      try { real = fs.realpathSync(abs); } catch { /* keep */ }
+      const r = path.relative(realRoot, real);
+      if (!r || r.startsWith('..') || path.isAbsolute(r)) { targets[rel] = 'outside'; continue; }
+      targets[rel] = blobSha(fs.readFileSync(abs));
+    }
+  }
+  return { head, files, links, linked, targets, problems: [...new Set(problems)] };
+}
+
+/**
+ * Compare projectLocalState() with GitHub. api(endpoint) → Promise<json>, rejecting with an
+ * Unverified whose .httpStatus is set for an HTTP error. → { problems, warnings, tip, defaultBranch }
+ */
+export async function verifyProjectTrust(local, { repo, api }) {
+  const problems = [...local.problems];
+  const warnings = [];
+  const defaultBranch = (await api(`repos/${repo}`)).default_branch;
+  if (!defaultBranch) throw new Unverified(`can't read the default branch of ${repo}`);
+  const ref = await api(`repos/${repo}/git/ref/heads/${encodeURIComponent(defaultBranch)}`);
+  const tip = ref?.object?.sha;
+  if (!/^[0-9a-f]{40}$/.test(tip || '')) throw new Unverified(`can't read the tip of ${repo} ${defaultBranch}`);
+  let status = '';
+  if (tip === local.head) status = 'identical';
+  else {
+    try { status = (await api(`repos/${repo}/compare/${tip}...${local.head}?per_page=1`)).status || ''; } catch (e) {
+      if (e instanceof Unverified && (e.httpStatus === 404 || e.httpStatus === 422)) status = 'unknown-commit';
+      else throw e;
+    }
+  }
+  if (status === 'behind') warnings.push(`pin checkout behind ${defaultBranch}: HEAD ${local.head.slice(0, 12)} is an ancestor of ${tip.slice(0, 12)}; run fleet sync`);
+  else if (status !== 'identical') {
+    problems.push(`pin-head   ${repo} checkout HEAD ${local.head} is not ${defaultBranch} or an ancestor of it (${tip.slice(0, 12)}; compare: ${status || 'no status'})`);
+    return { problems, warnings, tip, defaultBranch };
+  }
+  // HEAD's .claude/ tree, from GitHub.
+  const commit = await api(`repos/${repo}/git/commits/${local.head}`);
+  const top = parseTreeEntries(await api(`repos/${repo}/git/trees/${commit?.tree?.sha}`));
+  const claudeEntry = top.find((e) => e.path === '.claude' && e.type === 'tree');
+  const want = new Map();
+  if (claudeEntry) {
+    for (const e of parseTreeEntries(await api(`repos/${repo}/git/trees/${claudeEntry.sha}?recursive=1`))) {
+      if (e.type === 'blob' && !e.path.endsWith('.DS_Store')) want.set(`.claude/${e.path}`, { sha: e.sha, mode: e.mode });
+    }
+  }
+  if (local.files['.claude/'] === 'not-a-file') problems.push('claude-dir .claude is not a directory');
+  for (const [rel, w] of want) {
+    if (isExempt(rel)) continue;
+    if (!(rel in local.files)) problems.push(`missing    ${rel} (tracked at HEAD)`);
+  }
+  for (const [rel, have] of Object.entries(local.files)) {
+    if (rel === '.claude/') continue;
+    const w = want.get(rel);
+    if (have === 'not-a-file') problems.push(`not-a-file ${rel}`);
+    else if (!w) problems.push(`untracked  ${rel} (not in HEAD)`);
+    else if (have.startsWith('symlink:')) {
+      if (w.mode !== '120000' || `symlink:${w.sha}` !== have) problems.push(`modified   ${rel} (a symlink that differs from HEAD)`);
+    } else if (w.mode === '120000') problems.push(`not-a-file ${rel} (a symlink at HEAD)`);
+    else if (w.sha !== have) problems.push(`modified   ${rel} ${have}`);
+  }
+  // What tracked symlinks under .claude/ point at: inside the repo, and matching HEAD there too.
+  const linkRoots = [...new Set(Object.values(local.links || {}).filter((t) => t !== 'outside' && !t.startsWith('.claude/')))];
+  for (const [rel, t] of Object.entries(local.links || {})) {
+    if (t === 'outside') problems.push(`not-a-file ${rel} (a symlink that points outside the repo)`);
+  }
+  for (const t of linkRoots) {
+    const wantT = await treeFilesAt(api, repo, commit?.tree?.sha, t);
+    const haveT = Object.fromEntries(Object.entries(local.linked || {}).filter(([p]) => p === t || p.startsWith(`${t}/`)));
+    for (const [p, w] of wantT) if (!(p in haveT)) problems.push(`missing    ${p} (tracked at HEAD, linked from .claude/)`);
+    for (const [p, have] of Object.entries(haveT)) {
+      const w = wantT.get(p);
+      if (have === 'missing') { if (!wantT.size) problems.push(`missing    ${p} (linked from .claude/, not at HEAD)`); }
+      else if (have === 'not-a-file') problems.push(`not-a-file ${p} (linked from .claude/)`);
+      else if (!w) problems.push(`untracked  ${p} (linked from .claude/, not in HEAD)`);
+      else if (w.mode === '120000' || w.sha !== have) problems.push(`modified   ${p} ${have} (linked from .claude/)`);
+    }
+  }
+  for (const [rel, have] of Object.entries(local.targets)) {
+    if (have === 'missing') { problems.push(`hook       settings.json hook target ${rel} is missing`); continue; }
+    if (have === 'not-a-file') { problems.push(`hook       settings.json hook target ${rel} is not a regular file`); continue; }
+    if (have === 'outside') { problems.push(`hook       settings.json hook target ${rel} resolves outside the repo`); continue; }
+    let w = want.get(rel);
+    if (!w && !rel.startsWith('.claude/')) {
+      try {
+        const c = await api(`repos/${repo}/contents/${rel.split('/').map(encodeURIComponent).join('/')}?ref=${local.head}`);
+        if (c && !Array.isArray(c) && c.type === 'file' && typeof c.sha === 'string') w = { sha: c.sha };
+      } catch (e) {
+        if (!(e instanceof Unverified && e.httpStatus === 404)) throw e;
+      }
+    }
+    if (!w) problems.push(`hook       settings.json hook target ${rel} is not tracked at HEAD`);
+    else if (w.sha !== have) problems.push(`hook       settings.json hook target ${rel} differs from HEAD (${have})`);
+  }
+  return { problems: [...new Set(problems)], warnings, tip, defaultBranch };
+}
+
+/** Every blob at or under repoPath in a commit tree, from the API. → Map<repo path, {sha, mode}> (empty: not there) */
+async function treeFilesAt(api, repo, rootTree, repoPath) {
+  const out = new Map();
+  const parts = repoPath.split('/');
+  let tree = rootTree;
+  for (let i = 0; i < parts.length; i++) {
+    const e = parseTreeEntries(await api(`repos/${repo}/git/trees/${tree}`)).find((x) => x.path === parts[i]);
+    if (!e) return out;
+    if (i === parts.length - 1 && e.type === 'blob') { out.set(repoPath, { sha: e.sha, mode: e.mode }); return out; }
+    if (e.type !== 'tree') return out;
+    tree = e.sha;
+  }
+  for (const e of parseTreeEntries(await api(`repos/${repo}/git/trees/${tree}?recursive=1`))) {
+    if (e.type === 'blob' && !e.path.endsWith('.DS_Store')) out.set(`${repoPath}/${e.path}`, { sha: e.sha, mode: e.mode });
+  }
+  return out;
+}
+
+function parseTreeEntries(t) {
+  if (!t || !Array.isArray(t.tree)) throw new Unverified(`GitHub returned no tree${t && t.message ? `: ${t.message}` : ''}`);
+  if (t.truncated) throw new Unverified('GitHub truncated the tree');
+  return t.tree.filter((e) => e && typeof e.path === 'string' && typeof e.sha === 'string');
 }
 
 /**
@@ -463,7 +811,10 @@ function ghJson(gh, endpoint, timeoutMs) {
     execFile(gh, ['api', endpoint], { timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) {
         const why = String(stderr || err.message || err).trim().split('\n').pop().slice(0, 200);
-        reject(new Unverified(`gh api ${endpoint} failed: ${why}`));
+        const u = new Unverified(`gh api ${endpoint} failed: ${why}`);
+        const m = /HTTP (\d{3})/.exec(String(stderr || ''));
+        if (m) u.httpStatus = Number(m[1]);
+        reject(u);
         return;
       }
       try { resolve(JSON.parse(stdout)); } catch { reject(new Unverified(`gh api ${endpoint} returned something that is not JSON`)); }
@@ -517,6 +868,8 @@ export function parseArgs(argv) {
     checkSettings: false,
     userSettingsDir: '',
     pinSettingsSha: '',
+    pinRepo: '',
+    allowedUserPlugins: '',
   };
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
@@ -535,6 +888,8 @@ export function parseArgs(argv) {
       case '--check-settings': a.checkSettings = true; break;
       case '--user-settings-dir': a.userSettingsDir = v(); a.checkSettings = true; break;
       case '--pin-settings-sha': a.pinSettingsSha = v(); a.checkSettings = true; break;
+      case '--pin-repo': a.pinRepo = v(); a.checkSettings = true; break;
+      case '--allowed-user-plugins': a.allowedUserPlugins = v(); break;
       default: throw new Error(`unknown argument: ${k}`);
     }
   }
@@ -542,6 +897,7 @@ export function parseArgs(argv) {
   if (!TAG_RE.test(a.tag)) throw new Error('--tag must be a release tag, vX.Y.Z');
   if (!ID_RE.test(a.pluginId)) throw new Error('--plugin-id must be <plugin>@<marketplace>');
   if (!a.projectDir) throw new Error('--project-dir is needed');
+  if (a.pinRepo && !REPO_RE.test(a.pinRepo)) throw new Error('--pin-repo must be owner/repo');
   if (!a.plugins) throw new Error('--plugins is needed (the output of `claude plugin list --json`, run in the project dir)');
   if (a.maxAgeMin !== null && !(Number.isFinite(a.maxAgeMin) && a.maxAgeMin >= 0)) throw new Error('--max-age-min must be a number of minutes');
   if ((a.maxAgeMin !== null) !== Boolean(a.cache)) throw new Error('--cache and --max-age-min go together');
@@ -549,19 +905,27 @@ export function parseArgs(argv) {
 }
 
 /** The CLI, with its effects injectable for tests. → exit code. */
-export async function run(argv, { fetch = fetchRelease, now = Date.now, out = (s) => process.stdout.write(s + '\n') } = {}) {
+export async function run(argv, {
+  fetch = fetchRelease,
+  projectApi = (endpoint) => ghJson('gh', endpoint, 30_000),
+  projectLocal = projectLocalState,
+  now = Date.now,
+  out = (s) => process.stdout.write(s + '\n'),
+} = {}) {
   let a;
   try { a = parseArgs(argv); } catch (e) { out(`verify: ${e.message}`); return 2; }
   const target = `${a.repo}@${a.tag}`;
   const version = a.tag.slice(1);
   const mismatch = (lines) => {
-    const sorted = [...lines].sort();
+    const sorted = [...new Set(lines)].sort();
     out(`verify: MISMATCH against ${target}, ${sorted.length} problem(s):`);
     for (const l of sorted) out(`  ${l}`);
     out(`fingerprint: ${crypto.createHash('sha1').update(sorted.join('\n')).digest('hex')}`);
     if (a.cache) { try { fs.rmSync(a.cache, { force: true }); } catch { /* best effort */ } }
     return 1;
   };
+  const infoLines = (lines) => { for (const l of lines) out(`verify: info ${l}`); };
+  const warnLines = (lines) => { for (const l of lines) out(`verify: WARNING ${l}`); };
 
   let list;
   try { list = parsePluginList(fs.readFileSync(a.plugins, 'utf8')); } catch (e) { out(`verify: not verified: can't read the plugin list (${e.message})`); return 3; }
@@ -574,15 +938,26 @@ export async function run(argv, { fetch = fetchRelease, now = Date.now, out = (s
   });
   if (sel.notInstalled) { out(`verify: not verified: ${a.pluginId} is not installed for ${a.projectDir} (run: fleet sync)`); return 3; }
   const preProblems = [...sel.problems];
-  if (a.checkSettings) {
-    preProblems.push(
-      ...checkSettings({
-        projectDir: a.projectDir,
-        userSettingsDir: a.userSettingsDir,
-        pinSettingsSha: a.pinSettingsSha,
-      }),
-    );
+  let info = [];
+  let project = null;
+  if (a.pinRepo) {
+    try { project = projectLocal(a.projectDir); } catch (e) {
+      out(`verify: not verified: ${e instanceof Unverified ? e.message : `can't read the pin checkout (${e && e.message})`}`);
+      return 3;
+    }
   }
+  if (a.checkSettings) {
+    const r = checkSettingsDetailed({
+      projectDir: a.projectDir,
+      userSettingsDir: a.userSettingsDir,
+      pinSettingsSha: a.pinSettingsSha,
+      projectVerified: Boolean(project),
+      allowedUserPlugins: parseAllowedPlugins(a.allowedUserPlugins),
+    });
+    preProblems.push(...r.problems);
+    info = r.info;
+  }
+  infoLines(info);
   if (preProblems.length) return mismatch(preProblems);
 
   let local;
@@ -592,11 +967,14 @@ export async function run(argv, { fetch = fetchRelease, now = Date.now, out = (s
     try { host = scanHost(a.engsysDir); } catch (e) { out(`verify: not verified: can't read the host kit files (${e.message})`); return 3; }
   }
   const where = sel.roots.join(', ');
+  const projectKey = project ? { repo: a.pinRepo, ...project } : null;
 
   if (a.cache) {
     const c = readCache(a.cache);
     const ageMin = c ? (now() - Number(c.verifiedAt)) / 60_000 : Infinity;
-    if (c && c.result === 'ok' && c.repo === a.repo && c.tag === a.tag && sameJson(c.local, local) && sameJson(c.host ?? null, host) && ageMin >= 0 && ageMin < a.maxAgeMin) {
+    if (c && c.result === 'ok' && c.repo === a.repo && c.tag === a.tag && sameJson(c.local, local) && sameJson(c.host ?? null, host)
+      && sameJson(c.project ?? null, projectKey) && sameJson(c.info ?? [], info) && ageMin >= 0 && ageMin < a.maxAgeMin) {
+      warnLines(Array.isArray(c.warnings) ? c.warnings : []);
       out(`verify: ok, ${countFiles(local)} protected files in ${where} match ${target} (unchanged since the check ${Math.floor(ageMin)}m ago)`);
       return 0;
     }
@@ -615,14 +993,25 @@ export async function run(argv, { fetch = fetchRelease, now = Date.now, out = (s
   if (host) {
     for (const d of compareHost(rel.tree, host, a.engsysDir)) problems.push(`${d.kind.padEnd(10)} ${d.absPath} ${d.have}`);
   }
+  let warnings = [];
+  if (project) {
+    let pt;
+    try { pt = await verifyProjectTrust(project, { repo: a.pinRepo, api: projectApi }); } catch (e) {
+      out(`verify: not verified against ${a.pinRepo}: ${e instanceof Unverified ? e.message : String(e && e.message || e)}`);
+      return 3;
+    }
+    problems.push(...pt.problems);
+    warnings = pt.warnings;
+  }
+  warnLines(warnings);
   if (problems.length) return mismatch(problems);
 
   if (a.cache) {
-    try { writeCache(a.cache, { repo: a.repo, tag: a.tag, local, host, result: 'ok', verifiedAt: now() }); } catch (e) {
+    try { writeCache(a.cache, { repo: a.repo, tag: a.tag, local, host, project: projectKey, info, warnings, result: 'ok', verifiedAt: now() }); } catch (e) {
       out(`verify: WARNING can't write ${a.cache} (${e.message}); the next run asks GitHub again`);
     }
   }
-  out(`verify: ok, ${countFiles(local)} protected files in ${where} match ${target} (commit ${rel.commit.slice(0, 12)}, on ${rel.defaultBranch})`);
+  out(`verify: ok, ${countFiles(local)} protected files in ${where} match ${target} (commit ${rel.commit.slice(0, 12)}, on ${rel.defaultBranch})${project ? `; ${a.pinRepo} checkout ${project.head.slice(0, 12)} and its .claude/ match GitHub` : ''}`);
   return 0;
 }
 

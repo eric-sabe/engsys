@@ -10,6 +10,13 @@
 # When ENGSYS_REF is forced (fleet.local.conf or the environment) to something other than the pin in
 # PIN_SETTINGS, it says so: a forced older tag is a way back to a weaker guard.
 #
+# Also checked (lib/verify-wrappers.mjs): the pin checkout's .claude/ tree and every script its settings
+# hooks run, against PIN_REPO's default branch on GitHub (PIN_DIR's HEAD must be that tip or behind it;
+# behind is a warning to run fleet sync), and the user-scope settings of the Claude config dir the
+# sessions use: FLEET_CLAUDE_CONFIG_DIR when fleet.conf sets it, else ~/.claude. A user-scope plugin the
+# pin repo doesn't enable is a mismatch unless VERIFY_ALLOWED_USER_PLUGINS (fleet.conf, space-separated
+# name@marketplace) lists it; a listed one is reported as `allowed`.
+#
 #   --alert          post `fleet notify --level alert` once per incident, and resolve it on the next pass:
 #                      wrapper-integrity             a mismatch (latch: .fleet/verify-wrappers.alerted, holding
 #                                                    the mismatch's fingerprint: a different mismatch alerts again)
@@ -67,6 +74,11 @@ elif [ "$alert" = 1 ] && [ -f "$FORCED_LATCH" ]; then
 fi
 
 rc=0 out="" plist=""
+# The Claude Code config dir the fleet's sessions run with: FLEET_CLAUDE_CONFIG_DIR (fleet-env.sh exports
+# it as CLAUDE_CONFIG_DIR for every fleet command and session, so `claude plugin list` below reads it
+# too), else the account's ~/.claude. Its user-scope settings and plugins load in every fleet session.
+claude_cfg="${FLEET_CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+echo "fleet verify: Claude config dir: $claude_cfg${FLEET_CLAUDE_CONFIG_DIR:+ (FLEET_CLAUDE_CONFIG_DIR)}"
 if [ -z "$repo" ] || [ -z "$ref" ]; then
   out="fleet verify: not verified: no '$ENGSYS_MARKETPLACE' marketplace with a repo and ref in $PIN_SETTINGS"; rc=3
 elif ! [[ "$ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -77,6 +89,8 @@ elif [ "${HARNESS:-claude}" = "claude" ] && ! command -v claude >/dev/null; then
   out="fleet verify: not verified: claude not found, so the installed plugin can't be located"; rc=3
 elif ! [ -d "$PIN_DIR" ]; then
   out="fleet verify: not verified: PIN_DIR not found: $PIN_DIR"; rc=3
+elif [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] && ! [ -d "$FLEET_CLAUDE_CONFIG_DIR" ]; then
+  out="fleet verify: not verified: FLEET_CLAUDE_CONFIG_DIR not found: $FLEET_CLAUDE_CONFIG_DIR (see the fleet guide: a separate Claude config dir)"; rc=3
 else
   plist="$(mktemp "$FLEET_STATE/plugin-list.XXXXXX")"
   if [ "${HARNESS:-claude}" = "copilot" ]; then
@@ -101,18 +115,17 @@ else
     fi
   fi
   if [ "$rc" = 0 ]; then
-    args=(--repo "$repo" --tag "$ref" --plugin-id "engsys@$ENGSYS_MARKETPLACE" --project-dir "$PIN_DIR" --plugins "$plist" --harness "${HARNESS:-claude}" --check-settings --user-settings-dir "$HOME/.claude")
+    args=(--repo "$repo" --tag "$ref" --plugin-id "engsys@$ENGSYS_MARKETPLACE" --project-dir "$PIN_DIR" --plugins "$plist" --harness "${HARNESS:-claude}" --check-settings --user-settings-dir "$claude_cfg")
+    [ -z "${VERIFY_ALLOWED_USER_PLUGINS:-}" ] || args+=(--allowed-user-plugins "$VERIFY_ALLOWED_USER_PLUGINS")
     if [ -e "$ENGSYS_DIR" ] || [ -L "$ENGSYS_DIR" ]; then
       args+=(--engsys-dir "$ENGSYS_DIR")
     fi
-    if git -C "$PIN_DIR" rev-parse --git-dir >/dev/null 2>&1; then
-      pin_origin_ref="$(git -C "$PIN_DIR" symbolic-ref --short -q refs/remotes/origin/HEAD 2>/dev/null || true)"
-      [ -n "$pin_origin_ref" ] || { git -C "$PIN_DIR" rev-parse --verify -q refs/remotes/origin/main >/dev/null 2>&1 && pin_origin_ref="origin/main"; }
-      [ -n "$pin_origin_ref" ] || { git -C "$PIN_DIR" rev-parse --verify -q refs/remotes/origin/master >/dev/null 2>&1 && pin_origin_ref="origin/master"; }
-      if [ -n "$pin_origin_ref" ]; then
-        pin_sha="$(git -C "$PIN_DIR" rev-parse -q --verify "refs/remotes/${pin_origin_ref}:.claude/settings.json" 2>/dev/null || true)"
-        [ -z "$pin_sha" ] || args+=(--pin-settings-sha "$pin_sha")
-      fi
+    # Project settings and hooks: checked against PIN_REPO's default branch on GitHub (never a local
+    # ref). A PIN_DIR that is not a git checkout can't be: its settings hooks are then a mismatch.
+    if [ "$(git -C "$PIN_DIR" rev-parse --is-inside-work-tree 2>/dev/null || true)" = true ]; then
+      args+=(--pin-repo "$PIN_REPO")
+    else
+      echo "fleet verify: WARNING PIN_DIR ($PIN_DIR) is not a git checkout, so its .claude/ can't be checked against $PIN_REPO; any settings hook there is a mismatch"
     fi
     [ -z "$max_age" ] || args+=(--cache "$FLEET_STATE/verify-wrappers.json" --max-age-min "$max_age")
     out="$(node "$FLEET_KIT_DIR/lib/verify-wrappers.mjs" "${args[@]}" 2>&1)" || rc=$?
@@ -138,7 +151,7 @@ if [ "$alert" = 1 ]; then
       fp="$(sed -n 's/^fingerprint: //p' <<<"$out" | tail -1)"
       if [ "$(cat "$LATCH" 2>/dev/null)" != "$fp" ]; then
         lines="$(sed -n 's/^  \(.*\)$/\1/p' <<<"$out" | head -n 8)"
-        notify --level alert --incident wrapper-integrity "Plugin check on $host: the engsys plugin that the merge and maintain monsters load does not match $repo@$ref, so it may have been changed on this host. Merge and maintain sessions will not be launched or relaunched here until it matches. Running sessions were left as they are: please check them and stop any you don't trust, then reinstall the plugin (from a directory outside any project: claude plugin uninstall --scope user engsys@$ENGSYS_MARKETPLACE, delete its cache directory, then fleet sync). What differs:
+        notify --level alert --incident wrapper-integrity "Plugin check on $host: what the merge and maintain monsters load does not match $repo@$ref (the engsys plugin and host kit), $PIN_REPO's default branch on GitHub (the pin checkout's .claude/ and hook scripts), or the allowed Claude settings in $claude_cfg, so it may have been changed on this host. Merge and maintain sessions will not be launched or relaunched here until it matches. Running sessions and their batons were left as they are: please check them and stop any you don't trust. Then fix what differs: for plugin files, reinstall (from a directory outside any project: claude plugin uninstall --scope user engsys@$ENGSYS_MARKETPLACE, delete its cache directory, then fleet sync); for the pin checkout, restore it to GitHub's main; for a user-scope plugin, remove it or list it in VERIFY_ALLOWED_USER_PLUGINS. What differs:
 $lines
 Details: fleet verify" && printf '%s\n' "$fp" >"$LATCH"
       fi ;;
