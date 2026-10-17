@@ -27,7 +27,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { recordHookTelemetry } from '../lib/harness-io.mjs';
+import { parseHookInput, recordHookTelemetry } from '../lib/harness-io.mjs';
 import { isMainEntry } from '../lib/is-main.mjs';
 import { isValidPointerKey, resolveCacheDir } from '../lib/memory/index-db.mjs';
 
@@ -219,6 +219,53 @@ export function extractAgentType(input) {
 	return firstString(input?.agent_type);
 }
 
+/** engsys v2.0.1 (M5, round 2 F7): in pre-agent (PreToolUse `Agent|Task`) mode, the Class B
+ * exclusion check must key off the agent ABOUT TO BE DISPATCHED (`tool_input.subagent_type`/
+ * `tool_input.agent_type`), never `input.agent_type`, which at this event is the CALLING
+ * session's own agent type. Using the caller would let a non-excluded session (e.g. the
+ * orchestrator) dispatch an excluded agent (Nyx, any `security: true` agent) and have the
+ * exclusion check pass on the wrong identity.
+ *
+ * Round 2 hardening:
+ *   - parses `tool_input` through harness-io's `parseHookInput` (passed `rawStdin`, the exact
+ *     bytes read from stdin) rather than this module re-deriving the shape itself — ONE place
+ *     normalizes toolArgs/toolCall across harnesses, and this is that place's result, not a
+ *     second guess at it;
+ *   - trims and Unicode-NFKC-normalizes the target name (a homoglyph or an added combining mark
+ *     could otherwise slip past an exact-string exclusion-set lookup downstream);
+ *   - fails closed (returns `''`) when `tool_input.subagent_type` and `tool_input.agent_type`
+ *     are BOTH present and DISAGREE — a dispatch payload asserting two different identities for
+ *     the same field is itself a signal something is wrong, not a case to silently pick a winner
+ *     on.
+ * Fails closed throughout: an unresolvable target returns `''` (empty string), which callers
+ * must treat as "unknown — exclude", never as "no agent — allow". */
+export function extractTargetAgentType(input, { rawStdin = null } = {}) {
+	// round 3 (F5): also strips Unicode `\p{Cf}` format characters (zero-width space/joiner, bidi
+	// control marks, …) — NFKC alone does not remove these, and one hiding inside an otherwise
+	// normal-looking name could survive an exact-string exclusion-set lookup downstream.
+	const normalize = (s) => (typeof s === 'string' ? s.normalize('NFKC').replace(/[\p{Cf}]/gu, '').trim() : '');
+	// round 3 (F5): the subagent_type/agent_type DISAGREEMENT check compares BARE names (the
+	// `engsys:` namespace prefix stripped) — `engsys:isabelle` vs `isabelle` is the same target
+	// under a different spelling, not a conflict to fail closed on.
+	const bare = (s) => {
+		const parts = s.split(':');
+		return parts[parts.length - 1].toLowerCase();
+	};
+	let toolInput = input?.tool_input;
+	if (typeof rawStdin === 'string' && rawStdin.trim()) {
+		try {
+			toolInput = parseHookInput(rawStdin, process.env).toolInput;
+		} catch { /* fall back to input?.tool_input above */ }
+	}
+	toolInput = toolInput ?? {};
+	const subagentType = normalize(toolInput.subagent_type);
+	const agentTypeField = normalize(toolInput.agent_type);
+	if (subagentType && agentTypeField && bare(subagentType) !== bare(agentTypeField)) {
+		return ''; // disagree (even after namespace-stripping) -> fail closed, never guess
+	}
+	return subagentType || agentTypeField || '';
+}
+
 /** No verified prompt field exists at SubagentStart (see the note above) — reads `input.prompt`
  * only in case a future payload adds one; never guesses through a nested `tool_input`. */
 export function extractPrompt(input) {
@@ -313,10 +360,10 @@ function logInjection(cwd, record) {
 export async function main({ argv = process.argv.slice(2), stdin = process.stdin, now = () => Date.now(), write = (s) => process.stdout.write(s), defaultCwd = process.cwd() } = {}) {
 	const t0 = now();
 	let input = null;
+	let rawStdin = '';
 	try {
-		let raw = '';
-		for await (const chunk of stdin) raw += chunk;
-		input = JSON.parse(raw);
+		for await (const chunk of stdin) rawStdin += chunk;
+		input = JSON.parse(rawStdin);
 	} catch {
 		input = null;
 	}
@@ -335,13 +382,14 @@ export async function main({ argv = process.argv.slice(2), stdin = process.stdin
 	// PreToolUse (`Agent|Task`) mode (#142): stash the dispatch prompt, prompt path hints, and any
 	// target worktree path under `<cacheDir>/pending-dispatch/` so the immediately following
 	// SubagentStart hook can consume it. Always fails open with `{}`.
-	if (argv[0] === 'pre-agent' || input?.hook_event_name === 'PreToolUse' || input?.hookEventName === 'preToolUse') {
+	const isPreAgent = argv[0] === 'pre-agent' || input?.hook_event_name === 'PreToolUse' || input?.hookEventName === 'preToolUse';
+	if (isPreAgent) {
 		if (input) recordPendingDispatch(input, { cwd, now });
 		recordHookTelemetry({
 			hook: 'subagent-memory-inject',
 			event: 'PreToolUse',
 			decision: 'stashed',
-			detail: `agent=${extractAgentType(input) || 'any'}`,
+			detail: `agent=${extractTargetAgentType(input, { rawStdin }) || 'unknown'}`,
 		});
 		if (!process.env.ENGSYS_HARNESS || process.env.ENGSYS_HARNESS === 'claude') {
 			write('{}');
@@ -349,7 +397,21 @@ export async function main({ argv = process.argv.slice(2), stdin = process.stdin
 		}
 	}
 
-	const agentType = extractAgentType(input);
+	// engsys v2.0.1 (M5): on a non-Claude harness, PreToolUse is the only dispatch-time hook, so a
+	// brief may be built here too. The exclusion/selection decision must be keyed on the agent
+	// ABOUT TO BE DISPATCHED (`tool_input.subagent_type`), never the calling session's own
+	// `agent_type` — see `extractTargetAgentType`. Fails CLOSED on a MISSING/EMPTY target only (no
+	// `subagent_type`/`agent_type` at all on `tool_input`): returns `{}` immediately rather than
+	// falling through with an agentType of `null`/`'any'`, which `resolveExcludedAgents`/
+	// `isClassBExcluded` would otherwise treat as "no agent to exclude" and hand Class B content
+	// to. An UNRECOGNIZED (but non-empty) target still reaches the ordinary allow-unless-excluded
+	// path below, same as any other agent name `isClassBExcluded` doesn't know — that's the
+	// existing policy, not something this fix changes.
+	const agentType = isPreAgent ? extractTargetAgentType(input, { rawStdin }) : extractAgentType(input);
+	if (isPreAgent && !agentType) {
+		write('{}');
+		return 0;
+	}
 
 	let briefText = '';
 	let logKeys = { lesson_keys: [], pointer_keys: [], bytes: 0 };
@@ -361,7 +423,13 @@ export async function main({ argv = process.argv.slice(2), stdin = process.stdin
 	let skippedBudget = false;
 	let spawnFailed = false;
 	try {
-		const pending = input ? consumePendingDispatch(input, { cwd, now }) : null;
+		// cr review (round 2): on the non-Claude pre-agent path, `consumePendingDispatch` must look
+		// up the record `recordPendingDispatch` filed under the TARGET identity (`agentType`,
+		// resolved above) — not whatever `extractAgentType(input)` (the caller, or nothing, at this
+		// event) would derive internally. Without this, the prefixes never matched and the pending
+		// dispatch (prompt, prompt paths, worktree) was silently lost on every non-Claude harness.
+		const lookupInput = isPreAgent && input ? { ...input, agent_type: agentType } : input;
+		const pending = lookupInput ? consumePendingDispatch(lookupInput, { cwd, now }) : null;
 		const prompt = extractPrompt(input) || pending?.prompt || '';
 		let diffCwd = cwd;
 		if (pending?.worktree) {

@@ -14,6 +14,7 @@ import {
   mergeEvents,
   compactEvents,
   createMemoryRefStore,
+  verifyMemoryRefTip,
 } from './ref-store.mjs';
 
 describe('ref-store (#130)', () => {
@@ -277,7 +278,7 @@ describe('ref-store (#130)', () => {
     }
   });
 
-  it('fetchMemoryRefs invokes git fetch with +refs/engsys/memory/*:refs/engsys/memory/*', () => {
+  it('fetchMemoryRefs invokes git fetch with refs/engsys/memory/*:refs/engsys/memory/* (engsys v2.0.1 M4: no forced "+" refspec)', () => {
     const calls = [];
     const res = fetchMemoryRefs('/repo/root', {
       exec: (cmd, args) => {
@@ -297,6 +298,10 @@ describe('ref-store (#130)', () => {
       'origin',
       MEMORY_FETCH_REFSPEC,
     ]);
+    // The regression this guards: MEMORY_FETCH_REFSPEC must not start with '+' (forced), which
+    // would make `git fetch` silently clobber a local ref tip instead of failing non-fast-forward.
+    assert.equal(MEMORY_FETCH_REFSPEC.startsWith('+'), false);
+    assert.equal(MEMORY_FETCH_REFSPEC, 'refs/engsys/memory/*:refs/engsys/memory/*');
   });
 
   it('mergeEvents and compactEvents unit behavior', () => {
@@ -311,5 +316,103 @@ describe('ref-store (#130)', () => {
     assert.equal(compacted.length, 1);
     assert.equal(scanTextForSecrets('no secrets here').matched, false);
     assert.equal(scanEventForSecrets({ k: 'a', summary: 'xoxb-1234567890-abcdef' }).matched, true);
+  });
+
+  describe('verifyMemoryRefTip (engsys v2.0.1 M4) — NOT wired into any consumer; unit-tested in isolation', () => {
+    it('rejects a tip whose committer numeric ID does not match the publisher user ID', async () => {
+      const res = await verifyMemoryRefTip('/repo', {
+        sha: 'cafed00dcafed00dcafed00dcafed00dcafed00d',
+        repo: 'owner/repo',
+        publisherUserId: 999,
+        events: [{ k: 'x', path: 'docs/agent-lessons/a.md' }],
+        fetchCommitIdentity: async () => ({ committerId: 123, verified: true }),
+        resolveSha: () => 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
+        exec: () => { throw new Error('should not be called'); },
+      });
+      assert.equal(res.ok, false);
+      assert.equal(res.reason, 'untrusted_publisher');
+      assert.deepEqual(res.events, []);
+    });
+
+    it('v2.0.1 round 2 (F3): rejects a tip whose AUTHOR id matches the publisher but the COMMITTER id does not — author.id is never an alternate match', async () => {
+      const res = await verifyMemoryRefTip('/repo', {
+        sha: 'cafed00dcafed00dcafed00dcafed00dcafed00d',
+        repo: 'owner/repo',
+        publisherUserId: 999,
+        events: [{ k: 'x', path: 'docs/agent-lessons/a.md' }],
+        fetchCommitIdentity: async () => ({ authorId: 999, committerId: 1, verified: true }),
+        resolveSha: () => 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
+        exec: () => { throw new Error('should not be called'); },
+      });
+      assert.equal(res.ok, false);
+      assert.equal(res.reason, 'untrusted_publisher');
+    });
+
+    it('cr review (round 1): rejects a tip whose committer/author ID MATCHES but the commit has no verified signature — author.id/committer.id alone are derived from the (self-settable) commit email, not proof of the publisher', async () => {
+      const res = await verifyMemoryRefTip('/repo', {
+        sha: 'cafed00dcafed00dcafed00dcafed00dcafed00d',
+        repo: 'owner/repo',
+        publisherUserId: 999,
+        events: [{ k: 'x', path: 'docs/agent-lessons/a.md' }],
+        fetchCommitIdentity: async () => ({ authorId: null, committerId: 999, verified: false }),
+        resolveSha: () => 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
+        exec: () => { throw new Error('should not be called'); },
+      });
+      assert.equal(res.ok, false);
+      assert.equal(res.reason, 'untrusted_publisher');
+      assert.deepEqual(res.events, []);
+    });
+
+    it('accepts a tip whose committer ID matches the publisher user ID AND carries a verified signature AND every event path exists in the reviewed tree, stripping any embedded author_kind/author_id (positive control)', async () => {
+      const execCalls = [];
+      const res = await verifyMemoryRefTip('/repo', {
+        sha: 'cafed00dcafed00dcafed00dcafed00dcafed00d',
+        repo: 'owner/repo',
+        publisherUserId: 999,
+        events: [
+          { k: 'x', path: 'docs/agent-lessons/a.md', author_kind: 'operator', author_id: 1 },
+        ],
+        fetchCommitIdentity: async () => ({ authorId: null, committerId: 999, verified: true }),
+        resolveSha: () => 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
+        exec: (cmd, args) => {
+          execCalls.push({ cmd, args });
+          return ''; // cat-file -e succeeds (no throw) -> path exists
+        },
+      });
+      assert.equal(res.ok, true);
+      assert.equal(res.events.length, 1);
+      // Never trusts the embedded author_kind/author_id — always overwritten post-verification.
+      assert.equal(res.events[0].author_kind, 'bot');
+      assert.equal(res.events[0].author_id, 999);
+      assert.ok(execCalls.some((c) => c.args.includes('cat-file')));
+    });
+
+    it('drops an event whose path does NOT exist in the independently reviewed tree, even from a trusted publisher', async () => {
+      const res = await verifyMemoryRefTip('/repo', {
+        sha: 'cafed00dcafed00dcafed00dcafed00dcafed00d',
+        repo: 'owner/repo',
+        publisherUserId: 999,
+        events: [{ k: 'x', path: 'docs/agent-lessons/does-not-exist.md' }],
+        fetchCommitIdentity: async () => ({ authorId: null, committerId: 999, verified: true }),
+        resolveSha: () => 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
+        exec: () => { throw new Error('cat-file: path not found'); },
+      });
+      assert.equal(res.ok, true);
+      assert.deepEqual(res.events, []);
+    });
+
+    it('fails closed (ok: false) when no reviewed SHA can be resolved, even with a verified publisher', async () => {
+      const res = await verifyMemoryRefTip('/repo', {
+        sha: 'cafed00dcafed00dcafed00dcafed00dcafed00d',
+        repo: 'owner/repo',
+        publisherUserId: 999,
+        events: [{ k: 'x' }],
+        fetchCommitIdentity: async () => ({ authorId: 999, committerId: 999, verified: true }),
+        resolveSha: () => null,
+        exec: () => '',
+      });
+      assert.equal(res.ok, false);
+      assert.equal(res.reason, 'no_reviewed_sha');
+    });
   });
 });

@@ -325,6 +325,11 @@ describe('bareAgentType', () => {
 		assert.equal(bareAgentType(''), '');
 		assert.equal(bareAgentType(42), '');
 	});
+	test('engsys v2.0.1 (L6): lowercases the bare name so case-differing agent_type spellings still match', () => {
+		assert.equal(bareAgentType('Nyx'), 'nyx');
+		assert.equal(bareAgentType('NYX'), 'nyx');
+		assert.equal(bareAgentType('engsys:Nyx'), 'nyx');
+	});
 });
 
 describe('isClassBExcluded', () => {
@@ -344,9 +349,26 @@ describe('isClassBExcluded', () => {
 		assert.ok(isClassBExcluded(undefined, excluded));
 		assert.ok(isClassBExcluded('', excluded));
 	});
+	test('engsys v2.0.1 (L6): a differently-cased agent_type still matches the (lowercase) excluded set', () => {
+		assert.ok(isClassBExcluded('Nyx', excluded));
+		assert.ok(isClassBExcluded('NYX', excluded));
+		assert.ok(isClassBExcluded('engsys:NYX', excluded));
+		// Positive control: a non-excluded name in a different case is still correctly NOT excluded.
+		assert.ok(!isClassBExcluded('Isabelle', excluded));
+	});
 });
 
 describe('resolveExcludedAgents', () => {
+	test('engsys v2.0.1 round 2 (Nyx F7): nyx is ALWAYS excluded, even with no matching agent file anywhere and an otherwise-empty config', () => {
+		const dir = mkdtempSync(join(tmpdir(), 'memory-brief-noagents-'));
+		try {
+			const excluded = resolveExcludedAgents({ exclude_class_b_agents: [] }, { agentsRoot: dir });
+			assert.ok(excluded.has('nyx'), 'nyx must be seeded unconditionally, independent of every scan');
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	test('security:true agent frontmatter is excluded even with an empty config list (repo/dev layout: <root>/core/agents)', () => {
 		const dir = makeRepo({ agentsSecurityTrue: ['nyx'] });
 		try {
@@ -448,6 +470,52 @@ describe('resolveExcludedAgents', () => {
 			const excluded = resolveExcludedAgents({ exclude_class_b_agents: [] }, { agentsRoot: dir });
 			assert.ok(excluded.has('nyx'));
 			assert.ok(!excluded.has('isabelle'), 'the fail-safe must not fire once the scan actually finds a real security agent');
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('engsys v2.0.1 (L6): also scans the REPO\'s own .claude/agents/*.md (read from the reviewed SHA, never the live filesystem)', () => {
+		const dir = makeRepo({});
+		try {
+			mkdirSync(join(dir, '.claude', 'agents'), { recursive: true });
+			writeFileSync(join(dir, '.claude', 'agents', 'sandy.md'), '---\nname: sandy\nsecurity: true\n---\n\nbody\n');
+			hermeticGit(dir, [...GIT_OPTS, 'add', '-A'], { isolateConfig: true });
+			hermeticGit(dir, [...GIT_OPTS, 'commit', '-q', '-m', 'add repo-local security agent'], { isolateConfig: true });
+			pushOrigin(dir);
+
+			// agentsRoot is a bare fixture dir with NO agents of its own — only the repo-local
+			// .claude/agents scan (keyed on repoRoot) can find `sandy`.
+			const otherAgentsRoot = mkdtempSync(join(tmpdir(), 'memory-brief-noagents-root-'));
+			try {
+				const excluded = resolveExcludedAgents({ exclude_class_b_agents: [] }, { agentsRoot: otherAgentsRoot, repoRoot: dir });
+				assert.ok(excluded.has('sandy'), 'repo-local .claude/agents/sandy.md (security: true) must be found');
+			} finally {
+				rmSync(otherAgentsRoot, { recursive: true, force: true });
+			}
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('engsys v2.0.1 (L6) positive control: a repo-local .claude/agents/*.md edit made AFTER the reviewed SHA (unreviewed) is never trusted', () => {
+		const dir = makeRepo({});
+		try {
+			const otherAgentsRoot = mkdtempSync(join(tmpdir(), 'memory-brief-noagents-root2-'));
+			try {
+				// Reviewed tree (pushed to origin/main) has NO .claude/agents at all.
+				const beforeExcluded = resolveExcludedAgents({ exclude_class_b_agents: [] }, { agentsRoot: otherAgentsRoot, repoRoot: dir });
+				assert.ok(!beforeExcluded.has('sandy'));
+
+				// Add the security:true agent file WITHOUT committing/pushing it (an unreviewed local
+				// edit — e.g. an attacker-controlled worktree trying to strip its own security:true).
+				mkdirSync(join(dir, '.claude', 'agents'), { recursive: true });
+				writeFileSync(join(dir, '.claude', 'agents', 'sandy.md'), '---\nname: sandy\nsecurity: true\n---\n\nbody\n');
+				const afterExcluded = resolveExcludedAgents({ exclude_class_b_agents: [] }, { agentsRoot: otherAgentsRoot, repoRoot: dir });
+				assert.ok(!afterExcluded.has('sandy'), 'an uncommitted/unreviewed .claude/agents file must never be trusted — only git show <reviewedSha>:... is read');
+			} finally {
+				rmSync(otherAgentsRoot, { recursive: true, force: true });
+			}
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
@@ -778,13 +846,19 @@ describe('buildBrief — end to end, fail-open, and the agent exclusion boundary
 	test('an excluded (security:true) agent type gets Class A content only — pointers are never computed for it', { skip: !SQLITE_AVAILABLE }, () => {
 		const dir = makeRepo({ agentsSecurityTrue: ['nyx'], lessons: [['one', { keywords: ['widget'] }]] });
 		try {
+			// round 3 (F6): the "no author_kind at all" fallback is now restricted to kind:'commit'
+			// with no body — a review_thread pointer needs a REAL, trusted author_kind/author_id to
+			// pass the brief-time gate, same as it would from a genuine memory-sync ingest.
+			mkdirSync(join(dir, '.claude'), { recursive: true });
+			writeFileSync(join(dir, '.claude', 'memory.yml'), 'trusted_bot_user_ids: [500]\n');
+			commitAndPush(dir, 'add memory.yml');
 			// Seed a Class B event directly via delta.jsonl so, if the exclusion were broken, a
 			// pointer COULD appear.
 			const cacheDir = join(dir, '.git', 'engsys-memory');
 			mkdirSync(cacheDir, { recursive: true });
 			writeFileSync(
 				join(cacheDir, 'delta.jsonl'),
-				`${JSON.stringify({ k: 'ev1', kind: 'review_thread', path: 'docs/agent-lessons/one.md', line: 1, outcome: 'fixed', updated_at: new Date().toISOString(), text: 'secret-ish free text' })}\n`,
+				`${JSON.stringify({ k: 'ev1', kind: 'review_thread', path: 'docs/agent-lessons/one.md', line: 1, outcome: 'fixed', updated_at: new Date().toISOString(), author_kind: 'bot', author_id: 500, text: 'secret-ish free text' })}\n`,
 			);
 			const forNyx = buildBrief({ repoRoot: dir, agentType: 'nyx', prompt: 'widget', touchedPaths: ['docs/agent-lessons/one.md'] });
 			assert.deepEqual(forNyx.pointerKeys, [], 'excluded agent must get zero Class B pointers');
@@ -802,6 +876,12 @@ describe('buildBrief — end to end, fail-open, and the agent exclusion boundary
 		const RLO = '‮';
 		const dir = makeRepo({ lessons: [['one', { keywords: ['widget'] }]] });
 		try {
+			// round 3 (F6): the valid control below needs a real, trusted author_kind/author_id to
+			// pass the brief-time gate now that the "no author_kind at all" fallback is restricted
+			// to kind:'commit' with no body.
+			mkdirSync(join(dir, '.claude'), { recursive: true });
+			writeFileSync(join(dir, '.claude', 'memory.yml'), 'trusted_bot_user_ids: [500]\n');
+			commitAndPush(dir, 'add memory.yml');
 			const cacheDir = join(dir, '.git', 'engsys-memory');
 			mkdirSync(cacheDir, { recursive: true });
 			const hostileLines = [
@@ -812,7 +892,7 @@ describe('buildBrief — end to end, fail-open, and the agent exclusion boundary
 				// Positive control (Nyx L1): a genuinely VALID event, right alongside the hostile
 				// ones, so a validator broken too strictly (dropping everything, hostile or not)
 				// would be caught here, not just "the hostile ones happened not to render".
-				{ k: 'o/r:valid', kind: 'review_thread', path: 'docs/agent-lessons/one.md', line: 1, outcome: 'fixed', updated_at: '2026-01-01T00:00:00Z', text: 'this text itself must never render, only the structured pointer line' },
+				{ k: 'o/r:valid', kind: 'review_thread', path: 'docs/agent-lessons/one.md', line: 1, outcome: 'fixed', updated_at: '2026-01-01T00:00:00Z', author_kind: 'bot', author_id: 500, text: 'this text itself must never render, only the structured pointer line' },
 			];
 			writeFileSync(cacheDir + '/delta.jsonl', hostileLines.map((l) => JSON.stringify(l)).join('\n') + '\n');
 			const result = buildBrief({ repoRoot: dir, agentType: 'isabelle', prompt: 'widget', touchedPaths: ['docs/agent-lessons/one.md'] });
