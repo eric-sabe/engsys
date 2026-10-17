@@ -240,7 +240,17 @@ export function extractAgentType(input) {
  * Fails closed throughout: an unresolvable target returns `''` (empty string), which callers
  * must treat as "unknown — exclude", never as "no agent — allow". */
 export function extractTargetAgentType(input, { rawStdin = null } = {}) {
-	const normalize = (s) => (typeof s === 'string' ? s.normalize('NFKC').trim() : '');
+	// round 3 (F5): also strips Unicode `\p{Cf}` format characters (zero-width space/joiner, bidi
+	// control marks, …) — NFKC alone does not remove these, and one hiding inside an otherwise
+	// normal-looking name could survive an exact-string exclusion-set lookup downstream.
+	const normalize = (s) => (typeof s === 'string' ? s.normalize('NFKC').replace(/[\p{Cf}]/gu, '').trim() : '');
+	// round 3 (F5): the subagent_type/agent_type DISAGREEMENT check compares BARE names (the
+	// `engsys:` namespace prefix stripped) — `engsys:isabelle` vs `isabelle` is the same target
+	// under a different spelling, not a conflict to fail closed on.
+	const bare = (s) => {
+		const parts = s.split(':');
+		return parts[parts.length - 1].toLowerCase();
+	};
 	let toolInput = input?.tool_input;
 	if (typeof rawStdin === 'string' && rawStdin.trim()) {
 		try {
@@ -250,8 +260,8 @@ export function extractTargetAgentType(input, { rawStdin = null } = {}) {
 	toolInput = toolInput ?? {};
 	const subagentType = normalize(toolInput.subagent_type);
 	const agentTypeField = normalize(toolInput.agent_type);
-	if (subagentType && agentTypeField && subagentType !== agentTypeField) {
-		return ''; // disagree -> fail closed, never guess
+	if (subagentType && agentTypeField && bare(subagentType) !== bare(agentTypeField)) {
+		return ''; // disagree (even after namespace-stripping) -> fail closed, never guess
 	}
 	return subagentType || agentTypeField || '';
 }

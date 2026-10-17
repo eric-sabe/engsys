@@ -75,6 +75,34 @@ describe('extractTargetAgentType (engsys v2.0.1 M5)', () => {
 			'isabelle',
 		);
 	});
+	test('engsys v2.0.1 round 3 (F5): strips Unicode \\p{Cf} zero-width/format characters, which NFKC alone does not remove', () => {
+		// U+200B ZERO WIDTH SPACE spliced into the middle of an otherwise normal name.
+		assert.equal(
+			extractTargetAgentType({ tool_input: { subagent_type: 'isa​belle' } }),
+			'isabelle',
+		);
+		// U+200E LEFT-TO-RIGHT MARK and U+202A LEFT-TO-RIGHT EMBEDDING, both \p{Cf}.
+		assert.equal(
+			extractTargetAgentType({ tool_input: { subagent_type: '‎engsys:isabelle‪' } }),
+			'engsys:isabelle',
+		);
+	});
+	test('engsys v2.0.1 round 3 (F5): subagent_type vs agent_type disagreement compares BARE names — a namespace-prefix spelling difference is not a conflict', () => {
+		// Positive control: same bare name, one namespaced, one not -> no conflict, resolves.
+		assert.equal(
+			extractTargetAgentType({ tool_input: { subagent_type: 'engsys:isabelle', agent_type: 'isabelle' } }),
+			'engsys:isabelle',
+		);
+		assert.equal(
+			extractTargetAgentType({ tool_input: { subagent_type: 'isabelle', agent_type: 'engsys:isabelle' } }),
+			'isabelle',
+		);
+		// A genuine disagreement — even after stripping namespaces — still fails closed.
+		assert.equal(
+			extractTargetAgentType({ tool_input: { subagent_type: 'engsys:isabelle', agent_type: 'nyx' } }),
+			'',
+		);
+	});
 	test('engsys v2.0.1 round 2 (F7): fails closed when subagent_type and agent_type disagree, but passes through when they agree (positive control)', () => {
 		assert.equal(
 			extractTargetAgentType({ tool_input: { subagent_type: 'engsys:isabelle', agent_type: 'engsys:nyx' } }),
