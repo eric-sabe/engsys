@@ -223,6 +223,10 @@ translate_antigravity_flags() {
         if [ $# -gt 0 ]; then out+=(--effort "$1"); shift; fi ;;
       --model)
         if [ $# -gt 0 ]; then
+          if is_security_model "$1"; then
+            echo "error: Antigravity cannot run the security model ($1); refusing to map it to another model" >&2
+            return 1
+          fi
           case "$1" in
             opus | sonnet | fable | claude-* | pro) out+=(--model gemini-4-argon) ;;
             haiku | flash) out+=(--model gemini-3.8-flash) ;;
@@ -244,10 +248,12 @@ translate_antigravity_flags() {
   fi
 }
 
-# Turnkey Antigravity Remote Control: unlike Claude Code (where --remote-control is self-contained per session),
-# Antigravity requires a host-level background daemon (`agy remote-control start`) in addition to per-session
-# `--remote-control`. Auto-start the daemon when HARNESS=antigravity and any roster session uses --remote-control.
-if [ "$HARNESS" = "antigravity" ] && [ "${AGY_REMOTE_CONTROL_AUTOSTART:-1}" != 0 ]; then
+# Antigravity Remote Control is opt-in. Unlike Claude Code (where --remote-control is self-contained per
+# session), Antigravity needs a host-level background daemon (`agy remote-control start`), which exposes
+# the host's sessions for remote driving. The launcher never starts it on its own: set
+# AGY_REMOTE_CONTROL_AUTOSTART=1 to start it when HARNESS=antigravity and a roster session uses
+# --remote-control (or AGY_REMOTE_CONTROL=1). Default off.
+if [ "$HARNESS" = "antigravity" ] && [ "${AGY_REMOTE_CONTROL_AUTOSTART:-0}" = 1 ]; then
   agy_needs_rc=0
   if [ "${AGY_REMOTE_CONTROL:-0}" = 1 ]; then
     agy_needs_rc=1
@@ -267,6 +273,78 @@ if [ "$HARNESS" = "antigravity" ] && [ "${AGY_REMOTE_CONTROL_AUTOSTART:-1}" != 0
     fi
   fi
 fi
+
+# Model names are normalized before any policy match: lowercase, quotes dropped, a `[…]` suffix (for
+# example a context-window tag) and a trailing date stamp stripped.
+norm_model() {
+  local m
+  m="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d "\"'")"
+  m="${m%%\[*}"
+  m="$(printf '%s' "$m" | sed -E 's/[-@.]?(19|20)[0-9]{2}-?[0-9]{2}-?[0-9]{2}$//')"
+  printf '%s' "$m"
+}
+# 0 when a model names Claude Opus 4.8 in any spelling (claude-opus-4-8, claude-opus-4.8, …) or the
+# `security` alias.
+is_security_model() {
+  local m
+  m="$(norm_model "$1")"
+  case "$m" in claude-opus-4-8* | claude-opus-4.8* | security) return 0 ;; esac
+  return 1
+}
+# 0 when an env file is the security lane: its name, without directory and extension, normalizes to
+# `security` or `nyx`.
+is_security_env() {
+  local b
+  [ -n "$1" ] || return 1
+  b="${1##*/}"; b="${b%.*}"
+  b="$(printf '%s' "$b" | tr '[:upper:]' '[:lower:]' | tr -d "\"' ")"
+  case "$b" in security | nyx) return 0 ;; esac
+  return 1
+}
+# The --model value(s) in a flag string, one per line (both `--model X` and `--model=X`).
+model_values() {
+  local tok prev=""
+  set -f
+  # shellcheck disable=SC2086
+  set -- $1
+  set +f
+  for tok in "$@"; do
+    [ "$prev" = "--model" ] && printf '%s\n' "$tok"
+    case "$tok" in --model=*) printf '%s\n' "${tok#--model=}" ;; esac
+    prev="$tok"
+  done
+  return 0
+}
+# A security-tier roster line: a model that names Claude Opus 4.8, or the security env lane.
+is_security_line() { # is_security_line <flags> <env file> → 0 when security tier
+  local m
+  is_security_env "$2" && return 0
+  while IFS= read -r m; do
+    [ -n "$m" ] && is_security_model "$m" && return 0
+  done < <(model_values "$1")
+  return 1
+}
+# The monster role a prompt runs, case-insensitively and with `_`, spaces or `-` between the words:
+# merge | maintain, or empty.
+prompt_role() {
+  local p
+  p="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr '_ ' '--')"
+  case "$p" in
+    *merge-monster*) echo merge ;;
+    *maintenance-monster*) echo maintain ;;
+  esac
+  return 0
+}
+# 0 when a prompt runs the resource broker (the third monster), with the same tolerance as prompt_role.
+prompt_is_broker() {
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr '_ ' '--')" in *resource-broker*) return 0 ;; esac
+  return 1
+}
+# 0 when the host (fleet launch) classified this session as a monster or a supervised session.
+is_supervised_session() {
+  case " ${ENGSYS_SUPERVISED_SESSIONS:-} " in *" $1 "*) return 0 ;; esac
+  return 1
+}
 
 # ---------------------------------------------------------------------------
 # Launch
@@ -298,13 +376,38 @@ launch_one() {
   # ENGSYS_SINGLETON_ROLE, which arms the plugin's singleton-write guard hook for the session and
   # every agent it dispatches; any other session has it unset.
   run="$(date -u +%Y%m%dT%H%M%SZ)-$$-${RANDOM}"
-  case "$prompt" in
-    *merge-monster*) role=merge ;;
-    *maintenance-monster*) role=maintain ;;
-  esac
-  if [ "$HARNESS" = "antigravity" ] && [ -n "$role" ] && [ "${AGY_HEADLESS_SUPPORTED:-1}" != 1 ]; then
-    echo "error: Antigravity ($name) headless monster sessions disabled (AGY_HEADLESS_SUPPORTED=0)" >&2
-    return 1
+  role="$(prompt_role "$prompt")"
+  # The monsters and the security lane are Claude-only: the merge and maintain batons and security work
+  # stay on Claude (security on Claude Opus 4.8), so a non-Claude harness never launches them.
+  local flags="${MODEL:+$MODEL }${extra:-}"
+  if [ "$HARNESS" != "claude" ]; then
+    if [ -n "$role" ]; then
+      echo "error: refusing to launch '$name' (role=$role) on HARNESS=$HARNESS: merge and maintenance monsters run only on HARNESS=claude" >&2
+      return 1
+    fi
+    if prompt_is_broker "$prompt"; then
+      echo "error: refusing to launch '$name' (resource broker) on HARNESS=$HARNESS: monsters run only on HARNESS=claude" >&2
+      return 1
+    fi
+    if is_supervised_session "$name"; then
+      echo "error: refusing to launch '$name' on HARNESS=$HARNESS: the host classifies it as a monster or supervised session, which runs only on HARNESS=claude" >&2
+      return 1
+    fi
+    if is_security_line "$flags" "${session_env:-}"; then
+      echo "error: refusing to launch '$name' on HARNESS=$HARNESS: security-tier sessions run only on HARNESS=claude with claude-opus-4-8" >&2
+      return 1
+    fi
+  elif [ "$role" = maintain ] || is_security_env "${session_env:-}"; then
+    # On Claude, the maintenance monster and the security env lane run on Claude Opus 4.8 and nothing else.
+    local m ok=0
+    while IFS= read -r m; do
+      [ -n "$m" ] || continue
+      if is_security_model "$m" && [ "$(norm_model "$m")" != security ]; then ok=1; else ok=0; break; fi
+    done < <(model_values "$flags")
+    if [ "$ok" != 1 ]; then
+      echo "error: refusing to launch '$name': the maintenance monster and the security lane must run with --model claude-opus-4-8 (got: $(model_values "$flags" | tr '\n' ' '))" >&2
+      return 1
+    fi
   fi
   # ENGSYS_SESSION_ROOT is the directory the session was launched in: a guarded `fleet msg send`
   # takes its --body-file only from <root>/tmp, wherever the session cd's later (engsys#108).
@@ -326,7 +429,7 @@ launch_one() {
     cmd+="agy $(printf %q "$workdir")"
     [ -n "$prompt" ] && cmd+=" -i $(printf %q "$prompt")"
     local agy_flags
-    agy_flags="$(translate_antigravity_flags "${MODEL:+$MODEL }${extra:-}")"
+    agy_flags="$(translate_antigravity_flags "${MODEL:+$MODEL }${extra:-}")" || { echo "error: refusing to launch '$name' on HARNESS=antigravity" >&2; return 1; }
     [ -n "$agy_flags" ] && cmd+=" $agy_flags"
   else
     cmd+="claude --name $(printf %q "$name") --settings $(printf %q "$SETTINGS_FILE")"
@@ -351,25 +454,34 @@ launch_one() {
     # Trailing colon matters: `-t session` (no colon) is a WINDOW target — the
     # session's current window — and the second launch dies with "index 0 in
     # use". `-t session:` means "next free index in this session".
-    tmux new-window -t "${TMUX_SESSION}:" -n "$name"
+    tmux new-window -t "${TMUX_SESSION}:" -n "$name" || { echo "error: tmux new-window failed for '$name'" >&2; return 1; }
   else
-    tmux new-session -d -s "$TMUX_SESSION" -n "$name"
+    tmux new-session -d -s "$TMUX_SESSION" -n "$name" || { echo "error: tmux new-session failed for '$name'" >&2; return 1; }
   fi
-  tmux send-keys -t "${TMUX_SESSION}:${name}" "$cmd" Enter
+  tmux send-keys -t "${TMUX_SESSION}:${name}" "$cmd" Enter || { echo "error: tmux send-keys failed for '$name'" >&2; return 1; }
   echo "launched: $name  ($workdir)"
 }
 
-launched=0
+launched=0 failed=0
 for spec in "${SESSIONS[@]}"; do
   IFS='|' read -r name workdir prompt extra env_file <<<"$spec"
   [ -z "$name" ] && continue
   if [ -n "$ONLY" ] && [ "$ONLY" != "$name" ]; then
     continue
   fi
-  launch_one "$name" "$workdir" "$prompt" "$extra" "$env_file"
-  launched=$((launched + 1))
+  # A refused or broken line is skipped loudly; the rest of the roster still launches.
+  if launch_one "$name" "$workdir" "$prompt" "$extra" "$env_file"; then
+    launched=$((launched + 1))
+  else
+    failed=$((failed + 1))
+    echo "SKIPPED: $name (see the error above)" >&2
+  fi
 done
 
+if [ "$failed" -gt 0 ]; then
+  echo "error: $failed roster session(s) not launched; $launched launched" >&2
+  exit 1
+fi
 if [ "$launched" -eq 0 ]; then
   if [ -n "$ONLY" ]; then
     echo "no session named '$ONLY' in the roster" >&2

@@ -84,6 +84,10 @@ const SUITES = [
   ["node --test core/fleet/health/health.test.mjs"],
   ["node --test core/.claude-plugin/weather-check.test.mjs"],
   ["node --test core/fleet/lib/xray.test.mjs"],
+  ["node --test tests/personas-and-skills.test.mjs"],
+  ["node --test tests/monster-skill-rules.test.mjs"],
+  ["node --test tests/model-policy.test.mjs"],
+  ["bash core/skills/agent-sessions/scripts/launch-agent-sessions.test.sh"],
 ];
 
 // Variables the kit reads from a fleet session's environment.

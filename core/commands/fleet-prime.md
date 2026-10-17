@@ -4,7 +4,7 @@ description: Re-ground a fleet session's role + subagent-orchestration disciplin
 
 Re-ground this session before continuing. A `/clear` reloads [CLAUDE.md](../../CLAUDE.md) and the memory index but drops any loaded role skill and the memory-file bodies; this command re-installs the operating discipline on demand (the `post-clear-reground.sh` hook does it automatically after a clear/resume — run this any other time you feel un-grounded).
 
-1. **Role skill** — if this session runs a long-lived role skill (`merge-monster` / `maintenance-monster`, or similar): re-invoke it, or re-read its `SKILL.md` + config + `<state_dir>/state.md`, then reconcile against live GitHub per its Session-startup steps. A launch script that primes the role via a first-turn slash command does not re-fire it after a clear.
+1. **Role skill** — if this session runs a long-lived role skill (`merge-monster` / `maintenance-monster`, or similar): re-invoke it, or re-read its `SKILL.md` + every `references/*.md` file that `SKILL.md` names (merge-monster: `references/runbook-details.md`; maintenance-monster: `references/phase-details.md`) + config + `<state_dir>/state.md`, then reconcile against live GitHub per its Session-startup steps. A launch script that primes the role via a first-turn slash command does not re-fire it after a clear.
 
 2. **Subagent orchestration** — re-read [CLAUDE.md](../../CLAUDE.md) § Subagent orchestration and apply it:
    - An async background agent (no `name`) reports its result back automatically; a **named** teammate goes idle holding its result — message it to pull it. Prefer async when you just want an answer.

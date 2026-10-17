@@ -29,6 +29,10 @@ merge_method:
 ready_requirements:
   review_marker: ""          # evidence comment preflight requires on the PR,
                              # e.g. "<!-- review-findings -->" — empty to skip
+  sdd_contract: false        # opt-in: true only when this repo's PRs carry SDD
+                             # `<!-- engsys:issue-meta -->` contracts; preflight then
+                             # runs with --check-contract. Off by default: on a repo
+                             # without SDD contracts every PR would fail missing_issue_meta.
 
 # Globs (against changed files) whose PRs merge early to minimize queue-wide
 # rebase churn — lockfiles, CI workflow files, schemas, shared-package APIs.
