@@ -158,6 +158,7 @@ its holder resets it with `reset`. No pool-file change is needed.
    **`NOOP`** or the delta: the bus's event lines, then `+`/`-` occupancy lines. `NOOP` → re-arm the
    ScheduleWakeup and stop: no `state.md` rewrite, no journal line. A delta → an ordinary wake (below)
    with those lines as its events. Restart the Monitor too if it died.
+   - **Non-Claude harnesses (`HARNESS=copilot` or `HARNESS=antigravity`)**: if `Monitor` / `ScheduleWakeup` are unavailable, drive the loop directly by running `broker-tick.sh` every `poll_interval` seconds (via Antigravity's `schedule` tool or `sleep <poll_interval>` between foreground `broker-tick.sh` calls).
 
 ## The loop: on every wake (event or tick)
 

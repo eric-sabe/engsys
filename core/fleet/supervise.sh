@@ -110,6 +110,13 @@ grep -q '^HOST_HEALTH_INCIDENT=' "$conf" || printf 'HOST_HEALTH_INCIDENT=fleet-r
 grep -q '^NOTIFY_CMD=' "$conf" || printf 'NOTIFY_CMD=bash %s/bin/fleet --instance %s notify\n' "$FLEET_KIT_DIR" "$FLEET_REPO" >>"$conf"
 grep -q '^INTEGRITY_CMD=' "$conf" || printf 'INTEGRITY_CMD=bash %s/bin/fleet --instance %s verify --alert --max-age %s\n' "$FLEET_KIT_DIR" "$FLEET_REPO" "$VERIFY_MAX_AGE_MIN" >>"$conf"
 grep -q '^HEARTBEAT_CMD=' "$conf" || printf 'HEARTBEAT_CMD=bash %s/bin/fleet --instance %s heartbeat\n' "$FLEET_KIT_DIR" "$FLEET_REPO" >>"$conf"
+grep -q '^HARNESS=' "$conf" || printf 'HARNESS=%s\n' "${PRIMARY_HARNESS:-$HARNESS}" >>"$conf"
+if [ -n "${HARNESS_FALLBACK:-}" ] && ! grep -q '^HARNESS_FALLBACK=' "$conf"; then
+  printf 'HARNESS_FALLBACK=%s\n' "$HARNESS_FALLBACK" >>"$conf"
+fi
+if [ -n "${QUOTA_COOLDOWN_MIN:-}" ] && ! grep -q '^QUOTA_COOLDOWN_MIN=' "$conf"; then
+  printf 'QUOTA_COOLDOWN_MIN=%s\n' "$QUOTA_COOLDOWN_MIN" >>"$conf"
+fi
 # The expired-login alert (engsys#103) links the fleet's status issue, where the heartbeat says the same.
 if [ -n "$status_target" ] && ! grep -q '^STATUS_URL=' "$conf"; then
   printf 'STATUS_URL=https://github.com/%s/issues/%s\n' "${status_target%%#*}" "${status_target##*#}" >>"$conf"

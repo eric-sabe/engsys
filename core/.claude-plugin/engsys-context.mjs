@@ -59,10 +59,20 @@ try {
   t = t.replace(/\n<!--\s*\n\s*ENGSYS:PROJECT-FACTS region\.[\s\S]*$/, '\n'); // the project's CLAUDE.md is its facts
 
   if (/\{\{[A-Z_]+\}\}/.test(t)) throw new Error('unrendered template token'); // never inject a half-rendered template
+  const harness = detectHarness(process.env);
+  const coAuthorByHarness = {
+    claude: 'Co-Authored-By: Claude <noreply@anthropic.com>',
+    copilot: 'Co-Authored-By: GitHub Copilot <noreply@github.com>',
+    antigravity: 'Co-Authored-By: Google Antigravity <noreply@google.com>',
+  };
+  const activeTrailer = coAuthorByHarness[harness] || coAuthorByHarness.claude;
+  t = t.replace(
+    /End commit messages with the harness-matched `Co-Authored-By` trailer[^\n]*\./,
+    `End commit messages with \`${activeTrailer}\` (active harness: \`${harness}\`).`,
+  );
   let timeLine = '';
   try { timeLine = (await import(pathToFileURL(path.join(root, 'lib', 'operator-time.mjs')))).contextLine(process.env); } catch { /* conventions still go out */ }
   const out = timeLine ? `${t.trim()}\n\n${timeLine}\n` : t.trim() + '\n';
-  const harness = detectHarness(process.env);
   writeHookResult(emitSessionStartContext(harness, out, { jsonMode: true }), { hook: 'engsys-context', event: 'SessionStart' });
 } catch {
   process.exit(0);

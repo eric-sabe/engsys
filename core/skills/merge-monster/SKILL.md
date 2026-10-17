@@ -38,6 +38,7 @@ You are the merge baton-holder (`refs/engsys/batons/merge`). While you hold it, 
    <skill-dir>/scripts/mm-tick.sh --repo <repo> --state-dir <state_dir> --issue <ledger_issue> --config <config>
    ```
    `NOOP` → re-arm `ScheduleWakeup` and stop. Delta lines → process as wake.
+   - **Non-Claude harnesses (`HARNESS=copilot` or `HARNESS=antigravity`)**: if `Monitor` / `ScheduleWakeup` are unavailable, drive the loop directly by running `mm-tick.sh` every `poll_interval` seconds (via Antigravity's `schedule` tool or `sleep <poll_interval>` between foreground `mm-tick.sh` calls) and `mm-baton.sh renew` every 2.5 minutes.
 
 ## The loop — on every wake (event or tick)
 

@@ -106,7 +106,7 @@ Install once per machine (`claude plugin marketplace add eric-sabe/engsys#v2.0.0
    - **`claude` (default):** `.claude/{agents,commands,skills,hooks,workflows}/`, `CLAUDE.md`, `.claude/settings.json`, and `.mcp.json`.
    - **`copilot`:** `.github/copilot-instructions.md`, `.github/agents/*.agent.md`, `.github/skills/<name>/SKILL.md`, `.github/hooks/engsys-hooks.json`, `.github/copilot/settings.json`, and `.vscode/mcp.json`.
    - **`antigravity`:** `GEMINI.md`, `AGENTS.md`, `.agents/agents/*.md`, `.agents/skills/<name>/SKILL.md`, `.agents/rules/*.md`, `.agents/workflows/*.md`, `.agents/hooks.json`, and `.agents/plugins/engsys/plugin.json`.
-   - Universal hook I/O normalization ([`core/lib/harness-io.mjs`](core/lib/harness-io.mjs)) translates hook events and allow/deny/context decisions across all three harnesses automatically.
+   - Universal hook I/O normalization ([`core/lib/harness-io.mjs`](core/lib/harness-io.mjs)) translates hook events, allow/deny/context decisions, and **harness-matched `Co-Authored-By` commit trailers** (`Claude <noreply@anthropic.com>`, `GitHub Copilot <noreply@github.com>`, `Google Antigravity <noreply@google.com>`) across all three harnesses automatically.
 2. **15 Specialist Personas (11 Core + 4 Opt-In)**:
    - **Core (`agents.core: all`):** **Leith** (Product/UX Specs), **Melvin** (Cloud & Scale Architect), **Aaron** (IaC & Deploys), **Jody** (Planner), **Isabelle** (Implementer), **Bert** (Bug Hunter), **Marcelo** (Testing Strategist), **Patricia** (Librarian / ADRs), **Nyx** (Offensive Security — pinned to `claude-opus-4-8`), **Otto** (LLM/Token Optimization), and **Gary** (Design Critic).
    - **Opt-In (`agents.extra`):** **Sandy** (Marketing/SEO), **Jos** (Monetization/ASO), **DeAndre** (Tutor & Plain-Language Session Explainer), and **Steve** (Morale Scapegoat).
@@ -171,9 +171,13 @@ When your repository produces enough PRs and security alerts that human merge-ba
 - **Fleet Health Desk (`fleet health` · [`docs/fleet-health-desk.md`](docs/fleet-health-desk.md)):**
   - Probes upstream dependencies (`statuspage` with ETag `304` caching, `observed` CI rolling windows, `http-health`, and `synthetic-command` with local-auth separation) using asymmetric hysteresis (`trip_fails` / `recover_clean`) and `depends_on` DAG alarm suppression.
   - Maintains a pinned `<!-- fleet-health -->` GitHub status board, posts calm transition-only Slack alerts, correlates inbound session friction reports (`fleet health report`), and injects 1–2 lines of weather context at `SessionStart` / `UserPromptSubmit` ([`core/.claude-plugin/weather-check.mjs`](core/.claude-plugin/weather-check.mjs)) only when services are degraded or down.
-- **Single-Watcher Efficiency & Deterministic Supervision:**
+- **Single-Watcher Efficiency, Seat-Quota Harness Fallback & Deterministic Supervision:**
   - Each monster runs **one** unified watcher (`mm-watch.sh`, `mnt-watch.sh`, `broker-watch.sh`) and single-call ticks (`mm-tick.sh`, `mnt-tick.sh`, `broker-tick.sh`) that coalesce events so a quiet 30-minute window costs **1 tool call**.
   - When idle context usage crosses `rotate_context_tokens` (clamped below 70% of the compaction window), the monster runs `mm-baton.sh rotate` / `mnt-baton.sh rotate` to record `rotation requested`, release its baton, and let the deterministic `launchd` supervisor ([`fleet-supervisor.sh`](core/skills/agent-sessions/scripts/fleet-supervisor.sh)) relaunch a fresh session (with automatic `forfeited-on-rotation` baton recovery if the session idles at its prompt).
+  - **Automatic Seat-Quota Harness Fallback (`HARNESS_FALLBACK=copilot,antigravity`):** When a primary seat hits its usage or rate limit (`You've hit your limit · resets …`, `Usage limit reached`, `Copilot rate limit exceeded`), `fleet-supervisor.sh` automatically revokes the stalled monster's baton (`--reason quota-fallback`), activates the next configured fallback harness (`copilot` → `antigravity`), and relaunches the monster using the same fleet bot identity (`feedfrwd-fleet[bot]`). After `QUOTA_COOLDOWN_MIN` (default `60m`), the supervisor probes the primary harness and fails back automatically once the seat resets.
+- **Deep Live Observability & Troubleshooting (`fleet xray` · [`core/fleet/lib/xray.mjs`](core/fleet/lib/xray.mjs)):**
+  - `fleet xray` inspects all **10 runtime subsystems** in one pass (host `ENGSYS_DIR` & `PIN_DIR` trust closure, GitHub App / Azure SP cert expiry, `launchd` jobs & active `HARNESS_FALLBACK` state, v2.0.0 model routing & live JSONL transcript token pressure, singleton batons & subagent `agents.tsv` liveness, a live **9-hook synthetic self-test**, the **Hook Flight Recorder** (`hook-events.jsonl`), SQLite FTS5 & `refs/engsys/memory/events/v1`, SDD validators, and FHD/Federation/Broker state).
+  - Supports `--session <name>` / `--role merge|maintain|e2e` deep-dives, `--timeline [--since 1h]` chronological event reconstruction, `--diagnose` automated root-cause & copy-paste remediation playbooks, `--watch [sec]`, and `--json`.
 
 ```bash
 # Scaffold a dedicated fleet instance repo on your always-on host:
@@ -189,6 +193,7 @@ git clone https://github.com/eric-sabe/engsys ~/git/engsys
 ~/git/acme-fleet/scripts/fleet verify         # verify wrapper, host ENGSYS_DIR & settings integrity
 ~/git/acme-fleet/scripts/fleet launch         # launch tmux sessions
 ~/git/acme-fleet/scripts/fleet install-jobs   # load launchd supervisor & identity jobs
+~/git/acme-fleet/scripts/fleet xray           # full 10-subsystem X-Ray & live 9-hook self-test
 ```
 
 ---
@@ -229,10 +234,11 @@ For organizations running multiple repositories or multiple always-on hosts ([`d
 | Command | Purpose |
 |---|---|
 | `fleet status [--federation]` | Show pin alignment, session state, auth holds, or federation-wide heartbeats and baton holders. |
-| `fleet sync [--check]` | Sync host checkouts and plugins to pinned tags using per-instance worktree isolation. |
+| `fleet xray [--role <r>\|--session <s>] [--timeline] [--diagnose] [--watch] [--json]` | Deep 10-subsystem runtime inspection, live 9-hook synthetic self-test, session deep-dive, chronological behavior timeline, and automated root-cause remediation playbook. |
+| `fleet sync [--check]` | Sync host checkouts and plugins (including `HARNESS_FALLBACK` caches) to pinned tags using per-instance worktree isolation. |
 | `fleet verify [--alert]` | Verify singleton guard scripts, host `ENGSYS_DIR`, and settings against GitHub release tree SHAs. |
 | `fleet launch` / `fleet restart [--stale]` | Start missing sessions or cycle stale sessions onto newly synced pins. |
-| `fleet supervise` / `fleet install-jobs` | Run one deterministic supervisor tick or load the recurring `launchd` jobs. |
+| `fleet supervise` / `fleet install-jobs` | Run one deterministic supervisor tick (including seat-quota `HARNESS_FALLBACK` failover) or load the recurring `launchd` jobs. |
 | `fleet health <subcommand>` | Operate the Fleet Health Desk (`validate`, `status`, `tick`, `check`, `report`, `simulate`, `invoke`, `self-probe`, `digest`, `watch-add`). |
 | `fleet msg <route\|send\|inbox>` / `fleet relay` | Send, route, and poll cross-fleet messages. |
 | `fleet pin` | Verify tag/manifest version alignment (`package.json`, `marketplace.json`, `plugin.json`) and open a pin bump PR. |

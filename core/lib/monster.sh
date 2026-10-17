@@ -48,6 +48,21 @@
 #                                       is never replaced. MONSTER_ROTATION=1 when it is the rotation status;
 #                                       MONSTER_CTX = the tokens read (empty when unknown).
 
+# When GH_APP_ENV_FILE is set (fleet GitHub App bot identity), keep core/fleet/identity/bin at the
+# front of PATH if a login subshell (e.g. under HARNESS=copilot or antigravity) prepended brew/system dirs.
+if [ -n "${GH_APP_ENV_FILE:-}" ]; then
+  _monster_id_bin="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/fleet/identity/bin"
+  if [ -x "$_monster_id_bin/gh" ]; then
+    case ":$PATH:" in
+      ":$_monster_id_bin:"*) ;;
+      *":$_monster_id_bin:"*)
+        PATH="$_monster_id_bin:${PATH//:$_monster_id_bin/}"
+        export PATH ;;
+    esac
+  fi
+  unset _monster_id_bin
+fi
+
 monster_sha256() {
   if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
   else sha256sum "$1" | awk '{print $1}'; fi

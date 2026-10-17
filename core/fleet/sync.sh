@@ -36,7 +36,7 @@ main() {
   done
   # shellcheck source=lib/fleet-env.sh
   . "$(dirname "${BASH_SOURCE[0]}")/lib/fleet-env.sh"
-  if [ "${HARNESS:-claude}" = "claude" ]; then
+  if [ "${PRIMARY_HARNESS:-${HARNESS:-claude}}" = "claude" ]; then
     command -v claude >/dev/null || fleet_die "claude is required"
   fi
 
@@ -158,8 +158,9 @@ main() {
     [ -n "${m_repos[$i]}" ] || fleet_die "no repo for marketplace '$m' in $PIN_SETTINGS"
     m_plugins[i]="$(fleet_enabled_plugins "$m")"
   done
-  if [ "${HARNESS:-claude}" = "copilot" ] || [ "${HARNESS:-claude}" = "antigravity" ]; then
-    sync_non_claude_plugins "$check" "$engsys_target"
+  local primary_h="${PRIMARY_HARNESS:-${HARNESS:-claude}}"
+  if [ "$primary_h" = "copilot" ] || [ "$primary_h" = "antigravity" ]; then
+    sync_non_claude_plugins "$check" "$engsys_target" "$primary_h" 0
   else
     sync_tmp
     [ "$check" = 1 ] || settings_guard_begin
@@ -209,6 +210,16 @@ main() {
     done
     [ -z "$bad" ] || fleet_die "after the plugin step these enabled plugins are not installed at the pin:$bad. NOT synced. Re-run: fleet sync. If a plugin stays at the wrong version: claude plugin uninstall --scope user <plugin@marketplace> (from a directory outside any project), then fleet sync."
     GUARDED=(); sync_cleanup; trap - EXIT
+  fi
+  if [ -n "${HARNESS_FALLBACK:-}" ]; then
+    local fb_item fb_list=()
+    IFS=',' read -r -a fb_list <<<"$HARNESS_FALLBACK"
+    for fb_item in ${fb_list[@]+"${fb_list[@]}"}; do
+      case "$fb_item" in
+        copilot | antigravity)
+          sync_non_claude_plugins "$check" "$engsys_target" "$fb_item" 1 ;;
+      esac
+    done
   fi
 
   # --- report ------------------------------------------------------------------------------------
@@ -305,11 +316,13 @@ require_clean() { # tracked changes would block (or be carried across) a checkou
     || fleet_die "$1 has uncommitted changes to tracked files — inspect with: git -C $1 status (discard only if it's noise)"
 }
 
-sync_non_claude_plugins() { # sync_non_claude_plugins <check> <engsys_target>
-  local check_mode="$1" engsys_checkout="$2" i m ref want p src_repo sub cache_dir cfg_file cur_ver
+sync_non_claude_plugins() { # sync_non_claude_plugins <check> <engsys_target> [target_harness] [is_fallback]
+  local check_mode="$1" engsys_checkout="$2" target_h="${3:-${HARNESS:-claude}}" is_fb="${4:-0}" i m ref want p src_repo sub cache_dir cfg_file cur_ver
   local entries="[]"
-  if [ "${HARNESS:-claude}" = "copilot" ]; then
+  if [ "$target_h" = "copilot" ]; then
     cfg_file="${COPILOT_HOME:-$FLEET_STATE/copilot-home}/config.json"
+  elif [ "$is_fb" = 1 ] && [ ! -d "$PIN_DIR/.agents" ]; then
+    cfg_file="$FLEET_STATE/agy-plugins.json"
   else
     cfg_file="$PIN_DIR/.agents/plugins.json"
   fi
@@ -324,7 +337,7 @@ sync_non_claude_plugins() { # sync_non_claude_plugins <check> <engsys_target>
       sub="$(jq -r --arg p "$p" '.plugins[]? | select(.name == $p) | .source // empty' "$src_repo/.claude-plugin/marketplace.json" 2>/dev/null || true)"
       sub="${sub#./}"
       [ -n "$sub" ] || sub="core"
-      if [ "${HARNESS:-claude}" = "copilot" ]; then
+      if [ "$target_h" = "copilot" ]; then
         cache_dir="${COPILOT_HOME:-$FLEET_STATE/copilot-home}/installed-plugins/$m/$p"
         cur_ver=""
         if [ -f "$cfg_file" ]; then
@@ -339,7 +352,7 @@ sync_non_claude_plugins() { # sync_non_claude_plugins <check> <engsys_target>
       fi
       if [ "$cur_ver" != "$want" ] || [ ! -d "$cache_dir" ]; then
         if [ "$check_mode" = 1 ]; then
-          say "plugin $p@$m is at '${cur_ver:-absent}' (pin $want)"; drift=1
+          say "plugin $p@$m ($target_h) is at '${cur_ver:-absent}' (pin $want)"; drift=1
           continue
         fi
         [ -d "$src_repo/$sub" ] && [ ! -L "$src_repo/$sub" ] || fleet_die "plugin source $src_repo/$sub not found for $p@$m"
@@ -363,7 +376,7 @@ sync_non_claude_plugins() { # sync_non_claude_plugins <check> <engsys_target>
   done
   if [ "$check_mode" = 0 ]; then
     mkdir -p "$(dirname "$cfg_file")"
-    if [ "${HARNESS:-claude}" = "copilot" ]; then
+    if [ "$target_h" = "copilot" ]; then
       existing_cfg="{}"
       if [ -f "$cfg_file" ]; then
         existing_cfg="$(sed '/^[[:space:]]*\/\//d' "$cfg_file" | jq -c 'if type == "object" then . else {} end' 2>/dev/null || echo "{}")"
@@ -375,7 +388,9 @@ sync_non_claude_plugins() { # sync_non_claude_plugins <check> <engsys_target>
     else
       jq -n --argjson p "$entries" '{plugins: $p}' >"$cfg_file"
       mkdir -p "$FLEET_STATE"
-      cp "$cfg_file" "$FLEET_STATE/agy-plugins.json" 2>/dev/null || true
+      if [ "$cfg_file" != "$FLEET_STATE/agy-plugins.json" ]; then
+        cp "$cfg_file" "$FLEET_STATE/agy-plugins.json" 2>/dev/null || true
+      fi
     fi
   fi
 }

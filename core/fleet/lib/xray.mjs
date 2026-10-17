@@ -856,6 +856,38 @@ export function inspectLaunchdAndLatches(ctx) {
     } catch { /* ignore */ }
   }
 
+  // Check Harness & Seat-Quota Fallback state (HARNESS_FALLBACK / harness.fallback)
+  const primaryHarness = ctx.fleetConf.HARNESS || ctx.env.PRIMARY_HARNESS || ctx.env.HARNESS || 'claude';
+  const harnessFallback = ctx.fleetConf.HARNESS_FALLBACK || ctx.env.HARNESS_FALLBACK || '';
+  const quotaCooldownMin = ctx.fleetConf.QUOTA_COOLDOWN_MIN || ctx.env.QUOTA_COOLDOWN_MIN || '60';
+  const fbCandidates = [
+    ctx.logDir ? path.join(ctx.logDir, 'harness.fallback') : null,
+    ctx.fleetRepo ? path.join(ctx.fleetRepo, 'logs', 'fleet-supervisor', 'harness.fallback') : null,
+    ctx.pinDir ? path.join(ctx.pinDir, 'logs', 'fleet-supervisor', 'harness.fallback') : null,
+  ].filter(Boolean);
+  const fbFile = fbCandidates.find((p) => fs.existsSync(p));
+  if (fbFile) {
+    const fbLines = fs.readFileSync(fbFile, 'utf8').split('\n');
+    const fbHarness = (fbLines[0] || '').trim() || 'unknown';
+    const fbSince = (fbLines[1] || '').trim() || '?';
+    const fbPrimary = (fbLines[2] || '').trim() || primaryHarness;
+    const fbWhere = (fbLines[3] || '').trim() || '?';
+    const fbUntil = (fbLines[4] || '').trim() || '';
+    items.push({
+      name: 'Harness & Seat-Quota Fallback',
+      status: 'warn',
+      detail: `ACTIVE FALLBACK: HARNESS=${fbHarness} (fell back from ${fbPrimary} at ${fbSince} in ${fbWhere}; configured HARNESS_FALLBACK=${harnessFallback || 'none'}, cooldown=${quotaCooldownMin}m)`,
+      meta: { fallbackActive: true, fbHarness, fbSince, fbPrimary, fbWhere, fbUntil, fbFile },
+    });
+  } else {
+    items.push({
+      name: 'Harness & Seat-Quota Fallback',
+      status: 'pass',
+      detail: `primary=${primaryHarness}, fallback=${harnessFallback || 'none'} (cooldown=${quotaCooldownMin}m, active=${primaryHarness})`,
+      meta: { fallbackActive: false, primaryHarness, harnessFallback },
+    });
+  }
+
   return { id: 3, title: 'Launchd Jobs, Supervisor & Alert Latches', items };
 }
 
@@ -2023,6 +2055,13 @@ export function synthesizeDiagnoses(ctx, sections, sessionDeepDive) {
           symptom: `Supervisor latches active: ${item.meta.latches.map((l) => path.basename(l)).join(', ')}`,
           cause: 'A previous supervisor tick detected an unverified wrapper or stale monster heartbeat and latched an alert.',
           remediation: `Verify integrity and clear latches: fleet verify && rm -f ${item.meta.latches.map((l) => `"${l}"`).join(' ')}`,
+        });
+      } else if (item.name === 'Harness & Seat-Quota Fallback' && item.meta?.fallbackActive) {
+        diagnoses.push({
+          severity: 'warn',
+          symptom: item.detail,
+          cause: `Primary harness (${item.meta.fbPrimary}) hit its seat usage/rate limit in '${item.meta.fbWhere}' at ${item.meta.fbSince}; fleet-supervisor failed over supervised monsters to HARNESS=${item.meta.fbHarness}.`,
+          remediation: `Supervisor will automatically probe ${item.meta.fbPrimary} and fail back after cooldown. To return to ${item.meta.fbPrimary} immediately once the seat resets: rm -f "${item.meta.fbFile}"`,
         });
       } else if (item.name === 'Rendered .fleet/env/{session,security}.env') {
         diagnoses.push({

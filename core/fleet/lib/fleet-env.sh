@@ -53,6 +53,41 @@ case "$HARNESS" in
   agy) HARNESS=antigravity ;;
   *) fleet_die "HARNESS must be claude, copilot, or antigravity (got '$HARNESS')" ;;
 esac
+PRIMARY_HARNESS="$HARNESS"
+: "${HARNESS_FALLBACK:=}"
+if [ -n "$HARNESS_FALLBACK" ]; then
+  _fb_norm="" _fb_part=""
+  IFS=',' read -r -a _fb_parts <<<"$HARNESS_FALLBACK"
+  for _fb_part in ${_fb_parts[@]+"${_fb_parts[@]}"}; do
+    _fb_part="${_fb_part//[[:space:]]/}"
+    [ -n "$_fb_part" ] || continue
+    case "$_fb_part" in
+      claude | copilot | antigravity) ;;
+      agy) _fb_part=antigravity ;;
+      *) fleet_die "HARNESS_FALLBACK entries must be claude, copilot, or antigravity (got '$_fb_part')" ;;
+    esac
+    [ "$_fb_part" != "$PRIMARY_HARNESS" ] || continue
+    case ",$_fb_norm," in *,"$_fb_part",*) continue ;; esac
+    _fb_norm="${_fb_norm:+$_fb_norm,}$_fb_part"
+  done
+  HARNESS_FALLBACK="$_fb_norm"
+  unset _fb_norm _fb_part _fb_parts
+fi
+: "${QUOTA_COOLDOWN_MIN:=60}"
+[[ "$QUOTA_COOLDOWN_MIN" =~ ^[0-9]+$ ]] || fleet_die "QUOTA_COOLDOWN_MIN must be a whole number of minutes (got '$QUOTA_COOLDOWN_MIN')"
+if [ -n "${FLEET_ACTIVE_HARNESS:-}" ]; then
+  case "$FLEET_ACTIVE_HARNESS" in
+    claude | copilot | antigravity) HARNESS="$FLEET_ACTIVE_HARNESS" ;;
+    agy) HARNESS=antigravity; FLEET_ACTIVE_HARNESS=antigravity ;;
+    *) fleet_die "FLEET_ACTIVE_HARNESS must be claude, copilot, or antigravity (got '$FLEET_ACTIVE_HARNESS')" ;;
+  esac
+elif [ -n "$HARNESS_FALLBACK" ] && [ -f "$FLEET_REPO/logs/fleet-supervisor/harness.fallback" ]; then
+  _active_fb="$(head -n 1 "$FLEET_REPO/logs/fleet-supervisor/harness.fallback" 2>/dev/null || true)"
+  case "$_active_fb" in
+    claude | copilot | antigravity) HARNESS="$_active_fb"; FLEET_ACTIVE_HARNESS="$_active_fb" ;;
+  esac
+  unset _active_fb
+fi
 FLEET_HARNESS="$HARNESS"
 : "${COPILOT_HOME:=$FLEET_STATE/copilot-home}"
 : "${ENGSYS_MARKETPLACE:=engsys}"
@@ -94,7 +129,7 @@ for _k in PIN_REPO PIN_DIR; do
   [ -n "${!_k:-}" ] || fleet_die "$_k is not set in $FLEET_REPO/fleet/fleet.conf (or ~/.config/$FLEET_ORG/fleet.local.conf)"
 done
 unset _k
-export FLEET_ORG PIN_REPO PIN_DIR ENGSYS_DIR HARNESS FLEET_HARNESS COPILOT_HOME ENGSYS_MARKETPLACE INSTANCE_MARKETPLACE READY_LABEL REVIEW_BLOCK_REGEX PIN_WAIT_MAX_MIN VERIFY_MAX_AGE_MIN LOG_DIR SLACK_ENV NOTIFY_FALLBACK_ISSUE FLEET_ID FEDERATION_FILE FLEET_INSTANCE_REPO OPERATOR_TIMEZONE OPERATOR_CLOCK
+export FLEET_ORG PIN_REPO PIN_DIR ENGSYS_DIR HARNESS PRIMARY_HARNESS HARNESS_FALLBACK QUOTA_COOLDOWN_MIN FLEET_HARNESS COPILOT_HOME ENGSYS_MARKETPLACE INSTANCE_MARKETPLACE READY_LABEL REVIEW_BLOCK_REGEX PIN_WAIT_MAX_MIN VERIFY_MAX_AGE_MIN LOG_DIR SLACK_ENV NOTIFY_FALLBACK_ISSUE FLEET_ID FEDERATION_FILE FLEET_INSTANCE_REPO OPERATOR_TIMEZONE OPERATOR_CLOCK
 
 command -v jq >/dev/null || fleet_die "jq is required"
 

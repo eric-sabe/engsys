@@ -268,6 +268,11 @@ test('runXray deep-dives into sessions, parses transcripts/agents.tsv/federation
       path.join(memCacheDir, 'injections.jsonl'),
       `${JSON.stringify({ ts: '2026-10-16T20:11:30.000Z', agent_type: 'nyx', lesson_keys: ['bash:quoting'], pointer_keys: [], bytes: 812, ms: 42 })}\n`,
     );
+    fs.mkdirSync(path.join(fleetDir, 'logs', 'fleet-supervisor'), { recursive: true });
+    fs.writeFileSync(
+      path.join(fleetDir, 'logs', 'fleet-supervisor', 'harness.fallback'),
+      'copilot\n2026-10-16T20:10:00Z\nclaude\nkeystone-merge\n9999999999\n',
+    );
 
     // Verify unit parsers directly
     const tsSummary = parseTranscriptSummary(trxPath);
@@ -306,6 +311,7 @@ test('runXray deep-dives into sessions, parses transcripts/agents.tsv/federation
 
     // Verify automated root-cause diagnoses cover the simulated anomalies
     const symptoms = report.diagnoses.map((d) => d.symptom).join('\n');
+    assert.match(symptoms, /ACTIVE FALLBACK: HARNESS=copilot/);
     assert.match(symptoms, /Baton \[merge\]/);
     assert.match(symptoms, /Monster state ceiling \[merge\]/);
     assert.match(symptoms, /Subagent registry \[merge\]/);

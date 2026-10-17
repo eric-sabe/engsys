@@ -82,8 +82,9 @@ runs them for you from an **instance repo** (section 4):
 |---|---|
 | `fleet status` | pins vs host, and which sessions are behind |
 | `fleet status --federation [--json]` | every fleet (operator, enabled, status issue, fleet and broker heartbeat ages, relay) and every baton (home, standby, live holder, expiry, `!` when the holder's fleet is not the home). Read-only; a row that cannot be read shows `?` and a note |
+| `fleet xray [--role <r>\|--session <s>] [--timeline] [--diagnose] [--watch] [--json]` | 10-subsystem runtime inspection, live 9-hook synthetic self-test, session/monster deep-dive, chronological behavior timeline, and automated root-cause diagnosis & remediation playbook |
 | `fleet pin` | release your instance plugin and open the pin PR (section 7) |
-| `fleet sync` | make the host match the pins: checkouts and plugins. Touches no running session |
+| `fleet sync` | make the host match the pins: checkouts and plugins (including `HARNESS_FALLBACK` plugin caches). Touches no running session |
 | `fleet restart` | cycle sessions onto what is installed, when you choose |
 | `fleet launch [<name>]` | render templates and start missing sessions |
 | `fleet supervise` | one supervisor tick (what the launchd job runs) |
@@ -217,6 +218,14 @@ session (or `claude /login` in a terminal), the status issue's heartbeat and `fl
 `auth: expired since <time>`, and the first tick after the login works resolves the alert and
 relaunches each held session once. Details: the agent-sessions skill and the header of
 `fleet-supervisor.sh` (engsys#103).
+
+When a primary seat hits its usage or rate limit (`You've hit your limit · resets …`, `Usage limit reached`,
+`Copilot rate limit exceeded`) and `HARNESS_FALLBACK` is configured in `fleet/fleet.conf` (for example
+`HARNESS_FALLBACK=copilot,antigravity`), the supervisor does not stall the monsters:
+1. `fleet sync` pre-stages the plugin caches for every harness listed in `HARNESS_FALLBACK` (`$COPILOT_HOME/config.json` and `.fleet/agy-plugins.json`, without modifying `PIN_DIR`).
+2. When `fleet-supervisor.sh` sees a seat-quota error in a pane, it records the active fallback in `logs/fleet-supervisor/harness.fallback`, posts one calm `fleet notify --level info --incident harness-fallback` notification, revokes the stalled singleton monster's baton (`--reason quota-fallback`), verifies plugin integrity for the fallback harness, and relaunches the monster onto `HARNESS=copilot` (cascading to `antigravity` if `copilot` is also exhausted).
+3. All fleet identities (`GIT_AUTHOR_*`, `GIT_COMMITTER_*`, `GH_APP_ENV_FILE`, the `core/fleet/identity/bin/gh` bot shim, and `AZURE_AGENTS_ENV`) are injected via the tmux launch wrapper and protected at the front of `PATH` by `core/lib/monster.sh`, so commits, PR merges, and baton leases remain 100% authenticated as `<org>-fleet[bot]` regardless of which harness is active.
+4. After `QUOTA_COOLDOWN_MIN` minutes (default `60`), the supervisor probes the primary harness; once the primary seat responds cleanly, it removes `harness.fallback`, resolves the `harness-fallback` notification, and returns subsequent monster launches/rotations to `PRIMARY_HARNESS`.
 
 ### Where the pins live
 
@@ -1339,6 +1348,9 @@ format) overrides it per machine. Environment values for `ENGSYS_REF` / `INSTANC
 | `PIN_REPO` | yes | `owner/name` whose `.claude/settings.json` holds the pins |
 | `PIN_DIR` | yes | Local checkout of `PIN_REPO`; also the sessions' default workdir |
 | `ENGSYS_DIR` | no | The pinned engsys checkout. Default `~/git/engsys` |
+| `HARNESS` | no | Primary harness runtime (`claude`, `copilot`, or `antigravity`). Default `claude` |
+| `HARNESS_FALLBACK` | no | Ordered comma-separated fallback harnesses (`copilot,antigravity`) for automatic supervisor failover when the primary seat hits its usage/rate limit. Empty means no automatic harness fallback |
+| `QUOTA_COOLDOWN_MIN` | no | Minutes before the supervisor probes `PRIMARY_HARNESS` to fail back after a seat-quota fallback. Default `60` |
 | `ENGSYS_MARKETPLACE` | no | Default `engsys` |
 | `INSTANCE_MARKETPLACE` | no | The instance's own marketplace name (for example `acme`). Empty means no instance plugin: no instance release, and the instance checkout is not pinned |
 | `WORKTREES_DIR` | no | Agent worktrees directory; created by `launch`; available to templates for `--add-dir` |
