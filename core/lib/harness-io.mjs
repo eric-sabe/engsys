@@ -435,7 +435,6 @@ const MAX_HOOK_TELEMETRY_BYTES = 512 * 1024;
 export function hookTelemetryPath(env = process.env) {
   if (!env || env.ENGSYS_HOOK_TELEMETRY === '0') return null;
   if (env.ENGSYS_HOOK_TELEMETRY_FILE) return env.ENGSYS_HOOK_TELEMETRY_FILE;
-  if ((env.NODE_TEST_CONTEXT || process.env.NODE_TEST_CONTEXT) && env.ENGSYS_HOOK_TELEMETRY !== '1') return null;
   const dir =
     env.ENGSYS_SESSIONS_DIR ||
     path.join(env.XDG_STATE_HOME || path.join(env.HOME || os.homedir(), '.local', 'state'), 'engsys', 'sessions');
@@ -448,6 +447,17 @@ export function hookTelemetryPath(env = process.env) {
  */
 export function recordHookTelemetry(entry, env = process.env) {
   try {
+    if (!env || env.ENGSYS_HOOK_TELEMETRY === '0') return null;
+    if (
+      (env.NODE_TEST_CONTEXT || process.env.NODE_TEST_CONTEXT) &&
+      !env.ENGSYS_HOOK_TELEMETRY_FILE &&
+      env.ENGSYS_HOOK_TELEMETRY !== '1'
+    ) {
+      return null;
+    }
+    if (!env.HOME && !env.ENGSYS_SESSIONS_DIR && !env.XDG_STATE_HOME && !env.ENGSYS_HOOK_TELEMETRY_FILE) {
+      return null;
+    }
     const file = hookTelemetryPath(env);
     if (!file || !entry || typeof entry !== 'object') return null;
     const dir = path.dirname(file);

@@ -21,11 +21,13 @@ function frontmatterModel(file) {
   return line ? line.slice('model:'.length).trim().replace(/^(['"])(.*)\1$/, '$2') : null;
 }
 
-/** The SECURITY_MODEL default the `fleet init` scaffold writes into fleet/fleet.conf. */
+/** The SECURITY_MODEL default the `fleet init` scaffold writes into fleet/fleet.conf for the Claude harness. */
 function securityModelDefault() {
   const conf = fs.readFileSync(path.join(ROOT, 'core/fleet/scaffold/fleet/fleet.conf'), 'utf8');
-  const lines = conf.split('\n').filter((l) => /^SECURITY_MODEL=/.test(l));
-  assert.equal(lines.length, 1, 'fleet.conf sets SECURITY_MODEL exactly once');
+  const claudeBlock = /\{\{#if harness_claude\}\}([\s\S]*?)\{\{\/if\}\}/.exec(conf);
+  const target = claudeBlock ? claudeBlock[1] : conf;
+  const lines = target.split('\n').filter((l) => /^SECURITY_MODEL=/.test(l));
+  assert.equal(lines.length, 1, 'fleet.conf (harness_claude) sets SECURITY_MODEL exactly once');
   return lines[0].slice('SECURITY_MODEL='.length).trim();
 }
 
