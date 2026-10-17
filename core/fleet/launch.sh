@@ -26,9 +26,10 @@
 # (and refuses when the alert can't be delivered).
 # No config file or environment variable turns it on, and the supervisor never passes it.
 #
-# Claude-only: a merge, maintain, broker (any monster) or security-lane session (5th field security*)
-# is refused, or left out of a whole-roster launch, when HARNESS is anything but claude, whether it
-# came from fleet.conf, fleet.local.conf, the environment or a HARNESS= line in the roster.
+# Claude-only: a merge, maintain, broker (any monster), supervised or security-lane session (5th field
+# security*) is refused when HARNESS is anything but claude, whether it came from fleet.conf,
+# fleet.local.conf, the environment or a HARNESS= line in the roster. A whole-roster launch starts the
+# rest, prints `SKIPPED: <name>` for each refused one, and exits non-zero: a refusal is an error.
 #
 # Usage: launch.sh [--instance <dir>]                              # every session that runs on this host
 #        launch.sh [--instance <dir>] <name> [--force-excluded]    # just one (the supervisor relaunches this way)
@@ -162,6 +163,7 @@ launch_harness="${launch_harness:-${HARNESS:-claude}}"
 case "$launch_harness" in agy) launch_harness=antigravity ;; esac
 claude_only() { # claude_only <name> → 0 when <name> may only run on Claude
   case "$(fleet_host_kind_of "$1")" in merge | maintain | broker | monster) return 0 ;; esac
+  fleet_ledger_sessions | grep -Fxq -- "$1" && return 0   # any supervised session
   local envf
   envf="$(awk -F'|' -v n="$1" '$1 == n { print $5; exit }' "$FLEET_STATE/roster")"
   case "${envf##*/}" in security*) return 0 ;; esac
@@ -191,7 +193,7 @@ if [ -n "$name" ]; then
 fi
 
 # The host roster: the rendered roster minus the sessions that are not on this host.
-host_roster="$FLEET_STATE/roster.host" kept=0
+host_roster="$FLEET_STATE/roster.host" kept=0 refused=0
 : >"$host_roster"; chmod 600 "$host_roster"
 while IFS= read -r line; do
   case "$line" in
@@ -203,8 +205,9 @@ while IFS= read -r line; do
         continue
       fi
       if harness_refused "$n"; then
-        echo "skip: $n, Claude-only session and HARNESS=$launch_harness"
+        echo "SKIPPED: $n (a Claude-only session, and HARNESS=$launch_harness)" >&2
         printf '# claude-only: %s (HARNESS=%s)\n' "$n" "$launch_harness" >>"$host_roster"
+        refused=$((refused + 1))
         continue
       fi
       if is_singleton "$n" && ! singleton_integrity_ok; then
@@ -216,5 +219,11 @@ while IFS= read -r line; do
   esac
   printf '%s\n' "$line" >>"$host_roster"
 done <"$FLEET_STATE/roster"
-if [ "$kept" = 0 ]; then echo "fleet: no roster session runs on this host; nothing to launch"; exit 0; fi
-exec bash "$LAUNCHER" --roster "$host_roster"
+if [ "$kept" = 0 ]; then
+  [ "$refused" = 0 ] || fleet_die "$refused Claude-only session(s) refused on HARNESS=$launch_harness (SKIPPED above); nothing else to launch"
+  echo "fleet: no roster session runs on this host; nothing to launch"; exit 0
+fi
+[ "$refused" != 0 ] || exec bash "$LAUNCHER" --roster "$host_roster"
+lrc=0; bash "$LAUNCHER" --roster "$host_roster" || lrc=$?
+echo "fleet: $refused Claude-only session(s) refused on HARNESS=$launch_harness (SKIPPED above)" >&2
+exit $(( lrc != 0 ? lrc : 1 ))

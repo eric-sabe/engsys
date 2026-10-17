@@ -50,9 +50,12 @@ main() {
     git -C "$PIN_DIR" rev-parse --git-dir >/dev/null 2>&1 || fleet_die "PIN_DIR is not a git checkout: $PIN_DIR"
     git -C "$PIN_DIR" fetch -q origin
     local pin_branch default_branch
-    pin_branch="$(git -C "$PIN_DIR" symbolic-ref --short -q HEAD || echo DETACHED)"
-    default_branch="$(git -C "$PIN_DIR" symbolic-ref --short -q refs/remotes/origin/HEAD 2>/dev/null || true)"
-    default_branch="${default_branch#origin/}"; : "${default_branch:=main}"
+    # Full ref names, never --short: a local branch or tag named origin/<x> makes --short ambiguous.
+    pin_branch="$(git -C "$PIN_DIR" symbolic-ref -q HEAD || true)"
+    case "$pin_branch" in refs/heads/*) pin_branch="${pin_branch#refs/heads/}" ;; *) pin_branch=DETACHED ;; esac
+    default_branch="$(git -C "$PIN_DIR" symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null || true)"
+    case "$default_branch" in refs/remotes/origin/?*) default_branch="${default_branch#refs/remotes/origin/}" ;; *) default_branch="" ;; esac
+    : "${default_branch:=main}"
     # Fully qualified: a local branch or tag named origin/<x> must never stand in for the remote ref.
     local origin_ref="refs/remotes/origin/$default_branch"
     if [ "$(git -C "$PIN_DIR" rev-parse HEAD)" != "$(git -C "$PIN_DIR" rev-parse --verify -q "$origin_ref^{commit}")" ]; then

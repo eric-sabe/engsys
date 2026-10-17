@@ -168,9 +168,12 @@ if [ "$rc" = 1 ]; then
 fi
 sync_why=""
 if [ "$only_stale" = 1 ] && [ "$auto_sync" = 1 ]; then
-  pin_branch="$(git -C "$PIN_DIR" symbolic-ref --short -q HEAD 2>/dev/null || true)"
-  def_branch="$(git -C "$PIN_DIR" symbolic-ref --short -q refs/remotes/origin/HEAD 2>/dev/null || true)"
-  def_branch="${def_branch#origin/}"; : "${def_branch:=main}"
+  # Full ref names, never --short: a local branch or tag named origin/<x> makes --short ambiguous.
+  pin_branch="$(git -C "$PIN_DIR" symbolic-ref -q HEAD 2>/dev/null || true)"
+  case "$pin_branch" in refs/heads/*) pin_branch="${pin_branch#refs/heads/}" ;; *) pin_branch="" ;; esac
+  def_branch="$(git -C "$PIN_DIR" symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null || true)"
+  case "$def_branch" in refs/remotes/origin/?*) def_branch="${def_branch#refs/remotes/origin/}" ;; *) def_branch="" ;; esac
+  : "${def_branch:=main}"
   if [ "$pin_branch" != "$def_branch" ]; then sync_why="the pin checkout is on '${pin_branch:-a detached HEAD}', not $def_branch"
   elif [ -n "$(git -C "$PIN_DIR" status --porcelain --untracked-files=no 2>/dev/null || echo dirty)" ]; then sync_why="the pin checkout has uncommitted changes to tracked files"
   elif [ -n "$(git -C "$PIN_DIR" status --porcelain -- .claude ':(exclude,icase).claude/settings.local.json' \

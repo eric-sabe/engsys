@@ -642,6 +642,18 @@ has "…it is not an ancestor of main" "$OUT" "is not main or an ancestor of it"
 hasnt "…and no sync was tried" "$OUT" "auto-syncing"
 git -C "$APPD" fetch -q origin; git -C "$APPD" reset -q --hard refs/remotes/origin/main
 run fleet verify; rc_is "back on main: passes" 0
+# A local branch and a local tag named origin/main (which make `symbolic-ref --short` ambiguous) never
+# break sync or auto-sync: refs are read in full.
+git -C "$APPD" remote set-head origin main >/dev/null 2>&1 || git -C "$APPD" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+git -C "$APPD" branch -q origin/main HEAD~1 2>/dev/null || git -C "$APPD" branch -q origin/main
+git -C "$APPD" tag origin/main HEAD
+run fleet sync --check
+rc_is "a planted branch and tag named origin/main: sync --check still works" 0
+behind CLAUDE.md
+run fleet verify --auto-sync
+rc_is "…and auto-sync still fast-forwards and passes" 0
+eq "…to the real origin/main" "$(git -C "$APPD" rev-parse HEAD)" "$(git -C "$P" rev-parse HEAD)"
+git -C "$APPD" branch -q -D origin/main; git -C "$APPD" tag -d origin/main >/dev/null
 grep -q -- '--auto-sync' "$STATE/supervisor.conf" && ok "the supervisor's INTEGRITY_CMD passes --auto-sync" || bad "the supervisor's INTEGRITY_CMD passes --auto-sync" "$(cat "$STATE/supervisor.conf")"
 
 echo "== G. install-jobs"

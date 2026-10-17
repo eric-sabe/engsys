@@ -671,7 +671,8 @@ export function inspectPinsAndTrust(ctx) {
   // 1c. FLEET_REPO
   if (fleetRepo && fs.existsSync(fleetRepo)) {
     const fHead = runCmd('git', ['-C', fleetRepo, 'rev-parse', '--short', 'HEAD']);
-    const fBranch = runCmd('git', ['-C', fleetRepo, 'rev-parse', '--abbrev-ref', 'HEAD']);
+    const fRef = runCmd('git', ['-C', fleetRepo, 'symbolic-ref', '-q', 'HEAD']);
+    const fBranch = { ok: true, stdout: fRef.ok && fRef.stdout.startsWith('refs/heads/') ? fRef.stdout.slice('refs/heads/'.length) : 'HEAD' };
     items.push({
       name: 'FLEET_REPO checkout',
       status: 'pass',

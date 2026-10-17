@@ -76,13 +76,14 @@ resolve_base() {
     return
   fi
   local head_ref
-  head_ref="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+  # full ref names: a local branch or tag named origin/<x> would make --short (and a bare origin/main) ambiguous
+  head_ref="$(git symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null || true)"
   if [[ -n "$head_ref" ]] && git rev-parse --verify --quiet "$head_ref" >/dev/null; then
     echo "$head_ref"
     return
   fi
   local cand
-  for cand in origin/main main master; do
+  for cand in refs/remotes/origin/main refs/heads/main refs/heads/master; do
     if git rev-parse --verify --quiet "$cand" >/dev/null; then
       echo "$cand"
       return
