@@ -27,7 +27,7 @@ import { fileURLToPath } from 'node:url';
 import { detectHostToolchain } from '../../lib/host-toolchain.mjs';
 import { hookTelemetryPath } from '../../lib/harness-io.mjs';
 import { fleetIdProblems, loadFederation, registryWarnings } from './federation.mjs';
-import { checkSettingsDetailed, ENGSYS_HOST_FILES, ENGSYS_HOST_PATHS, ENGSYS_HOST_TREES, parseAllowedPlugins } from './verify-wrappers.mjs';
+import { checkSettingsDetailed, ENGSYS_HOST_FILES, ENGSYS_HOST_PATHS, ENGSYS_HOST_TREES, parseAllowedHooks, parseAllowedPlugins } from './verify-wrappers.mjs';
 
 export const DEFAULT_CLAUDE_TIERS = Object.freeze({
   opus: 'claude-opus-5-5',
@@ -641,6 +641,8 @@ export function inspectPinsAndTrust(ctx) {
       userSettingsDir: cfg.dir,
       pinSettingsSha,
       allowedUserPlugins: parseAllowedPlugins(ctx.fleetConf.VERIFY_ALLOWED_USER_PLUGINS || ''),
+      allowedUserHooks: parseAllowedHooks(ctx.fleetConf.VERIFY_ALLOWED_USER_HOOKS || ''),
+      home: ctx.home,
     });
     items.push({
       name: 'Claude settings trust closure',
@@ -2089,7 +2091,7 @@ export function synthesizeDiagnoses(ctx, sections, sessionDeepDive) {
           severity: 'fail',
           symptom: item.detail,
           cause: 'User or local settings contain disableAllHooks, dangerous env overrides (PATH, NODE_OPTIONS, CLAUDE_PLUGIN_ROOT, ENGSYS_SINGLETON_ROLE), or unapproved plugins (#96 M3).',
-          remediation: `Inspect settings.json and settings.local.json in the fleet's Claude config dir (${claudeConfigDir(ctx).dir}), and "${ctx.pinDir || '.'}/.claude/settings.local.json", and remove the offending keys (or, for an operator-approved user-scope plugin, list it in VERIFY_ALLOWED_USER_PLUGINS).`,
+          remediation: `Inspect settings.json and settings.local.json in the fleet's Claude config dir (${claudeConfigDir(ctx).dir}), and "${ctx.pinDir || '.'}/.claude/settings.local.json", and remove the offending keys (or, for an operator-approved user-scope plugin or command, list it in VERIFY_ALLOWED_USER_PLUGINS / VERIFY_ALLOWED_USER_HOOKS).`,
         });
       } else if (item.name.startsWith('Azure SP Cert')) {
         diagnoses.push({

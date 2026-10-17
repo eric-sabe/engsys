@@ -219,13 +219,13 @@ session (or `claude /login` in a terminal), the status issue's heartbeat and `fl
 relaunches each held session once. Details: the agent-sessions skill and the header of
 `fleet-supervisor.sh` (engsys#103).
 
-When a primary seat hits its usage or rate limit (`You've hit your limit · resets …`, `Usage limit reached`,
-`Copilot rate limit exceeded`) and `HARNESS_FALLBACK` is configured in `fleet/fleet.conf` (for example
-`HARNESS_FALLBACK=copilot,antigravity`), the supervisor does not stall the monsters:
-1. `fleet sync` pre-stages the plugin caches for every harness listed in `HARNESS_FALLBACK` (`$COPILOT_HOME/config.json` and `.fleet/agy-plugins.json`, without modifying `PIN_DIR`).
-2. When `fleet-supervisor.sh` sees a seat-quota error in a pane, it records the active fallback in `logs/fleet-supervisor/harness.fallback`, posts one calm `fleet notify --level info --incident harness-fallback` notification, revokes the stalled singleton monster's baton (`--reason quota-fallback`), verifies plugin integrity for the fallback harness, and relaunches the monster onto `HARNESS=copilot` (cascading to `antigravity` if `copilot` is also exhausted).
-3. All fleet identities (`GIT_AUTHOR_*`, `GIT_COMMITTER_*`, `GH_APP_ENV_FILE`, the `core/fleet/identity/bin/gh` bot shim, and `AZURE_AGENTS_ENV`) are injected via the tmux launch wrapper and protected at the front of `PATH` by `core/lib/monster.sh`, so commits, PR merges, and baton leases remain 100% authenticated as `<org>-fleet[bot]` regardless of which harness is active.
-4. After `QUOTA_COOLDOWN_MIN` minutes (default `60`), the supervisor probes the primary harness; once the primary seat responds cleanly, it removes `harness.fallback`, resolves the `harness-fallback` notification, and returns subsequent monster launches/rotations to `PRIMARY_HARNESS`.
+When a seat hits its usage or rate limit (`You've hit your limit · resets …`, `Usage limit reached`), the
+supervisor does not move any supervised session to another harness: the fleet is Claude-only, whatever
+`HARNESS_FALLBACK` says. It posts one `fleet notify --level alert --incident seat-limit`, resolved once no
+supervised pane shows the limit, and every relaunch stays on the primary harness. Only Claude Code's own
+limit line, as the last message of a pane the supervisor launched, counts: text in tool output or in
+another pane never does. (`HARNESS_FALLBACK` only makes `fleet sync` pre-stage those harnesses' plugin
+caches; starting an interactive session on one is an operator's decision at the terminal.)
 
 ### Where the pins live
 
@@ -1177,13 +1177,18 @@ root is `PIN_REPO`'s default branch as the GitHub API reports it, never a local 
 `refs/remotes/*` can be repointed by anything on the host):
 
 - `PIN_DIR`'s HEAD must be that branch's tip or an ancestor of it (GitHub's compare says `identical` or
-  `behind`). Behind is fine, with a warning to run `fleet sync`, so a merged pin PR never turns into a false
-  mismatch. Ahead, diverged, or a commit GitHub doesn't have is a mismatch.
-- Every file under `.claude/` must be a file of HEAD's `.claude/` tree (read from the API) with the same
-  content, and every file of that tree must be there: nothing modified, missing or untracked. Claude
-  Code's own runtime files there (`settings.local.json`, checked separately, `scheduled_tasks.lock` and the
-  `worktrees/` directory) are skipped.
-- Every script a `settings.json` hook command names (with `$CLAUDE_PROJECT_DIR` resolved; a word with a `/`,
+  `behind`). Ahead, diverged, or a commit GitHub doesn't have is a mismatch.
+- The files a session loads on its own are compared with HEAD's tree (read from the API): everything
+  under `.claude/`, every `CLAUDE.md` and `CLAUDE.local.md` in the checkout (dependency `node_modules/`
+  trees aside), `.mcp.json`, and what a tracked symlink among them points at. Nothing may be modified,
+  missing or untracked. Claude Code's own runtime files (`.claude/settings.local.json`, checked
+  separately, `.claude/scheduled_tasks.lock` and `.claude/worktrees/`) are skipped, matched
+  case-insensitively as APFS does.
+- When HEAD is behind the tip, every one of those files, and every settings-command target, must also be
+  identical at the tip: an older hook, skill or `CLAUDE.md` is a mismatch (`stale …`; run `fleet sync`).
+  Only a lag in other code is a warning, so a merged pin PR never turns into a false mismatch.
+- Every script a `settings.json` hook or command key (`statusLine`, `apiKeyHelper`, any `*Helper` /
+  `*Command`, …) names (with `$CLAUDE_PROJECT_DIR` resolved; a word with a `/`,
   or a bare name of a file in the repo root) must be inside the repo, a regular file, tracked at HEAD and
   unchanged. A hook that runs a path outside the repo, or has any other variable or command substitution
   in it, is a mismatch. Code a hook reaches indirectly (`npm run …`, `make …`) is not followed: keep hook
@@ -1194,12 +1199,20 @@ settings is a mismatch.
 
 **User-scope settings.** `fleet verify` also reads `settings.json` and `settings.local.json` of the Claude
 config dir the sessions use (`FLEET_CLAUDE_CONFIG_DIR`, else `~/.claude`): a plugin the pin repo doesn't
-enable is a mismatch unless `VERIFY_ALLOWED_USER_PLUGINS` lists it (§ 6.1), and so is `disableAllHooks`, or an
+enable is a mismatch unless `VERIFY_ALLOWED_USER_PLUGINS` lists it (§ 6.1). A user-scope hook or command
+key (`statusLine`, `fileSuggestion`, `apiKeyHelper`, `awsAuthRefresh`, `awsCredentialExport`,
+`gcpAuthRefresh`, `otelHeadersHelper`, `proxyAuthHelper`, any `*Helper` / `*Command`), and any such command
+key in the project's untracked `settings.local.json`, is a mismatch unless `VERIFY_ALLOWED_USER_HOOKS` lists
+its content hash: the mismatch line prints it (`sha256 …`), and any change to the command or to a file it
+runs changes it. A command with a variable other than `~`, `$HOME` or `$CLAUDE_PROJECT_DIR` can't be
+pinned and is always a mismatch. Also a mismatch, at every scope: `disableAllHooks`, or an
 `env` key in a protected family (`ENGSYS_*`, `FLEET_*`, `HARNESS*`, `COPILOT_*`, `AGY_*`, `NODE_*`,
 `CLAUDE_PLUGIN_ROOT`, `CLAUDE_CONFIG_DIR`, `PATH`, `GH_*`, `GITHUB_*`) in any settings file. So is a model
 override: `CLAUDE_CODE_SUBAGENT_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL_FORCE`, `ANTHROPIC_MODEL`,
-`ANTHROPIC_SMALL_FAST_MODEL` or any `ANTHROPIC_*_MODEL` in an `env`, or a top-level `model` /
-`availableModels` in the project's settings: each could move a pinned security agent off its model. The
+`ANTHROPIC_SMALL_FAST_MODEL` or any `ANTHROPIC_*_MODEL` in an `env`, or a top-level `model`,
+`availableModels`, `fallbackModel`, `advisorModel`, `modelOverrides`, `deniedModels`,
+`enforceAvailableModels` or `switchModelsOnFlag: true` (the model keys of Claude Code 2.1.292's settings
+schema): each could move a pinned security agent off its model. The
 security lane's rendered env also unsets `CLAUDE_CODE_SUBAGENT_MODEL` and `CLAUDE_CODE_SUBAGENT_MODEL_FORCE`.
 
 **A mismatch never touches a running session.** The supervisor holds relaunches of the merge and
@@ -1411,9 +1424,7 @@ format) overrides it per machine. Environment values for `ENGSYS_REF` / `INSTANC
 | `PIN_DIR` | yes | Local checkout of `PIN_REPO`; also the sessions' default workdir |
 | `ENGSYS_DIR` | no | The pinned engsys checkout. Default `~/git/engsys` |
 | `HARNESS` | no | Primary harness runtime (`claude`, `copilot`, or `antigravity`). Default `claude` |
-| `HARNESS_FALLBACK` | no | Ordered comma-separated fallback harnesses (`copilot,antigravity`) the supervisor may fail eligible sessions over to when the primary seat hits its limit. Empty (the default) means no harness switch ever happens. A switch needs Claude Code's own limit line in a pane the supervisor launched, a test request that confirms it, and, for any harness but `claude`, an operator's approval of a gate request in GitHub (`FALLBACK_GATE_*`). Merge, maintain and security-tier sessions never switch |
-| `FALLBACK_GATE_ISSUE` | no | `owner/repo#N` where the supervisor posts a `harness-fallback` gate request. Default: the fleet's status issue (multi-fleet mode). Unset with no status issue means a non-Claude switch never happens |
-| `FALLBACK_GATE_OPERATORS_TEAM` / `FALLBACK_GATE_OPERATORS` | no | The operator source `gate-check` verifies that approval against: `org/team-slug`, or `login:id,…` pins. Neither set means a non-Claude switch never happens |
+| `HARNESS_FALLBACK` | no | Fallback harnesses (`copilot,antigravity`) whose plugins `fleet sync` also installs. The supervisor never moves a supervised session (merge, maintain, broker, any monster) to one: the fleet is Claude-only, and a seat limit is only alerted (`seat-limit` incident). Empty is the default |
 | `QUOTA_COOLDOWN_MIN` | no | Minutes before the supervisor probes `PRIMARY_HARNESS` to fail back after a seat-quota fallback. Default `60` |
 | `ENGSYS_MARKETPLACE` | no | Default `engsys` |
 | `INSTANCE_MARKETPLACE` | no | The instance's own marketplace name (for example `acme`). Empty means no instance plugin: no instance release, and the instance checkout is not pinned |
@@ -1421,6 +1432,7 @@ format) overrides it per machine. Environment values for `ENGSYS_REF` / `INSTANC
 | `GH_APP_ENV` | no | Path to the GitHub App env file. Set means identity kit on |
 | `FLEET_CLAUDE_CONFIG_DIR` | no | A separate Claude Code config dir for the fleet, with its own login (§ 6.1). Every fleet command and every launched session runs with `CLAUDE_CONFIG_DIR` set to it; `fleet sync` installs the plugins there and `fleet verify` checks it. An absolute path (or `~/…`). Never inherited from the caller's environment. Unset means `~/.claude` |
 | `VERIFY_ALLOWED_USER_PLUGINS` | no | Space-separated `name@marketplace` user-scope plugins `fleet verify` reports as `allowed` instead of a mismatch (§ 6.1). Never inherited from the caller's environment |
+| `VERIFY_ALLOWED_USER_HOOKS` | no | Space-separated sha256 content hashes of user-scope hooks and settings commands (`statusLine`, `apiKeyHelper`, any `*Helper` / `*Command`, …) that `fleet verify` accepts (§ 7, "User-scope settings"). The hash covers the command and every file it runs, and is printed in the mismatch line. Never inherited from the caller's environment |
 | `REVIEW_CMD` | no | Review run in the pin PR's worktree (for example `<your-review-cli> review --base origin/main`). Empty means no review; the label only |
 | `REVIEW_MARKER` | no | Marker line opening the review comment (for example `<!-- local-review-findings -->`) |
 | `REVIEW_BLOCK_REGEX` | no | Default `critical\|warning` (case-insensitive). A match, or a non-zero exit, stops auto-labeling |

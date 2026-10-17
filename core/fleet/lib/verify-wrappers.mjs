@@ -35,14 +35,17 @@
 //   verify-wrappers.mjs --repo <owner/repo> --tag vX.Y.Z --plugin-id engsys@<marketplace>
 //                       --project-dir <PIN_DIR> --plugins <`claude plugin list --json` output file>
 //                       [--engsys-dir <ENGSYS_DIR>] [--check-settings] [--user-settings-dir <claude config dir>]
-//                       [--allowed-user-plugins "<name@mkt> ..."] [--pin-repo <owner/repo>]
+//                       [--allowed-user-plugins "<name@mkt> ..."] [--allowed-user-hooks "<sha256> ..."]
+//                       [--pin-repo <owner/repo>]
 //                       [--cache <file> --max-age-min <n>]
 //
 // --engsys-dir: the host kit (ENGSYS_HOST_TREES, ENGSYS_HOST_FILES) against the same release tree.
 // --user-settings-dir: the Claude config dir the sessions use (FLEET_CLAUDE_CONFIG_DIR, else ~/.claude);
-//   a user-scope plugin the project doesn't enable is a mismatch unless --allowed-user-plugins lists it.
+//   a user-scope plugin the project doesn't enable is a mismatch unless --allowed-user-plugins lists it,
+//   and a user-scope hook or settings command unless --allowed-user-hooks lists its userCommandHash.
 // --pin-repo: PIN_DIR's .claude/ tree and every settings-hook target against that repo's default branch
-//   on GitHub (projectLocalState + verifyProjectTrust, below). A pin checkout behind the tip passes with a WARNING line.
+//   on GitHub (projectLocalState + verifyProjectTrust, below). A pin checkout behind the tip passes with a
+//   WARNING line only while every auto-loaded file is identical at the tip.
 //
 // Exit: 0 everything matches | 1 MISMATCH (a definite difference) | 3 not verified (GitHub unreachable,
 //       API error, truncated tree, nothing installed) | 2 usage. Callers hold merge/maintain sessions on
@@ -116,8 +119,6 @@ export const DANGEROUS_SETTINGS_ENV_RE = /^(ENGSYS_|FLEET_|HARNESS|COPILOT_|AGY_
  * (model: claude-opus-4-8) would otherwise run on whatever a committed settings file names.
  */
 export const MODEL_SETTINGS_ENV_RE = /^(CLAUDE_CODE_SUBAGENT_MODEL|CLAUDE_CODE_SUBAGENT_MODEL_FORCE|ANTHROPIC_MODEL|ANTHROPIC_SMALL_FAST_MODEL|ANTHROPIC_[A-Z0-9_]*_MODEL)$/;
-/** Top-level project settings keys that pick or limit the session's model. */
-export const MODEL_SETTINGS_KEYS = ['model', 'availableModels'];
 export const isProtectedEnvKey = (k) => DANGEROUS_SETTINGS_ENV_KEYS.includes(k) || DANGEROUS_SETTINGS_ENV_RE.test(k) || MODEL_SETTINGS_ENV_RE.test(k);
 
 /** Claude Code's PID-marker directory at the top of an install root: written by Claude Code, never loaded. */
@@ -251,34 +252,109 @@ export function parseAllowedPlugins(text) {
   return new Set(String(text || '').split(/\s+/).filter((t) => ID_RE.test(t)));
 }
 
+/** Parse VERIFY_ALLOWED_USER_HOOKS: space-separated sha256 hex digests (userCommandHash). → Set */
+export function parseAllowedHooks(text) {
+  return new Set(String(text || '').split(/\s+/).map((t) => t.toLowerCase()).filter((t) => /^[0-9a-f]{64}$/.test(t)));
+}
+
+// --- Commands in settings files -------------------------------------------------------------------
+// Claude Code runs commands from settings files besides hooks: the status line, the @-mention file
+// suggester, and the credential / header helpers (Claude Code 2.1.292's settings schema). Any other
+// top-level key ending in Helper or Command is treated the same way.
+export const COMMAND_SETTINGS_KEYS = [
+  'statusLine', 'fileSuggestion', 'apiKeyHelper', 'awsAuthRefresh', 'awsCredentialExport',
+  'gcpAuthRefresh', 'otelHeadersHelper', 'proxyAuthHelper',
+];
+const COMMAND_KEY_RE = /(Helper|Command)$/;
+
+/** Every command a settings object runs: hooks and command-bearing keys. → [{ where, command }] */
+export function settingsCommands(cfg) {
+  const out = [];
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) return out;
+  for (const c of hookCommands(cfg)) out.push({ where: 'hook', command: c });
+  for (const [k, v] of Object.entries(cfg)) {
+    if (!COMMAND_SETTINGS_KEYS.includes(k) && !COMMAND_KEY_RE.test(k)) continue;
+    if (typeof v === 'string' && v.trim()) out.push({ where: k, command: v });
+    else if (v && typeof v === 'object' && typeof v.command === 'string') out.push({ where: k, command: v.command });
+    else if (v !== undefined && v !== null && v !== false) out.push({ where: k, command: JSON.stringify(v) });
+  }
+  return out;
+}
+
 /**
- * Check Claude Code settings files for hook/env/plugin overrides or pin drift (engsys#96 M3).
+ * The content hash an operator allowlists (VERIFY_ALLOWED_USER_HOOKS) for one user-scope command: sha256
+ * over the command text and the content of every file it names (~, $HOME and $CLAUDE_PROJECT_DIR
+ * resolved). → { hash, problems }: an expansion it can't resolve can't be pinned, so it is a problem
+ * whatever the allowlist says. Any change to the command or a file it runs changes the hash.
+ */
+export function userCommandHash(command, { home = os.homedir(), projectDir = '' } = {}) {
+  const problems = [];
+  const files = new Map();
+  const visit = (cmd, depth) => {
+    for (let w of shellWords(cmd)) {
+      w = w.replace(/^~(?=\/|$)/, home).replace(/\$\{HOME\}|\$HOME(?![A-Za-z0-9_])/g, home);
+      if (projectDir) w = w.replace(/\$\{CLAUDE_PROJECT_DIR\}|\$CLAUDE_PROJECT_DIR(?![A-Za-z0-9_])/g, path.resolve(projectDir));
+      if (/[\s;|&]/.test(w) && depth < 2) { visit(w, depth + 1); continue; }
+      if (/[$`]/.test(w)) { problems.push(w); continue; }
+      if (!w.includes('/')) continue;
+      const abs = path.resolve(projectDir || home, w);
+      let state;
+      try {
+        const st = fs.statSync(abs);
+        state = st.isFile() ? crypto.createHash('sha256').update(fs.readFileSync(abs)).digest('hex') : st.isDirectory() ? 'dir' : 'not-a-file';
+      } catch { state = 'missing'; }
+      files.set(abs, state);
+    }
+  };
+  visit(command, 0);
+  const h = crypto.createHash('sha256').update(`engsys-user-command-v1\0${command}\0`);
+  for (const k of [...files.keys()].sort()) h.update(`${k}\0${files.get(k)}\0`);
+  return { hash: h.digest('hex'), problems };
+}
+
+/** Top-level settings keys that pick, limit or redirect the session's model (Claude Code 2.1.292). */
+export const MODEL_SETTINGS_TOP_KEYS = ['model', 'availableModels', 'fallbackModel', 'advisorModel', 'modelOverrides', 'deniedModels', 'enforceAvailableModels'];
+
+/**
+ * Check Claude Code settings files for hook/env/plugin/model overrides or pin drift (engsys#96 M3).
  * Inspects:
- *   - <projectDir>/.claude/settings.json: disableAllHooks, protected env keys; its hooks count as
- *     verified only when projectVerified (verifyProjectTrust compared the whole .claude/ tree and every
- *     hook target with the reviewed commit) or its blob matches pinSettingsSha;
- *   - <projectDir>/.claude/settings.local.json;
+ *   - <projectDir>/.claude/settings.json: disableAllHooks, protected env keys, model keys; its hooks and
+ *     commands count as verified only when projectVerified (verifyProjectTrust compared .claude/ and
+ *     every command target with GitHub) or its blob matches pinSettingsSha;
+ *   - <projectDir>/.claude/settings.local.json (untracked: hooks are a mismatch, other commands need the
+ *     operator allowlist);
  *   - <userSettingsDir>/settings.json and settings.local.json (the fleet's CLAUDE_CONFIG_DIR, else
- *     ~/.claude). A user-scope plugin the project doesn't enable is a mismatch unless it is in
- *     allowedUserPlugins (VERIFY_ALLOWED_USER_PLUGINS), which reports it as `allowed` in info instead:
- *     its hooks still run in fleet sessions, so allowing one is an operator decision.
+ *     ~/.claude). A user-scope plugin the project doesn't enable is a mismatch unless allowedUserPlugins
+ *     (VERIFY_ALLOWED_USER_PLUGINS) lists it; a user-scope hook or command is a mismatch unless its
+ *     userCommandHash is in allowedUserHooks (VERIFY_ALLOWED_USER_HOOKS). Listed ones are `allowed` info.
  * → { problems: [...], info: [...] }
  */
-export function checkSettingsDetailed({ projectDir, userSettingsDir = '', pinSettingsSha = '', projectVerified = false, allowedUserPlugins = new Set() }) {
+export function checkSettingsDetailed({
+  projectDir, userSettingsDir = '', pinSettingsSha = '', projectVerified = false,
+  allowedUserPlugins = new Set(), allowedUserHooks = new Set(), home = os.homedir(),
+}) {
   const problems = [];
   const info = [];
   const allowed = allowedUserPlugins instanceof Set ? allowedUserPlugins : parseAllowedPlugins(allowedUserPlugins);
-  const envProblems = (f, cfg, project = false) => {
+  const allowedHooks = allowedUserHooks instanceof Set ? allowedUserHooks : parseAllowedHooks(allowedUserHooks);
+  const common = (f, cfg) => {
     if (cfg.env && typeof cfg.env === 'object' && !Array.isArray(cfg.env)) {
       for (const k of Object.keys(cfg.env).sort()) {
         if (isProtectedEnvKey(k)) problems.push(`settings   ${f} overrides protected env ${k}`);
       }
     }
-    if (project) {
-      for (const k of MODEL_SETTINGS_KEYS) {
-        if (Object.prototype.hasOwnProperty.call(cfg, k)) problems.push(`settings   ${f} sets ${k} (the fleet pins models per session)`);
-      }
+    for (const k of MODEL_SETTINGS_TOP_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(cfg, k)) problems.push(`settings   ${f} sets ${k} (the fleet pins models per session)`);
     }
+    if (cfg.switchModelsOnFlag === true) problems.push(`settings   ${f} sets switchModelsOnFlag (the fleet pins models per session)`);
+    if (cfg.disableAllHooks === true) problems.push(`settings   ${f} sets disableAllHooks: true`);
+  };
+  const allowlisted = (f, where, command) => {
+    const { hash, problems: unpinned } = userCommandHash(command, { home, projectDir });
+    const label = where === 'hook' ? 'a hook' : `${where}`;
+    if (unpinned.length) problems.push(`settings   ${f} ${label} runs a command with an expansion that can't be pinned (${unpinned[0]})`);
+    else if (allowedHooks.has(hash)) info.push(`allowed    ${f} ${label} ${hash} (VERIFY_ALLOWED_USER_HOOKS)`);
+    else problems.push(`settings   ${f} ${label} runs a command not on VERIFY_ALLOWED_USER_HOOKS (sha256 ${hash})`);
   };
   const pinFile = path.join(projectDir, '.claude', 'settings.json');
   let pinEnabled = new Set();
@@ -300,13 +376,13 @@ export function checkSettingsDetailed({ projectDir, userSettingsDir = '', pinSet
         if (!pinCfg || typeof pinCfg !== 'object' || Array.isArray(pinCfg)) {
           problems.push(`settings   ${pinFile} is not a JSON object`);
         } else {
-          if (pinCfg.disableAllHooks === true) {
-            problems.push(`settings   ${pinFile} sets disableAllHooks: true`);
+          if (!pinSettingsSha && !projectVerified) {
+            if (pinCfg.hooks !== undefined) problems.push(`settings   ${pinFile} defines hooks (unverified against origin)`);
+            for (const c of settingsCommands(pinCfg)) {
+              if (c.where !== 'hook') problems.push(`settings   ${pinFile} sets ${c.where} (unverified against origin)`);
+            }
           }
-          if (!pinSettingsSha && !projectVerified && pinCfg.hooks !== undefined) {
-            problems.push(`settings   ${pinFile} defines hooks (unverified against origin)`);
-          }
-          envProblems(pinFile, pinCfg, true);
+          common(pinFile, pinCfg);
           pinEnabled = new Set(
             pinCfg.enabledPlugins && typeof pinCfg.enabledPlugins === 'object' && !Array.isArray(pinCfg.enabledPlugins)
               ? Object.entries(pinCfg.enabledPlugins)
@@ -352,16 +428,17 @@ export function checkSettingsDetailed({ projectDir, userSettingsDir = '', pinSet
       problems.push(`settings   ${f} is not a JSON object`);
       continue;
     }
-    if (cfg.disableAllHooks === true) {
-      problems.push(`settings   ${f} sets disableAllHooks: true`);
-    }
     if (cfg.allowManagedHooksOnly === true) {
       problems.push(`settings   ${f} sets allowManagedHooksOnly: true`);
     }
-    if (cfg.hooks !== undefined && f.endsWith('.local.json')) {
-      problems.push(`settings   ${f} defines hooks`);
+    common(f, cfg);
+    for (const c of settingsCommands(cfg)) {
+      // The project's untracked local overlay never carries hooks; its other commands, and every
+      // user-scope command, run only when the operator allowlisted their exact content.
+      if (!user && c.where === 'hook') continue;
+      allowlisted(f, c.where, c.command);
     }
-    envProblems(f, cfg, !user);
+    if (!user && cfg.hooks !== undefined) problems.push(`settings   ${f} defines hooks`);
     if (cfg.enabledPlugins && typeof cfg.enabledPlugins === 'object' && !Array.isArray(cfg.enabledPlugins)) {
       for (const [plugin, enabled] of Object.entries(cfg.enabledPlugins)) {
         if (enabled === true && !pinEnabled.has(plugin)) {
@@ -373,7 +450,7 @@ export function checkSettingsDetailed({ projectDir, userSettingsDir = '', pinSet
       }
     }
   }
-  return { problems, info };
+  return { problems: [...new Set(problems)], info: [...new Set(info)] };
 }
 
 /** checkSettingsDetailed's problems only (the original API). */
@@ -381,26 +458,31 @@ export function checkSettings(opts) {
   return checkSettingsDetailed(opts).problems;
 }
 
-// --- Project settings and hooks (the pin checkout) ------------------------------------------------
-// Claude Code loads PIN_DIR/.claude/ (settings.json, its hooks, agents, commands, skills) into every
-// fleet session, and a settings hook runs whatever script it names. The trust root is the pin repo's
-// default branch as GitHub reports it, never a local ref (origin/HEAD and refs/remotes/* can be
-// repointed by anything that runs as this user):
+// --- Project settings, hooks and memory files (the pin checkout) -----------------------------------
+// Claude Code loads PIN_DIR/.claude/ (settings.json, its hooks, agents, commands, skills), every
+// CLAUDE.md / CLAUDE.local.md in the tree and .mcp.json into fleet sessions, and a settings command runs
+// whatever script it names. The trust root is the pin repo's default branch as GitHub reports it,
+// never a local ref (origin/HEAD and refs/remotes/* can be repointed by anything that runs as this user):
 //   1. the default branch's tip SHA, from the API;
-//   2. PIN_DIR's HEAD must be that tip or an ancestor of it: compare/<tip>...<HEAD> is `identical`
-//      (ok) or `behind` (ok, with a warning to run fleet sync). `ahead`, `diverged`, or a commit GitHub
-//      doesn't have is a mismatch;
-//   3. every file under .claude/ on disk must be a blob of HEAD's .claude/ tree (from the API) with the
-//      same content, and every blob of that tree must be on disk: nothing modified, missing or
-//      untracked. Claude Code's own runtime state there is skipped (PROJECT_RUNTIME_EXEMPT);
-//   4. every script a settings.json hook command names ($CLAUDE_PROJECT_DIR resolved) must lie inside
-//      the repo, be a regular file, be tracked at HEAD and match it.
+//   2. PIN_DIR's HEAD must be that tip or an ancestor of it: compare/<tip>...<HEAD> is `identical` or
+//      `behind`. `ahead`, `diverged`, or a commit GitHub doesn't have is a mismatch;
+//   3. every auto-loaded file on disk (.claude/**, CLAUDE.md files, .mcp.json, what a tracked symlink
+//      among them points at, every settings-command target) must be a blob of HEAD's tree (from the
+//      API) with the same content, and every such blob of HEAD must be on disk. Claude Code's own
+//      runtime state is skipped (PROJECT_RUNTIME_EXEMPT, matched case-insensitively);
+//   4. when HEAD is behind, every one of those paths must also be identical at the tip (a reviewed
+//      but superseded hook or memory file is a mismatch); a lag in other code is only a warning.
 
-/** Paths under .claude/ that Claude Code itself writes and never loads as configuration. */
+/** Paths Claude Code itself writes and never loads as configuration. */
 export const PROJECT_RUNTIME_EXEMPT = {
   files: ['.claude/settings.local.json', '.claude/scheduled_tasks.lock'],
   dirs: ['.claude/worktrees/'],
 };
+/** Memory files Claude Code loads from any directory, and the project MCP config at the root. */
+const MEMORY_NAMES = ['claude.md', 'claude.local.md'];
+const MCP_FILE = '.mcp.json';
+/** Directories never walked for memory files (dependency trees and git's own). */
+const MEMORY_SKIP_DIRS = ['node_modules', '.git'];
 /** Interpreters and devices a hook command may name outside the repo. */
 const SYSTEM_PATH_RE = /^\/(dev\/null$|bin\/|sbin\/|usr\/bin\/|usr\/sbin\/)/;
 
@@ -447,7 +529,7 @@ export function hookCommands(cfg) {
 }
 
 /**
- * The repo files a hook command names. → { targets: [repo-relative posix path], problems: [] }.
+ * The repo files a settings command names. → { targets: [repo-relative posix path], problems: [] }.
  * Once $CLAUDE_PROJECT_DIR is resolved, a word with a `/`, or a bare word naming a file in projectDir,
  * is a path: it must stay inside projectDir (system interpreters and /dev/null aside). Any other
  * expansion left in a word can't be verified and is a problem. A word that is itself a command line
@@ -480,13 +562,25 @@ export function hookTargets(command, projectDir, depth = 0) {
   return { targets: [...new Set(targets)], problems };
 }
 
-function isExempt(rel) {
-  return PROJECT_RUNTIME_EXEMPT.files.includes(rel) || PROJECT_RUNTIME_EXEMPT.dirs.some((d) => rel.startsWith(d));
+/** APFS and HFS+ compare names case-insensitively and normalize Unicode: so does the exempt list. */
+const fold = (p) => String(p).normalize('NFC').toLowerCase();
+export function isExempt(rel) {
+  const r = fold(rel);
+  return PROJECT_RUNTIME_EXEMPT.files.includes(r) || PROJECT_RUNTIME_EXEMPT.dirs.some((d) => r.startsWith(d));
+}
+/** Is a repo path one of the files Claude Code loads on its own (memory files, .mcp.json, .claude/**)? */
+export function isAutoLoaded(rel) {
+  if (isExempt(rel)) return false;
+  const r = fold(rel);
+  if (r.startsWith('.claude/') || r === fold(MCP_FILE)) return true;
+  if (r.split('/').some((seg) => MEMORY_SKIP_DIRS.includes(seg))) return false;
+  return MEMORY_NAMES.includes(r.split('/').pop());
 }
 
 /**
- * What the pin checkout has on disk: HEAD, every file under .claude/ (exempt paths aside), and each
- * hook target. → { head, files: {rel: sha|'not-a-file'}, targets: {rel: sha|'missing'|'not-a-file'|'outside'}, problems }
+ * What the pin checkout has on disk: HEAD, every auto-loaded file (.claude/**, CLAUDE.md files, .mcp.json;
+ * exempt paths aside), what a symlink among them points at, and each settings-command target.
+ * → { head, files: {rel: sha|'symlink:<sha>'|'not-a-file'}, links, linked, targets, problems }
  */
 export function projectLocalState(projectDir, { git = hermeticGit } = {}) {
   const problems = [];
@@ -495,17 +589,16 @@ export function projectLocalState(projectDir, { git = hermeticGit } = {}) {
   try { head = git(root, ['--no-replace-objects', 'rev-parse', '--verify', '-q', 'HEAD^{commit}']).trim(); } catch { head = ''; }
   if (!/^[0-9a-f]{40}$/.test(head)) throw new Unverified(`can't read HEAD of the pin checkout ${root}`);
   const files = {};
-  const links = {}; // a symlink under .claude/ → the repo path it points at, or 'outside'
+  const links = {}; // a symlink among the auto-loaded files → the repo path it points at, or 'outside'
   const linked = {}; // the files under each such target: {rel: sha | 'not-a-file' | 'missing'}
-  const claudeDir = path.join(root, '.claude');
-  const realRootEarly = (() => { try { return fs.realpathSync(root); } catch { return root; } })();
+  const realRoot = (() => { try { return fs.realpathSync(root); } catch { return root; } })();
   const inRepo = (abs) => {
     let real = abs;
     try { real = fs.realpathSync(abs); } catch { /* lexical */ }
-    const r = path.relative(realRootEarly, real);
+    const r = path.relative(realRoot, real);
     return r && !r.startsWith('..') && !path.isAbsolute(r) ? r.split(path.sep).join('/') : null;
   };
-  // Files under a directory, no symlinks followed: what a symlinked .claude/ entry brings in.
+  // Files under a path, no symlinks followed: what a symlinked auto-loaded entry brings in.
   const walk = (abs, rel, out) => {
     let st2 = null;
     try { st2 = fs.lstatSync(abs); } catch { st2 = null; }
@@ -515,39 +608,47 @@ export function projectLocalState(projectDir, { git = hermeticGit } = {}) {
     if (!st2.isDirectory()) { out[rel] = 'not-a-file'; return; }
     for (const e of fs.readdirSync(abs)) { if (e !== '.DS_Store') walk(path.join(abs, e), `${rel}/${e}`, out); }
   };
-  let st = null;
-  try { st = fs.lstatSync(claudeDir); } catch { st = null; }
-  if (st && (st.isSymbolicLink() || !st.isDirectory())) files['.claude/'] = 'not-a-file';
-  else if (st) {
-    const visit = (absDir, relDir) => {
-      for (const e of fs.readdirSync(absDir, { withFileTypes: true })) {
-        if (e.name === '.DS_Store') continue;
-        const rel = `${relDir}/${e.name}`;
-        const abs = path.join(absDir, e.name);
-        if (e.isDirectory()) { if (!isExempt(`${rel}/`)) visit(abs, rel); }
-        else if (isExempt(rel)) continue;
-        else if (e.isFile()) files[rel] = blobSha(fs.readFileSync(abs));
-        else if (e.isSymbolicLink()) {
-          // A tracked symlink (git stores its target as the blob): compared with HEAD like any file,
-          // and what it points at must be in the repo and match HEAD too.
-          files[rel] = `symlink:${blobSha(fs.readlinkSync(abs))}`;
-          const target = inRepo(path.resolve(absDir, fs.readlinkSync(abs)));
-          if (!target) links[rel] = 'outside';
-          else {
-            links[rel] = target;
-            if (!target.startsWith('.claude/')) walk(path.join(root, target), target, linked);
-          }
-        } else files[rel] = 'not-a-file';
+  const record = (abs, rel, e) => {
+    if (e.isFile()) files[rel] = blobSha(fs.readFileSync(abs));
+    else if (e.isSymbolicLink()) {
+      // A tracked symlink (git stores its target as the blob): compared with HEAD like any file, and
+      // what it points at must be in the repo and match HEAD too.
+      const to = fs.readlinkSync(abs);
+      files[rel] = `symlink:${blobSha(to)}`;
+      const target = inRepo(path.resolve(path.dirname(abs), to));
+      if (!target) links[rel] = 'outside';
+      else {
+        links[rel] = target;
+        if (!isAutoLoaded(target)) walk(path.join(root, target), target, linked);
       }
-    };
-    visit(claudeDir, '.claude');
-  }
+    } else files[rel] = 'not-a-file';
+  };
+  // One walk of the checkout: everything under .claude/, and memory files anywhere else.
+  const visit = (absDir, relDir) => {
+    let entries;
+    try { entries = fs.readdirSync(absDir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (e.name === '.DS_Store') continue;
+      const rel = relDir ? `${relDir}/${e.name}` : e.name;
+      const abs = path.join(absDir, e.name);
+      const inClaude = fold(rel).startsWith('.claude/') || fold(rel) === '.claude';
+      if (e.isDirectory()) {
+        if (isExempt(`${rel}/`)) continue;
+        if (!inClaude && MEMORY_SKIP_DIRS.includes(e.name)) continue;
+        visit(abs, rel);
+      } else if (fold(rel) === '.claude') {
+        files['.claude/'] = 'not-a-file';
+      } else if (isAutoLoaded(rel)) {
+        record(abs, rel, e);
+      }
+    }
+  };
+  visit(root, '');
   const targets = {};
   let cfg = null;
-  try { cfg = JSON.parse(fs.readFileSync(path.join(claudeDir, 'settings.json'), 'utf8')); } catch { cfg = null; }
-  const realRoot = (() => { try { return fs.realpathSync(root); } catch { return root; } })();
-  for (const cmd of hookCommands(cfg)) {
-    const t = hookTargets(cmd, root);
+  try { cfg = JSON.parse(fs.readFileSync(path.join(root, '.claude', 'settings.json'), 'utf8')); } catch { cfg = null; }
+  for (const { command } of settingsCommands(cfg)) {
+    const t = hookTargets(command, root);
     problems.push(...t.problems);
     for (const rel of t.targets) {
       const abs = path.join(root, rel);
@@ -555,14 +656,23 @@ export function projectLocalState(projectDir, { git = hermeticGit } = {}) {
       try { s2 = fs.lstatSync(abs); } catch { s2 = null; }
       if (!s2) { targets[rel] = 'missing'; continue; }
       if (s2.isSymbolicLink() || !s2.isFile()) { targets[rel] = 'not-a-file'; continue; }
-      let real = abs;
-      try { real = fs.realpathSync(abs); } catch { /* keep */ }
-      const r = path.relative(realRoot, real);
-      if (!r || r.startsWith('..') || path.isAbsolute(r)) { targets[rel] = 'outside'; continue; }
+      if (!inRepo(abs)) { targets[rel] = 'outside'; continue; }
       targets[rel] = blobSha(fs.readFileSync(abs));
     }
   }
   return { head, files, links, linked, targets, problems: [...new Set(problems)] };
+}
+
+/** A commit's whole tree from the API. → Map<path, {sha, mode}> of its blobs (a truncated tree is "not verified") */
+async function commitBlobs(api, repo, sha) {
+  const commit = await api(`repos/${repo}/git/commits/${sha}`);
+  const treeSha = commit?.tree?.sha;
+  if (!/^[0-9a-f]{40}$/.test(treeSha || '')) throw new Unverified(`can't read the tree of ${repo}@${sha.slice(0, 12)}`);
+  const out = new Map();
+  for (const e of parseTreeEntries(await api(`repos/${repo}/git/trees/${treeSha}?recursive=1`))) {
+    if (e.type === 'blob' && !e.path.endsWith('.DS_Store')) out.set(e.path, { sha: e.sha, mode: e.mode });
+  }
+  return out;
 }
 
 /**
@@ -585,28 +695,22 @@ export async function verifyProjectTrust(local, { repo, api }) {
       else throw e;
     }
   }
-  if (status === 'behind') warnings.push(`pin checkout behind ${defaultBranch}: HEAD ${local.head.slice(0, 12)} is an ancestor of ${tip.slice(0, 12)}; run fleet sync`);
-  else if (status !== 'identical') {
+  if (status !== 'identical' && status !== 'behind') {
     problems.push(`pin-head   ${repo} checkout HEAD ${local.head} is not ${defaultBranch} or an ancestor of it (${tip.slice(0, 12)}; compare: ${status || 'no status'})`);
     return { problems, warnings, tip, defaultBranch };
   }
-  // HEAD's .claude/ tree, from GitHub.
-  const commit = await api(`repos/${repo}/git/commits/${local.head}`);
-  const top = parseTreeEntries(await api(`repos/${repo}/git/trees/${commit?.tree?.sha}`));
-  const claudeEntry = top.find((e) => e.path === '.claude' && e.type === 'tree');
-  const want = new Map();
-  if (claudeEntry) {
-    for (const e of parseTreeEntries(await api(`repos/${repo}/git/trees/${claudeEntry.sha}?recursive=1`))) {
-      if (e.type === 'blob' && !e.path.endsWith('.DS_Store')) want.set(`.claude/${e.path}`, { sha: e.sha, mode: e.mode });
-    }
-  }
+  const want = await commitBlobs(api, repo, local.head);
+  const checked = new Set(); // every path whose content a session loads: HEAD's must equal the tip's
+
   if (local.files['.claude/'] === 'not-a-file') problems.push('claude-dir .claude is not a directory');
-  for (const [rel, w] of want) {
-    if (isExempt(rel)) continue;
+  for (const [rel] of want) {
+    if (!isAutoLoaded(rel)) continue;
+    checked.add(rel);
     if (!(rel in local.files)) problems.push(`missing    ${rel} (tracked at HEAD)`);
   }
   for (const [rel, have] of Object.entries(local.files)) {
     if (rel === '.claude/') continue;
+    checked.add(rel);
     const w = want.get(rel);
     if (have === 'not-a-file') problems.push(`not-a-file ${rel}`);
     else if (!w) problems.push(`untracked  ${rel} (not in HEAD)`);
@@ -615,58 +719,47 @@ export async function verifyProjectTrust(local, { repo, api }) {
     } else if (w.mode === '120000') problems.push(`not-a-file ${rel} (a symlink at HEAD)`);
     else if (w.sha !== have) problems.push(`modified   ${rel} ${have}`);
   }
-  // What tracked symlinks under .claude/ point at: inside the repo, and matching HEAD there too.
-  const linkRoots = [...new Set(Object.values(local.links || {}).filter((t) => t !== 'outside' && !t.startsWith('.claude/')))];
+  // What tracked symlinks among them point at: inside the repo, and matching HEAD there too.
   for (const [rel, t] of Object.entries(local.links || {})) {
     if (t === 'outside') problems.push(`not-a-file ${rel} (a symlink that points outside the repo)`);
   }
+  const linkRoots = [...new Set(Object.values(local.links || {}).filter((t) => t !== 'outside' && !isAutoLoaded(t)))];
   for (const t of linkRoots) {
-    const wantT = await treeFilesAt(api, repo, commit?.tree?.sha, t);
-    const haveT = Object.fromEntries(Object.entries(local.linked || {}).filter(([p]) => p === t || p.startsWith(`${t}/`)));
-    for (const [p, w] of wantT) if (!(p in haveT)) problems.push(`missing    ${p} (tracked at HEAD, linked from .claude/)`);
+    const under = (p) => p === t || p.startsWith(`${t}/`);
+    const haveT = Object.fromEntries(Object.entries(local.linked || {}).filter(([p]) => under(p)));
+    const wantT = [...want].filter(([p]) => under(p));
+    for (const [p] of wantT) { checked.add(p); if (!(p in haveT)) problems.push(`missing    ${p} (tracked at HEAD, linked from .claude/)`); }
     for (const [p, have] of Object.entries(haveT)) {
-      const w = wantT.get(p);
-      if (have === 'missing') { if (!wantT.size) problems.push(`missing    ${p} (linked from .claude/, not at HEAD)`); }
+      checked.add(p);
+      const w = want.get(p);
+      if (have === 'missing') { if (!wantT.length) problems.push(`missing    ${p} (linked from .claude/, not at HEAD)`); }
       else if (have === 'not-a-file') problems.push(`not-a-file ${p} (linked from .claude/)`);
       else if (!w) problems.push(`untracked  ${p} (linked from .claude/, not in HEAD)`);
       else if (w.mode === '120000' || w.sha !== have) problems.push(`modified   ${p} ${have} (linked from .claude/)`);
     }
   }
   for (const [rel, have] of Object.entries(local.targets)) {
+    checked.add(rel);
     if (have === 'missing') { problems.push(`hook       settings.json hook target ${rel} is missing`); continue; }
     if (have === 'not-a-file') { problems.push(`hook       settings.json hook target ${rel} is not a regular file`); continue; }
     if (have === 'outside') { problems.push(`hook       settings.json hook target ${rel} resolves outside the repo`); continue; }
-    let w = want.get(rel);
-    if (!w && !rel.startsWith('.claude/')) {
-      try {
-        const c = await api(`repos/${repo}/contents/${rel.split('/').map(encodeURIComponent).join('/')}?ref=${local.head}`);
-        if (c && !Array.isArray(c) && c.type === 'file' && typeof c.sha === 'string') w = { sha: c.sha };
-      } catch (e) {
-        if (!(e instanceof Unverified && e.httpStatus === 404)) throw e;
-      }
-    }
+    const w = want.get(rel);
     if (!w) problems.push(`hook       settings.json hook target ${rel} is not tracked at HEAD`);
-    else if (w.sha !== have) problems.push(`hook       settings.json hook target ${rel} differs from HEAD (${have})`);
+    else if (w.mode === '120000' || w.sha !== have) problems.push(`hook       settings.json hook target ${rel} differs from HEAD (${have})`);
+  }
+
+  if (status === 'behind') {
+    // An older reviewed commit is fine for ordinary code, never for what a session loads.
+    const atTip = await commitBlobs(api, repo, tip);
+    for (const [p] of atTip) if (isAutoLoaded(p)) checked.add(p);
+    const stale = [...checked].filter((p) => {
+      const a = want.get(p); const b = atTip.get(p);
+      return (a?.sha ?? null) !== (b?.sha ?? null) || (a?.mode ?? null) !== (b?.mode ?? null);
+    }).sort();
+    for (const p of stale) problems.push(`stale      ${p} differs from ${defaultBranch} (${tip.slice(0, 12)}); run fleet sync`);
+    if (!stale.length) warnings.push(`pin checkout behind ${defaultBranch}: HEAD ${local.head.slice(0, 12)} is an ancestor of ${tip.slice(0, 12)} (no auto-loaded file differs); run fleet sync`);
   }
   return { problems: [...new Set(problems)], warnings, tip, defaultBranch };
-}
-
-/** Every blob at or under repoPath in a commit tree, from the API. → Map<repo path, {sha, mode}> (empty: not there) */
-async function treeFilesAt(api, repo, rootTree, repoPath) {
-  const out = new Map();
-  const parts = repoPath.split('/');
-  let tree = rootTree;
-  for (let i = 0; i < parts.length; i++) {
-    const e = parseTreeEntries(await api(`repos/${repo}/git/trees/${tree}`)).find((x) => x.path === parts[i]);
-    if (!e) return out;
-    if (i === parts.length - 1 && e.type === 'blob') { out.set(repoPath, { sha: e.sha, mode: e.mode }); return out; }
-    if (e.type !== 'tree') return out;
-    tree = e.sha;
-  }
-  for (const e of parseTreeEntries(await api(`repos/${repo}/git/trees/${tree}?recursive=1`))) {
-    if (e.type === 'blob' && !e.path.endsWith('.DS_Store')) out.set(`${repoPath}/${e.path}`, { sha: e.sha, mode: e.mode });
-  }
-  return out;
 }
 
 function parseTreeEntries(t) {
@@ -888,6 +981,7 @@ export function parseArgs(argv) {
     pinSettingsSha: '',
     pinRepo: '',
     allowedUserPlugins: '',
+    allowedUserHooks: '',
   };
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
@@ -908,6 +1002,7 @@ export function parseArgs(argv) {
       case '--pin-settings-sha': a.pinSettingsSha = v(); a.checkSettings = true; break;
       case '--pin-repo': a.pinRepo = v(); a.checkSettings = true; break;
       case '--allowed-user-plugins': a.allowedUserPlugins = v(); break;
+      case '--allowed-user-hooks': a.allowedUserHooks = v(); break;
       default: throw new Error(`unknown argument: ${k}`);
     }
   }
@@ -971,6 +1066,7 @@ export async function run(argv, {
       pinSettingsSha: a.pinSettingsSha,
       projectVerified: Boolean(project),
       allowedUserPlugins: parseAllowedPlugins(a.allowedUserPlugins),
+      allowedUserHooks: parseAllowedHooks(a.allowedUserHooks),
     });
     preProblems.push(...r.problems);
     info = r.info;
@@ -1029,7 +1125,7 @@ export async function run(argv, {
       out(`verify: WARNING can't write ${a.cache} (${e.message}); the next run asks GitHub again`);
     }
   }
-  out(`verify: ok, ${countFiles(local)} protected files in ${where} match ${target} (commit ${rel.commit.slice(0, 12)}, on ${rel.defaultBranch})${project ? `; ${a.pinRepo} checkout ${project.head.slice(0, 12)} and its .claude/ match GitHub` : ''}`);
+  out(`verify: ok, ${countFiles(local)} protected files in ${where} match ${target} (commit ${rel.commit.slice(0, 12)}, on ${rel.defaultBranch})${project ? `; ${a.pinRepo} checkout ${project.head.slice(0, 12)} and its auto-loaded files (.claude/, CLAUDE.md, .mcp.json, command targets) match GitHub` : ''}`);
   return 0;
 }
 

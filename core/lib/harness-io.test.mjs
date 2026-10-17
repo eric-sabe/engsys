@@ -148,6 +148,12 @@ describe('core/lib/harness-io.mjs', () => {
     assert.equal(resolvePluginRoot({ AGY_PLUGIN_ROOT: '/p/agy', ENGSYS_PLUGIN_ROOT: '/p/e', CLAUDE_PLUGIN_ROOT: '/p/claude' }), '/p/claude');
     assert.equal(resolvePluginRoot({ ENGSYS_PLUGIN_ROOT: '/p/engsys' }, meta, 'claude'), '/opt/plugin/core');
     assert.equal(resolvePluginRoot({ ENGSYS_HARNESS: 'claude', COPILOT_PLUGIN_ROOT: '/p/copilot' }, meta), '/opt/plugin/core');
+    // a harness-naming env var never moves a Claude hook's root while CLAUDE_PLUGIN_ROOT is set
+    for (const k of ['ENGSYS_HARNESS', 'FLEET_ACTIVE_HARNESS', 'FLEET_HARNESS', 'HARNESS']) {
+      assert.equal(resolvePluginRoot({ [k]: 'copilot', CLAUDE_PLUGIN_ROOT: '/p/claude', ENGSYS_PLUGIN_ROOT: '/p/e', COPILOT_PLUGIN_ROOT: '/p/c' }, meta), '/p/claude', k);
+    }
+    // positive control: without CLAUDE_PLUGIN_ROOT the env selector still picks the harness
+    assert.equal(resolvePluginRoot({ ENGSYS_HARNESS: 'copilot', COPILOT_PLUGIN_ROOT: '/p/c' }, meta), '/p/c');
     // positive controls: each override counts under its own harness
     assert.equal(resolvePluginRoot({ ENGSYS_PLUGIN_ROOT: '/p/engsys', CLAUDE_PLUGIN_ROOT: '/p/claude' }, null, 'copilot'), '/p/engsys');
     assert.equal(resolvePluginRoot({ COPILOT_PLUGIN_ROOT: '/p/copilot', ENGSYS_PLUGIN_ROOT: '/p/engsys' }, null, 'copilot'), '/p/copilot');

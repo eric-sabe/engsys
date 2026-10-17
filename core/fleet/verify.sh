@@ -15,7 +15,10 @@
 # behind is a warning to run fleet sync), and the user-scope settings of the Claude config dir the
 # sessions use: FLEET_CLAUDE_CONFIG_DIR when fleet.conf sets it, else ~/.claude. A user-scope plugin the
 # pin repo doesn't enable is a mismatch unless VERIFY_ALLOWED_USER_PLUGINS (fleet.conf, space-separated
-# name@marketplace) lists it; a listed one is reported as `allowed`.
+# name@marketplace) lists it, and so is a user-scope hook or settings command (statusLine, *Helper, ...)
+# unless VERIFY_ALLOWED_USER_HOOKS (fleet.conf, space-separated sha256 content hashes, printed in the
+# mismatch line) lists it; listed ones are reported as `allowed`. The pin checkout's auto-loaded files
+# (.claude/, CLAUDE.md files, .mcp.json, settings-command targets) must also be identical at the tip.
 #
 #   --alert          post `fleet notify --level alert` once per incident, and resolve it on the next pass:
 #                      wrapper-integrity             a mismatch (latch: .fleet/verify-wrappers.alerted, holding
@@ -117,6 +120,7 @@ else
   if [ "$rc" = 0 ]; then
     args=(--repo "$repo" --tag "$ref" --plugin-id "engsys@$ENGSYS_MARKETPLACE" --project-dir "$PIN_DIR" --plugins "$plist" --harness "${HARNESS:-claude}" --check-settings --user-settings-dir "$claude_cfg")
     [ -z "${VERIFY_ALLOWED_USER_PLUGINS:-}" ] || args+=(--allowed-user-plugins "$VERIFY_ALLOWED_USER_PLUGINS")
+    [ -z "${VERIFY_ALLOWED_USER_HOOKS:-}" ] || args+=(--allowed-user-hooks "$VERIFY_ALLOWED_USER_HOOKS")
     if [ -e "$ENGSYS_DIR" ] || [ -L "$ENGSYS_DIR" ]; then
       args+=(--engsys-dir "$ENGSYS_DIR")
     fi

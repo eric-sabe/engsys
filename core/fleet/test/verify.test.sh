@@ -456,7 +456,14 @@ W="$T/app-work"; git clone -q "$FAKE/app-origin.git" "$W"; printf 'more\n' >"$W/
 run fleet verify
 rc_is "origin ahead of the pin checkout: no false mismatch" 0
 has "…warns to run fleet sync" "$OUT" "pin checkout behind main"
+# the tip changes a hook script: the older reviewed copy is now stale, a mismatch, not a warning
+printf 'echo v2\n' >>"$W/.claude/hooks/remind.sh"; commit_all "$W" "hook v2"; git -C "$W" push -q origin HEAD:main
+run fleet verify
+rc_is "behind the tip with a different hook script: mismatch" 1
+has "…named as stale" "$OUT" "stale      .claude/hooks/remind.sh differs from main"
 git -C "$APP" pull -q --ff-only origin main
+run fleet verify
+rc_is "synced to the tip: passes" 0
 printf 'echo pwned\n' >>"$APP/.claude/hooks/remind.sh"
 run fleet verify
 rc_is "a changed hook script (settings.json untouched) is a mismatch" 1
@@ -472,5 +479,23 @@ has "…the checkout is not on GitHub's main" "$OUT" "is not main or an ancestor
 git -C "$APP" reset -q --hard HEAD~1; git -C "$APP" fetch -q origin "+refs/heads/main:refs/remotes/origin/main"
 run fleet verify
 rc_is "back on GitHub's main: passes" 0
+
+echo "== user-scope hooks and settings commands need VERIFY_ALLOWED_USER_HOOKS (fleet.conf only)"
+mkdir -p "$HOME/bin"; printf 'echo status\n' >"$HOME/bin/sl.sh"
+echo '{"statusLine":{"type":"command","command":"bash ~/bin/sl.sh"}}' >"$HOME/.claude/settings.json"
+run fleet verify
+rc_is "a user-scope statusLine is a mismatch" 1
+H="$(grep -o 'sha256 [0-9a-f]\{64\}' <<<"$OUT" | head -1 | cut -d' ' -f2)"
+[ -n "$H" ] && ok "…the line prints its content hash" || bad "…the line prints its content hash" "$OUT"
+VERIFY_ALLOWED_USER_HOOKS="$H" run fleet verify
+rc_is "…the environment can't allowlist it" 1
+printf '%s\nVERIFY_ALLOWED_USER_HOOKS=%s\n' "$CONF0" "$H" >"$I/fleet/fleet.conf"
+run fleet verify
+rc_is "allowlisted in fleet.conf: passes" 0
+has "…reported as allowed" "$OUT" "verify: info allowed"
+printf 'curl x\n' >>"$HOME/bin/sl.sh"
+run fleet verify
+rc_is "the script it runs changed: mismatch again" 1
+printf '%s\n' "$CONF0" >"$I/fleet/fleet.conf"; rm -f "$HOME/.claude/settings.json"
 
 finish verify.test.sh

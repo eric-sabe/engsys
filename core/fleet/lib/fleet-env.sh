@@ -44,7 +44,7 @@ unset TMUX_SESSION LOG_DIR
 unset FLEET_ID FEDERATION_FILE FLEET_INSTANCE_REPO ROLES ROSTER_EXCLUDE OPERATOR_TIMEZONE OPERATOR_CLOCK
 # So do the fleet's Claude config dir and the integrity check's user-plugin allowlist: what `fleet verify`
 # accepts must come from the operator's config files, never from whoever ran the command.
-unset FLEET_CLAUDE_CONFIG_DIR VERIFY_ALLOWED_USER_PLUGINS
+unset FLEET_CLAUDE_CONFIG_DIR VERIFY_ALLOWED_USER_PLUGINS VERIFY_ALLOWED_USER_HOOKS
 fleet_load_conf "$FLEET_REPO/fleet/fleet.conf"
 [ -n "${FLEET_ORG:-}" ] || fleet_die "FLEET_ORG is not set in $FLEET_REPO/fleet/fleet.conf"
 [ -f "$HOME/.config/$FLEET_ORG/fleet.local.conf" ] && fleet_load_conf "$HOME/.config/$FLEET_ORG/fleet.local.conf"
@@ -251,8 +251,8 @@ fi
 # (`claude plugin` in sync, `claude plugin list` in verify, the supervisor's login probe) and every
 # session the fleet launches run with CLAUDE_CONFIG_DIR=<it>. Unset = the account's default ~/.claude,
 # and an inherited CLAUDE_CONFIG_DIR is dropped so what verify checks is what the sessions load.
-: "${VERIFY_ALLOWED_USER_PLUGINS:=}"
-export VERIFY_ALLOWED_USER_PLUGINS
+: "${VERIFY_ALLOWED_USER_PLUGINS:=}" "${VERIFY_ALLOWED_USER_HOOKS:=}"
+export VERIFY_ALLOWED_USER_PLUGINS VERIFY_ALLOWED_USER_HOOKS
 if [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ]; then
   case "$FLEET_CLAUDE_CONFIG_DIR" in /*) ;; *) fleet_die "FLEET_CLAUDE_CONFIG_DIR must be an absolute path (or start with ~), got '$FLEET_CLAUDE_CONFIG_DIR'" ;; esac
   export FLEET_CLAUDE_CONFIG_DIR CLAUDE_CONFIG_DIR="$FLEET_CLAUDE_CONFIG_DIR"

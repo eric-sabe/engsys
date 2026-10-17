@@ -112,11 +112,10 @@ export function detectHarness(env = process.env, rawStdinObj = null) {
  * the detected one (`harness`, else detectHarness(env)).
  */
 export function resolvePluginRoot(env = process.env, importMetaUrl = null, harness = null) {
-  // Claude Code sets CLAUDE_PLUGIN_ROOT for every plugin hook, so its presence means Claude unless a
-  // harness is named explicitly; the other roots are never evidence of their own harness here.
-  const explicit = normalizeHarnessName(harness) ||
-    normalizeHarnessName(env?.ENGSYS_HARNESS || env?.FLEET_ACTIVE_HARNESS || env?.FLEET_HARNESS || env?.HARNESS);
-  const h = explicit || (env?.CLAUDE_PLUGIN_ROOT ? 'claude' : detectHarness(env));
+  // Claude Code sets CLAUDE_PLUGIN_ROOT for every plugin hook: when it is there, no environment
+  // variable naming a harness (ENGSYS_HARNESS, FLEET_ACTIVE_HARNESS, FLEET_HARNESS, HARNESS) counts,
+  // since a settings `env` could set one to move the root. Only a caller's explicit harness does.
+  const h = normalizeHarnessName(harness) || (env?.CLAUDE_PLUGIN_ROOT ? 'claude' : detectHarness(env));
   const fromMeta = importMetaUrl ? path.resolve(path.dirname(fileURLToPath(importMetaUrl)), '..') : null;
   let fromEnv = null;
   if (h === 'copilot') fromEnv = env?.COPILOT_PLUGIN_ROOT || env?.ENGSYS_PLUGIN_ROOT || env?.CLAUDE_PLUGIN_ROOT;
