@@ -82,6 +82,7 @@ const SUITES = [
   ["bash core/skills/merge-monster/scripts/monster-bus.test.sh"],
   ["node --test core/fleet/health/health.test.mjs"],
   ["node --test core/.claude-plugin/weather-check.test.mjs"],
+  ["node --test core/fleet/lib/xray.test.mjs"],
 ];
 
 // Variables the kit reads from a fleet session's environment.

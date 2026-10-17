@@ -13,6 +13,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { recordHookTelemetry } from '../lib/harness-io.mjs';
 
 export function shimDir(env = process.env) {
   if (!env.GH_APP_ENV_FILE) return null;
@@ -46,8 +47,12 @@ export function apply(env = process.env) {
   const line = exportLine(dir);
   let cur = '';
   try { cur = fs.readFileSync(file, 'utf8'); } catch { /* absent: created below */ }
-  if (cur.split('\n').includes(line)) return false;
+  if (cur.split('\n').includes(line)) {
+    recordHookTelemetry({ hook: 'fleet-gh-path', event: 'SessionStart', decision: 'noop', detail: 'already-present' }, env);
+    return false;
+  }
   fs.appendFileSync(file, `${line}\n`);
+  recordHookTelemetry({ hook: 'fleet-gh-path', event: 'SessionStart', decision: 'inject', bytes: Buffer.byteLength(line, 'utf8'), detail: dir }, env);
   return true;
 }
 

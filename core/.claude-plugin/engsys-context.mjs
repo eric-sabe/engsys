@@ -51,6 +51,7 @@ try {
       '',
     ].join('\n'),
   );
+  t = t.replace('{{MESSAGING_NOTE}}', '');
   t = t.replace(
     '{{LESSONS_NOTE}}',
     "Durable lessons live in the project's `docs/agent-lessons/`; the engsys `lessons-library` is read in place from the plugin root (no copy) by the memory brief (SubagentStart injection — docs/memory-spec.md §5-§6). The injection hook and the harvester (`harvest-findings.mjs`) run in PLUGIN MODE ONLY for now — copy mode seeds the lesson *content* (`docs/agent-lessons/library/`) but installs neither the hook nor the memory-brief/harvest-findings tooling (engsys#140 W3); run the harvester from an engsys checkout directly in copy mode (`node <engsys-checkout>/core/scripts/harvest-findings.mjs run --repo … --prs …`).",
@@ -62,7 +63,7 @@ try {
   try { timeLine = (await import(pathToFileURL(path.join(root, 'lib', 'operator-time.mjs')))).contextLine(process.env); } catch { /* conventions still go out */ }
   const out = timeLine ? `${t.trim()}\n\n${timeLine}\n` : t.trim() + '\n';
   const harness = detectHarness(process.env);
-  writeHookResult(emitSessionStartContext(harness, out, { jsonMode: true }));
+  writeHookResult(emitSessionStartContext(harness, out, { jsonMode: true }), { hook: 'engsys-context', event: 'SessionStart' });
 } catch {
   process.exit(0);
 }

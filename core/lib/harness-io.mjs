@@ -2,6 +2,8 @@
 // harness-io.mjs — Tri-harness (Claude Code, GitHub Copilot CLI, Google Antigravity)
 // hook stdin/stdout/stderr/exit-code normalizer and plugin root resolver.
 
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -423,18 +425,107 @@ export function emitStopBlock(harness, reason) {
   };
 }
 
+const MAX_HOOK_TELEMETRY_BYTES = 512 * 1024;
+
+/**
+ * Resolve the Hook Flight Recorder JSONL path (`~/.local/state/engsys/sessions/hook-events.jsonl`
+ * or `$ENGSYS_HOOK_TELEMETRY_FILE`). Returns `null` when disabled (`ENGSYS_HOOK_TELEMETRY=0`) or
+ * inside `node --test` unless explicitly opted in.
+ */
+export function hookTelemetryPath(env = process.env) {
+  if (!env || env.ENGSYS_HOOK_TELEMETRY === '0') return null;
+  if (env.ENGSYS_HOOK_TELEMETRY_FILE) return env.ENGSYS_HOOK_TELEMETRY_FILE;
+  if ((env.NODE_TEST_CONTEXT || process.env.NODE_TEST_CONTEXT) && env.ENGSYS_HOOK_TELEMETRY !== '1') return null;
+  const dir =
+    env.ENGSYS_SESSIONS_DIR ||
+    path.join(env.XDG_STATE_HOME || path.join(env.HOME || os.homedir(), '.local', 'state'), 'engsys', 'sessions');
+  return path.join(dir, 'hook-events.jsonl');
+}
+
+/**
+ * Append a single Hook Flight Recorder event (`hook-events.jsonl`, auto-rotated at 512 KB).
+ * Fail-open: never throws or blocks a hook.
+ */
+export function recordHookTelemetry(entry, env = process.env) {
+  try {
+    const file = hookTelemetryPath(env);
+    if (!file || !entry || typeof entry !== 'object') return null;
+    const dir = path.dirname(file);
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    try {
+      const st = fs.statSync(file);
+      if (st.size > MAX_HOOK_TELEMETRY_BYTES) {
+        fs.renameSync(file, `${file}.1`);
+      }
+    } catch { /* file does not exist yet */ }
+    const clean = (v, n = 160) =>
+      v === null || v === undefined ? null : String(v).replace(/[\u0000-\u001f\u007f]+/g, ' ').slice(0, n);
+    const rec = {
+      ts: entry.ts || new Date().toISOString(),
+      session: clean(entry.session ?? env.ENGSYS_SESSION ?? null, 80),
+      fleet: clean(entry.fleet ?? env.FLEET_ID ?? null, 40),
+      role: clean(entry.role ?? env.ENGSYS_SINGLETON_ROLE ?? null, 32),
+      harness: clean(entry.harness ?? detectHarness(env), 24),
+      hook: clean(entry.hook || path.basename(process.argv[1] || 'unknown', '.mjs'), 64),
+      event: clean(entry.event || null, 40),
+      decision: clean(entry.decision || 'allow', 24),
+      bytes: typeof entry.bytes === 'number' ? entry.bytes : 0,
+      ...(typeof entry.ms === 'number' ? { ms: Math.round(entry.ms) } : {}),
+      ...(entry.detail ? { detail: clean(entry.detail, 200) } : {}),
+    };
+    fs.appendFileSync(file, `${JSON.stringify(rec)}\n`, { mode: 0o600 });
+    return rec;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Write a hook output descriptor to stdout/stderr and return its exit code.
  */
-export function writeHookResult(result, { stdout = process.stdout, stderr = process.stderr } = {}) {
+export function writeHookResult(result, { stdout = process.stdout, stderr = process.stderr, hook, event, detail, env = process.env } = {}) {
   if (!result) return 0;
+  let bytes = 0;
+  let decision = 'allow';
+  let inferredEvent = event || null;
   if (result.json !== undefined) {
-    stdout.write(JSON.stringify(result.json));
+    const s = JSON.stringify(result.json);
+    bytes = Buffer.byteLength(s, 'utf8');
+    stdout.write(s);
+    const j = result.json;
+    inferredEvent = inferredEvent || j?.hookSpecificOutput?.hookEventName || null;
+    if (j?.permissionDecision === 'deny' || j?.hookSpecificOutput?.permissionDecision === 'deny') {
+      decision = 'deny';
+    } else if (j?.decision === 'block') {
+      decision = 'block';
+    } else if (j?.additionalContext || j?.hookSpecificOutput?.additionalContext) {
+      decision = 'context';
+    }
   } else if (typeof result.stdout === 'string' && result.stdout.length > 0) {
+    bytes = Buffer.byteLength(result.stdout, 'utf8');
     stdout.write(result.stdout);
+    decision = 'context';
   }
   if (typeof result.stderr === 'string' && result.stderr.length > 0) {
     stderr.write(result.stderr.endsWith('\n') ? result.stderr : `${result.stderr}\n`);
+    if (result.exitCode === 2) decision = 'block';
+  }
+  if (hook || !env?.NODE_TEST_CONTEXT || env?.ENGSYS_HOOK_TELEMETRY_FILE || env?.ENGSYS_HOOK_TELEMETRY === '1') {
+    recordHookTelemetry(
+      {
+        hook,
+        event: inferredEvent,
+        decision,
+        bytes,
+        detail:
+          detail ||
+          result.json?.permissionDecisionReason ||
+          result.json?.reason ||
+          (typeof result.stderr === 'string' ? result.stderr.trim() : null),
+      },
+      env,
+    );
   }
   return typeof result.exitCode === 'number' ? result.exitCode : 0;
 }
+

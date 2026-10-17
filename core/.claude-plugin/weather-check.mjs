@@ -20,7 +20,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { detectHarness } from '../lib/harness-io.mjs';
+import { detectHarness, recordHookTelemetry } from '../lib/harness-io.mjs';
 import { formatFromEnv, isConfigured as isOperatorTimeConfigured } from '../lib/operator-time.mjs';
 import {
   isBoardStale,
@@ -190,6 +190,7 @@ export function run(event = 'session-start', env = process.env, { cwd = process.
   if (!board) return '';
 
   const seenFile = seenFilePath(cacheFile, env);
+  const hookEventName = event === 'prompt' ? 'UserPromptSubmit' : 'SessionStart';
 
   if (event === 'prompt') {
     const limitMin =
@@ -207,12 +208,28 @@ export function run(event = 'session-start', env = process.env, { cwd = process.
     const prevBoard = seen?.board || null;
     writeSeenState(seenFile, board, now);
     const deltaText = formatWeatherPromptDelta(prevBoard, board, { env, now });
+    if (deltaText) {
+      recordHookTelemetry({
+        hook: 'weather-check',
+        event: hookEventName,
+        decision: 'inject',
+        bytes: Buffer.byteLength(deltaText, 'utf8'),
+        detail: deltaText.slice(0, 120),
+      }, env);
+    }
     return wrapHookOutput('prompt', deltaText, env);
   }
 
   // session-start
   writeSeenState(seenFile, board, now);
   const startText = formatWeatherSessionStart(board, { env, now });
+  recordHookTelemetry({
+    hook: 'weather-check',
+    event: hookEventName,
+    decision: startText ? 'inject' : 'allow',
+    bytes: Buffer.byteLength(startText, 'utf8'),
+    detail: startText ? startText.split('\n')[0].slice(0, 120) : 'all-up',
+  }, env);
   return wrapHookOutput('session-start', startText, env);
 }
 

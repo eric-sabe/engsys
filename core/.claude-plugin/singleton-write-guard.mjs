@@ -71,6 +71,7 @@ import {
   emitPreToolDeny,
   normalizeToolName,
   parseHookInput,
+  recordHookTelemetry,
   resolvePluginRoot,
   writeHookResult,
 } from '../lib/harness-io.mjs';
@@ -1027,8 +1028,22 @@ async function main() {
   } catch (e) {
     d = ROLES.has(process.env.ENGSYS_SINGLETON_ROLE) ? { deny: `engsys singleton-write guard failed (${String(e && e.message)}): denied, fail closed` } : null;
   }
-  if (!d) return 0;
-  return writeHookResult(emitPreToolDeny(parsed.harness, d.deny));
+  if (!d) {
+    if (ROLES.has(process.env.ENGSYS_SINGLETON_ROLE)) {
+      recordHookTelemetry({
+        hook: 'singleton-write-guard',
+        event: 'PreToolUse',
+        decision: 'allow',
+        detail: `${parsed.toolName}${parsed.command ? `: ${String(parsed.command).slice(0, 80)}` : ''}`,
+      });
+    }
+    return 0;
+  }
+  return writeHookResult(emitPreToolDeny(parsed.harness, d.deny), {
+    hook: 'singleton-write-guard',
+    event: 'PreToolUse',
+    detail: d.deny,
+  });
 }
 
 const isMain = (() => {

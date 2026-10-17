@@ -34,7 +34,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { detectHarness, emitStopBlock, writeHookResult } from '../lib/harness-io.mjs';
+import { detectHarness, emitStopBlock, recordHookTelemetry, writeHookResult } from '../lib/harness-io.mjs';
 import { sessionsDir } from './session-transcript.mjs';
 
 // Strong: a promise to act later. Overrides even an explicit `STATUS: COMPLETE`.
@@ -267,14 +267,32 @@ async function main() {
   } else if (mode === 'stop') {
     reason = stopDecision(input);
   }
+  const evName = mode === 'subagent' ? 'SubagentStop' : 'Stop';
   if (reason) {
     const harness = detectHarness(process.env, rawInput);
     if (harness === 'copilot') {
-      process.exitCode = writeHookResult(emitStopBlock('copilot', reason));
+      process.exitCode = writeHookResult(emitStopBlock('copilot', reason), {
+        hook: 'handback-guard',
+        event: evName,
+        detail: `${input.agent_type || mode}: ${reason.split('\n')[0]}`,
+      });
     } else {
+      recordHookTelemetry({
+        hook: 'handback-guard',
+        event: evName,
+        decision: 'block',
+        detail: `${input.agent_type || mode}: ${reason.split('\n')[0]}`,
+      });
       process.stderr.write(`${reason}\n`);
       process.exitCode = 2; // block: the reason goes back to the model, which keeps working
     }
+  } else {
+    recordHookTelemetry({
+      hook: 'handback-guard',
+      event: evName,
+      decision: 'allow',
+      detail: input.agent_type ? `agent=${input.agent_type}` : mode,
+    });
   }
 }
 

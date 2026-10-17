@@ -20,6 +20,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { recordHookTelemetry } from '../lib/harness-io.mjs';
 
 const NAME = /^[A-Za-z0-9._-]{1,128}$/;
 
@@ -49,9 +50,17 @@ export function record(input, env = process.env, now = () => new Date()) {
     source: typeof input.source === 'string' ? input.source : null,
     at: now().toISOString(),
   };
+  const payload = `${JSON.stringify(rec)}\n`;
   const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, `${JSON.stringify(rec)}\n`, { mode: 0o600 });
+  fs.writeFileSync(tmp, payload, { mode: 0o600 });
   fs.renameSync(tmp, file);
+  recordHookTelemetry({
+    hook: 'session-transcript',
+    event: 'SessionStart',
+    decision: 'record',
+    bytes: Buffer.byteLength(payload, 'utf8'),
+    detail: path.basename(file),
+  }, env);
   return file;
 }
 
