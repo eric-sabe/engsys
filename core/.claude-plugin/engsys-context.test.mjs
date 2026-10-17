@@ -59,4 +59,6 @@ test('session start: Co-Authored-By trailer matches the active harness (claude, 
   assert.match(context({ HARNESS: 'antigravity' }), /Co-Authored-By: Google Antigravity <noreply@google\.com>/);
 });
 
-
+test('session start: includes host toolchain OS and userland context line', () => {
+  assert.match(context({}), /Host toolchain: (macOS|Linux|Windows)/);
+});

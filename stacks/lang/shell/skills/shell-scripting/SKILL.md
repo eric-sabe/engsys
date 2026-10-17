@@ -43,6 +43,29 @@ Applies to: any `*.sh` file in this repo. Common locations: `scripts/`, `.githoo
 - Combine with `set -euo pipefail` so parse errors are fatal.
 - Document parser dependencies at the top; fail fast with a helpful message if missing.
 
+## Cross-Platform & Non-Login Environment Portability (macOS BSD vs. Linux GNU)
+
+Scripts and one-liners often run across macOS (`darwin`, BSD userland, `/bin/bash` 3.2), Linux / WSL2 (`GNU` userland, `/bin/sh` = `dash`), and non-login environments (`launchd`, `cron`, `systemd`, or GUI/IDE harnesses like Antigravity and VS Code).
+
+- **Bootstrap `PATH` in non-login scripts (`launchd` / `cron` / GUI harnesses):**
+  ```bash
+  export PATH="/opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$HOME/.local/bin:$PATH"
+  ```
+- **Bash 3.2 (`/bin/bash` on macOS) vs. Bash 5+ (`/opt/homebrew/bin/bash` / Linux):**
+  - If a script uses `#!/bin/bash` (or `bash script.sh`), it must work on **Bash 3.2** unless it explicitly re-execs `/opt/homebrew/bin/bash`:
+    - Under `set -u`, empty array expansion `"${arr[@]}"` throws `unbound variable` in Bash 3.2 — always write `${arr[@]+"${arr[@]}"}`.
+    - Avoid `declare -A`, `mapfile`/`readarray`, and `${var,,}` / `${var^^}` unless Bash 4+ is guaranteed.
+- **BSD (macOS) vs. GNU (Linux/WSL2) Rosetta Table:**
+
+| Operation | macOS (BSD) | Linux / WSL2 (GNU) | Portable Pattern |
+|---|---|---|---|
+| File mtime (epoch) | `stat -f '%m' "$f"` | `stat -c '%Y' "$f"` | `stat -c '%Y' "$f" 2>/dev/null \|\| stat -f '%m' "$f"` |
+| File uid / mode | `stat -f '%u %Lp' "$f"` | `stat -c '%u %a' "$f"` | Try GNU `stat -c`, fallback to BSD `stat -f` |
+| Epoch → ISO UTC | `date -u -r "$ts" +%Y-%m-%dT%H:%M:%SZ` | `date -u -d "@$ts" +%Y-%m-%dT%H:%M:%SZ` | `date -u -d "@$ts" ... 2>/dev/null \|\| date -u -r "$ts" ...` |
+| SHA-256 hex | `shasum -a 256 "$f"` | `sha256sum "$f"` | `sha256sum "$f" 2>/dev/null \|\| shasum -a 256 "$f"` |
+| In-place `sed` | `sed -i '' 's/a/b/' "$f"` | `sed -i 's/a/b/' "$f"` | Write to `"$f.tmp"` and `mv "$f.tmp" "$f"` |
+| Extended regex `grep -E` | Rejects empty branch `(foo\|)` (`empty (sub)expression`) | Accepts `(foo\|)` | Always use `(foo)?` or chained `grep -v`, never `(foo\|)` |
+
 ## Template
 
 ```bash
