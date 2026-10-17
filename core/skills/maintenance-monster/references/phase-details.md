@@ -503,7 +503,7 @@ request link back and you keep waiting.
 ## Subagent liveness (optional — `liveness:` config block)
 
 Same substrate as Merge Monster — follow **§ Subagent liveness in
-[<engsys-root>/skills/merge-monster/SKILL.md](../merge-monster/SKILL.md)** with
+[<engsys-root>/skills/merge-monster/references/runbook-details.md](../../merge-monster/references/runbook-details.md)** with
 `<state_dir>` = this config's `state_dir` and the shared scripts at
 `<engsys-root>/skills/merge-monster/scripts/mm-agent-{reg,watch}.sh`. Applies to
 every expert agent you dispatch (§ Expert routing): register on spawn with
