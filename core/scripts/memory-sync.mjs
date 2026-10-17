@@ -38,6 +38,18 @@ export const INIT_CAPS = Object.freeze({
 
 const EVIDENCE_MARKER_RE = createMarkerRe('HISTORICAL REPO EVIDENCE');
 
+// engsys v2.0.1 round 3 (F4): a commit carrying any of these trailers is agent-authored — its
+// rationale is the agent's own text, never a human operator's, regardless of who it was
+// committed as. Matches three trailer names (`Co-Authored-By:`/`Assisted-by:`/`Generated-by:`,
+// whitespace-tolerant before the colon, case-insensitive throughout) followed anywhere on the
+// same line by a known agent name/provider identifier or email domain. This is explicitly
+// defense-in-depth, NOT the real trust boundary: the real boundary is key custody (see
+// docs/memory-spec.md) — no operator signing key reachable from an agent session, and GitHub
+// Codespaces GPG auto-signing turned off for operator accounts. A trailer match can never be
+// exhaustive against every current and future agent/provider name.
+const AGENT_TRAILER_RE =
+  /(?:co-authored-by|assisted-by|generated-by)\s*:[^\n]*(?:\bclaude\b|\bcopilot\b|\bgemini\b|\bantigravity\b|\bcodex\b|\bgpt\b|\bopus\b|\bsonnet\b|\bdeepseek\b|\bgrok\b|noreply@anthropic\.com|@openai\.com|@google\.com|google\s*ai)/i;
+
 // ---------------------------------------------------------------------------
 // §7.4 Quarantine & Anomaly Tagging
 // ---------------------------------------------------------------------------
@@ -794,7 +806,7 @@ export function extractEventFromCommit(
   // legacy/unlabeled allowance instead, same as before, carrying nothing sensitive to protect.
   const operators = new Set((config.operator_user_ids ?? []).map(Number));
   const committerId = commit.committerId != null ? Number(commit.committerId) : null;
-  const hasAgentCoAuthor = /co-authored-by:[^\n]*\b(claude|copilot|gemini|antigravity)\b/i.test(body);
+  const hasAgentCoAuthor = AGENT_TRAILER_RE.test(body);
   const isOperatorCommit =
     commit.verified === true &&
     committerId != null &&

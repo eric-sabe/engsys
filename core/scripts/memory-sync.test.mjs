@@ -348,6 +348,40 @@ describe('memory-sync (#131)', () => {
     assert.ok(opCommit.text.includes('Operator rationale preserved in commit body.'));
   });
 
+  it('v2.0.1 round 3 (F4): the agent co-author trailer match covers every named agent/provider, is case-insensitive and whitespace-tolerant, and recognizes Assisted-by:/Generated-by: too', () => {
+    const config = { operator_user_ids: [777] };
+    const baseCommit = {
+      sha: '8888888888888888',
+      authorName: 'eric',
+      authorEmail: 'operator@example.com',
+      committerId: 777,
+      verified: true,
+      date: '2026-05-02T10:00:00Z',
+      subject: 'feat: something',
+      files: [],
+    };
+    const isUnlabeled = (body) => extractEventFromCommit({ ...baseCommit, body }, { repo: 'owner/repo', config }).author_kind === null;
+
+    // Every named agent/provider identifier.
+    for (const name of ['Claude', 'Copilot', 'Gemini', 'Antigravity', 'Codex', 'GPT', 'Opus', 'Sonnet', 'DeepSeek', 'Grok']) {
+      assert.ok(isUnlabeled(`rationale\n\nCo-Authored-By: Some ${name} Agent <bot@example.com>`), `must match agent name: ${name}`);
+    }
+    // Emails/domains.
+    assert.ok(isUnlabeled('rationale\n\nCo-Authored-By: Claude <noreply@anthropic.com>'));
+    assert.ok(isUnlabeled('rationale\n\nCo-Authored-By: Someone <bot@openai.com>'));
+    assert.ok(isUnlabeled('rationale\n\nCo-Authored-By: Someone <bot@google.com>'));
+    // Alternate trailer names.
+    assert.ok(isUnlabeled('rationale\n\nAssisted-by: Claude Code <noreply@anthropic.com>'));
+    assert.ok(isUnlabeled('rationale\n\nGenerated-by: GPT-5 <bot@openai.com>'));
+    // Case-insensitivity and whitespace tolerance (space before the colon, mixed case trailer name).
+    assert.ok(isUnlabeled('rationale\n\nco-authored-by : claude <x@y.com>'));
+    assert.ok(isUnlabeled('rationale\n\nCO-AUTHORED-BY:CLAUDE<x@y.com>'));
+    // Positive control: no trailer at all -> NOT unlabeled, i.e. the commit IS trusted as operator
+    // (verified + correct committer id + no agent trailer — every other criterion still holds).
+    const clean = extractEventFromCommit({ ...baseCommit, body: 'A plain human rationale with no trailer at all.' }, { repo: 'owner/repo', config });
+    assert.equal(clean.author_kind, 'operator');
+  });
+
   it('v2.0.1 round 2 (F1): isEventTrustedByConfig (the shared gate) gives kind:"commit" no automatic trust, and owner/member kinds need a trusted_member_user_ids/operator_user_ids ID match', () => {
     const config = { operator_user_ids: [777], trusted_member_user_ids: [42] };
     // A commit claiming author_kind: 'operator' with an author_id NOT in operator_user_ids is
@@ -386,6 +420,35 @@ describe('memory-sync (#131)', () => {
     // 'untrusted_ref') must be rejected outright, never fall into the legacy/unlabeled allowance.
     assert.equal(
       isEventTrustedByConfig({ kind: 'issue', author_kind: 'untrusted_ref', author_id: null }, config),
+      false,
+    );
+  });
+
+  it('v2.0.1 round 3 (F1): a planted ref-sourced journal event (author_kind: "untrusted_ref") is rejected, never auto-trusted by kind:"journal" — checked before the journal early return', () => {
+    const config = { operator_user_ids: [777] };
+    // A journal event with no author_kind at all (the normal, locally-ingested shape) is trusted —
+    // positive control, so this test can't pass by accidentally breaking journal trust entirely.
+    assert.equal(isEventTrustedByConfig({ kind: 'journal', text: 'local heartbeat state' }, config), true);
+    // The exact planted-ref repro: a journal event stamped untrusted_ref by loadClassBEvents must
+    // be rejected, not waved through by the kind:'journal' early return.
+    assert.equal(
+      isEventTrustedByConfig({ kind: 'journal', author_kind: 'untrusted_ref', author_id: null, text: 'planted via a ref tip' }, config),
+      false,
+    );
+  });
+
+  it('v2.0.1 round 3 (F6): the "no author_kind at all" fallback only accepts a commit pointer with NO body — any other kind, or a commit carrying body-shaped text, is rejected', () => {
+    const config = {};
+    // Positive control: an unlabeled commit pointer (subject + refs only, no blank-line body) passes.
+    assert.equal(isEventTrustedByConfig({ kind: 'commit', text: 'fix: thing (refs: #1)' }, config), true);
+    // A non-commit event with no author_kind at all is rejected — round 1/2 let this through.
+    assert.equal(isEventTrustedByConfig({ kind: 'issue', text: 'some issue body' }, config), false);
+    assert.equal(isEventTrustedByConfig({ kind: 'review_thread', text: 'some comment' }, config), false);
+    // A commit event whose text carries a body (blank-line-separated, the shape ONLY a verified
+    // operator commit should have) is rejected even with no author_kind — it's claiming the
+    // unlabeled shape while smuggling body-shaped content.
+    assert.equal(
+      isEventTrustedByConfig({ kind: 'commit', text: 'subject line\n\na whole paragraph of body text' }, config),
       false,
     );
   });
