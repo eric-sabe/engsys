@@ -325,6 +325,11 @@ describe('bareAgentType', () => {
 		assert.equal(bareAgentType(''), '');
 		assert.equal(bareAgentType(42), '');
 	});
+	test('engsys v2.0.1 (L6): lowercases the bare name so case-differing agent_type spellings still match', () => {
+		assert.equal(bareAgentType('Nyx'), 'nyx');
+		assert.equal(bareAgentType('NYX'), 'nyx');
+		assert.equal(bareAgentType('engsys:Nyx'), 'nyx');
+	});
 });
 
 describe('isClassBExcluded', () => {
@@ -343,6 +348,13 @@ describe('isClassBExcluded', () => {
 		assert.ok(isClassBExcluded(null, excluded));
 		assert.ok(isClassBExcluded(undefined, excluded));
 		assert.ok(isClassBExcluded('', excluded));
+	});
+	test('engsys v2.0.1 (L6): a differently-cased agent_type still matches the (lowercase) excluded set', () => {
+		assert.ok(isClassBExcluded('Nyx', excluded));
+		assert.ok(isClassBExcluded('NYX', excluded));
+		assert.ok(isClassBExcluded('engsys:NYX', excluded));
+		// Positive control: a non-excluded name in a different case is still correctly NOT excluded.
+		assert.ok(!isClassBExcluded('Isabelle', excluded));
 	});
 });
 
@@ -448,6 +460,52 @@ describe('resolveExcludedAgents', () => {
 			const excluded = resolveExcludedAgents({ exclude_class_b_agents: [] }, { agentsRoot: dir });
 			assert.ok(excluded.has('nyx'));
 			assert.ok(!excluded.has('isabelle'), 'the fail-safe must not fire once the scan actually finds a real security agent');
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('engsys v2.0.1 (L6): also scans the REPO\'s own .claude/agents/*.md (read from the reviewed SHA, never the live filesystem)', () => {
+		const dir = makeRepo({});
+		try {
+			mkdirSync(join(dir, '.claude', 'agents'), { recursive: true });
+			writeFileSync(join(dir, '.claude', 'agents', 'sandy.md'), '---\nname: sandy\nsecurity: true\n---\n\nbody\n');
+			hermeticGit(dir, [...GIT_OPTS, 'add', '-A'], { isolateConfig: true });
+			hermeticGit(dir, [...GIT_OPTS, 'commit', '-q', '-m', 'add repo-local security agent'], { isolateConfig: true });
+			pushOrigin(dir);
+
+			// agentsRoot is a bare fixture dir with NO agents of its own — only the repo-local
+			// .claude/agents scan (keyed on repoRoot) can find `sandy`.
+			const otherAgentsRoot = mkdtempSync(join(tmpdir(), 'memory-brief-noagents-root-'));
+			try {
+				const excluded = resolveExcludedAgents({ exclude_class_b_agents: [] }, { agentsRoot: otherAgentsRoot, repoRoot: dir });
+				assert.ok(excluded.has('sandy'), 'repo-local .claude/agents/sandy.md (security: true) must be found');
+			} finally {
+				rmSync(otherAgentsRoot, { recursive: true, force: true });
+			}
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('engsys v2.0.1 (L6) positive control: a repo-local .claude/agents/*.md edit made AFTER the reviewed SHA (unreviewed) is never trusted', () => {
+		const dir = makeRepo({});
+		try {
+			const otherAgentsRoot = mkdtempSync(join(tmpdir(), 'memory-brief-noagents-root2-'));
+			try {
+				// Reviewed tree (pushed to origin/main) has NO .claude/agents at all.
+				const beforeExcluded = resolveExcludedAgents({ exclude_class_b_agents: [] }, { agentsRoot: otherAgentsRoot, repoRoot: dir });
+				assert.ok(!beforeExcluded.has('sandy'));
+
+				// Add the security:true agent file WITHOUT committing/pushing it (an unreviewed local
+				// edit — e.g. an attacker-controlled worktree trying to strip its own security:true).
+				mkdirSync(join(dir, '.claude', 'agents'), { recursive: true });
+				writeFileSync(join(dir, '.claude', 'agents', 'sandy.md'), '---\nname: sandy\nsecurity: true\n---\n\nbody\n');
+				const afterExcluded = resolveExcludedAgents({ exclude_class_b_agents: [] }, { agentsRoot: otherAgentsRoot, repoRoot: dir });
+				assert.ok(!afterExcluded.has('sandy'), 'an uncommitted/unreviewed .claude/agents file must never be trusted — only git show <reviewedSha>:... is read');
+			} finally {
+				rmSync(otherAgentsRoot, { recursive: true, force: true });
+			}
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
