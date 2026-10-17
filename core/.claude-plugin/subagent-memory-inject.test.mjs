@@ -64,6 +64,37 @@ describe('extractTargetAgentType (engsys v2.0.1 M5)', () => {
 		assert.equal(extractTargetAgentType({}), '');
 		assert.equal(extractTargetAgentType(null), '');
 	});
+	test('engsys v2.0.1 round 2 (F7): trims and Unicode-NFKC-normalizes the target name', () => {
+		assert.equal(
+			extractTargetAgentType({ tool_input: { subagent_type: '  engsys:isabelle  ' } }),
+			'engsys:isabelle',
+		);
+		// U+FF49 FULLWIDTH LATIN SMALL LETTER I etc. NFKC-normalizes to ASCII "isabelle".
+		assert.equal(
+			extractTargetAgentType({ tool_input: { subagent_type: 'ｉｓａｂｅｌｌｅ' } }),
+			'isabelle',
+		);
+	});
+	test('engsys v2.0.1 round 2 (F7): fails closed when subagent_type and agent_type disagree, but passes through when they agree (positive control)', () => {
+		assert.equal(
+			extractTargetAgentType({ tool_input: { subagent_type: 'engsys:isabelle', agent_type: 'engsys:nyx' } }),
+			'',
+			'disagreeing identities on the same dispatch must never resolve to either one',
+		);
+		assert.equal(
+			extractTargetAgentType({ tool_input: { subagent_type: 'engsys:isabelle', agent_type: 'engsys:isabelle' } }),
+			'engsys:isabelle',
+			'agreeing identities resolve normally',
+		);
+	});
+	test('engsys v2.0.1 round 2 (F7): when rawStdin is supplied, the target is parsed through harness-io\'s parseHookInput, not re-derived from the already-parsed object', () => {
+		const rawStdin = JSON.stringify({
+			hook_event_name: 'PreToolUse',
+			tool_name: 'Agent',
+			tool_input: { subagent_type: 'engsys:isabelle' },
+		});
+		assert.equal(extractTargetAgentType({ tool_input: {} }, { rawStdin }), 'engsys:isabelle');
+	});
 });
 
 describe('main — pre-agent mode on a non-Claude harness (engsys v2.0.1 M5)', () => {
@@ -121,6 +152,52 @@ describe('main — pre-agent mode on a non-Claude harness (engsys v2.0.1 M5)', (
 			const lastLine = readFileSync(injectionsLog, 'utf8').trim().split('\n').pop();
 			const record = JSON.parse(lastLine);
 			assert.equal(record.agent_type, 'engsys:isabelle', 'the gate must have passed using the TARGET agent_type, not the caller (engsys:nyx)');
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
+	test('cr review (round 2): the pending-dispatch prompt/paths are recoverable on a non-Claude harness — consumePendingDispatch must be looked up under the TARGET identity recordPendingDispatch filed it under, not the caller', { skip: !SQLITE_AVAILABLE }, () => {
+		const cwd = mkdtempSync(join(tmpdir(), 'inject-f-pending-'));
+		try {
+			const GIT_OPTS = ['-c', 'user.name=a', '-c', 'user.email=a@b.c'];
+			hermeticGit(cwd, [...GIT_OPTS, 'init', '-q'], { isolateConfig: true });
+			mkdirSync(join(cwd, 'docs', 'agent-lessons'), { recursive: true });
+			writeFileSync(
+				join(cwd, 'docs', 'agent-lessons', 'pending-lesson.md'),
+				'---\nglobs: []\nstacks: []\nroles: []\nkeywords: ["idempotency"]\nsecurity: false\nsupersedes: []\n---\n\n# Idempotency lesson\n\n**Trigger:** idempotency work.\n',
+			);
+			writeFileSync(join(cwd, 'README.md'), 'init\n');
+			hermeticGit(cwd, [...GIT_OPTS, 'add', '-A'], { isolateConfig: true });
+			hermeticGit(cwd, [...GIT_OPTS, 'commit', '-q', '-m', 'init'], { isolateConfig: true });
+
+			const env = { ...process.env, ENGSYS_HARNESS: 'copilot', NODE_NO_WARNINGS: '1' };
+			const out = execFileSync('node', [SCRIPT, 'pre-agent'], {
+				input: JSON.stringify({
+					session_id: 'sess-f-pending',
+					hook_event_name: 'PreToolUse',
+					agent_type: 'engsys:nyx', // caller — must be ignored
+					tool_input: {
+						subagent_type: 'engsys:isabelle', // target — must be what the lookup keys on
+						description: 'Fix idempotency bug',
+						prompt: 'Please address idempotency carefully.',
+					},
+				}),
+				encoding: 'utf8',
+				env,
+				cwd,
+			});
+			const parsed = JSON.parse(out);
+			// This fixture repo isn't allowlisted/indexed the same way a real one would be, so the
+			// brief falls back to the plugin's own bundled lessons-library — but it still scores
+			// against OUR stashed prompt, not an empty one. Proof the dispatch was recovered: the
+			// selected lessons are strongly idempotency-related, matching "idempotency" in the
+			// stashed prompt, not a generic/unscored set.
+			assert.match(
+				parsed.hookSpecificOutput?.additionalContext ?? '',
+				/idempoten/i,
+				'the dispatch prompt stashed under the target identity must be recovered and used for brief selection in the SAME non-Claude pre-agent call',
+			);
 		} finally {
 			rmSync(cwd, { recursive: true, force: true });
 		}
