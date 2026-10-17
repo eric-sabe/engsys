@@ -105,15 +105,24 @@ export function detectHarness(env = process.env, rawStdinObj = null) {
 
 /**
  * Resolve the engsys plugin/core root across Claude Code, Copilot CLI, and Antigravity.
+ *
+ * Under Claude Code only the harness's own CLAUDE_PLUGIN_ROOT, else this file's location, counts: a
+ * settings `env` (or any other inherited variable) naming ENGSYS_PLUGIN_ROOT / COPILOT_PLUGIN_ROOT /
+ * AGY_PLUGIN_ROOT must not move the root a Claude hook trusts. Those count only when their harness is
+ * the detected one (`harness`, else detectHarness(env)).
  */
-export function resolvePluginRoot(env = process.env, importMetaUrl = null) {
-  const fromEnv =
-    env?.ENGSYS_PLUGIN_ROOT ||
-    env?.CLAUDE_PLUGIN_ROOT ||
-    env?.COPILOT_PLUGIN_ROOT ||
-    env?.AGY_PLUGIN_ROOT;
+export function resolvePluginRoot(env = process.env, importMetaUrl = null, harness = null) {
+  // Claude Code sets CLAUDE_PLUGIN_ROOT for every plugin hook: when it is there, no environment
+  // variable naming a harness (ENGSYS_HARNESS, FLEET_ACTIVE_HARNESS, FLEET_HARNESS, HARNESS) counts,
+  // since a settings `env` could set one to move the root. Only a caller's explicit harness does.
+  const h = normalizeHarnessName(harness) || (env?.CLAUDE_PLUGIN_ROOT ? 'claude' : detectHarness(env));
+  const fromMeta = importMetaUrl ? path.resolve(path.dirname(fileURLToPath(importMetaUrl)), '..') : null;
+  let fromEnv = null;
+  if (h === 'copilot') fromEnv = env?.COPILOT_PLUGIN_ROOT || env?.ENGSYS_PLUGIN_ROOT || env?.CLAUDE_PLUGIN_ROOT;
+  else if (h === 'antigravity') fromEnv = env?.AGY_PLUGIN_ROOT || env?.ENGSYS_PLUGIN_ROOT || env?.CLAUDE_PLUGIN_ROOT;
+  else fromEnv = env?.CLAUDE_PLUGIN_ROOT;
   if (fromEnv) return fromEnv;
-  if (importMetaUrl) return path.resolve(path.dirname(fileURLToPath(importMetaUrl)), '..');
+  if (fromMeta) return fromMeta;
   return process.cwd();
 }
 
@@ -276,8 +285,9 @@ export function parseHookInput(rawStdin, env = process.env) {
     Array.isArray(obj.workspacePaths) && typeof obj.workspacePaths[0] === 'string'
       ? obj.workspacePaths[0].replace(/^file:\/\//, '')
       : null;
+  // The hook's cwd comes from the harness (its payload field or workspace), never from tool_input: a
+  // tool call's own Cwd argument is model-controlled. (It stays readable as toolInput.Cwd.)
   const cwd =
-    (typeof rawToolInput.Cwd === 'string' && rawToolInput.Cwd) ||
     (typeof obj.cwd === 'string' && obj.cwd) ||
     workspaceRoot ||
     process.cwd();

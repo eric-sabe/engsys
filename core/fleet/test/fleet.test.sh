@@ -23,7 +23,7 @@ set -euo pipefail
 S="$FAKE/claude"; mkdir -p "$S"
 [ -f "$S/marketplaces.json" ] || echo '[]' >"$S/marketplaces.json"
 [ -f "$S/plugins.json" ] || echo '[]' >"$S/plugins.json"
-printf '%s\tPATH0=%s\n' "$*" "${PATH%%:*}" >>"$FAKE/claude.log"
+printf '%s\tPATH0=%s\tCFG=%s\n' "$*" "${PATH%%:*}" "${CLAUDE_CONFIG_DIR:-unset}" >>"$FAKE/claude.log"
 printf '%s\t%s\n' "$(pwd -P)" "$*" >>"$FAKE/claude.cwd"
 [ "${1:-}" = plugin ] || { echo "stub claude: unsupported: $*" >&2; exit 2; }
 shift
@@ -92,6 +92,7 @@ case "$sub" in
   list-panes)
     case "$fmt" in
       *pane_pid*) cat "$F/pid-$w" 2>/dev/null || exit 1 ;;
+      *pane_id*) [ -f "$F/cmd-$w" ] || exit 1; echo "%pane-$w" ;;
       *) cat "$F/cmd-$w" 2>/dev/null || exit 1 ;;
     esac ;;
   capture-pane) cat "$F/cap-$w" 2>/dev/null || true ;;
@@ -407,6 +408,36 @@ has "engsys-side job template change reinstalls jobs" "$OUT" "launchd templates 
 has "marketplace repaired" "$OUT" "marketplace acme: v0.1.0 → v0.2.0"
 eq "plugins back" "$(json_names plugins '.[].id')" "core@engsys ctx@acme extra@acme"
 run fleet sync --check; rc_is "in sync again" 0
+# The same heal from inside a fleet job (what verify --auto-sync runs): never touches launchd.
+git -C "$ENGSYS_HOST" checkout -q v1.0.0
+: >"$FAKE/launchctl.log"
+run fleet sync --no-jobs
+rc_is "sync --no-jobs heals the checkout too" 0
+has "…says the job files changed and asks for install-jobs" "$OUT" "not reloading them. Run: fleet install-jobs"
+eq "…and never called launchctl" "$(cat "$FAKE/launchctl.log")" ""
+run fleet sync --check; rc_is "in sync again (no-jobs)" 0
+
+echo "== D2. FLEET_CLAUDE_CONFIG_DIR: sync installs the pinned plugins into the fleet's own Claude config dir"
+FCFG="$T/fleet-claude"; mkdir -p "$FCFG"
+LC="$HOME/.config/acme/fleet.local.conf"; cp "$LC" "$T/flc.bak" 2>/dev/null || : >"$T/flc.bak"
+printf 'FLEET_CLAUDE_CONFIG_DIR=%s\n' "$FCFG" >>"$LC"
+# a marketplace that moved: the sync has real plugin work to do
+jq 'map(if .name == "engsys" then .ref = "v1.0.0" else . end)' "$FAKE/claude/marketplaces.json" >"$FAKE/m.json" && mv "$FAKE/m.json" "$FAKE/claude/marketplaces.json"
+m="$(mark)"; CLAUDE_CONFIG_DIR="$T/inherited" run fleet sync
+rc_is "sync with FLEET_CLAUDE_CONFIG_DIR exits 0" 0
+has "…it ran the plugin step" "$(since "$m")" "plugin marketplace add https://github.com/vendor/engsys.git"
+eq "…every claude call ran with CLAUDE_CONFIG_DIR=<the fleet's dir>" "$(since "$m" | grep -v '^MARK' | grep -vc "CFG=$FCFG\$" || true)" 0
+has "…and sync says which config dir it used" "$OUT" "claude config dir: $FCFG (FLEET_CLAUDE_CONFIG_DIR)"
+cp "$T/flc.bak" "$LC"
+m="$(mark)"; CLAUDE_CONFIG_DIR="$T/inherited" run fleet sync --check
+rc_is "unset again: in sync" 0
+eq "…every claude call ran with no CLAUDE_CONFIG_DIR (an inherited one is dropped)" "$(since "$m" | grep -v '^MARK' | grep -vc 'CFG=unset$' || true)" 0
+has "…reporting the default dir" "$OUT" "claude config dir: $HOME/.claude"
+printf 'FLEET_CLAUDE_CONFIG_DIR=%s\n' "$T/missing-cfg" >>"$LC"
+run fleet sync
+rc_is "a FLEET_CLAUDE_CONFIG_DIR that doesn't exist stops sync" 1
+has "…with the one-time setup" "$OUT" "log in with CLAUDE_CONFIG_DIR=$T/missing-cfg claude"
+cp "$T/flc.bak" "$LC"
 
 echo "== D2. the plugin step never touches project settings (engsys#112)"
 APP_SETTINGS="$HOME/git/app/.claude/settings.json"
@@ -468,6 +499,8 @@ echo "== E. launch: rendering, the 5th roster field, the launcher command lines"
 rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"
 run fleet launch
 rc_is "launch exits 0" 0
+eq "fleet launch records each supervised session's pane (the supervisor reads seat limits only there)" "$(cat "$INST/logs/fleet-supervisor/acme-mm.pane" 2>/dev/null)" "%pane-acme-mm"
+[ ! -f "$INST/logs/fleet-supervisor/acme-build.pane" ] && ok "…and not an interactive one's" || bad "…and not an interactive one's"
 has "preflight ran" "$OUT" "preflight-ok"
 [ -d "$HOME/git/worktrees" ] && ok "WORKTREES_DIR created" || bad "WORKTREES_DIR created"
 S_ENV="$(cat "$STATE/env/session.env")"; X_ENV="$(cat "$STATE/env/security.env")"
@@ -478,6 +511,8 @@ has "session env puts the gh shim first on PATH" "$S_ENV" "core/fleet/identity/b
 has "session env drops an inherited GH_TOKEN" "$S_ENV" "unset GH_TOKEN GITHUB_TOKEN"
 has "security env sources the session env" "$X_ENV" ". \"$STATE/env/session.env\""
 has "security env overrides the model" "$X_ENV" 'MODEL_ALIAS="model-s"'
+has "security env never inherits a subagent model override" "$X_ENV" "unset CLAUDE_CODE_SUBAGENT_MODEL CLAUDE_CODE_SUBAGENT_MODEL_FORCE"
+hasnt "…only the security lane" "$S_ENV" "unset CLAUDE_CODE_SUBAGENT_MODEL"
 has "every rendered env gets the identity lines" "$X_ENV" "GIT_AUTHOR_NAME=fleet-bot"
 has "…even the relative-path lane" "$(cat "$STATE/env/rel.env")" "GIT_AUTHOR_NAME=fleet-bot"
 eq "env files are 0600" "$(mode_of "$STATE/env/session.env")" 600
@@ -509,6 +544,55 @@ run bash -c "cd '$T' && bash '$ENGSYS_HOST/core/skills/agent-sessions/scripts/la
 rc_is "launcher: a missing per-session env file is an error" 1
 has "…naming the resolved path" "$OUT" "env file for 'acme-x' not found: $T/gone.env"
 
+# Claude-only: monsters and the security lane never start on another harness, whatever sets HARNESS.
+for how in "HARNESS=copilot" "FLEET_ACTIVE_HARNESS=antigravity"; do
+  : >"$FAKE/tmux.log"
+  run env "$how" bash "$ENGSYS_HOST/core/fleet/bin/fleet" --instance "$INST" launch acme-mm
+  rc_is "$how: launching the merge monster is refused" 1
+  has "…saying why" "$OUT" "run on Claude only"
+  run env "$how" bash "$ENGSYS_HOST/core/fleet/bin/fleet" --instance "$INST" launch acme-security
+  rc_is "$how: launching the security lane is refused" 1
+  eq "…nothing reached tmux" "$(grep -c send-keys "$FAKE/tmux.log" || true)" 0
+done
+cp "$INST/fleet/roster.tmpl" "$T/roster.bak"; sed -i.x '1a\
+HARNESS=copilot' "$INST/fleet/roster.tmpl"; rm -f "$INST/fleet/roster.tmpl.x"
+run fleet launch acme-mm
+rc_is "a HARNESS= line in the roster: the merge monster is refused too" 1
+cp "$T/roster.bak" "$INST/fleet/roster.tmpl"
+# An interactive session on the security lane (5th field security*) is Claude-only as well; a plain
+# interactive one is not refused for it (positive control).
+printf 'acme-audit|||--model m|__ENV_DIR__/security.env\n' >>"$INST/fleet/roster.tmpl"
+run env HARNESS=copilot bash "$ENGSYS_HOST/core/fleet/bin/fleet" --instance "$INST" launch acme-audit
+rc_is "HARNESS=copilot: a security-lane interactive session is refused" 1
+has "…saying why" "$OUT" "run on Claude only"
+run env HARNESS=copilot bash "$ENGSYS_HOST/core/fleet/bin/fleet" --instance "$INST" launch acme-build
+hasnt "HARNESS=copilot: a plain interactive session is not refused as Claude-only" "$OUT" "run on Claude only"
+cp "$T/roster.bak" "$INST/fleet/roster.tmpl"
+# A harness.fallback file on the host (session-writable) never selects a harness any more.
+LC="$HOME/.config/acme/fleet.local.conf"; cp "$LC" "$T/flc0.bak" 2>/dev/null || : >"$T/flc0.bak"
+printf 'HARNESS_FALLBACK=copilot\n' >>"$LC"; mkdir -p "$INST/logs/fleet-supervisor"; echo copilot >"$INST/logs/fleet-supervisor/harness.fallback"
+grep -Fxv acme-build "$FAKE/tmux/windows" >"$FAKE/w.new" || true; mv "$FAKE/w.new" "$FAKE/tmux/windows"; : >"$FAKE/tmux.log"
+run fleet launch acme-build
+rc_is "with a harness.fallback file present, a launch still works" 0
+has "…on Claude (positive control: the interactive session starts)" "$(tl acme-build)" "claude --name acme-build"
+cp "$T/flc0.bak" "$LC"; rm -f "$INST/logs/fleet-supervisor/harness.fallback"
+
+# The fleet's Claude config dir reaches every launched session (monsters, interactive, security): R1.
+has "no FLEET_CLAUDE_CONFIG_DIR: a launched session drops any inherited CLAUDE_CONFIG_DIR" "$(tl acme-build)" "unset CLAUDE_CONFIG_DIR && "
+FCFG="$T/fleet-claude"; mkdir -p "$FCFG"
+LC="$HOME/.config/acme/fleet.local.conf"; cp "$LC" "$T/flc.bak" 2>/dev/null || : >"$T/flc.bak"
+printf 'FLEET_CLAUDE_CONFIG_DIR=%s\n' "$FCFG" >>"$LC"
+rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"
+CLAUDE_CONFIG_DIR="$T/inherited" run fleet launch
+rc_is "launch with FLEET_CLAUDE_CONFIG_DIR exits 0" 0
+for w in acme-mm acme-security acme-build; do
+  has "$w: launched with CLAUDE_CONFIG_DIR=<the fleet's dir>" "$(tl "$w")" "CLAUDE_CONFIG_DIR=$FCFG"
+  hasnt "$w: …never the inherited one" "$(tl "$w")" "$T/inherited"
+done
+has "the rendered session env carries it too" "$(cat "$STATE/env/session.env")" "CLAUDE_CONFIG_DIR=$FCFG"
+has "…and the security env" "$(cat "$STATE/env/security.env")" "CLAUDE_CONFIG_DIR=$FCFG"
+cp "$T/flc.bak" "$LC"
+
 echo "== F. supervise"
 rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"; : >"$FAKE/gh.log"
 jq -n --arg b "last: $(iso 200) — status: working" '{state: "OPEN", body: $b}' >"$FAKE/ledger-11.json"
@@ -522,13 +606,74 @@ has "conf: sessions from the template" "$SUP" "acme-mm|11|60"
 has "conf: the merge monster carries its role, so the supervisor asks the lease (engsys#62)" "$SUP" "acme-mm|11|60|||merge"
 has "conf: …and the maintenance monster too" "$SUP" "acme-security|12|60|||maintain"
 has "conf: HEARTBEAT_CMD defaulted to the dispatcher" "$SUP" "HEARTBEAT_CMD=bash $ENGSYS_HOST/core/fleet/bin/fleet --instance $INST heartbeat"
-has "conf: INTEGRITY_CMD defaulted to fleet verify, throttled to 15 min (engsys#70)" "$SUP" "INTEGRITY_CMD=bash $ENGSYS_HOST/core/fleet/bin/fleet --instance $INST verify --alert --max-age 15"
+has "conf: INTEGRITY_CMD defaulted to fleet verify, throttled to 15 min (engsys#70)" "$SUP" "INTEGRITY_CMD=bash $ENGSYS_HOST/core/fleet/bin/fleet --instance $INST verify --alert --auto-sync --max-age 15"
 has "the integrity check ran in the tick and passed" "$(cat "$INST/logs/fleet-supervisor/supervisor.log")" "integrity: ok"
+eq "the relaunched supervised session's pane is recorded (seat-limit evidence)" "$(cat "$INST/logs/fleet-supervisor/acme-mm.pane" 2>/dev/null)" "%pane-acme-mm"
+hasnt "supervisor conf: no harness fallback is handed to the supervisor (Claude-only)" "$(cat "$STATE/supervisor.conf")" "HARNESS_FALLBACK"
 has "stale monster with no window is relaunched through the kit" "$(grep -F '[new-session]' "$FAKE/tmux.log" | grep -F '[acme-mm]' || true)" "[acme-mm]"
 hasnt "closed ledger (kill switch) is left alone" "$(cat "$FAKE/tmux.log")" "[acme-security]"
 has "supervisor log kept in the instance" "$(cat "$INST/logs/fleet-supervisor/supervisor.log")" "acme-security: ledger acme/app#12 CLOSED"
 has "relaunch reported on the ledger" "$(cat "$FAKE/gh.log")" "issue comment 11 -R acme/app"
 has "the supervisor's gh calls went through the identity shim" "$(cat "$FAKE/shim.log")" "shim gh issue view 11"
+
+echo "== F2. a pin checkout behind main with changed auto-loaded files: the supervisor auto-syncs"
+APPD="$HOME/git/app"
+behind() { # behind <file> — main moves on with a change to a file sessions load
+  mkdir -p "$P/$(dirname "$1")"; printf 'v%s\n' "$RANDOM" >>"$P/$1"; git -C "$P" pull -q origin main 2>/dev/null || true
+  commit_all "$P" "move $1"; push_all "$P"
+}
+run fleet verify; rc_is "positive control: in step with main, verify passes" 0
+behind .claude/agents/helper.md
+run fleet verify
+rc_is "behind main with a changed .claude file: a stale mismatch" 1
+has "…named stale" "$OUT" "stale      .claude/agents/helper.md differs from main"
+h0="$(git -C "$APPD" rev-parse HEAD)"; run fleet verify
+eq "…and plain verify doesn't touch the checkout" "$(git -C "$APPD" rev-parse HEAD)" "$h0"
+run fleet verify --alert
+has "…its alert says behind main, not tampering" "$OUT" "is behind main, and files the sessions load changed there"
+has "…and, without --auto-sync, asks for fleet sync instead of claiming it runs" "$OUT" "Run fleet sync (a supervised host also does it on its own"
+hasnt "…" "$OUT" "Auto-syncing: fleet sync is running"
+rm -f "$STATE/verify-wrappers.alerted"
+: >"$FAKE/launchctl.log"
+run fleet verify --auto-sync
+rc_is "--auto-sync on a clean checkout of main: syncs and passes" 0
+eq "…without touching launchd (it runs inside the supervisor's job)" "$(cat "$FAKE/launchctl.log")" ""
+has "…saying it auto-syncs" "$OUT" "auto-syncing (fleet sync, no restarts)"
+eq "…the checkout is at main now" "$(git -C "$APPD" rev-parse HEAD)" "$(git -C "$P" rev-parse HEAD)"
+behind notes.txt; git -C "$APPD" pull -q --ff-only origin main   # a tracked, ordinary file to dirty
+behind CLAUDE.md
+printf 'local edit\n' >>"$APPD/notes.txt"
+run fleet verify --auto-sync
+rc_is "a dirty checkout is not auto-synced: mismatch stands" 1
+has "…saying why" "$OUT" "could not auto-sync: the pin checkout has uncommitted changes to tracked files"
+git -C "$APPD" checkout -q -- notes.txt
+# Claude Code's own runtime files in .claude/ (not even gitignored here) never block the auto-sync.
+git -C "$APPD" pull -q --ff-only origin main; behind CLAUDE.md
+printf '{}' >"$APPD/.claude/settings.local.json"; printf '1' >"$APPD/.claude/scheduled_tasks.lock"
+run fleet verify --auto-sync
+rc_is "runtime files in .claude/: still auto-synced" 0
+rm -f "$APPD/.claude/settings.local.json" "$APPD/.claude/scheduled_tasks.lock"
+behind CLAUDE.md
+git -C "$APPD" -c user.name=t -c user.email=t@x commit -q --allow-empty -m "local only"
+run fleet verify --auto-sync
+rc_is "a diverged checkout is not auto-synced: mismatch" 1
+has "…it is not an ancestor of main" "$OUT" "is not main or an ancestor of it"
+hasnt "…and no sync was tried" "$OUT" "auto-syncing"
+git -C "$APPD" fetch -q origin; git -C "$APPD" reset -q --hard refs/remotes/origin/main
+run fleet verify; rc_is "back on main: passes" 0
+# A local branch and a local tag named origin/main (which make `symbolic-ref --short` ambiguous) never
+# break sync or auto-sync: refs are read in full.
+git -C "$APPD" remote set-head origin main >/dev/null 2>&1 || git -C "$APPD" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+git -C "$APPD" branch -q origin/main HEAD~1 2>/dev/null || git -C "$APPD" branch -q origin/main
+git -C "$APPD" tag origin/main HEAD
+run fleet sync --check
+rc_is "a planted branch and tag named origin/main: sync --check still works" 0
+behind CLAUDE.md
+run fleet verify --auto-sync
+rc_is "…and auto-sync still fast-forwards and passes" 0
+eq "…to the real origin/main" "$(git -C "$APPD" rev-parse HEAD)" "$(git -C "$P" rev-parse HEAD)"
+git -C "$APPD" branch -q -D origin/main; git -C "$APPD" tag -d origin/main >/dev/null
+grep -q -- '--auto-sync' "$STATE/supervisor.conf" && ok "the supervisor's INTEGRITY_CMD passes --auto-sync" || bad "the supervisor's INTEGRITY_CMD passes --auto-sync" "$(cat "$STATE/supervisor.conf")"
 
 echo "== G. install-jobs"
 LA="$HOME/Library/LaunchAgents"

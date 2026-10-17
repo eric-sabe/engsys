@@ -21,6 +21,9 @@
 #
 # Usage: sync.sh [--instance <dir>]           # sync
 #        sync.sh [--instance <dir>] --check   # report drift only; exit 1 if the host is behind the pins
+#        sync.sh [--instance <dir>] --no-jobs # never (re)load or unload launchd jobs: what `fleet verify
+#                                             # --auto-sync` runs from inside the supervisor job, which a
+#                                             # reload would kill. Changed job files are alerted instead.
 set -euo pipefail
 
 main() {
@@ -29,6 +32,7 @@ main() {
   while [ $# -gt 0 ]; do
     case "$1" in
       --check) check=1 ;;
+      --no-jobs) export FLEET_SYNC_NO_JOBS=1 ;; # carried across the re-execs below
       -h | --help) sed -n '2,/^set -/{/^set -/!p;}' "$0"; exit 0 ;;
       *) echo "fleet-sync: unknown arg: $1" >&2; exit 2 ;;
     esac
@@ -50,18 +54,23 @@ main() {
     git -C "$PIN_DIR" rev-parse --git-dir >/dev/null 2>&1 || fleet_die "PIN_DIR is not a git checkout: $PIN_DIR"
     git -C "$PIN_DIR" fetch -q origin
     local pin_branch default_branch
-    pin_branch="$(git -C "$PIN_DIR" symbolic-ref --short -q HEAD || echo DETACHED)"
-    default_branch="$(git -C "$PIN_DIR" symbolic-ref --short -q refs/remotes/origin/HEAD 2>/dev/null || true)"
-    default_branch="${default_branch#origin/}"; : "${default_branch:=main}"
-    if [ "$(git -C "$PIN_DIR" rev-parse HEAD)" != "$(git -C "$PIN_DIR" rev-parse "origin/$default_branch")" ]; then
+    # Full ref names, never --short: a local branch or tag named origin/<x> makes --short ambiguous.
+    pin_branch="$(git -C "$PIN_DIR" symbolic-ref -q HEAD || true)"
+    case "$pin_branch" in refs/heads/*) pin_branch="${pin_branch#refs/heads/}" ;; *) pin_branch=DETACHED ;; esac
+    default_branch="$(git -C "$PIN_DIR" symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null || true)"
+    case "$default_branch" in refs/remotes/origin/?*) default_branch="${default_branch#refs/remotes/origin/}" ;; *) default_branch="" ;; esac
+    : "${default_branch:=main}"
+    # Fully qualified: a local branch or tag named origin/<x> must never stand in for the remote ref.
+    local origin_ref="refs/remotes/origin/$default_branch"
+    if [ "$(git -C "$PIN_DIR" rev-parse HEAD)" != "$(git -C "$PIN_DIR" rev-parse --verify -q "$origin_ref^{commit}")" ]; then
       if [ "$check" = 1 ]; then
         say "pin checkout is behind origin/$default_branch"; drift=1
-      elif [ "$pin_branch" = "$default_branch" ] && git -C "$PIN_DIR" merge -q --ff-only "origin/$default_branch" 2>/dev/null; then
+      elif [ "$pin_branch" = "$default_branch" ] && git -C "$PIN_DIR" merge -q --ff-only "$origin_ref" 2>/dev/null; then
         say "pin checkout: fast-forwarded to $(git -C "$PIN_DIR" rev-parse --short HEAD)"
       else
         warn "pin checkout ($PIN_DIR) is on '$pin_branch' and can't fast-forward to origin/$default_branch — sessions read pins from its working tree. Using origin/$default_branch's pins; fix the checkout."
         mkdir -p "$FLEET_STATE"
-        git -C "$PIN_DIR" show "origin/$default_branch:.claude/settings.json" >"$FLEET_STATE/pins.settings.json"
+        git -C "$PIN_DIR" show "$origin_ref:.claude/settings.json" >"$FLEET_STATE/pins.settings.json"
         PIN_SETTINGS="$FLEET_STATE/pins.settings.json"; export PIN_SETTINGS   # carried across the re-execs below
       fi
     fi
@@ -163,6 +172,7 @@ main() {
     sync_non_claude_plugins "$check" "$engsys_target" "$primary_h" 0
   else
     sync_tmp
+    claude_config_report "$check" || drift=1
     [ "$check" = 1 ] || settings_guard_begin
     installed="$(user_plugins)"
     for i in "${!markets[@]}"; do
@@ -233,7 +243,12 @@ main() {
   case "$FEDERATION_FILE" in "$FLEET_REPO"/*) fed_rel=("${FEDERATION_FILE#"$FLEET_REPO"/}") ;; esac
   if [ -n "$prev_instance" ] && ! git -C "$FLEET_REPO" diff --quiet "$prev_instance" HEAD -- jobs/launchd fleet/fleet.conf fleet/roster.tmpl fleet/supervisor.conf.tmpl ${fed_rel[@]+"${fed_rel[@]}"} 2>/dev/null; then jobs_changed=1; fi
   if [ -n "$prev_engsys" ] && ! git -C "$ENGSYS_DIR" diff --quiet "$prev_engsys" HEAD -- core/fleet/jobs core/fleet/install-jobs.sh core/fleet/lib/host-roles.sh 2>/dev/null; then jobs_changed=1; fi
-  if [ "$jobs_changed" = 1 ]; then
+  if [ "${FLEET_SYNC_NO_JOBS:-0}" = 1 ]; then
+    if [ "$jobs_changed" = 1 ]; then
+      say "launchd job files changed, but this sync runs inside a fleet job (--no-jobs): not reloading them. Run: fleet install-jobs"
+      node "$FLEET_KIT_DIR/notify.mjs" --level alert --incident fleet-jobs-changed "Fleet on $(hostname -s 2>/dev/null || echo this host): the pin advanced and the launchd job files changed. The supervisor synced the host but did not reload its own jobs. Please run: fleet install-jobs" >&2 || true
+    fi
+  elif [ "$jobs_changed" = 1 ]; then
     if command -v launchctl >/dev/null 2>&1; then
       say "launchd templates changed — reinstalling jobs"
       bash "$FLEET_KIT_DIR/install-jobs.sh" --instance "$FLEET_REPO"
@@ -276,7 +291,29 @@ sync_tmp() { # call in the main shell (not in $(…)) so later calls share it; r
   mkdir -p "$SYNC_TMP/cwd" "$SYNC_TMP/snap"
   trap 'settings_guard_restore >/dev/null || true; sync_cleanup' EXIT
 }
-plugin_cli() { (cd "$SYNC_TMP/cwd" && claude plugin "$@"); }
+# The fleet's own Claude config dir when fleet.conf sets FLEET_CLAUDE_CONFIG_DIR (its user-scope plugins are
+# what every fleet session loads), else the account's ~/.claude; never an inherited CLAUDE_CONFIG_DIR.
+fleet_claude() {
+  if [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ]; then CLAUDE_CONFIG_DIR="$FLEET_CLAUDE_CONFIG_DIR" claude "$@"
+  else env -u CLAUDE_CONFIG_DIR claude "$@"; fi
+}
+plugin_cli() { (cd "$SYNC_TMP/cwd" && fleet_claude plugin "$@"); }
+# claude_config_report <check> → which config dir the fleet uses and whether it is logged in (no account
+# details, no token). A FLEET_CLAUDE_CONFIG_DIR that doesn't exist stops a sync: create it and log in first.
+claude_config_report() {
+  local dir="${FLEET_CLAUDE_CONFIG_DIR:-$HOME/.claude}" li
+  if [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] && [ ! -d "$FLEET_CLAUDE_CONFIG_DIR" ]; then
+    [ "$1" = 1 ] || fleet_die "FLEET_CLAUDE_CONFIG_DIR $FLEET_CLAUDE_CONFIG_DIR does not exist. One-time setup: mkdir -p it, log in with CLAUDE_CONFIG_DIR=$FLEET_CLAUDE_CONFIG_DIR claude, then fleet sync (fleet guide: a separate Claude config dir)"
+    say "claude config dir: $dir (FLEET_CLAUDE_CONFIG_DIR) does not exist"; return 1
+  fi
+  li="$( (cd "$SYNC_TMP/cwd" && fleet_claude auth status --json) 2>/dev/null | jq -r 'if .loggedIn == true then "logged in" elif .loggedIn == false then "NOT logged in" else "login unknown" end' 2>/dev/null || true)"
+  say "claude config dir: $dir${FLEET_CLAUDE_CONFIG_DIR:+ (FLEET_CLAUDE_CONFIG_DIR)}, ${li:-login unknown}"
+  if [ "$li" = "NOT logged in" ]; then
+    warn "the fleet's Claude config dir is not logged in: CLAUDE_CONFIG_DIR=$dir claude, then /login. Until then fleet verify holds merge and maintain launches (and alerts)."
+    [ -z "${FLEET_CLAUDE_CONFIG_DIR:-}" ] || return 1
+  fi
+  return 0
+}
 user_plugins() { # "<id>\t<version>" for each user-scope install (the list also shows per-project installs)
   plugin_cli list --json | jq -r '.[] | select((.scope // "user") == "user") | [.id, (.version // "")] | @tsv'
 }

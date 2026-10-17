@@ -49,10 +49,12 @@ plugins() { # plugins <jq program producing the list> — what `claude plugin li
 DEFAULT_PLUGINS='[{id: "engsys@engsys", version: "1.0.0", scope: "user", enabled: true, installPath: $c}, {id: "other@engsys", version: "1.0.0", scope: "user", enabled: true, installPath: "/nowhere"}]'
 plugins "$DEFAULT_PLUGINS"
 
+cp "$HERE/fake-github.sh" "$FAKE/fake-github.sh"
 cat >"$T/bin/claude" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
-  "plugin list --json") pwd -P >"$FAKE/claude.cwd"; cat "$FAKE/plugins.json" ;;
+  "plugin list --json") pwd -P >"$FAKE/claude.cwd"; printf '%s\n' "${CLAUDE_CONFIG_DIR:-unset}" >"$FAKE/claude.cfg"; cat "$FAKE/plugins.json" ;;
+  "auth status --json") [ -f "$FAKE/auth.json" ] || exit 2; cat "$FAKE/auth.json" ;;
   *) echo "stub claude: unsupported: $*" >&2; exit 2 ;;
 esac
 SH
@@ -66,6 +68,8 @@ case "${1:-} ${2:-}" in
   "api repos/vendor/engsys") echo '{"default_branch":"main"}' ;;
   "api repos/vendor/engsys/compare/$c...main?per_page=1") printf '{"status":"%s"}\n' "$(cat "$FAKE/compare-status")" ;;
   "api repos/vendor/engsys/git/trees/$c?recursive=1") cat "$FAKE/tree.json" ;;
+  "api repos/acme/app"*) [ -d "$FAKE/app-origin.git" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+    . "$FAKE/fake-github.sh"; p="${2#repos/acme/app}"; fake_github_api "$FAKE/app-origin.git" "${p#/}" ;;
   "api "*) echo '{"message":"Not Found"}'; echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
   "issue comment"*) [ ! -f "$FAKE/comment-fail" ] || { echo "gh: HTTP 502" >&2; exit 1; } ;;
   *) echo "stub gh: unexpected: $*" >&2; exit 1 ;;
@@ -390,5 +394,186 @@ has "…named" "$OUT" "enables unpinned plugin unpinned@evil"
 rm -f "$APP/.claude/settings.local.json"
 run fleet verify
 rc_is "clean settings pass again" 0
+
+echo "== the operator's own user-scope plugins (R1): FLEET_CLAUDE_CONFIG_DIR and VERIFY_ALLOWED_USER_PLUGINS"
+CONF0="$(cat "$I/fleet/fleet.conf")"
+echo '{"enabledPlugins":{"codex@openai-codex":true,"apple-container@apple-container-skill":true}}' >"$HOME/.claude/settings.json"
+run fleet verify
+rc_is "the operator's user-scope plugins in ~/.claude are a mismatch" 1
+has "…naming the first" "$OUT" "enables unpinned plugin codex@openai-codex"
+has "…and the second" "$OUT" "enables unpinned plugin apple-container@apple-container-skill"
+has "…and the config dir it checked" "$OUT" "Claude config dir: $HOME/.claude"
+eq "…and claude plugin list ran with no CLAUDE_CONFIG_DIR" "$(cat "$FAKE/claude.cfg")" unset
+VERIFY_ALLOWED_USER_PLUGINS="codex@openai-codex apple-container@apple-container-skill" run fleet verify
+rc_is "an allowlist from the environment is ignored: only the operator's config files set it" 1
+printf '%s\nVERIFY_ALLOWED_USER_PLUGINS=codex@openai-codex apple-container@apple-container-skill\n' "$CONF0" >"$I/fleet/fleet.conf"
+run fleet verify
+rc_is "both plugins listed in fleet.conf → passes" 0
+has "…each reported as allowed" "$OUT" "verify: info allowed"
+has "…codex" "$OUT" "user-scope plugin codex@openai-codex"
+has "…apple-container" "$OUT" "user-scope plugin apple-container@apple-container-skill"
+printf '%s\nVERIFY_ALLOWED_USER_PLUGINS=codex@openai-codex\n' "$CONF0" >"$I/fleet/fleet.conf"
+run fleet verify
+rc_is "one listed → the unlisted one still mismatches" 1
+has "…named" "$OUT" "enables unpinned plugin apple-container@apple-container-skill"
+hasnt "…the listed one isn't" "$OUT" "unpinned plugin codex@openai-codex"
+# The fleet's own config dir: verify checks it (and claude plugin list runs against it), not ~/.claude.
+FCFG="$T/fleet-claude"
+mkdir -p "$FCFG"
+printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\n' "$CONF0" "$FCFG" >"$I/fleet/fleet.conf"
+run fleet verify
+rc_is "FLEET_CLAUDE_CONFIG_DIR set: the operator's ~/.claude no longer matters" 0
+has "…it says which dir it checked" "$OUT" "Claude config dir: $FCFG (FLEET_CLAUDE_CONFIG_DIR)"
+eq "…and claude plugin list ran against it" "$(cat "$FAKE/claude.cfg")" "$FCFG"
+echo '{"enabledPlugins":{"stray@market":true}}' >"$FCFG/settings.json"
+run fleet verify
+rc_is "an unpinned plugin in the fleet's own config dir is a mismatch" 1
+has "…named" "$OUT" "$FCFG/settings.json enables unpinned plugin stray@market"
+rm -f "$FCFG/settings.json"
+CLAUDE_CONFIG_DIR="$T/elsewhere" FLEET_CLAUDE_CONFIG_DIR="$T/elsewhere" run fleet verify
+rc_is "the environment can't move the config dir: fleet.conf decides" 0
+eq "…claude plugin list still ran against fleet.conf's dir" "$(cat "$FAKE/claude.cfg")" "$FCFG"
+# Not logged in: a launch hold (not verified, alerted), so a rotation never relaunches into a login prompt.
+printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\n' "$CONF0" "$FCFG" >"$I/fleet/fleet.conf"
+echo '{"loggedIn": false}' >"$FAKE/auth.json"
+run fleet verify
+rc_is "the fleet config dir is not logged in: not verified (a hold)" 3
+has "…saying so" "$OUT" "is not logged in"
+echo '{"loggedIn": true, "email": "x"}' >"$FAKE/auth.json"
+run fleet verify
+rc_is "…logged in again: passes (positive control)" 0
+rm -f "$FAKE/auth.json"
+printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\n' "$CONF0" "$T/no-such-dir" >"$I/fleet/fleet.conf"
+run fleet verify
+rc_is "a FLEET_CLAUDE_CONFIG_DIR that doesn't exist is 'not verified'" 3
+printf '%s\n' "$CONF0" >"$I/fleet/fleet.conf"
+rm -f "$HOME/.claude/settings.json"
+
+echo "== the pin checkout's .claude/ and hooks against the pin repo's default branch on GitHub (R3, H1)"
+# PIN_DIR becomes a git checkout of a sandbox remote that the stub gh serves as acme/app on GitHub.
+mkdir -p "$APP/.claude/hooks"
+printf 'echo remind\n' >"$APP/.claude/hooks/remind.sh"
+jq '. + {hooks: {PostToolUse: [{matcher: "Edit", hooks: [{type: "command", command: "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/remind.sh\""}]}]}}' \
+  "$APP/.claude/settings.json" >"$APP/.claude/s.tmp" && mv "$APP/.claude/s.tmp" "$APP/.claude/settings.json"
+git init -q "$APP"; commit_all "$APP" "app"
+git clone -q --bare "$APP" "$FAKE/app-origin.git"
+git -C "$APP" remote add origin "$FAKE/app-origin.git"; git -C "$APP" fetch -q origin
+run fleet verify
+rc_is "a clean pin checkout at the tip passes, hooks and all" 0
+has "…checked against GitHub" "$OUT" "acme/app checkout"
+has "…the tip came from the API" "$(cat "$FAKE/gh.log")" "repos/acme/app/git/ref/heads/main"
+# origin moves ahead (e.g. the pin PR merges): the reviewed older commit still verifies, with a warning
+W="$T/app-work"; git clone -q "$FAKE/app-origin.git" "$W"; printf 'more\n' >"$W/README"; commit_all "$W" "ahead"; git -C "$W" push -q origin HEAD:main
+run fleet verify
+rc_is "origin ahead of the pin checkout: no false mismatch" 0
+has "…warns to run fleet sync" "$OUT" "pin checkout behind main"
+# the tip changes a hook script: the older reviewed copy is now stale, a mismatch, not a warning
+printf 'echo v2\n' >>"$W/.claude/hooks/remind.sh"; commit_all "$W" "hook v2"; git -C "$W" push -q origin HEAD:main
+run fleet verify
+rc_is "behind the tip with a different hook script: mismatch" 1
+has "…named as stale" "$OUT" "stale      .claude/hooks/remind.sh differs from main"
+git -C "$APP" pull -q --ff-only origin main
+run fleet verify
+rc_is "synced to the tip: passes" 0
+printf 'echo pwned\n' >>"$APP/.claude/hooks/remind.sh"
+run fleet verify
+rc_is "a changed hook script (settings.json untouched) is a mismatch" 1
+has "…naming it" "$OUT" "modified   .claude/hooks/remind.sh"
+git -C "$APP" checkout -q -- .claude/hooks/remind.sh
+# a local commit + every local ref repointed at it: still not the trust root
+printf 'echo local\n' >>"$APP/.claude/hooks/remind.sh"; commit_all "$APP" "local"
+git -C "$APP" update-ref refs/remotes/origin/main HEAD
+git -C "$APP" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+run fleet verify
+rc_is "a local commit with origin/main and origin/HEAD repointed at it is a mismatch" 1
+has "…the checkout is not on GitHub's main" "$OUT" "is not main or an ancestor of it"
+git -C "$APP" reset -q --hard HEAD~1; git -C "$APP" fetch -q origin "+refs/heads/main:refs/remotes/origin/main"
+run fleet verify
+rc_is "back on GitHub's main: passes" 0
+
+echo "== user-scope hooks and settings commands need VERIFY_ALLOWED_USER_HOOKS (fleet.conf only)"
+mkdir -p "$HOME/bin"; printf 'echo status\n' >"$HOME/bin/sl.sh"
+echo '{"statusLine":{"type":"command","command":"bash ~/bin/sl.sh"}}' >"$HOME/.claude/settings.json"
+run fleet verify
+rc_is "a user-scope statusLine is a mismatch" 1
+H="$(grep -o 'sha256 [0-9a-f]\{64\}' <<<"$OUT" | head -1 | cut -d' ' -f2)"
+[ -n "$H" ] && ok "…the line prints its content hash" || bad "…the line prints its content hash" "$OUT"
+VERIFY_ALLOWED_USER_HOOKS="$H" run fleet verify
+rc_is "…the environment can't allowlist it" 1
+printf '%s\nVERIFY_ALLOWED_USER_HOOKS=%s\n' "$CONF0" "$H" >"$I/fleet/fleet.conf"
+run fleet verify
+rc_is "allowlisted in fleet.conf: passes" 0
+has "…reported as allowed" "$OUT" "verify: info allowed"
+printf 'curl x\n' >>"$HOME/bin/sl.sh"
+run fleet verify
+rc_is "the script it runs changed: mismatch again" 1
+printf '%s\n' "$CONF0" >"$I/fleet/fleet.conf"; rm -f "$HOME/.claude/settings.json"
+
+echo "== user-scope agents, skills, MCP servers and parent memory need VERIFY_ALLOWED_USER_FILES (fleet.conf only)"
+run fleet verify
+rc_is "positive control: nothing user-scope, passes" 0
+mkdir -p "$HOME/.claude/agents"; printf -- '---\nname: x\n---\n' >"$HOME/.claude/agents/x.md"
+echo '{"mcpServers":{"srv":{"command":"x"}}}' >"$HOME/.claude.json"
+run fleet verify
+rc_is "a user agent and a user MCP server are a mismatch" 1
+has "…the agent" "$OUT" "agents/x.md is not on VERIFY_ALLOWED_USER_FILES"
+has "…the MCP server, from ~/.claude.json" "$OUT" "MCP server srv ($HOME/.claude.json)"
+HS="$(grep -o 'VERIFY_ALLOWED_USER_FILES (sha256 [0-9a-f]\{64\})' <<<"$OUT" | grep -o '[0-9a-f]\{64\}' | paste -sd' ' -)"
+VERIFY_ALLOWED_USER_FILES="$HS" run fleet verify
+rc_is "…the environment can't allowlist them" 1
+printf '%s\nVERIFY_ALLOWED_USER_FILES=%s\n' "$CONF0" "$HS" >"$I/fleet/fleet.conf"
+run fleet verify
+rc_is "allowlisted in fleet.conf: passes" 0
+printf 'x\n' >"$HOME/git/CLAUDE.md"
+run fleet verify
+rc_is "a CLAUDE.md above PIN_DIR is a mismatch" 1
+has "…named" "$OUT" "$HOME/git/CLAUDE.md is loaded into every session above the pin checkout"
+rm -f "$HOME/git/CLAUDE.md" "$HOME/.claude.json"; rm -rf "$HOME/.claude/agents"; printf '%s\n' "$CONF0" >"$I/fleet/fleet.conf"
+run fleet verify
+rc_is "cleaned up: passes" 0
+
+echo "== fleet config-dir init: a fresh fleet config dir with only the settings unattended sessions need"
+mkdir -p "$HOME/.claude"
+jq -n '{skipDangerousModePermissionPrompt: true, skipAutoPermissionPrompt: true, autoMode: {allow: ["$defaults"]}, effortLevel: "high",
+  env: {CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1", ANTHROPIC_BASE_URL: "https://x"}, enabledPlugins: {"p@m": true},
+  hooks: {Stop: []}, statusLine: {type: "command", command: "x"}, mcpServers: {s: {}}, model: "opus", permissions: {allow: ["Bash"]}}' >"$HOME/.claude/settings.json"
+echo '{"hasCompletedOnboarding": true, "mcpServers": {"s": {}}, "oauthAccount": {"x": 1}}' >"$HOME/.claude.json"
+CD="$T/fleet-cfg-init"
+run fleet config-dir init --dir "$CD"
+rc_is "config-dir init exits 0" 0
+eq "settings: exactly the allowlisted keys (no autoMode, plugins, hooks, MCP, models)" "$(jq -c 'keys' "$CD/settings.json")" '["effortLevel","env","skipAutoPermissionPrompt","skipDangerousModePermissionPrompt"]'
+eq "…env: only the agent-teams flag" "$(jq -c '.env' "$CD/settings.json")" '{"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS":"1"}'
+eq ".claude.json: only onboarding (no MCP servers, no account)" "$(jq -c . "$CD/.claude.json")" '{"hasCompletedOnboarding":true}'
+eq "the dir is private" "$(stat -f %Lp "$CD" 2>/dev/null || stat -c %a "$CD")" 700
+has "…and prints the next steps" "$OUT" "accept workspace trust"
+echo '{"x":1}' >"$CD/settings.json"
+run fleet config-dir init --dir "$CD"
+eq "an existing settings.json is left alone" "$(cat "$CD/settings.json")" '{"x":1}'
+run fleet config-dir init --dir "$HOME/.claude"
+rc_is "refuses the operator's own ~/.claude" 1
+printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\n' "$CONF0" "$CD" >"$I/fleet/fleet.conf"
+echo '{"x":1}' >"$CD/settings.json"; run fleet config-dir init --force
+rc_is "with FLEET_CLAUDE_CONFIG_DIR set, --force reseeds it" 0
+eq "…from the allowlist again" "$(jq -c 'keys' "$CD/settings.json")" '["effortLevel","env","skipAutoPermissionPrompt","skipDangerousModePermissionPrompt"]'
+printf '%s\n' "$CONF0" >"$I/fleet/fleet.conf"; rm -f "$HOME/.claude/settings.json" "$HOME/.claude.json"
+
+echo "== a large user-scope mismatch: one grouped alert, exit 1 (never a broken pipe)"
+mkdir -p "$HOME/.claude/skills/big"; for i in $(seq 1 1500); do printf 'x%s\n' "$i" >"$HOME/.claude/skills/big/f$i.md"; done
+rm -f "$I/.fleet/verify-wrappers.alerted"; a0="$(said 'user-scope skills/agents/files (1500)')"
+run fleet verify --alert
+rc_is "1500 user-scope files: exit 1" 1
+eq "…one alert naming the category and count" "$(said 'user-scope skills/agents/files (1500)')" "$((a0 + 1))"
+has "…with the total" "$(cat "$FAKE/gh.log")" "1500 problems"
+has "…and the config-dir hint" "$(cat "$FAKE/gh.log")" "fleet config-dir init"
+printf 'changed\n' >"$HOME/.claude/skills/big/f1.md"
+run fleet verify --alert
+eq "a skill resync (same files, new content) doesn't re-alert" "$(said 'user-scope skills/agents/files (1500)')" "$((a0 + 1))"
+rm -rf "$HOME/.claude/skills"
+
+echo "== PIN_SETTINGS from the caller's environment is never honoured"
+jq '.extraKnownMarketplaces.engsys.source.ref = "v9.9.9"' "$APP/.claude/settings.json" >"$T/other-pins.json"
+PIN_SETTINGS="$T/other-pins.json" run fleet verify
+rc_is "an inherited PIN_SETTINGS doesn't move the pin" 0
+has "…verify still checks the real pin" "$OUT" "match vendor/engsys@v1.0.0"
 
 finish verify.test.sh
