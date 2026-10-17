@@ -11,6 +11,7 @@ import {
   run,
   formatWeatherSessionStart,
   formatWeatherPromptDelta,
+  resolveWeatherCachePath,
 } from './weather-check.mjs';
 import { writeBoardCache } from '../fleet/health/board.mjs';
 
@@ -24,7 +25,7 @@ describe('weather-check.mjs hook (#98)', () => {
   test('silent when unconfigured or cache file does not exist', () => {
     const tmp = makeTmpDir();
     try {
-      const env = { ENGSYS_FHD_STATE_DIR: tmp, ENGSYS_SESSION: 'dev-1' };
+      const env = { FLEET_STATE: tmp, ENGSYS_SESSION: 'dev-1' };
       assert.equal(run('session-start', env, { cwd: tmp }), '');
       assert.equal(run('prompt', env, { cwd: tmp }), '');
     } finally {
@@ -46,7 +47,7 @@ describe('weather-check.mjs hook (#98)', () => {
       };
       writeBoardCache(tmp, board, { fetchedAt: now.toISOString() });
 
-      const env = { ENGSYS_FHD_STATE_DIR: tmp, ENGSYS_SESSION: 'dev-1' };
+      const env = { FLEET_STATE: tmp, ENGSYS_SESSION: 'dev-1' };
       assert.equal(run('session-start', env, { cwd: tmp, now }), '');
       assert.equal(run('prompt', env, { cwd: tmp, now }), '');
     } finally {
@@ -69,7 +70,7 @@ describe('weather-check.mjs hook (#98)', () => {
       writeBoardCache(tmp, board, { fetchedAt: now.toISOString() });
 
       const env = {
-        ENGSYS_FHD_STATE_DIR: tmp,
+        FLEET_STATE: tmp,
         ENGSYS_SESSION: 'dev-1',
         OPERATOR_TIMEZONE: 'America/New_York',
         OPERATOR_CLOCK: '12h',
@@ -136,8 +137,8 @@ describe('weather-check.mjs hook (#98)', () => {
       };
       writeBoardCache(tmp, boardUp, { fetchedAt: now.toISOString() });
 
-      const envA = { ENGSYS_FHD_STATE_DIR: tmp, ENGSYS_SESSION: 'session-a' };
-      const envB = { ENGSYS_FHD_STATE_DIR: tmp, ENGSYS_SESSION: 'session-b' };
+      const envA = { FLEET_STATE: tmp, ENGSYS_SESSION: 'session-a' };
+      const envB = { FLEET_STATE: tmp, ENGSYS_SESSION: 'session-b' };
 
       // Both sessions start while board is UP -> silent
       assert.equal(run('session-start', envA, { cwd: tmp, now }), '');
@@ -188,12 +189,108 @@ describe('weather-check.mjs hook (#98)', () => {
       const script = path.join(__dirname, 'weather-check.mjs');
       const stdout = execFileSync(process.execPath, [script, 'session-start'], {
         cwd: tmp,
-        env: { ...process.env, ENGSYS_FHD_STATE_DIR: tmp },
+        env: { PATH: process.env.PATH, FLEET_STATE: tmp },
         encoding: 'utf8',
       });
       assert.equal(stdout, '');
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
+  });
+
+  // --- Trust boundary (engsys v2.0.1) -------------------------------------------------------------
+
+  const NOW = new Date('2026-10-15T18:00:00.000Z');
+  const downBoard = (over = {}) => ({
+    version: 1,
+    last_updated: '2026-10-15T17:59:00.000Z',
+    stale_minutes: 30,
+    services: { 'svc-a': { id: 'svc-a', state: 'down', hold_merges: true } },
+    ...over,
+  });
+
+  test('the cache is read only from an absolute FLEET_STATE, never from the working tree', () => {
+    const repo = makeTmpDir('weather-repo-');
+    const state = makeTmpDir('weather-state-');
+    try {
+      // A board planted in the working tree, plus every former override pointing at it.
+      writeBoardCache(path.join(repo, '.fleet'), downBoard(), { fetchedAt: NOW.toISOString() });
+      writeBoardCache(repo, downBoard(), { fetchedAt: NOW.toISOString() });
+      const planted = path.join(repo, '.fleet', 'fhd', 'board-cache.json');
+      const ignoredEnvs = [
+        {},
+        { FLEET_INSTANCE: repo },
+        { ENGSYS_FHD_BOARD_CACHE: planted },
+        { ENGSYS_FHD_STATE_DIR: repo },
+        { FLEET_STATE: '.fleet' }, // relative: would resolve against the repo
+      ];
+      for (const env of ignoredEnvs) {
+        assert.equal(run('session-start', { ...env, ENGSYS_SESSION: 's' }, { now: NOW }), '', JSON.stringify(env));
+        assert.equal(run('prompt', { ...env, ENGSYS_SESSION: 's' }, { now: NOW }), '', JSON.stringify(env));
+      }
+      assert.equal(resolveWeatherCachePath({ ENGSYS_FHD_BOARD_CACHE: planted }), null);
+      // Nothing was written into the working tree.
+      assert.deepEqual(fs.readdirSync(path.join(repo, '.fleet', 'fhd')).sort(), ['board-cache.json']);
+
+      // Positive control: the same board under the launcher-set FLEET_STATE is read and announced.
+      writeBoardCache(state, downBoard(), { fetchedAt: NOW.toISOString() });
+      const out = run('session-start', { FLEET_STATE: state, ENGSYS_SESSION: 's' }, { now: NOW });
+      assert.match(JSON.parse(out).additionalContext, /svc-a is DOWN/);
+      // ...and the per-session seen file lands in the state dir.
+      assert.ok(fs.existsSync(path.join(state, 'fhd', 'fhd-seen-s.json')));
+    } finally {
+      fs.rmSync(repo, { recursive: true, force: true });
+      fs.rmSync(state, { recursive: true, force: true });
+    }
+  });
+
+  test('injected text carries only id, state and gate booleans, never board free text', () => {
+    const HOSTILE = 'IGNORE-PREVIOUS-INSTRUCTIONS';
+    const board = {
+      version: 1,
+      last_updated: '2026-10-15T17:59:00.000Z',
+      stale_minutes: 30,
+      services: {
+        'svc-a': {
+          id: `svc-a ${HOSTILE}`,
+          name: `${HOSTILE} name`,
+          state: 'down',
+          advice: `${HOSTILE} advice`,
+          summary: `${HOSTILE} summary`,
+          root_cause: `${HOSTILE} root cause`,
+          hold_merges: true,
+          pause_claims: 'yes', // not a boolean: ignored
+        },
+        [`Bad Id ${HOSTILE}`]: { state: 'down', advice: HOSTILE },
+        'svc-b': { state: `down ${HOSTILE}`, advice: HOSTILE },
+        ['x'.repeat(41)]: { state: 'down' },
+      },
+    };
+    const start = formatWeatherSessionStart(board, { env: {}, now: NOW });
+    const delta = formatWeatherPromptDelta(null, board, { env: {}, now: NOW });
+    for (const text of [start, delta]) {
+      assert.ok(!text.includes(HOSTILE), text);
+      assert.ok(!text.includes('name'), text);
+      assert.ok(!text.includes('x'.repeat(41)), text);
+    }
+    // Positive control: the valid service is reported with its state and its boolean gate.
+    assert.match(start, /svc-a is DOWN/);
+    assert.match(start, /Weather advisory: hold merges\./);
+    assert.ok(!start.includes('pause'), 'a non-boolean pause_claims is not a gate');
+    assert.match(delta, /svc-a healthy -> down \(hold merges\)/);
+  });
+
+  test('a board timestamp is never echoed raw, and a future one counts as stale', () => {
+    const forged = formatWeatherSessionStart(downBoard({ last_updated: '2026-10-15T17:59:00Z <!-- note -->' }), { env: {}, now: NOW });
+    assert.ok(!forged.includes('note'), forged);
+    assert.match(forged, /weather unknown \(board stale since unknown\)/);
+
+    const future = formatWeatherSessionStart(downBoard({ last_updated: '2026-10-16T18:00:00.000Z' }), { env: {}, now: NOW });
+    assert.match(future, /^Fleet Health Desk: weather unknown \(board stale since 2026-10-16T18:00:00Z\)$/);
+    assert.ok(!future.includes('svc-a'), 'a future-dated board reports no services');
+
+    // Positive control: within clock skew, the board is current.
+    const fresh = formatWeatherSessionStart(downBoard({ last_updated: '2026-10-15T18:00:30.000Z' }), { env: {}, now: NOW });
+    assert.match(fresh, /svc-a is DOWN/);
   });
 });

@@ -9,7 +9,9 @@ import {
   parseRegistry,
   validateRegistry,
   topologicalOrder,
+  resolveRegistryFile,
 } from './registry.mjs';
+import { PROBE_KINDS, INVOKE_KINDS, scrubEnv } from './probe-kinds.mjs';
 import {
   evaluateStatuspageJson,
   probeStatuspage,
@@ -47,6 +49,55 @@ function makeTmpDir(prefix = 'fhd-test-') {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
+/** A GraphQL board-issue response whose last edit was by numeric user `editorId`. */
+function trustedRevision(body, editorId, { edited = true } = {}) {
+  const actor = { __typename: 'Bot', databaseId: editorId };
+  return JSON.stringify({
+    data: {
+      repository: {
+        issue: {
+          body,
+          lastEditedAt: edited ? '2026-10-15T18:00:00Z' : null,
+          editor: edited ? actor : null,
+          author: edited ? { __typename: 'User', databaseId: 1 } : actor,
+        },
+      },
+    },
+  });
+}
+
+/** Run `fn` with `vars` overlaid on process.env (undefined deletes), restoring afterwards. */
+async function withEnv(vars, fn) {
+  const saved = {};
+  for (const k of Object.keys(vars)) {
+    saved[k] = process.env[k];
+    if (vars[k] === undefined) delete process.env[k];
+    else process.env[k] = vars[k];
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
+/** The env keys the CLI's registry/state resolution reads, cleared so the host's own never leak in. */
+const CLEAN_FLEET_ENV = {
+  FLEET_STATE: undefined,
+  FLEET_INSTANCE: undefined,
+  FLEET_HEALTH_FILE: undefined,
+  ENGSYS_FHD_REGISTRY: undefined,
+  ENGSYS_FHD_STATE_DIR: undefined,
+  ENGSYS_FHD_BOARD_CACHE: undefined,
+  ENGSYS_FHD_BOARD_ISSUE: undefined,
+  FLEET_INSTANCE_REPO: undefined,
+};
+// Hermetic: this file runs in its own process, so drop the host's fleet identity and paths up front.
+for (const k of [...Object.keys(CLEAN_FLEET_ENV), 'FLEET_ID', 'ENGSYS_SESSION']) delete process.env[k];
+
 const SAMPLE_YAML = `
 version: 1
 board:
@@ -71,8 +122,9 @@ services:
       hold_merges: true
       advice: "Hold merges and pause claims until GitHub API recovers."
     invoke:
-      command: "echo pong"
-      allow_args: true
+      kind: gh-run-list
+      params: { status: queued, limit: 5 }
+      requires_gate: false
     runbook: "Hold merges and pause claims until GitHub API recovers."
   github-actions:
     name: "GitHub Actions"
@@ -99,8 +151,9 @@ services:
     probe:
       adapter: synthetic-command
       tier: on-ambiguity
-      command: "kubectl get nodes"
-      auth_check: "kubectl config current-context"
+      check: gh-api-get
+      params: { path: /rate_limit }
+      auth_check: { check: gh-auth-status, params: { hostname: github.com } }
     poll_seconds: 180
     thresholds:
       trip_fails: 2
@@ -233,8 +286,9 @@ describe('P1-A (#97): Probe adapters (statuspage, observed, http-health, synthet
   test('synthetic-command splits host-local missing auth/context from vendor outage', () => {
     const probeCfg = {
       adapter: 'synthetic-command',
-      command: 'kubectl get nodes',
-      auth_check: 'kubectl config current-context',
+      check: 'gh-api-get',
+      params: { path: '/rate_limit' },
+      auth_check: 'gh-auth-status',
     };
 
     // Auth check fails -> status is 'healthy' with authLocalFailure: true (not vendor 'down')
@@ -425,6 +479,7 @@ describe('P1-B (#98): Status board rendering, ETag caching, and transition notif
 
       const seenArgs = [];
       const gh200 = (args) => {
+        if (args[1] === 'graphql') return trustedRevision(block, 7);
         seenArgs.push(args);
         return [
           'HTTP/2.0 200 OK',
@@ -440,6 +495,7 @@ describe('P1-B (#98): Status board rendering, ETag caching, and transition notif
         cacheFile,
         maxAgeMs: 0,
         ghExec: gh200,
+        trustedEditorIds: [7],
       });
       assert.equal(first.ok, true);
       assert.equal(first.source, '200');
@@ -456,6 +512,7 @@ describe('P1-B (#98): Status board rendering, ETag caching, and transition notif
         cacheFile,
         maxAgeMs: 0,
         ghExec: gh304,
+        trustedEditorIds: [7],
       });
       assert.equal(second.ok, true);
       assert.equal(second.source, '304');
@@ -624,6 +681,7 @@ describe('P3 (#100): CLI subcommands (simulate, watch-add, watch-remove, invoke,
 
   test('simulate, check, self-probe, invoke, and watch-remove work end-to-end', async () => {
     const tmp = makeTmpDir();
+    await withEnv({ ...CLEAN_FLEET_ENV, FLEET_STATE: tmp }, async () => {
     try {
       const cfgFile = path.join(tmp, 'fleet-health.yml');
       fs.writeFileSync(cfgFile, SAMPLE_YAML, 'utf8');
@@ -649,10 +707,12 @@ describe('P3 (#100): CLI subcommands (simulate, watch-add, watch-remove, invoke,
         0,
       );
 
-      // Invoke configured command on github-api returns exit 0
+      // Invoke without an approved gate is refused even though the entry says requires_gate: false
       assert.equal(
-        await runCli(['invoke', 'github-api', '--file', cfgFile, '--json']),
-        0,
+        await runCli(['invoke', 'github-api', '--file', cfgFile, '--json'], {
+          execFile: () => assert.fail('nothing may run without the gate'),
+        }),
+        1,
       );
 
       // watch-remove refuses removing github-api because github-actions depends on it
@@ -669,6 +729,7 @@ describe('P3 (#100): CLI subcommands (simulate, watch-add, watch-remove, invoke,
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
+    });
   });
 
   test('docs/fleet-health-desk.md YAML example validates cleanly and preserves name and impact booleans', () => {
@@ -681,7 +742,7 @@ describe('P3 (#100): CLI subcommands (simulate, watch-add, watch-remove, invoke,
     assert.equal(reg.services['github-api'].impact.pause_claims, true);
     assert.equal(reg.services['github-api'].impact.dispatch_warn, true);
     assert.equal(reg.services['github-actions'].invoke.requires_gate, true);
-    assert.equal(reg.services['github-actions'].invoke.allow_args, false);
+    assert.equal(reg.services['github-actions'].invoke.kind, 'gh-run-list');
   });
 
   test('expired simulation resumes live probes immediately instead of turning unknown, and unsuppressed downstream outage alarms on upstream recovery', async () => {
@@ -882,3 +943,297 @@ describe('P3 (#100): CLI subcommands (simulate, watch-add, watch-remove, invoke,
     }
   });
 });
+
+describe('Trust boundary (engsys v2.0.1): registry location, probe execution, gates, board editors', () => {
+  const MINI = 'version: 1\nservices:\n  svc-a:\n    probe: { adapter: observed }\n';
+
+  test('a registry in the working tree or its .claude/ is never resolved; one in the fleet roots is', () => {
+    const repo = makeTmpDir('fhd-repo-');
+    const instance = makeTmpDir('fhd-instance-');
+    try {
+      fs.mkdirSync(path.join(repo, '.claude'), { recursive: true });
+      fs.writeFileSync(path.join(repo, 'fleet-health.yml'), MINI);
+      fs.writeFileSync(path.join(repo, '.claude', 'fleet-health.yml'), MINI);
+      const planted = path.join(repo, 'fleet-health.yml');
+
+      // No fleet env, a relative FLEET_STATE, and explicit pointers into the repo: all refused.
+      assert.equal(resolveRegistryFile({}), null);
+      assert.equal(resolveRegistryFile({ FLEET_STATE: '.fleet' }), null);
+      assert.equal(resolveRegistryFile({ FLEET_HEALTH_FILE: planted }), null);
+      assert.equal(resolveRegistryFile({ ENGSYS_FHD_REGISTRY: planted }), null);
+      const state = path.join(instance, '.fleet');
+      fs.mkdirSync(state);
+      assert.equal(resolveRegistryFile({ FLEET_STATE: state, FLEET_HEALTH_FILE: planted }), null);
+      // A symlink inside a trusted root that points back into the repo is refused too.
+      fs.symlinkSync(planted, path.join(state, 'fleet-health.yml'));
+      assert.equal(resolveRegistryFile({ FLEET_STATE: state }), null);
+      fs.rmSync(path.join(state, 'fleet-health.yml'));
+
+      // Positive controls: <instance>/config/, then <FLEET_STATE>/, then <instance>/ (which wins).
+      fs.mkdirSync(path.join(instance, 'config'));
+      fs.writeFileSync(path.join(state, 'fleet-health.yml'), MINI);
+      assert.equal(fs.realpathSync(resolveRegistryFile({ FLEET_STATE: state })), fs.realpathSync(path.join(state, 'fleet-health.yml')));
+      fs.writeFileSync(path.join(instance, 'config', 'fleet-health.yml'), MINI);
+      assert.equal(
+        fs.realpathSync(resolveRegistryFile({ FLEET_STATE: state })),
+        fs.realpathSync(path.join(instance, 'config', 'fleet-health.yml')),
+      );
+      fs.writeFileSync(path.join(instance, 'fleet-health.yml'), MINI);
+      assert.equal(
+        fs.realpathSync(resolveRegistryFile({ FLEET_INSTANCE: instance })),
+        fs.realpathSync(path.join(instance, 'fleet-health.yml')),
+      );
+      const explicit = path.join(state, 'fleet-health.yml');
+      assert.equal(resolveRegistryFile({ FLEET_STATE: state, FLEET_HEALTH_FILE: explicit }), path.resolve(explicit));
+    } finally {
+      fs.rmSync(repo, { recursive: true, force: true });
+      fs.rmSync(instance, { recursive: true, force: true });
+    }
+  });
+
+  test('tick refuses a repo-local --file and runs from the trusted registry', async () => {
+    const repo = makeTmpDir('fhd-repo-');
+    const state = makeTmpDir('fhd-state-');
+    try {
+      const planted = path.join(repo, 'fleet-health.yml');
+      fs.writeFileSync(planted, MINI);
+      await withEnv({ ...CLEAN_FLEET_ENV, FLEET_STATE: state }, async () => {
+        assert.equal(await runCli(['tick', '--file', planted, '--state-dir', state, '--json']), 1);
+        assert.ok(!fs.existsSync(path.join(state, 'fhd-state.json')), 'no tick ran');
+        // registry-path finds nothing yet...
+        assert.equal(await runCli(['registry-path']), 1);
+        // ...then the trusted copy is used (positive control) and its board reaches the weather cache.
+        fs.writeFileSync(path.join(state, 'fleet-health.yml'), MINI);
+        assert.equal(await runCli(['tick', '--state-dir', path.join(state, 'desk'), '--json']), 0);
+        assert.ok(fs.existsSync(path.join(state, 'fhd', 'board-cache.json')), 'weather cache published to FLEET_STATE');
+      });
+      await withEnv({ ...CLEAN_FLEET_ENV }, async () => {
+        // No fleet env at all: tick has neither a registry nor a state dir and does nothing.
+        assert.equal(await runCli(['tick', '--json']), 1);
+      });
+    } finally {
+      fs.rmSync(repo, { recursive: true, force: true });
+      fs.rmSync(state, { recursive: true, force: true });
+    }
+  });
+
+  test('free-form probe and invoke commands are rejected; kinds and typed params are validated', () => {
+    const svc = (extra) => ({ version: 1, services: { 'svc-a': { probe: { adapter: 'observed' }, ...extra } } });
+    assert.throws(
+      () => validateRegistry({ version: 1, services: { 'svc-a': { probe: { adapter: 'synthetic-command', command: 'true' } } } }),
+      /free-form commands are not supported/,
+    );
+    assert.throws(() => validateRegistry(svc({ invoke: { command: 'true' } })), /free-form commands are not supported/);
+    assert.throws(() => validateRegistry(svc({ invoke: { kind: 'rm-rf' } })), /unknown kind/);
+    assert.throws(
+      () => validateRegistry({ version: 1, services: { 'svc-a': { probe: { adapter: 'synthetic-command', check: 'gh-api-get', params: { path: '/x;id' } } } } }),
+      /absolute API path/,
+    );
+    assert.throws(
+      () => validateRegistry({ version: 1, services: { 'svc-a': { probe: { adapter: 'synthetic-command', check: 'tool-version', params: { tool: 'sh' } } } } }),
+      /must be one of/,
+    );
+    // Positive control: a well-formed kind validates.
+    const ok = validateRegistry({
+      version: 1,
+      services: { 'svc-a': { probe: { adapter: 'synthetic-command', check: 'tool-version', params: { tool: 'git' } } } },
+    });
+    assert.equal(ok.services['svc-a'].probe.check, 'tool-version');
+  });
+
+  test('probes run as argv arrays with no shell, from a neutral cwd', () => {
+    const calls = [];
+    const execFn = (file, args, opts) => {
+      calls.push({ file, args, opts });
+      return '{}';
+    };
+    const res = probeSyntheticCommand(
+      { check: 'gh-api-get', params: { path: '/rate_limit' }, auth_check: { check: 'gh-auth-status', params: { hostname: 'github.com' } } },
+      { execFn, env: { PATH: '/usr/bin' } },
+    );
+    assert.equal(res.status, 'healthy');
+    assert.deepEqual(calls.map((c) => [c.file, ...c.args]), [
+      ['gh', 'auth', 'status', '--hostname', 'github.com'],
+      ['gh', 'api', '--method', 'GET', '/rate_limit'],
+    ]);
+    for (const c of calls) {
+      assert.ok(!['/bin/sh', 'sh', 'bash', '/bin/bash'].includes(c.file), 'no shell executable');
+      assert.equal(c.opts.shell, false);
+      assert.equal(c.opts.cwd, os.tmpdir());
+    }
+    // A config that skipped validation still can't name an executable.
+    calls.length = 0;
+    const bad = probeSyntheticCommand({ command: 'echo hi; id' }, { execFn });
+    assert.equal(bad.status, 'unknown');
+    assert.equal(calls.length, 0);
+
+    // Positive control: a real (harmless) kind actually executes.
+    const real = probeSyntheticCommand({ check: 'tool-version', params: { tool: 'node' } }, { env: { PATH: path.dirname(process.execPath) } });
+    assert.equal(real.status, 'healthy');
+    assert.match(real.detail, /^v\d+\./);
+  });
+
+  test('every kind gets a scrubbed env: credentials only for the group it declares', () => {
+    const hostile = {
+      PATH: '/usr/bin',
+      HOME: '/home/x',
+      LANG: 'C',
+      GH_TOKEN: 'gh-secret',
+      GITHUB_TOKEN: 'github-secret',
+      GH_APP_PEM: '/k.pem',
+      AZURE_CLIENT_SECRET: 'az-secret',
+      AZURE_CONFIG_DIR: '/az',
+      SLACK_BOT_TOKEN: 'slack-secret',
+      ANTHROPIC_API_KEY: 'anthropic-secret',
+      DATABASE_PASSWORD: 'db-secret',
+      NODE_OPTIONS: '--require /evil.js',
+      LD_PRELOAD: '/evil.so',
+    };
+    const seen = {};
+    const execFn = (file, args, opts) => {
+      seen[args.includes('auth') && file === 'gh' ? 'gh' : file] = opts.env;
+      return '{}';
+    };
+    probeSyntheticCommand({ check: 'tool-version', params: { tool: 'git' } }, { execFn, env: hostile });
+    probeSyntheticCommand({ check: 'gh-auth-status' }, { execFn, env: hostile });
+    probeSyntheticCommand({ check: 'az-account-show' }, { execFn, env: hostile });
+
+    const leaks = (env) => Object.keys(env).filter((k) => /TOKEN|SECRET|PASSWORD|KEY|PEM/.test(k));
+    assert.deepEqual(Object.keys(seen.git).sort(), ['HOME', 'LANG', 'PATH']);
+    assert.deepEqual(leaks(seen.az), ['AZURE_CLIENT_SECRET']);
+    assert.ok(!('GH_TOKEN' in seen.az) && !('SLACK_BOT_TOKEN' in seen.az));
+    assert.deepEqual(leaks(seen.gh).sort(), ['GH_APP_PEM', 'GH_TOKEN', 'GITHUB_TOKEN']);
+    for (const env of Object.values(seen)) {
+      assert.ok(!('NODE_OPTIONS' in env) && !('LD_PRELOAD' in env) && !('ANTHROPIC_API_KEY' in env));
+    }
+    // Every declared group exists, so no kind silently loses (or gains) its credentials.
+    for (const def of [...Object.values(PROBE_KINDS), ...Object.values(INVOKE_KINDS)]) {
+      for (const g of def.env) assert.ok(Object.keys(scrubEnv({ GH_X: '1', AZURE_X: '1', DOCKER_X: '1' }, [g])).length > 0, g);
+    }
+    // docker-info keeps daemon selection; Windows matches names case-insensitively, keeping spelling.
+    assert.equal(scrubEnv({ DOCKER_HOST: 'tcp://d', GH_TOKEN: 'x' }, PROBE_KINDS['docker-info'].env).DOCKER_HOST, 'tcp://d');
+    assert.deepEqual(scrubEnv({ Path: 'C:\\bin', gh_token: 'x' }, [], { platform: 'win32' }), { Path: 'C:\\bin' });
+    assert.deepEqual(scrubEnv({ Path: '/bin' }, [], { platform: 'linux' }), {});
+  });
+
+  test('invoke always needs the gate its kind defines, whatever requires_gate says', async () => {
+    const state = makeTmpDir('fhd-state-');
+    try {
+      fs.writeFileSync(
+        path.join(state, 'fleet-health.yml'),
+        [
+          'version: 1',
+          'board: { repo: acme/fleet, issue: 9 }',
+          'services:',
+          '  svc-a:',
+          '    probe: { adapter: observed }',
+          '    invoke: { kind: gh-run-list, params: { status: queued, limit: 3 }, requires_gate: false }',
+          '',
+        ].join('\n'),
+      );
+      assert.equal(parseRegistry(fs.readFileSync(path.join(state, 'fleet-health.yml'), 'utf8')).services['svc-a'].invoke.requires_gate, true);
+
+      await withEnv({ ...CLEAN_FLEET_ENV, FLEET_STATE: state, GH_TOKEN: 'gh-secret', SLACK_BOT_TOKEN: 'slack-secret' }, async () => {
+        const calls = [];
+        const execFile = (file, args, opts) => {
+          calls.push({ file, args, opts });
+          return 'ok\n';
+        };
+        // No gate: refused, nothing runs.
+        assert.equal(await runCli(['invoke', 'svc-a', '--json'], { execFile }), 1);
+        assert.equal(calls.length, 0);
+        // Extra command-line arguments: refused.
+        assert.equal(await runCli(['invoke', 'svc-a', 'extra-arg', '--approved-gate', 'config-20261017000000-abcd'], { execFile }), 2);
+        assert.equal(calls.length, 0);
+
+        // Positive control: an approved gate is checked (fixed target/kind, not caller flags), then the kind runs.
+        assert.equal(
+          await runCli(['invoke', 'svc-a', '--approved-gate', 'config-20261017000000-abcd', '--target', 'other', '--kind', 'merge', '--json'], { execFile }),
+          0,
+        );
+        assert.equal(calls.length, 2);
+        const gate = calls[0].args;
+        assert.equal(gate[gate.indexOf('--target') + 1], 'fleet-health:invoke:svc-a');
+        assert.equal(gate[gate.indexOf('--kind') + 1], 'config');
+        assert.deepEqual([calls[1].file, ...calls[1].args], ['gh', 'run', 'list', '--status', 'queued', '--limit', '3']);
+        assert.equal(calls[1].opts.shell, false);
+        assert.equal(calls[1].opts.env.GH_TOKEN, 'gh-secret');
+        assert.ok(!('SLACK_BOT_TOKEN' in calls[1].opts.env));
+      });
+    } finally {
+      fs.rmSync(state, { recursive: true, force: true });
+    }
+  });
+
+  test('a board body is accepted only from a trusted numeric editor ID', () => {
+    const tmp = makeTmpDir();
+    try {
+      const reg = parseRegistry(SAMPLE_YAML);
+      const block = renderBoardBlock(reg, { updated_at: '2026-10-15T18:00:00Z', services: { 'github-api': { state: 'down' } } }, {});
+      const rest = ['HTTP/2.0 200 OK', 'ETag: "e1"', '', JSON.stringify({ number: 42, body: block, user: { id: 7 } })].join('\r\n');
+      const fetchWith = (editorId, trustedEditorIds, opts) =>
+        fetchBoardCached({
+          repo: 'acme/app',
+          issue: 42,
+          cacheFile: path.join(tmp, 'fhd', 'board-cache.json'),
+          maxAgeMs: 0,
+          trustedEditorIds,
+          ghExec: (args) => (args[1] === 'graphql' ? trustedRevision(block, editorId, opts) : rest),
+        });
+
+      const untrusted = fetchWith(666, [7]);
+      assert.equal(untrusted.ok, false);
+      assert.equal(untrusted.source, 'untrusted-editor');
+      assert.ok(!fs.existsSync(path.join(tmp, 'fhd', 'board-cache.json')), 'a rejected body is never cached');
+      // The REST author being trusted doesn't help when someone else made the last edit.
+      assert.equal(fetchWith(666, [7]).ok, false);
+      // An empty allowlist accepts nothing.
+      assert.equal(fetchWith(7, []).source, 'untrusted-editor');
+
+      // Positive controls: the trusted bot's edit, and a never-edited body it authored.
+      const trusted = fetchWith(7, [7]);
+      assert.equal(trusted.ok, true);
+      assert.equal(trusted.board.services['github-api'].state, 'down');
+      assert.equal(fetchWith(7, [7], { edited: false }).ok, true);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test('watch-board lines carry no board free text', async () => {
+    const state = makeTmpDir('fhd-state-');
+    try {
+      fs.writeFileSync(path.join(state, 'fleet-health.yml'), MINI);
+      writeFhdCache(state, {
+        version: 1,
+        last_updated: new Date().toISOString(),
+        services: {
+          'svc-a': { state: 'down', advice: 'HOSTILE-ADVICE', name: 'HOSTILE-NAME', hold_merges: true },
+          'Bad Id HOSTILE': { state: 'down' },
+        },
+      });
+      let out = '';
+      const orig = process.stdout.write.bind(process.stdout);
+      process.stdout.write = (chunk) => {
+        out += chunk;
+        return true;
+      };
+      try {
+        await withEnv({ ...CLEAN_FLEET_ENV, FLEET_STATE: state }, () => runCli(['watch-board', '--max-age-sec', '3600']));
+      } finally {
+        process.stdout.write = orig;
+      }
+      assert.ok(!out.includes('HOSTILE'), out);
+      assert.match(out, /^FHD_CHANGE svc-a down — hold merges$/m);
+    } finally {
+      fs.rmSync(state, { recursive: true, force: true });
+    }
+  });
+});
+
+function writeFhdCache(stateDir, board) {
+  const file = path.join(stateDir, 'fhd', 'board-cache.json');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ fetched_at: new Date().toISOString(), board }));
+}
+

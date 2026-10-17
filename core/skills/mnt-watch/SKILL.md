@@ -45,12 +45,12 @@ Every new watched service entry must answer all 9 questions:
 1. **Q1 — Service ID & Name**: Lowercase slug (`^[a-z0-9][a-z0-9_-]*$`, e.g., `github-actions`) and human display name (`name`).
 2. **Q2 — Failure Modes**: Which concrete outages or degradations affect fleet sessions (e.g., stuck workflow queues, HTTP 502/503, rate-limit exhaustion)?
 3. **Q3 — Observability Class**: Triage as `green`, `yellow`, or `red` (refuse `red`); stored in `fleet-health.yml` as `observability: central` or `per-session`.
-4. **Q4 — Adapter & Probe Surface (`probe.*`)**: `statuspage` (`url`, optional `components`), `observed` (`window_minutes`, `fail_rate_degraded`, `fail_rate_down`), `http-health` (`url`, `degraded_codes`, `down_codes`, `expect_json`), `synthetic-command` (`command`, `auth_check`), or `fleet-report-only`.
+4. **Q4 — Adapter & Probe Surface (`probe.*`)**: `statuspage` (`url`, optional `components`), `observed` (`window_minutes`, `fail_rate_degraded`, `fail_rate_down`), `http-health` (`url`, `degraded_codes`, `down_codes`, `expect_json`), `synthetic-command` (`check` kind + typed `params`, `auth_check`; kinds in `<engsys-root>/fleet/health/probe-kinds.mjs`), or `fleet-report-only`.
 5. **Q5 — Tier & Cadence**: `probe.tier` (`passive` or `on-ambiguity`) plus `poll_seconds`.
 6. **Q6 — Asymmetric Hysteresis**: `thresholds.trip_fails` (consecutive bad probes to trip `degraded`/`down`) and `thresholds.recover_clean` (consecutive clean probes + statuspage clear to recover to `healthy`).
 7. **Q7 — Dependency DAG (`depends_on`)**: Upstream services whose outage causes this service to fail (e.g., `github-actions` depends on `github-api`), enabling root-cause tagging and downstream alarm suppression (`suppressed_by`).
 8. **Q8 — Fleet Impact Flags**: `impact.hold_merges` (Merge Monster holds merges), `impact.pause_claims` (workers pause new issue claims), `impact.dispatch_warn` (warn before dispatching subagents), and `impact.advice`.
-9. **Q9 — Runbook & Invoke**: Concise operator/agent advice (`runbook` string, never containing `PUSH_OVERRIDE`) and optional gated command (`invoke.command`, `invoke.requires_gate`).
+9. **Q9 — Runbook & Invoke**: Concise operator/agent advice (`runbook` string, never containing `PUSH_OVERRIDE`) and optional gated invoke (`invoke.kind` + `invoke.params`; every invoke kind needs an approved operator gate).
 
 ## Workflow for Adding or Removing a Watch
 
