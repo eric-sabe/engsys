@@ -111,7 +111,14 @@ export const DANGEROUS_SETTINGS_ENV_KEYS = [
  * plugin and config roots, PATH, and the GitHub identity / endpoint (GH_, GITHUB_).
  */
 export const DANGEROUS_SETTINGS_ENV_RE = /^(ENGSYS_|FLEET_|HARNESS|COPILOT_|AGY_|NODE_|CLAUDE_PLUGIN_ROOT|CLAUDE_CONFIG_DIR|PATH$|GH_|GITHUB_)/;
-export const isProtectedEnvKey = (k) => DANGEROUS_SETTINGS_ENV_KEYS.includes(k) || DANGEROUS_SETTINGS_ENV_RE.test(k);
+/**
+ * Settings `env` keys that move a session or a subagent off its pinned model: a pinned security agent
+ * (model: claude-opus-4-8) would otherwise run on whatever a committed settings file names.
+ */
+export const MODEL_SETTINGS_ENV_RE = /^(CLAUDE_CODE_SUBAGENT_MODEL|CLAUDE_CODE_SUBAGENT_MODEL_FORCE|ANTHROPIC_MODEL|ANTHROPIC_SMALL_FAST_MODEL|ANTHROPIC_[A-Z0-9_]*_MODEL)$/;
+/** Top-level project settings keys that pick or limit the session's model. */
+export const MODEL_SETTINGS_KEYS = ['model', 'availableModels'];
+export const isProtectedEnvKey = (k) => DANGEROUS_SETTINGS_ENV_KEYS.includes(k) || DANGEROUS_SETTINGS_ENV_RE.test(k) || MODEL_SETTINGS_ENV_RE.test(k);
 
 /** Claude Code's PID-marker directory at the top of an install root: written by Claude Code, never loaded. */
 export const IN_USE = '.in_use';
@@ -261,10 +268,15 @@ export function checkSettingsDetailed({ projectDir, userSettingsDir = '', pinSet
   const problems = [];
   const info = [];
   const allowed = allowedUserPlugins instanceof Set ? allowedUserPlugins : parseAllowedPlugins(allowedUserPlugins);
-  const envProblems = (f, cfg) => {
+  const envProblems = (f, cfg, project = false) => {
     if (cfg.env && typeof cfg.env === 'object' && !Array.isArray(cfg.env)) {
       for (const k of Object.keys(cfg.env).sort()) {
         if (isProtectedEnvKey(k)) problems.push(`settings   ${f} overrides protected env ${k}`);
+      }
+    }
+    if (project) {
+      for (const k of MODEL_SETTINGS_KEYS) {
+        if (Object.prototype.hasOwnProperty.call(cfg, k)) problems.push(`settings   ${f} sets ${k} (the fleet pins models per session)`);
       }
     }
   };
@@ -294,7 +306,7 @@ export function checkSettingsDetailed({ projectDir, userSettingsDir = '', pinSet
           if (!pinSettingsSha && !projectVerified && pinCfg.hooks !== undefined) {
             problems.push(`settings   ${pinFile} defines hooks (unverified against origin)`);
           }
-          envProblems(pinFile, pinCfg);
+          envProblems(pinFile, pinCfg, true);
           pinEnabled = new Set(
             pinCfg.enabledPlugins && typeof pinCfg.enabledPlugins === 'object' && !Array.isArray(pinCfg.enabledPlugins)
               ? Object.entries(pinCfg.enabledPlugins)
@@ -349,7 +361,7 @@ export function checkSettingsDetailed({ projectDir, userSettingsDir = '', pinSet
     if (cfg.hooks !== undefined && f.endsWith('.local.json')) {
       problems.push(`settings   ${f} defines hooks`);
     }
-    envProblems(f, cfg);
+    envProblems(f, cfg, !user);
     if (cfg.enabledPlugins && typeof cfg.enabledPlugins === 'object' && !Array.isArray(cfg.enabledPlugins)) {
       for (const [plugin, enabled] of Object.entries(cfg.enabledPlugins)) {
         if (enabled === true && !pinEnabled.has(plugin)) {
@@ -436,9 +448,10 @@ export function hookCommands(cfg) {
 
 /**
  * The repo files a hook command names. → { targets: [repo-relative posix path], problems: [] }.
- * A word with a `/` is a path once $CLAUDE_PROJECT_DIR is resolved: it must stay inside projectDir
- * (system interpreters and /dev/null aside). Any other expansion left in a path can't be verified and
- * is a problem. A word that is itself a command line (bash -c "...") is split again.
+ * Once $CLAUDE_PROJECT_DIR is resolved, a word with a `/`, or a bare word naming a file in projectDir,
+ * is a path: it must stay inside projectDir (system interpreters and /dev/null aside). Any other
+ * expansion left in a word can't be verified and is a problem. A word that is itself a command line
+ * (bash -c "...") is split again. Not covered: code a command reaches indirectly (npm run, make).
  */
 export function hookTargets(command, projectDir, depth = 0) {
   const targets = [];
@@ -451,9 +464,14 @@ export function hookTargets(command, projectDir, depth = 0) {
       targets.push(...sub.targets); problems.push(...sub.problems);
       continue;
     }
-    if (!w.includes('/')) continue;
-    if (/[$`]/.test(w)) { problems.push(`hook       settings.json hook command names a path that can't be resolved: ${w}`); continue; }
+    if (/[$`]/.test(w)) { problems.push(`hook       settings.json hook command has an expansion that can't be resolved: ${w}`); continue; }
     const abs = path.resolve(root, w);
+    if (!w.includes('/')) {
+      // a bare word names a repo file when one exists at <root>/<word> (hooks run in the project dir)
+      let exists = false;
+      try { fs.lstatSync(abs); exists = true; } catch { /* a command name or an argument */ }
+      if (!exists) continue;
+    }
     if (SYSTEM_PATH_RE.test(abs)) continue;
     const rel = path.relative(root, abs);
     if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) { problems.push(`hook       settings.json hook command runs ${abs}, outside the repo`); continue; }

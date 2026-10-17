@@ -427,6 +427,39 @@ test('settings env: every protected family is flagged, ordinary keys are not', (
   assert.deepEqual(r.problems.map((l) => l.replace(/^.* overrides protected env /, '')), ['ENGSYS_PLUGIN_ROOT']);
 });
 
+test('settings: model overrides (subagent model, ANTHROPIC_*_MODEL, model/availableModels) are flagged', () => {
+  const proj = tmp('verify-model-proj-');
+  const user = tmp('verify-model-user-');
+  fs.mkdirSync(path.join(proj, '.claude'));
+  const pinFile = path.join(proj, '.claude', 'settings.json');
+  // positive control: ordinary env and no model keys pass
+  fs.writeFileSync(pinFile, JSON.stringify({ env: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1', ANTHROPIC_LOG: 'debug' } }));
+  fs.writeFileSync(path.join(user, 'settings.json'), JSON.stringify({ model: 'opus' }));
+  assert.deepEqual(checkSettingsDetailed({ projectDir: proj, userSettingsDir: user, projectVerified: true }).problems, [],
+    'ordinary env passes, and a user-scope model choice is not a project override');
+  fs.writeFileSync(pinFile, JSON.stringify({
+    model: 'x', availableModels: ['x'],
+    env: {
+      CLAUDE_CODE_SUBAGENT_MODEL: 'x', CLAUDE_CODE_SUBAGENT_MODEL_FORCE: '1', ANTHROPIC_MODEL: 'x',
+      ANTHROPIC_DEFAULT_OPUS_MODEL: 'x', ANTHROPIC_DEFAULT_SONNET_MODEL: 'x', ANTHROPIC_DEFAULT_HAIKU_MODEL: 'x',
+      ANTHROPIC_DEFAULT_FABLE_MODEL: 'x', ANTHROPIC_SMALL_FAST_MODEL: 'x', ANTHROPIC_CUSTOM_NEW_MODEL: 'x',
+    },
+  }));
+  const p = checkSettingsDetailed({ projectDir: proj, projectVerified: true }).problems.join('\n');
+  for (const k of ['CLAUDE_CODE_SUBAGENT_MODEL', 'CLAUDE_CODE_SUBAGENT_MODEL_FORCE', 'ANTHROPIC_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL',
+    'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_FABLE_MODEL', 'ANTHROPIC_SMALL_FAST_MODEL', 'ANTHROPIC_CUSTOM_NEW_MODEL']) {
+    assert.match(p, new RegExp(`overrides protected env ${k}$`, 'm'), k);
+  }
+  assert.match(p, /settings\.json sets model /);
+  assert.match(p, /settings\.json sets availableModels /);
+  // the local overlay too
+  fs.writeFileSync(pinFile, '{}');
+  fs.writeFileSync(path.join(proj, '.claude', 'settings.local.json'), JSON.stringify({ model: 'x', env: { CLAUDE_CODE_SUBAGENT_MODEL: 'x' } }));
+  const q = checkSettingsDetailed({ projectDir: proj, projectVerified: true }).problems.join('\n');
+  assert.match(q, /settings\.local\.json sets model/);
+  assert.match(q, /settings\.local\.json overrides protected env CLAUDE_CODE_SUBAGENT_MODEL$/m);
+});
+
 test('user-scope plugins: unlisted ones are a mismatch, VERIFY_ALLOWED_USER_PLUGINS ones are reported as allowed', async () => {
   const root = makeCache();
   const proj = tmp('verify-allow-proj-');
@@ -655,6 +688,11 @@ test('hookTargets: $CLAUDE_PROJECT_DIR resolves, interpreters and /dev/null are 
   assert.deepEqual(hookTargets('/usr/bin/env node ${CLAUDE_PROJECT_DIR}/x/y.mjs', dir).targets, ['x/y.mjs']);
   assert.deepEqual(hookTargets('bash -c "cd $CLAUDE_PROJECT_DIR && ./scripts/z.sh"', dir).targets, ['scripts/z.sh']);
   assert.match(hookTargets('bash "$HOME/hooks/a.sh"', dir).problems[0], /can't be resolved/);
+  assert.match(hookTargets('bash -c "$SCRIPT"', dir).problems[0], /can't be resolved/, 'an expansion with no slash is a problem too');
+  const real = tmp('verify-bare-');
+  fs.writeFileSync(path.join(real, 'hook.sh'), 'echo hi\n');
+  assert.deepEqual(hookTargets('bash hook.sh --flag', real), { targets: ['hook.sh'], problems: [] }, 'a bare file name in the project is a target');
+  assert.deepEqual(hookTargets('echo done', real), { targets: [], problems: [] }, 'positive control: ordinary words are not');
   assert.match(hookTargets('bash "$CLAUDE_PROJECT_DIR/../other/a.sh"', dir).problems[0], /outside the repo/);
 });
 

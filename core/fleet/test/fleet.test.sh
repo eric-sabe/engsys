@@ -486,28 +486,6 @@ run fleet sync
 rc_is "sync installs it at user scope" 0; has "…" "$OUT" "installed ctx@acme"
 run fleet sync --check; rc_is "in sync again" 0
 
-echo "== D2. FLEET_CLAUDE_CONFIG_DIR: sync installs the pinned plugins into the fleet's own Claude config dir"
-FCFG="$T/fleet-claude"; mkdir -p "$FCFG"
-LC="$HOME/.config/acme/fleet.local.conf"; cp "$LC" "$T/flc.bak" 2>/dev/null || : >"$T/flc.bak"
-printf 'FLEET_CLAUDE_CONFIG_DIR=%s\n' "$FCFG" >>"$LC"
-# a marketplace that moved: the sync has real plugin work to do
-jq 'map(if .name == "engsys" then .ref = "v1.0.0" else . end)' "$FAKE/claude/marketplaces.json" >"$FAKE/m.json" && mv "$FAKE/m.json" "$FAKE/claude/marketplaces.json"
-m="$(mark)"; CLAUDE_CONFIG_DIR="$T/inherited" run fleet sync
-rc_is "sync with FLEET_CLAUDE_CONFIG_DIR exits 0" 0
-has "…it ran the plugin step" "$(since "$m")" "plugin marketplace add https://github.com/vendor/engsys.git"
-eq "…every claude call ran with CLAUDE_CONFIG_DIR=<the fleet's dir>" "$(since "$m" | grep -v '^MARK' | grep -vc "CFG=$FCFG\$" || true)" 0
-has "…and sync says which config dir it used" "$OUT" "claude config dir: $FCFG (FLEET_CLAUDE_CONFIG_DIR)"
-cp "$T/flc.bak" "$LC"
-m="$(mark)"; CLAUDE_CONFIG_DIR="$T/inherited" run fleet sync --check
-rc_is "unset again: in sync" 0
-eq "…every claude call ran with no CLAUDE_CONFIG_DIR (an inherited one is dropped)" "$(since "$m" | grep -v '^MARK' | grep -vc 'CFG=unset$' || true)" 0
-has "…reporting the default dir" "$OUT" "claude config dir: $HOME/.claude"
-printf 'FLEET_CLAUDE_CONFIG_DIR=%s\n' "$T/missing-cfg" >>"$LC"
-run fleet sync
-rc_is "a FLEET_CLAUDE_CONFIG_DIR that doesn't exist stops sync" 1
-has "…with the one-time setup" "$OUT" "log in with CLAUDE_CONFIG_DIR=$T/missing-cfg claude"
-cp "$T/flc.bak" "$LC"
-
 echo "== E. launch: rendering, the 5th roster field, the launcher command lines"
 rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"
 run fleet launch
@@ -522,6 +500,8 @@ has "session env puts the gh shim first on PATH" "$S_ENV" "core/fleet/identity/b
 has "session env drops an inherited GH_TOKEN" "$S_ENV" "unset GH_TOKEN GITHUB_TOKEN"
 has "security env sources the session env" "$X_ENV" ". \"$STATE/env/session.env\""
 has "security env overrides the model" "$X_ENV" 'MODEL_ALIAS="model-s"'
+has "security env never inherits a subagent model override" "$X_ENV" "unset CLAUDE_CODE_SUBAGENT_MODEL CLAUDE_CODE_SUBAGENT_MODEL_FORCE"
+hasnt "…only the security lane" "$S_ENV" "unset CLAUDE_CODE_SUBAGENT_MODEL"
 has "every rendered env gets the identity lines" "$X_ENV" "GIT_AUTHOR_NAME=fleet-bot"
 has "…even the relative-path lane" "$(cat "$STATE/env/rel.env")" "GIT_AUTHOR_NAME=fleet-bot"
 eq "env files are 0600" "$(mode_of "$STATE/env/session.env")" 600

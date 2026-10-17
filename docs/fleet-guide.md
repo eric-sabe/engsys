@@ -1183,9 +1183,11 @@ root is `PIN_REPO`'s default branch as the GitHub API reports it, never a local 
   content, and every file of that tree must be there: nothing modified, missing or untracked. Claude
   Code's own runtime files there (`settings.local.json`, checked separately, `scheduled_tasks.lock` and the
   `worktrees/` directory) are skipped.
-- Every script a `settings.json` hook command names (with `$CLAUDE_PROJECT_DIR` resolved) must be inside
-  the repo, a regular file, tracked at HEAD and unchanged. A hook that runs a path outside the repo, or a
-  path with any other variable in it, is a mismatch.
+- Every script a `settings.json` hook command names (with `$CLAUDE_PROJECT_DIR` resolved; a word with a `/`,
+  or a bare name of a file in the repo root) must be inside the repo, a regular file, tracked at HEAD and
+  unchanged. A hook that runs a path outside the repo, or has any other variable or command substitution
+  in it, is a mismatch. Code a hook reaches indirectly (`npm run …`, `make …`) is not followed: keep hook
+  commands to a direct script.
 
 A `PIN_DIR` that is not a git checkout can't be checked this way: `fleet verify` warns, and any hook in its
 settings is a mismatch.
@@ -1194,7 +1196,11 @@ settings is a mismatch.
 config dir the sessions use (`FLEET_CLAUDE_CONFIG_DIR`, else `~/.claude`): a plugin the pin repo doesn't
 enable is a mismatch unless `VERIFY_ALLOWED_USER_PLUGINS` lists it (§ 6.1), and so is `disableAllHooks`, or an
 `env` key in a protected family (`ENGSYS_*`, `FLEET_*`, `HARNESS*`, `COPILOT_*`, `AGY_*`, `NODE_*`,
-`CLAUDE_PLUGIN_ROOT`, `CLAUDE_CONFIG_DIR`, `PATH`, `GH_*`, `GITHUB_*`) in any settings file.
+`CLAUDE_PLUGIN_ROOT`, `CLAUDE_CONFIG_DIR`, `PATH`, `GH_*`, `GITHUB_*`) in any settings file. So is a model
+override: `CLAUDE_CODE_SUBAGENT_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL_FORCE`, `ANTHROPIC_MODEL`,
+`ANTHROPIC_SMALL_FAST_MODEL` or any `ANTHROPIC_*_MODEL` in an `env`, or a top-level `model` /
+`availableModels` in the project's settings: each could move a pinned security agent off its model. The
+security lane's rendered env also unsets `CLAUDE_CODE_SUBAGENT_MODEL` and `CLAUDE_CODE_SUBAGENT_MODEL_FORCE`.
 
 **A mismatch never touches a running session.** The supervisor holds relaunches of the merge and
 maintain monsters and alerts; it does not kill a running one and never revokes or breaks its baton. A

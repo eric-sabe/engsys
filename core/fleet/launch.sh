@@ -97,6 +97,9 @@ for tmpl in "$FLEET_REPO"/fleet/env/*.env.tmpl; do
     } >>"$dest"
   fi
   if [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ]; then printf 'CLAUDE_CONFIG_DIR=%q\n' "$FLEET_CLAUDE_CONFIG_DIR" >>"$dest"; fi
+  # The security lane never inherits a subagent model override: it would move pinned security agents
+  # (model: claude-opus-4-8) onto another model. (fleet verify flags the same keys in settings files.)
+  case "$(basename "$dest")" in security*) printf '# Security lane: no inherited subagent model override.\nunset CLAUDE_CODE_SUBAGENT_MODEL CLAUDE_CODE_SUBAGENT_MODEL_FORCE\n' >>"$dest" ;; esac
   if [ "${HARNESS:-claude}" != claude ]; then printf 'HARNESS=%q\n' "$HARNESS" >>"$dest"; fi
   if [ "${HARNESS:-claude}" = copilot ] && [ -n "${COPILOT_HOME:-}" ]; then printf 'COPILOT_HOME=%q\n' "$COPILOT_HOME" >>"$dest"; fi
   if [ -n "$FLEET_ID" ]; then
