@@ -554,7 +554,8 @@ function gitEnv(env) {
 /** The Claude Code config dir the fleet's sessions use: FLEET_CLAUDE_CONFIG_DIR (fleet.conf), else ~/.claude. */
 export function claudeConfigDir(ctx) {
   const set = ctx.fleetConf?.FLEET_CLAUDE_CONFIG_DIR || '';
-  return { dir: set ? expandHome(set, ctx.home) : path.join(ctx.home, '.claude'), fromConf: Boolean(set) };
+  const scope = ctx.fleetConf?.FLEET_CLAUDE_CONFIG_DIR_SCOPE === 'supervised' ? 'supervised' : 'all';
+  return { dir: set ? expandHome(set, ctx.home) : path.join(ctx.home, '.claude'), fromConf: Boolean(set), scope };
 }
 
 /** Which config dir is in use and whether it is logged in (`claude auth status`: loggedIn only, nothing else). */
@@ -572,11 +573,12 @@ function claudeConfigItem(ctx, cfg) {
       else if (j && j.loggedIn === false) login = 'NOT logged in';
     } catch { /* unknown */ }
   }
+  const who = cfg.interactive ? 'interactive roles' : cfg.fromConf && cfg.scope === 'supervised' ? 'supervised sessions' : 'fleet sessions';
   return {
-    name: 'Claude config dir (fleet sessions)',
+    name: `Claude config dir (${who})`,
     status: !exists && cfg.fromConf ? 'fail' : login === 'logged in' ? 'pass' : 'warn',
-    detail: `${cfg.dir}${cfg.fromConf ? ' (FLEET_CLAUDE_CONFIG_DIR)' : ' (default; set FLEET_CLAUDE_CONFIG_DIR to separate the fleet from the operator)'} — ${exists ? login : 'missing'}`,
-    meta: { dir: cfg.dir, fromConf: cfg.fromConf, exists, login },
+    detail: `${cfg.dir}${cfg.interactive ? ' (FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised)' : cfg.fromConf ? ` (FLEET_CLAUDE_CONFIG_DIR, scope ${cfg.scope})` : ' (default; set FLEET_CLAUDE_CONFIG_DIR to separate the fleet from the operator)'} — ${exists ? login : 'missing'}`,
+    meta: { dir: cfg.dir, fromConf: cfg.fromConf, scope: cfg.scope, interactive: Boolean(cfg.interactive), exists, login },
   };
 }
 
@@ -666,7 +668,13 @@ export function inspectPinsAndTrust(ctx) {
     });
   }
 
-  items.push(claudeConfigItem(ctx, claudeConfigDir(ctx)));
+  const cfgDir = claudeConfigDir(ctx);
+  items.push(claudeConfigItem(ctx, cfgDir));
+  // With scope supervised the interactive roles run on ~/.claude: report it too (fleet sync keeps its
+  // pinned plugins; fleet verify does not gate it).
+  if (cfgDir.fromConf && cfgDir.scope === 'supervised') {
+    items.push(claudeConfigItem(ctx, { dir: path.join(ctx.home, '.claude'), fromConf: false, scope: 'supervised', interactive: true }));
+  }
 
   // 1c. FLEET_REPO
   if (fleetRepo && fs.existsSync(fleetRepo)) {

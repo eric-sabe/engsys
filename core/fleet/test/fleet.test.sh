@@ -20,7 +20,8 @@ cat >"$T/bin/claude" <<'SH'
 #!/usr/bin/env bash
 # stub claude: plugin list|validate|install, plugin marketplace list|add|remove — state in $FAKE/claude/*.json
 set -euo pipefail
-S="$FAKE/claude"; mkdir -p "$S"
+S="$FAKE/claude"; [ -z "${CLAUDE_CONFIG_DIR:-}" ] || S="$FAKE/claude-cfg/$(printf '%s' "$CLAUDE_CONFIG_DIR" | tr '/' '_')"   # one plugin state per config dir
+mkdir -p "$S"
 [ -f "$S/marketplaces.json" ] || echo '[]' >"$S/marketplaces.json"
 [ -f "$S/plugins.json" ] || echo '[]' >"$S/plugins.json"
 printf '%s\tPATH0=%s\tCFG=%s\n' "$*" "${PATH%%:*}" "${CLAUDE_CONFIG_DIR:-unset}" >>"$FAKE/claude.log"
@@ -421,8 +422,7 @@ echo "== D2. FLEET_CLAUDE_CONFIG_DIR: sync installs the pinned plugins into the 
 FCFG="$T/fleet-claude"; mkdir -p "$FCFG"
 LC="$HOME/.config/acme/fleet.local.conf"; cp "$LC" "$T/flc.bak" 2>/dev/null || : >"$T/flc.bak"
 printf 'FLEET_CLAUDE_CONFIG_DIR=%s\n' "$FCFG" >>"$LC"
-# a marketplace that moved: the sync has real plugin work to do
-jq 'map(if .name == "engsys" then .ref = "v1.0.0" else . end)' "$FAKE/claude/marketplaces.json" >"$FAKE/m.json" && mv "$FAKE/m.json" "$FAKE/claude/marketplaces.json"
+# a fresh fleet dir: the sync has real plugin work to do there
 m="$(mark)"; CLAUDE_CONFIG_DIR="$T/inherited" run fleet sync
 rc_is "sync with FLEET_CLAUDE_CONFIG_DIR exits 0" 0
 has "…it ran the plugin step" "$(since "$m")" "plugin marketplace add https://github.com/vendor/engsys.git"
@@ -437,6 +437,41 @@ printf 'FLEET_CLAUDE_CONFIG_DIR=%s\n' "$T/missing-cfg" >>"$LC"
 run fleet sync
 rc_is "a FLEET_CLAUDE_CONFIG_DIR that doesn't exist stops sync" 1
 has "…with the one-time setup" "$OUT" "log in with CLAUDE_CONFIG_DIR=$T/missing-cfg claude"
+cp "$T/flc.bak" "$LC"
+
+echo "== D3. FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised: sync reconciles both the fleet dir and ~/.claude"
+FS="$FAKE/claude-cfg/$(printf '%s' "$FCFG" | tr '/' '_')"
+printf 'FLEET_CLAUDE_CONFIG_DIR=%s\nFLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised\n' "$FCFG" >>"$LC"
+# both dirs behind: the fleet dir missing a plugin, ~/.claude on an old marketplace ref
+jq 'map(select(.id != "ctx@acme"))' "$FS/plugins.json" >"$FAKE/p.json" && mv "$FAKE/p.json" "$FS/plugins.json"
+jq 'map(if .name == "engsys" then .ref = "v1.0.0" else . end)' "$FAKE/claude/marketplaces.json" >"$FAKE/m.json" && mv "$FAKE/m.json" "$FAKE/claude/marketplaces.json"
+run fleet sync --check
+rc_is "--check: drift in either dir is drift" 1
+has "…reports the fleet dir" "$OUT" "claude config dir: $FCFG (FLEET_CLAUDE_CONFIG_DIR, scope supervised)"
+has "…and ~/.claude for the interactive roles" "$OUT" "claude config dir: $HOME/.claude (interactive roles)"
+has "…the fleet dir's drift" "$OUT" "plugin ctx@acme not installed"
+has "…~/.claude's drift" "$OUT" "marketplace engsys is at 'v1.0.0'"
+m="$(mark)"; run fleet sync
+rc_is "sync with scope supervised exits 0" 0
+has "…installed into the fleet dir" "$(since "$m" | grep "CFG=$FCFG\$")" "plugin install ctx@acme"
+has "…and reconciled ~/.claude (user scope)" "$(since "$m" | grep 'CFG=unset$')" "plugin marketplace add https://github.com/vendor/engsys.git"
+eq "…~/.claude: only user-scope plugin calls" "$(since "$m" | grep 'CFG=unset$' | grep -E 'marketplace (add|remove)|install ' | grep -vc -- '--scope user' || true)" 0
+eq "fleet dir plugins" "$(jq -r '.[].id' "$FS/plugins.json" | sort | paste -sd' ' -)" "core@engsys ctx@acme extra@acme"
+eq "~/.claude plugins" "$(json_names plugins '.[].id')" "core@engsys ctx@acme extra@acme"
+run fleet sync --check; rc_is "both dirs in sync" 0
+run fleet status
+has "fleet status: the fleet dir's login" "$OUT" "claude config dir: $FCFG (FLEET_CLAUDE_CONFIG_DIR, scope supervised), login unknown"
+has "fleet status: ~/.claude's login" "$OUT" "claude config dir: $HOME/.claude (interactive roles), login unknown"
+# scope all (the default): the fleet dir only
+cp "$T/flc.bak" "$LC"; printf 'FLEET_CLAUDE_CONFIG_DIR=%s\n' "$FCFG" >>"$LC"
+m="$(mark)"; run fleet sync --check
+rc_is "scope all: in sync" 0
+eq "…no claude call against ~/.claude" "$(since "$m" | grep -v '^MARK' | grep -c 'CFG=unset$' || true)" 0
+hasnt "…and no ~/.claude line" "$OUT" "(interactive roles)"
+printf 'FLEET_CLAUDE_CONFIG_DIR_SCOPE=sometimes\n' >>"$LC"
+run fleet sync --check
+rc_is "an unknown scope is refused" 1
+has "…named" "$OUT" "FLEET_CLAUDE_CONFIG_DIR_SCOPE must be all or supervised"
 cp "$T/flc.bak" "$LC"
 
 echo "== D2. the plugin step never touches project settings (engsys#112)"
@@ -522,9 +557,9 @@ has "roster: ENV_FILE points at the rendered lane env" "$ROSTER_OUT" "ENV_FILE=$
 has "roster: 5th field rendered" "$ROSTER_OUT" "acme-security|$HOME/git/app|/maintenance-monster|--model claude-opus-4-8|$STATE/env/security.env"
 has "roster: monster line" "$ROSTER_OUT" "acme-mm|$HOME/git/app|/merge-monster|--model model-m --dangerously-skip-permissions"
 tl() { grep -F "[send-keys] [-t] [acme:$1]" "$FAKE/tmux.log" | head -1; } # the launch command line for a window
-has "mm: default env (roster ENV_FILE)" "$(tl acme-mm)" "cd $HOME/git/app && set -a && . $STATE/env/session.env && set +a && claude --name acme-mm"
+has "mm: default env (roster ENV_FILE)" "$(tl acme-mm)" "cd $HOME/git/app && set -a && . $STATE/env/session.env && set +a && unset CLAUDE_CONFIG_DIR && claude --name acme-mm"
 has "mm: prompt before the extra flags" "$(tl acme-mm)" "/merge-monster --model model-m --dangerously-skip-permissions"
-has "security: the 5th field replaces ENV_FILE" "$(tl acme-security)" "set -a && . $STATE/env/security.env && set +a && claude --name acme-security"
+has "security: the 5th field replaces ENV_FILE" "$(tl acme-security)" "set -a && . $STATE/env/security.env && set +a && unset CLAUDE_CONFIG_DIR && claude --name acme-security"
 hasnt "security: the roster-level env is NOT used" "$(tl acme-security)" "session.env"
 has "security: prompt before the extra flags" "$(tl acme-security)" "/maintenance-monster --model claude-opus-4-8"
 has "rel: a relative 5th field resolves against the roster's directory" "$(tl acme-rel)" "set -a && . $STATE/env/rel.env && set +a"
@@ -591,6 +626,32 @@ for w in acme-mm acme-security acme-build; do
 done
 has "the rendered session env carries it too" "$(cat "$STATE/env/session.env")" "CLAUDE_CONFIG_DIR=$FCFG"
 has "…and the security env" "$(cat "$STATE/env/security.env")" "CLAUDE_CONFIG_DIR=$FCFG"
+for w in acme-mm acme-security acme-build; do
+  has "$w (scope all): the dir is set after the env file, so no env file can move it" "$(tl "$w")" "set +a && export CLAUDE_CONFIG_DIR=$FCFG && "
+done
+# FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised: monsters and the security lane keep the fleet dir; the
+# interactive roles run on ~/.claude (unset on the launch line and in their env file).
+printf 'FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised\n' >>"$LC"
+printf 'acme-audit|||--model claude-opus-4-8|__ENV_DIR__/security.env\n' >>"$INST/fleet/roster.tmpl"
+rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"
+CLAUDE_CONFIG_DIR="$T/inherited" run fleet launch
+rc_is "launch with scope supervised exits 0" 0
+for w in acme-mm acme-security acme-audit; do
+  has "$w (supervised / security lane): CLAUDE_CONFIG_DIR=<the fleet dir>" "$(tl "$w")" "export CLAUDE_CONFIG_DIR=$FCFG && "
+done
+has "acme-build (interactive): CLAUDE_CONFIG_DIR unset, ~/.claude" "$(tl acme-build)" "set +a && unset CLAUDE_CONFIG_DIR && "
+hasnt "…never the fleet dir" "$(tl acme-build)" "CLAUDE_CONFIG_DIR=$FCFG"
+has "acme-rel (interactive, its own env): unset too" "$(tl acme-rel)" "unset CLAUDE_CONFIG_DIR && "
+has "session.env (interactive users): unsets it" "$(cat "$STATE/env/session.env")" "unset CLAUDE_CONFIG_DIR"
+hasnt "…and doesn't set it" "$(cat "$STATE/env/session.env")" "CLAUDE_CONFIG_DIR=$FCFG"
+has "security.env (security lane only): the fleet dir" "$(cat "$STATE/env/security.env")" "CLAUDE_CONFIG_DIR=$FCFG"
+# a security env that also sources session.env (which unsets it) still ends on the fleet dir
+has "…after it sources session.env" "$(sed -n '/session.env/,$p' "$STATE/env/security.env")" "CLAUDE_CONFIG_DIR=$FCFG"
+# named relaunch (the supervisor's path) of a supervised session: the fleet dir too
+grep -Fxv acme-mm "$FAKE/tmux/windows" >"$FAKE/w.new" || true; mv "$FAKE/w.new" "$FAKE/tmux/windows"; : >"$FAKE/tmux.log"
+run fleet launch acme-mm
+has "named relaunch of a supervised session: the fleet dir" "$(tl acme-mm)" "export CLAUDE_CONFIG_DIR=$FCFG && "
+cp "$T/roster.bak2" "$INST/fleet/roster.tmpl" 2>/dev/null || sed -i.x '/^acme-audit|/d' "$INST/fleet/roster.tmpl"; rm -f "$INST/fleet/roster.tmpl.x"
 cp "$T/flc.bak" "$LC"
 
 echo "== F. supervise"

@@ -414,16 +414,21 @@ launch_one() {
   local root
   root="$(cd "$workdir" && pwd -P)" || { echo "error: cannot resolve workdir for '$name': $workdir" >&2; return 1; }
   cmd="export ENGSYS_SESSION=$(printf %q "$name") ENGSYS_SESSION_RUN=$(printf %q "$run") ENGSYS_SESSION_ROOT=$(printf %q "$root")"
-  # The Claude Code config dir comes from the launcher's own environment (the fleet kit sets it from
-  # FLEET_CLAUDE_CONFIG_DIR), never from the tmux server's, which may predate it: set means every
-  # session gets it, unset means none inherits a stale one.
-  if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then cmd+=" CLAUDE_CONFIG_DIR=$(printf %q "$CLAUDE_CONFIG_DIR")"; fi
   if [ -n "$role" ]; then cmd+=" ENGSYS_SINGLETON_ROLE=$role && "; else cmd+=" && unset ENGSYS_SINGLETON_ROLE && "; fi
-  [ -n "${CLAUDE_CONFIG_DIR:-}" ] || cmd+="unset CLAUDE_CONFIG_DIR && "
   cmd+="cd $(printf %q "$workdir") && "
   if [ -n "$session_env" ]; then
     cmd+="set -a && . $(printf %q "$session_env") && set +a && "
   fi
+  # The Claude Code config dir comes from the launcher's own environment (the fleet kit sets it from
+  # FLEET_CLAUDE_CONFIG_DIR), never from the tmux server's, which may predate it, and it is decided
+  # after the env file, so no env file can move a session to another dir. With
+  # FLEET_CLAUDE_CONFIG_DIR_SESSIONS set (scope supervised), only those sessions get it; every other
+  # one runs with it unset (~/.claude).
+  local cfg_dir="${CLAUDE_CONFIG_DIR:-}"
+  if [ -n "$cfg_dir" ] && [ -n "${FLEET_CLAUDE_CONFIG_DIR_SESSIONS+x}" ]; then
+    case "$FLEET_CLAUDE_CONFIG_DIR_SESSIONS" in *" $name "*) ;; *) cfg_dir="" ;; esac
+  fi
+  if [ -n "$cfg_dir" ]; then cmd+="export CLAUDE_CONFIG_DIR=$(printf %q "$cfg_dir") && "; else cmd+="unset CLAUDE_CONFIG_DIR && "; fi
   if [ "$HARNESS" = "copilot" ]; then
     cmd+="copilot --name $(printf %q "$name")"
     [ -n "$prompt" ] && cmd+=" -i $(printf %q "$prompt")"

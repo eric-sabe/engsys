@@ -89,7 +89,8 @@ fi
 rc=0 out="" plist=""
 # The Claude Code config dir the fleet's sessions run with: FLEET_CLAUDE_CONFIG_DIR (fleet-env.sh exports
 # it as CLAUDE_CONFIG_DIR for every fleet command and session, so `claude plugin list` below reads it
-# too), else the account's ~/.claude. Its user-scope settings and plugins load in every fleet session.
+# too), else the account's ~/.claude. It is what the monsters load. (With FLEET_CLAUDE_CONFIG_DIR_SCOPE=
+# supervised the interactive roles run on ~/.claude instead, which is not integrity-gated.)
 claude_cfg="${FLEET_CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 echo "fleet verify: Claude config dir: $claude_cfg${FLEET_CLAUDE_CONFIG_DIR:+ (FLEET_CLAUDE_CONFIG_DIR)}"
 if [ -z "$repo" ] || [ -z "$ref" ]; then

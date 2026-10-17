@@ -172,53 +172,17 @@ main() {
     sync_non_claude_plugins "$check" "$engsys_target" "$primary_h" 0
   else
     sync_tmp
-    claude_config_report "$check" || drift=1
-    [ "$check" = 1 ] || settings_guard_begin
-    installed="$(user_plugins)"
-    for i in "${!markets[@]}"; do
-      m="${markets[$i]}" ref="${m_refs[$i]}" repo="${m_repos[$i]}"
-      cur="$(plugin_cli marketplace list --json | jq -r --arg m "$m" '.[] | select(.name == $m) | .ref // ""')"
-      if [ "$cur" != "$ref" ]; then
-        if [ "$check" = 1 ]; then
-          say "marketplace $m is at '${cur:-absent}' (pin $ref)"; drift=1; continue
-        fi
-        # remove uninstalls every plugin from this marketplace; running sessions keep their cache dirs.
-        if [ -n "$cur" ]; then plugin_cli marketplace remove "$m" --scope user >/dev/null; settings_guard_check "marketplace remove $m"; fi
-        plugin_cli marketplace add "https://github.com/$repo.git#$ref" --scope user >/dev/null \
-          || fleet_die "marketplace add $m#$ref failed — $m plugins are UNINSTALLED on this host. Re-run: fleet sync (running sessions are unaffected)."
-        settings_guard_check "marketplace add $m"
-        say "marketplace $m: ${cur:-absent} → $ref"; changed=1
-        installed="$(user_plugins)"
-      fi
-      while IFS= read -r p; do
-        [ -n "$p" ] || continue
-        installed_version "$p@$m" "$installed" >/dev/null && continue
-        if [ "$check" = 1 ]; then say "plugin $p@$m not installed"; drift=1; continue; fi
-        plugin_cli install "$p@$m" --scope user >/dev/null || fleet_die "plugin install $p@$m failed — re-run: fleet sync"
-        settings_guard_check "plugin install $p@$m"
-        say "installed $p@$m"; changed=1
-      done <<<"${m_plugins[$i]}"
+    # The fleet's config dir (or ~/.claude when none is set); with FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised
+    # the interactive roles run on ~/.claude, so that one gets the pinned plugins too (user scope only).
+    local cfg_dirs=("${FLEET_CLAUDE_CONFIG_DIR:-}")
+    if [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] && [ "${FLEET_CLAUDE_CONFIG_DIR_SCOPE:-all}" = supervised ]; then cfg_dirs+=(""); fi
+    local cfg_dir
+    for cfg_dir in "${cfg_dirs[@]}"; do
+      SYNC_CFG="$cfg_dir"
+      claude_config_report "$check" || drift=1
+      sync_claude_plugins
     done
-    [ "$check" = 1 ] || settings_guard_check "the plugin step"
-    # Every enabled plugin must now be installed at user scope, at the pinned version (a vX.Y.Z pin
-    # stamps X.Y.Z into every plugin — fleet pin).
-    installed="$(user_plugins)"
-    local have want bad=""
-    for i in "${!markets[@]}"; do
-      m="${markets[$i]}" ref="${m_refs[$i]}"
-      want=""; [[ "$ref" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([-+].*)?$ ]] && want="${ref#v}"
-      while IFS= read -r p; do
-        [ -n "$p" ] || continue
-        if ! have="$(installed_version "$p@$m" "$installed")"; then
-          [ "$check" = 1 ] || bad+=" $p@$m (not installed)"
-          continue
-        fi
-        [ -n "$want" ] && [ "$have" != "$want" ] || continue
-        if [ -z "$have" ]; then warn "plugin $p@$m reports no version; can't check it against the pin $ref"; continue; fi
-        if [ "$check" = 1 ]; then say "plugin $p@$m is at $have (pin $want)"; drift=1; else bad+=" $p@$m (at $have, pin $want)"; fi
-      done <<<"${m_plugins[$i]}"
-    done
-    [ -z "$bad" ] || fleet_die "after the plugin step these enabled plugins are not installed at the pin:$bad. NOT synced. Re-run: fleet sync. If a plugin stays at the wrong version: claude plugin uninstall --scope user <plugin@marketplace> (from a directory outside any project), then fleet sync."
+    SYNC_CFG="${FLEET_CLAUDE_CONFIG_DIR:-}"
     GUARDED=(); sync_cleanup; trap - EXIT
   fi
   if [ -n "${HARNESS_FALLBACK:-}" ]; then
@@ -276,6 +240,58 @@ main() {
   bash "$FLEET_KIT_DIR/restart.sh" --instance "$FLEET_REPO" --status
 }
 
+# One config dir's plugin step (SYNC_CFG: the dir, '' = ~/.claude). Runs inside main(): it reads and sets
+# main's locals (check, markets, m_refs, m_repos, m_plugins, changed, drift) through bash's dynamic scope.
+sync_claude_plugins() {
+  local i m ref repo cur installed p
+  [ "$check" = 1 ] || settings_guard_begin
+  installed="$(user_plugins)"
+  for i in "${!markets[@]}"; do
+    m="${markets[$i]}" ref="${m_refs[$i]}" repo="${m_repos[$i]}"
+    cur="$(plugin_cli marketplace list --json | jq -r --arg m "$m" '.[] | select(.name == $m) | .ref // ""')"
+    if [ "$cur" != "$ref" ]; then
+      if [ "$check" = 1 ]; then
+        say "marketplace $m is at '${cur:-absent}' (pin $ref)"; drift=1; continue
+      fi
+      # remove uninstalls every plugin from this marketplace; running sessions keep their cache dirs.
+      if [ -n "$cur" ]; then plugin_cli marketplace remove "$m" --scope user >/dev/null; settings_guard_check "marketplace remove $m"; fi
+      plugin_cli marketplace add "https://github.com/$repo.git#$ref" --scope user >/dev/null \
+        || fleet_die "marketplace add $m#$ref failed — $m plugins are UNINSTALLED on this host. Re-run: fleet sync (running sessions are unaffected)."
+      settings_guard_check "marketplace add $m"
+      say "marketplace $m: ${cur:-absent} → $ref"; changed=1
+      installed="$(user_plugins)"
+    fi
+    while IFS= read -r p; do
+      [ -n "$p" ] || continue
+      installed_version "$p@$m" "$installed" >/dev/null && continue
+      if [ "$check" = 1 ]; then say "plugin $p@$m not installed"; drift=1; continue; fi
+      plugin_cli install "$p@$m" --scope user >/dev/null || fleet_die "plugin install $p@$m failed — re-run: fleet sync"
+      settings_guard_check "plugin install $p@$m"
+      say "installed $p@$m"; changed=1
+    done <<<"${m_plugins[$i]}"
+  done
+  [ "$check" = 1 ] || settings_guard_check "the plugin step"
+  # Every enabled plugin must now be installed at user scope, at the pinned version (a vX.Y.Z pin
+  # stamps X.Y.Z into every plugin — fleet pin).
+  installed="$(user_plugins)"
+  local have want bad=""
+  for i in "${!markets[@]}"; do
+    m="${markets[$i]}" ref="${m_refs[$i]}"
+    want=""; [[ "$ref" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([-+].*)?$ ]] && want="${ref#v}"
+    while IFS= read -r p; do
+      [ -n "$p" ] || continue
+      if ! have="$(installed_version "$p@$m" "$installed")"; then
+        [ "$check" = 1 ] || bad+=" $p@$m (not installed)"
+        continue
+      fi
+      [ -n "$want" ] && [ "$have" != "$want" ] || continue
+      if [ -z "$have" ]; then warn "plugin $p@$m reports no version; can't check it against the pin $ref"; continue; fi
+      if [ "$check" = 1 ]; then say "plugin $p@$m is at $have (pin $want)"; drift=1; else bad+=" $p@$m (at $have, pin $want)"; fi
+    done <<<"${m_plugins[$i]}"
+  done
+  [ -z "$bad" ] || fleet_die "after the plugin step these enabled plugins are not installed at the pin:$bad. NOT synced. Re-run: fleet sync. If a plugin stays at the wrong version: claude plugin uninstall --scope user <plugin@marketplace> (from a directory outside any project), then fleet sync."
+}
+
 say() { echo "fleet-sync: $*"; }
 warn() { echo "fleet-sync: WARNING $*" >&2; }
 
@@ -293,24 +309,31 @@ sync_tmp() { # call in the main shell (not in $(…)) so later calls share it; r
 }
 # The fleet's own Claude config dir when fleet.conf sets FLEET_CLAUDE_CONFIG_DIR (its user-scope plugins are
 # what every fleet session loads), else the account's ~/.claude; never an inherited CLAUDE_CONFIG_DIR.
+SYNC_CFG="${FLEET_CLAUDE_CONFIG_DIR:-}"   # the config dir the plugin step works on ('' = ~/.claude)
 fleet_claude() {
-  if [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ]; then CLAUDE_CONFIG_DIR="$FLEET_CLAUDE_CONFIG_DIR" claude "$@"
+  if [ -n "$SYNC_CFG" ]; then CLAUDE_CONFIG_DIR="$SYNC_CFG" claude "$@"
   else env -u CLAUDE_CONFIG_DIR claude "$@"; fi
 }
 plugin_cli() { (cd "$SYNC_TMP/cwd" && fleet_claude plugin "$@"); }
 # claude_config_report <check> → which config dir the fleet uses and whether it is logged in (no account
 # details, no token). A FLEET_CLAUDE_CONFIG_DIR that doesn't exist stops a sync: create it and log in first.
 claude_config_report() {
-  local dir="${FLEET_CLAUDE_CONFIG_DIR:-$HOME/.claude}" li
-  if [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] && [ ! -d "$FLEET_CLAUDE_CONFIG_DIR" ]; then
-    [ "$1" = 1 ] || fleet_die "FLEET_CLAUDE_CONFIG_DIR $FLEET_CLAUDE_CONFIG_DIR does not exist. One-time setup: mkdir -p it, log in with CLAUDE_CONFIG_DIR=$FLEET_CLAUDE_CONFIG_DIR claude, then fleet sync (fleet guide: a separate Claude config dir)"
-    say "claude config dir: $dir (FLEET_CLAUDE_CONFIG_DIR) does not exist"; return 1
+  local dir="${SYNC_CFG:-$HOME/.claude}" li what
+  if [ -n "$SYNC_CFG" ] && [ "$SYNC_CFG" = "${FLEET_CLAUDE_CONFIG_DIR:-}" ]; then what=" (FLEET_CLAUDE_CONFIG_DIR)"; [ "${FLEET_CLAUDE_CONFIG_DIR_SCOPE:-all}" != supervised ] || what=" (FLEET_CLAUDE_CONFIG_DIR, scope supervised)"
+  elif [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ]; then what=" (interactive roles)"
+  else what=""; fi
+  if [ -n "$SYNC_CFG" ] && [ ! -d "$SYNC_CFG" ]; then
+    [ "$1" = 1 ] || fleet_die "FLEET_CLAUDE_CONFIG_DIR $SYNC_CFG does not exist. One-time setup: fleet config-dir init, log in with CLAUDE_CONFIG_DIR=$SYNC_CFG claude, then fleet sync (fleet guide § 6.1)"
+    say "claude config dir: $dir$what does not exist"; return 1
   fi
   li="$( (cd "$SYNC_TMP/cwd" && fleet_claude auth status --json) 2>/dev/null | jq -r 'if .loggedIn == true then "logged in" elif .loggedIn == false then "NOT logged in" else "login unknown" end' 2>/dev/null || true)"
-  say "claude config dir: $dir${FLEET_CLAUDE_CONFIG_DIR:+ (FLEET_CLAUDE_CONFIG_DIR)}, ${li:-login unknown}"
+  say "claude config dir: $dir$what, ${li:-login unknown}"
   if [ "$li" = "NOT logged in" ]; then
-    warn "the fleet's Claude config dir is not logged in: CLAUDE_CONFIG_DIR=$dir claude, then /login. Until then fleet verify holds merge and maintain launches (and alerts)."
-    [ -z "${FLEET_CLAUDE_CONFIG_DIR:-}" ] || return 1
+    if [ -n "$SYNC_CFG" ]; then
+      warn "the fleet's Claude config dir is not logged in: CLAUDE_CONFIG_DIR=$dir claude, then /login. Until then fleet verify holds merge and maintain launches (and alerts)."
+      return 1
+    fi
+    warn "$dir is not logged in: claude, then /login"
   fi
   return 0
 }
