@@ -26,24 +26,13 @@ for d in "${_dirs[@]}"; do
 done
 [ -n "$REAL_GH" ] || { echo "gh (fleet shim): real gh not found on PATH" >&2; exit 127; }
 
-# If the GitHub Copilot CLI binary itself calls `gh auth token` or `gh auth status` to authenticate
-# the operator's Copilot seat, hand it GH_TOKEN_COPILOT_CLI (never the operator's personal gh keychain).
-#
-# engsys v2.0.1 (L2): this gate must NOT depend on the parent process's NAME — `ps -o comm=` reports
-# whatever the process called itself, and any Bash tool call can launch a binary or shell function
-# named "copilot" to match it. The launcher sets ENGSYS_COPILOT_CLI_PID=$$ immediately before
-# `exec copilot ...`, so the gate instead requires $PPID to equal that EXACT PID, mandatorily — not
-# as a fallback that's skipped when the variable happens to be unset. No ENGSYS_COPILOT_CLI_PID set
-# means no relay, full stop, even if the launcher is later changed and this would otherwise make a
-# Copilot launch fail for a monster session: the gate stays strict either way.
-if [ "${1:-}" = "auth" ] && { [ "${2:-}" = "token" ] || [ "${2:-}" = "status" ]; } \
-  && [ -n "${GH_TOKEN_COPILOT_CLI:-}" ] && [ -n "${ENGSYS_COPILOT_CLI_PID:-}" ] \
-  && [ "$PPID" = "$ENGSYS_COPILOT_CLI_PID" ]; then
-  GH_TOKEN="$GH_TOKEN_COPILOT_CLI" exec "$REAL_GH" "$@"
-fi
-# Not the narrow Copilot-auth-relay case above: never let the seat token ride along into an
-# agent-visible environment (this process's own env, and anything it execs below) — e.g. a plain
-# `gh ...` call issued by an agent's Bash tool must not be able to `env | grep COPILOT` and read it.
+# engsys v2.0.1 round 2 (F5, Nyx F3): the Copilot-CLI seat-token relay that used to live here is
+# REMOVED entirely. The fleet is Claude-only (CLAUDE.md: "the fleet is Claude-only unless the
+# operator explicitly opts in through a GitHub gate") — the relay was dead code for the fleet's
+# actual operating mode, and it was still a bypassable identity boundary (round 1 tightened the
+# PID check instead of removing the relay; round 2's review called that the wrong fix). This shim
+# now NEVER returns anything but the fleet's own App installation token, for every invocation,
+# including `gh auth token`/`gh auth status`. GH_TOKEN_COPILOT_CLI is never read.
 unset GH_TOKEN_COPILOT_CLI
 
 # Which account's installation to use (GH_APP_INSTALLATIONS in the env file). Precedence:
