@@ -149,19 +149,80 @@ describe('H6: the security tier never renders to another model', () => {
   test('scaffold fleet.conf: every harness block keeps SECURITY_MODEL and MAINTAIN_MODEL on claude-opus-4-8', () => {
     const conf = read('core/fleet/scaffold/fleet/fleet.conf');
     for (const h of ['claude', 'copilot', 'antigravity']) {
-      const block = new RegExp(`\\{\\{#if harness_${h}\\}\\}([\\s\\S]*?)\\n\\{\\{/if\\}\\}\\n(?:\\{\\{#if harness_|# Permission)`).exec(conf);
+      const block = new RegExp(`\\{\\{#if harness_${h}\\}\\}([\\s\\S]*?)\\n\\{\\{/if\\}\\}\\n(?:\\{\\{#if harness_|\\{\\{#unless harness_claude|# Permission)`).exec(conf);
       assert.ok(block, `harness_${h} block`);
       assert.match(block[1], /^SECURITY_MODEL=claude-opus-4-8$/m, `${h} SECURITY_MODEL`);
       assert.match(block[1], /^MAINTAIN_MODEL=claude-opus-4-8$/m, `${h} MAINTAIN_MODEL`);
     }
     assert.doesNotMatch(conf, /^(SECURITY|MAINTAIN)_MODEL=(?!claude-opus-4-8$).*/m);
+    // The merge monster model is Claude-only: no per-harness non-Claude MM_MODEL.
+    for (const line of conf.split('\n').filter((l) => /^MM_MODEL=/.test(l))) assert.match(line, /^MM_MODEL=claude-/, line);
+  });
+});
+
+describe('F4: security: true always renders the security tier', () => {
+  const variants = ['security: true', 'security: True', 'security: "true"', "security: 'TRUE'", 'security: yes', 'Security: true', 'SECURITY: on', 'security: true # pinned'];
+  for (const v of variants) {
+    test(`'${v}' is security-tier, on Claude with no models: block too`, () => {
+      const md = `---\nname: warden\ndescription: d\nmodel: opus\n${v}\nskills: []\n---\n\nbody\n`;
+      assert.equal(render.isSecurityPersona(md), true);
+      assert.equal(modelOf(render.renderAgentForHarness(md, 'claude', {})), 'claude-opus-4-8');
+      assert.equal(modelOf(render.renderAgentForHarness(md, 'copilot', {})), 'claude-opus-4.8');
+      assert.match(render.renderAntigravityAgent(md, {}), /^unsupported: true$/m);
+    });
+  }
+  for (const v of ['security: false', 'security: no', 'security: "false"', 'insecurity: true']) {
+    test(`'${v}' is not security-tier (positive control)`, () => {
+      const md = `---\nname: w\ndescription: d\nmodel: opus\n${v}\n---\n\nbody\n`;
+      assert.equal(render.isSecurityPersona(md), false);
+      assert.equal(render.renderAgentForHarness(md, 'claude', {}), md, 'untouched on Claude with no models:');
+    });
+  }
+  test('a security persona with no model: line gets the security model', () => {
+    const md = '---\nname: w\ndescription: d\nsecurity: true\n---\n\nbody\n';
+    assert.equal(modelOf(render.renderAgentForHarness(md, 'claude', {})), 'claude-opus-4-8');
+  });
+  test('nyx renders byte-identical on Claude with no models: block (already pinned)', () => {
+    assert.equal(render.renderAgentForHarness(NYX, 'claude', {}), NYX);
+  });
+  test('lint: every shipped persona with security: true pins model: claude-opus-4-8', () => {
+    const dirs = ['core/agents', 'optional-agents'];
+    let seen = 0;
+    for (const d of dirs) {
+      for (const f of fs.readdirSync(path.join(ROOT, d)).filter((x) => x.endsWith('.md'))) {
+        const md = read(`${d}/${f}`);
+        if (!render.isSecurityPersona(md)) continue;
+        seen++;
+        assert.equal(modelOf(md), 'claude-opus-4-8', `${d}/${f}: security: true requires model: claude-opus-4-8`);
+      }
+    }
+    assert.ok(seen >= 1, 'nyx is found as a security persona');
+  });
+  test('install: securityAgentNames honours YAML-boolean variants (models.<agent> held)', () => {
+    assert.throws(() => render.validateModelsConfig({ models: { warden: 'x' } }, ['nyx', 'warden']), /models\.warden/);
   });
 });
 
 describe('M2: persona tool sets', () => {
-  test('nyx has Bash (no tools: line narrows it)', () => {
+  test('nyx has Bash, and no send-capable MCP tools (explicit allowlist)', () => {
     const tools = toolsOf(NYX);
-    assert.ok(tools === null || tools.includes('Bash'), `nyx tools: ${tools}`);
+    assert.ok(Array.isArray(tools), 'nyx declares an explicit tools: allowlist');
+    assert.ok(tools.includes('Bash'), `nyx tools: ${tools}`);
+    assert.deepEqual(tools, ['Read', 'Grep', 'Glob', 'Bash', 'Write', 'WebFetch', 'WebSearch']);
+    assert.ok(!tools.some((t) => t.startsWith('mcp__')), 'no MCP tools');
+  });
+
+  test('a persona with a tools: allowlist binds no MCP-driven skill it cannot call', () => {
+    const MCP_SKILLS = ['chrome-devtools'];
+    for (const d of ['core/agents', 'optional-agents']) {
+      for (const f of fs.readdirSync(path.join(ROOT, d)).filter((x) => x.endsWith('.md'))) {
+        const md = read(`${d}/${f}`);
+        const tools = toolsOf(md);
+        if (tools === null || tools.some((t) => t.startsWith('mcp__'))) continue;
+        const skills = ((/^skills:\s*\[(.*)\]$/m.exec(fmOf(md)) || [])[1] || '').split(',').map((x) => x.trim());
+        for (const sk of MCP_SKILLS) assert.ok(!skills.includes(sk), `${d}/${f} binds ${sk} but its tools: allowlist has no MCP tools`);
+      }
+    }
   });
 
   test('marcelo has Bash', () => {
