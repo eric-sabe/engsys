@@ -27,6 +27,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { recordHookTelemetry } from '../lib/harness-io.mjs';
 import { isMainEntry } from '../lib/is-main.mjs';
 import { isValidPointerKey, resolveCacheDir } from '../lib/memory/index-db.mjs';
 
@@ -336,6 +337,12 @@ export async function main({ argv = process.argv.slice(2), stdin = process.stdin
 	// SubagentStart hook can consume it. Always fails open with `{}`.
 	if (argv[0] === 'pre-agent' || input?.hook_event_name === 'PreToolUse' || input?.hookEventName === 'preToolUse') {
 		if (input) recordPendingDispatch(input, { cwd, now });
+		recordHookTelemetry({
+			hook: 'subagent-memory-inject',
+			event: 'PreToolUse',
+			decision: 'stashed',
+			detail: `agent=${extractAgentType(input) || 'any'}`,
+		});
 		if (!process.env.ENGSYS_HARNESS || process.env.ENGSYS_HARNESS === 'claude') {
 			write('{}');
 			return 0;
@@ -384,7 +391,16 @@ export async function main({ argv = process.argv.slice(2), stdin = process.stdin
 		briefText = '';
 	}
 
-	logInjection(cwd, { ts: new Date(now()).toISOString(), agent_type: agentType, ...logKeys, ms: now() - t0, skipped_budget: skippedBudget, spawn_failed: spawnFailed });
+	const elapsedMs = now() - t0;
+	logInjection(cwd, { ts: new Date(now()).toISOString(), agent_type: agentType, ...logKeys, ms: elapsedMs, skipped_budget: skippedBudget, spawn_failed: spawnFailed });
+	recordHookTelemetry({
+		hook: 'subagent-memory-inject',
+		event: 'SubagentStart',
+		decision: briefText ? 'context' : 'pass',
+		bytes: logKeys.bytes || 0,
+		ms: elapsedMs,
+		detail: `agent=${agentType || 'any'} lessons=${(logKeys.lesson_keys || []).length} pointers=${(logKeys.pointer_keys || []).length}`,
+	});
 
 	if (!briefText) {
 		write('{}');

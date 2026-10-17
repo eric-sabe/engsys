@@ -283,7 +283,10 @@ export function checkSettings({ projectDir, userSettingsDir = '', pinSettingsSha
     if (cfg.disableAllHooks === true) {
       problems.push(`settings   ${f} sets disableAllHooks: true`);
     }
-    if (cfg.hooks !== undefined) {
+    if (cfg.allowManagedHooksOnly === true) {
+      problems.push(`settings   ${f} sets allowManagedHooksOnly: true`);
+    }
+    if (cfg.hooks !== undefined && f.endsWith('.local.json')) {
       problems.push(`settings   ${f} defines hooks`);
     }
     if (cfg.env && typeof cfg.env === 'object' && !Array.isArray(cfg.env)) {

@@ -24,7 +24,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { detectHarness, resolvePluginRoot } from '../lib/harness-io.mjs';
+import { detectHarness, recordHookTelemetry, resolvePluginRoot } from '../lib/harness-io.mjs';
 
 export const MAX_LINES = 10;
 const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'fish', 'ksh', 'env', 'login', 'timeout', 'nohup']);
@@ -87,9 +87,16 @@ export async function run(event, env = process.env) {
   );
   const text = lines.join('\n');
   const harness = detectHarness(env);
+  const hookEventName = event === 'prompt' ? 'UserPromptSubmit' : event === 'post-tool-use' ? 'PostToolUse' : 'SessionStart';
+  recordHookTelemetry({
+    hook: 'fleet-inbox',
+    event: hookEventName,
+    decision: 'inject',
+    bytes: Buffer.byteLength(text, 'utf8'),
+    detail: `delivered:${shown.length}`,
+  }, env);
   if (harness === 'copilot') return JSON.stringify({ additionalContext: text });
   if (harness === 'antigravity') return text;
-  const hookEventName = event === 'prompt' ? 'UserPromptSubmit' : event === 'post-tool-use' ? 'PostToolUse' : 'SessionStart';
   return JSON.stringify({ hookSpecificOutput: { hookEventName, additionalContext: text } });
 }
 

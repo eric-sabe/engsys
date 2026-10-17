@@ -15,7 +15,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseHookInput, resolvePluginRoot } from '../lib/harness-io.mjs';
+import { parseHookInput, recordHookTelemetry, resolvePluginRoot } from '../lib/harness-io.mjs';
 
 // Low-risk bookkeeping only: liveness registry + watchdog, GitHub watch/snapshot, ledger heartbeat, the
 // single-call ticks (renew-if-due + snapshot delta + heartbeat-when-due, engsys#123),
@@ -108,6 +108,12 @@ async function main() {
   if (!rel) return;
   if (parsed.harness === 'antigravity') return;
   const reason = `engsys: own bookkeeping script (${rel}) invoked by literal path`;
+  recordHookTelemetry({
+    hook: 'approve-own-scripts',
+    event: 'PreToolUse',
+    decision: 'allow',
+    detail: rel,
+  });
   process.stdout.write(JSON.stringify({
     permissionDecision: 'allow',
     permissionDecisionReason: reason,
