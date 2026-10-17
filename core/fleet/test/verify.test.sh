@@ -557,6 +557,19 @@ rc_is "with FLEET_CLAUDE_CONFIG_DIR set, --force reseeds it" 0
 eq "…from the allowlist again" "$(jq -c 'keys' "$CD/settings.json")" '["effortLevel","env","skipAutoPermissionPrompt","skipDangerousModePermissionPrompt"]'
 printf '%s\n' "$CONF0" >"$I/fleet/fleet.conf"; rm -f "$HOME/.claude/settings.json" "$HOME/.claude.json"
 
+echo "== a large user-scope mismatch: one grouped alert, exit 1 (never a broken pipe)"
+mkdir -p "$HOME/.claude/skills/big"; for i in $(seq 1 1500); do printf 'x%s\n' "$i" >"$HOME/.claude/skills/big/f$i.md"; done
+rm -f "$I/.fleet/verify-wrappers.alerted"; a0="$(said 'user-scope skills/agents/files (1500)')"
+run fleet verify --alert
+rc_is "1500 user-scope files: exit 1" 1
+eq "…one alert naming the category and count" "$(said 'user-scope skills/agents/files (1500)')" "$((a0 + 1))"
+has "…with the total" "$(cat "$FAKE/gh.log")" "1500 problems"
+has "…and the config-dir hint" "$(cat "$FAKE/gh.log")" "fleet config-dir init"
+printf 'changed\n' >"$HOME/.claude/skills/big/f1.md"
+run fleet verify --alert
+eq "a skill resync (same files, new content) doesn't re-alert" "$(said 'user-scope skills/agents/files (1500)')" "$((a0 + 1))"
+rm -rf "$HOME/.claude/skills"
+
 echo "== PIN_SETTINGS from the caller's environment is never honoured"
 jq '.extraKnownMarketplaces.engsys.source.ref = "v9.9.9"' "$APP/.claude/settings.json" >"$T/other-pins.json"
 PIN_SETTINGS="$T/other-pins.json" run fleet verify

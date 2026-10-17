@@ -208,14 +208,14 @@ if [ "$alert" = 1 ]; then
     1)
       fp="$(sed -n 's/^fingerprint: //p' <<<"$out" | tail -1)"
       if [ "$only_stale" = 1 ] && [ "$(cat "$LATCH" 2>/dev/null)" != "$fp|$sync_why" ]; then
-        lines="$(sed -n 's/^  \(.*\)$/\1/p' <<<"$out" | head -n 8)"
+        lines="$(sed -n 's/^  \(.*\)$/\1/p' <<<"$out" | awk 'NR <= 8')"
         notify --level alert --incident wrapper-integrity "Plugin check on $host: the pin checkout ($PIN_DIR) is behind main, and files the sessions load changed there. $(if [ -n "$sync_why" ]; then printf 'Auto-sync could not fast-forward it: %s. Please bring the checkout back to main and run fleet sync.' "$sync_why"; else printf 'Auto-syncing: the supervisor runs fleet sync on its next tick.'; fi) Merge and maintain sessions are held until it matches; running sessions are left as they are. This is not a sign of tampering. Behind on:
 $lines
 Details: fleet verify" && printf '%s\n' "$fp|$sync_why" >"$LATCH"
       elif [ "$only_stale" = 0 ] && [ "$(cat "$LATCH" 2>/dev/null)" != "$fp" ]; then
         summary="$(sed -n 's/^summary: //p' <<<"$out" | tail -1)"
         hint="$(sed -n 's/^hint: //p' <<<"$out" | tail -1)"
-        lines="$(sed -n 's/^  \(.*\)$/\1/p' <<<"$out" | head -n 5)"
+        lines="$(sed -n 's/^  \(.*\)$/\1/p' <<<"$out" | awk 'NR <= 5')"
         notify --level alert --incident wrapper-integrity "Plugin check on $host: ${summary:-a mismatch}. What the merge and maintain monsters load does not match $repo@$ref (the engsys plugin and host kit), $PIN_REPO's default branch on GitHub (the pin checkout), or the allowed Claude settings in $claude_cfg. Merge and maintain sessions will not be launched or relaunched here until it matches; running sessions and their batons were left as they are.${hint:+ For the user-scope items: $hint.} To fix: for plugin files, reinstall (claude plugin uninstall --scope user engsys@$ENGSYS_MARKETPLACE from outside any project, delete its cache directory, fleet sync); for the pin checkout, restore it to GitHub's main and check who changed it; for a user-scope item, remove it or allowlist it (VERIFY_ALLOWED_USER_PLUGINS / _HOOKS / _FILES). First of them:
 $lines
 Details: fleet verify" && printf '%s\n' "$fp" >"$LATCH"
