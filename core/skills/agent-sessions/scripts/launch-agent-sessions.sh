@@ -244,10 +244,12 @@ translate_antigravity_flags() {
   fi
 }
 
-# Turnkey Antigravity Remote Control: unlike Claude Code (where --remote-control is self-contained per session),
-# Antigravity requires a host-level background daemon (`agy remote-control start`) in addition to per-session
-# `--remote-control`. Auto-start the daemon when HARNESS=antigravity and any roster session uses --remote-control.
-if [ "$HARNESS" = "antigravity" ] && [ "${AGY_REMOTE_CONTROL_AUTOSTART:-1}" != 0 ]; then
+# Antigravity Remote Control is opt-in. Unlike Claude Code (where --remote-control is self-contained per
+# session), Antigravity needs a host-level background daemon (`agy remote-control start`), which exposes
+# the host's sessions for remote driving. The launcher never starts it on its own: set
+# AGY_REMOTE_CONTROL_AUTOSTART=1 to start it when HARNESS=antigravity and a roster session uses
+# --remote-control (or AGY_REMOTE_CONTROL=1). Default off.
+if [ "$HARNESS" = "antigravity" ] && [ "${AGY_REMOTE_CONTROL_AUTOSTART:-0}" = 1 ]; then
   agy_needs_rc=0
   if [ "${AGY_REMOTE_CONTROL:-0}" = 1 ]; then
     agy_needs_rc=1
@@ -267,6 +269,25 @@ if [ "$HARNESS" = "antigravity" ] && [ "${AGY_REMOTE_CONTROL_AUTOSTART:-1}" != 0
     fi
   fi
 fi
+
+# A security-tier roster line: its model is Claude Opus 4.8 (any spelling, or the `security` alias), or
+# it runs in the security lane's env file (security.env). Prints "yes" or "no".
+is_security_line() {
+  local flags="$1" env_file="$2" tok prev=""
+  case "${env_file##*/}" in security.env) echo yes; return ;; esac
+  set -f
+  # shellcheck disable=SC2086
+  set -- $flags
+  set +f
+  for tok in "$@"; do
+    if [ "$prev" = "--model" ]; then
+      case "$tok" in claude-opus-4-8 | claude-opus-4.8 | security) echo yes; return ;; esac
+    fi
+    case "$tok" in --model=claude-opus-4-8 | --model=claude-opus-4.8 | --model=security) echo yes; return ;; esac
+    prev="$tok"
+  done
+  echo no
+}
 
 # ---------------------------------------------------------------------------
 # Launch
@@ -302,9 +323,17 @@ launch_one() {
     *merge-monster*) role=merge ;;
     *maintenance-monster*) role=maintain ;;
   esac
-  if [ "$HARNESS" = "antigravity" ] && [ -n "$role" ] && [ "${AGY_HEADLESS_SUPPORTED:-1}" != 1 ]; then
-    echo "error: Antigravity ($name) headless monster sessions disabled (AGY_HEADLESS_SUPPORTED=0)" >&2
-    return 1
+  # The monsters and the security lane are Claude-only: the merge and maintain batons and security work
+  # stay on Claude (security on Claude Opus 4.8), so a non-Claude harness never launches them.
+  if [ "$HARNESS" != "claude" ]; then
+    if [ -n "$role" ]; then
+      echo "error: refusing to launch '$name' (role=$role) on HARNESS=$HARNESS: merge and maintenance monsters run only on HARNESS=claude" >&2
+      return 1
+    fi
+    if [ "$(is_security_line "${MODEL:+$MODEL }${extra:-}" "${session_env:-}")" = yes ]; then
+      echo "error: refusing to launch '$name' on HARNESS=$HARNESS: security-tier sessions run only on HARNESS=claude with claude-opus-4-8" >&2
+      return 1
+    fi
   fi
   # ENGSYS_SESSION_ROOT is the directory the session was launched in: a guarded `fleet msg send`
   # takes its --body-file only from <root>/tmp, wherever the session cd's later (engsys#108).
