@@ -59,6 +59,7 @@ const SUITES = [
   ["NODE_NO_WARNINGS=1 node --test core/scripts/memory-brief.test.mjs"],
   ["NODE_NO_WARNINGS=1 node --test core/scripts/memory-sync.test.mjs"],
   ["NODE_NO_WARNINGS=1 node --test core/.claude-plugin/subagent-memory-inject.test.mjs"],
+  ["node --test lib/commands.test.mjs"],
   ["bash core/fleet/identity/git-env.test.sh"],
   ["bash core/fleet/identity/gh-shim.test.sh"],
   ["bash core/fleet/test/fleet.test.sh"],
