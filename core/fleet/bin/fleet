@@ -45,9 +45,9 @@
 #                                 health line; no-op in single-fleet mode
 #   health <subcommand> ...       Fleet Health Desk (validate|status|tick|watch-board|check|report|simulate|
 #                                 invoke|self-probe|digest|watch-add|watch-remove; see `fleet health --help`)
-#   xray [--json] [--tail-hooks <n>] (alias: doctor)
+#   xray [--session <s|role>] [--since <dur>] [--timeline] [--diagnose] [--watch [s]] [--json] (alias: doctor)
 #                                 live operational X-Ray across all 10 engsys v2.0.0 subsystems + synthetic
-#                                 9-hook self-test + live Hook Flight Recorder & Subagent Memory telemetry
+#                                 9-hook self-test + session deep-dive + timeline + root-cause diagnosis
 #   init ...                      scaffold a new fleet instance (engsys fleet init)
 #
 # The instance is --instance <dir>, else $FLEET_INSTANCE, else the git toplevel of the current
