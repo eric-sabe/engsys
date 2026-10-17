@@ -394,13 +394,37 @@ jobs only.
 Either way, the fleet never writes global git config and never touches your `gh` login. The only real
 overlap is host ports and Docker if your local test stack uses them.
 
-For **B**, give the fleet its own Claude Code config directory so its login and plugins stay separate from
-yours: set `FLEET_CLAUDE_CONFIG_DIR=$HOME/.claude-fleet` in `~/.config/acme/fleet.local.conf`, then run
-`CLAUDE_CONFIG_DIR=~/.claude-fleet claude` once, `/login` with the fleet's seat and `/exit`. The kit exports
-`CLAUDE_CONFIG_DIR` for every fleet command and writes it into each session env. If your Claude Code
-version shares the login across config directories (both show the same account), use setup A instead.
-Tools that keep a single login per macOS account (some review CLIs) have the same limit: logging in as
-the fleet replaces your own.
+For **B**, give the fleet its own Claude Code config directory, so its login (the fleet's seat), user
+settings and plugins stay separate from yours. Your own user-scope plugins load into every Claude Code
+session that reads `~/.claude`, fleet sessions included, and their hooks run there, so `fleet verify`
+reports them as a mismatch until the fleet has its own directory (or you allow them, below).
+
+**One-time setup of a separate Claude config dir:**
+
+1. Create the directory: `mkdir -p ~/.config/acme/claude && chmod 700 ~/.config/acme/claude`.
+2. Log in with the fleet's seat: `CLAUDE_CONFIG_DIR=~/.config/acme/claude claude`, then `/login` and
+   `/exit`. Check it with `CLAUDE_CONFIG_DIR=~/.config/acme/claude claude auth status --text`.
+3. Set `FLEET_CLAUDE_CONFIG_DIR=~/.config/acme/claude` in `fleet/fleet.conf` (or in
+   `~/.config/acme/fleet.local.conf` for this host only). Only these files set it: an environment value is
+   ignored.
+4. Run `fleet sync`. It installs the pinned marketplaces and plugins into that directory
+   (`CLAUDE_CONFIG_DIR=<dir> claude plugin …`) and prints `claude config dir: <dir>, logged in`.
+5. Restart the sessions: `fleet restart` (or `fleet launch` for a first start). Every session the fleet
+   launches (monsters, interactive and security sessions, and the supervisor's relaunches) gets
+   `CLAUDE_CONFIG_DIR=<dir>`, and `fleet verify` checks that directory's settings instead of `~/.claude`.
+
+`fleet status` (through `fleet sync --check`) and `fleet xray` report the directory in use and whether it
+is logged in; neither prints the account or any token. With `FLEET_CLAUDE_CONFIG_DIR` unset, the fleet uses
+`~/.claude` and drops a `CLAUDE_CONFIG_DIR` it inherits, so what `fleet verify` checks is what the sessions
+load. If your Claude Code version shares the login across config directories (both show the same
+account), use setup A instead. Tools that keep a single login per macOS account (some review CLIs) have the
+same limit: logging in as the fleet replaces your own.
+
+**The secondary option: allow specific user-scope plugins.** If the fleet does share `~/.claude` with you,
+`VERIFY_ALLOWED_USER_PLUGINS` in `fleet.conf` (space-separated `name@marketplace`) lists the user-scope
+plugins you accept in fleet sessions. `fleet verify` reports each listed one as `verify: info allowed …`
+instead of a mismatch; any plugin not listed is still a mismatch. Allowing a plugin is a real decision:
+its hooks and skills run inside the merge and maintain sessions, which hold the fleet's GitHub identity.
 
 ### 6.2 The machine
 
@@ -1142,10 +1166,42 @@ Two settings make the check stronger:
   Claude Code writes a marker file into the version directory. The owner can still clear the flag, so this
   only stops casual writes. Clear it before `fleet sync` removes that version.
 
-What it does not cover yet: the verifier, the supervisor and the gh shim run from the host engsys checkout
-(`ENGSYS_DIR`), which the hook does not protect (engsys#88). Settings files, shell rc files and the `node`
-and `claude` binaries are outside the check too, and a running monster keeps its loaded files until it is
-stopped. Treat a change in the host checkout (`git -C ~/git/engsys status`) as seriously as a mismatch.
+**The host kit.** The fleet kit runs from the host engsys checkout (`ENGSYS_DIR`), not from the plugin
+cache. `fleet verify` compares the whole `core/fleet/` and `core/lib/` trees there (the gh shim, `git-env.sh`,
+the lease and baton code, the verifier itself) plus the supervisor and launcher scripts with the same
+release tree: a modified, missing or extra file there is a mismatch too.
+
+**The pin checkout's `.claude/` and its hooks.** Claude Code loads `PIN_DIR/.claude/` (settings, hooks,
+agents, commands, skills) into every session, and a settings hook runs whatever script it names. Its trust
+root is `PIN_REPO`'s default branch as the GitHub API reports it, never a local ref (`origin/HEAD` and
+`refs/remotes/*` can be repointed by anything on the host):
+
+- `PIN_DIR`'s HEAD must be that branch's tip or an ancestor of it (GitHub's compare says `identical` or
+  `behind`). Behind is fine, with a warning to run `fleet sync`, so a merged pin PR never turns into a false
+  mismatch. Ahead, diverged, or a commit GitHub doesn't have is a mismatch.
+- Every file under `.claude/` must be a file of HEAD's `.claude/` tree (read from the API) with the same
+  content, and every file of that tree must be there: nothing modified, missing or untracked. Claude
+  Code's own runtime files there (`settings.local.json`, checked separately, `scheduled_tasks.lock` and the
+  `worktrees/` directory) are skipped.
+- Every script a `settings.json` hook command names (with `$CLAUDE_PROJECT_DIR` resolved) must be inside
+  the repo, a regular file, tracked at HEAD and unchanged. A hook that runs a path outside the repo, or a
+  path with any other variable in it, is a mismatch.
+
+A `PIN_DIR` that is not a git checkout can't be checked this way: `fleet verify` warns, and any hook in its
+settings is a mismatch.
+
+**User-scope settings.** `fleet verify` also reads `settings.json` and `settings.local.json` of the Claude
+config dir the sessions use (`FLEET_CLAUDE_CONFIG_DIR`, else `~/.claude`): a plugin the pin repo doesn't
+enable is a mismatch unless `VERIFY_ALLOWED_USER_PLUGINS` lists it (§ 6.1), and so is `disableAllHooks`, or an
+`env` key in a protected family (`ENGSYS_*`, `FLEET_*`, `HARNESS*`, `COPILOT_*`, `AGY_*`, `NODE_*`,
+`CLAUDE_PLUGIN_ROOT`, `CLAUDE_CONFIG_DIR`, `PATH`, `GH_*`, `GITHUB_*`) in any settings file.
+
+**A mismatch never touches a running session.** The supervisor holds relaunches of the merge and
+maintain monsters and alerts; it does not kill a running one and never revokes or breaks its baton. A
+session that is already dead or stale is relaunched once the check passes, as usual.
+
+Outside the check: shell rc files, the `node` and `claude` binaries, and a running monster's loaded files
+(kept until it is stopped).
 
 ### Humans' machines
 
@@ -1349,13 +1405,16 @@ format) overrides it per machine. Environment values for `ENGSYS_REF` / `INSTANC
 | `PIN_DIR` | yes | Local checkout of `PIN_REPO`; also the sessions' default workdir |
 | `ENGSYS_DIR` | no | The pinned engsys checkout. Default `~/git/engsys` |
 | `HARNESS` | no | Primary harness runtime (`claude`, `copilot`, or `antigravity`). Default `claude` |
-| `HARNESS_FALLBACK` | no | Ordered comma-separated fallback harnesses (`copilot,antigravity`) for automatic supervisor failover when the primary seat hits its usage/rate limit. Empty means no automatic harness fallback |
+| `HARNESS_FALLBACK` | no | Ordered comma-separated fallback harnesses (`copilot,antigravity`) the supervisor may fail eligible sessions over to when the primary seat hits its limit. Empty (the default) means no harness switch ever happens. A switch needs Claude Code's own limit line in a pane the supervisor launched, a test request that confirms it, and, for any harness but `claude`, an operator's approval of a gate request in GitHub (`FALLBACK_GATE_*`). Merge, maintain and security-tier sessions never switch |
+| `FALLBACK_GATE_ISSUE` | no | `owner/repo#N` where the supervisor posts a `harness-fallback` gate request. Default: the fleet's status issue (multi-fleet mode). Unset with no status issue means a non-Claude switch never happens |
+| `FALLBACK_GATE_OPERATORS_TEAM` / `FALLBACK_GATE_OPERATORS` | no | The operator source `gate-check` verifies that approval against: `org/team-slug`, or `login:id,…` pins. Neither set means a non-Claude switch never happens |
 | `QUOTA_COOLDOWN_MIN` | no | Minutes before the supervisor probes `PRIMARY_HARNESS` to fail back after a seat-quota fallback. Default `60` |
 | `ENGSYS_MARKETPLACE` | no | Default `engsys` |
 | `INSTANCE_MARKETPLACE` | no | The instance's own marketplace name (for example `acme`). Empty means no instance plugin: no instance release, and the instance checkout is not pinned |
 | `WORKTREES_DIR` | no | Agent worktrees directory; created by `launch`; available to templates for `--add-dir` |
 | `GH_APP_ENV` | no | Path to the GitHub App env file. Set means identity kit on |
-| `FLEET_CLAUDE_CONFIG_DIR` | no | A separate Claude Code config dir for the fleet (shared-account setups). Exported as `CLAUDE_CONFIG_DIR` and written into each session env |
+| `FLEET_CLAUDE_CONFIG_DIR` | no | A separate Claude Code config dir for the fleet, with its own login (§ 6.1). Every fleet command and every launched session runs with `CLAUDE_CONFIG_DIR` set to it; `fleet sync` installs the plugins there and `fleet verify` checks it. An absolute path (or `~/…`). Never inherited from the caller's environment. Unset means `~/.claude` |
+| `VERIFY_ALLOWED_USER_PLUGINS` | no | Space-separated `name@marketplace` user-scope plugins `fleet verify` reports as `allowed` instead of a mismatch (§ 6.1). Never inherited from the caller's environment |
 | `REVIEW_CMD` | no | Review run in the pin PR's worktree (for example `<your-review-cli> review --base origin/main`). Empty means no review; the label only |
 | `REVIEW_MARKER` | no | Marker line opening the review comment (for example `<!-- local-review-findings -->`) |
 | `REVIEW_BLOCK_REGEX` | no | Default `critical\|warning` (case-insensitive). A match, or a non-zero exit, stops auto-labeling |

@@ -42,6 +42,9 @@ unset TMUX_SESSION LOG_DIR
 # The fleet's identity comes only from its own config files, never from a caller's environment (a
 # session env carries FLEET_ID too). The same goes for the per-host role filter (lib/host-roles.sh).
 unset FLEET_ID FEDERATION_FILE FLEET_INSTANCE_REPO ROLES ROSTER_EXCLUDE OPERATOR_TIMEZONE OPERATOR_CLOCK
+# So do the fleet's Claude config dir and the integrity check's user-plugin allowlist: what `fleet verify`
+# accepts must come from the operator's config files, never from whoever ran the command.
+unset FLEET_CLAUDE_CONFIG_DIR VERIFY_ALLOWED_USER_PLUGINS
 fleet_load_conf "$FLEET_REPO/fleet/fleet.conf"
 [ -n "${FLEET_ORG:-}" ] || fleet_die "FLEET_ORG is not set in $FLEET_REPO/fleet/fleet.conf"
 [ -f "$HOME/.config/$FLEET_ORG/fleet.local.conf" ] && fleet_load_conf "$HOME/.config/$FLEET_ORG/fleet.local.conf"
@@ -243,6 +246,16 @@ if [ -n "${GH_APP_ENV:-}" ]; then
     echo "fleet: WARNING GH_APP_ENV is set but $ENGSYS_DIR/core/fleet/identity/git-env.sh is missing — git identity not applied" >&2
   fi
 fi
-# Optional separate Claude Code config dir for the fleet (a machine shared with a person's own
-# Claude use). Unset = the account's default ~/.claude.
-if [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ]; then export CLAUDE_CONFIG_DIR="$FLEET_CLAUDE_CONFIG_DIR"; fi
+# Optional separate Claude Code config dir for the fleet (a machine shared with a person's own Claude
+# use): its own login (the fleet's seat), user settings and plugin installs. Set = every fleet command
+# (`claude plugin` in sync, `claude plugin list` in verify, the supervisor's login probe) and every
+# session the fleet launches run with CLAUDE_CONFIG_DIR=<it>. Unset = the account's default ~/.claude,
+# and an inherited CLAUDE_CONFIG_DIR is dropped so what verify checks is what the sessions load.
+: "${VERIFY_ALLOWED_USER_PLUGINS:=}"
+export VERIFY_ALLOWED_USER_PLUGINS
+if [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ]; then
+  case "$FLEET_CLAUDE_CONFIG_DIR" in /*) ;; *) fleet_die "FLEET_CLAUDE_CONFIG_DIR must be an absolute path (or start with ~), got '$FLEET_CLAUDE_CONFIG_DIR'" ;; esac
+  export FLEET_CLAUDE_CONFIG_DIR CLAUDE_CONFIG_DIR="$FLEET_CLAUDE_CONFIG_DIR"
+else
+  unset CLAUDE_CONFIG_DIR
+fi

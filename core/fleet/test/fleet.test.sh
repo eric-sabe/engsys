@@ -23,7 +23,7 @@ set -euo pipefail
 S="$FAKE/claude"; mkdir -p "$S"
 [ -f "$S/marketplaces.json" ] || echo '[]' >"$S/marketplaces.json"
 [ -f "$S/plugins.json" ] || echo '[]' >"$S/plugins.json"
-printf '%s\tPATH0=%s\n' "$*" "${PATH%%:*}" >>"$FAKE/claude.log"
+printf '%s\tPATH0=%s\tCFG=%s\n' "$*" "${PATH%%:*}" "${CLAUDE_CONFIG_DIR:-unset}" >>"$FAKE/claude.log"
 printf '%s\t%s\n' "$(pwd -P)" "$*" >>"$FAKE/claude.cwd"
 [ "${1:-}" = plugin ] || { echo "stub claude: unsupported: $*" >&2; exit 2; }
 shift
@@ -408,6 +408,28 @@ has "marketplace repaired" "$OUT" "marketplace acme: v0.1.0 → v0.2.0"
 eq "plugins back" "$(json_names plugins '.[].id')" "core@engsys ctx@acme extra@acme"
 run fleet sync --check; rc_is "in sync again" 0
 
+echo "== D2. FLEET_CLAUDE_CONFIG_DIR: sync installs the pinned plugins into the fleet's own Claude config dir"
+FCFG="$T/fleet-claude"; mkdir -p "$FCFG"
+LC="$HOME/.config/acme/fleet.local.conf"; cp "$LC" "$T/flc.bak" 2>/dev/null || : >"$T/flc.bak"
+printf 'FLEET_CLAUDE_CONFIG_DIR=%s\n' "$FCFG" >>"$LC"
+# a marketplace that moved: the sync has real plugin work to do
+jq 'map(if .name == "engsys" then .ref = "v1.0.0" else . end)' "$FAKE/claude/marketplaces.json" >"$FAKE/m.json" && mv "$FAKE/m.json" "$FAKE/claude/marketplaces.json"
+m="$(mark)"; CLAUDE_CONFIG_DIR="$T/inherited" run fleet sync
+rc_is "sync with FLEET_CLAUDE_CONFIG_DIR exits 0" 0
+has "…it ran the plugin step" "$(since "$m")" "plugin marketplace add https://github.com/vendor/engsys.git"
+eq "…every claude call ran with CLAUDE_CONFIG_DIR=<the fleet's dir>" "$(since "$m" | grep -v '^MARK' | grep -vc "CFG=$FCFG\$" || true)" 0
+has "…and sync says which config dir it used" "$OUT" "claude config dir: $FCFG (FLEET_CLAUDE_CONFIG_DIR)"
+cp "$T/flc.bak" "$LC"
+m="$(mark)"; CLAUDE_CONFIG_DIR="$T/inherited" run fleet sync --check
+rc_is "unset again: in sync" 0
+eq "…every claude call ran with no CLAUDE_CONFIG_DIR (an inherited one is dropped)" "$(since "$m" | grep -v '^MARK' | grep -vc 'CFG=unset$' || true)" 0
+has "…reporting the default dir" "$OUT" "claude config dir: $HOME/.claude"
+printf 'FLEET_CLAUDE_CONFIG_DIR=%s\n' "$T/missing-cfg" >>"$LC"
+run fleet sync
+rc_is "a FLEET_CLAUDE_CONFIG_DIR that doesn't exist stops sync" 1
+has "…with the one-time setup" "$OUT" "log in with CLAUDE_CONFIG_DIR=$T/missing-cfg claude"
+cp "$T/flc.bak" "$LC"
+
 echo "== D2. the plugin step never touches project settings (engsys#112)"
 APP_SETTINGS="$HOME/git/app/.claude/settings.json"
 cp -p "$APP_SETTINGS" "$T/app-settings.orig"
@@ -464,6 +486,28 @@ run fleet sync
 rc_is "sync installs it at user scope" 0; has "…" "$OUT" "installed ctx@acme"
 run fleet sync --check; rc_is "in sync again" 0
 
+echo "== D2. FLEET_CLAUDE_CONFIG_DIR: sync installs the pinned plugins into the fleet's own Claude config dir"
+FCFG="$T/fleet-claude"; mkdir -p "$FCFG"
+LC="$HOME/.config/acme/fleet.local.conf"; cp "$LC" "$T/flc.bak" 2>/dev/null || : >"$T/flc.bak"
+printf 'FLEET_CLAUDE_CONFIG_DIR=%s\n' "$FCFG" >>"$LC"
+# a marketplace that moved: the sync has real plugin work to do
+jq 'map(if .name == "engsys" then .ref = "v1.0.0" else . end)' "$FAKE/claude/marketplaces.json" >"$FAKE/m.json" && mv "$FAKE/m.json" "$FAKE/claude/marketplaces.json"
+m="$(mark)"; CLAUDE_CONFIG_DIR="$T/inherited" run fleet sync
+rc_is "sync with FLEET_CLAUDE_CONFIG_DIR exits 0" 0
+has "…it ran the plugin step" "$(since "$m")" "plugin marketplace add https://github.com/vendor/engsys.git"
+eq "…every claude call ran with CLAUDE_CONFIG_DIR=<the fleet's dir>" "$(since "$m" | grep -v '^MARK' | grep -vc "CFG=$FCFG\$" || true)" 0
+has "…and sync says which config dir it used" "$OUT" "claude config dir: $FCFG (FLEET_CLAUDE_CONFIG_DIR)"
+cp "$T/flc.bak" "$LC"
+m="$(mark)"; CLAUDE_CONFIG_DIR="$T/inherited" run fleet sync --check
+rc_is "unset again: in sync" 0
+eq "…every claude call ran with no CLAUDE_CONFIG_DIR (an inherited one is dropped)" "$(since "$m" | grep -v '^MARK' | grep -vc 'CFG=unset$' || true)" 0
+has "…reporting the default dir" "$OUT" "claude config dir: $HOME/.claude"
+printf 'FLEET_CLAUDE_CONFIG_DIR=%s\n' "$T/missing-cfg" >>"$LC"
+run fleet sync
+rc_is "a FLEET_CLAUDE_CONFIG_DIR that doesn't exist stops sync" 1
+has "…with the one-time setup" "$OUT" "log in with CLAUDE_CONFIG_DIR=$T/missing-cfg claude"
+cp "$T/flc.bak" "$LC"
+
 echo "== E. launch: rendering, the 5th roster field, the launcher command lines"
 rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"
 run fleet launch
@@ -509,6 +553,22 @@ run bash -c "cd '$T' && bash '$ENGSYS_HOST/core/skills/agent-sessions/scripts/la
 rc_is "launcher: a missing per-session env file is an error" 1
 has "…naming the resolved path" "$OUT" "env file for 'acme-x' not found: $T/gone.env"
 
+# The fleet's Claude config dir reaches every launched session (monsters, interactive, security): R1.
+has "no FLEET_CLAUDE_CONFIG_DIR: a launched session drops any inherited CLAUDE_CONFIG_DIR" "$(tl acme-build)" "unset CLAUDE_CONFIG_DIR && "
+FCFG="$T/fleet-claude"; mkdir -p "$FCFG"
+LC="$HOME/.config/acme/fleet.local.conf"; cp "$LC" "$T/flc.bak" 2>/dev/null || : >"$T/flc.bak"
+printf 'FLEET_CLAUDE_CONFIG_DIR=%s\n' "$FCFG" >>"$LC"
+rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"
+CLAUDE_CONFIG_DIR="$T/inherited" run fleet launch
+rc_is "launch with FLEET_CLAUDE_CONFIG_DIR exits 0" 0
+for w in acme-mm acme-security acme-build; do
+  has "$w: launched with CLAUDE_CONFIG_DIR=<the fleet's dir>" "$(tl "$w")" "CLAUDE_CONFIG_DIR=$FCFG"
+  hasnt "$w: …never the inherited one" "$(tl "$w")" "$T/inherited"
+done
+has "the rendered session env carries it too" "$(cat "$STATE/env/session.env")" "CLAUDE_CONFIG_DIR=$FCFG"
+has "…and the security env" "$(cat "$STATE/env/security.env")" "CLAUDE_CONFIG_DIR=$FCFG"
+cp "$T/flc.bak" "$LC"
+
 echo "== F. supervise"
 rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"; : >"$FAKE/gh.log"
 jq -n --arg b "last: $(iso 200) — status: working" '{state: "OPEN", body: $b}' >"$FAKE/ledger-11.json"
@@ -524,6 +584,8 @@ has "conf: …and the maintenance monster too" "$SUP" "acme-security|12|60|||mai
 has "conf: HEARTBEAT_CMD defaulted to the dispatcher" "$SUP" "HEARTBEAT_CMD=bash $ENGSYS_HOST/core/fleet/bin/fleet --instance $INST heartbeat"
 has "conf: INTEGRITY_CMD defaulted to fleet verify, throttled to 15 min (engsys#70)" "$SUP" "INTEGRITY_CMD=bash $ENGSYS_HOST/core/fleet/bin/fleet --instance $INST verify --alert --max-age 15"
 has "the integrity check ran in the tick and passed" "$(cat "$INST/logs/fleet-supervisor/supervisor.log")" "integrity: ok"
+has "supervisor conf: the security-tier session (security env) is listed, so it never fails over" "$(cat "$STATE/supervisor.conf")" "SECURITY_SESSIONS=acme-security"
+hasnt "supervisor conf: no harness-fallback gate without HARNESS_FALLBACK operators" "$(cat "$STATE/supervisor.conf")" "GATE_OPERATORS"
 has "stale monster with no window is relaunched through the kit" "$(grep -F '[new-session]' "$FAKE/tmux.log" | grep -F '[acme-mm]' || true)" "[acme-mm]"
 hasnt "closed ledger (kill switch) is left alone" "$(cat "$FAKE/tmux.log")" "[acme-security]"
 has "supervisor log kept in the instance" "$(cat "$INST/logs/fleet-supervisor/supervisor.log")" "acme-security: ledger acme/app#12 CLOSED"

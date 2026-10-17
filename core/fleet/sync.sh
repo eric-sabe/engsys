@@ -53,15 +53,17 @@ main() {
     pin_branch="$(git -C "$PIN_DIR" symbolic-ref --short -q HEAD || echo DETACHED)"
     default_branch="$(git -C "$PIN_DIR" symbolic-ref --short -q refs/remotes/origin/HEAD 2>/dev/null || true)"
     default_branch="${default_branch#origin/}"; : "${default_branch:=main}"
-    if [ "$(git -C "$PIN_DIR" rev-parse HEAD)" != "$(git -C "$PIN_DIR" rev-parse "origin/$default_branch")" ]; then
+    # Fully qualified: a local branch or tag named origin/<x> must never stand in for the remote ref.
+    local origin_ref="refs/remotes/origin/$default_branch"
+    if [ "$(git -C "$PIN_DIR" rev-parse HEAD)" != "$(git -C "$PIN_DIR" rev-parse --verify -q "$origin_ref^{commit}")" ]; then
       if [ "$check" = 1 ]; then
         say "pin checkout is behind origin/$default_branch"; drift=1
-      elif [ "$pin_branch" = "$default_branch" ] && git -C "$PIN_DIR" merge -q --ff-only "origin/$default_branch" 2>/dev/null; then
+      elif [ "$pin_branch" = "$default_branch" ] && git -C "$PIN_DIR" merge -q --ff-only "$origin_ref" 2>/dev/null; then
         say "pin checkout: fast-forwarded to $(git -C "$PIN_DIR" rev-parse --short HEAD)"
       else
         warn "pin checkout ($PIN_DIR) is on '$pin_branch' and can't fast-forward to origin/$default_branch — sessions read pins from its working tree. Using origin/$default_branch's pins; fix the checkout."
         mkdir -p "$FLEET_STATE"
-        git -C "$PIN_DIR" show "origin/$default_branch:.claude/settings.json" >"$FLEET_STATE/pins.settings.json"
+        git -C "$PIN_DIR" show "$origin_ref:.claude/settings.json" >"$FLEET_STATE/pins.settings.json"
         PIN_SETTINGS="$FLEET_STATE/pins.settings.json"; export PIN_SETTINGS   # carried across the re-execs below
       fi
     fi
@@ -163,6 +165,7 @@ main() {
     sync_non_claude_plugins "$check" "$engsys_target" "$primary_h" 0
   else
     sync_tmp
+    claude_config_report "$check" || drift=1
     [ "$check" = 1 ] || settings_guard_begin
     installed="$(user_plugins)"
     for i in "${!markets[@]}"; do
@@ -276,7 +279,26 @@ sync_tmp() { # call in the main shell (not in $(…)) so later calls share it; r
   mkdir -p "$SYNC_TMP/cwd" "$SYNC_TMP/snap"
   trap 'settings_guard_restore >/dev/null || true; sync_cleanup' EXIT
 }
-plugin_cli() { (cd "$SYNC_TMP/cwd" && claude plugin "$@"); }
+# The fleet's own Claude config dir when fleet.conf sets FLEET_CLAUDE_CONFIG_DIR (its user-scope plugins are
+# what every fleet session loads), else the account's ~/.claude; never an inherited CLAUDE_CONFIG_DIR.
+fleet_claude() {
+  if [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ]; then CLAUDE_CONFIG_DIR="$FLEET_CLAUDE_CONFIG_DIR" claude "$@"
+  else env -u CLAUDE_CONFIG_DIR claude "$@"; fi
+}
+plugin_cli() { (cd "$SYNC_TMP/cwd" && fleet_claude plugin "$@"); }
+# claude_config_report <check> → which config dir the fleet uses and whether it is logged in (no account
+# details, no token). A FLEET_CLAUDE_CONFIG_DIR that doesn't exist stops a sync: create it and log in first.
+claude_config_report() {
+  local dir="${FLEET_CLAUDE_CONFIG_DIR:-$HOME/.claude}" li
+  if [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] && [ ! -d "$FLEET_CLAUDE_CONFIG_DIR" ]; then
+    [ "$1" = 1 ] || fleet_die "FLEET_CLAUDE_CONFIG_DIR $FLEET_CLAUDE_CONFIG_DIR does not exist. One-time setup: mkdir -p it, log in with CLAUDE_CONFIG_DIR=$FLEET_CLAUDE_CONFIG_DIR claude, then fleet sync (fleet guide: a separate Claude config dir)"
+    say "claude config dir: $dir (FLEET_CLAUDE_CONFIG_DIR) does not exist"; return 1
+  fi
+  li="$( (cd "$SYNC_TMP/cwd" && fleet_claude auth status --json) 2>/dev/null | jq -r 'if .loggedIn == true then "logged in" elif .loggedIn == false then "NOT logged in" else "login unknown" end' 2>/dev/null || true)"
+  say "claude config dir: $dir${FLEET_CLAUDE_CONFIG_DIR:+ (FLEET_CLAUDE_CONFIG_DIR)}, ${li:-login unknown}"
+  [ "$li" != "NOT logged in" ] || warn "the fleet's Claude config dir is not logged in: CLAUDE_CONFIG_DIR=$dir claude, then /login"
+  return 0
+}
 user_plugins() { # "<id>\t<version>" for each user-scope install (the list also shows per-project installs)
   plugin_cli list --json | jq -r '.[] | select((.scope // "user") == "user") | [.id, (.version // "")] | @tsv'
 }

@@ -57,7 +57,7 @@ main() {
   local cur_engsys cur_inst="" engsys_repo inst_repo=""
   MAIN_SETTINGS="$FLEET_STATE/pin-main.settings.json"
   mkdir -p "$FLEET_STATE"
-  git -C "$PIN_DIR" show origin/main:.claude/settings.json >"$MAIN_SETTINGS" \
+  git -C "$PIN_DIR" show refs/remotes/origin/main:.claude/settings.json >"$MAIN_SETTINGS" \
     || fleet_die "$PIN_REPO has no .claude/settings.json on origin/main"
   cur_engsys="$(fleet_pin "$ENGSYS_MARKETPLACE" "$MAIN_SETTINGS")"
   engsys_repo="$(fleet_pin_repo "$ENGSYS_MARKETPLACE" "$MAIN_SETTINGS")"
@@ -159,7 +159,7 @@ release_instance() { # release_instance <vX.Y.Z|next> <owner/repo> → echoes th
       case "$(git -C "$FLEET_REPO" log -1 --format=%s "$base")" in
         'release: '*) base="$(git -C "$FLEET_REPO" rev-parse "$base^")" || fleet_die "can't resolve the base of $latest" ;;
       esac
-      if [ "$(git -C "$FLEET_REPO" rev-parse origin/main)" = "$base" ]; then
+      if [ "$(git -C "$FLEET_REPO" rev-parse refs/remotes/origin/main)" = "$base" ]; then
         say "nothing new on $repo main since $latest — pinning $latest"
         emit "$latest"; return 0
       fi
@@ -174,7 +174,7 @@ release_instance() { # release_instance <vX.Y.Z|next> <owner/repo> → echoes th
   ver="${want#v}"
   wt="$FLEET_STATE/wt-release"
   rm_worktree "$FLEET_REPO" "$wt"
-  must git -C "$FLEET_REPO" worktree add -q --detach "$wt" origin/main
+  must git -C "$FLEET_REPO" worktree add -q --detach "$wt" refs/remotes/origin/main
 
   # Stamp: marketplace version, then every plugin the marketplace lists (its source is a relative
   # directory holding .claude-plugin/plugin.json; an entry that carries its own version is stamped too).
@@ -214,7 +214,7 @@ release_instance() { # release_instance <vX.Y.Z|next> <owner/repo> → echoes th
   gh release create "$want" -R "$repo" --verify-tag --generate-notes \
     || fleet_die "tag $want is pushed but the GitHub release failed. Create it: gh release create $want -R $repo --verify-tag --generate-notes   then re-run"
   rm_worktree "$FLEET_REPO" "$wt"
-  say "released $INSTANCE_MARKETPLACE $want ($(git -C "$FLEET_REPO" rev-parse --short origin/main) + version stamp)"
+  say "released $INSTANCE_MARKETPLACE $want ($(git -C "$FLEET_REPO" rev-parse --short refs/remotes/origin/main) + version stamp)"
   emit "$want"
 }
 
@@ -249,12 +249,12 @@ open_pin_pr() { # open_pin_pr <cur_engsys> <new_engsys> <cur_inst> <new_inst> �
     fi
     say "$PIN_REPO#$pr (these pins) is already open — re-running its review"
     must git -C "$PIN_DIR" fetch -q origin "+refs/heads/$branch:refs/remotes/origin/$branch"
-    must git -C "$PIN_DIR" worktree add -q --detach "$wt" "origin/$branch"
+    must git -C "$PIN_DIR" worktree add -q --detach "$wt" "refs/remotes/origin/$branch"
     review_and_queue "$pr" "$wt" "$branch"
     emit "$pr"; return 0
   fi
 
-  must git -C "$PIN_DIR" worktree add -q -B "$branch" "$wt" origin/main
+  must git -C "$PIN_DIR" worktree add -q -B "$branch" "$wt" refs/remotes/origin/main
   s="$wt/.claude/settings.json"
   set_ref "$s" "$ENGSYS_MARKETPLACE" "$ne" || fleet_die "couldn't edit $s"
   [ -z "$INSTANCE_MARKETPLACE" ] || set_ref "$s" "$INSTANCE_MARKETPLACE" "$ni" || fleet_die "couldn't edit $s"
@@ -270,7 +270,7 @@ open_pin_pr() { # open_pin_pr <cur_engsys> <new_engsys> <cur_inst> <new_inst> �
     (cd "$wt" && bash -c "$PREPUSH_SETUP_CMD") || fleet_die "PREPUSH_SETUP_CMD failed in $wt"
   fi
   must git -C "$wt" commit -q -m "$title" -- .claude/settings.json   # only the settings file, whatever the setup step touched
-  files="$(git -C "$wt" diff --name-only origin/main HEAD)"
+  files="$(git -C "$wt" diff --name-only refs/remotes/origin/main HEAD)"
   [ "$files" = ".claude/settings.json" ] || fleet_die "the pin commit changed more than .claude/settings.json ($files) — inspect $wt"
   say "pushing $branch…"
   must git -C "$wt" push -q -u --force origin "$branch"   # our own generated branch; --force covers a re-run after a half-finished push
