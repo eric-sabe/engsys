@@ -1,29 +1,21 @@
 // monster-skill-rules.test.mjs — the monster skills keep every rule in their always-loaded SKILL.md.
 //
 // references/*.md files are optional reads and are not re-read on their own after a compaction, so a
-// rule that lives only there is a rule a long-running monster can lose. The fixture lists the
-// canonical v1.16.0 rules (the full Hard rules list plus the other rules that must stay always
-// loaded); each must appear, after normalization, in the current SKILL.md.
+// rule that lives only there is a rule a long-running monster can lose. The test diffs every rule
+// unit of the frozen v1.16.0 SKILL.md (tests/fixtures/v1.16.0/) against the current one: each must
+// appear in the current SKILL.md, or be listed in the reviewed fixture as moved to references (and
+// still be there verbatim) or deliberately superseded. The fixture also lists the full v1.16.0
+// hard-rules lists and the reworded rules that must stay in SKILL.md.
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { normalize, ruleUnits } from './lib/rule-units.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const FIXTURE = JSON.parse(fs.readFileSync(path.join(ROOT, 'tests/fixtures/monster-skill-rules.json'), 'utf8'));
 const SKILLS = ['merge-monster', 'maintenance-monster'];
-
-/** Markdown-insensitive comparison form: no emphasis/code marks, one space, straight quotes, lowercase. */
-export function normalize(text) {
-  return text
-    .replace(/[*`]/g, '')
-    .replace(/[“”]/g, '"')
-    .replace(/[‘’]/g, "'")
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toLowerCase();
-}
 
 const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
 const skillText = (skill) => read(`core/skills/${skill}/SKILL.md`);
@@ -39,7 +31,7 @@ describe('monster SKILL.md carries every rule (no rule lives only in references/
 
     test(`${skill}: fixture is non-trivial`, () => {
       assert.ok(spec.hard_rules.length >= 15, 'fixture must list the full v1.16.0 hard-rules set');
-      assert.ok(spec.always_loaded.length >= 5);
+      assert.ok(spec.reworded_required.length >= 5);
     });
 
     test(`${skill}: every v1.16.0 hard rule appears in SKILL.md`, () => {
@@ -48,10 +40,42 @@ describe('monster SKILL.md carries every rule (no rule lives only in references/
       assert.deepEqual(missing, [], `${skill}/SKILL.md lost hard rules`);
     });
 
-    test(`${skill}: every always-loaded rule appears in SKILL.md`, () => {
+    test(`${skill}: every reworded rule that must stay always-loaded appears in SKILL.md`, () => {
       const body = normalize(skillText(skill));
-      const missing = spec.always_loaded.filter((rule) => !body.includes(normalize(rule)));
+      const missing = spec.reworded_required.filter((rule) => !body.includes(normalize(rule)));
       assert.deepEqual(missing, [], `${skill}/SKILL.md lost always-loaded rules`);
+    });
+
+    test(`${skill}: every v1.16.0 rule unit is in SKILL.md or explicitly reviewed as moved/superseded`, () => {
+      const baseline = ruleUnits(read(spec.baseline));
+      assert.ok(baseline.length > 100, 'the unit extractor found the baseline rules');
+      const body = normalize(skillText(skill));
+      const ref = normalize(read(`core/skills/${skill}/${spec.reference}`));
+      const moved = new Map(spec.moved_to_references_ok.map((e) => [e.unit, e]));
+      const superseded = new Map(spec.superseded_ok.map((e) => [e.unit, e]));
+      const unaccounted = baseline.filter((u) => !body.includes(u) && !moved.has(u) && !superseded.has(u));
+      assert.deepEqual(unaccounted, [], `${skill}: v1.16.0 rules missing from SKILL.md with no reviewed entry`);
+      for (const [u, e] of moved) {
+        assert.ok(e.reason && e.reason.length > 20, `moved entry needs a reason: ${u}`);
+        assert.ok(ref.includes(u), `${skill}: rule listed as moved is no longer in ${spec.reference}: ${u}`);
+      }
+      for (const [u, e] of superseded) assert.ok(e.reason && e.reason.length > 20, `superseded entry needs a reason: ${u}`);
+      // No stale entries: every listed unit is a baseline unit that is actually absent from SKILL.md.
+      const base = new Set(baseline);
+      for (const u of [...moved.keys(), ...superseded.keys()]) {
+        assert.ok(base.has(u), `fixture lists a unit that is not in the v1.16.0 baseline: ${u}`);
+        assert.ok(!body.includes(u), `fixture lists a unit that SKILL.md carries again; drop it from the list: ${u}`);
+      }
+    });
+
+    test(`${skill}: dropping a carried rule from SKILL.md is caught (negative control)`, () => {
+      const baseline = ruleUnits(read(spec.baseline));
+      const body = normalize(skillText(skill));
+      const carried = baseline.find((u) => body.includes(u));
+      assert.ok(carried, 'at least one v1.16.0 unit is carried verbatim');
+      const gutted = body.split(carried).join('');
+      const listed = new Set([...spec.moved_to_references_ok, ...spec.superseded_ok].map((e) => e.unit));
+      assert.ok(!gutted.includes(carried) && !listed.has(carried));
     });
 
     test(`${skill}: a SKILL.md with a rule removed fails the check (negative control)`, () => {
@@ -84,9 +108,9 @@ describe('monster SKILL.md carries every rule (no rule lives only in references/
     });
   }
 
-  test('reground templates (compact, clear) re-read SKILL.md and the references it names', () => {
-    for (const t of ['post-compact-reground.sh.tmpl', 'post-clear-reground.sh.tmpl']) {
-      const body = read(`core/templates/${t}`);
+  test('reground surfaces (compact/clear hooks, /fleet-prime, CLAUDE.md template) re-read SKILL.md and the references it names', () => {
+    for (const t of ['core/templates/post-compact-reground.sh.tmpl', 'core/templates/post-clear-reground.sh.tmpl', 'core/commands/fleet-prime.md', 'core/templates/CLAUDE.md.tmpl']) {
+      const body = read(t).replace(/`/g, '');
       for (const skill of SKILLS) {
         assert.ok(body.includes(FIXTURE[skill].reference), `${t} must name ${skill}'s ${FIXTURE[skill].reference}`);
       }
