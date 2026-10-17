@@ -1358,7 +1358,9 @@ export async function runLiveHookSelfTest(ctx) {
     // 7. weather-check.mjs
     {
       const { run: runWeather } = await import(path.join(pluginDir, 'weather-check.mjs'));
-      const boardFile = path.join(tmpDir, 'board-cache.json');
+      // The hook reads only <FLEET_STATE>/fhd/board-cache.json (engsys v2.0.1).
+      const boardFile = path.join(tmpDir, 'fhd', 'board-cache.json');
+      fs.mkdirSync(path.dirname(boardFile), { recursive: true });
       const nowIso = new Date().toISOString();
       fs.writeFileSync(
         boardFile,
@@ -1367,7 +1369,7 @@ export async function runLiveHookSelfTest(ctx) {
           services: { github: { id: 'github', state: 'up' } },
         }),
       );
-      const wEnv = { ...baseEnv, ENGSYS_FHD_BOARD_CACHE: boardFile };
+      const wEnv = { ...baseEnv, FLEET_STATE: tmpDir };
       const silentOut = runWeather('session-start', wEnv);
       fs.writeFileSync(
         boardFile,

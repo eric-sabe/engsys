@@ -5,15 +5,19 @@
 //   - On `session-start`:
 //     * Unconfigured / no cache file -> silent (exit 0)
 //     * All services `up` -> silent (exit 0)
-//     * Board older than stale threshold (default 30m) ->
+//     * Board older than stale threshold (default 30m), or stamped in the future ->
 //       "Fleet Health Desk: weather unknown (board stale since <ts>)"
-//     * Any non-suppressed service `degraded` or `down` ->
-//       1-2 concise lines with operator-formatted timestamp and actionable advice.
+//     * Any non-suppressed service `degraded` or `down` -> 1-2 concise lines.
 //   - On `prompt` (UserPromptSubmit):
-//     * Compares current board fingerprint against `<cacheDir>/fhd-seen-<session>.json`
+//     * Compares current board fingerprint against `<FLEET_STATE>/fhd/fhd-seen-<session>.json`
 //       (scoped by $ENGSYS_SESSION).
 //     * Silent unless a non-suppressed service state changed since last seen by this session,
 //       in which case it emits a single-line update and records the new seen state.
+//
+// Trust boundary (engsys v2.0.1): the cache is read only from the launcher-set FLEET_STATE, never the
+// working tree, and the injected text is built only from a service id matching ^[a-z0-9-]{1,40}$, the
+// state enum, and the hold_merges / pause_claims booleans. No `advice`, `name` or other free text from
+// the board ever reaches session context.
 //
 // Zero external dependencies; imports only from within core/.
 
@@ -26,26 +30,27 @@ import {
   isBoardStale,
   boardFingerprint,
   diffBoards,
+  weatherCacheFile,
   DEFAULT_STALE_MINUTES,
+  SAFE_SERVICE_ID_RE,
+  BOARD_STATES,
 } from '../fleet/health/board.mjs';
 
 /**
- * Resolve the path to `board-cache.json` from environment variables or working directory.
+ * Path to the weather cache: `<FLEET_STATE>/fhd/board-cache.json`, or `null` outside a fleet session
+ * (FLEET_STATE unset or not absolute). Nothing else is consulted.
  */
-export function resolveWeatherCachePath(env = process.env, cwd = process.cwd()) {
-  if (env.ENGSYS_FHD_BOARD_CACHE) return path.resolve(env.ENGSYS_FHD_BOARD_CACHE);
-  if (env.ENGSYS_FHD_STATE_DIR) return path.resolve(env.ENGSYS_FHD_STATE_DIR, 'fhd', 'board-cache.json');
-  if (env.FLEET_STATE) return path.resolve(env.FLEET_STATE, 'fhd', 'board-cache.json');
-  if (env.FLEET_INSTANCE) return path.resolve(env.FLEET_INSTANCE, '.fleet', 'fhd', 'board-cache.json');
-  return path.resolve(cwd, '.fleet', 'fhd', 'board-cache.json');
+export function resolveWeatherCachePath(env = process.env) {
+  return weatherCacheFile(env);
 }
 
 function sessionSlug(env = process.env) {
   const raw = (env.ENGSYS_SESSION || 'default').trim();
-  return raw.replace(/[^A-Za-z0-9_.-]/g, '_') || 'default';
+  return raw.replace(/[^A-Za-z0-9_.-]/g, '_').slice(0, 80) || 'default';
 }
 
 function seenFilePath(cacheFile, env = process.env) {
+  // Beside the cache, which is always inside FLEET_STATE.
   return path.join(path.dirname(cacheFile), `fhd-seen-${sessionSlug(env)}.json`);
 }
 
@@ -58,20 +63,49 @@ export function loadCachedBoard(cacheFile) {
     const raw = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
     if (!raw || typeof raw !== 'object') return null;
     const board = raw.board && typeof raw.board === 'object' ? raw.board : raw;
-    if (!board || typeof board.services !== 'object') return null;
+    if (!board || !board.services || typeof board.services !== 'object') return null;
     return board;
   } catch {
     return null;
   }
 }
 
+/** The board's services reduced to the fields that may be injected; invalid entries are dropped. */
+function safeServices(board) {
+  const out = [];
+  for (const [id, s] of Object.entries(board?.services || {})) {
+    if (!SAFE_SERVICE_ID_RE.test(id) || !s || typeof s !== 'object') continue;
+    if (!BOARD_STATES.includes(s.state)) continue;
+    out.push({
+      id,
+      state: s.state,
+      suppressed: Boolean(s.suppressed_by),
+      hold_merges: s.hold_merges === true,
+      pause_claims: s.pause_claims === true,
+    });
+  }
+  return out;
+}
+
+function staleLimit(env, board, staleMinutes) {
+  const ok = (v) => Number.isSafeInteger(v) && v > 0 && v <= 10080;
+  if (ok(staleMinutes)) return staleMinutes;
+  const fromEnv = env.ENGSYS_FHD_STALE_MINUTES ? Number(env.ENGSYS_FHD_STALE_MINUTES) : NaN;
+  if (ok(fromEnv)) return fromEnv;
+  if (ok(board?.stale_minutes)) return board.stale_minutes;
+  return DEFAULT_STALE_MINUTES;
+}
+
+/** A timestamp rebuilt from the parsed date (never the board's own string). */
 function formatTimestamp(iso, env = process.env, now = new Date()) {
-  if (!iso) return 'unknown';
-  if (!isOperatorTimeConfigured(env)) return iso;
+  const ms = typeof iso === 'string' ? Date.parse(iso) : NaN;
+  if (!Number.isFinite(ms)) return 'unknown';
+  const canonical = new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  if (!isOperatorTimeConfigured(env)) return canonical;
   try {
-    return formatFromEnv(iso, env, { now });
+    return formatFromEnv(canonical, env, { now });
   } catch {
-    return iso;
+    return canonical;
   }
 }
 
@@ -82,36 +116,24 @@ export function formatWeatherSessionStart(
   board,
   { env = process.env, now = new Date(), staleMinutes } = {},
 ) {
-  if (!board || typeof board.services !== 'object') return '';
-  const limitMin =
-    staleMinutes ??
-    (env.ENGSYS_FHD_STALE_MINUTES ? Number(env.ENGSYS_FHD_STALE_MINUTES) : undefined) ??
-    board.stale_minutes ??
-    DEFAULT_STALE_MINUTES;
+  if (!board || !board.services || typeof board.services !== 'object') return '';
+  const limitMin = staleLimit(env, board, staleMinutes);
 
   const ts = formatTimestamp(board.last_updated, env, now);
   if (isBoardStale(board, { now, staleMinutes: limitMin })) {
     return `Fleet Health Desk: weather unknown (board stale since ${ts})`;
   }
 
-  const impacted = Object.values(board.services).filter(
-    (s) => (s.state === 'degraded' || s.state === 'down') && !s.suppressed_by,
+  const impacted = safeServices(board).filter(
+    (s) => (s.state === 'degraded' || s.state === 'down') && !s.suppressed,
   );
   if (impacted.length === 0) return '';
 
-  const summaries = impacted.map((s) => {
-    const label = s.id || s.name;
-    const state = String(s.state).toUpperCase();
-    const advice = s.advice ? ` — ${s.advice}` : '';
-    return `${label} is ${state}${advice}`;
-  });
-
+  const summaries = impacted.map((s) => `${s.id} is ${s.state.toUpperCase()}`);
   const line1 = `Fleet Health Desk (as of ${ts}): ${summaries.join('; ')}`;
-  const holdMerges = impacted.some((s) => s.hold_merges);
-  const pauseClaims = impacted.some((s) => s.pause_claims);
   const gates = [];
-  if (holdMerges) gates.push('hold merges');
-  if (pauseClaims) gates.push('pause new issue claims');
+  if (impacted.some((s) => s.hold_merges)) gates.push('hold merges');
+  if (impacted.some((s) => s.pause_claims)) gates.push('pause new issue claims');
 
   if (gates.length > 0) {
     return `${line1}\nWeather advisory: ${gates.join(', ')}.`;
@@ -127,14 +149,23 @@ export function formatWeatherPromptDelta(
   nextBoard,
   { env = process.env, now = new Date() } = {},
 ) {
-  if (!nextBoard || typeof nextBoard.services !== 'object') return '';
-  const changes = diffBoards(prevBoard, nextBoard).filter((c) => !c.suppressed_by);
+  if (!nextBoard || !nextBoard.services || typeof nextBoard.services !== 'object') return '';
+  const changes = diffBoards(prevBoard, nextBoard).filter(
+    (c) => !c.suppressed_by
+      && SAFE_SERVICE_ID_RE.test(String(c.service))
+      && BOARD_STATES.includes(c.from)
+      && BOARD_STATES.includes(c.to),
+  );
   if (changes.length === 0) return '';
 
   const ts = formatTimestamp(nextBoard.last_updated, env, now);
   const parts = changes.map((c) => {
-    const advice = c.advice ? ` (${c.advice})` : '';
-    return `${c.service} ${c.from} -> ${c.to}${advice}`;
+    // Gates from the board's own values, true only when they are literally boolean true.
+    const svc = nextBoard.services[c.service] || {};
+    const gates = [];
+    if (svc.hold_merges === true) gates.push('hold merges');
+    if (svc.pause_claims === true) gates.push('pause new issue claims');
+    return `${c.service} ${c.from} -> ${c.to}${gates.length ? ` (${gates.join(', ')})` : ''}`;
   });
   return `Fleet Health Desk update (as of ${ts}): ${parts.join('; ')}`;
 }
@@ -184,8 +215,9 @@ function wrapHookOutput(event, text, env = process.env) {
  * Execute the weather-check hook for `session-start` or `prompt`.
  * Returns the serialized hook output string (or `""` when silent).
  */
-export function run(event = 'session-start', env = process.env, { cwd = process.cwd(), now = new Date() } = {}) {
-  const cacheFile = resolveWeatherCachePath(env, cwd);
+export function run(event = 'session-start', env = process.env, { now = new Date() } = {}) {
+  const cacheFile = resolveWeatherCachePath(env);
+  if (!cacheFile) return '';
   const board = loadCachedBoard(cacheFile);
   if (!board) return '';
 
@@ -193,10 +225,7 @@ export function run(event = 'session-start', env = process.env, { cwd = process.
   const hookEventName = event === 'prompt' ? 'UserPromptSubmit' : 'SessionStart';
 
   if (event === 'prompt') {
-    const limitMin =
-      (env.ENGSYS_FHD_STALE_MINUTES ? Number(env.ENGSYS_FHD_STALE_MINUTES) : undefined) ??
-      board.stale_minutes ??
-      DEFAULT_STALE_MINUTES;
+    const limitMin = staleLimit(env, board);
     if (isBoardStale(board, { now, staleMinutes: limitMin })) {
       return '';
     }
