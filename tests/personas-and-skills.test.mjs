@@ -72,8 +72,8 @@ describe('Personas & Skills Contract Suite (CT-PS-01..CT-PS-09)', () => {
     assert.equal(personaFiles.length, 15, 'Expected exactly 15 persona markdown files');
     const allSkills = collectAllSkillNames();
     // Read-only design/critic personas per #150 (NA-PS-1). nyx and marcelo are NOT read-only: nyx runs
-    // repros and posts review comments, marcelo runs suites; both keep the full v1.16.0 tool set
-    // (no `tools:` line = every tool the session has).
+    // repros and posts review comments through Bash `gh` (an explicit list without send-capable MCP
+    // tools), marcelo runs suites and keeps the full v1.16.0 tool set (no `tools:` line).
     const readOnlyCritics = new Set([
       'gary',
       'melvin',
@@ -84,7 +84,7 @@ describe('Personas & Skills Contract Suite (CT-PS-01..CT-PS-09)', () => {
       'deandre',
       'steve',
     ]);
-    const fullToolPersonas = new Set(['nyx', 'marcelo']);
+    const fullToolPersonas = new Set(['marcelo']);
 
     for (const file of personaFiles) {
       const stem = path.basename(file, '.md');
@@ -119,6 +119,7 @@ describe('Personas & Skills Contract Suite (CT-PS-01..CT-PS-09)', () => {
       }
 
       if (stem === 'nyx') {
+        assert.deepEqual(frontmatter.tools, ['Read', 'Grep', 'Glob', 'Bash', 'Write', 'WebFetch', 'WebSearch'], 'nyx tool set');
         assert.match(frontmatter.model, /^claude-opus-/, 'nyx.md must pin full security model ID');
         assert.equal(frontmatter.security, 'true', 'nyx.md must keep security: true');
       }
