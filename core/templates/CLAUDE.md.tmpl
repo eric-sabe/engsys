@@ -113,6 +113,10 @@ Prefer the most direct, scriptable tool first; fall back to MCP, then manual:
 
 General rule: **gh CLI > MCP > manual/UI fallback.**
 
+- **Host OS & non-login shell toolchain:**
+  - **Non-login `PATH` (GUI/IDE harnesses like Antigravity/VS Code, `launchd`, `cron`):** Often omits Homebrew and user shims. If `node`, `pnpm`, `gh`, `jq`, `cr`/`coderabbit`, `grok`, `codex`, `copilot`, or `agy` is missing, prepend `PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"` (macOS) or `PATH="/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"` (Linux/WSL2).
+  - **macOS (BSD userland, `/bin/bash` 3.2) vs. Linux/WSL2 (GNU userland, `/bin/sh` = `dash`):** On macOS, `/bin/bash` is 3.2 (use `/opt/homebrew/bin/bash` for Bash 5+ features like `mapfile`/`declare -A`, or guard empty arrays under `set -u` with `${arr[@]+"${arr[@]}"}`) and userland is BSD (`sed -i ''`, `stat -f`, `date -r`/`-v`, `shasum -a 256`; never use empty ERE subexpressions like `(a|)` in BSD `grep -E`). On Linux/WSL2, invoke `bash` explicitly rather than `sh` when using `[[ ]]`, `pipefail`, or arrays.
+
 ## MCP servers
 
 {{MCP_SERVERS}}

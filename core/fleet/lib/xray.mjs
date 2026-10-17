@@ -24,6 +24,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { detectHostToolchain } from '../../lib/host-toolchain.mjs';
 import { hookTelemetryPath } from '../../lib/harness-io.mjs';
 import { fleetIdProblems, loadFederation, registryWarnings } from './federation.mjs';
 import { checkSettings } from './verify-wrappers.mjs';
@@ -671,6 +672,15 @@ export function inspectPinsAndTrust(ctx) {
     }
   }
 
+  // 1e. Host OS & shell toolchain
+  const tc = detectHostToolchain(ctx.env);
+  items.push({
+    name: 'Host OS & shell toolchain',
+    status: 'pass',
+    detail: `${tc.osLabel} ${tc.arch} (${tc.userland} userland, Node ${tc.nodeVersion}${tc.brewBash ? `, bash5=${tc.brewBash}` : ''}${tc.missingFromPath.length > 0 ? `, non-login PATH omits: ${tc.missingFromPath.join(':')}` : ', PATH complete'})`,
+    meta: tc,
+  });
+
   return { id: 1, title: 'Pins, Checkouts & Wrapper Trust Closure', items };
 }
 
@@ -860,6 +870,16 @@ export function inspectLaunchdAndLatches(ctx) {
   const primaryHarness = ctx.fleetConf.HARNESS || ctx.env.PRIMARY_HARNESS || ctx.env.HARNESS || 'claude';
   const harnessFallback = ctx.fleetConf.HARNESS_FALLBACK || ctx.env.HARNESS_FALLBACK || '';
   const quotaCooldownMin = ctx.fleetConf.QUOTA_COOLDOWN_MIN || ctx.env.QUOTA_COOLDOWN_MIN || '60';
+  const fbClis = harnessFallback
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((h) => {
+      const bin = h === 'copilot' ? 'copilot' : h === 'antigravity' || h === 'agy' ? 'agy' : 'claude';
+      const found = runCmd('which', [bin]);
+      return `${h}(${bin}=${found.ok ? 'ok' : 'missing'})`;
+    });
+  const fbCliSummary = fbClis.length > 0 ? ` [fallback-clis: ${fbClis.join(', ')}]` : '';
   const fbCandidates = [
     ctx.logDir ? path.join(ctx.logDir, 'harness.fallback') : null,
     ctx.fleetRepo ? path.join(ctx.fleetRepo, 'logs', 'fleet-supervisor', 'harness.fallback') : null,
@@ -876,14 +896,14 @@ export function inspectLaunchdAndLatches(ctx) {
     items.push({
       name: 'Harness & Seat-Quota Fallback',
       status: 'warn',
-      detail: `ACTIVE FALLBACK: HARNESS=${fbHarness} (fell back from ${fbPrimary} at ${fbSince} in ${fbWhere}; configured HARNESS_FALLBACK=${harnessFallback || 'none'}, cooldown=${quotaCooldownMin}m)`,
+      detail: `ACTIVE FALLBACK: HARNESS=${fbHarness} (fell back from ${fbPrimary} at ${fbSince} in ${fbWhere}; configured HARNESS_FALLBACK=${harnessFallback || 'none'}, cooldown=${quotaCooldownMin}m)${fbCliSummary}`,
       meta: { fallbackActive: true, fbHarness, fbSince, fbPrimary, fbWhere, fbUntil, fbFile },
     });
   } else {
     items.push({
       name: 'Harness & Seat-Quota Fallback',
       status: 'pass',
-      detail: `primary=${primaryHarness}, fallback=${harnessFallback || 'none'} (cooldown=${quotaCooldownMin}m, active=${primaryHarness})`,
+      detail: `primary=${primaryHarness}, fallback=${harnessFallback || 'none'} (cooldown=${quotaCooldownMin}m, active=${primaryHarness})${fbCliSummary}`,
       meta: { fallbackActive: false, primaryHarness, harnessFallback },
     });
   }

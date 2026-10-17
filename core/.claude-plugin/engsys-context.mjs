@@ -72,7 +72,10 @@ try {
   );
   let timeLine = '';
   try { timeLine = (await import(pathToFileURL(path.join(root, 'lib', 'operator-time.mjs')))).contextLine(process.env); } catch { /* conventions still go out */ }
-  const out = timeLine ? `${t.trim()}\n\n${timeLine}\n` : t.trim() + '\n';
+  let toolchainLine = '';
+  try { toolchainLine = (await import(pathToFileURL(path.join(root, 'lib', 'host-toolchain.mjs')))).contextLine(process.env); } catch { /* conventions still go out */ }
+  const tailLines = [toolchainLine, timeLine].filter(Boolean).join('\n');
+  const out = tailLines ? `${t.trim()}\n\n${tailLines}\n` : t.trim() + '\n';
   writeHookResult(emitSessionStartContext(harness, out, { jsonMode: true }), { hook: 'engsys-context', event: 'SessionStart' });
 } catch {
   process.exit(0);

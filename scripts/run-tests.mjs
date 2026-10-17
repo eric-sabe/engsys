@@ -31,6 +31,7 @@ const SUITES = [
   ["node --test core/fleet/lib/verify-wrappers.test.mjs"],
   ["node --test core/fleet/lib/federation-status.test.mjs"],
   ["node --test core/lib/operator-time.test.mjs"],
+  ["node --test core/lib/host-toolchain.test.mjs"],
   ["node --test core/.claude-plugin/engsys-context.test.mjs"],
   ["node --test core/fleet/lib/fleet-msg.test.mjs"],
   ["node --test core/fleet/lib/route.test.mjs"],
