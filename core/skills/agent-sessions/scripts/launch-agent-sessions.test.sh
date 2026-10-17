@@ -18,7 +18,7 @@ cat >"$T/bin/tmux" <<'SH'
 case "$1" in
   list-windows) exit 0 ;;                       # no windows: every name is free
   has-session) exit 1 ;;                        # no session yet
-  send-keys) shift; echo "send-keys $*" >>"$FAKE/actions" ;;
+  send-keys) [ -n "${TMUX_FAIL:-}" ] && exit 1; shift; echo "send-keys $*" >>"$FAKE/actions" ;;
 esac
 exit 0
 SH
@@ -129,6 +129,12 @@ if [ "$rc" -ne 0 ]; then ok "roster: exits non-zero when a line is refused"; els
 has "roster: names the skipped line" "$err" "SKIPPED: acme-mm"
 has "roster: the next line still launches" "$acts" "copilot --name acme-build"
 lacks "roster: the refused line launches nothing" "$acts" "acme-mm"
+
+echo "a failed tmux call is a failed launch, not a launched session"
+run claude "$BUILD" TMUX_FAIL=1
+if [ "$rc" -ne 0 ]; then ok "tmux failure: exits non-zero"; else no "tmux failure: exits non-zero" "rc=$rc"; fi
+has "tmux failure: names the failed call" "$err" "tmux send-keys failed for 'acme-build'"
+has "tmux failure: the line is reported skipped" "$err" "SKIPPED: acme-build"
 
 echo "translate_antigravity_flags fails hard on the security model"
 eval "$(sed -n -e '/^norm_model()/,/^}/p' -e '/^is_security_model()/,/^}/p' -e '/^translate_antigravity_flags()/,/^}/p' "$LAUNCH")"

@@ -178,6 +178,15 @@ describe('F4: security: true always renders the security tier', () => {
       assert.equal(render.renderAgentForHarness(md, 'claude', {}), md, 'untouched on Claude with no models:');
     });
   }
+  test('a CRLF security persona is still pinned and stubbed', () => {
+    const md = '---\r\nname: warden\r\ndescription: d\r\nmodel: opus\r\nsecurity: true\r\n---\r\n\r\nbody\r\n';
+    assert.equal(render.isSecurityPersona(md), true);
+    assert.equal(modelOf(render.renderAgentForHarness(md, 'claude', {})), 'claude-opus-4-8');
+    assert.equal(modelOf(render.renderAgentForHarness(md, 'copilot', {})), 'claude-opus-4.8');
+    assert.match(render.renderAntigravityAgent(md, {}), /^unsupported: true$/m);
+    assert.equal(modelOf(render.renderAgentForHarness(NYX.replace(/\n/g, '\r\n'), 'claude', {})), 'claude-opus-4-8');
+  });
+
   test('a security persona with no model: line gets the security model', () => {
     const md = '---\nname: w\ndescription: d\nsecurity: true\n---\n\nbody\n';
     assert.equal(modelOf(render.renderAgentForHarness(md, 'claude', {})), 'claude-opus-4-8');

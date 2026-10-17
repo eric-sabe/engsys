@@ -445,11 +445,11 @@ launch_one() {
     # Trailing colon matters: `-t session` (no colon) is a WINDOW target — the
     # session's current window — and the second launch dies with "index 0 in
     # use". `-t session:` means "next free index in this session".
-    tmux new-window -t "${TMUX_SESSION}:" -n "$name"
+    tmux new-window -t "${TMUX_SESSION}:" -n "$name" || { echo "error: tmux new-window failed for '$name'" >&2; return 1; }
   else
-    tmux new-session -d -s "$TMUX_SESSION" -n "$name"
+    tmux new-session -d -s "$TMUX_SESSION" -n "$name" || { echo "error: tmux new-session failed for '$name'" >&2; return 1; }
   fi
-  tmux send-keys -t "${TMUX_SESSION}:${name}" "$cmd" Enter
+  tmux send-keys -t "${TMUX_SESSION}:${name}" "$cmd" Enter || { echo "error: tmux send-keys failed for '$name'" >&2; return 1; }
   echo "launched: $name  ($workdir)"
 }
 

@@ -18,6 +18,7 @@ The config's `phase:` key is the single source of truth for which phase is live 
 
 > **Invoke each script as its own Bash call, by literal path.** No `cd`, no shell variables, no `&&`/`;` chaining, and no `mkdir`.
 
+0. **Harness check, before anything else**: the monsters are Claude-only, and the launcher refuses a maintenance monster on a non-Claude harness (`HARNESS=copilot` or `HARNESS=antigravity`). If you find yourself running on one anyway, do not take the baton and make no GitHub write: journal it locally, post one `fleet notify --level alert` (it needs no baton), and stop.
 1. Read the config and load prior `<state_dir>/state.md` / journal if present.
 2. **Take the baton before touching GitHub**: `<skill-dir>/scripts/mnt-baton.sh startup --repo <repo> --state-dir <state_dir>`. Act on `decision` (`acquired`/`resumed` → continue; `held_elsewhere`/`wait_self` → stand by: no heartbeat, no ledger comment, no Monitor, nothing that writes, and run `startup` again on each tick; `not_home` → stop, schedule no tick; `registry_error`/`error`/`protocol_unsupported` → never act, retry on tick).
 3. **Reconcile reality**: run `<skill-dir>/scripts/mnt-snapshot.sh --repo <repo> --default-branch <default_branch>` and rebuild the findings queue from live state — never trust a stale queue file over GitHub. Then read your cross-fleet inbox (multi-fleet, read-only): `node <engsys-root>/fleet/msg.mjs inbox <your session> --mark-read`. Read each pointer with `node <engsys-root>/fleet/msg.mjs read <url>` and re-read that PR or issue on GitHub. With `fp_policies:` configured, run `<skill-dir>/scripts/mnt-fp-candidates.sh --repo <repo> --config <config-file> --state-dir <state_dir> --all` once.
@@ -37,7 +38,6 @@ The config's `phase:` key is the single source of truth for which phase is live 
    ```
    (plus `--stale-min` / `--no-stale` as for the bus). `NOOP` → re-arm the ScheduleWakeup and stop: no `state.md` rewrite, no journal line. Delta lines → an ordinary wake (§ The loop) with those as its events. Exit 1 (`BATON_LOST`) → as `BATON_LOST` below. Exit 5 (`STANDBY`) → run `mnt-baton.sh startup` as in step 2.
    - **Slow surfaces sweep on their own cadence** (`watch.<surface>.poll`), not every tick: when one is due (its last run is in the journal), sweep it on that tick even after a `NOOP`. They are the package manager's audit, base-image staleness, and (when `watch.entra_app_credentials` or a similar app-credential block is configured) credential expiry: any cert/secret on a listed app ending within `warn_days` → **escalate** with the rotation runbook, never rotate it yourself. Post the weekly policy-disposition digest when one is due.
-   - **Non-Claude harnesses (`HARNESS=copilot` or `HARNESS=antigravity`)**: the launcher refuses to start the maintenance monster on them (it is the security lane, which stays on Claude Opus 4.8). If you find yourself running on one, stop and escalate; do not take the baton.
 
 ## The loop — on every wake (event or tick)
 

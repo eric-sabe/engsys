@@ -17,6 +17,7 @@ You are the merge baton-holder (`refs/engsys/batons/merge`). While you hold it, 
 
 > **Invoke each script as its own Bash call, by literal path.** No `cd`, no shell variables, no `&&`/`;` chaining, and no `mkdir`.
 
+0. **Harness check, before anything else**: the monsters are Claude-only, and the launcher refuses a merge monster on a non-Claude harness (`HARNESS=copilot` or `HARNESS=antigravity`). If you find yourself running on one anyway, do not take the baton and make no GitHub write: journal it locally, post one `fleet notify --level alert` (it needs no baton), and stop.
 1. Read the config and load prior `<state_dir>/state.md` / journal if present.
 2. **Take the baton before touching GitHub**: `<skill-dir>/scripts/mm-baton.sh startup --repo <repo> --state-dir <state_dir>`.
    - `acquired` / `resumed` (exit 0): continue to step 3 (`tookOver` + `notBefore`: no mutation before `notBefore`).
@@ -39,7 +40,6 @@ You are the merge baton-holder (`refs/engsys/batons/merge`). While you hold it, 
    <skill-dir>/scripts/mm-tick.sh --repo <repo> --state-dir <state_dir> --issue <ledger_issue> --config <config>
    ```
    (plus `--stale-min` / `--no-stale` as for the bus). `NOOP` → re-arm `ScheduleWakeup` and stop (no `state.md` rewrite, no journal line, no other call). Delta lines → process as wake. A `{"k":"gate","pr":N,…}` delta line (or any change to a gated PR) → run `gate-check.sh` for that PR's gate (§ Operator gates). Exit 1 (`BATON_LOST`) → § Lost baton; exit 5 (`STANDBY`) → `mm-baton.sh startup` as in step 2. **Restart the Monitor too if it died** (its end notice is its own wake).
-   - **Non-Claude harnesses (`HARNESS=copilot` or `HARNESS=antigravity`)**: the launcher refuses to start a merge monster on them (the fleet is Claude-only for the monsters). If you find yourself running on one, stop and escalate; do not take the baton.
 
 ## The loop — on every wake (event or tick)
 
