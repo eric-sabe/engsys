@@ -37,7 +37,15 @@
 # the pinned engsys release on GitHub (engsys#70). GitHub is asked at most once per VERIFY_MAX_AGE_MIN
 # minutes while the local files are unchanged. Anything but a pass (a mismatch, or a check that can't
 # run) alerts once per incident and holds every relaunch of those sessions (engsys#86 review H1);
-# running ones are left alone.
+# running ones are left alone: never killed, and their batons are never revoked or broken for it.
+#
+# Harness fallback (HARNESS_FALLBACK in fleet.conf, off by default): the conf also gets
+# SECURITY_SESSIONS (roster sessions whose 5th-field env file is a security* env, or whose flags name
+# __SECURITY_MODEL__) and, from fleet.conf,
+# GATE_ISSUE (FALLBACK_GATE_ISSUE, default: the fleet status issue) and the operator source
+# (FALLBACK_GATE_OPERATORS_TEAM or FALLBACK_GATE_OPERATORS). A switch to a non-Claude harness then waits
+# for an operator's approval of a gate request in GitHub; merge, maintain and security sessions never
+# switch (fleet-supervisor.sh header).
 #
 # Merge and maintain monsters (by their roster prompt, lib/host-roles.sh) get their role appended as
 # the 6th field (`acme-mm|7|60|||merge`): the supervisor then reads the role's holder from the github
@@ -117,6 +125,18 @@ fi
 if [ -n "${QUOTA_COOLDOWN_MIN:-}" ] && ! grep -q '^QUOTA_COOLDOWN_MIN=' "$conf"; then
   printf 'QUOTA_COOLDOWN_MIN=%s\n' "$QUOTA_COOLDOWN_MIN" >>"$conf"
 fi
+# Harness fallback guard rails (fleet-supervisor.sh "Seat quota"): security-tier sessions never switch,
+# and a switch waits for an operator gate in GitHub.
+# Always added (the supervisor adds up every SECURITY_SESSIONS line, so a template can't empty it).
+if [ -f "$FLEET_REPO/fleet/roster.tmpl" ]; then
+  sec="$(awk -F'|' '/^[a-z0-9][a-z0-9-]*\|/ && ($5 ~ /(^|\/)security[^\/]*$/ || $4 ~ /__SECURITY_MODEL__/) { printf "%s ", $1 }' "$FLEET_REPO/fleet/roster.tmpl" | sed 's/ $//')"
+  [ -z "$sec" ] || printf 'SECURITY_SESSIONS=%s\n' "$sec" >>"$conf"
+fi
+gate_issue="${FALLBACK_GATE_ISSUE:-}"
+[ -n "$gate_issue" ] || [ -z "$status_target" ] || gate_issue="$status_target"
+if [ -n "$gate_issue" ] && ! grep -q '^GATE_ISSUE=' "$conf"; then printf 'GATE_ISSUE=%s\n' "$gate_issue" >>"$conf"; fi
+if [ -n "${FALLBACK_GATE_OPERATORS_TEAM:-}" ] && ! grep -q '^GATE_OPERATORS_TEAM=' "$conf"; then printf 'GATE_OPERATORS_TEAM=%s\n' "$FALLBACK_GATE_OPERATORS_TEAM" >>"$conf"; fi
+if [ -n "${FALLBACK_GATE_OPERATORS:-}" ] && ! grep -q '^GATE_OPERATORS=' "$conf"; then printf 'GATE_OPERATORS=%s\n' "$FALLBACK_GATE_OPERATORS" >>"$conf"; fi
 # The expired-login alert (engsys#103) links the fleet's status issue, where the heartbeat says the same.
 if [ -n "$status_target" ] && ! grep -q '^STATUS_URL=' "$conf"; then
   printf 'STATUS_URL=https://github.com/%s/issues/%s\n' "${status_target%%#*}" "${status_target##*#}" >>"$conf"
