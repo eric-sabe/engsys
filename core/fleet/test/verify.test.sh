@@ -557,4 +557,10 @@ rc_is "with FLEET_CLAUDE_CONFIG_DIR set, --force reseeds it" 0
 eq "…from the allowlist again" "$(jq -c 'keys' "$CD/settings.json")" '["effortLevel","env","skipAutoPermissionPrompt","skipDangerousModePermissionPrompt"]'
 printf '%s\n' "$CONF0" >"$I/fleet/fleet.conf"; rm -f "$HOME/.claude/settings.json" "$HOME/.claude.json"
 
+echo "== PIN_SETTINGS from the caller's environment is never honoured"
+jq '.extraKnownMarketplaces.engsys.source.ref = "v9.9.9"' "$APP/.claude/settings.json" >"$T/other-pins.json"
+PIN_SETTINGS="$T/other-pins.json" run fleet verify
+rc_is "an inherited PIN_SETTINGS doesn't move the pin" 0
+has "…verify still checks the real pin" "$OUT" "match vendor/engsys@v1.0.0"
+
 finish verify.test.sh

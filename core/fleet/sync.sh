@@ -21,6 +21,9 @@
 #
 # Usage: sync.sh [--instance <dir>]           # sync
 #        sync.sh [--instance <dir>] --check   # report drift only; exit 1 if the host is behind the pins
+#        sync.sh [--instance <dir>] --no-jobs # never (re)load or unload launchd jobs: what `fleet verify
+#                                             # --auto-sync` runs from inside the supervisor job, which a
+#                                             # reload would kill. Changed job files are alerted instead.
 set -euo pipefail
 
 main() {
@@ -29,6 +32,7 @@ main() {
   while [ $# -gt 0 ]; do
     case "$1" in
       --check) check=1 ;;
+      --no-jobs) export FLEET_SYNC_NO_JOBS=1 ;; # carried across the re-execs below
       -h | --help) sed -n '2,/^set -/{/^set -/!p;}' "$0"; exit 0 ;;
       *) echo "fleet-sync: unknown arg: $1" >&2; exit 2 ;;
     esac
@@ -239,7 +243,12 @@ main() {
   case "$FEDERATION_FILE" in "$FLEET_REPO"/*) fed_rel=("${FEDERATION_FILE#"$FLEET_REPO"/}") ;; esac
   if [ -n "$prev_instance" ] && ! git -C "$FLEET_REPO" diff --quiet "$prev_instance" HEAD -- jobs/launchd fleet/fleet.conf fleet/roster.tmpl fleet/supervisor.conf.tmpl ${fed_rel[@]+"${fed_rel[@]}"} 2>/dev/null; then jobs_changed=1; fi
   if [ -n "$prev_engsys" ] && ! git -C "$ENGSYS_DIR" diff --quiet "$prev_engsys" HEAD -- core/fleet/jobs core/fleet/install-jobs.sh core/fleet/lib/host-roles.sh 2>/dev/null; then jobs_changed=1; fi
-  if [ "$jobs_changed" = 1 ]; then
+  if [ "${FLEET_SYNC_NO_JOBS:-0}" = 1 ]; then
+    if [ "$jobs_changed" = 1 ]; then
+      say "launchd job files changed, but this sync runs inside a fleet job (--no-jobs): not reloading them. Run: fleet install-jobs"
+      node "$FLEET_KIT_DIR/notify.mjs" --level alert --incident fleet-jobs-changed "Fleet on $(hostname -s 2>/dev/null || echo this host): the pin advanced and the launchd job files changed. The supervisor synced the host but did not reload its own jobs. Please run: fleet install-jobs" >&2 || true
+    fi
+  elif [ "$jobs_changed" = 1 ]; then
     if command -v launchctl >/dev/null 2>&1; then
       say "launchd templates changed — reinstalling jobs"
       bash "$FLEET_KIT_DIR/install-jobs.sh" --instance "$FLEET_REPO"

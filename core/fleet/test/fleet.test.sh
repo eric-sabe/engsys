@@ -407,6 +407,14 @@ has "engsys-side job template change reinstalls jobs" "$OUT" "launchd templates 
 has "marketplace repaired" "$OUT" "marketplace acme: v0.1.0 → v0.2.0"
 eq "plugins back" "$(json_names plugins '.[].id')" "core@engsys ctx@acme extra@acme"
 run fleet sync --check; rc_is "in sync again" 0
+# The same heal from inside a fleet job (what verify --auto-sync runs): never touches launchd.
+git -C "$ENGSYS_HOST" checkout -q v1.0.0
+: >"$FAKE/launchctl.log"
+run fleet sync --no-jobs
+rc_is "sync --no-jobs heals the checkout too" 0
+has "…says the job files changed and asks for install-jobs" "$OUT" "not reloading them. Run: fleet install-jobs"
+eq "…and never called launchctl" "$(cat "$FAKE/launchctl.log")" ""
+run fleet sync --check; rc_is "in sync again (no-jobs)" 0
 
 echo "== D2. FLEET_CLAUDE_CONFIG_DIR: sync installs the pinned plugins into the fleet's own Claude config dir"
 FCFG="$T/fleet-claude"; mkdir -p "$FCFG"
@@ -617,8 +625,10 @@ rc_is "behind main with a changed .claude file: a stale mismatch" 1
 has "…named stale" "$OUT" "stale      .claude/agents/helper.md differs from main"
 h0="$(git -C "$APPD" rev-parse HEAD)"; run fleet verify
 eq "…and plain verify doesn't touch the checkout" "$(git -C "$APPD" rev-parse HEAD)" "$h0"
+: >"$FAKE/launchctl.log"
 run fleet verify --auto-sync
 rc_is "--auto-sync on a clean checkout of main: syncs and passes" 0
+eq "…without touching launchd (it runs inside the supervisor's job)" "$(cat "$FAKE/launchctl.log")" ""
 has "…saying it auto-syncs" "$OUT" "auto-syncing (fleet sync, no restarts)"
 eq "…the checkout is at main now" "$(git -C "$APPD" rev-parse HEAD)" "$(git -C "$P" rev-parse HEAD)"
 behind notes.txt; git -C "$APPD" pull -q --ff-only origin main   # a tracked, ordinary file to dirty

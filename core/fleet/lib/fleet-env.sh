@@ -45,6 +45,10 @@ unset FLEET_ID FEDERATION_FILE FLEET_INSTANCE_REPO ROLES ROSTER_EXCLUDE OPERATOR
 # So do the fleet's Claude config dir and the integrity check's user-plugin allowlist: what `fleet verify`
 # accepts must come from the operator's config files, never from whoever ran the command.
 unset FLEET_CLAUDE_CONFIG_DIR VERIFY_ALLOWED_USER_PLUGINS VERIFY_ALLOWED_USER_HOOKS VERIFY_ALLOWED_USER_FILES
+# PIN_SETTINGS (where the pins are read) too: only a conf file, or sync's own pins copy in .fleet/
+# (FLEET_SYNC_PINS, set by sync.sh across its re-execs), may point it somewhere else.
+_pin_settings_sync="${FLEET_SYNC_RESUMED:+${PIN_SETTINGS:-}}"
+unset PIN_SETTINGS
 fleet_load_conf "$FLEET_REPO/fleet/fleet.conf"
 [ -n "${FLEET_ORG:-}" ] || fleet_die "FLEET_ORG is not set in $FLEET_REPO/fleet/fleet.conf"
 [ -f "$HOME/.config/$FLEET_ORG/fleet.local.conf" ] && fleet_load_conf "$HOME/.config/$FLEET_ORG/fleet.local.conf"
@@ -155,6 +159,11 @@ fleet_render() { # fleet_render <template> <dest> [mode]
 # --- Pins --------------------------------------------------------------------------------------
 # Single source of truth: the pin repo's .claude/settings.json (the working tree of PIN_DIR — what
 # the sessions load). Either ref may be forced through the environment or fleet.local.conf.
+# A sync re-exec may carry its own pins copy, and only one under this instance's .fleet/.
+if [ -z "${PIN_SETTINGS:-}" ] && [ -n "$_pin_settings_sync" ] && [ "$_pin_settings_sync" = "$FLEET_STATE/pins.settings.json" ]; then
+  PIN_SETTINGS="$_pin_settings_sync"
+fi
+unset _pin_settings_sync
 PIN_SETTINGS="${PIN_SETTINGS:-$PIN_DIR/.claude/settings.json}"
 export PIN_SETTINGS
 

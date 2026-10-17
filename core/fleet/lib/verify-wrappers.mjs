@@ -783,18 +783,26 @@ export function checkSettings(opts) {
 //   3. every auto-loaded file on disk (.claude/**, CLAUDE.md files, .mcp.json, what a tracked symlink
 //      among them points at, every settings-command target) must be a blob of HEAD's tree (from the
 //      API) with the same content, and every such blob of HEAD must be on disk. Claude Code's own
-//      runtime state is skipped (PROJECT_RUNTIME_EXEMPT, matched case-insensitively), and so is an
-//      untracked file git ignores (.gitignore or .git/info/exclude): runtime state, not reviewed content.
-//      Someone on the host who edits the ignore files can hide a file this way; like repointing a local
-//      ref, a local writer is out of scope (the tracked .gitignore itself is compared at HEAD);
+//      runtime state is skipped (PROJECT_RUNTIME_EXEMPT: an explicit list, matched case-folded). Git
+//      ignore rules never exempt a file: a session can write .git/info/exclude;
 //   4. when HEAD is behind, every one of those paths must also be identical at the tip (a reviewed
 //      but superseded hook or memory file is a mismatch); a lag in other code is only a warning.
 
-/** Paths Claude Code itself writes and never loads as configuration. */
+/**
+ * Paths under .claude/ that Claude Code itself writes and never loads as configuration: an explicit
+ * list, matched case-folded. Ignore rules (.gitignore, .git/info/exclude) never exempt anything: a
+ * session can write them. Memory files and .claude/{commands,agents,skills,rules,hooks} are never on it.
+ * (.claude/scheduled_tasks.json is not exempt either: it carries prompts; see SCHEDULED_TASKS.)
+ */
 export const PROJECT_RUNTIME_EXEMPT = {
-  files: ['.claude/settings.local.json', '.claude/scheduled_tasks.lock'],
-  dirs: ['.claude/worktrees/'],
+  files: ['.claude/settings.local.json', '.claude/scheduled_tasks.lock', '.claude/agent-registry.json',
+    '.claude/first-run', '.claude/assistant-daemon-state.json', '.claude/agent-memory-local'],
+  dirs: ['.claude/worktrees/', '.claude/checkpoints/', '.claude/mailbox/', '.claude/routines/.state/',
+    '.claude/agent-memory-local/'],
 };
+/** Claude Code's scheduled tasks: prompts it runs on its own. Present and non-empty, it needs the operator allowlist. */
+export const SCHEDULED_TASKS = '.claude/scheduled_tasks.json';
+const NEVER_EXEMPT_RE = /^\.claude\/(commands|agents|skills|rules|hooks)\//;
 /** Memory files Claude Code loads from any directory, and the project MCP config at the root. */
 const MEMORY_NAMES = ['claude.md', 'claude.local.md'];
 const MCP_FILE = '.mcp.json';
@@ -842,6 +850,10 @@ export function hookTargets(command, projectDir, { home = os.homedir() } = {}) {
 const fold = (p) => String(p).normalize('NFC').toLowerCase();
 export function isExempt(rel) {
   const r = fold(rel);
+  if (NEVER_EXEMPT_RE.test(r) || MEMORY_NAMES.includes(r.split('/').pop())) {
+    // memory files are exempt only inside .claude/worktrees/ (other checkouts, never loaded from here)
+    return r.startsWith('.claude/worktrees/');
+  }
   return PROJECT_RUNTIME_EXEMPT.files.includes(r) || PROJECT_RUNTIME_EXEMPT.dirs.some((d) => r.startsWith(d));
 }
 /** Is a repo path one of the files Claude Code loads on its own (memory files, .mcp.json, .claude/**)? */
@@ -909,7 +921,8 @@ export function projectLocalState(projectDir, { git = hermeticGit } = {}) {
       const abs = path.join(absDir, e.name);
       const inClaude = fold(rel).startsWith('.claude/') || fold(rel) === '.claude';
       if (e.isDirectory()) {
-        if (isExempt(`${rel}/`)) continue;
+        // only .claude/worktrees/ (other checkouts) is not walked: in any other exempt dir a memory file still counts
+        if (fold(`${rel}/`).startsWith('.claude/worktrees/')) continue;
         if (!inClaude && MEMORY_SKIP_DIRS.includes(e.name)) continue;
         visit(abs, rel);
       } else if (fold(rel) === '.claude') {
@@ -920,19 +933,6 @@ export function projectLocalState(projectDir, { git = hermeticGit } = {}) {
     }
   };
   visit(root, '');
-  // Untracked files git ignores (.gitignore, .git/info/exclude) are runtime state, not reviewed content:
-  // Claude Code's own scheduled-task, checkpoint and mailbox files, a stray tmp/claude.md. A tracked file
-  // is never "ignored" here (check-ignore consults the index), so only untracked ones can be skipped.
-  const ignored = [];
-  const candidates = Object.keys(files).filter((r) => r !== '.claude/');
-  if (candidates.length) {
-    let out = '';
-    try { out = git(root, ['check-ignore', '--stdin', '-z'], { input: candidates.join('\0') + '\0' }); } catch (e) {
-      out = e && typeof e.stdout === 'string' ? e.stdout : ''; // exit 1: none ignored
-      if (e && e.status !== 1) throw new Unverified(`git check-ignore failed in the pin checkout ${root}`);
-    }
-    ignored.push(...out.split('\0').filter(Boolean));
-  }
   const targets = {};
   let cfg = null;
   try { cfg = JSON.parse(fs.readFileSync(path.join(root, '.claude', 'settings.json'), 'utf8')); } catch { cfg = null; }
@@ -949,7 +949,20 @@ export function projectLocalState(projectDir, { git = hermeticGit } = {}) {
       targets[rel] = blobSha(fs.readFileSync(abs));
     }
   }
-  return { head, files, links, linked, targets, ignored, problems: [...new Set(problems)] };
+  // The scheduled-task file is judged on its own (it carries prompts): absent or empty passes; otherwise
+  // the operator allowlists its content (VERIFY_ALLOWED_USER_FILES).
+  let scheduledTasks = null;
+  for (const k of Object.keys(files)) {
+    if (fold(k) !== SCHEDULED_TASKS) continue;
+    const buf = files[k] === 'not-a-file' ? null : fs.readFileSync(path.join(root, k));
+    delete files[k];
+    if (buf === null) { scheduledTasks = { rel: k, empty: false, hash: 'not-a-file' }; continue; }
+    const txt = buf.toString('utf8').trim();
+    let empty = txt === '';
+    if (!empty) { try { const j = JSON.parse(txt); empty = (Array.isArray(j) && !j.length) || (j && typeof j === 'object' && !Array.isArray(j) && !Object.keys(j).length) || (Array.isArray(j?.tasks) && !j.tasks.length && Object.keys(j).length === 1); } catch { /* not empty */ } }
+    scheduledTasks = { rel: k, empty, hash: crypto.createHash('sha256').update(`engsys-user-file-v1\0${k}\0`).update(buf).digest('hex') };
+  }
+  return { head, files, links, linked, targets, scheduledTasks, problems: [...new Set(problems)] };
 }
 
 /** A commit's whole tree from the API. → Map<path, {sha, mode}> of its blobs (a truncated tree is "not verified") */
@@ -993,15 +1006,13 @@ export async function verifyProjectTrust(local, { repo, api }) {
 
   if (local.files['.claude/'] === 'not-a-file') problems.push('claude-dir .claude is not a directory');
   for (const [rel] of want) {
-    if (!isAutoLoaded(rel)) continue;
+    if (!isAutoLoaded(rel) || fold(rel) === SCHEDULED_TASKS) continue;
     checked.add(rel);
     if (!(rel in local.files)) problems.push(`missing    ${rel} (tracked at HEAD)`);
   }
-  const ignoredSet = new Set(local.ignored || []);
   for (const [rel, have] of Object.entries(local.files)) {
     if (rel === '.claude/') continue;
     const w = want.get(rel);
-    if (!w && ignoredSet.has(rel)) continue; // untracked and ignored by git: runtime state
     checked.add(rel);
     if (have === 'not-a-file') problems.push(`not-a-file ${rel}`);
     else if (!w) problems.push(`untracked  ${rel} (not in HEAD)`);
@@ -1314,6 +1325,46 @@ export function parseArgs(argv) {
   return a;
 }
 
+/** Problem categories for the alert, in the order they are shown. */
+const PROBLEM_GROUPS = [
+  { key: 'plugin', label: 'engsys plugin or host kit', integrity: true },
+  { key: 'pin', label: 'pin checkout', integrity: true },
+  { key: 'plugins', label: 'unpinned user-scope plugins', userScope: true },
+  { key: 'mcp', label: 'MCP servers', userScope: true },
+  { key: 'files', label: 'user-scope skills/agents/files', userScope: true },
+  { key: 'commands', label: 'user-scope hooks and commands', userScope: true },
+  { key: 'settings', label: 'settings' },
+  { key: 'memory', label: 'memory files above the pin checkout' },
+];
+function problemGroup(l) {
+  if (/^user-cfg\s+MCP server /.test(l)) return 'mcp';
+  if (/^user-cfg /.test(l)) return 'files';
+  if (/^settings .* enables unpinned plugin /.test(l)) return 'plugins';
+  if (/^settings .* (a hook|\S+) runs a command/.test(l)) return 'commands';
+  if (/^settings /.test(l)) return 'settings';
+  if (/^memory /.test(l)) return 'memory';
+  if (/^(release|version|no-path|two-paths|disabled|shadowed) /.test(l)) return 'plugin';
+  if (/^\S+\s+\//.test(l)) return 'plugin'; // an absolute path: the plugin cache or the host kit
+  return 'pin';
+}
+/** → [{ label, count, userScope }] for the categories present */
+export function groupProblems(lines) {
+  const n = new Map();
+  for (const l of lines) { const k = problemGroup(l); n.set(k, (n.get(k) || 0) + 1); }
+  return PROBLEM_GROUPS.filter((g) => n.has(g.key)).map((g) => ({ label: g.label, count: n.get(g.key), userScope: Boolean(g.userScope) }));
+}
+/**
+ * The alert latch's fingerprint: categories and counts, plus the exact paths (content hashes stripped) of
+ * integrity problems (the plugin, the host kit, the pin checkout). A user-scope skill sync that rewrites
+ * files then doesn't re-alert every tick; a newly tampered path always does.
+ */
+export function problemFingerprint(lines) {
+  const parts = groupProblems(lines).map((g) => `${g.label}=${g.count}`);
+  const integrity = new Set(PROBLEM_GROUPS.filter((g) => g.integrity).map((g) => g.key));
+  for (const l of lines) if (integrity.has(problemGroup(l))) parts.push(l.replace(/\b[0-9a-f]{40,64}\b/g, '#'));
+  return crypto.createHash('sha1').update(parts.join('\n')).digest('hex');
+}
+
 /** The CLI, with its effects injectable for tests. → exit code. */
 export async function run(argv, {
   fetch = fetchRelease,
@@ -1330,7 +1381,10 @@ export async function run(argv, {
     const sorted = [...new Set(lines)].sort();
     out(`verify: MISMATCH against ${target}, ${sorted.length} problem(s):`);
     for (const l of sorted) out(`  ${l}`);
-    out(`fingerprint: ${crypto.createHash('sha1').update(sorted.join('\n')).digest('hex')}`);
+    const groups = groupProblems(sorted);
+    out(`summary: ${sorted.length} problems: ${groups.map((g) => `${g.label} (${g.count})`).join(', ')}`);
+    if (groups.some((g) => g.userScope)) out('hint: set up a separate fleet config dir: fleet config-dir init (see fleet guide § 6.1)');
+    out(`fingerprint: ${problemFingerprint(sorted)}`);
     if (a.cache) { try { fs.rmSync(a.cache, { force: true }); } catch { /* best effort */ } }
     return 1;
   };
@@ -1415,6 +1469,12 @@ export async function run(argv, {
     }
     problems.push(...pt.problems);
     warnings = pt.warnings;
+    const st = project.scheduledTasks;
+    if (st && !st.empty) {
+      const allowedF = parseAllowedFiles(a.allowedUserFiles);
+      if (st.hash !== 'not-a-file' && allowedF.has(st.hash)) out(`verify: info allowed    ${st.rel} ${st.hash} (VERIFY_ALLOWED_USER_FILES)`);
+      else problems.push(`sched      ${st.rel} holds scheduled prompts, not on VERIFY_ALLOWED_USER_FILES (sha256 ${st.hash})`);
+    }
   }
   warnLines(warnings);
   if (problems.length) return mismatch(problems);

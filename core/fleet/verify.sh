@@ -30,8 +30,9 @@
 #                      engsys-ref-forced             ENGSYS_REF forced away from the pin (latch: .fleet/verify-ref-forced.alerted)
 #   --auto-sync      (the supervisor's tick) when the only problems are `stale` (the pin checkout is behind
 #                    the default branch and files the sessions load changed there) and PIN_DIR is on the
-#                    default branch with a clean tracked tree, run `fleet sync` once (fast-forward + plugin
-#                    reconcile, no restarts) and verify again. Dirty, diverged or another branch: the
+#                    default branch with a clean tracked tree, run `fleet sync --no-jobs` once (fast-forward +
+#                    plugin reconcile, no restarts, never a launchd reload: changed job files are alerted)
+#                    and verify again. Dirty, diverged or another branch: the
 #                    mismatch stands, alerted as "behind main", not as tampering.
 #   --max-age <min>  reuse a pass from the last <min> minutes while the local files are unchanged (the
 #                    supervisor's throttle; cache: .fleet/verify-wrappers.json). `fleet launch` never
@@ -177,10 +178,14 @@ if [ "$only_stale" = 1 ] && [ "$auto_sync" = 1 ]; then
   if [ "$pin_branch" != "$def_branch" ]; then sync_why="the pin checkout is on '${pin_branch:-a detached HEAD}', not $def_branch"
   elif [ -n "$(git -C "$PIN_DIR" status --porcelain --untracked-files=no 2>/dev/null || echo dirty)" ]; then sync_why="the pin checkout has uncommitted changes to tracked files"
   elif [ -n "$(git -C "$PIN_DIR" status --porcelain -- .claude ':(exclude,icase).claude/settings.local.json' \
-      ':(exclude,icase).claude/scheduled_tasks.lock' ':(exclude,icase).claude/worktrees' 2>/dev/null || echo dirty)" ]; then sync_why="the pin checkout's .claude/ has untracked files"
+      ':(exclude,icase).claude/scheduled_tasks.lock' ':(exclude,icase).claude/worktrees' ':(exclude,icase).claude/checkpoints' \
+      ':(exclude,icase).claude/mailbox' ':(exclude,icase).claude/routines/.state' ':(exclude,icase).claude/agent-registry.json' \
+      ':(exclude,icase).claude/agent-memory-local' ':(exclude,icase).claude/first-run' \
+      ':(exclude,icase).claude/assistant-daemon-state.json' 2>/dev/null || echo dirty)" ]; then sync_why="the pin checkout's .claude/ has untracked files"
   else
     echo "fleet verify: the pin checkout is behind $def_branch and files the sessions load changed there: auto-syncing (fleet sync, no restarts)"
-    if bash "$FLEET_KIT_DIR/sync.sh" --instance "$FLEET_REPO" </dev/null >&2; then
+    # --no-jobs: this runs inside the supervisor's own launchd job, which a job reload would kill.
+    if bash "$FLEET_KIT_DIR/sync.sh" --instance "$FLEET_REPO" --no-jobs </dev/null >&2; then
       [ -z "${plist:-}" ] || rm -f "$plist"
       reargs=(--instance "$FLEET_REPO"); [ "$alert" = 0 ] || reargs+=(--alert); [ -z "$max_age" ] || reargs+=(--max-age "$max_age")
       exec bash "$FLEET_KIT_DIR/verify.sh" "${reargs[@]}"   # once: the re-run has no --auto-sync
@@ -208,8 +213,10 @@ if [ "$alert" = 1 ]; then
 $lines
 Details: fleet verify" && printf '%s\n' "$fp|$sync_why" >"$LATCH"
       elif [ "$only_stale" = 0 ] && [ "$(cat "$LATCH" 2>/dev/null)" != "$fp" ]; then
-        lines="$(sed -n 's/^  \(.*\)$/\1/p' <<<"$out" | head -n 8)"
-        notify --level alert --incident wrapper-integrity "Plugin check on $host: what the merge and maintain monsters load does not match $repo@$ref (the engsys plugin and host kit), $PIN_REPO's default branch on GitHub (the pin checkout's .claude/ and hook scripts), or the allowed Claude settings in $claude_cfg, so it may have been changed on this host. Merge and maintain sessions will not be launched or relaunched here until it matches. Running sessions and their batons were left as they are: please check them and stop any you don't trust. Then fix what differs: for plugin files, reinstall (from a directory outside any project: claude plugin uninstall --scope user engsys@$ENGSYS_MARKETPLACE, delete its cache directory, then fleet sync); for the pin checkout, restore it to GitHub's main; for a user-scope plugin, remove it or list it in VERIFY_ALLOWED_USER_PLUGINS. What differs:
+        summary="$(sed -n 's/^summary: //p' <<<"$out" | tail -1)"
+        hint="$(sed -n 's/^hint: //p' <<<"$out" | tail -1)"
+        lines="$(sed -n 's/^  \(.*\)$/\1/p' <<<"$out" | head -n 5)"
+        notify --level alert --incident wrapper-integrity "Plugin check on $host: ${summary:-a mismatch}. What the merge and maintain monsters load does not match $repo@$ref (the engsys plugin and host kit), $PIN_REPO's default branch on GitHub (the pin checkout), or the allowed Claude settings in $claude_cfg. Merge and maintain sessions will not be launched or relaunched here until it matches; running sessions and their batons were left as they are.${hint:+ For the user-scope items: $hint.} To fix: for plugin files, reinstall (claude plugin uninstall --scope user engsys@$ENGSYS_MARKETPLACE from outside any project, delete its cache directory, fleet sync); for the pin checkout, restore it to GitHub's main and check who changed it; for a user-scope item, remove it or allowlist it (VERIFY_ALLOWED_USER_PLUGINS / _HOOKS / _FILES). First of them:
 $lines
 Details: fleet verify" && printf '%s\n' "$fp" >"$LATCH"
       fi ;;

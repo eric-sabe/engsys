@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import {
   PLUGIN_SUBDIR, IN_USE, blobSha, cachePath, scanRoot, localState, parseTree, compare, selectInstalls, run, Unverified,
   checkSettingsDetailed, isProtectedEnvKey, parseAllowedPlugins, parseAllowedHooks, isExempt, projectLocalState, verifyProjectTrust, hookTargets,
-  scanHost, compareHost, ENGSYS_HOST_TREES, userCommandHash, parseAllowedFiles, parentMemoryFiles,
+  scanHost, compareHost, ENGSYS_HOST_TREES, userCommandHash, parseAllowedFiles, parentMemoryFiles, groupProblems, problemFingerprint,
 } from './verify-wrappers.mjs';
 import { WRAPPERS } from '../../.claude-plugin/singleton-write-guard.mjs';
 import { hermeticGit } from '../../lib/git-env.mjs';
@@ -191,7 +191,12 @@ test('CLI: 0 untouched, 1 tampered (with a fingerprint per mismatch), 3 when Git
   fs.appendFileSync(cachePath(root, 'core/skills/maintenance-monster/scripts/mnt-act.sh'), '# y\n');
   c = capture();
   await run(args(plugins), { fetch, out: c.out });
-  assert.notEqual(c.text().match(/^fingerprint: ([0-9a-f]{40})$/m)[1], fp1, 'a different mismatch has a different fingerprint');
+  assert.equal(c.text().match(/^fingerprint: ([0-9a-f]{40})$/m)[1], fp1, 'the same path changed again: same incident');
+  fs.appendFileSync(cachePath(root, 'core/skills/merge-monster/scripts/mm-act.sh'), '# z\n');
+  c = capture();
+  await run(args(plugins), { fetch, out: c.out });
+  assert.notEqual(c.text().match(/^fingerprint: ([0-9a-f]{40})$/m)[1], fp1, 'a newly tampered path has a different fingerprint');
+  fs.copyFileSync(path.join(REPO, 'core/skills/merge-monster/scripts/mm-act.sh'), cachePath(root, 'core/skills/merge-monster/scripts/mm-act.sh'));
 
   c = capture();
   assert.equal(await run(args(plugins), { fetch: async () => { throw new Unverified('gh api failed: connect ETIMEDOUT'); }, out: c.out }), 3);
@@ -859,6 +864,29 @@ test('userCommandHash: interpreter path and every file are pinned; anything unre
   }
 });
 
+test('run(): a non-empty scheduled_tasks.json is a mismatch unless VERIFY_ALLOWED_USER_FILES lists it', async () => {
+  const root = makeCache();
+  const { origin, pin } = pinRepo();
+  const gh = fakeGitHub(origin);
+  const plugins = pluginList([userEntry(root)]);
+  const go = async (allowed = '') => {
+    const c = capture();
+    const code = await run(['--repo', 'eric-sabe/engsys', '--tag', 'v9.9.9', '--plugin-id', 'engsys@engsys', '--project-dir', pin, '--plugins', plugins,
+      '--check-settings', '--pin-repo', 'acme/app', ...(allowed ? ['--allowed-user-files', allowed] : [])],
+    { fetch: async () => release, projectApi: gh.api, out: c.out });
+    return { code, text: c.text() };
+  };
+  assert.equal((await go()).code, 0, 'positive control: absent');
+  fs.writeFileSync(path.join(pin, '.claude', 'scheduled_tasks.json'), JSON.stringify([{ prompt: 'x' }]));
+  let r = await go();
+  assert.equal(r.code, 1);
+  const h = /scheduled prompts, not on VERIFY_ALLOWED_USER_FILES \(sha256 ([0-9a-f]{64})\)/.exec(r.text)?.[1];
+  assert.ok(h, r.text);
+  r = await go(h);
+  assert.equal(r.code, 0, r.text);
+  assert.match(r.text, /info allowed .*scheduled_tasks\.json/);
+});
+
 test('run(): --pin-repo checks the pin checkout against GitHub and caches only a pass', async () => {
   const root = makeCache();
   const { origin, pin } = pinRepo();
@@ -971,32 +999,51 @@ test('memory files above the pin checkout, up to $HOME, are a mismatch', () => {
   assert.equal(r.problems.filter((l) => /^memory\s+.* above the pin checkout/.test(l)).length, 3);
 });
 
-test('pin checkout: untracked files git ignores are runtime state; untracked files it does not ignore still mismatch', async () => {
+test('pin checkout: an explicit runtime list is exempt; ignore rules never exempt anything', async () => {
   const { origin, pin } = pinRepo();
-  fs.writeFileSync(path.join(origin, '.gitignore'), 'tmp/\n');
-  gitc(origin, ['add', '-A']); gitc(origin, ['commit', '-q', '-m', 'ignore tmp']);
-  gitc(pin, ['pull', '-q', '--ff-only']);
   const gh = fakeGitHub(origin);
-  fs.appendFileSync(path.join(pin, '.git', 'info', 'exclude'), '.claude/scheduled_tasks.json\n.claude/checkpoints/\n.claude/agent-registry.json\n');
-  fs.writeFileSync(path.join(pin, '.claude', 'scheduled_tasks.json'), '[]');
-  fs.mkdirSync(path.join(pin, '.claude', 'checkpoints'), { recursive: true });
-  fs.writeFileSync(path.join(pin, '.claude', 'checkpoints', 'c1.json'), '{}');
-  fs.writeFileSync(path.join(pin, '.claude', 'agent-registry.json'), '{}');
-  fs.mkdirSync(path.join(pin, 'tmp', 'x'), { recursive: true });
-  fs.writeFileSync(path.join(pin, 'tmp', 'x', 'claude.md'), 'stray\n');
+  const C = (p) => path.join(pin, '.claude', p);
+  // the listed runtime files and dirs pass (positive control), case-folded
+  fs.mkdirSync(C('checkpoints'), { recursive: true }); fs.writeFileSync(C('checkpoints/c1.json'), '{}');
+  fs.mkdirSync(C('mailbox'), { recursive: true }); fs.writeFileSync(C('mailbox/m.json'), '{}');
+  fs.mkdirSync(C('routines/.state'), { recursive: true }); fs.writeFileSync(C('routines/.state/s'), 'x');
+  for (const f of ['agent-registry.json', 'first-run', 'assistant-daemon-state.json', 'agent-memory-local', 'Scheduled_Tasks.lock']) fs.writeFileSync(C(f), '{}');
+  fs.writeFileSync(C('scheduled_tasks.json'), '[]');
   let r = await trust(pin, gh);
   assert.deepEqual(r.problems, [], r.problems.join('\n'));
-  // positive control: the same kinds of file, not ignored, are a mismatch
-  fs.writeFileSync(path.join(pin, '.claude', 'mailbox.json'), '{}');
-  fs.mkdirSync(path.join(pin, 'docs'), { recursive: true });
-  fs.writeFileSync(path.join(pin, 'docs', 'CLAUDE.md'), 'planted\n');
+  // ignore rules don't exempt: a session can write .git/info/exclude
+  fs.appendFileSync(path.join(pin, '.git', 'info', 'exclude'), '.claude/commands/\nCLAUDE.local.md\ntmp/\n.claude/mailbox/\n');
+  fs.mkdirSync(C('commands'), { recursive: true }); fs.writeFileSync(C('commands/evil.md'), 'do bad things\n');
+  fs.writeFileSync(path.join(pin, 'CLAUDE.local.md'), 'planted\n');
+  fs.mkdirSync(path.join(pin, 'tmp'), { recursive: true }); fs.writeFileSync(path.join(pin, 'tmp', 'claude.md'), 'stray\n');
+  fs.writeFileSync(C('mailbox/CLAUDE.md'), 'a memory file in an exempt dir\n');
   r = await trust(pin, gh);
-  assert.ok(r.problems.some((l) => /^untracked\s+\.claude\/mailbox\.json/.test(l)), r.problems.join('\n'));
-  assert.ok(r.problems.some((l) => /^untracked\s+docs\/CLAUDE\.md/.test(l)), r.problems.join('\n'));
-  // a tracked file can't hide behind an ignore rule
-  fs.rmSync(path.join(pin, '.claude', 'mailbox.json')); fs.rmSync(path.join(pin, 'docs'), { recursive: true });
-  fs.appendFileSync(path.join(pin, '.git', 'info', 'exclude'), '.claude/hooks/remind.sh\n');
-  fs.appendFileSync(path.join(pin, '.claude', 'hooks', 'remind.sh'), 'echo edited\n');
-  r = await trust(pin, gh);
-  assert.ok(r.problems.some((l) => /^modified\s+\.claude\/hooks\/remind\.sh/.test(l)), r.problems.join('\n'));
+  for (const re of [/^untracked\s+\.claude\/commands\/evil\.md/, /^untracked\s+CLAUDE\.local\.md/, /^untracked\s+tmp\/claude\.md/, /^untracked\s+\.claude\/mailbox\/CLAUDE\.md/]) {
+    assert.ok(r.problems.some((l) => re.test(l)), `${re}: ${r.problems.join('\n')}`);
+  }
+  // the scheduled-task file: absent or empty passes (above); with prompts it needs the operator allowlist
+  for (const p of ['commands', 'mailbox/CLAUDE.md']) fs.rmSync(C(p), { recursive: true });
+  fs.rmSync(path.join(pin, 'CLAUDE.local.md')); fs.rmSync(path.join(pin, 'tmp'), { recursive: true });
+  fs.writeFileSync(C('scheduled_tasks.json'), JSON.stringify([{ cron: '* * * * *', prompt: 'run something' }]));
+  const local = projectLocalState(pin);
+  assert.equal(local.scheduledTasks.empty, false);
+  assert.match(local.scheduledTasks.hash, /^[0-9a-f]{64}$/);
+});
+
+test('mismatch summary: grouped by category with a total, a config-dir hint for user scope, and a stable fingerprint', () => {
+  const lines = [
+    'settings   /h/.claude/settings.json enables unpinned plugin a@b',
+    'user-cfg   MCP server x (/h/.claude.json) is not on VERIFY_ALLOWED_USER_FILES (sha256 ' + 'a'.repeat(64) + ')',
+    'user-cfg   /h/.claude/skills/s/SKILL.md is not on VERIFY_ALLOWED_USER_FILES (sha256 ' + 'b'.repeat(64) + ')',
+    'user-cfg   /h/.claude/skills/s/x.md is not on VERIFY_ALLOWED_USER_FILES (sha256 ' + 'c'.repeat(64) + ')',
+    'untracked  .claude/agents/x.md (not in HEAD)',
+    'modified   /cache/engsys/1.0.0/hooks/hooks.json ' + 'd'.repeat(40),
+  ];
+  assert.deepEqual(groupProblems(lines).map((g) => `${g.label}=${g.count}`), [
+    'engsys plugin or host kit=1', 'pin checkout=1', 'unpinned user-scope plugins=1', 'MCP servers=1', 'user-scope skills/agents/files=2']);
+  const fp = problemFingerprint(lines);
+  const resynced = lines.map((l) => l.replace('b'.repeat(64), 'e'.repeat(64)));
+  assert.equal(problemFingerprint(resynced), fp, 'a skill sync (new hashes, same files) does not re-alert');
+  assert.notEqual(problemFingerprint([...lines, 'user-cfg   /h/.claude/skills/t/SKILL.md is not on VERIFY_ALLOWED_USER_FILES (sha256 ' + 'f'.repeat(64) + ')']), fp, 'a count change does');
+  assert.notEqual(problemFingerprint(lines.map((l) => l.replace('agents/x.md', 'agents/y.md'))), fp, 'a different tampered path does');
 });

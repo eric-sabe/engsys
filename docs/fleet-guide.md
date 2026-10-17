@@ -1209,16 +1209,23 @@ root is `PIN_REPO`'s default branch as the GitHub API reports it, never a local 
   in it, is a mismatch. Code a hook reaches indirectly (`npm run …`, `make …`) is not followed: keep hook
   commands to a direct script.
 
-An untracked file that git ignores (`.gitignore`, or `.git/info/exclude` in the pin checkout) is runtime
-state, not reviewed content, and is skipped: Claude Code's `scheduled_tasks.json`, `checkpoints/`,
-`mailbox/` and the like, or a stray `claude.md` under an ignored `tmp/`. An untracked file git does not
-ignore is still a mismatch, and a tracked file never counts as ignored. Someone on the host who edits the
-ignore files can hide a file this way; like repointing a local ref, a local writer is out of scope.
+Claude Code's own runtime state under `.claude/` is skipped by an explicit list, matched
+case-insensitively: `settings.local.json` (checked separately), `scheduled_tasks.lock`, `worktrees/`,
+`checkpoints/`, `mailbox/`, `routines/.state/`, `agent-registry.json`, `agent-memory-local`, `first-run` and
+`assistant-daemon-state.json`. Git ignore rules never exempt anything: a session can write
+`.git/info/exclude`. A memory file (`CLAUDE.md`, `CLAUDE.local.md`, any case) is never exempt, in any
+directory, and neither is anything under `.claude/commands`, `agents`, `skills`, `rules` or `hooks`.
+Claude Code reads a nested `CLAUDE.md` when it works in that directory, so an untracked one anywhere in the
+checkout (a stray `tmp/claude.md` too) is a mismatch. `.claude/scheduled_tasks.json` holds prompts Claude
+Code runs on its own: absent or empty passes; otherwise it is a mismatch unless `VERIFY_ALLOWED_USER_FILES`
+lists its sha256.
 
 **A pin checkout behind main.** The supervisor's check runs `fleet verify --auto-sync`: when the only
 problems are `stale` files and the pin checkout is on the default branch with no uncommitted changes to
-tracked files (and nothing untracked in `.claude/`), it runs `fleet sync` itself (fast-forward and plugin
-reconcile, no restarts), at most once per tick, and verifies again. A dirty, diverged or off-branch
+tracked files (and nothing untracked in `.claude/`), it runs `fleet sync --no-jobs` itself (fast-forward and
+plugin reconcile, no restarts), at most once per tick, and verifies again. `--no-jobs` never reloads
+launchd jobs (the supervisor runs inside one, and a reload would kill it): if the job files changed with
+the pin, it alerts `fleet-jobs-changed` asking you to run `fleet install-jobs`. A dirty, diverged or off-branch
 checkout keeps the mismatch, alerted as "the pin checkout is behind main", not as tampering.
 
 A `PIN_DIR` that is not a git checkout can't be checked this way: `fleet verify` warns, and any hook in its
@@ -1263,6 +1270,12 @@ override: `CLAUDE_CODE_SUBAGENT_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL_FORCE`, `ANT
 `enforceAvailableModels` or `switchModelsOnFlag: true` (the model keys of Claude Code 2.1.292's settings
 schema): each could move a pinned security agent off its model. The
 security lane's rendered env also unsets `CLAUDE_CODE_SUBAGENT_MODEL` and `CLAUDE_CODE_SUBAGENT_MODEL_FORCE`.
+
+**The alert** names the total and the categories (engsys plugin or host kit, pin checkout, unpinned
+user-scope plugins, MCP servers, user-scope skills/agents/files, user-scope hooks and commands, settings,
+memory files above the pin checkout), lists the first few problems, and for user-scope items points at
+`fleet config-dir init`. It is posted again only when the categories or counts change, or a different
+plugin or pin-checkout path differs: a user-scope skill sync that rewrites files doesn't re-alert.
 
 **A mismatch never touches a running session.** The supervisor holds relaunches of the merge and
 maintain monsters and alerts; it does not kill a running one and never revokes or breaks its baton. A
@@ -1464,7 +1477,8 @@ Logs and state: launchd job logs in `~/Library/Logs/<org>-fleet/`; the superviso
 
 Plain `KEY=VALUE` lines. A line starting with `#` is a comment. No quoting or expansion is performed,
 except a leading `~` in a value, which becomes `$HOME`. `~/.config/<FLEET_ORG>/fleet.local.conf` (same
-format) overrides it per machine. Environment values for `ENGSYS_REF` / `INSTANCE_REF` also force a pin.
+format) overrides it per machine. Environment values for `ENGSYS_REF` / `INSTANCE_REF` also force a pin;
+`PIN_SETTINGS` (where the pins are read from) is never taken from the environment.
 
 | Key | Required | Meaning and default |
 |---|---|---|
