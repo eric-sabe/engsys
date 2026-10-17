@@ -27,18 +27,24 @@ done
 [ -n "$REAL_GH" ] || { echo "gh (fleet shim): real gh not found on PATH" >&2; exit 127; }
 
 # If the GitHub Copilot CLI binary itself calls `gh auth token` or `gh auth status` to authenticate
-# the operator's Copilot seat, hand it GH_TOKEN_COPILOT_CLI (never the operator's personal gh keychain,
-# and never an environment-variable parent-name override). When ENGSYS_COPILOT_CLI_PID is set by the
-# launcher (`ENGSYS_COPILOT_CLI_PID=$$ exec copilot ...`), require PPID to match that exact PID so no
-# child shell or copied binary inside an agent Bash tool call can impersonate the root copilot process.
-if [ "${1:-}" = "auth" ] && { [ "${2:-}" = "token" ] || [ "${2:-}" = "status" ]; } && [ -n "${GH_TOKEN_COPILOT_CLI:-}" ]; then
-  if [ -z "${ENGSYS_COPILOT_CLI_PID:-}" ] || [ "$PPID" = "$ENGSYS_COPILOT_CLI_PID" ]; then
-    parent_comm="$(ps -o comm= -p "$PPID" 2>/dev/null | awk -F/ '{print $NF}' | sed 's/^-//')"
-    if [ "$parent_comm" = "copilot" ]; then
-      GH_TOKEN="$GH_TOKEN_COPILOT_CLI" exec "$REAL_GH" "$@"
-    fi
-  fi
+# the operator's Copilot seat, hand it GH_TOKEN_COPILOT_CLI (never the operator's personal gh keychain).
+#
+# engsys v2.0.1 (L2): this gate must NOT depend on the parent process's NAME — `ps -o comm=` reports
+# whatever the process called itself, and any Bash tool call can launch a binary or shell function
+# named "copilot" to match it. The launcher sets ENGSYS_COPILOT_CLI_PID=$$ immediately before
+# `exec copilot ...`, so the gate instead requires $PPID to equal that EXACT PID, mandatorily — not
+# as a fallback that's skipped when the variable happens to be unset. No ENGSYS_COPILOT_CLI_PID set
+# means no relay, full stop, even if the launcher is later changed and this would otherwise make a
+# Copilot launch fail for a monster session: the gate stays strict either way.
+if [ "${1:-}" = "auth" ] && { [ "${2:-}" = "token" ] || [ "${2:-}" = "status" ]; } \
+  && [ -n "${GH_TOKEN_COPILOT_CLI:-}" ] && [ -n "${ENGSYS_COPILOT_CLI_PID:-}" ] \
+  && [ "$PPID" = "$ENGSYS_COPILOT_CLI_PID" ]; then
+  GH_TOKEN="$GH_TOKEN_COPILOT_CLI" exec "$REAL_GH" "$@"
 fi
+# Not the narrow Copilot-auth-relay case above: never let the seat token ride along into an
+# agent-visible environment (this process's own env, and anything it execs below) — e.g. a plain
+# `gh ...` call issued by an agent's Bash tool must not be able to `env | grep COPILOT` and read it.
+unset GH_TOKEN_COPILOT_CLI
 
 # Which account's installation to use (GH_APP_INSTALLATIONS in the env file). Precedence:
 # GH_APP_OWNER > --owner (names the account a command like `gh project`/`gh repo list`/

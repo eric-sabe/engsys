@@ -65,8 +65,39 @@ chmod +x "$T/copilotps/ps"
 
 check "CT-09: child bash calling gh auth token gets App token" tok_default "$(run "$T/norepo" auth token)"
 check "CT-09: copilot parent without GH_TOKEN_COPILOT_CLI still gets App token (never operator keychain)" tok_default "$(cd "$T/norepo" && env -u GH_TOKEN PATH="$HERE/bin:$T/copilotps:$T/realbin:$PATH" GH_APP_ENV_FILE="$T/gh-app.env" "$SHIM" auth token)"
-check "CT-09: copilot parent calling gh auth status with GH_TOKEN_COPILOT_CLI gets seat token" "gho_seat" "$(cd "$T/norepo" && env -u GH_TOKEN GH_TOKEN_COPILOT_CLI=gho_seat PATH="$HERE/bin:$T/copilotps:$T/realbin:$PATH" GH_APP_ENV_FILE="$T/gh-app.env" "$SHIM" auth status)"
+# engsys v2.0.1 (L2): a process merely NAMED "copilot" (ps -o comm=) must NOT be enough to get the
+# seat token without ENGSYS_COPILOT_CLI_PID also being set and matching $PPID exactly.
+check "v2.0.1 L2: copilot-named parent with NO ENGSYS_COPILOT_CLI_PID gets App token, never the seat token" tok_default "$(cd "$T/norepo" && env -u GH_TOKEN GH_TOKEN_COPILOT_CLI=gho_seat PATH="$HERE/bin:$T/copilotps:$T/realbin:$PATH" GH_APP_ENV_FILE="$T/gh-app.env" "$SHIM" auth status)"
 check "CT-09: mismatched ENGSYS_COPILOT_CLI_PID rejects spoofed copilot child process" tok_default "$(cd "$T/norepo" && env -u GH_TOKEN GH_TOKEN_COPILOT_CLI=gho_seat ENGSYS_COPILOT_CLI_PID=999999 PATH="$HERE/bin:$T/copilotps:$T/realbin:$PATH" GH_APP_ENV_FILE="$T/gh-app.env" "$SHIM" auth token)"
+# Positive control: the legitimate relay still works when ENGSYS_COPILOT_CLI_PID correctly names
+# the shim's real parent PID. A tiny relay wrapper reads its OWN $PPID (its parent, i.e. the
+# process that is about to become the shim's parent too) and exports it before `exec`'ing the
+# shim in its place — exec never changes PPID, so the shim sees the exact same $PPID it just set.
+# ($BASHPID/$$ from the calling subshell are NOT reliable stand-ins here: which PID ends up as the
+# shim's PPID depends on bash's fork-elision for the last command in a subshell, which this test
+# observed to NOT be $BASHPID.)
+cat >"$T/relay.sh" <<'SH'
+#!/usr/bin/env bash
+export ENGSYS_COPILOT_CLI_PID="$PPID"
+exec "$@"
+SH
+chmod +x "$T/relay.sh"
+check "v2.0.1 L2: correct ENGSYS_COPILOT_CLI_PID still relays the seat token" "gho_seat" "$(cd "$T/norepo" && env -u GH_TOKEN GH_TOKEN_COPILOT_CLI=gho_seat PATH="$HERE/bin:$T/copilotps:$T/realbin:$PATH" GH_APP_ENV_FILE="$T/gh-app.env" "$T/relay.sh" "$SHIM" auth status)"
+# The gate no longer looks at the parent process's name at all: a correct PID relays the seat token
+# even when the parent isn't named "copilot" (PATH has no $T/copilotps here).
+check "v2.0.1 L2: correct ENGSYS_COPILOT_CLI_PID relays regardless of parent process name" "gho_seat" "$(cd "$T/norepo" && env -u GH_TOKEN GH_TOKEN_COPILOT_CLI=gho_seat PATH="$HERE/bin:$T/realbin:$PATH" GH_APP_ENV_FILE="$T/gh-app.env" "$T/relay.sh" "$SHIM" auth status)"
+# The seat token must never ride along into an agent-visible env for an ordinary (non-auth-relay)
+# call: a dedicated "real gh" stub reports whether it inherited GH_TOKEN_COPILOT_CLI at all.
+mkdir -p "$T/envbin"
+cat >"$T/envbin/gh" <<'SH'
+#!/usr/bin/env bash
+printf 'seen=%s\n' "${GH_TOKEN_COPILOT_CLI+yes}"
+SH
+chmod +x "$T/envbin/gh"
+# Not "auth token"/"auth status" (so this does NOT take the seat-token relay branch at all) — a
+# PID-matched Copilot-launcher session's GH_TOKEN_COPILOT_CLI must not leak into env for any other
+# gh subcommand either.
+check "v2.0.1 L2: GH_TOKEN_COPILOT_CLI is unset before any other gh invocation" "seen=" "$(cd "$T/norepo" && env -u GH_TOKEN GH_TOKEN_COPILOT_CLI=gho_seat PATH="$HERE/bin:$T/envbin:$PATH" GH_APP_ENV_FILE="$T/gh-app.env" "$T/relay.sh" "$SHIM" pr list)"
 check "CT-09: copilot parent calling gh pr list still gets App token (NA-6)" tok_pat "$(cd "$T/repo-pat" && env -u GH_TOKEN GH_TOKEN_COPILOT_CLI=gho_seat PATH="$HERE/bin:$T/copilotps:$T/realbin:$PATH" GH_APP_ENV_FILE="$T/gh-app.env" "$SHIM" pr list)"
 
 if [ "$FAILS" -gt 0 ]; then echo "gh-shim.test.sh: $FAILS failure(s)" >&2; exit 1; fi
