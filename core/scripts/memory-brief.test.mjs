@@ -846,13 +846,19 @@ describe('buildBrief — end to end, fail-open, and the agent exclusion boundary
 	test('an excluded (security:true) agent type gets Class A content only — pointers are never computed for it', { skip: !SQLITE_AVAILABLE }, () => {
 		const dir = makeRepo({ agentsSecurityTrue: ['nyx'], lessons: [['one', { keywords: ['widget'] }]] });
 		try {
+			// round 3 (F6): the "no author_kind at all" fallback is now restricted to kind:'commit'
+			// with no body — a review_thread pointer needs a REAL, trusted author_kind/author_id to
+			// pass the brief-time gate, same as it would from a genuine memory-sync ingest.
+			mkdirSync(join(dir, '.claude'), { recursive: true });
+			writeFileSync(join(dir, '.claude', 'memory.yml'), 'trusted_bot_user_ids: [500]\n');
+			commitAndPush(dir, 'add memory.yml');
 			// Seed a Class B event directly via delta.jsonl so, if the exclusion were broken, a
 			// pointer COULD appear.
 			const cacheDir = join(dir, '.git', 'engsys-memory');
 			mkdirSync(cacheDir, { recursive: true });
 			writeFileSync(
 				join(cacheDir, 'delta.jsonl'),
-				`${JSON.stringify({ k: 'ev1', kind: 'review_thread', path: 'docs/agent-lessons/one.md', line: 1, outcome: 'fixed', updated_at: new Date().toISOString(), text: 'secret-ish free text' })}\n`,
+				`${JSON.stringify({ k: 'ev1', kind: 'review_thread', path: 'docs/agent-lessons/one.md', line: 1, outcome: 'fixed', updated_at: new Date().toISOString(), author_kind: 'bot', author_id: 500, text: 'secret-ish free text' })}\n`,
 			);
 			const forNyx = buildBrief({ repoRoot: dir, agentType: 'nyx', prompt: 'widget', touchedPaths: ['docs/agent-lessons/one.md'] });
 			assert.deepEqual(forNyx.pointerKeys, [], 'excluded agent must get zero Class B pointers');
@@ -870,6 +876,12 @@ describe('buildBrief — end to end, fail-open, and the agent exclusion boundary
 		const RLO = '‮';
 		const dir = makeRepo({ lessons: [['one', { keywords: ['widget'] }]] });
 		try {
+			// round 3 (F6): the valid control below needs a real, trusted author_kind/author_id to
+			// pass the brief-time gate now that the "no author_kind at all" fallback is restricted
+			// to kind:'commit' with no body.
+			mkdirSync(join(dir, '.claude'), { recursive: true });
+			writeFileSync(join(dir, '.claude', 'memory.yml'), 'trusted_bot_user_ids: [500]\n');
+			commitAndPush(dir, 'add memory.yml');
 			const cacheDir = join(dir, '.git', 'engsys-memory');
 			mkdirSync(cacheDir, { recursive: true });
 			const hostileLines = [
@@ -880,7 +892,7 @@ describe('buildBrief — end to end, fail-open, and the agent exclusion boundary
 				// Positive control (Nyx L1): a genuinely VALID event, right alongside the hostile
 				// ones, so a validator broken too strictly (dropping everything, hostile or not)
 				// would be caught here, not just "the hostile ones happened not to render".
-				{ k: 'o/r:valid', kind: 'review_thread', path: 'docs/agent-lessons/one.md', line: 1, outcome: 'fixed', updated_at: '2026-01-01T00:00:00Z', text: 'this text itself must never render, only the structured pointer line' },
+				{ k: 'o/r:valid', kind: 'review_thread', path: 'docs/agent-lessons/one.md', line: 1, outcome: 'fixed', updated_at: '2026-01-01T00:00:00Z', author_kind: 'bot', author_id: 500, text: 'this text itself must never render, only the structured pointer line' },
 			];
 			writeFileSync(cacheDir + '/delta.jsonl', hostileLines.map((l) => JSON.stringify(l)).join('\n') + '\n');
 			const result = buildBrief({ repoRoot: dir, agentType: 'isabelle', prompt: 'widget', touchedPaths: ['docs/agent-lessons/one.md'] });

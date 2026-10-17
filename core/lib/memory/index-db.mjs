@@ -839,12 +839,23 @@ export function loadClassBEvents(cacheDir, { repoRoot = null, refShas = null, pl
 // watermark
 // ---------------------------------------------------------------------------------------------
 
-/** The staleness manifest: engsys version + a path->sha1 map for every Class A source + the Class
- * B event count (events themselves aren't content-hashed here; delta.jsonl's own mtime/size is a
- * cheap enough proxy and is folded in by the caller via `eventsFingerprint`). Directory mtimes are
- * deliberately not used (§4: they miss in-place edits and git checkout resets them). */
+// engsys v2.0.1 round 3 (low): most callers never pass a real `version` to `ensureIndex`/
+// `computeWatermark` — it defaults to the literal string `'dev'` everywhere, so a cached
+// `index.sqlite` built under OLDER trust logic (which rows/author_kind values are, or aren't,
+// trusted) was never invalidated by a code change alone, only by a Class A file edit or a new
+// event. TRUST_SCHEMA is baked into the watermark directly, independent of whatever the caller
+// passes as `version` — bump it whenever trust-relevant extraction/gating logic changes
+// (core/lib/memory/trust.mjs, extractEventFromCommit, loadClassBEvents' ref-stripping, …) so a
+// stale index is detected and rebuilt on the very next read, not left silently out of date.
+export const TRUST_SCHEMA = 3;
+
+/** The staleness manifest: engsys version + TRUST_SCHEMA + a path->sha1 map for every Class A
+ * source + the Class B event count (events themselves aren't content-hashed here; delta.jsonl's
+ * own mtime/size is a cheap enough proxy and is folded in by the caller via `eventsFingerprint`).
+ * Directory mtimes are deliberately not used (§4: they miss in-place edits and git checkout
+ * resets them). */
 export function computeWatermark(manifest, eventsFingerprint, version) {
-	return { version, files: manifest, events: eventsFingerprint };
+	return { version, trustSchema: TRUST_SCHEMA, files: manifest, events: eventsFingerprint };
 }
 
 function stableStringify(obj) {

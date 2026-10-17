@@ -23,6 +23,7 @@ try { require('node:sqlite'); } catch { SQLITE_AVAILABLE = false; }
 import {
 	closeIndex,
 	computeWatermark,
+	TRUST_SCHEMA,
 	ensureIndex,
 	isRepoAllowlisted,
 	listEvents,
@@ -621,6 +622,16 @@ describe('computeWatermark', () => {
 		const w1 = computeWatermark({ a: '1', b: '2' }, 0, 'v1');
 		const w2 = computeWatermark({ b: '2', a: '1' }, 0, 'v1');
 		assert.deepEqual(w1, w2);
+	});
+
+	test('engsys v2.0.1 round 3 (F3): bakes TRUST_SCHEMA in, independent of `version` — a trust-logic bump is detected even when every caller still passes the same (often literal "dev") version', () => {
+		const w = computeWatermark({ 'a.md': 'sha-1' }, 0, 'dev');
+		assert.equal(typeof w.trustSchema, 'number', 'trustSchema must be present and numeric');
+		assert.equal(w.trustSchema, TRUST_SCHEMA, 'must be the exported constant, not a copy that can drift');
+		// Positive control: identical files/events/version still produce byte-identical watermarks
+		// (trustSchema doesn't introduce nondeterminism) — only TRUST_SCHEMA itself changing moves it.
+		const w2 = computeWatermark({ 'a.md': 'sha-1' }, 0, 'dev');
+		assert.deepEqual(w, w2);
 	});
 });
 
