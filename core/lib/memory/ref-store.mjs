@@ -19,10 +19,15 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createGitDataClient } from '../lease/github-backend.mjs';
+import { resolveReviewedSha } from './index-db.mjs';
 
 export const EVENTS_REF = 'refs/engsys/memory/events';
 export const MEMORY_REF_PREFIX = 'refs/engsys/memory/';
-export const MEMORY_FETCH_REFSPEC = '+refs/engsys/memory/*:refs/engsys/memory/*';
+// engsys v2.0.1 (M4): NO forced (`+`) refspec. A forced refspec makes `git fetch` silently
+// clobber a local ref tip with whatever the remote currently has, which defeats any after-the-fact
+// trust check on the tip (the local record of "what we last verified" is gone by the time we'd
+// check it). A non-forced fetch fails closed with "not a fast-forward" instead.
+export const MEMORY_FETCH_REFSPEC = 'refs/engsys/memory/*:refs/engsys/memory/*';
 export const DEFAULT_MAX_EVENTS = 20_000;
 export const DEFAULT_TOMBSTONE_TTL_DAYS = 180;
 
@@ -476,4 +481,122 @@ export function createMemoryRefStore({
     writeEvents,
     gitData,
   };
+}
+
+// ---------------------------------------------------------------------------
+// engsys v2.0.1 (M4): verified consumption of refs/engsys/memory/* tips
+// ---------------------------------------------------------------------------
+//
+// NOT WIRED INTO ANY CONSUMER. `fetchMemoryRefs` above has zero production callers in this repo
+// (verified by grep at the time of this fix); nothing currently reads a peer's
+// `refs/engsys/memory/*` tip back into Class A/B trust. This export exists so that if/when a
+// consumer is built, it starts from a verified primitive rather than trusting the ref blindly.
+// Per the engsys#140/v2.0.1 review, the memory ref fetch stays unwired until a consumer uses this
+// (or an equivalent) check.
+
+async function defaultFetchCommitIdentity(repo, sha, { exec = execFileSync } = {}) {
+  const normRepo = typeof repo === 'string' && /^[^/\s]+\/[^/\s]+$/.test(repo) ? repo : null;
+  if (!normRepo || !sha) return null;
+  try {
+    const out = exec(
+      'gh',
+      [
+        'api',
+        `repos/${normRepo}/commits/${sha}`,
+        '--jq',
+        '{authorId: .author.id, committerId: .committer.id, verified: .commit.verification.verified}',
+      ],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 },
+    );
+    const parsed = JSON.parse(String(out || '{}'));
+    return {
+      authorId: parsed.authorId != null ? Number(parsed.authorId) : null,
+      committerId: parsed.committerId != null ? Number(parsed.committerId) : null,
+      verified: parsed.verified === true,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function pathExistsInReviewedTree(repoRoot, reviewedSha, relPath, exec) {
+  try {
+    exec('git', ['-C', repoRoot, 'cat-file', '-e', `${reviewedSha}:${relPath}`], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'ignore', 'ignore'],
+      timeout: 2000,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Verify a fetched `refs/engsys/memory/*` tip before trusting any event inside it.
+ *
+ * Trust comes ONLY from:
+ *   - the commit at `sha` having `commit.verification.verified === true` (a cryptographically
+ *     verified GPG/SSH signature, per GitHub's own check) AND a `committer.id` or `author.id`
+ *     (resolved via the GitHub REST API for this exact SHA) equal to `publisherUserId`.
+ *     Both are required: `author.id`/`committer.id` ALONE are not proof of who published the tip
+ *     — GitHub derives them by mapping the commit's author/committer EMAIL to an account, and the
+ *     publisher sets that email locally (`git -c user.email=…`), same as the name/email trust this
+ *     whole v2.0.1 pass (M3, M4) is removing elsewhere. The verified-signature requirement is what
+ *     actually ties the commit to a key only the real publisher holds.
+ *   - each event's own `path` / `paths` existing in the tree at the independently
+ *     `resolveReviewedSha`-resolved SHA (so a tip can't vouch for a file it alone claims exists).
+ *
+ * `author_kind` / `author_id` embedded in the event JSON are NEVER read for trust — they're
+ * stripped from every event and, only once the commit-level check above passes, replaced with a
+ * fixed `author_kind: 'bot'`, `author_id: publisherUserId`.
+ *
+ * `publisherUserId` is a GitHub USER account's numeric id (the bot account's id, e.g. as returned
+ * for `app-slug[bot]` by `/users/<slug>%5Bbot%5D`) — NOT a GitHub App's own `id` field, which is a
+ * different number and would never match `.committer.id`/`.author.id`.
+ *
+ * Fails closed (`{ ok: false, events: [] }`) on any missing input or verification failure.
+ */
+export async function verifyMemoryRefTip(
+  repoRoot,
+  {
+    sha,
+    events = [],
+    repo,
+    publisherUserId,
+    fetchCommitIdentity = defaultFetchCommitIdentity,
+    resolveSha = resolveReviewedSha,
+    exec = execFileSync,
+  } = {},
+) {
+  if (!sha || !repoRoot || publisherUserId == null) {
+    return { ok: false, events: [], reason: 'missing_sha_or_publisher' };
+  }
+  const identity = await fetchCommitIdentity(repo, sha, { exec });
+  const wantId = Number(publisherUserId);
+  const idMatches =
+    (identity?.committerId != null && Number(identity.committerId) === wantId) ||
+    (identity?.authorId != null && Number(identity.authorId) === wantId);
+  const verifiedPublisher = idMatches && identity?.verified === true;
+  if (!verifiedPublisher) {
+    return { ok: false, events: [], reason: 'untrusted_publisher' };
+  }
+
+  const reviewedSha = resolveSha(repoRoot);
+  if (!reviewedSha) {
+    return { ok: false, events: [], reason: 'no_reviewed_sha' };
+  }
+
+  const trusted = [];
+  for (const raw of Array.isArray(events) ? events : []) {
+    if (!raw || typeof raw !== 'object') continue;
+    // Deliberately discard any author_kind/author_id the event JSON carries — never a trust input.
+    const { author_kind: _ignoredKind, author_id: _ignoredId, ...rest } = raw;
+    const paths = [rest.path, ...(Array.isArray(rest.paths) ? rest.paths : [])].filter(Boolean);
+    if (paths.length > 0 && !paths.every((p) => pathExistsInReviewedTree(repoRoot, reviewedSha, p, exec))) {
+      continue;
+    }
+    trusted.push({ ...rest, author_kind: 'bot', author_id: wantId });
+  }
+  return { ok: true, events: trusted, reviewedSha };
 }
