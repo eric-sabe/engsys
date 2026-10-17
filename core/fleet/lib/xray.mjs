@@ -562,7 +562,10 @@ function claudeConfigItem(ctx, cfg) {
   const exists = fs.existsSync(cfg.dir);
   let login = 'unknown';
   if (exists) {
-    const r = runCmd('claude', ['auth', 'status', '--json'], { cwd: os.tmpdir(), env: { ...ctx.env, CLAUDE_CONFIG_DIR: cfg.dir }, timeout: 15000 });
+    // as the fleet runs it: CLAUDE_CONFIG_DIR only for a configured fleet dir, unset otherwise
+    const env = { ...ctx.env };
+    if (cfg.fromConf) env.CLAUDE_CONFIG_DIR = cfg.dir; else delete env.CLAUDE_CONFIG_DIR;
+    const r = runCmd('claude', ['auth', 'status', '--json'], { cwd: os.tmpdir(), env, timeout: 15000 });
     try {
       const j = JSON.parse(r.stdout || 'null');
       if (j && j.loggedIn === true) login = 'logged in';
@@ -631,7 +634,9 @@ export function inspectPinsAndTrust(ctx) {
     // Only the fully qualified remote-tracking ref, and never HEAD: this is a hint, not the trust root
     // (`fleet verify` checks .claude/ and every hook target against GitHub). No ref = hooks unverified.
     let pinSettingsSha = '';
-    const originShaRes = runCmd('git', ['--no-replace-objects', '-C', pinDir, 'rev-parse', '--verify', '-q', 'refs/remotes/origin/main:.claude/settings.json'], { env: gitEnv(ctx.env) });
+    const headRef = runCmd('git', ['-C', pinDir, 'symbolic-ref', '-q', 'refs/remotes/origin/HEAD'], { env: gitEnv(ctx.env) });
+    const defRef = headRef.ok && /^refs\/remotes\/origin\/[A-Za-z0-9._\/-]+$/.test(headRef.stdout) ? headRef.stdout : 'refs/remotes/origin/main';
+    const originShaRes = runCmd('git', ['--no-replace-objects', '-C', pinDir, 'rev-parse', '--verify', '-q', `${defRef}:.claude/settings.json`], { env: gitEnv(ctx.env) });
     if (originShaRes.ok && /^[0-9a-f]{40}$/.test(originShaRes.stdout)) {
       pinSettingsSha = originShaRes.stdout;
     }

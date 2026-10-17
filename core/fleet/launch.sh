@@ -26,6 +26,10 @@
 # (and refuses when the alert can't be delivered).
 # No config file or environment variable turns it on, and the supervisor never passes it.
 #
+# Claude-only: a merge, maintain, broker (any monster) or security-lane session (5th field security*)
+# is refused, or left out of a whole-roster launch, when HARNESS is anything but claude, whether it
+# came from fleet.conf, fleet.local.conf, the environment or a HARNESS= line in the roster.
+#
 # Usage: launch.sh [--instance <dir>]                              # every session that runs on this host
 #        launch.sh [--instance <dir>] <name> [--force-excluded]    # just one (the supervisor relaunches this way)
 #        launch.sh [--instance <dir>] <name> --skip-verify         # a merge/maintain session without the plugin
@@ -150,10 +154,26 @@ singleton_integrity_ok() { # → 0 when merge/maintain sessions may start
 }
 is_singleton() { case "$(fleet_host_kind_of "$1")" in merge | maintain) return 0 ;; esac; return 1; }
 
+# Claude-only: merge, maintain, broker (and any other monster) and security-lane sessions never start on
+# another harness, wherever HARNESS came from (fleet.conf, fleet.local.conf, the environment, or a
+# HARNESS= line in the roster).
+launch_harness="$(sed -n 's/^HARNESS=//p' "$FLEET_STATE/roster" | tail -n 1 | tr -d '\r' | sed -e 's/[[:space:]][[:space:]]*#.*$//' -e 's/[[:space:]]*$//')"
+launch_harness="${launch_harness:-${HARNESS:-claude}}"
+case "$launch_harness" in agy) launch_harness=antigravity ;; esac
+claude_only() { # claude_only <name> → 0 when <name> may only run on Claude
+  case "$(fleet_host_kind_of "$1")" in merge | maintain | broker | monster) return 0 ;; esac
+  local envf
+  envf="$(awk -F'|' -v n="$1" '$1 == n { print $5; exit }' "$FLEET_STATE/roster")"
+  case "${envf##*/}" in security*) return 0 ;; esac
+  return 1
+}
+harness_refused() { [ "$launch_harness" != claude ] && claude_only "$1"; }
+
 export HARNESS="${HARNESS:-claude}"
 cd "$PIN_DIR"
 if [ -n "$name" ]; then
   grep -q "^$name|" "$FLEET_STATE/roster" || fleet_die "no session named '$name' in the roster"
+  harness_refused "$name" && fleet_die "not launching $name on HARNESS=$launch_harness: merge, maintain, broker and security sessions run on Claude only"
   if is_singleton "$name" && [ "$skip_verify" = 1 ]; then
     {
       echo "fleet: ################################################################################"
@@ -180,6 +200,11 @@ while IFS= read -r line; do
       if why="$(fleet_host_excluded "$n")"; then
         echo "skip: $n is not on this host ($why)"
         printf '# not on this host: %s (%s)\n' "$n" "$why" >>"$host_roster"
+        continue
+      fi
+      if harness_refused "$n"; then
+        echo "skip: $n, Claude-only session and HARNESS=$launch_harness"
+        printf '# claude-only: %s (HARNESS=%s)\n' "$n" "$launch_harness" >>"$host_roster"
         continue
       fi
       if is_singleton "$n" && ! singleton_integrity_ok; then

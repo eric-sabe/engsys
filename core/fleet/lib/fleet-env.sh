@@ -44,7 +44,7 @@ unset TMUX_SESSION LOG_DIR
 unset FLEET_ID FEDERATION_FILE FLEET_INSTANCE_REPO ROLES ROSTER_EXCLUDE OPERATOR_TIMEZONE OPERATOR_CLOCK
 # So do the fleet's Claude config dir and the integrity check's user-plugin allowlist: what `fleet verify`
 # accepts must come from the operator's config files, never from whoever ran the command.
-unset FLEET_CLAUDE_CONFIG_DIR VERIFY_ALLOWED_USER_PLUGINS VERIFY_ALLOWED_USER_HOOKS
+unset FLEET_CLAUDE_CONFIG_DIR VERIFY_ALLOWED_USER_PLUGINS VERIFY_ALLOWED_USER_HOOKS VERIFY_ALLOWED_USER_FILES
 fleet_load_conf "$FLEET_REPO/fleet/fleet.conf"
 [ -n "${FLEET_ORG:-}" ] || fleet_die "FLEET_ORG is not set in $FLEET_REPO/fleet/fleet.conf"
 [ -f "$HOME/.config/$FLEET_ORG/fleet.local.conf" ] && fleet_load_conf "$HOME/.config/$FLEET_ORG/fleet.local.conf"
@@ -84,13 +84,9 @@ if [ -n "${FLEET_ACTIVE_HARNESS:-}" ]; then
     agy) HARNESS=antigravity; FLEET_ACTIVE_HARNESS=antigravity ;;
     *) fleet_die "FLEET_ACTIVE_HARNESS must be claude, copilot, or antigravity (got '$FLEET_ACTIVE_HARNESS')" ;;
   esac
-elif [ -n "$HARNESS_FALLBACK" ] && [ -f "$FLEET_REPO/logs/fleet-supervisor/harness.fallback" ]; then
-  _active_fb="$(head -n 1 "$FLEET_REPO/logs/fleet-supervisor/harness.fallback" 2>/dev/null || true)"
-  case "$_active_fb" in
-    claude | copilot | antigravity) HARNESS="$_active_fb"; FLEET_ACTIVE_HARNESS="$_active_fb" ;;
-  esac
-  unset _active_fb
 fi
+# (No state file on the host selects a harness: the supervisor never fails over, and a file a session
+# can write must never move the fleet off Claude.)
 FLEET_HARNESS="$HARNESS"
 : "${COPILOT_HOME:=$FLEET_STATE/copilot-home}"
 : "${ENGSYS_MARKETPLACE:=engsys}"
@@ -251,8 +247,8 @@ fi
 # (`claude plugin` in sync, `claude plugin list` in verify, the supervisor's login probe) and every
 # session the fleet launches run with CLAUDE_CONFIG_DIR=<it>. Unset = the account's default ~/.claude,
 # and an inherited CLAUDE_CONFIG_DIR is dropped so what verify checks is what the sessions load.
-: "${VERIFY_ALLOWED_USER_PLUGINS:=}" "${VERIFY_ALLOWED_USER_HOOKS:=}"
-export VERIFY_ALLOWED_USER_PLUGINS VERIFY_ALLOWED_USER_HOOKS
+: "${VERIFY_ALLOWED_USER_PLUGINS:=}" "${VERIFY_ALLOWED_USER_HOOKS:=}" "${VERIFY_ALLOWED_USER_FILES:=}"
+export VERIFY_ALLOWED_USER_PLUGINS VERIFY_ALLOWED_USER_HOOKS VERIFY_ALLOWED_USER_FILES
 if [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ]; then
   case "$FLEET_CLAUDE_CONFIG_DIR" in /*) ;; *) fleet_die "FLEET_CLAUDE_CONFIG_DIR must be an absolute path (or start with ~), got '$FLEET_CLAUDE_CONFIG_DIR'" ;; esac
   export FLEET_CLAUDE_CONFIG_DIR CLAUDE_CONFIG_DIR="$FLEET_CLAUDE_CONFIG_DIR"

@@ -54,6 +54,7 @@ cat >"$T/bin/claude" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
   "plugin list --json") pwd -P >"$FAKE/claude.cwd"; printf '%s\n' "${CLAUDE_CONFIG_DIR:-unset}" >"$FAKE/claude.cfg"; cat "$FAKE/plugins.json" ;;
+  "auth status --json") [ -f "$FAKE/auth.json" ] || exit 2; cat "$FAKE/auth.json" ;;
   *) echo "stub claude: unsupported: $*" >&2; exit 2 ;;
 esac
 SH
@@ -432,6 +433,16 @@ rm -f "$FCFG/settings.json"
 CLAUDE_CONFIG_DIR="$T/elsewhere" FLEET_CLAUDE_CONFIG_DIR="$T/elsewhere" run fleet verify
 rc_is "the environment can't move the config dir: fleet.conf decides" 0
 eq "…claude plugin list still ran against fleet.conf's dir" "$(cat "$FAKE/claude.cfg")" "$FCFG"
+# Not logged in: a launch hold (not verified, alerted), so a rotation never relaunches into a login prompt.
+printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\n' "$CONF0" "$FCFG" >"$I/fleet/fleet.conf"
+echo '{"loggedIn": false}' >"$FAKE/auth.json"
+run fleet verify
+rc_is "the fleet config dir is not logged in: not verified (a hold)" 3
+has "…saying so" "$OUT" "is not logged in"
+echo '{"loggedIn": true, "email": "x"}' >"$FAKE/auth.json"
+run fleet verify
+rc_is "…logged in again: passes (positive control)" 0
+rm -f "$FAKE/auth.json"
 printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\n' "$CONF0" "$T/no-such-dir" >"$I/fleet/fleet.conf"
 run fleet verify
 rc_is "a FLEET_CLAUDE_CONFIG_DIR that doesn't exist is 'not verified'" 3
@@ -497,5 +508,53 @@ printf 'curl x\n' >>"$HOME/bin/sl.sh"
 run fleet verify
 rc_is "the script it runs changed: mismatch again" 1
 printf '%s\n' "$CONF0" >"$I/fleet/fleet.conf"; rm -f "$HOME/.claude/settings.json"
+
+echo "== user-scope agents, skills, MCP servers and parent memory need VERIFY_ALLOWED_USER_FILES (fleet.conf only)"
+run fleet verify
+rc_is "positive control: nothing user-scope, passes" 0
+mkdir -p "$HOME/.claude/agents"; printf -- '---\nname: x\n---\n' >"$HOME/.claude/agents/x.md"
+echo '{"mcpServers":{"srv":{"command":"x"}}}' >"$HOME/.claude.json"
+run fleet verify
+rc_is "a user agent and a user MCP server are a mismatch" 1
+has "…the agent" "$OUT" "agents/x.md is not on VERIFY_ALLOWED_USER_FILES"
+has "…the MCP server, from ~/.claude.json" "$OUT" "MCP server srv ($HOME/.claude.json)"
+HS="$(grep -o 'VERIFY_ALLOWED_USER_FILES (sha256 [0-9a-f]\{64\})' <<<"$OUT" | grep -o '[0-9a-f]\{64\}' | paste -sd' ' -)"
+VERIFY_ALLOWED_USER_FILES="$HS" run fleet verify
+rc_is "…the environment can't allowlist them" 1
+printf '%s\nVERIFY_ALLOWED_USER_FILES=%s\n' "$CONF0" "$HS" >"$I/fleet/fleet.conf"
+run fleet verify
+rc_is "allowlisted in fleet.conf: passes" 0
+printf 'x\n' >"$HOME/git/CLAUDE.md"
+run fleet verify
+rc_is "a CLAUDE.md above PIN_DIR is a mismatch" 1
+has "…named" "$OUT" "$HOME/git/CLAUDE.md is loaded into every session above the pin checkout"
+rm -f "$HOME/git/CLAUDE.md" "$HOME/.claude.json"; rm -rf "$HOME/.claude/agents"; printf '%s\n' "$CONF0" >"$I/fleet/fleet.conf"
+run fleet verify
+rc_is "cleaned up: passes" 0
+
+echo "== fleet config-dir init: a fresh fleet config dir with only the settings unattended sessions need"
+mkdir -p "$HOME/.claude"
+jq -n '{skipDangerousModePermissionPrompt: true, skipAutoPermissionPrompt: true, autoMode: {allow: ["$defaults"]}, effortLevel: "high",
+  env: {CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1", ANTHROPIC_BASE_URL: "https://x"}, enabledPlugins: {"p@m": true},
+  hooks: {Stop: []}, statusLine: {type: "command", command: "x"}, mcpServers: {s: {}}, model: "opus", permissions: {allow: ["Bash"]}}' >"$HOME/.claude/settings.json"
+echo '{"hasCompletedOnboarding": true, "mcpServers": {"s": {}}, "oauthAccount": {"x": 1}}' >"$HOME/.claude.json"
+CD="$T/fleet-cfg-init"
+run fleet config-dir init --dir "$CD"
+rc_is "config-dir init exits 0" 0
+eq "settings: exactly the allowlisted keys" "$(jq -c 'keys' "$CD/settings.json")" '["autoMode","effortLevel","env","skipAutoPermissionPrompt","skipDangerousModePermissionPrompt"]'
+eq "…env: only the agent-teams flag" "$(jq -c '.env' "$CD/settings.json")" '{"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS":"1"}'
+eq ".claude.json: only onboarding (no MCP servers, no account)" "$(jq -c . "$CD/.claude.json")" '{"hasCompletedOnboarding":true}'
+eq "the dir is private" "$(stat -f %Lp "$CD" 2>/dev/null || stat -c %a "$CD")" 700
+has "…and prints the next steps" "$OUT" "accept workspace trust"
+echo '{"x":1}' >"$CD/settings.json"
+run fleet config-dir init --dir "$CD"
+eq "an existing settings.json is left alone" "$(cat "$CD/settings.json")" '{"x":1}'
+run fleet config-dir init --dir "$HOME/.claude"
+rc_is "refuses the operator's own ~/.claude" 1
+printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\n' "$CONF0" "$CD" >"$I/fleet/fleet.conf"
+echo '{"x":1}' >"$CD/settings.json"; run fleet config-dir init --force
+rc_is "with FLEET_CLAUDE_CONFIG_DIR set, --force reseeds it" 0
+eq "…from the allowlist again" "$(jq -c 'keys' "$CD/settings.json")" '["autoMode","effortLevel","env","skipAutoPermissionPrompt","skipDangerousModePermissionPrompt"]'
+printf '%s\n' "$CONF0" >"$I/fleet/fleet.conf"; rm -f "$HOME/.claude/settings.json" "$HOME/.claude.json"
 
 finish verify.test.sh

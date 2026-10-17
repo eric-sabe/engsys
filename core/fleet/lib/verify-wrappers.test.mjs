@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import {
   PLUGIN_SUBDIR, IN_USE, blobSha, cachePath, scanRoot, localState, parseTree, compare, selectInstalls, run, Unverified,
   checkSettingsDetailed, isProtectedEnvKey, parseAllowedPlugins, parseAllowedHooks, isExempt, projectLocalState, verifyProjectTrust, hookTargets,
-  scanHost, compareHost, ENGSYS_HOST_TREES,
+  scanHost, compareHost, ENGSYS_HOST_TREES, userCommandHash, parseAllowedFiles, parentMemoryFiles,
 } from './verify-wrappers.mjs';
 import { WRAPPERS } from '../../.claude-plugin/singleton-write-guard.mjs';
 import { hermeticGit } from '../../lib/git-env.mjs';
@@ -714,7 +714,7 @@ test('pin checkout: a modified hook script, a planted .claude file, and an edite
   fs.rmSync(path.join(pin, '.claude', 'hooks', 'remind.sh'));
   r = await trust(pin, gh);
   assert.ok(r.problems.some((l) => /^missing\s+\.claude\/hooks\/remind\.sh/.test(l)), r.problems.join('\n'));
-  assert.ok(r.problems.some((l) => /hook target \.claude\/hooks\/remind\.sh is missing/.test(l)));
+  assert.ok(r.problems.some((l) => /can't be pinned \(the bash script is not a regular file \(missing\): .*remind\.sh\)/.test(l)));
   gitc(pin, ['checkout', '--', '.claude/hooks/remind.sh']);
 
   // positive control: Claude Code's own runtime files under .claude/ are not configuration
@@ -743,8 +743,8 @@ test('pin checkout: an untracked hook target, a target outside the repo, and a s
   fs.symlinkSync(path.join(pin, 'scripts', 'check.mjs'), path.join(pin, 'scripts', 'link.sh'));
   const r = await trust(pin, gh);
   assert.ok(r.problems.some((l) => /hook target tools\/new\.sh is not tracked at HEAD/.test(l)), r.problems.join('\n'));
-  assert.ok(r.problems.some((l) => /runs \/opt\/elsewhere\/run\.sh, outside the repo/.test(l)), r.problems.join('\n'));
-  assert.ok(r.problems.some((l) => /hook target scripts\/link\.sh is not a regular file/.test(l)), r.problems.join('\n'));
+  assert.ok(r.problems.some((l) => /not a regular file \(missing\): \/opt\/elsewhere\/run\.sh/.test(l)), r.problems.join('\n'));
+  assert.ok(r.problems.some((l) => /not a regular file \(symlink\): .*scripts\/link\.sh/.test(l)), r.problems.join('\n'));
   assert.ok(!r.problems.some((l) => /check\.mjs/.test(l)), 'the tracked, clean target is fine');
 });
 
@@ -799,18 +799,64 @@ test('pin checkout: a tracked symlink under .claude/ is compared, and so is ever
   assert.ok(r.problems.some((l) => /points outside the repo/.test(l)), r.problems.join('\n'));
 });
 
-test('hookTargets: $CLAUDE_PROJECT_DIR resolves, interpreters and /dev/null are fine, unresolvable paths are problems', () => {
-  const dir = '/r/app';
+test('hookTargets: only absolute regular files inside the repo, run by system interpreters', () => {
+  const dir = tmp('verify-ht-');
+  fs.mkdirSync(path.join(dir, '.claude', 'hooks'), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'x'));
+  fs.writeFileSync(path.join(dir, '.claude', 'hooks', 'a.sh'), 'echo a\n');
+  fs.writeFileSync(path.join(dir, 'x', 'y.mjs'), 'export {}\n');
+  fs.writeFileSync(path.join(dir, 'hook.sh'), 'echo hi\n');
+  // positive controls
   assert.deepEqual(hookTargets('bash "$CLAUDE_PROJECT_DIR/.claude/hooks/a.sh" 2>/dev/null', dir), { targets: ['.claude/hooks/a.sh'], problems: [] });
-  assert.deepEqual(hookTargets('/usr/bin/env node ${CLAUDE_PROJECT_DIR}/x/y.mjs', dir).targets, ['x/y.mjs']);
-  assert.deepEqual(hookTargets('bash -c "cd $CLAUDE_PROJECT_DIR && ./scripts/z.sh"', dir).targets, ['scripts/z.sh']);
-  assert.match(hookTargets('bash "$HOME/hooks/a.sh"', dir).problems[0], /can't be resolved/);
-  assert.match(hookTargets('bash -c "$SCRIPT"', dir).problems[0], /can't be resolved/, 'an expansion with no slash is a problem too');
-  const real = tmp('verify-bare-');
-  fs.writeFileSync(path.join(real, 'hook.sh'), 'echo hi\n');
-  assert.deepEqual(hookTargets('bash hook.sh --flag', real), { targets: ['hook.sh'], problems: [] }, 'a bare file name in the project is a target');
-  assert.deepEqual(hookTargets('echo done', real), { targets: [], problems: [] }, 'positive control: ordinary words are not');
-  assert.match(hookTargets('bash "$CLAUDE_PROJECT_DIR/../other/a.sh"', dir).problems[0], /outside the repo/);
+  assert.deepEqual(hookTargets('/usr/bin/env node ${CLAUDE_PROJECT_DIR}/x/y.mjs >/dev/null 2>&1', dir).targets, ['x/y.mjs']);
+  assert.deepEqual(hookTargets('bash -c "echo start; bash $CLAUDE_PROJECT_DIR/hook.sh"', dir), { targets: ['hook.sh'], problems: [] }, 'one level of sh -c');
+  const bad = (cmd, re) => assert.match(hookTargets(cmd, dir).problems.join('\n'), re, cmd);
+  bad('bash hook.sh', /not an absolute path: hook\.sh/);
+  bad('bash ./hook.sh', /not an absolute path/);
+  bad('hook.sh', /found on PATH that is not an interpreter/);
+  bad('jq . "$CLAUDE_PROJECT_DIR/x/y.mjs"', /found on PATH that is not an interpreter: jq/);
+  bad('bash "$CLAUDE_PROJECT_DIR/x"', /not a regular file \(dir\)/);
+  bad('bash "$CLAUDE_PROJECT_DIR"/*.sh', /a glob/);
+  bad('bash ~root/a.sh', /~user/);
+  bad('bash "$CLAUDE_PROJECT_DIR"/{a,b}.sh', /brace expansion/);
+  bad('bash <"$CLAUDE_PROJECT_DIR/hook.sh"', /input redirect/);
+  bad('bash<x', /input redirect/);
+  bad('bash "$CLAUDE_PROJECT_DIR/hook.sh" > /tmp/out', /output redirect/);
+  bad('bash -c "bash -c \'bash $CLAUDE_PROJECT_DIR/hook.sh\'"', /nested more than once/);
+  bad('bash -c "$SCRIPT"', /expansion other than/);
+  bad('bash "$HOME/../x.sh" $(id)', /expansion other than|command substitution/);
+  bad('node -e "require(1)"', /can load code that can't be pinned/);
+  bad('PATH=/tmp bash "$CLAUDE_PROJECT_DIR/hook.sh"', /environment assignment/);
+  bad('(bash "$CLAUDE_PROJECT_DIR/hook.sh")', /subshell/);
+  bad('bash /etc/hosts', /outside the repo/);
+  bad('python3 -mhooks.run "$CLAUDE_PROJECT_DIR/hook.sh"', /can load code/);
+  bad('python3 -cimport "$CLAUDE_PROJECT_DIR/hook.sh"', /can load code/);
+  bad('node --require x "$CLAUDE_PROJECT_DIR/x/y.mjs"', /can load code/);
+  assert.deepEqual(hookTargets('bash -e -o pipefail "$CLAUDE_PROJECT_DIR/hook.sh"', dir).problems, [], 'positive control: shell option flags');
+  assert.deepEqual(hookTargets('python3 -u "$CLAUDE_PROJECT_DIR/hook.sh"', dir).problems, [], 'positive control: python -u');
+});
+
+test('userCommandHash: interpreter path and every file are pinned; anything unresolvable is a problem', () => {
+  const home = tmp('verify-uch-');
+  fs.mkdirSync(path.join(home, 'bin'));
+  fs.writeFileSync(path.join(home, 'bin', 'a.sh'), 'echo a\n');
+  const ok = userCommandHash('bash ~/bin/a.sh', { home });
+  assert.deepEqual(ok.problems, [], 'positive control');
+  assert.equal(userCommandHash('bash $HOME/bin/a.sh', { home }).problems.length, 0);
+  assert.notEqual(userCommandHash('bash ~/bin/a.sh', { home }).hash, userCommandHash('sh ~/bin/a.sh', { home }).hash, 'the interpreter is part of the pin');
+  fs.appendFileSync(path.join(home, 'bin', 'a.sh'), 'curl x\n');
+  assert.notEqual(userCommandHash('bash ~/bin/a.sh', { home }).hash, ok.hash, 'the script content is part of the pin');
+  // a program outside /bin and /usr/bin (e.g. a user-writable prefix) is pinned by content, not path
+  const prog = path.join(home, 'bin', 'tool');
+  fs.writeFileSync(prog, '#!/bin/sh\necho t\n'); fs.chmodSync(prog, 0o755);
+  const t1 = userCommandHash(prog, { home });
+  assert.deepEqual(t1.problems, []);
+  fs.appendFileSync(prog, 'curl x\n');
+  assert.notEqual(userCommandHash(prog, { home }).hash, t1.hash, 'its content is part of the pin');
+  assert.deepEqual(userCommandHash('/usr/bin/true', { home }).problems, [], 'a root-owned system program by path');
+  for (const c of ['a.sh', 'bash bin/a.sh', 'bash ~/bin', 'bash ~/bin/missing.sh', 'bash ~/bin/*.sh', 'gh api x', 'bash < ~/bin/a.sh']) {
+    assert.ok(userCommandHash(c, { home }).problems.length > 0, c);
+  }
 });
 
 test('run(): --pin-repo checks the pin checkout against GitHub and caches only a pass', async () => {
@@ -866,4 +912,91 @@ test('host closure: the whole core/fleet and core/lib trees are compared, plante
     'modified core/lib/lease/baton.mjs',
     'unexpected core/lib/lease/extra.mjs',
   ]);
+});
+
+test('settings env: endpoint, credential, provider and proxy keys are protected', () => {
+  for (const k of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_CUSTOM_HEADERS',
+    'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY', 'ANTHROPIC_BEDROCK_BASE_URL', 'OTHER_BASE_URL',
+    'HTTP_PROXY', 'https_proxy', 'All_Proxy', 'no_proxy']) {
+    assert.ok(isProtectedEnvKey(k), k);
+  }
+  for (const k of ['BASE_URLS', 'MY_URL', 'CLAUDE_CODE_USE_POWERSHELL_TOOL', 'PROXY']) assert.ok(!isProtectedEnvKey(k), `${k} is ordinary`);
+});
+
+test('user-scope config: agents, commands, skills, rules, memory and MCP servers need VERIFY_ALLOWED_USER_FILES', () => {
+  const home = tmp('verify-ucfg-home-');
+  const cfg = path.join(home, 'fleet-claude');
+  const proj = path.join(home, 'git', 'app');
+  fs.mkdirSync(path.join(proj, '.claude'), { recursive: true });
+  fs.mkdirSync(cfg, { recursive: true });
+  const run1 = (allowed = '') => checkSettingsDetailed({ projectDir: proj, userSettingsDir: cfg, projectVerified: true, home,
+    claudeJson: path.join(cfg, '.claude.json'), allowedUserFiles: parseAllowedFiles(allowed) });
+  assert.deepEqual(run1().problems, [], 'positive control: an empty config dir passes');
+  fs.mkdirSync(path.join(cfg, 'agents')); fs.writeFileSync(path.join(cfg, 'agents', 'helper.md'), '---\nname: helper\n---\n');
+  fs.mkdirSync(path.join(cfg, 'skills', 's1'), { recursive: true }); fs.writeFileSync(path.join(cfg, 'skills', 's1', 'SKILL.md'), 'x\n');
+  fs.mkdirSync(path.join(cfg, 'commands')); fs.writeFileSync(path.join(cfg, 'commands', 'go.md'), 'x\n');
+  fs.mkdirSync(path.join(cfg, 'rules')); fs.writeFileSync(path.join(cfg, 'rules', 'r.md'), 'x\n');
+  fs.writeFileSync(path.join(cfg, 'CLAUDE.md'), 'be nice\n');
+  fs.writeFileSync(path.join(cfg, '.claude.json'), JSON.stringify({ mcpServers: { srv: { command: 'x' } }, projects: { [proj]: { mcpServers: { local1: { url: 'https://x' } } } } }));
+  fs.writeFileSync(path.join(cfg, 'settings.json'), JSON.stringify({ mcpServers: { s2: { command: 'y' } } }));
+  fs.mkdirSync(path.join(cfg, 'plugins', 'cache'), { recursive: true }); fs.writeFileSync(path.join(cfg, 'plugins', 'cache', 'x'), 'pinned elsewhere\n');
+  const r = run1();
+  const text = r.problems.join('\n');
+  for (const re of [/agents\/helper\.md is not on VERIFY_ALLOWED_USER_FILES/, /skills\/s1\/SKILL\.md is not on/, /commands\/go\.md is not on/,
+    /rules\/r\.md is not on/, /CLAUDE\.md is not on/, /MCP server srv /, /MCP server local1 /, /MCP server s2 /]) assert.match(text, re);
+  assert.doesNotMatch(text, /plugins/, 'plugin caches are pinned by fleet verify, not here');
+  const hashes = [...text.matchAll(/sha256 ([0-9a-f]{64})/g)].map((m) => m[1]);
+  assert.equal(hashes.length, 8);
+  const r2 = run1(hashes.join(' '));
+  assert.deepEqual(r2.problems, [], 'all allowlisted: passes');
+  assert.equal(r2.info.filter((l) => /VERIFY_ALLOWED_USER_FILES/.test(l)).length, 8);
+  fs.appendFileSync(path.join(cfg, 'agents', 'helper.md'), 'changed\n');
+  assert.match(run1(hashes.join(' ')).problems.join('\n'), /agents\/helper\.md is not on/, 'a changed file needs a new hash');
+  // without the flag (older callers), none of this is inspected
+  assert.deepEqual(checkSettingsDetailed({ projectDir: proj, userSettingsDir: cfg, projectVerified: true, home }).problems
+    .filter((l) => /user-cfg/.test(l)), []);
+});
+
+test('memory files above the pin checkout, up to $HOME, are a mismatch', () => {
+  const home = tmp('verify-parent-home-');
+  const proj = path.join(home, 'git', 'org', 'app');
+  fs.mkdirSync(path.join(proj, '.claude'), { recursive: true });
+  assert.deepEqual(parentMemoryFiles(proj, home), [], 'positive control: none');
+  fs.writeFileSync(path.join(home, 'git', 'CLAUDE.md'), 'x\n');
+  fs.writeFileSync(path.join(home, 'git', 'org', 'claude.local.md'), 'x\n');
+  fs.writeFileSync(path.join(home, 'CLAUDE.md'), 'x\n');
+  fs.writeFileSync(path.join(proj, 'CLAUDE.md'), 'the project own one is checked elsewhere\n');
+  assert.deepEqual(parentMemoryFiles(proj, home), [path.join(home, 'CLAUDE.md'), path.join(home, 'git', 'CLAUDE.md'), path.join(home, 'git', 'org', 'claude.local.md')].sort());
+  const r = checkSettingsDetailed({ projectDir: proj, projectVerified: true, home, allowedUserFiles: new Set() });
+  assert.equal(r.problems.filter((l) => /^memory\s+.* above the pin checkout/.test(l)).length, 3);
+});
+
+test('pin checkout: untracked files git ignores are runtime state; untracked files it does not ignore still mismatch', async () => {
+  const { origin, pin } = pinRepo();
+  fs.writeFileSync(path.join(origin, '.gitignore'), 'tmp/\n');
+  gitc(origin, ['add', '-A']); gitc(origin, ['commit', '-q', '-m', 'ignore tmp']);
+  gitc(pin, ['pull', '-q', '--ff-only']);
+  const gh = fakeGitHub(origin);
+  fs.appendFileSync(path.join(pin, '.git', 'info', 'exclude'), '.claude/scheduled_tasks.json\n.claude/checkpoints/\n.claude/agent-registry.json\n');
+  fs.writeFileSync(path.join(pin, '.claude', 'scheduled_tasks.json'), '[]');
+  fs.mkdirSync(path.join(pin, '.claude', 'checkpoints'), { recursive: true });
+  fs.writeFileSync(path.join(pin, '.claude', 'checkpoints', 'c1.json'), '{}');
+  fs.writeFileSync(path.join(pin, '.claude', 'agent-registry.json'), '{}');
+  fs.mkdirSync(path.join(pin, 'tmp', 'x'), { recursive: true });
+  fs.writeFileSync(path.join(pin, 'tmp', 'x', 'claude.md'), 'stray\n');
+  let r = await trust(pin, gh);
+  assert.deepEqual(r.problems, [], r.problems.join('\n'));
+  // positive control: the same kinds of file, not ignored, are a mismatch
+  fs.writeFileSync(path.join(pin, '.claude', 'mailbox.json'), '{}');
+  fs.mkdirSync(path.join(pin, 'docs'), { recursive: true });
+  fs.writeFileSync(path.join(pin, 'docs', 'CLAUDE.md'), 'planted\n');
+  r = await trust(pin, gh);
+  assert.ok(r.problems.some((l) => /^untracked\s+\.claude\/mailbox\.json/.test(l)), r.problems.join('\n'));
+  assert.ok(r.problems.some((l) => /^untracked\s+docs\/CLAUDE\.md/.test(l)), r.problems.join('\n'));
+  // a tracked file can't hide behind an ignore rule
+  fs.rmSync(path.join(pin, '.claude', 'mailbox.json')); fs.rmSync(path.join(pin, 'docs'), { recursive: true });
+  fs.appendFileSync(path.join(pin, '.git', 'info', 'exclude'), '.claude/hooks/remind.sh\n');
+  fs.appendFileSync(path.join(pin, '.claude', 'hooks', 'remind.sh'), 'echo edited\n');
+  r = await trust(pin, gh);
+  assert.ok(r.problems.some((l) => /^modified\s+\.claude\/hooks\/remind\.sh/.test(l)), r.problems.join('\n'));
 });

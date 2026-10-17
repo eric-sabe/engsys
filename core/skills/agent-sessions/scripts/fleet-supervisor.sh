@@ -149,7 +149,7 @@
 #                              never killed for it and their batons are never revoked or broken
 #                              (a dead or stale one is relaunched once it passes, as the table says).
 #                              The command alerts on its own, once per
-#                              incident (the fleet kit: `fleet verify --alert --max-age N`,
+#                              incident (the fleet kit: `fleet verify --alert --auto-sync --max-age N`,
 #                              engsys#70); a held relaunch is also said once on that session's
 #                              ledger.
 #   AUTH_PROBE=on|off          optional (default on): the test request that tells a working login from an
@@ -668,13 +668,14 @@ fi
 quota_scan
 if [ -n "$QUOTA_BLOCKED" ]; then
   QUOTA_FIRST="${QUOTA_BLOCKED%%$'\n'*}"
-  auth_add_lines "$QUOTA_ACKED" "$QUOTA_BLOCKED"
   log "quota: seat limit reached in \`${QUOTA_FIRST%%|*}\`; supervised sessions never fail over to another harness (Claude-only), so it stays on $PRIMARY_HARNESS"
   if [ ! -f "$QUOTA_ALERTED" ]; then
     if notify --level alert --incident "$QUOTA_INCIDENT" "Seat limit reached on \`$PRIMARY_HARNESS\` on $HOST_NAME (seen in \`${QUOTA_FIRST%%|*}\`). The fleet is Claude-only, so no session is moved to another harness: the sessions wait for the limit to reset, or for an operator."; then
       date -u +%Y-%m-%dT%H:%M:%SZ >"$QUOTA_ALERTED"
     fi
   fi
+  # acknowledged only once the alert is out (an undelivered one is retried next tick)
+  [ ! -f "$QUOTA_ALERTED" ] || auth_add_lines "$QUOTA_ACKED" "$QUOTA_BLOCKED"
 elif [ "$QUOTA_ANY" = 0 ] && [ -f "$QUOTA_ALERTED" ]; then
   if notify --level info --incident "$QUOTA_INCIDENT" --resolve "Resolved: no supervised session on $HOST_NAME shows a seat limit any more."; then rm -f "$QUOTA_ALERTED"; fi
 fi

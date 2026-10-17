@@ -296,7 +296,10 @@ claude_config_report() {
   fi
   li="$( (cd "$SYNC_TMP/cwd" && fleet_claude auth status --json) 2>/dev/null | jq -r 'if .loggedIn == true then "logged in" elif .loggedIn == false then "NOT logged in" else "login unknown" end' 2>/dev/null || true)"
   say "claude config dir: $dir${FLEET_CLAUDE_CONFIG_DIR:+ (FLEET_CLAUDE_CONFIG_DIR)}, ${li:-login unknown}"
-  [ "$li" != "NOT logged in" ] || warn "the fleet's Claude config dir is not logged in: CLAUDE_CONFIG_DIR=$dir claude, then /login"
+  if [ "$li" = "NOT logged in" ]; then
+    warn "the fleet's Claude config dir is not logged in: CLAUDE_CONFIG_DIR=$dir claude, then /login. Until then fleet verify holds merge and maintain launches (and alerts)."
+    [ -z "${FLEET_CLAUDE_CONFIG_DIR:-}" ] || return 1
+  fi
   return 0
 }
 user_plugins() { # "<id>\t<version>" for each user-scope install (the list also shows per-project installs)

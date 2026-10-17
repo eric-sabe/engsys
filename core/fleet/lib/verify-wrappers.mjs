@@ -36,6 +36,7 @@
 //                       --project-dir <PIN_DIR> --plugins <`claude plugin list --json` output file>
 //                       [--engsys-dir <ENGSYS_DIR>] [--check-settings] [--user-settings-dir <claude config dir>]
 //                       [--allowed-user-plugins "<name@mkt> ..."] [--allowed-user-hooks "<sha256> ..."]
+//                       [--check-user-config --claude-json <file> --allowed-user-files "<sha256> ..."]
 //                       [--pin-repo <owner/repo>]
 //                       [--cache <file> --max-age-min <n>]
 //
@@ -119,7 +120,14 @@ export const DANGEROUS_SETTINGS_ENV_RE = /^(ENGSYS_|FLEET_|HARNESS|COPILOT_|AGY_
  * (model: claude-opus-4-8) would otherwise run on whatever a committed settings file names.
  */
 export const MODEL_SETTINGS_ENV_RE = /^(CLAUDE_CODE_SUBAGENT_MODEL|CLAUDE_CODE_SUBAGENT_MODEL_FORCE|ANTHROPIC_MODEL|ANTHROPIC_SMALL_FAST_MODEL|ANTHROPIC_[A-Z0-9_]*_MODEL)$/;
-export const isProtectedEnvKey = (k) => DANGEROUS_SETTINGS_ENV_KEYS.includes(k) || DANGEROUS_SETTINGS_ENV_RE.test(k) || MODEL_SETTINGS_ENV_RE.test(k);
+/**
+ * Settings `env` keys that move the API endpoint, the credentials or the provider, or route traffic
+ * through a proxy (proxy variables in any case).
+ */
+export const ENDPOINT_SETTINGS_ENV_RE = /^(ANTHROPIC_BASE_URL|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_API_KEY|ANTHROPIC_CUSTOM_HEADERS|CLAUDE_CODE_USE_BEDROCK|CLAUDE_CODE_USE_VERTEX|CLAUDE_CODE_USE_FOUNDRY|[A-Za-z0-9_]*_BASE_URL)$/;
+const PROXY_ENV_RE = /^(http_proxy|https_proxy|all_proxy|no_proxy)$/i;
+export const isProtectedEnvKey = (k) => DANGEROUS_SETTINGS_ENV_KEYS.includes(k) || DANGEROUS_SETTINGS_ENV_RE.test(k)
+  || MODEL_SETTINGS_ENV_RE.test(k) || ENDPOINT_SETTINGS_ENV_RE.test(k) || PROXY_ENV_RE.test(k);
 
 /** Claude Code's PID-marker directory at the top of an install root: written by Claude Code, never loaded. */
 export const IN_USE = '.in_use';
@@ -281,39 +289,330 @@ export function settingsCommands(cfg) {
   return out;
 }
 
+// --- Command lines in settings (hooks and command keys) --------------------------------------------
+// A command is pinned only when everything it runs is known: each simple command (split on ; & | && ||)
+// is a shell no-op (echo, printf, true, false, :, exit), an interpreter, or an absolute path to a
+// regular file, and every file it names is an absolute path to a regular file. Only ~, $HOME and
+// $CLAUDE_PROJECT_DIR are expanded. Rejected, never guessed at: other variables, command substitution,
+// globs, ~user, brace expansion, input redirects, output redirects other than to /dev/null or another
+// fd, subshells, env assignments, a program found on PATH that is not an interpreter in SYSTEM_BIN_DIRS,
+// interpreter flags outside a small safe list (anything that could load other code),
+// a relative path, a directory, a symlink, a missing file, and `sh -c` nested more than once. An
+// interpreter is pinned by its path; any other program outside /bin and /usr/bin by its content. A
+// script's own imports or sources are not followed: an allowlisted command should run one
+// self-contained file.
+
+/** Where an interpreter named without a path may come from; its resolved path is part of the pin. */
+export const SYSTEM_BIN_DIRS = ['/bin', '/usr/bin', '/opt/homebrew/bin', '/usr/local/bin'];
+const SHELLS = ['bash', 'sh', 'zsh'];
+const INTERPRETERS = [...SHELLS, 'node', 'python', 'python3'];
+const NOOPS = ['echo', 'printf', 'true', 'false', ':', 'exit'];
+/**
+ * Interpreter flags a pinned command may use: they change no code that runs. Anything else (-c, -e, -m,
+ * -r, --require, --import, attached forms like -mpkg or -cCODE, ...) can load code that isn't pinned.
+ */
+const SAFE_FLAGS = {
+  shell: /^[-+][euxvf]+$|^-o$|^(errexit|nounset|pipefail|xtrace)$|^--norc$|^--noprofile$/,
+  node: /^--(no-warnings|enable-source-maps|no-deprecation|trace-warnings)$/,
+  python: /^-[uBEsI]+$/,
+};
+/** Directories whose programs are root-owned on a stock macOS/Linux host: pinned by path alone. */
+const ROOT_BIN_DIRS = ['/bin', '/usr/bin'];
+
+/**
+ * Tokenize a command line. → { tokens: [{t:'word', v} | {t:'op', v}], problems }. Expands ~, $HOME and
+ * $CLAUDE_PROJECT_DIR; anything else that the shell would expand is a problem.
+ */
+function lexCommand(cmd, { home, projectDir }) {
+  const tokens = [];
+  const problems = [];
+  const s = String(cmd ?? '');
+  let cur = '', inWord = false;
+  const flush = () => { if (inWord) tokens.push({ t: 'word', v: cur }); cur = ''; inWord = false; };
+  const expand = (i) => { // at s[i] === '$' outside single quotes → [replacement, next index] or null
+    const m = /^\$(?:\{(HOME|CLAUDE_PROJECT_DIR)\}|(HOME|CLAUDE_PROJECT_DIR)(?![A-Za-z0-9_]))/.exec(s.slice(i));
+    if (!m) return null;
+    const name = m[1] || m[2];
+    if (name === 'CLAUDE_PROJECT_DIR' && !projectDir) return null;
+    return [name === 'HOME' ? home : path.resolve(projectDir), i + m[0].length];
+  };
+  for (let i = 0; i < s.length;) {
+    const c = s[i];
+    if (c === "'") {
+      const j = s.indexOf("'", i + 1);
+      if (j < 0) { problems.push('an unterminated quote'); break; }
+      cur += s.slice(i + 1, j); inWord = true; i = j + 1; continue;
+    }
+    if (c === '"') {
+      let j = i + 1; inWord = true;
+      for (; j < s.length && s[j] !== '"'; j++) {
+        if (s[j] === '\\' && j + 1 < s.length && '"\\$`'.includes(s[j + 1])) { cur += s[++j]; continue; }
+        if (s[j] === '`') { problems.push('command substitution'); continue; }
+        if (s[j] === '$') {
+          const e = expand(j);
+          if (!e) { problems.push(`an expansion other than ~, $HOME or $CLAUDE_PROJECT_DIR (${s.slice(j, j + 24)})`); continue; }
+          cur += e[0]; j = e[1] - 1; continue;
+        }
+        cur += s[j];
+      }
+      if (j >= s.length) { problems.push('an unterminated quote'); break; }
+      i = j + 1; continue;
+    }
+    if (c === '\\') { if (i + 1 < s.length && s[i + 1] !== '\n') cur += s[i + 1]; inWord = true; i += 2; continue; }
+    if (c === '$') {
+      const e = expand(i);
+      if (!e) { problems.push(`an expansion other than ~, $HOME or $CLAUDE_PROJECT_DIR (${s.slice(i, i + 24)})`); i++; continue; }
+      cur += e[0]; inWord = true; i = e[1]; continue;
+    }
+    if (c === '`') { problems.push('command substitution'); i++; continue; }
+    if (c === '~' && !inWord) {
+      if (i + 1 >= s.length || /[\s/;|&]/.test(s[i + 1])) { cur += home; inWord = true; i++; continue; }
+      problems.push('a ~user path'); i++; continue;
+    }
+    if ('*?['.includes(c)) { problems.push(`a glob (${c})`); cur += c; inWord = true; i++; continue; }
+    if (c === '{' || c === '}') { problems.push('brace expansion'); cur += c; inWord = true; i++; continue; }
+    if (c === '(' || c === ')') { problems.push('a subshell'); i++; continue; }
+    if (c === '<') { problems.push('an input redirect (<)'); i++; continue; }
+    if (c === '>') {
+      // an output redirect, optionally after an fd number: only to /dev/null or another fd
+      if (inWord && /^\d+$/.test(cur)) { cur = ''; inWord = false; }
+      flush();
+      let j = i + 1;
+      if (s[j] === '>') j++;
+      if (s[j] === '&') {
+        const m = /^&\d+/.exec(s.slice(j));
+        if (!m) { problems.push('an output redirect that is not to /dev/null'); i = j + 1; continue; }
+        i = j + m[0].length; continue;
+      }
+      while (j < s.length && /[ \t]/.test(s[j])) j++;
+      if (s.slice(j, j + 9) === '/dev/null' && (j + 9 >= s.length || /[\s;|&]/.test(s[j + 9]))) { i = j + 9; continue; }
+      problems.push('an output redirect that is not to /dev/null'); i = j; continue;
+    }
+    if (c === ';' || c === '|' || c === '&' || c === '\n') {
+      flush();
+      let v = c;
+      if ((c === '|' || c === '&') && s[i + 1] === c) v += c;
+      tokens.push({ t: 'op', v }); i += v.length; continue;
+    }
+    if (/\s/.test(c)) { flush(); i++; continue; }
+    cur += c; inWord = true; i++;
+  }
+  flush();
+  return { tokens, problems };
+}
+
+/** lstat a path → 'file' | 'dir' | 'symlink' | 'other' | 'missing' */
+function kindOf(abs) {
+  try {
+    const st = fs.lstatSync(abs);
+    return st.isSymbolicLink() ? 'symlink' : st.isFile() ? 'file' : st.isDirectory() ? 'dir' : 'other';
+  } catch { return 'missing'; }
+}
+
+/**
+ * Parse one settings command strictly (section header above). → { programs: [abs system binary paths],
+ * files: [abs regular files it runs or names], problems: [reasons] }. A command with any problem can't
+ * be pinned.
+ */
+export function parseSettingsCommand(command, { home = os.homedir(), projectDir = '', depth = 0 } = {}) {
+  const programs = [];
+  const files = [];
+  const lx = lexCommand(command, { home, projectDir });
+  const problems = [...lx.problems];
+  const fileArg = (w, what) => {
+    if (!path.isAbsolute(w)) { problems.push(`${what} is not an absolute path: ${w}`); return; }
+    const k = kindOf(w);
+    if (k === 'file') files.push(path.normalize(w));
+    else problems.push(`${what} is not a regular file (${k}): ${w}`);
+  };
+  const resolveBin = (name) => {
+    for (const d of SYSTEM_BIN_DIRS) {
+      const p = path.join(d, name);
+      try { if (fs.statSync(p).isFile()) return p; } catch { /* next */ }
+    }
+    return null;
+  };
+  const underSystem = (abs) => SYSTEM_BIN_DIRS.some((d) => abs.startsWith(`${d}/`));
+  const runInterpreter = (name, args) => {
+    let i = 0;
+    for (; i < args.length && args[i].startsWith('-'); i++) {
+      if (SHELLS.includes(name) && args[i] === '-c') {
+        if (depth >= 1) { problems.push(`${name} -c nested more than once`); return; }
+        if (i + 1 >= args.length) { problems.push(`${name} -c without a command`); return; }
+        const sub = parseSettingsCommand(args[i + 1], { home, projectDir, depth: depth + 1 });
+        programs.push(...sub.programs); files.push(...sub.files); problems.push(...sub.problems);
+        for (const a of args.slice(i + 2)) if (a.includes('/')) fileArg(a, 'an argument');
+        return;
+      }
+      const fam = SHELLS.includes(name) ? 'shell' : name === 'node' ? 'node' : 'python';
+      if (SHELLS.includes(name) && args[i] === '-o' && i + 1 < args.length) { i++; continue; }
+      if (!SAFE_FLAGS[fam].test(args[i])) { problems.push(`${name} ${args[i]} can load code that can't be pinned`); return; }
+    }
+    if (i >= args.length) { problems.push(`${name} with no script file`); return; }
+    fileArg(args[i], `the ${name} script`);
+    for (const a of args.slice(i + 1)) if (!a.startsWith('-') && a.includes('/')) fileArg(a, 'an argument');
+  };
+  const simple = (words) => {
+    if (!words.length) return;
+    let [prog, ...args] = words;
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(prog)) { problems.push(`an environment assignment (${prog.split('=')[0]}=)`); return; }
+    if (NOOPS.includes(prog)) return;
+    if (path.isAbsolute(prog)) {
+      const k = kindOf(prog);
+      let real = prog;
+      try { real = fs.realpathSync(prog); } catch { /* keep */ }
+      const base = path.basename(prog);
+      const pathOnly = (INTERPRETERS.includes(base) || base === 'env')
+        ? underSystem(prog) && underSystem(real)
+        : ROOT_BIN_DIRS.some((d) => prog.startsWith(`${d}/`)) && ROOT_BIN_DIRS.some((d) => real.startsWith(`${d}/`));
+      if (pathOnly && (k === 'file' || k === 'symlink')) {
+        programs.push(prog);
+        if (base === 'env') {
+          if (!args.length || args[0].startsWith('-') || args[0].includes('=')) { problems.push('env with options or assignments'); return; }
+          [prog, ...args] = args;
+          if (!INTERPRETERS.includes(prog)) { problems.push(`env runs a program that is not an interpreter: ${prog}`); return; }
+          const p = resolveBin(prog);
+          if (!p) { problems.push(`interpreter ${prog} not found in ${SYSTEM_BIN_DIRS.join(', ')}`); return; }
+          programs.push(p);
+          runInterpreter(prog, args);
+        } else if (INTERPRETERS.includes(base)) runInterpreter(base, args);
+        else for (const a of args) if (!a.startsWith('-') && a.includes('/')) fileArg(a, 'an argument');
+        return;
+      }
+      fileArg(prog, 'the program');
+      for (const a of args) if (!a.startsWith('-') && a.includes('/')) fileArg(a, 'an argument');
+      return;
+    }
+    if (prog.includes('/')) { problems.push(`the program is not an absolute path: ${prog}`); return; }
+    if (!INTERPRETERS.includes(prog)) { problems.push(`a program found on PATH that is not an interpreter: ${prog}`); return; }
+    const p = resolveBin(prog);
+    if (!p) { problems.push(`interpreter ${prog} not found in ${SYSTEM_BIN_DIRS.join(', ')}`); return; }
+    programs.push(p);
+    runInterpreter(prog, args);
+  };
+  let words = [];
+  for (const tk of lx.tokens) {
+    if (tk.t === 'op') { simple(words); words = []; } else words.push(tk.v);
+  }
+  simple(words);
+  return { programs: [...new Set(programs)], files: [...new Set(files)], problems: [...new Set(problems)] };
+}
+
 /**
  * The content hash an operator allowlists (VERIFY_ALLOWED_USER_HOOKS) for one user-scope command: sha256
- * over the command text and the content of every file it names (~, $HOME and $CLAUDE_PROJECT_DIR
- * resolved). → { hash, problems }: an expansion it can't resolve can't be pinned, so it is a problem
+ * over the command text, the path of every interpreter it uses and the content of every file it runs or
+ * names (parseSettingsCommand). → { hash, problems }: a command that can't be pinned is a problem
  * whatever the allowlist says. Any change to the command or a file it runs changes the hash.
  */
 export function userCommandHash(command, { home = os.homedir(), projectDir = '' } = {}) {
-  const problems = [];
-  const files = new Map();
-  const visit = (cmd, depth) => {
-    for (let w of shellWords(cmd)) {
-      w = w.replace(/^~(?=\/|$)/, home).replace(/\$\{HOME\}|\$HOME(?![A-Za-z0-9_])/g, home);
-      if (projectDir) w = w.replace(/\$\{CLAUDE_PROJECT_DIR\}|\$CLAUDE_PROJECT_DIR(?![A-Za-z0-9_])/g, path.resolve(projectDir));
-      if (/[\s;|&]/.test(w) && depth < 2) { visit(w, depth + 1); continue; }
-      if (/[$`]/.test(w)) { problems.push(w); continue; }
-      if (!w.includes('/')) continue;
-      const abs = path.resolve(projectDir || home, w);
-      let state;
-      try {
-        const st = fs.statSync(abs);
-        state = st.isFile() ? crypto.createHash('sha256').update(fs.readFileSync(abs)).digest('hex') : st.isDirectory() ? 'dir' : 'not-a-file';
-      } catch { state = 'missing'; }
-      files.set(abs, state);
-    }
-  };
-  visit(command, 0);
-  const h = crypto.createHash('sha256').update(`engsys-user-command-v1\0${command}\0`);
-  for (const k of [...files.keys()].sort()) h.update(`${k}\0${files.get(k)}\0`);
-  return { hash: h.digest('hex'), problems };
+  const p = parseSettingsCommand(command, { home, projectDir });
+  const h = crypto.createHash('sha256').update(`engsys-user-command-v2\0${command}\0`);
+  for (const b of [...p.programs].sort()) h.update(`bin\0${b}\0`);
+  for (const f of [...p.files].sort()) h.update(`file\0${f}\0${crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex')}\0`);
+  return { hash: h.digest('hex'), problems: p.problems };
 }
 
 /** Top-level settings keys that pick, limit or redirect the session's model (Claude Code 2.1.292). */
 export const MODEL_SETTINGS_TOP_KEYS = ['model', 'availableModels', 'fallbackModel', 'advisorModel', 'modelOverrides', 'deniedModels', 'enforceAvailableModels'];
+
+/** Parse VERIFY_ALLOWED_USER_FILES: space-separated sha256 digests (userConfigItems). → Set */
+export const parseAllowedFiles = parseAllowedHooks;
+
+/** User-scope directories whose files Claude Code loads into every session (agents, commands, skills, rules). */
+export const USER_CONFIG_DIRS = ['agents', 'commands', 'skills', 'rules'];
+
+const canonicalJson = (v) => (Array.isArray(v) ? `[${v.map(canonicalJson).join(',')}]`
+  : v && typeof v === 'object' ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(v[k])}`).join(',')}}`
+    : JSON.stringify(v));
+
+/**
+ * The user-scope configuration a fleet session loads besides settings, with the hash an operator
+ * allowlists for each (VERIFY_ALLOWED_USER_FILES). → { items: [{ what, hash }], problems }
+ *   - every file under <configDir>/{agents,commands,skills,rules} and <configDir>/CLAUDE.md: sha256 over
+ *     its path relative to the config dir and its content (symlinks followed once, loops refused);
+ *   - every MCP server definition: `mcpServers` in the user state file (claudeJson: <configDir>/.claude.json
+ *     with a fleet config dir, else ~/.claude.json), its `projects[<projectDir>].mcpServers`, and
+ *     `mcpServers` in <configDir>/settings*.json: sha256 over the server name and its canonical JSON.
+ * Plugin caches (<configDir>/plugins/) are not here: fleet verify and fleet sync pin those.
+ */
+export function userConfigItems({ configDir, claudeJson = '', projectDir = '' }) {
+  const items = [];
+  const problems = [];
+  const fileHash = (rel, buf) => crypto.createHash('sha256').update(`engsys-user-file-v1\0${rel}\0`).update(buf).digest('hex');
+  const seen = new Set();
+  const walk = (abs, rel, depth) => {
+    let st;
+    try { st = fs.statSync(abs); } catch { problems.push(`user-cfg   ${abs} is a dangling link or unreadable`); return; }
+    let real = abs;
+    try { real = fs.realpathSync(abs); } catch { /* keep */ }
+    if (st.isDirectory()) {
+      if (seen.has(real) || depth > 12) { problems.push(`user-cfg   ${abs} is a directory loop`); return; }
+      seen.add(real);
+      for (const e of fs.readdirSync(abs).sort()) { if (e !== '.DS_Store') walk(path.join(abs, e), `${rel}/${e}`, depth + 1); }
+    } else if (st.isFile()) items.push({ what: `${path.join(configDir, rel)}`, hash: fileHash(rel, fs.readFileSync(abs)) });
+    else problems.push(`user-cfg   ${abs} is not a regular file`);
+  };
+  for (const d of USER_CONFIG_DIRS) {
+    const abs = path.join(configDir, d);
+    try { fs.lstatSync(abs); } catch { continue; }
+    walk(abs, d, 0);
+  }
+  for (const name of ['CLAUDE.md', 'CLAUDE.local.md']) {
+    const abs = path.join(configDir, name);
+    try { fs.lstatSync(abs); } catch { continue; }
+    walk(abs, name, 0);
+  }
+  const servers = (obj, where) => {
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return;
+    for (const name of Object.keys(obj).sort()) {
+      items.push({ what: `MCP server ${name} (${where})`, hash: crypto.createHash('sha256').update(`engsys-user-mcp-v1\0${name}\0${canonicalJson(obj[name])}`).digest('hex') });
+    }
+  };
+  const readJson = (f) => {
+    try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch (e) {
+      if (e && e.code !== 'ENOENT') problems.push(`user-cfg   ${f} is not valid JSON`);
+      return null;
+    }
+  };
+  if (claudeJson) {
+    const j = readJson(claudeJson);
+    if (j) {
+      servers(j.mcpServers, claudeJson);
+      if (projectDir && j.projects && typeof j.projects === 'object') {
+        const want = new Set([path.resolve(projectDir)]);
+        try { want.add(fs.realpathSync(projectDir)); } catch { /* keep */ }
+        for (const [k, v] of Object.entries(j.projects)) if (want.has(k)) servers(v?.mcpServers, `${claudeJson} projects[${k}]`);
+      }
+    }
+  }
+  for (const f of ['settings.json', 'settings.local.json']) {
+    const j = readJson(path.join(configDir, f));
+    if (j) servers(j.mcpServers, path.join(configDir, f));
+  }
+  return { items, problems };
+}
+
+/**
+ * Memory files Claude Code also loads from the directories above the project: any CLAUDE.md or
+ * CLAUDE.local.md in a parent of projectDir, up to and including home (or / when the project is outside
+ * home). → [absolute paths] (names matched case-insensitively)
+ */
+export function parentMemoryFiles(projectDir, home = os.homedir()) {
+  const out = [];
+  let dir = path.resolve(projectDir);
+  const top = path.resolve(home);
+  const underHome = dir === top || dir.startsWith(`${top}/`);
+  while (true) {
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+    let entries = [];
+    try { entries = fs.readdirSync(dir); } catch { entries = []; }
+    for (const e of entries) if (MEMORY_NAMES.includes(fold(e))) out.push(path.join(dir, e));
+    if (underHome && dir === top) break;
+  }
+  return out.sort();
+}
 
 /**
  * Check Claude Code settings files for hook/env/plugin/model overrides or pin drift (engsys#96 M3).
@@ -332,6 +631,7 @@ export const MODEL_SETTINGS_TOP_KEYS = ['model', 'availableModels', 'fallbackMod
 export function checkSettingsDetailed({
   projectDir, userSettingsDir = '', pinSettingsSha = '', projectVerified = false,
   allowedUserPlugins = new Set(), allowedUserHooks = new Set(), home = os.homedir(),
+  claudeJson = '', allowedUserFiles = null,
 }) {
   const problems = [];
   const info = [];
@@ -450,6 +750,20 @@ export function checkSettingsDetailed({
       }
     }
   }
+  // User-scope configuration loaded besides settings (agents, commands, skills, rules, memory, MCP
+  // servers): each must be on VERIFY_ALLOWED_USER_FILES. Checked when allowedUserFiles is passed.
+  if (userSettingsDir && allowedUserFiles) {
+    const allowedF = allowedUserFiles instanceof Set ? allowedUserFiles : parseAllowedFiles(allowedUserFiles);
+    const uc = userConfigItems({ configDir: userSettingsDir, claudeJson, projectDir });
+    problems.push(...uc.problems);
+    for (const it of uc.items) {
+      if (allowedF.has(it.hash)) info.push(`allowed    ${it.what} ${it.hash} (VERIFY_ALLOWED_USER_FILES)`);
+      else problems.push(`user-cfg   ${it.what} is not on VERIFY_ALLOWED_USER_FILES (sha256 ${it.hash})`);
+    }
+  }
+  if (allowedUserFiles) {
+    for (const f of parentMemoryFiles(projectDir, home)) problems.push(`memory     ${f} is loaded into every session above the pin checkout; remove it`);
+  }
   return { problems: [...new Set(problems)], info: [...new Set(info)] };
 }
 
@@ -469,7 +783,10 @@ export function checkSettings(opts) {
 //   3. every auto-loaded file on disk (.claude/**, CLAUDE.md files, .mcp.json, what a tracked symlink
 //      among them points at, every settings-command target) must be a blob of HEAD's tree (from the
 //      API) with the same content, and every such blob of HEAD must be on disk. Claude Code's own
-//      runtime state is skipped (PROJECT_RUNTIME_EXEMPT, matched case-insensitively);
+//      runtime state is skipped (PROJECT_RUNTIME_EXEMPT, matched case-insensitively), and so is an
+//      untracked file git ignores (.gitignore or .git/info/exclude): runtime state, not reviewed content.
+//      Someone on the host who edits the ignore files can hide a file this way; like repointing a local
+//      ref, a local writer is out of scope (the tracked .gitignore itself is compared at HEAD);
 //   4. when HEAD is behind, every one of those paths must also be identical at the tip (a reviewed
 //      but superseded hook or memory file is a mismatch); a lag in other code is only a warning.
 
@@ -483,34 +800,6 @@ const MEMORY_NAMES = ['claude.md', 'claude.local.md'];
 const MCP_FILE = '.mcp.json';
 /** Directories never walked for memory files (dependency trees and git's own). */
 const MEMORY_SKIP_DIRS = ['node_modules', '.git'];
-/** Interpreters and devices a hook command may name outside the repo. */
-const SYSTEM_PATH_RE = /^\/(dev\/null$|bin\/|sbin\/|usr\/bin\/|usr\/sbin\/)/;
-
-/** Split a shell command into words: quotes and backslashes removed, nothing expanded. */
-export function shellWords(cmd) {
-  const words = [];
-  let cur = '', inWord = false, q = '';
-  const s = String(cmd ?? '');
-  for (let i = 0; i < s.length; i++) {
-    const c = s[i];
-    if (q === "'") { if (c === "'") q = ''; else cur += c; continue; }
-    if (q === '"') {
-      if (c === '"') q = '';
-      else if (c === '\\' && i + 1 < s.length && '"\\$`'.includes(s[i + 1])) cur += s[++i];
-      else cur += c;
-      continue;
-    }
-    if (c === "'" || c === '"') { q = c; inWord = true; continue; }
-    if (c === '\\' && i + 1 < s.length) { cur += s[++i]; inWord = true; continue; }
-    if (/\s/.test(c) || ';|&()<>'.includes(c)) {
-      if (inWord) { words.push(cur); cur = ''; inWord = false; }
-      continue;
-    }
-    cur += c; inWord = true;
-  }
-  if (inWord) words.push(cur);
-  return words;
-}
 
 /** Every `type: command` hook command in a settings object. */
 export function hookCommands(cfg) {
@@ -529,34 +818,21 @@ export function hookCommands(cfg) {
 }
 
 /**
- * The repo files a settings command names. → { targets: [repo-relative posix path], problems: [] }.
- * Once $CLAUDE_PROJECT_DIR is resolved, a word with a `/`, or a bare word naming a file in projectDir,
- * is a path: it must stay inside projectDir (system interpreters and /dev/null aside). Any other
- * expansion left in a word can't be verified and is a problem. A word that is itself a command line
- * (bash -c "...") is split again. Not covered: code a command reaches indirectly (npm run, make).
+ * The repo files a project settings command runs or names. → { targets: [repo-relative posix path],
+ * problems: [] }. Parsed strictly (parseSettingsCommand): every file must be an absolute path (after
+ * $CLAUDE_PROJECT_DIR) to a regular file inside projectDir; system interpreters are fine. Anything
+ * that can't be pinned is a problem. Not covered: what a script itself imports or sources.
  */
-export function hookTargets(command, projectDir, depth = 0) {
-  const targets = [];
-  const problems = [];
+export function hookTargets(command, projectDir, { home = os.homedir() } = {}) {
   const root = path.resolve(projectDir);
-  for (let w of shellWords(command)) {
-    w = w.replace(/\$\{CLAUDE_PROJECT_DIR\}|\$CLAUDE_PROJECT_DIR(?![A-Za-z0-9_])/g, root);
-    if (/[\s;|&]/.test(w) && depth < 2) {
-      const sub = hookTargets(w, projectDir, depth + 1);
-      targets.push(...sub.targets); problems.push(...sub.problems);
-      continue;
-    }
-    if (/[$`]/.test(w)) { problems.push(`hook       settings.json hook command has an expansion that can't be resolved: ${w}`); continue; }
-    const abs = path.resolve(root, w);
-    if (!w.includes('/')) {
-      // a bare word names a repo file when one exists at <root>/<word> (hooks run in the project dir)
-      let exists = false;
-      try { fs.lstatSync(abs); exists = true; } catch { /* a command name or an argument */ }
-      if (!exists) continue;
-    }
-    if (SYSTEM_PATH_RE.test(abs)) continue;
-    const rel = path.relative(root, abs);
-    if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) { problems.push(`hook       settings.json hook command runs ${abs}, outside the repo`); continue; }
+  const p = parseSettingsCommand(command, { home, projectDir: root });
+  const problems = p.problems.map((r) => `hook       settings.json command can't be pinned (${r}): ${command}`);
+  const realRoot = (() => { try { return fs.realpathSync(root); } catch { return root; } })();
+  const targets = [];
+  for (const f of p.files) {
+    let rel = path.relative(root, f);
+    if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) rel = path.relative(realRoot, f);
+    if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) { problems.push(`hook       settings.json hook command runs ${f}, outside the repo`); continue; }
     targets.push(rel.split(path.sep).join('/'));
   }
   return { targets: [...new Set(targets)], problems };
@@ -644,6 +920,19 @@ export function projectLocalState(projectDir, { git = hermeticGit } = {}) {
     }
   };
   visit(root, '');
+  // Untracked files git ignores (.gitignore, .git/info/exclude) are runtime state, not reviewed content:
+  // Claude Code's own scheduled-task, checkpoint and mailbox files, a stray tmp/claude.md. A tracked file
+  // is never "ignored" here (check-ignore consults the index), so only untracked ones can be skipped.
+  const ignored = [];
+  const candidates = Object.keys(files).filter((r) => r !== '.claude/');
+  if (candidates.length) {
+    let out = '';
+    try { out = git(root, ['check-ignore', '--stdin', '-z'], { input: candidates.join('\0') + '\0' }); } catch (e) {
+      out = e && typeof e.stdout === 'string' ? e.stdout : ''; // exit 1: none ignored
+      if (e && e.status !== 1) throw new Unverified(`git check-ignore failed in the pin checkout ${root}`);
+    }
+    ignored.push(...out.split('\0').filter(Boolean));
+  }
   const targets = {};
   let cfg = null;
   try { cfg = JSON.parse(fs.readFileSync(path.join(root, '.claude', 'settings.json'), 'utf8')); } catch { cfg = null; }
@@ -660,7 +949,7 @@ export function projectLocalState(projectDir, { git = hermeticGit } = {}) {
       targets[rel] = blobSha(fs.readFileSync(abs));
     }
   }
-  return { head, files, links, linked, targets, problems: [...new Set(problems)] };
+  return { head, files, links, linked, targets, ignored, problems: [...new Set(problems)] };
 }
 
 /** A commit's whole tree from the API. → Map<path, {sha, mode}> of its blobs (a truncated tree is "not verified") */
@@ -708,10 +997,12 @@ export async function verifyProjectTrust(local, { repo, api }) {
     checked.add(rel);
     if (!(rel in local.files)) problems.push(`missing    ${rel} (tracked at HEAD)`);
   }
+  const ignoredSet = new Set(local.ignored || []);
   for (const [rel, have] of Object.entries(local.files)) {
     if (rel === '.claude/') continue;
-    checked.add(rel);
     const w = want.get(rel);
+    if (!w && ignoredSet.has(rel)) continue; // untracked and ignored by git: runtime state
+    checked.add(rel);
     if (have === 'not-a-file') problems.push(`not-a-file ${rel}`);
     else if (!w) problems.push(`untracked  ${rel} (not in HEAD)`);
     else if (have.startsWith('symlink:')) {
@@ -982,6 +1273,9 @@ export function parseArgs(argv) {
     pinRepo: '',
     allowedUserPlugins: '',
     allowedUserHooks: '',
+    allowedUserFiles: '',
+    claudeJson: '',
+    checkUserConfig: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
@@ -1003,6 +1297,9 @@ export function parseArgs(argv) {
       case '--pin-repo': a.pinRepo = v(); a.checkSettings = true; break;
       case '--allowed-user-plugins': a.allowedUserPlugins = v(); break;
       case '--allowed-user-hooks': a.allowedUserHooks = v(); break;
+      case '--allowed-user-files': a.allowedUserFiles = v(); break;
+      case '--claude-json': a.claudeJson = v(); break;
+      case '--check-user-config': a.checkUserConfig = true; break;
       default: throw new Error(`unknown argument: ${k}`);
     }
   }
@@ -1067,6 +1364,8 @@ export async function run(argv, {
       projectVerified: Boolean(project),
       allowedUserPlugins: parseAllowedPlugins(a.allowedUserPlugins),
       allowedUserHooks: parseAllowedHooks(a.allowedUserHooks),
+      claudeJson: a.claudeJson,
+      allowedUserFiles: a.checkUserConfig ? parseAllowedFiles(a.allowedUserFiles) : null,
     });
     preProblems.push(...r.problems);
     info = r.info;
