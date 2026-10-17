@@ -149,7 +149,7 @@ How to dispatch and track subagents. This discipline lives in scattered memory f
 Context is cache; files and this repo are truth. Standing rules for every session, and doubly for long-runners (the monsters, fleet roles):
 
 - Write what you'd miss the moment you learn it — per-PR quirks onto the PR, decisions into the relevant journal/state file, durable lessons into the lessons dir. Never save flushing for session end.
-- After a compaction (a summary at the top of your context, plus the re-ground hook's note): re-read your skill's SKILL.md + config + state files and reconcile against live GitHub before acting. Treat summarized precision (PR numbers, SHAs, counters) as unverified.
+- After a compaction (a summary at the top of your context, plus the re-ground hook's note): re-read your skill's SKILL.md + every `references/*.md` file that SKILL.md names (merge-monster: `references/runbook-details.md`; maintenance-monster: `references/phase-details.md`) + config + state files and reconcile against live GitHub before acting. Treat summarized precision (PR numbers, SHAs, counters) as unverified.
 - Long-running orchestrators prefer **rotation over marathon compaction**: at high context pressure with nothing in flight, post a digest, final heartbeat **"rotation requested"** (exact phrase), and stop — the fleet supervisor (agent-sessions skill) relaunches within minutes; restart recovers from durable state. Operator only on relaunch failure or a stale-but-alive session.
 
 ## Memory & rules

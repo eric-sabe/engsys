@@ -68,21 +68,23 @@ describe('Personas & Skills Contract Suite (CT-PS-01..CT-PS-09)', () => {
     ...listMarkdownFiles(OPTIONAL_AGENTS_DIR),
   ];
 
-  test('CT-PS-01: All 15 persona files define frontmatter (name, description, model, tools, skills), least-privilege tools, and Handback Protocol', () => {
+  test('CT-PS-01: All 15 persona files define frontmatter (name, description, model, skills; tools except full-tool personas), least-privilege critic tools, and Handback Protocol', () => {
     assert.equal(personaFiles.length, 15, 'Expected exactly 15 persona markdown files');
     const allSkills = collectAllSkillNames();
+    // Read-only design/critic personas per #150 (NA-PS-1). nyx and marcelo are NOT read-only: nyx runs
+    // repros and posts review comments through Bash `gh`, marcelo runs suites. Both carry an explicit
+    // allowlist with Bash and without MCP or other send-capable tools.
     const readOnlyCritics = new Set([
       'gary',
       'melvin',
-      'nyx',
       'leith',
-      'marcelo',
       'otto',
       'jos',
       'sandy',
       'deandre',
       'steve',
     ]);
+    const fullToolPersonas = new Set();
 
     for (const file of personaFiles) {
       const stem = path.basename(file, '.md');
@@ -93,7 +95,11 @@ describe('Personas & Skills Contract Suite (CT-PS-01..CT-PS-09)', () => {
       assert.equal(frontmatter.name, stem, `${file} frontmatter name must match filename stem`);
       assert.ok(frontmatter.description && frontmatter.description.length > 10, `${file} must have a non-empty description`);
       assert.ok(frontmatter.model, `${file} must define model`);
-      assert.ok(Array.isArray(frontmatter.tools) && frontmatter.tools.length > 0, `${file} must define tools allowlist`);
+      if (fullToolPersonas.has(stem)) {
+        assert.equal(frontmatter.tools, undefined, `${file} must not narrow its tool set with a tools: line`);
+      } else {
+        assert.ok(Array.isArray(frontmatter.tools) && frontmatter.tools.length > 0, `${file} must define tools allowlist`);
+      }
       assert.ok(Array.isArray(frontmatter.skills), `${file} must define skills array`);
 
       for (const skill of frontmatter.skills) {
@@ -112,7 +118,12 @@ describe('Personas & Skills Contract Suite (CT-PS-01..CT-PS-09)', () => {
         assert.deepEqual(frontmatter.tools, ['Read'], 'steve.md must only have Read tool');
       }
 
+      if (stem === 'marcelo') {
+        assert.deepEqual(frontmatter.tools, ['Read', 'Grep', 'Glob', 'Bash', 'Edit', 'Write'], 'marcelo tool set');
+      }
+
       if (stem === 'nyx') {
+        assert.deepEqual(frontmatter.tools, ['Read', 'Grep', 'Glob', 'Bash', 'Write', 'WebFetch', 'WebSearch'], 'nyx tool set');
         assert.match(frontmatter.model, /^claude-opus-/, 'nyx.md must pin full security model ID');
         assert.equal(frontmatter.security, 'true', 'nyx.md must keep security: true');
       }
