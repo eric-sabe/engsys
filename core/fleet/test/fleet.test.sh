@@ -66,6 +66,11 @@ case "${1:-}" in
         rm -rf "$tmp" ;;
       remove)
         name="$3"
+        # A marketplace declared only by a project's settings: the real CLI refuses a user-scoped remove (engsys#200).
+        if [ "${FAKE_CLAUDE_REMOVE_FAIL:-}" = 1 ]; then echo "remove exploded" >&2; exit 1; fi
+        if [ "${FAKE_CLAUDE_PROJECT_DECLARED:-}" = "$name" ] && [ "${4:-}" = --scope ]; then
+          echo "Marketplace '$name' is not declared in user settings. Omit --scope to remove it from all scopes." >&2; exit 1
+        fi
         f="${FAKE_CLAUDE_WIPE:-$(proj_settings)}"; [ -z "$f" ] || wipe_project "$f" "$name"
         save "$S/marketplaces.json" --arg n "$name" 'map(select(.name != $n))'
         save "$S/plugins.json" --arg n "$name" 'map(select(.id | endswith("@" + $n) | not))' ;;
@@ -438,6 +443,18 @@ run fleet sync
 rc_is "a FLEET_CLAUDE_CONFIG_DIR that doesn't exist stops sync" 1
 has "…with the one-time setup" "$OUT" "log in with CLAUDE_CONFIG_DIR=$T/missing-cfg claude"
 cp "$T/flc.bak" "$LC"
+# A fleet dir seeded before the claude.ai sync switches existed: sync adds them, keeps every other key, and
+# never touches ~/.claude/settings.json (engsys#200).
+cp "$T/flc.bak" "$LC"; printf 'FLEET_CLAUDE_CONFIG_DIR=%s\n' "$FCFG" >>"$LC"
+echo '{"effortLevel":"high"}' >"$FCFG/settings.json"; mkdir -p "$HOME/.claude"; echo '{"keep":"me"}' >"$HOME/.claude/settings.json"
+run fleet sync
+rc_is "sync with a pre-existing fleet-dir settings.json exits 0" 0
+eq "…it gained the claude.ai sync switches, other keys kept" "$(jq -cS . "$FCFG/settings.json")" '{"effortLevel":"high","syncClaudeAiPlugins":false,"syncClaudeAiSkills":false}'
+eq "…and ~/.claude/settings.json is untouched" "$(cat "$HOME/.claude/settings.json")" '{"keep":"me"}'
+cp "$FCFG/settings.json" "$T/fcfg-settings.1"; run fleet sync
+eq "…a second sync leaves it byte-identical" "$(cat "$FCFG/settings.json")" "$(cat "$T/fcfg-settings.1")"
+rm -f "$HOME/.claude/settings.json" "$FCFG/settings.json"
+cp "$T/flc.bak" "$LC"
 
 echo "== D3. FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised: sync reconciles both the fleet dir and ~/.claude"
 FS="$FAKE/claude-cfg/$(printf '%s' "$FCFG" | tr '/' '_')"
@@ -542,6 +559,36 @@ if cmp -s "$T/app-settings.orig" "$APP_SETTINGS"; then ok "the rewritten setting
 run fleet sync
 rc_is "a plain re-run heals the host" 0
 eq "plugins back after the re-run" "$(json_names plugins '.[].id')" "core@engsys ctx@acme extra@acme"
+
+# A marketplace declared only by project settings: the scoped remove is refused, sync retries without --scope
+# (from the same empty cwd) and still finishes at the pin (engsys#200).
+stale_engsys; b="$(mark)"; c="$(cwd_mark)"
+run env FAKE_CLAUDE_PROJECT_DECLARED=engsys bash -c "cd '$HOME/git/app' && bash '$ENGSYS_HOST/core/fleet/bin/fleet' --instance '$INST' sync"
+rc_is "a project-declared marketplace no longer fails the sync" 0
+has "…the marketplace moved" "$OUT" "marketplace engsys: v1.0.0 → v1.1.0"
+seg="$(since "$b")"
+has "…the scoped remove was tried first" "$seg" "plugin marketplace remove engsys --scope user"
+eq "…exactly one unscoped remove" "$(grep -E 'plugin marketplace remove engsys' <<<"$seg" | grep -vc -- '--scope' || true)" 1
+eq "…plugins all back" "$(json_names plugins '.[].id')" "core@engsys ctx@acme extra@acme"
+eq "…no plugin call ran inside a project" "$(cwd_since "$c" | cut -f1 | sort -u | grep -cE "^($HOME/git|$INST)(/|\$)" || true)" 0
+if cmp -s "$T/app-settings.orig" "$APP_SETTINGS"; then ok "…pin checkout settings byte-identical"; else bad "…pin checkout settings byte-identical" "$(diff "$T/app-settings.orig" "$APP_SETTINGS" || true)"; fi
+# Any other remove failure stays fatal (no blind retry).
+stale_engsys
+run env FAKE_CLAUDE_PROJECT_DECLARED=engsys FAKE_CLAUDE_REMOVE_FAIL=1 bash -c "cd '$HOME/git/app' && bash '$ENGSYS_HOST/core/fleet/bin/fleet' --instance '$INST' sync"
+rc_is "an unrelated remove failure still fails the sync" 1
+run fleet sync
+rc_is "…and a plain re-run heals the host" 0
+# The unscoped fallback removes from EVERY scope: refused while another project has a project-scope install.
+stale_engsys
+jq '. + [{id: "core@engsys", version: "1.0.0", scope: "project", projectPath: "/somewhere/else/project"}]' "$FAKE/claude/plugins.json" >"$FAKE/p.json" && mv "$FAKE/p.json" "$FAKE/claude/plugins.json"
+m="$(mark)"
+run env FAKE_CLAUDE_PROJECT_DECLARED=engsys bash -c "cd '$HOME/git/app' && bash '$ENGSYS_HOST/core/fleet/bin/fleet' --instance '$INST' sync"
+rc_is "an unscoped fallback is refused while another project has an install" 1
+has "…naming the other project's plugin" "$OUT" "/somewhere/else/project"
+eq "…and no unscoped remove ran" "$(since "$m" | grep 'plugin marketplace remove engsys' | grep -vc -- '--scope' || true)" 0
+jq 'map(select(.projectPath == null))' "$FAKE/claude/plugins.json" >"$FAKE/p.json" && mv "$FAKE/p.json" "$FAKE/claude/plugins.json"
+run fleet sync
+rc_is "…and once that install is gone a plain sync heals the host" 0
 
 # An enabled plugin installed at the wrong version: --check names it, sync refuses to say synced.
 jq 'map(if .id == "core@engsys" then .version = "0.9.0" else . end)' "$FAKE/claude/plugins.json" >"$FAKE/p.json" && mv "$FAKE/p.json" "$FAKE/claude/plugins.json"
