@@ -26,6 +26,7 @@ import { isEventTrusted as sharedIsEventTrusted } from '../lib/memory/trust.mjs'
 import { loadConfig } from './memory-brief.mjs';
 import { buildMarkerMatchers, isMarkerBody, parseFindingAcks } from './harvest-findings.mjs';
 import { parseReviewComment } from './review-bakeoff.mjs';
+import { exitAfterFlush } from '../lib/exit-after-flush.mjs';
 
 const execFileP = promisify(execFile);
 
@@ -1198,15 +1199,19 @@ query($owner: String!, $name: String!, $prCount: Int!, $issueCount: Int!, $prAft
  */
 export async function fetchRepoPrsAndIssues(
   repo,
-  { gh = defaultGh, isInit = false, sinceIso = null } = {},
+  { gh = defaultGh, isInit = false, sinceIso = null, cursorIso = null } = {},
 ) {
   const normRepo = normalizeOptionalRepo(repo);
   if (!normRepo || typeof gh !== 'function') {
     return { prs: [], issues: [], ok: false, complete: false };
   }
   const [owner, name] = normRepo.split('/');
-  const maxPrs = isInit ? INIT_CAPS.prs : 100;
-  const maxIssues = isInit ? INIT_CAPS.issues : 100;
+  // A delta fetches one item past its cap of 100 as a probe: only an item that really exists (and is newer than
+  // sinceIso, since older ones stop the paging) proves the cap cut the window short.
+  const prCap = isInit ? INIT_CAPS.prs : 100;
+  const issueCap = isInit ? INIT_CAPS.issues : 100;
+  const maxPrs = isInit ? prCap : prCap + 1;
+  const maxIssues = isInit ? issueCap : issueCap + 1;
   const sinceMs = sinceIso ? Date.parse(sinceIso) : null;
 
   const prs = [];
@@ -1309,10 +1314,21 @@ export async function fetchRepoPrsAndIssues(
     }
   }
 
-  const complete = ok && (isInit || (!hitPrCap && !hitIssueCap));
-  // `capped`: the fetch itself succeeded but a delta page cap cut it short (a busy repo). Unlike `ok: false`
-  // (a failed call, which is retried over the same window), this is a volume condition (engsys#189).
-  const capped = ok && !isInit && (hitPrCap || hitIssueCap);
+  // `capped`: the fetch succeeded but the delta cap left items NEWER THAN THE CURSOR unfetched (a busy repo).
+  // Unlike `ok: false` (a failed call, retried over the same window), this is a volume condition (engsys#189).
+  // Items past the cap that are only inside the 48h overlap (at or before the cursor) were already ingested on an
+  // earlier run, so they don't count: nothing is lost and the run is complete.
+  const cursorMs = cursorIso ? Date.parse(cursorIso) : NaN;
+  const lossy = (nodes, cap) => {
+    if (nodes.length <= cap) return false;
+    nodes.length = cap; // drop the probe item
+    const oldestKept = Date.parse(nodes[cap - 1]?.updatedAt ?? '');
+    return Number.isNaN(cursorMs) || Number.isNaN(oldestKept) || oldestKept > cursorMs;
+  };
+  const prLossy = !isInit && lossy(prs, prCap);
+  const issueLossy = !isInit && lossy(issues, issueCap);
+  const capped = ok && (prLossy || issueLossy);
+  const complete = ok && (isInit || !capped);
   return { prs, issues, ok, complete, capped };
 }
 
@@ -1374,6 +1390,7 @@ export async function runMemorySync({
       gh: gh || defaultGh,
       isInit,
       sinceIso: ghSinceIso,
+      cursorIso: prevGhCursor || null,
     });
     resolvedPrNodes = fetched.prs;
     resolvedIssueNodes = fetched.issues;
@@ -1495,7 +1512,7 @@ const CAPPED_STREAK_WARN = 3; // consecutive capped delta runs before `main` war
 export function cappedWarning(res, repoName) {
   const streak = res?.ghCappedStreak ?? 0;
   if (streak < CAPPED_STREAK_WARN) return '';
-  return `memory-sync: ${repoName || 'the repo'} hit the GraphQL page cap on ${streak} consecutive delta runs; items between the previous cursor and the newest page were skipped. Run the heartbeat more often or raise the caps.\n`;
+  return `memory-sync: ${repoName || 'the repo'} hit the GraphQL page cap on ${streak} consecutive delta runs; items newer than the cursor may have been skipped. Run the heartbeat more often or raise the caps.\n`;
 }
 
 export async function main(argv = process.argv.slice(2), { out = process.stdout, err = process.stderr } = {}) {
@@ -1542,5 +1559,5 @@ export async function main(argv = process.argv.slice(2), { out = process.stdout,
 }
 
 if (isMainEntry(import.meta.url)) {
-  main().then((code) => process.exit(code));
+  main().then((code) => exitAfterFlush(code));
 }

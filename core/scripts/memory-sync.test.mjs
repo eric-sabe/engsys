@@ -873,14 +873,37 @@ describe('memory-sync (#131)', () => {
         assert.equal(r1.ghCappedStreak, 1);
         assert.equal(r1.cursorUpdatedAt, newest, 'the cursor advances to the newest ingested item, not stuck at the old watermark');
         assert.equal(readCursors(dir)['owner/repo'].ghUpdatedAt, newest);
-        const r2 = await delta(dir, ghWith(250, '2026-07-19T13:00:00.000Z'));
+        const r2 = await delta(dir, ghWith(250, '2026-07-19T20:00:00.000Z'));
         assert.equal(r2.ghCappedStreak, 2);
         assert.equal(r2.ghSinceIso, computeOverlapSince(newest), 'the next query window starts at the advanced cursor, not the old one');
         // Few enough items to finish below the cap: complete, streak back to 0.
-        const r3 = await delta(dir, ghWith(5, '2026-07-19T14:00:00.000Z'));
+        const r3 = await delta(dir, ghWith(5, '2026-07-19T21:00:00.000Z'));
         assert.equal(r3.ghCapped, false);
         assert.equal(r3.ghCappedStreak, 0);
-        assert.equal(r3.cursorUpdatedAt, '2026-07-19T14:00:00.000Z');
+        assert.equal(r3.cursorUpdatedAt, '2026-07-19T21:00:00.000Z');
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('capped means newer-than-cursor items were left unfetched: exactly the cap, or overflow only inside the overlap, is complete', async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-sync-nofalse-'));
+      try {
+        seed(dir, '2026-07-19T00:00:00Z');
+        // Exactly 100 PRs: a next page may exist but holds nothing, so the cap cut nothing short.
+        const exact = await delta(dir, ghWith(100, '2026-07-19T12:00:00.000Z'));
+        assert.equal(exact.ghCapped, false);
+        assert.equal(exact.ghCappedStreak, 0);
+        // 250 PRs, but the 100th newest (about 10:21) is already older than the cursor: the rest sit in the
+        // 48h overlap and were ingested before, so nothing is lost.
+        seed(dir, '2026-07-19T11:00:00Z');
+        const overlap = await delta(dir, ghWith(250, '2026-07-19T12:00:00.000Z'));
+        assert.equal(overlap.ghCapped, false);
+        assert.equal(overlap.ghCappedStreak, 0);
+        // 250 PRs with the 100th still newer than the cursor: a real skip.
+        seed(dir, '2026-07-19T00:00:00Z');
+        const real = await delta(dir, ghWith(250, '2026-07-19T12:00:00.000Z'));
+        assert.equal(real.ghCapped, true);
       } finally {
         fs.rmSync(dir, { recursive: true, force: true });
       }
@@ -913,7 +936,7 @@ describe('memory-sync (#131)', () => {
         const refStore = createMemoryRefStore({ repo: 'owner/repo', client: fake, sleep: async () => {} });
         const pub = await runMemorySync({ mode: 'publish', repo: 'owner/repo', repoRoot: dir, cacheDir: dir, config, exec: () => '', refStore, now: () => Date.parse('2026-07-20T00:00:00Z'), rebuildIndex: false });
         assert.equal(pub.ghCappedStreak, 1, 'publish ran no GitHub fetch, so the streak is untouched');
-        const r2 = await delta(dir, ghWith(250, '2026-07-19T13:00:00.000Z'));
+        const r2 = await delta(dir, ghWith(250, '2026-07-19T20:00:00.000Z'));
         assert.equal(r2.ghCappedStreak, 2);
       } finally {
         fs.rmSync(dir, { recursive: true, force: true });
