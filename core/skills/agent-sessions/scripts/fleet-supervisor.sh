@@ -574,7 +574,7 @@ limit_hold_done() {
     names="$(paste -sd, - <"$LIMIT_RESUMED_LIST" 2>/dev/null | sed 's/,/, /g' || true)"
     if [ ! -f "$QUOTA_ALERTED" ]; then rm -f "${LIMIT_RESUMED_LIST:?}"
     elif notify --level info --incident "$QUOTA_INCIDENT" --resolve "Resolved: the Claude usage limit has reset on $HOST_NAME${names:+; resumed on their own: $names}."; then
-      rm -f "${QUOTA_ALERTED:?}" "${LIMIT_RESUMED_LIST:?}"
+      rm -f "${QUOTA_ALERTED:?}" "${LIMIT_RESUMED_LIST:?}" "${QUOTA_ACKED:?}" # a repeat limit is a new incident
     fi
   fi
 }
@@ -859,7 +859,7 @@ if [ -n "$QUOTA_BLOCKED" ]; then
   # acknowledged only once the alert is out (an undelivered one is retried next tick)
   [ ! -f "$QUOTA_ALERTED" ] || auth_add_lines "$QUOTA_ACKED" "$QUOTA_BLOCKED"
 elif [ "$QUOTA_ANY" = 0 ] && [ -f "$QUOTA_ALERTED" ] && ! limit_holds_remaining; then
-  if notify --level info --incident "$QUOTA_INCIDENT" --resolve "Resolved: no supervised session on $HOST_NAME shows a seat limit any more."; then rm -f "${QUOTA_ALERTED:?}" "${LIMIT_RESUMED_LIST:?}"; fi
+  if notify --level info --incident "$QUOTA_INCIDENT" --resolve "Resolved: no supervised session on $HOST_NAME shows a seat limit any more."; then rm -f "${QUOTA_ALERTED:?}" "${LIMIT_RESUMED_LIST:?}" "${QUOTA_ACKED:?}"; fi
 fi
 
 # Singleton monsters: the integrity check (INTEGRITY_CMD, once per tick) and then the lease. Sets BATON_WHY.

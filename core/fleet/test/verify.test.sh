@@ -494,6 +494,7 @@ badfile() { # badfile <desc> <expected text>
 mv "$TOK" "$TOK.keep"; badfile "missing token file" "does not exist"
 : >"$TOK"; chmod 600 "$TOK"; badfile "empty token file" "is empty"
 printf '   \n' >"$TOK"; badfile "whitespace-only token file" "is empty"
+printf '\n%s\n' "$SENT" >"$TOK"; badfile "a token that does not start on the first line" "must be on its first line"
 printf '%s\n' "$SENT" >"$TOK"; chmod 644 "$TOK"; badfile "group/world-readable token file" "accessible to group or others (mode 644)"
 chmod 620 "$TOK"; badfile "group-writable token file" "(mode 620)"
 chmod 600 "$TOK"

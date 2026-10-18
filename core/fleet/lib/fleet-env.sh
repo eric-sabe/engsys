@@ -303,7 +303,7 @@ fleet_oauth_token_problem() {
   case "$mode" in '' | *[!0-7]*) echo "FLEET_CLAUDE_OAUTH_TOKEN_FILE $f: can't read its mode"; return 0 ;; esac
   if [ $((8#$mode & 8#077)) -ne 0 ]; then echo "FLEET_CLAUDE_OAUTH_TOKEN_FILE $f is accessible to group or others (mode $mode): chmod 600 it, and regenerate the token if it may have been read"; return 0; fi
   [ "$owner" = "$(id -u)" ] || { echo "FLEET_CLAUDE_OAUTH_TOKEN_FILE $f is not owned by $(id -un)"; return 0; }
-  grep -q '[^[:space:]]' "$f" 2>/dev/null || { echo "FLEET_CLAUDE_OAUTH_TOKEN_FILE $f is empty"; return 0; }
+  [ -n "$(head -n 1 "$f" 2>/dev/null | tr -d '[:space:]')" ] || { echo "FLEET_CLAUDE_OAUTH_TOKEN_FILE $f is empty (the token must be on its first line)"; return 0; }
   # the work-tree check is on where the file really lives: a link outside any repo to a token inside one is in a repo
   real="$f"; while [ -L "$real" ]; do dir="$(readlink "$real")"; case "$dir" in /*) real="$dir" ;; *) real="$(dirname "$real")/$dir" ;; esac; done
   dir="$(dirname "$real")"; dir="$(cd "$dir" 2>/dev/null && pwd -P)" || dir="$(dirname "$real")"

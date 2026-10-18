@@ -688,6 +688,7 @@ expect "  …still no ledger escalation" "!comment"
 run
 hold_has acme-rel "rehits=1"
 expect "re-hit: held again with back-off (rehits=1), not re-prompted in a loop" "^hold:acme-rel:rehits=1"
+expect "  …and a repeat limit is a new incident: alerted again" "^notify --level alert --incident seat-limit"
 expect "  …no re-prompt this tick" "!^sendkeys"
 resume_at="$(sed -n 's/^resume_at=//p' "$SLOG/acme-rel.limit-hold")"
 if [ "$resume_at" -ge $(( $(date +%s) + 500 )) ]; then echo "backoff-10m" >>"$T/actions"; fi
