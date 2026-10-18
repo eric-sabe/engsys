@@ -25,6 +25,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { detectHostToolchain } from '../../lib/host-toolchain.mjs';
+import { exitAfterFlush } from '../../lib/exit-after-flush.mjs';
 import { hookTelemetryPath } from '../../lib/harness-io.mjs';
 import { fleetIdProblems, loadFederation, registryWarnings } from './federation.mjs';
 import { checkSettingsDetailed, ENGSYS_HOST_FILES, ENGSYS_HOST_PATHS, ENGSYS_HOST_TREES, parseAllowedHooks, parseAllowedPlugins } from './verify-wrappers.mjs';
@@ -2504,7 +2505,7 @@ async function main() {
   } else {
     process.stdout.write(`${formatXrayReport(report, { includeTimeline: timeline, forceDiagnose: diagnose })}\n`);
   }
-  process.exit(report.summary.ok ? 0 : 1);
+  exitAfterFlush(report.summary.ok ? 0 : 1);
 }
 
 const isMain = (() => {

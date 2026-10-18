@@ -53,6 +53,7 @@ const SUITES = [
   ["node --test core/scripts/review-bakeoff.test.mjs"],
   ["node --test core/scripts/harvest-findings.test.mjs"],
   ["node --test core/lib/is-main.test.mjs"],
+  ["node --test core/lib/exit-after-flush.test.mjs"],
   ["node --test core/scripts/plugin-mode-layout.test.mjs"],
   ["NODE_NO_WARNINGS=1 node --test core/lib/memory/index-db.test.mjs"],
   ["NODE_NO_WARNINGS=1 node --test core/lib/memory/ref-store.test.mjs"],

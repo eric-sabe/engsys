@@ -67,6 +67,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { hermeticGit } from '../../lib/git-env.mjs';
+import { exitAfterFlush } from '../../lib/exit-after-flush.mjs';
 
 /** The repo directory the engsys core plugin is built from (its marketplace `source`). */
 export const PLUGIN_SUBDIR = 'core';
@@ -1519,7 +1520,7 @@ const isMain = (() => {
 if (isMain) {
   // Exit only once stdout has drained: process.exit() right after a big write to a pipe (the `$(...)` in
   // verify.sh) drops the tail on a loaded host, losing the summary/fingerprint lines the alert needs (engsys#198).
-  const finish = (code) => process.stdout.write('', () => process.exit(code));
+  const finish = exitAfterFlush;
   run(process.argv.slice(2)).then(finish, (e) => {
     process.stdout.write(`verify: not verified: internal error (${e && e.message})\n`);
     finish(3);
