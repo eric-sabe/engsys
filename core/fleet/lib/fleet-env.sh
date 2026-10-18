@@ -293,7 +293,7 @@ fi
 # used; rc 1 (and nothing) when it is fine or token mode is off. Fails closed: missing, not a regular file,
 # unreadable, empty, readable or writable by group/other, not owned by the fleet user, or inside a git work tree.
 fleet_oauth_token_problem() {
-  local f="${FLEET_CLAUDE_OAUTH_TOKEN_FILE:-}" st mode owner dir
+  local f="${FLEET_CLAUDE_OAUTH_TOKEN_FILE:-}" st mode owner dir real
   [ -n "$f" ] || return 1
   [ -e "$f" ] || { echo "FLEET_CLAUDE_OAUTH_TOKEN_FILE $f does not exist (claude setup-token, then write the token there, mode 600)"; return 0; }
   [ -f "$f" ] || { echo "FLEET_CLAUDE_OAUTH_TOKEN_FILE $f is not a regular file"; return 0; }
@@ -304,7 +304,9 @@ fleet_oauth_token_problem() {
   if [ $((8#$mode & 8#077)) -ne 0 ]; then echo "FLEET_CLAUDE_OAUTH_TOKEN_FILE $f is accessible to group or others (mode $mode): chmod 600 it, and regenerate the token if it may have been read"; return 0; fi
   [ "$owner" = "$(id -u)" ] || { echo "FLEET_CLAUDE_OAUTH_TOKEN_FILE $f is not owned by $(id -un)"; return 0; }
   grep -q '[^[:space:]]' "$f" 2>/dev/null || { echo "FLEET_CLAUDE_OAUTH_TOKEN_FILE $f is empty"; return 0; }
-  dir="$(dirname "$f")"; dir="$(cd "$dir" 2>/dev/null && pwd -P)" || dir="$(dirname "$f")"
+  # the work-tree check is on where the file really lives: a link outside any repo to a token inside one is in a repo
+  real="$f"; while [ -L "$real" ]; do dir="$(readlink "$real")"; case "$dir" in /*) real="$dir" ;; *) real="$(dirname "$real")/$dir" ;; esac; done
+  dir="$(dirname "$real")"; dir="$(cd "$dir" 2>/dev/null && pwd -P)" || dir="$(dirname "$real")"
   if git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then echo "FLEET_CLAUDE_OAUTH_TOKEN_FILE $f is inside a git work tree: keep it outside any repo"; return 0; fi
   return 1
 }

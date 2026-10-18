@@ -932,8 +932,8 @@ token_expiry_check() {
   [ -n "${FLEET_CLAUDE_OAUTH_TOKEN_FILE:-}" ] || return 0
   if [ -z "$exp" ]; then
     # a date that was removed: nothing left to warn about
-    if [ -f "$l30" ] || [ -f "$l7" ]; then
-      if notify --level info --incident "$TOKEN_INCIDENT" --resolve "Resolved: FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES is no longer set on $HOST_NAME."; then rm -f "${l30:?}" "${l7:?}"; fi
+    if [ -f "$l30" ] || [ -f "$l7" ] || [ -f "$bad" ]; then
+      if notify --level info --incident "$TOKEN_INCIDENT" --resolve "Resolved: FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES is no longer set on $HOST_NAME."; then rm -f "${l30:?}" "${l7:?}" "${bad:?}"; fi
     fi
     return 0
   fi
@@ -947,7 +947,9 @@ token_expiry_check() {
     log "token expiry: FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES '$exp' is not a date (want YYYY-MM-DD): not watched"
     return 0
   fi
-  rm -f "${bad:?}"
+  if [ -f "$bad" ]; then
+    if notify --level info --incident "$TOKEN_INCIDENT" --resolve "Resolved: FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES on $HOST_NAME now reads $exp."; then rm -f "${bad:?}"; fi
+  fi
   # a latch from another date is the old token's: resolve it and start over
   if { [ -f "$l30" ] && [ "$(cat "$l30")" != "$exp" ]; } || { [ -f "$l7" ] && [ "$(cat "$l7")" != "$exp" ]; }; then
     if notify --level info --incident "$TOKEN_INCIDENT" --resolve "Resolved: the Claude token's expiry on $HOST_NAME moved to $exp."; then rm -f "${l30:?}" "${l7:?}"; fi

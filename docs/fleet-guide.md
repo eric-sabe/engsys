@@ -496,14 +496,17 @@ of the picture: the fleet's seat is a long-lived (about one year) subscription t
 1. Generate it once, on a machine with a browser, signed in as the fleet's seat: `claude setup-token`. It
    prints the token once.
 2. Put it in a file **outside any repo**, owned by the fleet user, mode 600 (the directory 700), for example
-   `~/.config/acme/claude-token`: `umask 077; printf '%s\n' '<token>' > ~/.config/acme/claude-token`. Never in
-   a repo, an env file or a chat.
+   `~/.config/acme/claude-token`: `umask 077; IFS= read -rs t && printf '%s\n' "$t" > ~/.config/acme/claude-token; unset t`
+   (paste the token at the silent prompt, so it never reaches your shell history or the process list). Never
+   in a repo, an env file or a chat.
 3. Point the fleet at it, next to the config dir, in `fleet/fleet.conf` or `fleet.local.conf`:
-   `FLEET_CLAUDE_OAUTH_TOKEN_FILE=~/.config/acme/claude-token` (it needs `FLEET_CLAUDE_CONFIG_DIR`; steps 2
-   and 3 of the setup above, the `/login`, are not needed). Optionally add
+   `FLEET_CLAUDE_OAUTH_TOKEN_FILE=~/.config/acme/claude-token` (it needs `FLEET_CLAUDE_CONFIG_DIR`; step 2
+   of the setup above, the `/login`, is not needed; still accept workspace trust for the pin checkout (step 3)
+   with `CLAUDE_CODE_OAUTH_TOKEN="$(cat ~/.config/acme/claude-token)"` set). Optionally add
    `FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES=2027-10-18` (the date the token lapses, an ISO date). `fleet config-dir
    init` prints the matching next steps.
-4. `fleet verify`, then `fleet sync`, then `fleet restart --all`.
+4. `fleet sync` (installs the pinned plugins; it reports `logged in (long-lived token)`), then `fleet verify`,
+   then `fleet restart --all`.
 
 What it does. The token is read from the file at the moment a process starts, and exported as
 `CLAUDE_CODE_OAUTH_TOKEN` for that process only: each session that runs on the fleet's config dir (under

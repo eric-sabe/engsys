@@ -801,6 +801,12 @@ grep -q "heartbeat:" "$SLOG/supervisor.log" && echo carried-on >>"$T/actions"
 expect "  …the tick carried on to the heartbeat" "^carried-on"
 run
 expect "  …latched" "!claude-token-expiry"
+export FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES="$(dplus +60)"; run
+expect "  …a valid date replaces it: the incident is resolved" "^notify --level info --incident claude-token-expiry --resolve Resolved: FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES on .* now reads"
+run
+expect "  …once" "!claude-token-expiry"
+export FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES="soonish"; run; unset FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES; run
+expect "  …and so is removing the variable" "^notify --level info --incident claude-token-expiry --resolve Resolved: FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES is no longer set"
 export FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES="$(dplus +5)"; unset FLEET_CLAUDE_OAUTH_TOKEN_FILE; xconf; rm -rf "$SLOG"; run
 expect "no token file (not token mode): the date is ignored" "!claude-token-expiry"
 unset FLEET_CLAUDE_OAUTH_TOKEN_FILE FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES

@@ -507,7 +507,9 @@ rc_is "a symlink to a private file is followed: passes" 0
 rm -f "$TOK"; mv "$TOK.keep" "$TOK"
 mkdir -p "$E/tokdir"; printf '%s\n' "$SENT" >"$E/tokdir/t"; chmod 600 "$E/tokdir/t"; tokconf "$E/tokdir/t"
 : >"$FAKE/probe.count"; badfile "token file inside a git work tree" "inside a git work tree"
-rm -rf "${E:?}/tokdir"
+ln -s "$E/tokdir/t" "$T/secrets/link-into-repo"; tokconf "$T/secrets/link-into-repo"; : >"$FAKE/probe.count"
+badfile "a link outside any repo to a token inside a git work tree" "inside a git work tree"
+rm -f "$T/secrets/link-into-repo"; rm -rf "${E:?}/tokdir"
 tokconf "$TOK"; rm -f "$I/.fleet/token-probe.ok"
 run fleet launch acme-mm
 rc_is "launch: a working token launches the merge monster" 0
