@@ -77,13 +77,15 @@ fleet_session_config_dir() {
   case "$1" in '' | .* | */* | *..* | *[!A-Za-z0-9._-]*) return 1 ;; esac
   printf '%s.sessions/%s' "${FLEET_CLAUDE_CONFIG_DIR%/}" "$1"
 }
-# fleet_session_dir_names → the roster sessions on this host that get their own dir, one per line (per-session mode).
+# fleet_session_dir_names [--include-excluded] → the roster sessions on this host that get their own dir, one per line
+# (per-session mode). A session this host excludes (ROLES / ROSTER_EXCLUDE / registry) is left out, unless
+# --include-excluded: `fleet launch <name> --force-excluded` still needs its dir, its init and its verify.
 fleet_session_dir_names() {
   [ "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:-off}" = on ] || return 0
   local n
   while IFS= read -r n; do
     [ -n "$n" ] || continue
-    fleet_host_excluded "$n" >/dev/null && continue
+    [ "${1:-}" = --include-excluded ] || ! fleet_host_excluded "$n" >/dev/null || continue
     uses_fleet_config_dir "$n" || continue
     fleet_session_config_dir "$n" >/dev/null || { echo "fleet: WARNING session '$n' has a name that can't be a config dir name; skipped" >&2; continue; }
     printf '%s\n' "$n"

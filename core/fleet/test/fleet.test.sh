@@ -902,6 +902,15 @@ run fleet verify --session acme-mm
 eq "…and a run without --max-age (a launch) always asks" "$(pl_calls)" 4
 run fleet verify --session acme-mm --max-age 15; run fleet verify --session acme-mm --max-age 15
 eq "…and the cache is still used after that" "$(pl_calls)" 4
+# a session this host excludes can still be force-launched: its dir can be made, verified and launched
+setconf "FLEET_CLAUDE_CONFIG_DIR=$FCFG" "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on" "ROSTER_EXCLUDE=acme-mm"
+run fleet verify --session acme-mm
+rc_is "verify --session for a host-excluded session (fleet launch --force-excluded) checks its dir" 0
+run fleet config-dir init --session acme-mm
+has "config-dir init --session works for it too" "$OUT" "session acme-mm -> $SESS/acme-mm"
+run fleet verify
+hasnt "…while a plain verify leaves it out" "$OUT" "== session acme-mm"
+setconf "FLEET_CLAUDE_CONFIG_DIR=$FCFG" "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on"
 # claude calls fleet commands make against one session dir never overlap (the CLI contacts the API even for status/list).
 # Mutual exclusion is checked under bash 5 and under /bin/bash (3.2 on macOS, what the supervisor job runs), with the lock
 # taken inside $( ( … ) ) subshells like the real callers: the holder must stay "alive" for as long as it holds the lock.

@@ -95,6 +95,7 @@ if [ "$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION" = on ] && [ -z "$dir" ]; then
   fleet_roster_prepare
   names="$(fleet_session_dir_names)"
   if [ -n "$only_session" ]; then
+    names="$(fleet_session_dir_names --include-excluded)"
     grep -Fxq -- "$only_session" <<<"$names" || fleet_die "--session $only_session: not a session on this host that uses the fleet's config dir (per session: $(paste -sd' ' - <<<"$names"))"
     names="$only_session"
   fi

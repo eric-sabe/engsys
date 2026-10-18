@@ -95,7 +95,7 @@ if [ "$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION" = on ]; then
   fi
   # a refused --session is a usage error (2), never the verifier's MISMATCH (1) that callers read as tampering
   sdir="$(fleet_session_config_dir "$session")" || { echo "fleet verify: --session $session: not a name that can have its own config dir" >&2; exit 2; }
-  names="$(fleet_session_dir_names)"
+  names="$(fleet_session_dir_names --include-excluded)"
   grep -Fxq -- "$session" <<<"$names" || { echo "fleet verify: --session $session: not a session on this host that uses the fleet's config dir" >&2; exit 2; }
   FLEET_CLAUDE_CONFIG_DIR="$sdir" CLAUDE_CONFIG_DIR="$sdir"; export FLEET_CLAUDE_CONFIG_DIR CLAUDE_CONFIG_DIR
   SFX=".$session" INC="-$session"
