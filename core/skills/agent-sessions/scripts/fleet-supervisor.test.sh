@@ -624,6 +624,13 @@ pconf; reset; rm -f "$T"/pane-* "$T"/capture-*; baton free; ledger 90 "ok — me
 echo zsh >"$T/pane-acme-mm"; : >"$T/capture-acme-mm"; wpane acme-w "$(cat "$T/fixture-login-expired")"; run
 expect "205: a login error in an unsupervised window holds no session" "!^notify --level action"
 expect "  …the merge monster is relaunched" "^launch acme-mm"
+# a login error that shows up right after a relaunch holds that session only, and the heartbeat does not tell the
+# operator to /login "in any session" (another session's login does not repair this one's dir)
+pconf; reset; rm -f "$T"/pane-* "$T"/capture-* "$T/probe-ok"; baton free; ledger 90 "ok — merging #12"; ledger2 1 "ok"
+echo zsh >"$T/pane-acme-mm"; : >"$T/capture-acme-mm"; touch "$T/auth-expired"; run; rm -f "$T/auth-expired"
+expect "205: a relaunch that comes up logged out holds that session" "^notify --level action .*--incident claude-auth-expired-acme-mm "
+expect "  …the heartbeat names it and does not say to /login in any session" "^heartbeat .*auth: own login expired for acme-mm"
+expect "  …without the shared-login text" "!^heartbeat .*in any session"
 # the plugin check is per session: one session's bad dir holds only its relaunch
 pconf; reset; rm -f "$T"/pane-* "$T"/capture-*; baton free; ledger 90 "ok — merging #12"; ledger2 90 "ok"; echo zsh >"$T/pane-acme-mm"; : >"$T/capture-acme-mm"
 touch "$T/integrity-bad-acme-mm"; run

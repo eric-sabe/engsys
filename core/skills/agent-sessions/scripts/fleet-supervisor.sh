@@ -380,7 +380,7 @@ AUTH_HELD=0 AUTH_RESUMED="" AUTH_RESOLVE_TEXT="" RELAUNCH_OK=0
 # this tick and nobody else is. Unset (one shared login): one scope, the files auth.*, as before.
 AUTH_SCOPE="" AUTH_ONLY_WINDOW="" AUTH_PROBE_CFG="" AUTH_HELD_SET=" "
 auth_scope() { # auth_scope <session> → the hold state below is that session's (per-session mode only)
-  AUTH_SCOPE="$1" AUTH_ONLY_WINDOW="$1" AUTH_PROBE_CFG="${SESSION_CONFIG_DIR_BASE%/}/$1" AUTH_HELD=0
+  AUTH_SCOPE="$1" AUTH_ONLY_WINDOW="$1" AUTH_PROBE_CFG="${SESSION_CONFIG_DIR_BASE%/}/$1" AUTH_HELD=0 AUTH_RESOLVE_TEXT=""
   AUTH_EXPIRED="$STATE_DIR/auth.$1.expired" AUTH_ALERTED="$STATE_DIR/auth.$1.alerted" AUTH_HELD_LIST="$STATE_DIR/auth.$1.held"
   AUTH_SEEN="$STATE_DIR/auth.$1.panes" AUTH_ACKED="$STATE_DIR/auth.$1.acked" AUTH_INCIDENT="claude-auth-expired-$1"
 }
@@ -1250,7 +1250,7 @@ if [ -n "$HEARTBEAT_CMD" ] && [ $((UP + ROTATING + DOWN)) -gt 0 ]; then
     if [ -f "$QUOTA_ALERTED" ]; then SUMMARY="$SUMMARY; seat limit reached since $(head -n 1 "$QUOTA_ALERTED")"; fi
     if limit_holds_remaining; then SUMMARY="$SUMMARY; limit hold: $(limit_held_names | paste -sd, - | sed 's/,/, /g')"; fi
     set -- "$SUMMARY"
-    if [ "$AUTH_HELD" = 1 ]; then
+    if [ "$AUTH_HELD" = 1 ] && [ -z "$SESSION_CONFIG_DIR_BASE" ]; then
       # the summary keeps machine fields in ISO UTC; the second line is for people (operator's time, #89)
       AUTH_SINCE="$(head -n 1 "$AUTH_EXPIRED")"
       AUTH_HELD_NAMES="$(auth_held_names)"
