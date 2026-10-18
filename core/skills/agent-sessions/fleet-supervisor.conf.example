@@ -36,18 +36,24 @@ REPO=owner/name
 # AUTH_PROBE=on
 # Seconds to watch a relaunched pane for its first reply (0 = don't). Default 45.
 # AUTH_CHECK_WAIT_SEC=45
+# A seat limit (`You've hit your limit · resets …`) is held and resumed on its own: once the reset
+# time in the message plus this margin has passed, an idle session is re-prompted (a session that
+# exited is relaunched). A session that hits the limit again within 30 minutes of a resume backs off
+# (10 minutes, doubling, up to 4 h). LIMIT_RESUME=off keeps the older alert-only behaviour.
+# LIMIT_RESUME=on
+# LIMIT_RESUME_MARGIN_SEC=120
 # The link the login alert carries. Default: the first session's ledger issue.
 # STATUS_URL=https://github.com/owner/name/issues/1
 # <session>|<ledger issue>|<stale minutes>[|<owner/name>[|<marker>[|<role>]]]
-#   stale = heartbeat older than this; mirror the monster's stale_lock_minutes
-#   + grace. The optional 4th field overrides REPO= (multi-repo fleets). The
+#   stale = heartbeat older than this; exactly the monster's stale_lock_minutes
+#   (no grace). The optional 4th field overrides REPO= (multi-repo fleets). The
 #   optional 5th reads the heartbeat only from the <!-- <marker> --> block, for
 #   an issue that carries several (a fleet status issue). Under the fleet kit,
 #   `fleet supervise` writes it for the broker in multi-fleet mode. The 6th,
 #   merge or maintain, marks a monster that holds its role through the github
 #   lease: a relaunch then also needs the lease to be free (fleet-supervisor.sh
 #   header). Under the fleet kit `fleet supervise` writes it.
-acme-mm|0|60|||merge
-acme-maintain|0|60|||maintain
-# acme-<role>|0|60
-# other-mm|0|60|owner/other-repo
+acme-mm|0|45|||merge
+acme-maintain|0|45|||maintain
+# acme-<role>|0|45
+# other-mm|0|45|owner/other-repo

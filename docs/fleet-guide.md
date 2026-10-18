@@ -223,7 +223,14 @@ relaunches each held session once. Details: the agent-sessions skill and the hea
 When a seat hits its usage or rate limit (`You've hit your limit · resets …`, `Usage limit reached`), the
 supervisor does not move any supervised session to another harness: the fleet is Claude-only, whatever
 `HARNESS_FALLBACK` says. It posts one `fleet notify --level alert --incident seat-limit`, resolved once no
-supervised pane shows the limit, and every relaunch stays on the primary harness. Only Claude Code's own
+supervised pane shows the limit, and every relaunch stays on the primary harness. The supervisor also
+holds a limited session and resumes it on its own: it reads the reset time from the limit line
+(`resets Oct 20, 9pm (America/New_York)`), records `logs/fleet-supervisor/<session>.limit-hold`, and meanwhile
+raises no stale-heartbeat comment and relaunches nothing for that session. After the reset plus
+`LIMIT_RESUME_MARGIN_SEC` (default 120) it re-prompts an idle pane, or relaunches one that exited, then posts one
+info notice (the alert's resolve). A session that hits the limit again within 30 minutes of a resume backs off
+(10 minutes, doubling, up to 4 hours). If the reset time cannot be read, or `LIMIT_RESUME=off`, the behaviour is
+the alert only. Only Claude Code's own
 limit line, as the last message of a pane the fleet launched (`fleet launch` and the supervisor record
 each supervised session's pane), counts: text in tool output or in
 another pane never does. (`HARNESS_FALLBACK` only makes `fleet sync` pre-stage those harnesses' plugin
@@ -477,6 +484,41 @@ While the dir is set but not logged in, `fleet verify` reports "not verified" an
 (`wrapper-integrity-unverified`), which holds every merge and maintain launch and relaunch, so a
 rotation never relaunches a monster into a login prompt; `fleet sync --check` (in `fleet status`) reports
 it as drift.
+
+**One Claude login per session: `FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on`.** One shared fleet dir means one
+Keychain credential and one rotating refresh token for every long-lived session on it. At the access token's
+expiry (about every eight hours) those processes race the refresh; the loser gets `invalid_grant` and **writes an
+emptied credential over the winner's** ([anthropics/claude-code#88583](https://github.com/anthropics/claude-code/issues/88583),
+open and still present in 2.1.292). On 2026-10-18 that logged out all three monsters of a fleet at once (engsys#205).
+`setup-token` is not a way out: its token cannot establish Remote Control sessions, which every fleet session needs.
+So no two long-lived sessions may share a login:
+
+- Set it next to `FLEET_CLAUDE_CONFIG_DIR` in `fleet/fleet.conf` or `fleet.local.conf` (only those files set it;
+  `off` / unset is the shared dir, exactly as before). Each session that uses the fleet's dir gets its own,
+  `<FLEET_CLAUDE_CONFIG_DIR>.sessions/<session name>` (for `~/.config/acme/claude`: `~/.config/acme/claude.sessions/acme-mm`),
+  so its own Keychain item and refresh token. Under `FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised` the interactive
+  roles keep `~/.claude` and get no dir. A name with a slash, a leading dot or `..` never gets a dir; nothing can
+  leave the base.
+- **One-time setup:** `fleet config-dir init` creates and seeds every session's dir (the same seed as the shared dir,
+  `syncClaudeAiSkills` / `syncClaudeAiPlugins` false included; re-running it is safe) and prints, for each dir that
+  is not logged in, the commands to run: `CLAUDE_CONFIG_DIR=<its dir> claude`, `/login` with the fleet's seat, `/exit`,
+  and the workspace-trust step from section 6.1 step 3 for that dir. Then `fleet sync` (installs the pinned plugins
+  into every session dir), `fleet verify`, `fleet restart --all`. `fleet config-dir init --session <name>` does one.
+- **Re-login after a wipe is one session, not all:** `CLAUDE_CONFIG_DIR=<that dir> claude`, `/login`, `/exit`. The
+  supervisor holds only that session and the alert (`claude-auth-expired-<session>`) names the dir and the command.
+- **Add a session:** add it to the roster, then `fleet config-dir init --session <name>`, log it in, `fleet sync`.
+  Until it has a logged-in dir, `fleet launch` holds that session with the command to run; it never starts into a
+  login prompt.
+- `fleet verify` checks every session dir (plugins against the release, user-scope items, login) and prints a block
+  per dir; the verdict, the alert (`wrapper-integrity-<session>`) and the hold are per session, so one tampered or
+  logged-out dir holds only its session (`fleet verify --session <name>` asks about one).
+- **Fleet commands add no refreshers.** `claude auth status --json` and `claude plugin list --json` both contact
+  api.anthropic.com, even in a dir with no login (observed against an empty temp config dir with a local proxy:
+  two CONNECTs each), so on a logged-in dir they are extra processes on a credential its session is also
+  refreshing. They are therefore serialized per dir (`.fleet/locks/`), a logged-in answer is reused for `--max-age`
+  minutes, and the supervisor's test request runs only once a session is already logged out, and then on that
+  session's own dir. Whether they refresh a still-valid token could not be settled without a real login; the lock
+  keeps fleet commands off each other either way, but cannot stop a session's own refresh from overlapping one.
 
 `fleet status` (through `fleet sync --check`) and `fleet xray` report the directory in use and whether it
 is logged in; neither prints the account or any token. With `FLEET_CLAUDE_CONFIG_DIR` unset, the fleet uses
@@ -1506,7 +1548,8 @@ major Claude Code upgrade.
 | `still at … after switching` | a checkout did not land on the pinned ref. Check the tag exists on the remote (`git ls-remote --tags origin`) |
 | `engsys … has no fleet kit` | the pinned engsys release predates the kit; pin one that includes `core/fleet/` |
 | Supervisor log: `RELAUNCH FAILED` with `claude not found on PATH` | the supervisor's launchd PATH can't see `claude`. The default job PATH covers `~/.local/bin` (native installer) and Homebrew; for anywhere else, override the PATH in `<instance>/jobs/launchd/fleet-supervisor.plist.tmpl`. Then `fleet install-jobs` (it warns until every tool resolves) and `fleet launch` for anything missing. The supervisor escalates a failed relaunch once on the ledger and comments again when it recovers |
-| Alert `claude-auth-expired`, or `fleet status` shows `auth: expired since …` | Claude Code's login on the host no longer works, and the supervisor holds every relaunch so it doesn't relaunch sessions that can't answer. Run `/login` in any session's window (or `claude /login` in a terminal). The next supervisor tick sees a working login (a short test request, or the session answering), resolves the alert and relaunches each held session once. Nothing was killed while it waited |
+| Alert `claude-auth-expired-<session>`, or `fleet status` shows `auth (<session>): expired since …` (one login per session) | that one session's own login was lost; the others keep running. `CLAUDE_CONFIG_DIR=<its dir> claude`, `/login`, `/exit`. The next supervisor tick tests that dir, resolves the alert and relaunches the session once |
+| Alert `claude-auth-expired`, or `fleet status` shows `auth: expired since …` | Claude Code's login on the host no longer works, and the supervisor holds every relaunch so it doesn't relaunch sessions that can't answer. Run `/login` in any session's window (or `claude /login` in a terminal). The next supervisor tick sees a working login (a short test request; with `AUTH_PROBE=off`, a held pane answering normally), resolves the alert and relaunches each held session once. Nothing was killed while it waited |
 | Launchd job runs but `node: command not found` | node is not in `/opt/homebrew/bin` (nvm/fnm install). Install Homebrew node; launchd does not read your shell profile |
 | The fleet stopped after a reboot | the fleet user is not logged in (FileVault disables auto-login). Log in over Screen Sharing (section 6.2) |
 | `not launching acme-mm: its engsys plugin does not match vX.Y.Z` | `fleet verify` found protected plugin files, or an install, that don't match the pinned release. See "Plugin integrity" in section 7 |
@@ -1550,6 +1593,7 @@ format) overrides it per machine. Environment values for `ENGSYS_REF` / `INSTANC
 | `WORKTREES_DIR` | no | Agent worktrees directory; created by `launch`; available to templates for `--add-dir` |
 | `GH_APP_ENV` | no | Path to the GitHub App env file. Set means identity kit on |
 | `FLEET_CLAUDE_CONFIG_DIR` | no | A separate Claude Code config dir for the fleet, with its own login (§ 6.1). Every fleet command and every launched session runs with `CLAUDE_CONFIG_DIR` set to it; `fleet sync` installs the plugins there and `fleet verify` checks it. An absolute path (or `~/…`). Never inherited from the caller's environment. Unset means `~/.claude` |
+| `FLEET_CLAUDE_CONFIG_DIR_PER_SESSION` | no | `on`: every session that uses `FLEET_CLAUDE_CONFIG_DIR` gets its own dir, `<FLEET_CLAUDE_CONFIG_DIR>.sessions/<name>`, with its own login, so no two long-lived sessions share a refresh token (anthropics/claude-code#88583; § 6.1). `off` (default) or unset: one shared dir. Needs `FLEET_CLAUDE_CONFIG_DIR`. Never inherited from the caller's environment |
 | `FLEET_CLAUDE_CONFIG_DIR_SCOPE` | no | `all` (default): every launched session runs on `FLEET_CLAUDE_CONFIG_DIR`. `supervised`: only the lines positively classified as interactive keep `~/.claude`; everything else (monsters, supervised and security-tier lines, anything unclassified) runs on the fleet dir. `fleet sync` keeps the pinned plugins in both, and `fleet verify` also checks the engsys install in `~/.claude` (§ 6.1). Never inherited from the caller's environment |
 | `VERIFY_ALLOWED_USER_PLUGINS` | no | Space-separated `name@marketplace` user-scope plugins `fleet verify` reports as `allowed` instead of a mismatch (§ 6.1). Never inherited from the caller's environment |
 | `VERIFY_ALLOWED_USER_FILES` | no | Space-separated sha256 hashes of user-scope agents, commands, skills, rules, memory files and MCP server definitions that `fleet verify` accepts (§ 7, "User-scope configuration besides settings"). Never inherited from the caller's environment |

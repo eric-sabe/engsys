@@ -44,7 +44,7 @@ unset TMUX_SESSION LOG_DIR
 unset FLEET_ID FEDERATION_FILE FLEET_INSTANCE_REPO ROLES ROSTER_EXCLUDE OPERATOR_TIMEZONE OPERATOR_CLOCK
 # So do the fleet's Claude config dir and the integrity check's user-plugin allowlist: what `fleet verify`
 # accepts must come from the operator's config files, never from whoever ran the command.
-unset FLEET_CLAUDE_CONFIG_DIR FLEET_CLAUDE_CONFIG_DIR_SCOPE VERIFY_ALLOWED_USER_PLUGINS VERIFY_ALLOWED_USER_HOOKS VERIFY_ALLOWED_USER_FILES
+unset FLEET_CLAUDE_CONFIG_DIR FLEET_CLAUDE_CONFIG_DIR_SCOPE FLEET_CLAUDE_CONFIG_DIR_PER_SESSION VERIFY_ALLOWED_USER_PLUGINS VERIFY_ALLOWED_USER_HOOKS VERIFY_ALLOWED_USER_FILES
 # PIN_SETTINGS (where the pins are read) too: only a conf file, or sync's own pins copy in .fleet/
 # (FLEET_SYNC_PINS, set by sync.sh across its re-execs), may point it somewhere else.
 _pin_settings_sync="${FLEET_SYNC_RESUMED:+${PIN_SETTINGS:-}}"
@@ -272,3 +272,70 @@ if [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ]; then
 else
   unset CLAUDE_CONFIG_DIR
 fi
+
+# FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on (engsys#205): every session that uses the fleet's config dir gets its own,
+# <FLEET_CLAUDE_CONFIG_DIR>.sessions/<name>, with its own login, so no two long-lived processes share a refresh
+# token (anthropics/claude-code#88583; lib/session-dirs.sh). Off or unset = one shared dir, as before. Only the
+# conf files set it.
+: "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:=off}"
+case "$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION" in
+  on | off) ;;
+  *) fleet_die "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION must be on or off (got '$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION')" ;;
+esac
+if [ "$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION" = on ] && [ -z "${FLEET_CLAUDE_CONFIG_DIR:-}" ]; then
+  fleet_die "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on needs FLEET_CLAUDE_CONFIG_DIR (the base the per-session dirs hang off)"
+fi
+export FLEET_CLAUDE_CONFIG_DIR_PER_SESSION
+
+# fleet_dir_lock <dir> <command...> → runs the command holding a per-config-dir lock, in per-session mode; plain
+# otherwise. Fleet commands that run `claude` against a session's dir (verify's auth status and plugin list) are
+# extra processes on that credential, and the CLI contacts api.anthropic.com for them even when logged out, so
+# they are serialized per dir and never overlap one another (a session's own process can't be locked). rc 75 when
+# the lock stays busy for two minutes.
+fleet_dir_lock() {
+  local dir="$1"; shift
+  if [ "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:-off}" != on ]; then "$@"; return; fi
+  local lock guard waited=0 rc=0 lm owner ostart me mystart
+  lock="$FLEET_STATE/locks/claude-$(printf '%s' "$dir" | cksum | cut -d' ' -f1).lock"
+  guard="$lock.reclaim"
+  # The holder is the script process ($$, which is the script's pid even inside $(…) and ( … ) subshells and lives as
+  # long as the script does), with its start time, so a reused pid is not mistaken for a live holder. (A short-lived
+  # subshell's own pid, e.g. from `sh -c 'echo $PPID'`, would make a live lock look dead.) An accepted edge case: if only
+  # the script's own process is SIGKILLed, a surviving $( … ) child can outlive its lock and overlap the next holder.
+  me="$$"; mystart="$(ps -o lstart= -p "$me" 2>/dev/null | awk '{$1=$1; print}' || true)"
+  mkdir -p "$FLEET_STATE/locks"
+  until mkdir "$lock" 2>/dev/null; do
+    # A holder that died (Ctrl-C, a job timeout) leaves its lock behind. Reclaiming is itself done under a guard lock,
+    # and the holder is read again under it, so two waiters can't both remove a lock one of them has just taken.
+    if fleet_lock_holder_dead "$lock" && mkdir "$guard" 2>/dev/null; then
+      if fleet_lock_holder_dead "$lock"; then rm -rf "${lock:?}"; fi
+      rmdir "$guard" 2>/dev/null || true
+      continue
+    fi
+    lm=$(stat -c %Y "$guard" 2>/dev/null || stat -f %m "$guard" 2>/dev/null || echo 0)   # a reclaimer that died holding the guard
+    case "$lm" in '' | *[!0-9]*) lm=0 ;; esac
+    if [ "$lm" -gt 0 ] && [ $(( $(date +%s) - lm )) -gt 60 ]; then rmdir "$guard" 2>/dev/null || true; continue; fi
+    lm=$(stat -c %Y "$lock" 2>/dev/null || stat -f %m "$lock" 2>/dev/null || echo 0)
+    case "$lm" in '' | *[!0-9]*) lm=0 ;; esac
+    if [ "$lm" -gt 0 ] && [ $(( $(date +%s) - lm )) -gt 300 ] && [ ! -s "$lock/holder" ]; then rm -rf "${lock:?}"; continue; fi
+    waited=$((waited + 1)); [ "$waited" -lt 240 ] || return 75
+    sleep 0.5
+  done
+  printf '%s|%s\n' "$me" "$mystart" >"$lock/holder" 2>/dev/null || true
+  "$@" || rc=$?
+  rm -f "${lock:?}/holder"; rmdir "$lock" 2>/dev/null || true
+  return "$rc"
+}
+# fleet_lock_holder_dead <lock dir> → 0 when its holder file names a process that is gone, or one that started at a
+# different time than the file says (the pid was reused).
+fleet_lock_holder_dead() {
+  local rec owner ostart now_start
+  rec="$(cat "$1/holder" 2>/dev/null || true)"
+  owner="${rec%%|*}" ostart="${rec#*|}"
+  [[ "$owner" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$owner" 2>/dev/null || return 0
+  [ -n "$ostart" ] || return 1
+  now_start="$(ps -o lstart= -p "$owner" 2>/dev/null | awk '{$1=$1; print}' || true)"
+  [ -z "$now_start" ] || [ "$now_start" = "$ostart" ] || return 0
+  return 1
+}

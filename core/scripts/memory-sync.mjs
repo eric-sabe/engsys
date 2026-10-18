@@ -1221,8 +1221,6 @@ export async function fetchRepoPrsAndIssues(
   let fetchMorePrs = true;
   let fetchMoreIssues = true;
   let ok = true;
-  let hitPrCap = false;
-  let hitIssueCap = false;
 
   while ((fetchMorePrs && prs.length < maxPrs) || (fetchMoreIssues && issues.length < maxIssues)) {
     const prPageSize = fetchMorePrs ? Math.min(50, maxPrs - prs.length) : 0;
@@ -1271,7 +1269,6 @@ export async function fetchRepoPrsAndIssues(
         if (prs.length < maxPrs) {
           prs.push(n);
         } else {
-          hitPrCap = true;
           fetchMorePrs = false;
           break;
         }
@@ -1279,7 +1276,6 @@ export async function fetchRepoPrsAndIssues(
       if (!prConn?.pageInfo?.hasNextPage || !prConn?.pageInfo?.endCursor || nodes.length === 0) {
         fetchMorePrs = false;
       } else if (prs.length >= maxPrs) {
-        hitPrCap = true;
         fetchMorePrs = false;
       } else {
         prAfter = prConn.pageInfo.endCursor;
@@ -1298,7 +1294,6 @@ export async function fetchRepoPrsAndIssues(
         if (issues.length < maxIssues) {
           issues.push(n);
         } else {
-          hitIssueCap = true;
           fetchMoreIssues = false;
           break;
         }
@@ -1306,7 +1301,6 @@ export async function fetchRepoPrsAndIssues(
       if (!issueConn?.pageInfo?.hasNextPage || !issueConn?.pageInfo?.endCursor || nodes.length === 0) {
         fetchMoreIssues = false;
       } else if (issues.length >= maxIssues) {
-        hitIssueCap = true;
         fetchMoreIssues = false;
       } else {
         issueAfter = issueConn.pageInfo.endCursor;

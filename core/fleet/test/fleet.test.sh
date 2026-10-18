@@ -26,6 +26,13 @@ mkdir -p "$S"
 [ -f "$S/plugins.json" ] || echo '[]' >"$S/plugins.json"
 printf '%s\tPATH0=%s\tCFG=%s\n' "$*" "${PATH%%:*}" "${CLAUDE_CONFIG_DIR:-unset}" >>"$FAKE/claude.log"
 printf '%s\t%s\n' "$(pwd -P)" "$*" >>"$FAKE/claude.cwd"
+# one login per session (engsys#205): $FAKE/loggedin/<config dir name> | loggedout/<name> decide `auth status --json`
+if [ "${1:-}" = auth ] && [ "${2:-}" = status ]; then
+  b="$(basename "${CLAUDE_CONFIG_DIR:-default}")"
+  if [ -f "$FAKE/loggedout/$b" ]; then echo '{"loggedIn": false}'; exit 1; fi
+  if [ -f "$FAKE/loggedin/$b" ]; then echo '{"loggedIn": true}'; exit 0; fi
+  exit 2
+fi
 [ "${1:-}" = plugin ] || { echo "stub claude: unsupported: $*" >&2; exit 2; }
 shift
 save() { local f="$1"; shift; jq "$@" "$f" >"$f.new" && mv "$f.new" "$f"; }
@@ -455,6 +462,18 @@ cp "$FCFG/settings.json" "$T/fcfg-settings.1"; run fleet sync
 eq "…a second sync leaves it byte-identical" "$(cat "$FCFG/settings.json")" "$(cat "$T/fcfg-settings.1")"
 rm -f "$HOME/.claude/settings.json" "$FCFG/settings.json"
 cp "$T/flc.bak" "$LC"
+# FLEET_CLAUDE_CONFIG_DIR pointing at the operator's own ~/.claude (directly, or through a symlink): the sync-off
+# retrofit must not touch its settings.json (engsys#204).
+for how in direct symlink; do
+  if [ "$how" = direct ]; then OWN="$HOME/.claude"; else OWN="$T/own-link"; ln -sfn "$HOME/.claude" "$OWN"; fi
+  cp "$T/flc.bak" "$LC"; printf 'FLEET_CLAUDE_CONFIG_DIR=%s\n' "$OWN" >>"$LC"
+  echo '{"keep":"me"}' >"$HOME/.claude/settings.json"
+  run fleet sync
+  eq "$how ~/.claude as FLEET_CLAUDE_CONFIG_DIR: settings.json untouched (#204)" "$(cat "$HOME/.claude/settings.json")" '{"keep":"me"}'
+  has "…and sync warns about it" "$OUT" "is your own ~/.claude"
+  rm -f "$HOME/.claude/settings.json"
+done
+rm -f "$T/own-link"; cp "$T/flc.bak" "$LC"
 
 echo "== D3. FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised: sync reconciles both the fleet dir and ~/.claude"
 FS="$FAKE/claude-cfg/$(printf '%s' "$FCFG" | tr '/' '_')"
@@ -760,6 +779,194 @@ has "launcher: positive control, a plain listed line gets ~/.claude" "$(tl acme-
 cp "$T/roster.pre-f1" "$INST/fleet/roster.tmpl"; rm -f "$INST/fleet/env/nyx.env.tmpl"
 cp "$T/roster.bak2" "$INST/fleet/roster.tmpl" 2>/dev/null || sed -i.x '/^acme-audit|/d' "$INST/fleet/roster.tmpl"; rm -f "$INST/fleet/roster.tmpl.x"
 cp "$T/flc.bak" "$LC"
+
+echo "== K. FLEET_CLAUDE_CONFIG_DIR_PER_SESSION: one Claude login per session (engsys#205)"
+mkdir -p "$FAKE/loggedin" "$FAKE/loggedout"
+SESS="$FCFG.sessions"
+setconf() { cp "$T/flc.bak" "$LC"; printf '%s\n' "$@" >>"$LC"; }
+login_all() { local n; for n in "$@"; do touch "$FAKE/loggedin/$n"; rm -f "$FAKE/loggedout/$n"; done; }
+setconf "FLEET_CLAUDE_CONFIG_DIR=$FCFG" "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on"
+run fleet config-dir init
+rc_is "per-session init exits 0" 0
+for n in acme-mm acme-build acme-security acme-rel; do
+  [ -f "$SESS/$n/settings.json" ] && ok "init: $n has its own dir" || bad "init: $n has its own dir"
+  eq "…seeded with the claude.ai sync off" "$(jq -c '[.syncClaudeAiSkills, .syncClaudeAiPlugins]' "$SESS/$n/settings.json")" '[false,false]'
+  has "…and the one-time login command is printed for it" "$OUT" "$n: CLAUDE_CONFIG_DIR=$SESS/$n claude"
+  eq "…mode 700" "$(mode_of "$SESS/$n")" 700
+done
+login_all acme-mm
+run fleet config-dir init
+hasnt "init (idempotent): a logged-in dir is not asked to log in again" "$OUT" "acme-mm: CLAUDE_CONFIG_DIR"
+has "…the others still are" "$OUT" "acme-build: CLAUDE_CONFIG_DIR=$SESS/acme-build claude"
+run fleet config-dir init --session acme-mm
+has "init --session: just that one" "$OUT" "session acme-mm -> $SESS/acme-mm"
+hasnt "…not the others" "$OUT" "session acme-build"
+run fleet config-dir init --session acme-nope
+rc_is "init --session for an unknown session is refused" 1
+login_all acme-mm acme-build acme-security acme-rel
+# launch: every session has its own CLAUDE_CONFIG_DIR, set last on the launch line; no two share
+rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"; run fleet launch
+rc_is "per-session launch exits 0" 0
+for n in acme-mm acme-build acme-security acme-rel; do
+  has "$n: launched on its own dir" "$(tl "$n")" "export CLAUDE_CONFIG_DIR=$SESS/$n && command claude"
+done
+eq "no two sessions share a config dir" "$(for n in acme-mm acme-build acme-security acme-rel; do tl "$n" | grep -o "export CLAUDE_CONFIG_DIR=[^ ]*"; done | sort | uniq -d | wc -l | tr -d ' ')" 0
+hasnt "the shared base dir is on no launch line" "$(cat "$FAKE/tmux.log")" "export CLAUDE_CONFIG_DIR=$FCFG &&"
+hasnt "a shared env file carries no one session's dir" "$(cat "$STATE/env/session.env")" "CLAUDE_CONFIG_DIR=$SESS"
+# scope supervised: interactive roles keep ~/.claude, the monsters keep their own dirs
+setconf "FLEET_CLAUDE_CONFIG_DIR=$FCFG" "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on" "FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised"
+rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"; run fleet launch
+rc_is "per-session + scope supervised: launch exits 0" 0
+has "acme-mm: its own dir" "$(tl acme-mm)" "export CLAUDE_CONFIG_DIR=$SESS/acme-mm && command claude"
+has "…the baton gate sees the same dir as FLEET_CLAUDE_CONFIG_DIR" "$(tl acme-mm)" "export FLEET_CLAUDE_CONFIG_DIR=$SESS/acme-mm FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised"
+has "acme-security: its own dir" "$(tl acme-security)" "export CLAUDE_CONFIG_DIR=$SESS/acme-security && command claude"
+has "acme-build (interactive): ~/.claude" "$(tl acme-build)" "unset CLAUDE_CONFIG_DIR && command claude"
+hasnt "…never a session dir" "$(tl acme-build)" "$SESS/acme-build"
+run fleet config-dir init
+hasnt "init under scope supervised: no dir for an interactive role" "$OUT" "session acme-build"
+# a session with no dir, or a logged-out one, is held alone with the command that fixes it
+rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"
+mv "$SESS/acme-mm" "$SESS/acme-mm.away"; run fleet launch acme-mm
+rc_is "no dir yet: the launch is refused" 1
+has "…saying what to run" "$OUT" "fleet config-dir init --session acme-mm"
+has "…and how to log in" "$OUT" "CLAUDE_CONFIG_DIR=$SESS/acme-mm claude"
+eq "…nothing reached tmux" "$(grep -c send-keys "$FAKE/tmux.log" || true)" 0
+mv "$SESS/acme-mm.away" "$SESS/acme-mm"
+rm -f "$FAKE/loggedin/acme-security" "$STATE/auth-ok.acme-security"; touch "$FAKE/loggedout/acme-security"
+run fleet launch
+rc_is "one logged-out session dir: the whole launch exits non-zero" 1
+has "…naming it and the command" "$OUT" "SKIPPED: acme-security (its own Claude login ($SESS/acme-security) is not logged in: CLAUDE_CONFIG_DIR=$SESS/acme-security claude"
+has "…while the other sessions start" "$(tl acme-mm)" "export CLAUDE_CONFIG_DIR=$SESS/acme-mm"
+hasnt "…and the logged-out one does not" "$(cat "$FAKE/tmux.log")" "[acme:acme-security]"
+login_all acme-security
+# sync: the pinned plugins go into every session dir; a missing dir is drift for that session only
+rm -rf "$SESS/acme-rel"; setconf "FLEET_CLAUDE_CONFIG_DIR=$FCFG" "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on"
+m="$(mark)"; run fleet sync
+rc_is "per-session sync exits 0 (a missing dir is a warning)" 0
+has "…says which session has no dir" "$OUT" "session acme-rel has no config dir yet"
+for n in acme-mm acme-build acme-security; do
+  has "sync: $n's own dir got the plugins" "$(since "$m" | grep "CFG=$SESS/$n\$")" "plugin install"
+done
+run fleet sync --check
+rc_is "--check: the missing session dir is drift" 1
+has "…each dir is reported as its session's own" "$OUT" "claude config dir: $SESS/acme-mm (session acme-mm, own login)"
+login_all acme-rel; run fleet config-dir init --session acme-rel >/dev/null; run fleet sync
+rc_is "after init, sync covers acme-rel too" 0
+run fleet sync --check
+rc_is "…and everything is in sync" 0
+# verify: a verdict per session dir; one bad dir fails only its session
+run fleet verify
+rc_is "per-session verify passes when every dir does" 0
+has "…one block per session" "$OUT" "== session acme-mm ($SESS/acme-mm) =="
+echo '{"enabledPlugins":{"stray@market":true},"syncClaudeAiSkills":false,"syncClaudeAiPlugins":false}' >"$SESS/acme-security/settings.json"
+run fleet verify
+rc_is "a stray plugin in one session's dir: the run is a mismatch" 1
+has "…named in that session's block" "$(sed -n '/== session acme-security/,$p' <<<"$OUT")" "$SESS/acme-security/settings.json enables unpinned plugin stray@market"
+run fleet verify --session acme-mm
+rc_is "…another session verifies clean on its own" 0
+run fleet launch acme-security
+rc_is "…and only the bad one is refused a launch" 1
+has "…saying its dir" "$OUT" "its engsys plugin (in $SESS/acme-security) does not match"
+rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"; run fleet launch acme-mm
+rc_is "…while the good one launches" 0
+echo '{"syncClaudeAiSkills":false,"syncClaudeAiPlugins":false}' >"$SESS/acme-security/settings.json"
+rm -f "$FAKE/loggedin/acme-mm"; touch "$FAKE/loggedout/acme-mm"; rm -f "$STATE/auth-ok.acme-mm"
+run fleet verify
+rc_is "a logged-out session dir is 'not verified' (a hold) for that session" 3
+has "…naming its dir and the login command" "$(sed -n '/== session acme-mm/,/== session acme-build/p' <<<"$OUT")" "CLAUDE_CONFIG_DIR=$SESS/acme-mm claude, then /login"
+run fleet verify --session acme-security
+rc_is "…the others still pass" 0
+login_all acme-mm
+# a login that works is not asked about again within --max-age (and a logged-out one never is cached)
+: >"$FAKE/claude.log"; run fleet verify --session acme-mm --max-age 15; run fleet verify --session acme-mm --max-age 15
+eq "verify --max-age: one auth status per dir" "$(grep -c '^auth status' "$FAKE/claude.log" || true)" 1
+# launch reuses verify's logged-in answer, and leaves a running session's credential alone
+date +%s >"$STATE/auth-ok.acme-build"; rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"; : >"$FAKE/claude.log"
+run fleet launch acme-build
+eq "launch: a fresh cached login answer is reused (no auth status for the dir)" "$(grep -c "^auth status.*CFG=$SESS/acme-build" "$FAKE/claude.log" || true)" 0
+rm -f "$STATE"/auth-ok.*; run fleet launch; : >"$FAKE/claude.log"
+run fleet launch
+eq "launch: sessions already running are not asked about" "$(grep -c '^auth status.*CFG='"$SESS" "$FAKE/claude.log" || true)" 0
+# plugin list is not asked on every tick: reused within --max-age while nothing it depends on changed
+pl_calls() { grep -c "^plugin list --json.*CFG=$SESS/acme-mm" "$FAKE/claude.log" || true; }
+rm -f "$STATE"/plugin-list.acme-mm.*; : >"$FAKE/claude.log"
+run fleet verify --session acme-mm --max-age 15; run fleet verify --session acme-mm --max-age 15
+eq "verify --max-age: one plugin list per dir while nothing changed" "$(pl_calls)" 1
+mkdir -p "$SESS/acme-mm/plugins"; sleep 1; echo '{}' >"$SESS/acme-mm/plugins/installed_plugins.json"
+run fleet verify --session acme-mm --max-age 15
+eq "…listed again once the dir's plugins changed (what fleet sync does)" "$(pl_calls)" 2
+sleep 1; touch "$HOME/git/app/.claude/settings.json"
+run fleet verify --session acme-mm --max-age 15
+eq "…and once the pin checkout's settings changed (a pin change)" "$(pl_calls)" 3
+run fleet verify --session acme-mm
+eq "…and a run without --max-age (a launch) always asks" "$(pl_calls)" 4
+run fleet verify --session acme-mm --max-age 15; run fleet verify --session acme-mm --max-age 15
+eq "…and the cache is still used after that" "$(pl_calls)" 4
+# a session this host excludes can still be force-launched: its dir can be made, verified and launched
+setconf "FLEET_CLAUDE_CONFIG_DIR=$FCFG" "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on" "ROSTER_EXCLUDE=acme-mm"
+run fleet verify --session acme-mm
+rc_is "verify --session for a host-excluded session (fleet launch --force-excluded) checks its dir" 0
+run fleet config-dir init --session acme-mm
+has "config-dir init --session works for it too" "$OUT" "session acme-mm -> $SESS/acme-mm"
+run fleet verify
+hasnt "…while a plain verify leaves it out" "$OUT" "== session acme-mm"
+setconf "FLEET_CLAUDE_CONFIG_DIR=$FCFG" "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on"
+# claude calls fleet commands make against one session dir never overlap (the CLI contacts the API even for status/list).
+# Mutual exclusion is checked under bash 5 and under /bin/bash (3.2 on macOS, what the supervisor job runs), with the lock
+# taken inside $( ( … ) ) subshells like the real callers: the holder must stay "alive" for as long as it holds the lock.
+setconf "FLEET_CLAUDE_CONFIG_DIR=$FCFG" "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on"
+cat >"$T/lock-case.sh" <<'SH'
+. "$ENGSYS_HOST/core/fleet/lib/fleet-env.sh"
+hold() { echo "start $1" >>"$LOCK_ORDER"; sleep 2; echo "end $1" >>"$LOCK_ORDER"; }
+a="$( (fleet_dir_lock "$LOCK_DIR" hold A) )" &
+sleep 0.3
+b="$( (fleet_dir_lock "$LOCK_DIR" hold B) )" &
+wait
+SH
+for sh in bash /bin/bash; do
+  : >"$T/lock.order"
+  FLEET_INSTANCE="$INST" LOCK_ORDER="$T/lock.order" LOCK_DIR="$SESS/acme-mm" ENGSYS_HOST="$ENGSYS_HOST" "$sh" "$T/lock-case.sh"
+  eq "per-dir lock under $sh: the second caller waits for the first" "$(paste -sd' ' "$T/lock.order")" "start A end A start B end B"
+done
+# a lock left behind by a holder that died is reclaimed at once (not after minutes); so is one whose pid was reused
+mkdir -p "$STATE/locks"; lk="$STATE/locks/claude-$(printf '%s' "$SESS/acme-mm" | cksum | cut -d' ' -f1).lock"
+for rec in "999999|" "$$|Thu Jan  1 00:00:00 1970"; do
+  rm -rf "$lk"; mkdir "$lk"; echo "$rec" >"$lk/holder"
+  s0=$(date +%s)
+  (
+    export FLEET_INSTANCE="$INST"
+    # shellcheck source=/dev/null
+    . "$ENGSYS_HOST/core/fleet/lib/fleet-env.sh"
+    fleet_dir_lock "$SESS/acme-mm" true
+  ) && ok "per-dir lock: a lock whose holder is gone ($rec) does not block" || bad "per-dir lock: a lock whose holder is gone ($rec) does not block"
+  [ $(( $(date +%s) - s0 )) -lt 20 ] && ok "…and is reclaimed at once" || bad "…and is reclaimed at once"
+done
+run fleet verify --session acme-nope
+rc_is "verify --session for a name it refuses is a usage error (2), not a mismatch" 2
+# path safety
+(
+  export FLEET_INSTANCE="$INST"
+  # shellcheck source=/dev/null
+  . "$ENGSYS_HOST/core/fleet/lib/fleet-env.sh"
+  . "$ENGSYS_HOST/core/fleet/lib/session-dirs.sh"
+  for bad in '../x' 'a/b' '.hidden' 'a..b' '' '..' 'x y' '/etc'; do
+    if fleet_session_config_dir "$bad" >/dev/null; then bad "path safety: '$bad' must not get a dir"; else ok "path safety: '$bad' is refused"; fi
+  done
+  eq "path safety: a plain name maps under the base" "$(fleet_session_config_dir acme-mm)" "$FCFG.sessions/acme-mm"
+)
+printf 'NAMESPACE=acme\nacme-a..b|%s|/p|--x\n' "$HOME/git/app" >"$T/hostile.roster"; : >"$FAKE/tmux.log"; rm -rf "$FAKE/tmux"
+CLAUDE_CONFIG_DIR="$FCFG" ENGSYS_CONFIG_DIR_SESSIONS="$FCFG.sessions" run bash "$ENGSYS_HOST/core/skills/agent-sessions/scripts/launch-agent-sessions.sh" --roster "$T/hostile.roster"
+has "the launcher refuses a session name that could leave the base" "$OUT" "can't be a per-session Claude config dir name"
+eq "…nothing reached tmux" "$(grep -c send-keys "$FAKE/tmux.log" || true)" 0
+# off again: the shared dir, as before
+setconf "FLEET_CLAUDE_CONFIG_DIR=$FCFG"
+rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"; run fleet launch
+has "per-session off: the shared base dir again" "$(tl acme-mm)" "export CLAUDE_CONFIG_DIR=$FCFG && command claude"
+setconf "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on"
+run fleet verify
+rc_is "per-session on without FLEET_CLAUDE_CONFIG_DIR is a config error" 3
+has "…saying so" "$OUT" "needs FLEET_CLAUDE_CONFIG_DIR"
+cp "$T/flc.bak" "$LC"; rm -rf "$SESS" "$FAKE/tmux"; : >"$FAKE/tmux.log"
 
 echo "== F. supervise"
 rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"; : >"$FAKE/gh.log"

@@ -3,6 +3,9 @@
 # A fake gh answers from canned JSON files in $FAKE/resp (keyed by the subcommand) and logs every call;
 # no baton is held, so nothing here reaches GitHub. The lease logic is tested in core/lib/lease.
 set -euo pipefail
+# hermetic: a test run inside a fleet session inherits that fleet's own settings (FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised, ...)
+# shellcheck source=../../../fleet/test/scrub-env.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/../../../fleet/test/scrub-env.sh"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 MNT="$HERE/../../maintenance-monster/scripts"
 T="$(cd "$(mktemp -d)" && pwd -P)"

@@ -435,12 +435,23 @@ launch_one() {
           && ! is_security_line "$flags" "${session_env:-}"; then cfg_dir=""; fi ;;
     esac
   fi
+  # One login per session (engsys#205): the fleet kit passes ENGSYS_CONFIG_DIR_SESSIONS (<fleet dir>.sessions) and a
+  # session that gets the fleet dir runs on <that>/<its name>. The name is validated here too: nothing with a
+  # slash, a leading dot or ".." can step out of that directory.
+  local gate_dir="${CLAUDE_CONFIG_DIR:-}"
+  if [ -n "$cfg_dir" ] && [ -n "${ENGSYS_CONFIG_DIR_SESSIONS:-}" ]; then
+    case "$name" in
+      '' | .* | */* | *..* | *[!A-Za-z0-9._-]*) echo "error: refusing to launch '$name': its name can't be a per-session Claude config dir name" >&2; return 1 ;;
+    esac
+    cfg_dir="${ENGSYS_CONFIG_DIR_SESSIONS%/}/$name"
+  fi
+  [ -z "$cfg_dir" ] || gate_dir="$cfg_dir"
   # A function named claude in an env file must not stand in for the binary either.
   cmd+="unset -f claude 2>/dev/null; "
   # Under scope supervised the session knows the fleet dir and the scope, so the baton can refuse a
   # session that isn't on it (lib/lease/baton.mjs launchedSessionGate).
   if [ -n "${FLEET_CLAUDE_CONFIG_DIR_INTERACTIVE+x}" ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
-    cmd+="export FLEET_CLAUDE_CONFIG_DIR=$(printf %q "$CLAUDE_CONFIG_DIR") FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised && "
+    cmd+="export FLEET_CLAUDE_CONFIG_DIR=$(printf %q "$gate_dir") FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised && "
   else
     cmd+="unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && "
   fi

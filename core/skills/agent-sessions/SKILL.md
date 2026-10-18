@@ -165,6 +165,7 @@ runs under launchd/cron every ~5 minutes with **no LLM in the restart path**
 | (per tick, not per session) `HOST_HEALTH_CMD` fails | | one alert through `NOTIFY_CMD` per incident, resolved once the check passes again; a failed post is retried next tick |
 | stale | **alive** | never kill; escalate once on the ledger |
 | any relaunch **fails** | | escalate once on the ledger with the launcher's error, retry each tick without commenting, comment once on recovery |
+| a supervisor-launched pane's last message is the usage-limit line (`You've hit your [weekly ]limit · resets …`) | any | hold the session (`<name>.limit-hold`, reset time parsed from the line): no stale or relaunch escalation; after the reset plus `LIMIT_RESUME_MARGIN_SEC` re-prompt an idle pane, or relaunch an exited one, once; re-hit within 30 min backs off; an unreadable reset time is alert-only |
 | (per tick, not per session) a pane shows Claude Code's login error | any | hold **every** relaunch and kill nothing; one `NOTIFY_CMD --level action --incident claude-auth-expired`; resume, and resolve the alert, once the login works |
 
 **An expired Claude Code login (engsys#103).** A session whose login has expired answers its
@@ -182,10 +183,22 @@ plugins or hooks; `AUTH_PROBE=off` turns it off): if that request succeeds, the 
 is old, and that pane is ignored until it shows something else. Otherwise relaunches are held for
 every session, nothing is killed, one action-level alert goes out, the stale-but-alive ledger
 comments wait, and the status-issue heartbeat reads `auth: expired since <ISO>` plus a line for
-people. The hold ends on the first tick where a pane that showed the error answers normally
-(including `⎿ Login successful` after `/login`), or where the test request succeeds. The alert is
+people. The hold ends on the first tick where the test request succeeds (with `AUTH_PROBE=off`, where a
+pane that showed the error answers normally); a pane's reply alone does not end it, because a pane can print a
+message that is no proof of a working login (engsys#207: `Remote Control disconnected — OAuth token unavailable`
+once counted as an answer and ended a hold while the credential was empty; it, `OAuth token refresh failed`,
+`Signed out of Claude` and the other known phrases are now login errors that start or keep a hold). Every idle session that was stale during the hold, escalated before it or not, gets
+its one relaunch when it ends. The alert is
 then resolved and the table runs as usual on that same tick, so each held session gets its one
 relaunch. `fleet status` prints `auth: expired since <time>` while the hold is on.
+
+**One login per session (engsys#205).** With `SESSION_CONFIG_DIR_BASE=<dir>` in the conf (the fleet kit sets it when
+`FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on`), each supervised session has its own Claude config dir `<base>/<name>` and
+so its own login. The login hold above then runs per session, on `auth.<name>.*` state: a login error in a session's
+pane holds that session only, the test request runs with that session's `CLAUDE_CONFIG_DIR`, the alert
+(`claude-auth-expired-<name>`) names the session, its dir and the login command, and the other sessions keep
+running. `INTEGRITY_SESSION_CMD=<cmd>` replaces `INTEGRITY_CMD`: it is asked as `<cmd> <session>` for each singleton
+session once per tick, and its verdict holds only that session.
 
 **Moved ledger targets.** The supervisor records, per session, the ledger target it
 last launched it against (`logs/fleet-supervisor/<name>.target`). When the
