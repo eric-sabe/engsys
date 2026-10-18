@@ -772,6 +772,23 @@ export function checkSettingsDetailed({
   return { problems: [...new Set(problems)], info: [...new Set(info)] };
 }
 
+/** The keys the session launcher writes into its messaging settings file (launch-agent-sessions.sh). */
+export const MESSAGING_SETTINGS_KEYS = ['crossSessionInbound'];
+/**
+ * The launcher's messaging settings (`--settings` on every session, the monsters included): it may hold
+ * only the keys the launcher writes. → problems (an absent file is fine: the launcher creates it)
+ */
+export function checkMessagingSettings(file) {
+  let st;
+  try { st = fs.lstatSync(file); } catch (e) { return e && e.code === 'ENOENT' ? [] : [`settings   ${file} cannot be stat'd`]; }
+  if (st.isSymbolicLink() || !st.isFile()) return [`settings   ${file} is not a regular file`];
+  let cfg;
+  try { cfg = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return [`settings   ${file} is not valid JSON`]; }
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) return [`settings   ${file} is not a JSON object`];
+  return Object.keys(cfg).filter((k) => !MESSAGING_SETTINGS_KEYS.includes(k)).sort()
+    .map((k) => `settings   ${file} sets ${k} (the launcher's messaging settings may hold only ${MESSAGING_SETTINGS_KEYS.join(', ')})`);
+}
+
 /** checkSettingsDetailed's problems only (the original API). */
 export function checkSettings(opts) {
   return checkSettingsDetailed(opts).problems;
@@ -1290,6 +1307,7 @@ export function parseArgs(argv) {
     allowedUserPlugins: '',
     allowedUserHooks: '',
     allowedUserFiles: '',
+    messagingSettings: '',
     claudeJson: '',
     checkUserConfig: false,
   };
@@ -1315,6 +1333,7 @@ export function parseArgs(argv) {
       case '--allowed-user-hooks': a.allowedUserHooks = v(); break;
       case '--allowed-user-files': a.allowedUserFiles = v(); break;
       case '--claude-json': a.claudeJson = v(); break;
+      case '--messaging-settings': a.messagingSettings = v(); break;
       case '--check-user-config': a.checkUserConfig = true; break;
       default: throw new Error(`unknown argument: ${k}`);
     }
@@ -1428,6 +1447,7 @@ export async function run(argv, {
     });
     preProblems.push(...r.problems);
     info = r.info;
+    if (a.messagingSettings) preProblems.push(...checkMessagingSettings(a.messagingSettings));
   }
   infoLines(info);
   if (preProblems.length) return mismatch(preProblems);

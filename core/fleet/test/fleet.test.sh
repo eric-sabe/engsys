@@ -451,9 +451,25 @@ has "…reports the fleet dir" "$OUT" "claude config dir: $FCFG (FLEET_CLAUDE_CO
 has "…and ~/.claude for the interactive roles" "$OUT" "claude config dir: $HOME/.claude (interactive roles)"
 has "…the fleet dir's drift" "$OUT" "plugin ctx@acme not installed"
 has "…~/.claude's drift" "$OUT" "marketplace engsys is at 'v1.0.0'"
+# ~/.claude is the operator's: moving the engsys marketplace ref would uninstall their own unpinned
+# plugin of it and another project's project-scope install, so the step is refused (drift, no damage).
+cp "$FAKE/claude/plugins.json" "$T/user-plugins.bak"
+jq '. + [{id: "engsys-swift@engsys", version: "1.0.0", scope: "user", enabled: true},
+         {id: "core@engsys", version: "1.0.0", scope: "project", projectPath: "/other/proj", enabled: true}]' "$T/user-plugins.bak" >"$FAKE/claude/plugins.json"
+m="$(mark)"; run fleet sync
+rc_is "sync with unpinned plugins in ~/.claude still exits 0 (the fleet dir is synced)" 0
+has "…warns that moving it would uninstall unpinned plugins" "$OUT" "would uninstall plugins the fleet doesn't pin:"
+has "…naming the operator's plugin" "$OUT" "engsys-swift@engsys (user)"
+has "…and the project-scope install" "$OUT" "core@engsys (project /other/proj)"
+has "…while the fleet dir is synced all the same" "$(since "$m" | grep "CFG=$FCFG\$")" "plugin install ctx@acme"
+eq "…never ran marketplace remove in ~/.claude" "$(since "$m" | grep 'CFG=unset$' | grep -c 'marketplace remove' || true)" 0
+has "…the operator's own plugin survives" "$(jq -r '.[].id' "$FAKE/claude/plugins.json")" "engsys-swift@engsys"
+has "…and the other project's install" "$(jq -c '.[] | select(.scope == "project")' "$FAKE/claude/plugins.json")" '"projectPath":"/other/proj"'
+run fleet sync --check
+rc_is "…and --check reports the drift" 1
+cp "$T/user-plugins.bak" "$FAKE/claude/plugins.json"
 m="$(mark)"; run fleet sync
 rc_is "sync with scope supervised exits 0" 0
-has "…installed into the fleet dir" "$(since "$m" | grep "CFG=$FCFG\$")" "plugin install ctx@acme"
 has "…and reconciled ~/.claude (user scope)" "$(since "$m" | grep 'CFG=unset$')" "plugin marketplace add https://github.com/vendor/engsys.git"
 eq "…~/.claude: only user-scope plugin calls" "$(since "$m" | grep 'CFG=unset$' | grep -E 'marketplace (add|remove)|install ' | grep -vc -- '--scope user' || true)" 0
 eq "fleet dir plugins" "$(jq -r '.[].id' "$FS/plugins.json" | sort | paste -sd' ' -)" "core@engsys ctx@acme extra@acme"
@@ -557,9 +573,9 @@ has "roster: ENV_FILE points at the rendered lane env" "$ROSTER_OUT" "ENV_FILE=$
 has "roster: 5th field rendered" "$ROSTER_OUT" "acme-security|$HOME/git/app|/maintenance-monster|--model claude-opus-4-8|$STATE/env/security.env"
 has "roster: monster line" "$ROSTER_OUT" "acme-mm|$HOME/git/app|/merge-monster|--model model-m --dangerously-skip-permissions"
 tl() { grep -F "[send-keys] [-t] [acme:$1]" "$FAKE/tmux.log" | head -1; } # the launch command line for a window
-has "mm: default env (roster ENV_FILE)" "$(tl acme-mm)" "cd $HOME/git/app && set -a && . $STATE/env/session.env && set +a && unset CLAUDE_CONFIG_DIR && claude --name acme-mm"
+has "mm: default env (roster ENV_FILE)" "$(tl acme-mm)" "cd $HOME/git/app && set -a && . $STATE/env/session.env && set +a && unset -f claude 2>/dev/null; unset CLAUDE_CONFIG_DIR && command claude --name acme-mm"
 has "mm: prompt before the extra flags" "$(tl acme-mm)" "/merge-monster --model model-m --dangerously-skip-permissions"
-has "security: the 5th field replaces ENV_FILE" "$(tl acme-security)" "set -a && . $STATE/env/security.env && set +a && unset CLAUDE_CONFIG_DIR && claude --name acme-security"
+has "security: the 5th field replaces ENV_FILE" "$(tl acme-security)" "set -a && . $STATE/env/security.env && set +a && unset -f claude 2>/dev/null; unset CLAUDE_CONFIG_DIR && command claude --name acme-security"
 hasnt "security: the roster-level env is NOT used" "$(tl acme-security)" "session.env"
 has "security: prompt before the extra flags" "$(tl acme-security)" "/maintenance-monster --model claude-opus-4-8"
 has "rel: a relative 5th field resolves against the roster's directory" "$(tl acme-rel)" "set -a && . $STATE/env/rel.env && set +a"
@@ -627,7 +643,7 @@ done
 has "the rendered session env carries it too" "$(cat "$STATE/env/session.env")" "CLAUDE_CONFIG_DIR=$FCFG"
 has "…and the security env" "$(cat "$STATE/env/security.env")" "CLAUDE_CONFIG_DIR=$FCFG"
 for w in acme-mm acme-security acme-build; do
-  has "$w (scope all): the dir is set after the env file, so no env file can move it" "$(tl "$w")" "set +a && export CLAUDE_CONFIG_DIR=$FCFG && "
+  has "$w (scope all): the dir is set after the env file, so no env-file variable can move it" "$(tl "$w")" "set +a && unset -f claude 2>/dev/null; export CLAUDE_CONFIG_DIR=$FCFG && command claude"
 done
 # FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised: monsters and the security lane keep the fleet dir; the
 # interactive roles run on ~/.claude (unset on the launch line and in their env file).
@@ -639,7 +655,7 @@ rc_is "launch with scope supervised exits 0" 0
 for w in acme-mm acme-security acme-audit; do
   has "$w (supervised / security lane): CLAUDE_CONFIG_DIR=<the fleet dir>" "$(tl "$w")" "export CLAUDE_CONFIG_DIR=$FCFG && "
 done
-has "acme-build (interactive): CLAUDE_CONFIG_DIR unset, ~/.claude" "$(tl acme-build)" "set +a && unset CLAUDE_CONFIG_DIR && "
+has "acme-build (interactive): CLAUDE_CONFIG_DIR unset, ~/.claude" "$(tl acme-build)" "set +a && unset -f claude 2>/dev/null; unset CLAUDE_CONFIG_DIR && command claude"
 hasnt "…never the fleet dir" "$(tl acme-build)" "CLAUDE_CONFIG_DIR=$FCFG"
 has "acme-rel (interactive, its own env): unset too" "$(tl acme-rel)" "unset CLAUDE_CONFIG_DIR && "
 has "session.env (interactive users): unsets it" "$(cat "$STATE/env/session.env")" "unset CLAUDE_CONFIG_DIR"
@@ -651,6 +667,32 @@ has "…after it sources session.env" "$(sed -n '/session.env/,$p' "$STATE/env/s
 grep -Fxv acme-mm "$FAKE/tmux/windows" >"$FAKE/w.new" || true; mv "$FAKE/w.new" "$FAKE/tmux/windows"; : >"$FAKE/tmux.log"
 run fleet launch acme-mm
 has "named relaunch of a supervised session: the fleet dir" "$(tl acme-mm)" "export CLAUDE_CONFIG_DIR=$FCFG && "
+# Lines the launcher arms as monsters or security tier, whatever spelling: they must get the fleet dir.
+cp "$INST/fleet/roster.tmpl" "$T/roster.pre-f1"
+cp "$INST/fleet/env/security.env.tmpl" "$INST/fleet/env/nyx.env.tmpl"
+cat >>"$INST/fleet/roster.tmpl" <<'R'
+acme-nl|__PIN_DIR__|Run the merge monster skill now|--dangerously-skip-permissions
+acme-us|__PIN_DIR__|/engsys:merge_monster|--dangerously-skip-permissions
+acme-Merge|__PIN_DIR__|/merge-monster|--dangerously-skip-permissions
+acme-nyx|||--model claude-opus-4-8|__ENV_DIR__/nyx.env
+acme-o48|||--model claude-opus-4-8
+R
+rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"
+run fleet launch
+has "nyx.env (a security lane) unsets the subagent model override" "$(cat "$STATE/env/nyx.env")" "unset CLAUDE_CODE_SUBAGENT_MODEL CLAUDE_CODE_SUBAGENT_MODEL_FORCE"
+for w in acme-nl acme-us acme-Merge acme-nyx acme-o48; do
+  has "$w: launched on the fleet dir" "$(tl "$w")" "export CLAUDE_CONFIG_DIR=$FCFG && "
+done
+has "acme-Merge is gated by fleet verify like any merge monster" "$OUT" "fleet verify: Claude config dir"
+has "positive control: acme-build still runs on ~/.claude" "$(tl acme-build)" "unset CLAUDE_CONFIG_DIR && command claude"
+# The launcher itself never puts a monster or security line on ~/.claude, even if told it's interactive.
+printf 'NAMESPACE=acme\nacme-nl|%s|Run the merge monster skill now|--x\nacme-o48|%s||--model claude-opus-4-8\nacme-plain|%s||--x\n' "$HOME/git/app" "$HOME/git/app" "$HOME/git/app" >"$T/f1.roster"
+: >"$FAKE/tmux.log"; rm -rf "$FAKE/tmux"
+CLAUDE_CONFIG_DIR="$FCFG" FLEET_CLAUDE_CONFIG_DIR_INTERACTIVE=" acme-nl acme-o48 acme-plain " run bash "$ENGSYS_HOST/core/skills/agent-sessions/scripts/launch-agent-sessions.sh" --roster "$T/f1.roster"
+has "launcher: a monster prompt keeps the fleet dir though listed interactive" "$(tl acme-nl)" "export CLAUDE_CONFIG_DIR=$FCFG && "
+has "launcher: an opus-4-8 line keeps it too" "$(tl acme-o48)" "export CLAUDE_CONFIG_DIR=$FCFG && "
+has "launcher: positive control, a plain listed line gets ~/.claude" "$(tl acme-plain)" "unset CLAUDE_CONFIG_DIR && command claude"
+cp "$T/roster.pre-f1" "$INST/fleet/roster.tmpl"; rm -f "$INST/fleet/env/nyx.env.tmpl"
 cp "$T/roster.bak2" "$INST/fleet/roster.tmpl" 2>/dev/null || sed -i.x '/^acme-audit|/d' "$INST/fleet/roster.tmpl"; rm -f "$INST/fleet/roster.tmpl.x"
 cp "$T/flc.bak" "$LC"
 

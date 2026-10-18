@@ -53,7 +53,9 @@ cp "$HERE/fake-github.sh" "$FAKE/fake-github.sh"
 cat >"$T/bin/claude" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
-  "plugin list --json") pwd -P >"$FAKE/claude.cwd"; printf '%s\n' "${CLAUDE_CONFIG_DIR:-unset}" >"$FAKE/claude.cfg"; cat "$FAKE/plugins.json" ;;
+  "plugin list --json") pwd -P >"$FAKE/claude.cwd"
+    if [ -z "${CLAUDE_CONFIG_DIR:-}" ] && [ -f "$FAKE/plugins-user.json" ]; then cat "$FAKE/plugins-user.json"; exit 0; fi   # ~/.claude's own list, when a test sets one
+    printf '%s\n' "${CLAUDE_CONFIG_DIR:-unset}" >"$FAKE/claude.cfg"; cat "$FAKE/plugins.json" ;;
   "auth status --json") [ -f "$FAKE/auth.json" ] || exit 2; cat "$FAKE/auth.json" ;;
   *) echo "stub claude: unsupported: $*" >&2; exit 2 ;;
 esac
@@ -575,5 +577,36 @@ jq '.extraKnownMarketplaces.engsys.source.ref = "v9.9.9"' "$APP/.claude/settings
 PIN_SETTINGS="$T/other-pins.json" run fleet verify
 rc_is "an inherited PIN_SETTINGS doesn't move the pin" 0
 has "…verify still checks the real pin" "$OUT" "match vendor/engsys@v1.0.0"
+
+echo "== FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised: ~/.claude's engsys install is checked too (security reviews load it)"
+FCFG2="$T/fleet-claude2"; mkdir -p "$FCFG2"
+UCACHE="$T/user-cache/engsys/1.0.0"; mkdir -p "$(dirname "$UCACHE")"; cp -R "$E/core" "$UCACHE"
+jq -n --arg c "$UCACHE" '[{id: "engsys@engsys", version: "1.0.0", scope: "user", enabled: true, installPath: $c}, {id: "mine@elsewhere", version: "3.0.0", scope: "user", enabled: true, installPath: "/nowhere"}]' >"$FAKE/plugins-user.json"
+printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\nFLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised\n' "$CONF0" "$FCFG2" >"$I/fleet/fleet.conf"
+run fleet verify
+rc_is "scope supervised, ~/.claude's engsys intact: passes" 0
+has "…it checked ~/.claude" "$OUT" "~/.claude (interactive roles, FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised): the engsys plugin"
+printf '\n# tampered\n' >>"$UCACHE/skills/merge-monster/scripts/mm-act.sh"
+run fleet verify
+rc_is "a tampered engsys file in ~/.claude holds the monsters" 1
+has "…named" "$OUT" "$UCACHE/skills/merge-monster/scripts/mm-act.sh"
+printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\n' "$CONF0" "$FCFG2" >"$I/fleet/fleet.conf"
+run fleet verify
+rc_is "scope all: ~/.claude isn't the monsters' dir and isn't checked" 0
+hasnt "…" "$OUT" "interactive roles"
+printf '%s\n' "$CONF0" >"$I/fleet/fleet.conf"; rm -f "$FAKE/plugins-user.json"; rm -rf "$T/user-cache"
+
+echo "== the launcher's messaging settings may hold only the keys the launcher writes"
+MS="$HOME/.claude/acme-messaging-settings.json"
+printf '{"crossSessionInbound": "accept"}\n' >"$MS"
+run fleet verify
+rc_is "only crossSessionInbound: passes" 0
+for k in '"hooks": {}' '"env": {"X": "1"}' '"model": "opus"' '"statusLine": {"type": "command", "command": "x"}'; do
+  printf '{"crossSessionInbound": "accept", %s}\n' "$k" >"$MS"
+  run fleet verify
+  rc_is "messaging settings with ${k%%:*}: mismatch" 1
+  has "…named" "$OUT" "acme-messaging-settings.json sets"
+done
+rm -f "$MS"
 
 finish verify.test.sh

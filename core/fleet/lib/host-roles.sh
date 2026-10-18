@@ -28,7 +28,8 @@ fleet_host_render() { # fleet_host_render <value> → rendered when it holds __N
 }
 
 fleet_host_kind() { # fleet_host_kind <prompt> <in-ledger 0|1> → merge | maintain | broker | monster | interactive
-  case "$1" in
+  # The launcher's tolerance (launch-agent-sessions.sh prompt_role): any case, `_` or spaces between words.
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr '_ ' '--')" in
     *merge-monster*) echo merge ;;
     *maintenance-monster*) echo maintain ;;
     *resource-broker*) echo broker ;;
@@ -111,7 +112,7 @@ fleet_host_init() {
       done < <(fleet_host_list "$ROLES")
     fi
     FLEET_HOST_TABLE="${FLEET_HOST_TABLE}${name}|${kind}|${reason}"$'\n'
-  done < <(grep -E '^[a-z0-9-]+\|' "$FLEET_REPO/fleet/roster.tmpl")
+  done < <(grep -E '^[A-Za-z0-9][A-Za-z0-9._-]*\|' "$FLEET_REPO/fleet/roster.tmpl")   # every line the launcher runs
 
   # an entry that matches no session is almost always a typo
   for e in $(fleet_host_list "${ROLES:-} ${ROSTER_EXCLUDE:-}"); do

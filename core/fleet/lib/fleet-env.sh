@@ -211,7 +211,7 @@ fleet_ledger_sessions() { # names of the ledger-bearing (supervised) sessions
 }
 fleet_roster_sessions() { # every session name in the roster template
   [ -f "$FLEET_REPO/fleet/roster.tmpl" ] || return 0
-  grep -E '^[a-z0-9-]+\|' "$FLEET_REPO/fleet/roster.tmpl" | cut -d'|' -f1 || true
+  grep -E '^[A-Za-z0-9][A-Za-z0-9._-]*\|' "$FLEET_REPO/fleet/roster.tmpl" | cut -d'|' -f1 || true
 }
 fleet_roster_header() { # fleet_roster_header <KEY> → its value from the roster template ('' if absent), rendered
   local raw

@@ -420,14 +420,21 @@ launch_one() {
     cmd+="set -a && . $(printf %q "$session_env") && set +a && "
   fi
   # The Claude Code config dir comes from the launcher's own environment (the fleet kit sets it from
-  # FLEET_CLAUDE_CONFIG_DIR), never from the tmux server's, which may predate it, and it is decided
-  # after the env file, so no env file can move a session to another dir. With
-  # FLEET_CLAUDE_CONFIG_DIR_SESSIONS set (scope supervised), only those sessions get it; every other
-  # one runs with it unset (~/.claude).
+  # FLEET_CLAUDE_CONFIG_DIR), never from the tmux server's, which may predate it, and it is decided after
+  # the env file, so no env-file variable can move a session to another dir. With
+  # FLEET_CLAUDE_CONFIG_DIR_INTERACTIVE set (scope supervised), only the sessions it names run with it
+  # unset (~/.claude), and never one this launcher itself sees as a monster, the resource broker, a
+  # supervised session or a security-tier line: an unknown session fails toward the fleet dir.
   local cfg_dir="${CLAUDE_CONFIG_DIR:-}"
-  if [ -n "$cfg_dir" ] && [ -n "${FLEET_CLAUDE_CONFIG_DIR_SESSIONS+x}" ]; then
-    case "$FLEET_CLAUDE_CONFIG_DIR_SESSIONS" in *" $name "*) ;; *) cfg_dir="" ;; esac
+  if [ -n "$cfg_dir" ] && [ -n "${FLEET_CLAUDE_CONFIG_DIR_INTERACTIVE+x}" ]; then
+    case "$FLEET_CLAUDE_CONFIG_DIR_INTERACTIVE" in
+      *" $name "*)
+        if [ -z "$role" ] && ! prompt_is_broker "$prompt" && ! is_supervised_session "$name" \
+          && ! is_security_line "$flags" "${session_env:-}"; then cfg_dir=""; fi ;;
+    esac
   fi
+  # A function named claude in an env file must not stand in for the binary either.
+  cmd+="unset -f claude 2>/dev/null; "
   if [ -n "$cfg_dir" ]; then cmd+="export CLAUDE_CONFIG_DIR=$(printf %q "$cfg_dir") && "; else cmd+="unset CLAUDE_CONFIG_DIR && "; fi
   if [ "$HARNESS" = "copilot" ]; then
     cmd+="copilot --name $(printf %q "$name")"
@@ -442,7 +449,7 @@ launch_one() {
     agy_flags="$(translate_antigravity_flags "${MODEL:+$MODEL }${extra:-}")" || { echo "error: refusing to launch '$name' on HARNESS=antigravity" >&2; return 1; }
     [ -n "$agy_flags" ] && cmd+=" $agy_flags"
   else
-    cmd+="claude --name $(printf %q "$name") --settings $(printf %q "$SETTINGS_FILE")"
+    cmd+="command claude --name $(printf %q "$name") --settings $(printf %q "$SETTINGS_FILE")"
     # The prompt goes BEFORE the model/extra flags: several claude flags take a
     # list (--add-dir, --allowedTools, …) and would swallow a trailing prompt as
     # one more value — the session would start with no instruction.

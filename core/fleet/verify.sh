@@ -142,6 +142,9 @@ else
     args+=(--check-user-config --claude-json "${FLEET_CLAUDE_CONFIG_DIR:+$FLEET_CLAUDE_CONFIG_DIR/.claude.json}")
     [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] || args[${#args[@]}-1]="$HOME/.claude.json"
     [ -z "${VERIFY_ALLOWED_USER_FILES:-}" ] || args+=(--allowed-user-files "$VERIFY_ALLOWED_USER_FILES")
+    # The launcher's messaging settings (--settings on every session, monsters included): only the keys it writes.
+    ns="$(fleet_roster_header NAMESPACE)"
+    [ -z "$ns" ] || args+=(--messaging-settings "$HOME/.claude/$ns-messaging-settings.json")
     if [ -e "$ENGSYS_DIR" ] || [ -L "$ENGSYS_DIR" ]; then
       args+=(--engsys-dir "$ENGSYS_DIR")
     fi
@@ -159,6 +162,26 @@ else
       out="$out"$'\n'"fleet verify: not verified: the verifier failed (exit 1, above)"; rc=3
     fi
     case "$rc" in 0 | 1 | 3) ;; *) out="$out"$'\n'"fleet verify: not verified: the verifier exited $rc"; rc=3 ;; esac
+    # FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised: the interactive roles run on ~/.claude, and the security
+    # reviews they dispatch (whose verdicts gate merges) load the engsys plugin from there. So its engsys
+    # install is held to the same release check: a mismatch there holds the monsters too. Only that
+    # plugin; the operator's other plugins, skills and MCP servers in ~/.claude are not checked.
+    if [ "$rc" = 0 ] && [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] && [ "${FLEET_CLAUDE_CONFIG_DIR_SCOPE:-all}" = supervised ] \
+      && [ "${HARNESS:-claude}" = claude ]; then
+      plist_u="$(mktemp "$FLEET_STATE/plugin-list-user.XXXXXX")"
+      if ! (cd "$PIN_DIR" && env -u CLAUDE_CONFIG_DIR claude plugin list --json) >"$plist_u" 2>/dev/null; then
+        out="$out"$'\n'"fleet verify: not verified: claude plugin list failed in $PIN_DIR for ~/.claude (the interactive roles)"; rc=3
+      else
+        uargs=(--repo "$repo" --tag "$ref" --plugin-id "engsys@$ENGSYS_MARKETPLACE" --project-dir "$PIN_DIR" --plugins "$plist_u" --harness claude)
+        [ -z "$max_age" ] || uargs+=(--cache "$FLEET_STATE/verify-wrappers-user.json" --max-age-min "$max_age")
+        urc=0; uout="$(node "$FLEET_KIT_DIR/lib/verify-wrappers.mjs" "${uargs[@]}" 2>&1)" || urc=$?
+        if [ "$urc" = 1 ] && ! grep -q '^verify: MISMATCH' <<<"$uout"; then urc=3; fi
+        case "$urc" in 0 | 1 | 3) ;; *) urc=3 ;; esac
+        out="$out"$'\n'"fleet verify: ~/.claude (interactive roles, FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised): the engsys plugin"$'\n'"$uout"
+        rc="$urc"
+      fi
+      rm -f "$plist_u"
+    fi
   fi
 fi
 

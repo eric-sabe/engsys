@@ -243,7 +243,7 @@ main() {
 # One config dir's plugin step (SYNC_CFG: the dir, '' = ~/.claude). Runs inside main(): it reads and sets
 # main's locals (check, markets, m_refs, m_repos, m_plugins, changed, drift) through bash's dynamic scope.
 sync_claude_plugins() {
-  local i m ref repo cur installed p
+  local i m ref repo cur installed p refused=" "
   [ "$check" = 1 ] || settings_guard_begin
   installed="$(user_plugins)"
   for i in "${!markets[@]}"; do
@@ -254,6 +254,21 @@ sync_claude_plugins() {
         say "marketplace $m is at '${cur:-absent}' (pin $ref)"; drift=1; continue
       fi
       # remove uninstalls every plugin from this marketplace; running sessions keep their cache dirs.
+      # In ~/.claude under scope supervised (the operator's own dir) that is allowed only when it takes
+      # nothing but the pinned plugins, which are reinstalled right after: another plugin of this
+      # marketplace, or any project-scope install of one, makes the step refuse (drift, not damage).
+      if [ -n "$cur" ] && [ -z "$SYNC_CFG" ] && [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ]; then
+        local keep
+        keep="$(plugin_cli list --json | jq -r --arg m "$m" --arg pins "$(printf '%s\n' "${m_plugins[$i]}")" '
+          ($pins | split("\n") | map(select(length > 0))) as $p
+          | .[] | select((.id // "") | endswith("@" + $m))
+          | select(((.scope // "user") != "user") or ((.id | sub("@" + $m + "$"; "")) as $n | ($p | index($n)) == null))
+          | "\(.id) (\(.scope // "user")\(if .projectPath then " " + .projectPath else "" end))"' | paste -sd, - | sed 's/,/, /g')"
+        if [ -n "$keep" ]; then
+          warn "marketplace $m in ~/.claude is at '$cur' (pin $ref), but moving it would uninstall plugins the fleet doesn't pin: $keep. Not moving it; update it yourself (claude plugin marketplace update $m) or remove those plugins, then fleet sync."
+          drift=1; refused+=" $m "; continue
+        fi
+      fi
       if [ -n "$cur" ]; then plugin_cli marketplace remove "$m" --scope user >/dev/null; settings_guard_check "marketplace remove $m"; fi
       plugin_cli marketplace add "https://github.com/$repo.git#$ref" --scope user >/dev/null \
         || fleet_die "marketplace add $m#$ref failed — $m plugins are UNINSTALLED on this host. Re-run: fleet sync (running sessions are unaffected)."
@@ -261,6 +276,7 @@ sync_claude_plugins() {
       say "marketplace $m: ${cur:-absent} → $ref"; changed=1
       installed="$(user_plugins)"
     fi
+    case "$refused" in *" $m "*) continue ;; esac
     while IFS= read -r p; do
       [ -n "$p" ] || continue
       installed_version "$p@$m" "$installed" >/dev/null && continue
@@ -277,6 +293,7 @@ sync_claude_plugins() {
   local have want bad=""
   for i in "${!markets[@]}"; do
     m="${markets[$i]}" ref="${m_refs[$i]}"
+    case "$refused" in *" $m "*) continue ;; esac   # refused above, with a warning: drift, not a failure
     want=""; [[ "$ref" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([-+].*)?$ ]] && want="${ref#v}"
     while IFS= read -r p; do
       [ -n "$p" ] || continue
