@@ -174,8 +174,8 @@ for f in fleet/env/session.env.tmpl fleet/env/security.env.tmpl; do
   if git -C "$FULL" check-ignore -q "$f"; then bad "gitignore keeps $f"; else ok "gitignore keeps $f"; fi
 done
 rm -rf "$FULL/.git"
-file_has "supervisor.conf: monsters with ledger 0" "$FULL/fleet/supervisor.conf.tmpl" "acme-mm|0|60"
-file_has "…both" "$FULL/fleet/supervisor.conf.tmpl" "acme-maintain|0|60"
+file_has "supervisor.conf: monsters with ledger 0" "$FULL/fleet/supervisor.conf.tmpl" "acme-mm|0|45"
+file_has "…both" "$FULL/fleet/supervisor.conf.tmpl" "acme-maintain|0|45"
 file_has "…the repo" "$FULL/fleet/supervisor.conf.tmpl" "REPO=acme/app"
 file_has "roster: maintain runs in the security env (5th field)" "$FULL/fleet/roster.tmpl" "--dangerously-skip-permissions|__ENV_DIR__/security.env"
 file_has "roster: the identity preflight" "$FULL/fleet/roster.tmpl" "PREFLIGHT=bash __ENGSYS_DIR__/core/fleet/identity/gh-app-login.sh __GH_APP_ENV__"
@@ -459,7 +459,7 @@ run "$INST/scripts/fleet" supervise
 rc_is "supervise ticks" 0
 SUP="$(cat "$STATE/supervisor.conf")"
 has "supervisor.conf: repo" "$SUP" "REPO=acme/app"
-has "supervisor.conf: both monsters" "$SUP" "acme-maintain|0|60"
+has "supervisor.conf: both monsters" "$SUP" "acme-maintain|0|45"
 has "supervisor.conf: LAUNCH_CMD points back at the kit" "$SUP" "LAUNCH_CMD=bash $E/core/fleet/bin/fleet --instance $INST launch"
 has "supervisor.conf: tmux session" "$SUP" "TMUX_SESSION=acme"
 run "$INST/scripts/fleet" install-jobs --dry-run
@@ -518,7 +518,7 @@ has "jobs: the identity check is skipped" "$OUT" "skipped: com.acme.fleet.gh-app
 hasnt "jobs: no azure login" "$OUT" "az-sp-login"
 run "$INST/scripts/fleet" supervise
 rc_is "supervise ticks" 0
-has "supervisor.conf rendered" "$(cat "$STATE/supervisor.conf")" "acme-mm|0|60"
+has "supervisor.conf rendered" "$(cat "$STATE/supervisor.conf")" "acme-mm|0|45"
 
 echo "-- resource broker scaffold: the kit launches and supervises the third monster"
 INST="$RB"; STATE="$INST/.fleet"

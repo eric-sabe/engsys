@@ -703,6 +703,13 @@ expect "  …to 20m" "^backoff-20m"
 hconf "LIMIT_RESUME_MARGIN_SEC=0"; qreset; launched_by_sup acme-rel; ledger2 90 "ok"; live acme-rel "⏺ You've hit your limit · $(lreset -30)"; run
 expect "reset already past → re-prompted on the spot" "^sendkeys acme-rel"
 
+# a clock-only reset (no date) that passed minutes ago is due now, not tomorrow (CodeRabbit on this change)
+if [ "$(date -u +%H%M)" -ge 0015 ]; then
+  lclock() { local e=$(( $(date +%s) + $1 * 60 )); printf 'resets %s (UTC)' "$(date -u -r "$e" '+%-I:%M%p' 2>/dev/null || date -u -d "@$e" '+%-I:%M%p')"; }
+  hconf "LIMIT_RESUME_MARGIN_SEC=0"; qreset; launched_by_sup acme-rel; ledger2 90 "ok"; live acme-rel "⏺ You've hit your limit · $(lclock -10)"; run
+  expect "clock-only reset that passed 10 minutes ago → re-prompted on the spot, not held until tomorrow" "^sendkeys acme-rel"
+fi
+
 # an exited session: held (not relaunched by crash recovery) until the reset, then relaunched once
 hconf; qreset; launched_by_sup acme-rel; ledger2 90 "ok"; live acme-rel "⏺ You've hit your limit · $(lreset 90)"; echo zsh >"$T/pane-acme-rel"; run
 expect "exited + limit hold → not relaunched before the reset" "!^launch acme-rel"

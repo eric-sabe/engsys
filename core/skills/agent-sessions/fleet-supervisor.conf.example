@@ -53,7 +53,7 @@ REPO=owner/name
 #   merge or maintain, marks a monster that holds its role through the github
 #   lease: a relaunch then also needs the lease to be free (fleet-supervisor.sh
 #   header). Under the fleet kit `fleet supervise` writes it.
-acme-mm|0|60|||merge
-acme-maintain|0|60|||maintain
+acme-mm|0|45|||merge
+acme-maintain|0|45|||maintain
 # acme-<role>|0|60
 # other-mm|0|60|owner/other-repo
