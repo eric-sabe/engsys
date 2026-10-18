@@ -109,11 +109,7 @@ status() {
     [ ! -s "$sup_state/auth.held" ] || held="$(paste -sd, - <"$sup_state/auth.held" | sed 's/,/, /g')"
     local login_hint="claude /login"
     [ "${HARNESS:-claude}" = copilot ] && login_hint="gh auth login"
-    if [ -n "${FLEET_CLAUDE_OAUTH_TOKEN_FILE:-}" ]; then
-      echo "auth: the fleet's Claude token stopped working on $since. The supervisor relaunches and kills nothing until it works${held:+ (held: $held)}; run claude setup-token and write the new token to $FLEET_CLAUDE_OAUTH_TOKEN_FILE (mode 600)"
-    else
-      echo "auth: expired since $since. The supervisor relaunches and kills nothing until it works${held:+ (held: $held)}; run /login in any session, or $login_hint"
-    fi
+    echo "auth: expired since $since. The supervisor relaunches and kills nothing until it works${held:+ (held: $held)}; run /login in any session, or $login_hint"
   fi
   if [ "$LAST_CHANGE" != 0 ]; then
     echo "last host change: $(date -r "$LAST_CHANGE" '+%Y-%m-%d %H:%M' 2>/dev/null || date -d "@$LAST_CHANGE" '+%Y-%m-%d %H:%M')  ($(tail -1 "$FLEET_STATE/sync.log" 2>/dev/null | cut -d' ' -f2-))"

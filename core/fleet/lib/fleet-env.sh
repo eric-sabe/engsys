@@ -44,7 +44,7 @@ unset TMUX_SESSION LOG_DIR
 unset FLEET_ID FEDERATION_FILE FLEET_INSTANCE_REPO ROLES ROSTER_EXCLUDE OPERATOR_TIMEZONE OPERATOR_CLOCK
 # So do the fleet's Claude config dir and the integrity check's user-plugin allowlist: what `fleet verify`
 # accepts must come from the operator's config files, never from whoever ran the command.
-unset FLEET_CLAUDE_CONFIG_DIR FLEET_CLAUDE_CONFIG_DIR_SCOPE FLEET_CLAUDE_OAUTH_TOKEN_FILE FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES VERIFY_ALLOWED_USER_PLUGINS VERIFY_ALLOWED_USER_HOOKS VERIFY_ALLOWED_USER_FILES
+unset FLEET_CLAUDE_CONFIG_DIR FLEET_CLAUDE_CONFIG_DIR_SCOPE VERIFY_ALLOWED_USER_PLUGINS VERIFY_ALLOWED_USER_HOOKS VERIFY_ALLOWED_USER_FILES
 # PIN_SETTINGS (where the pins are read) too: only a conf file, or sync's own pins copy in .fleet/
 # (FLEET_SYNC_PINS, set by sync.sh across its re-execs), may point it somewhere else.
 _pin_settings_sync="${FLEET_SYNC_RESUMED:+${PIN_SETTINGS:-}}"
@@ -272,87 +272,3 @@ if [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ]; then
 else
   unset CLAUDE_CONFIG_DIR
 fi
-
-# Optional long-lived Claude Code token (engsys#205). An interactive /login is not a durable credential for
-# an unattended fleet: its access token lapses after about 8 hours and the refresh can be revoked when several
-# processes share it. FLEET_CLAUDE_OAUTH_TOKEN_FILE names a file (outside any repo, mode 600, owned by the fleet
-# user) holding a token from `claude setup-token`; the sessions that use the fleet's config dir, and the fleet
-# commands that run claude (verify, sync), get it as CLAUDE_CODE_OAUTH_TOKEN, read from the file at the moment
-# they start. The token is never exported from here, written to an env file, a launch line or a log: only the
-# file's PATH is in the environment. Unset = today's behaviour. FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES (an ISO date)
-# lets the supervisor warn before it lapses.
-if [ -n "${FLEET_CLAUDE_OAUTH_TOKEN_FILE:-}" ]; then
-  case "$FLEET_CLAUDE_OAUTH_TOKEN_FILE" in /*) ;; *) fleet_die "FLEET_CLAUDE_OAUTH_TOKEN_FILE must be an absolute path (or start with ~), got '$FLEET_CLAUDE_OAUTH_TOKEN_FILE'" ;; esac
-  [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] || fleet_die "FLEET_CLAUDE_OAUTH_TOKEN_FILE needs FLEET_CLAUDE_CONFIG_DIR: the token belongs to the fleet's own Claude config dir (fleet guide § 6.1)"
-  export FLEET_CLAUDE_OAUTH_TOKEN_FILE
-  # A token inherited from the caller (a fleet command run inside a session that has it) must not reach any claude
-  # call: only fleet_with_token and fleet_token_login_ok supply it, for the fleet's config dir alone.
-  unset CLAUDE_CODE_OAUTH_TOKEN
-else
-  unset FLEET_CLAUDE_OAUTH_TOKEN_FILE
-fi
-
-# fleet_oauth_token_problem → rc 0 and the reason on stdout when token mode is on and the token file can't be
-# used; rc 1 (and nothing) when it is fine or token mode is off. Fails closed: missing, not a regular file,
-# unreadable, empty, readable or writable by group/other, not owned by the fleet user, or inside a git work tree.
-fleet_oauth_token_problem() {
-  local f="${FLEET_CLAUDE_OAUTH_TOKEN_FILE:-}" st mode owner dir real
-  [ -n "$f" ] || return 1
-  [ -e "$f" ] || { echo "FLEET_CLAUDE_OAUTH_TOKEN_FILE $f does not exist (claude setup-token, then write the token there, mode 600)"; return 0; }
-  [ -f "$f" ] || { echo "FLEET_CLAUDE_OAUTH_TOKEN_FILE $f is not a regular file"; return 0; }
-  [ -r "$f" ] || { echo "FLEET_CLAUDE_OAUTH_TOKEN_FILE $f is not readable by $(id -un)"; return 0; }
-  st="$(stat -L -c '%a %u' "$f" 2>/dev/null || stat -L -f '%Lp %u' "$f" 2>/dev/null || true)"
-  mode="${st%% *}" owner="${st##* }"
-  case "$mode" in '' | *[!0-7]*) echo "FLEET_CLAUDE_OAUTH_TOKEN_FILE $f: can't read its mode"; return 0 ;; esac
-  if [ $((8#$mode & 8#077)) -ne 0 ]; then echo "FLEET_CLAUDE_OAUTH_TOKEN_FILE $f is accessible to group or others (mode $mode): chmod 600 it, and regenerate the token if it may have been read"; return 0; fi
-  [ "$owner" = "$(id -u)" ] || { echo "FLEET_CLAUDE_OAUTH_TOKEN_FILE $f is not owned by $(id -un)"; return 0; }
-  [ -n "$(head -n 1 "$f" 2>/dev/null | tr -d '[:space:]')" ] || { echo "FLEET_CLAUDE_OAUTH_TOKEN_FILE $f is empty (the token must be on its first line)"; return 0; }
-  # the work-tree check is on where the file really lives: a link outside any repo to a token inside one is in a repo
-  real="$f"; while [ -L "$real" ]; do dir="$(readlink "$real")"; case "$dir" in /*) real="$dir" ;; *) real="$(dirname "$real")/$dir" ;; esac; done
-  dir="$(dirname "$real")"; dir="$(cd "$dir" 2>/dev/null && pwd -P)" || dir="$(dirname "$real")"
-  if git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then echo "FLEET_CLAUDE_OAUTH_TOKEN_FILE $f is inside a git work tree: keep it outside any repo"; return 0; fi
-  return 1
-}
-
-# fleet_oauth_token_read → the token (first line, no whitespace) on stdout. Call it only inside $(…) that feeds one
-# command's environment; never echo, log or export the result.
-fleet_oauth_token_read() { head -n 1 "$FLEET_CLAUDE_OAUTH_TOKEN_FILE" 2>/dev/null | tr -d '[:space:]'; }
-
-# fleet_with_token <command...> → runs the command with CLAUDE_CODE_OAUTH_TOKEN set from the file for that one
-# command (token mode), else as it is. A file that can't be read runs it without the token: verify and launch
-# check the file first (fleet_oauth_token_problem) and refuse.
-fleet_with_token() {
-  local t=""
-  [ -z "${FLEET_CLAUDE_OAUTH_TOKEN_FILE:-}" ] || t="$(fleet_oauth_token_read)"
-  if [ -n "$t" ]; then CLAUDE_CODE_OAUTH_TOKEN="$t" "$@"; else "$@"; fi
-}
-
-# fleet_token_login_ok [<max age seconds>] → 0 when a one-line request through the fleet's token works. `claude auth
-# status` is not trusted in token mode: it can report a login the API rejects (and the other way round), so the
-# test request is the check. A pass is cached in $FLEET_STATE/token-probe.ok for <max age> seconds (default 0 =
-# always ask). FLEET_LOGIN_WHY says why not, with no token in it.
-# shellcheck disable=SC2034 # FLEET_LOGIN_WHY is read by verify.sh and sync.sh
-fleet_token_login_ok() {
-  local max="${1:-0}" cache="$FLEET_STATE/token-probe.ok" at dir t pid rc=0 waited=0 last limit="${FLEET_TEST_REQUEST_TIMEOUT_SEC:-60}"
-  FLEET_LOGIN_WHY=""
-  # a pass is only good for the token it tested: a file written since (a rotation) makes the cache stale
-  if [ "$max" -gt 0 ] && ! [ "$FLEET_CLAUDE_OAUTH_TOKEN_FILE" -nt "$cache" ] && at="$(cat "$cache" 2>/dev/null)" && [[ "$at" =~ ^[0-9]+$ ]] && [ $(( $(date +%s) - at )) -lt "$max" ]; then return 0; fi
-  command -v claude >/dev/null 2>&1 || { FLEET_LOGIN_WHY="claude is not on PATH"; return 1; }
-  t="$(fleet_oauth_token_read)"
-  [ -n "$t" ] || { FLEET_LOGIN_WHY="the token file is empty or unreadable"; return 1; }
-  dir="$(mktemp -d "${TMPDIR:-/tmp}/fleet-token-probe.XXXXXX")"
-  (cd "$dir" && CLAUDE_CODE_OAUTH_TOKEN="$t" exec claude -p --setting-sources project --strict-mcp-config --no-session-persistence --model haiku 'Reply with the single word OK') </dev/null >"$dir/probe.out" 2>&1 &
-  pid=$!
-  while kill -0 "$pid" 2>/dev/null; do
-    if [ "$waited" -ge $((limit * 2)) ]; then kill "$pid" 2>/dev/null || true; break; fi
-    sleep 0.5; waited=$((waited + 1))
-  done
-  wait "$pid" 2>/dev/null || rc=$?
-  last="$(grep -v '^[[:space:]]*$' "$dir/probe.out" | tail -n 1 | cut -c1-200 || true)"
-  rm -rf "${dir:?}"
-  last="${last//$t/[token]}"
-  if [ "$rc" = 0 ]; then mkdir -p "$FLEET_STATE" && date +%s >"$cache"; return 0; fi
-  rm -f "${cache:?}"
-  FLEET_LOGIN_WHY="the test request did not succeed (exit $rc): ${last:-no output}"
-  return 1
-}

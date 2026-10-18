@@ -485,51 +485,6 @@ While the dir is set but not logged in, `fleet verify` reports "not verified" an
 rotation never relaunches a monster into a login prompt; `fleet sync --check` (in `fleet status`) reports
 it as drift.
 
-**Token mode (recommended for unattended fleets): `FLEET_CLAUDE_OAUTH_TOKEN_FILE`.** An interactive `/login`
-is not a durable credential for sessions nobody watches: its access token lapses after about eight hours,
-and when several processes (three long-lived sessions, plus `fleet verify` and the supervisor's checks) renew
-one rotating refresh token at the same moment, the server can revoke the whole login (engsys#205: a fleet's
-three monsters lost theirs at the first expiry, eight hours after `/login`). Token mode takes the refresh out
-of the picture: the fleet's seat is a long-lived (about one year) subscription token from
-`claude setup-token`, handed to Claude Code as `CLAUDE_CODE_OAUTH_TOKEN`.
-
-1. Generate it once, on a machine with a browser, signed in as the fleet's seat: `claude setup-token`. It
-   prints the token once.
-2. Put it in a file **outside any repo**, owned by the fleet user, mode 600 (the directory 700), for example
-   `~/.config/acme/claude-token`: `umask 077; IFS= read -rs t && printf '%s\n' "$t" > ~/.config/acme/claude-token; unset t`
-   (paste the token at the silent prompt, so it never reaches your shell history or the process list). Never
-   in a repo, an env file or a chat.
-3. Point the fleet at it, next to the config dir, in `fleet/fleet.conf` or `fleet.local.conf`:
-   `FLEET_CLAUDE_OAUTH_TOKEN_FILE=~/.config/acme/claude-token` (it needs `FLEET_CLAUDE_CONFIG_DIR`; step 2
-   of the setup above, the `/login`, is not needed; still accept workspace trust for the pin checkout (step 3)
-   with `CLAUDE_CODE_OAUTH_TOKEN="$(cat ~/.config/acme/claude-token)"` set). Optionally add
-   `FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES=2027-10-18` (the date the token lapses, an ISO date). `fleet config-dir
-   init` prints the matching next steps.
-4. `fleet sync` (installs the pinned plugins; it reports `logged in (long-lived token)`), then `fleet verify`,
-   then `fleet restart --all`.
-
-What it does. The token is read from the file at the moment a process starts, and exported as
-`CLAUDE_CODE_OAUTH_TOKEN` for that process only: each session that runs on the fleet's config dir (under
-`FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised` the interactive roles do **not** get it, and are told to drop any
-inherited one), `fleet verify` and `fleet sync` (their `claude` calls on the fleet dir), and the supervisor's
-test request. Only the file's *path* is in an environment, an env file, a launch line, a log or an alert.
-Unset, nothing changes.
-
-It fails closed. If the file is missing, empty, readable or writable by group or others, not owned by the
-fleet user, or inside a git work tree, `fleet verify` reports "not verified" (exit 3), which holds every merge
-and maintain launch and relaunch like an expired login, and `fleet launch` refuses the sessions that would
-read it rather than let them fall back to a Keychain login. `claude auth status` is not trusted in token mode
-(it can report a login the API rejects), so `fleet verify` and `fleet sync` use a one-line test request
-instead (cached for `--max-age` minutes by the supervisor's check, five minutes by sync).
-
-Rotation. Generate a new token (`claude setup-token`), write it to the same file (keep mode 600), update
-`FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES`, then `fleet verify` and `fleet restart --all` (running sessions keep the
-old token until they restart). If the token stops working, the supervisor's login hold fires as for an expired
-login, but its alert, `fleet status` and the heartbeat tell you to regenerate the token instead of `/login`.
-With `FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES` set, the supervisor posts one `claude-token-expiry` alert 30 days
-before that date and another at 7 days (each once per date; a new date starts over; a date that doesn't parse
-warns once).
-
 `fleet status` (through `fleet sync --check`) and `fleet xray` report the directory in use and whether it
 is logged in; neither prints the account or any token. With `FLEET_CLAUDE_CONFIG_DIR` unset, the fleet uses
 `~/.claude` and drops a `CLAUDE_CONFIG_DIR` it inherits, so what `fleet verify` checks is what the sessions
@@ -1558,7 +1513,6 @@ major Claude Code upgrade.
 | `still at … after switching` | a checkout did not land on the pinned ref. Check the tag exists on the remote (`git ls-remote --tags origin`) |
 | `engsys … has no fleet kit` | the pinned engsys release predates the kit; pin one that includes `core/fleet/` |
 | Supervisor log: `RELAUNCH FAILED` with `claude not found on PATH` | the supervisor's launchd PATH can't see `claude`. The default job PATH covers `~/.local/bin` (native installer) and Homebrew; for anywhere else, override the PATH in `<instance>/jobs/launchd/fleet-supervisor.plist.tmpl`. Then `fleet install-jobs` (it warns until every tool resolves) and `fleet launch` for anything missing. The supervisor escalates a failed relaunch once on the ledger and comments again when it recovers |
-| Alert `claude-auth-expired` saying the fleet's Claude **token** stopped working (token mode) | the long-lived token was revoked, expired or replaced. Run `claude setup-token`, write the new token to `FLEET_CLAUDE_OAUTH_TOKEN_FILE` (mode 600), update `FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES`, then `fleet verify`; the next supervisor tick resumes and relaunches each held session once. Sessions already running keep their old token until restarted |
 | Alert `claude-auth-expired`, or `fleet status` shows `auth: expired since …` | Claude Code's login on the host no longer works, and the supervisor holds every relaunch so it doesn't relaunch sessions that can't answer. Run `/login` in any session's window (or `claude /login` in a terminal). The next supervisor tick sees a working login (a short test request, or the session answering), resolves the alert and relaunches each held session once. Nothing was killed while it waited |
 | Launchd job runs but `node: command not found` | node is not in `/opt/homebrew/bin` (nvm/fnm install). Install Homebrew node; launchd does not read your shell profile |
 | The fleet stopped after a reboot | the fleet user is not logged in (FileVault disables auto-login). Log in over Screen Sharing (section 6.2) |
@@ -1603,8 +1557,6 @@ format) overrides it per machine. Environment values for `ENGSYS_REF` / `INSTANC
 | `WORKTREES_DIR` | no | Agent worktrees directory; created by `launch`; available to templates for `--add-dir` |
 | `GH_APP_ENV` | no | Path to the GitHub App env file. Set means identity kit on |
 | `FLEET_CLAUDE_CONFIG_DIR` | no | A separate Claude Code config dir for the fleet, with its own login (§ 6.1). Every fleet command and every launched session runs with `CLAUDE_CONFIG_DIR` set to it; `fleet sync` installs the plugins there and `fleet verify` checks it. An absolute path (or `~/…`). Never inherited from the caller's environment. Unset means `~/.claude` |
-| `FLEET_CLAUDE_OAUTH_TOKEN_FILE` | no | Absolute path (or `~/…`) of a file holding a long-lived token from `claude setup-token`: outside any repo, mode 600, owned by the fleet user. Needs `FLEET_CLAUDE_CONFIG_DIR`. Sessions on the fleet dir (not the interactive roles under scope `supervised`) and fleet commands that run `claude` on it get it as `CLAUDE_CODE_OAUTH_TOKEN`, read from the file when they start; the token is never written to an env file, launch line, log or alert. A bad file is "not verified" (§ 6.1). Unset = interactive login. Never inherited from the caller's environment |
-| `FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES` | no | ISO date (`2027-10-18`) the token lapses. The supervisor alerts once at 30 days left and once at 7 (`claude-token-expiry`) |
 | `FLEET_CLAUDE_CONFIG_DIR_SCOPE` | no | `all` (default): every launched session runs on `FLEET_CLAUDE_CONFIG_DIR`. `supervised`: only the lines positively classified as interactive keep `~/.claude`; everything else (monsters, supervised and security-tier lines, anything unclassified) runs on the fleet dir. `fleet sync` keeps the pinned plugins in both, and `fleet verify` also checks the engsys install in `~/.claude` (§ 6.1). Never inherited from the caller's environment |
 | `VERIFY_ALLOWED_USER_PLUGINS` | no | Space-separated `name@marketplace` user-scope plugins `fleet verify` reports as `allowed` instead of a mismatch (§ 6.1). Never inherited from the caller's environment |
 | `VERIFY_ALLOWED_USER_FILES` | no | Space-separated sha256 hashes of user-scope agents, commands, skills, rules, memory files and MCP server definitions that `fleet verify` accepts (§ 7, "User-scope configuration besides settings"). Never inherited from the caller's environment |

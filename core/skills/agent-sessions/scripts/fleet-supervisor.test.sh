@@ -47,7 +47,6 @@ SH
 cat >"$T/bin/claude" <<'SH'
 #!/usr/bin/env bash
 echo "probe $*" >>"$FAKE/actions"
-[ "${CLAUDE_CODE_OAUTH_TOKEN:-}" != SENTINEL-TOKEN-205 ] || echo "probe-token sentinel" >>"$FAKE/actions"
 if [ -f "$FAKE/probe-ok" ]; then echo OK; exit 0; fi
 echo "Login expired · Please run /login"; exit 1
 SH
@@ -772,69 +771,6 @@ hconf; qreset; launched_by_sup acme-rel; ledger2 2 "ok"; live acme-rel "⏺ You'
 mkhold_due acme-rel; wpane acme-w "⏺ Login expired · Please run /login"; run
 expect "resume due while the login is expired → held, not re-prompted" "!^sendkeys"
 rm -f "$T"/pane-* "$T"/capture-*
-
-# Long-lived token mode (engsys#205): the test request carries the token from its file (for that one process),
-# the login hold says to regenerate the token, and the token's expiry is watched.
-TOKF="$T/token-file"; SENT=SENTINEL-TOKEN-205; printf '%s\n' "$SENT" >"$TOKF"; chmod 600 "$TOKF"
-no_leak() { # no_leak <desc>: the token string is in no log, state file or recorded action
-  if grep -rqF -- "$SENT" "$SLOG" "$T/actions" 2>/dev/null; then fail=$((fail + 1)); echo "  FAIL $1"; else pass=$((pass + 1)); echo "  ok  $1"; fi
-}
-authconf; reset; rm -f "$T"/pane-* "$T"/capture-* "$T/probe-ok"; ledger 1 "ok"; ledger2 90 "ok"; rpane
-wpane acme-w "$(cat "$T/fixture-login-expired")"; export FLEET_CLAUDE_OAUTH_TOKEN_FILE="$TOKF"; run
-expect "token mode: the test request runs with the token from the file" "^probe-token sentinel"
-expect "  …the login hold's alert says to regenerate the token" "^notify --level action .*--incident claude-auth-expired The fleet's Claude token stopped working on .*claude setup-token.*$TOKF"
-expect "  …and not to /login" "!^notify .*claude-auth-expired.*Run .*/login"
-expect "  …the held session is not relaunched" "!^launch acme-rel"
-expect "  …the heartbeat's line for people says the same" "^heartbeat .*Regenerate it .*setup-token"
-no_leak "  …the token string is in no log, state file or action"
-touch "$T/probe-ok"; run
-expect "token mode: a working token ends the hold" "^notify --level info --incident claude-auth-expired --resolve"
-no_leak "  …still nowhere"
-rm -f "$T/probe-ok"
-# a token file that is gone: the probe fails closed, without asking claude
-authconf; reset; rm -f "$T"/pane-* "$T"/capture-* "$T/probe-ok"; ledger 1 "ok"; ledger2 90 "ok"; rpane
-wpane acme-w "$(cat "$T/fixture-login-expired")"; export FLEET_CLAUDE_OAUTH_TOKEN_FILE="$T/no-such-token"; run
-expect "token mode, token file missing: no test request is made" "!^probe"
-expect "  …the hold stands" "^notify --level action"
-grep -q "token file $T/no-such-token is missing, empty or unreadable" "$SLOG/supervisor.log" && echo said-so >>"$T/actions"
-expect "  …and the log says why" "^said-so"
-export FLEET_CLAUDE_OAUTH_TOKEN_FILE="$TOKF"
-rm -f "$T"/pane-* "$T"/capture-*
-
-# Expiry warnings: one at 30 days left, one at 7, latched per date; a new date starts over; a bad date warns.
-dplus() { date -u -v"$1"d +%F 2>/dev/null || date -u -d "$1 days" +%F; } # dplus +25 | -2
-xconf() { qconf; qreset; : >"$T/actions"; }
-export FLEET_CLAUDE_OAUTH_TOKEN_FILE="$TOKF"
-export FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES="$(dplus +60)"; xconf; run
-expect "token expiry 60 days out: no warning" "!claude-token-expiry"
-export FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES="$(dplus +25)"; run
-expect "  …25 days out: one alert" "^notify --level alert --incident claude-token-expiry The fleet's Claude token expires in 2[45] day(s), on $FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES"
-expect "  …that says how to renew it" "^notify .*claude-token-expiry.*claude setup-token.*$TOKF"
-run; run
-expect "  …latched: no repeat on later ticks" "!claude-token-expiry"
-export FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES="$(dplus +5)"; run
-expect "a new date (5 days out): the old incident is resolved" "^notify --level info --incident claude-token-expiry --resolve Resolved: the Claude token's expiry on .* moved to"
-expect "  …and the 7-day warning goes out" "^notify --level alert --incident claude-token-expiry The fleet's Claude token expires in [45] day(s)"
-run
-expect "  …latched too" "!claude-token-expiry"
-export FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES="$(dplus -2)"; run
-expect "an expired date: the alert says it expired" "^notify --level alert --incident claude-token-expiry The fleet's Claude token expired on "
-export FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES="soonish"; run
-expect "an unreadable date: one warning, no crash" "^notify --level alert --incident claude-token-expiry fleet-supervisor: FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES .* 'soonish'"
-grep -q "heartbeat:" "$SLOG/supervisor.log" && echo carried-on >>"$T/actions"
-expect "  …the tick carried on to the heartbeat" "^carried-on"
-run
-expect "  …latched" "!claude-token-expiry"
-export FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES="$(dplus +60)"; run
-expect "  …a valid date replaces it: the incident is resolved" "^notify --level info --incident claude-token-expiry --resolve Resolved: FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES on .* now reads"
-run
-expect "  …once" "!claude-token-expiry"
-export FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES="soonish"; run; unset FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES; run
-expect "  …and so is removing the variable" "^notify --level info --incident claude-token-expiry --resolve Resolved: FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES is no longer set"
-export FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES="$(dplus +5)"; unset FLEET_CLAUDE_OAUTH_TOKEN_FILE; xconf; rm -rf "$SLOG"; run
-expect "no token file (not token mode): the date is ignored" "!claude-token-expiry"
-unset FLEET_CLAUDE_OAUTH_TOKEN_FILE FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES
-no_leak "the token string is in no log or state file"
 
 # launch-agent-sessions.sh harness policy and flag translation: launch-agent-sessions.test.sh.
 

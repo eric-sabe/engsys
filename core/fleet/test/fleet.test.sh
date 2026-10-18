@@ -13,7 +13,7 @@ CORE_SRC="$(cd "$KIT_SRC/.." && pwd -P)"  # core
 # shellcheck source=sandbox.sh
 . "$HERE/sandbox.sh"
 
-: >"$FAKE/shim.log"; : >"$FAKE/claude.log"; : >"$FAKE/claude.cwd"; : >"$FAKE/claude.tok"; : >"$FAKE/tmux.log"; : >"$FAKE/gh.log"; : >"$FAKE/cr.log"; : >"$FAKE/launchctl.log"
+: >"$FAKE/shim.log"; : >"$FAKE/claude.log"; : >"$FAKE/claude.cwd"; : >"$FAKE/tmux.log"; : >"$FAKE/gh.log"; : >"$FAKE/cr.log"; : >"$FAKE/launchctl.log"
 
 # --- stubs -----------------------------------------------------------------------------------
 cat >"$T/bin/claude" <<'SH'
@@ -26,10 +26,6 @@ mkdir -p "$S"
 [ -f "$S/plugins.json" ] || echo '[]' >"$S/plugins.json"
 printf '%s\tPATH0=%s\tCFG=%s\n' "$*" "${PATH%%:*}" "${CLAUDE_CONFIG_DIR:-unset}" >>"$FAKE/claude.log"
 printf '%s\t%s\n' "$(pwd -P)" "$*" >>"$FAKE/claude.cwd"
-# token mode (engsys#205): record which token (none | sentinel | other) each call ran with; -p is the test request
-tok=none; if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then tok=other; [ "$CLAUDE_CODE_OAUTH_TOKEN" != "SENTINEL-TOKEN-205" ] || tok=sentinel; fi
-printf '%s\tCFG=%s\ttok=%s\n' "$*" "${CLAUDE_CONFIG_DIR:-unset}" "$tok" >>"$FAKE/claude.tok"
-if [ "${1:-}" = -p ]; then [ -f "$FAKE/probe-ok" ] || { echo "Failed to authenticate. API Error: 401"; exit 1; }; echo OK; exit 0; fi
 [ "${1:-}" = plugin ] || { echo "stub claude: unsupported: $*" >&2; exit 2; }
 shift
 save() { local f="$1"; shift; jq "$@" "$f" >"$f.new" && mv "$f.new" "$f"; }
@@ -776,96 +772,6 @@ has "launcher: positive control, a plain listed line gets ~/.claude" "$(tl acme-
 cp "$T/roster.pre-f1" "$INST/fleet/roster.tmpl"; rm -f "$INST/fleet/env/nyx.env.tmpl"
 cp "$T/roster.bak2" "$INST/fleet/roster.tmpl" 2>/dev/null || sed -i.x '/^acme-audit|/d' "$INST/fleet/roster.tmpl"; rm -f "$INST/fleet/roster.tmpl.x"
 cp "$T/flc.bak" "$LC"
-
-echo "== K. FLEET_CLAUDE_OAUTH_TOKEN_FILE: a long-lived token for the fleet's sessions (engsys#205)"
-TOK="$T/secrets/claude-token"; mkdir -p "$T/secrets"; chmod 700 "$T/secrets"; SENT="SENTINEL-TOKEN-205"
-printf '%s\n' "$SENT" >"$TOK"; chmod 600 "$TOK"; touch "$FAKE/probe-ok"
-setconf() { cp "$T/flc.bak" "$LC"; printf '%s\n' "$@" >>"$LC"; }
-no_sentinel() { # no_sentinel <desc>: the token string is in no generated file, tmux command or captured output
-  if grep -rqF -- "$SENT" "$STATE" "$FAKE/tmux.log" "$FAKE/claude.log" "$INST/logs" 2>/dev/null || grep -qF -- "$SENT" <<<"$OUT"; then bad "$1"; else ok "$1"; fi
-}
-# unset: today's behaviour, no token anywhere on the launch lines
-setconf "FLEET_CLAUDE_CONFIG_DIR=$FCFG"
-rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"; run fleet launch
-rc_is "token mode off: launch exits 0" 0
-hasnt "…no token handling on the monster's launch line" "$(tl acme-mm)" "CLAUDE_CODE_OAUTH_TOKEN"
-hasnt "…nor on an interactive one's" "$(tl acme-build)" "CLAUDE_CODE_OAUTH_TOKEN"
-# on, scope all: every session reads the token from the file when its shell runs the line
-setconf "FLEET_CLAUDE_CONFIG_DIR=$FCFG" "FLEET_CLAUDE_OAUTH_TOKEN_FILE=$TOK"
-rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"; run fleet launch
-rc_is "token mode: launch exits 0" 0
-for w in acme-mm acme-security acme-build acme-rel; do
-  has "$w: reads the token from the file at exec time" "$(tl "$w")" "CLAUDE_CODE_OAUTH_TOKEN=\"\$(head -n 1 $TOK | tr -d '[:space:]')\" && [ -n \"\$CLAUDE_CODE_OAUTH_TOKEN\" ] && export CLAUDE_CODE_OAUTH_TOKEN && command claude"
-done
-hasnt "the generated env files carry no token handling" "$(cat "$STATE"/env/*.env)" "CLAUDE_CODE_OAUTH_TOKEN"
-no_sentinel "the token string is in no env file, launch line, log or output (launch)"
-# scope supervised: the interactive roles never get it
-setconf "FLEET_CLAUDE_CONFIG_DIR=$FCFG" "FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised" "FLEET_CLAUDE_OAUTH_TOKEN_FILE=$TOK"
-rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"; run fleet launch
-rc_is "token mode + scope supervised: launch exits 0" 0
-for w in acme-mm acme-security; do
-  has "$w (supervised): gets the token" "$(tl "$w")" "export CLAUDE_CODE_OAUTH_TOKEN && command claude"
-done
-for w in acme-build acme-rel; do
-  hasnt "$w (interactive): never reads the token file" "$(tl "$w")" "head -n 1 $TOK"
-  has "$w (interactive): drops any inherited token" "$(tl "$w")" "unset CLAUDE_CODE_OAUTH_TOKEN && command claude"
-done
-no_sentinel "the token string is nowhere (scope supervised)"
-# a token file that can't be used: sessions that would read it are refused, others still start
-chmod 644 "$TOK"
-rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"; run fleet launch acme-mm
-rc_is "group-readable token file: launching a supervised session is refused" 1
-has "…saying why" "$OUT" "accessible to group or others (mode 644)"
-eq "…nothing reached tmux" "$(grep -c send-keys "$FAKE/tmux.log" || true)" 0
-run fleet launch
-rc_is "…a whole-roster launch exits non-zero" 1
-has "…naming the refused session" "$OUT" "SKIPPED: acme-mm"
-has "…while the interactive role (scope supervised) still starts" "$(tl acme-build)" "claude --name acme-build"
-# the check follows the harness the launcher will use (a roster HARNESS= line wins over the conf), not just $HARNESS
-cp "$INST/fleet/roster.tmpl" "$T/roster.k"; sed -i.x '1a\
-HARNESS=claude' "$INST/fleet/roster.tmpl"; rm -f "$INST/fleet/roster.tmpl.x"
-printf 'HARNESS=copilot\n' >>"$LC"; run fleet launch acme-mm
-rc_is "group-readable token file, conf says copilot but the roster says claude: still refused" 1
-has "…saying why" "$OUT" "accessible to group or others"
-cp "$T/roster.k" "$INST/fleet/roster.tmpl"; sed -i.x '/^HARNESS=copilot$/d' "$LC"; rm -f "$LC.x"
-chmod 600 "$TOK"
-mv "$TOK" "$TOK.gone"; run fleet launch acme-mm
-rc_is "missing token file: refused" 1; has "…saying so" "$OUT" "does not exist"
-: >"$TOK"; chmod 600 "$TOK"; run fleet launch acme-mm
-rc_is "empty token file: refused" 1; has "…saying so" "$OUT" "is empty"
-mkdir -p "$ENGSYS_HOST/tmp-token-dir" && printf '%s\n' "$SENT" >"$ENGSYS_HOST/tmp-token-dir/t" && chmod 600 "$ENGSYS_HOST/tmp-token-dir/t"
-setconf "FLEET_CLAUDE_CONFIG_DIR=$FCFG" "FLEET_CLAUDE_OAUTH_TOKEN_FILE=$ENGSYS_HOST/tmp-token-dir/t"
-run fleet launch acme-mm
-rc_is "token file inside a git work tree: refused" 1; has "…saying so" "$OUT" "inside a git work tree"
-no_sentinel "…and a refusal never prints the token"
-rm -rf "${ENGSYS_HOST:?}/tmp-token-dir"
-setconf "FLEET_CLAUDE_OAUTH_TOKEN_FILE=$TOK"
-run fleet verify
-rc_is "a token file with no FLEET_CLAUDE_CONFIG_DIR is a config error" 3
-has "…saying so" "$OUT" "needs FLEET_CLAUDE_CONFIG_DIR"
-mv "$TOK.gone" "$TOK"
-# sync: the fleet dir's claude calls carry the token, ~/.claude's never do; auth status is not asked
-setconf "FLEET_CLAUDE_CONFIG_DIR=$FCFG" "FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised" "FLEET_CLAUDE_OAUTH_TOKEN_FILE=$TOK"
-: >"$FAKE/claude.tok"; run fleet sync --check
-has "sync: reports the fleet dir as logged in through the token" "$OUT" "claude config dir: $FCFG (FLEET_CLAUDE_CONFIG_DIR, scope supervised), logged in (long-lived token)"
-eq "…never asked claude auth status of the fleet dir" "$(grep "^auth status" "$FAKE/claude.tok" | grep -c "CFG=$FCFG" || true)" 0
-eq "…the fleet dir's calls all ran with the token" "$(grep "CFG=$FCFG" "$FAKE/claude.tok" | grep -vc 'tok=sentinel' || true)" 0
-eq "…and ~/.claude's calls never did" "$(grep 'CFG=unset' "$FAKE/claude.tok" | grep -vc 'tok=none' || true)" 0
-: >"$FAKE/claude.tok"; CLAUDE_CODE_OAUTH_TOKEN=inherited-from-a-session run fleet sync --check
-eq "…even when the caller had a token of its own (a fleet command run inside a session)" "$(grep -vc 'tok=sentinel\|tok=none' "$FAKE/claude.tok" || true)" 0
-eq "…and ~/.claude's calls still carry none" "$(grep 'CFG=unset' "$FAKE/claude.tok" | grep -vc 'tok=none' || true)" 0
-no_sentinel "…and the token string is nowhere (sync)"
-rm -f "$FAKE/probe-ok" "$STATE/token-probe.ok"; run fleet sync --check
-has "a rejected token: sync says the fleet dir is NOT logged in" "$OUT" "NOT logged in"
-has "…and what to do" "$OUT" "Regenerate it with claude setup-token"
-no_sentinel "…without the token"
-touch "$FAKE/probe-ok"
-run fleet config-dir init --dir "$T/cfg-token-test"
-has "config-dir: token mode says to use setup-token, not /login" "$OUT" "claude setup-token"
-hasnt "…and not the interactive login step" "$OUT" "/login with the fleet's seat"
-has "…and where the token goes" "$OUT" "$TOK"
-no_sentinel "…without the token"
-cp "$T/flc.bak" "$LC"; rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"
 
 echo "== F. supervise"
 rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"; : >"$FAKE/gh.log"

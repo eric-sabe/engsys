@@ -72,13 +72,6 @@
 # waits while the login hold is on. A reset time that cannot be read (no zone, no clock time, unknown zone, more
 # than 8 days out) writes no hold: the alert-only behaviour. Panes the supervisor did not launch never count.
 #
-# Long-lived token mode (engsys#205). With FLEET_CLAUDE_OAUTH_TOKEN_FILE in the environment (the fleet kit sets it
-# from fleet.conf; it is a path, never the token) the test request runs with CLAUDE_CODE_OAUTH_TOKEN read from
-# that file for that one process, the login alert and the heartbeat's line for people say to regenerate the token
-# (`claude setup-token`) instead of `/login`, and FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES (an ISO date) makes the
-# supervisor post one alert at 30 days left and one at 7 (incident claude-token-expiry, latched per date). An
-# expiry date that can't be read warns once and never stops the tick.
-#
 # Singleton monsters (engsys#62): a session line whose 6th field is `merge` or `maintain` holds that
 # role through the github lease (core/lib/lease/baton.mjs), and the lease, not the shared ledger
 # heartbeat, says who holds it. Before ANY relaunch of such a session the supervisor asks the lease
@@ -426,11 +419,6 @@ auth_probe() {
     (cd "$dir" && exec copilot -p 'Reply with the single word OK' -s --no-custom-instructions --disable-builtin-mcps --model claude-haiku-5.5) </dev/null >"$dir/probe.out" 2>&1 &
   elif [ "$h" = "antigravity" ]; then
     (cd "$dir" && exec agy -p 'Reply with the single word OK') </dev/null >"$dir/probe.out" 2>&1 &
-  elif [ -n "${FLEET_CLAUDE_OAUTH_TOKEN_FILE:-}" ]; then
-    # Token mode (engsys#205): the long-lived token comes from its file, for this one process only.
-    local tok; tok="$(head -n 1 "$FLEET_CLAUDE_OAUTH_TOKEN_FILE" 2>/dev/null | tr -d '[:space:]' || true)"
-    if [ -z "$tok" ]; then rm -rf "${dir:?}"; AUTH_PROBE_WHY="the token file $FLEET_CLAUDE_OAUTH_TOKEN_FILE is missing, empty or unreadable"; return 1; fi
-    (cd "$dir" && CLAUDE_CODE_OAUTH_TOKEN="$tok" exec claude -p --setting-sources project --strict-mcp-config --no-session-persistence --model haiku 'Reply with the single word OK') </dev/null >"$dir/probe.out" 2>&1 &
   else
     (cd "$dir" && exec claude -p --setting-sources project --strict-mcp-config --no-session-persistence --model haiku 'Reply with the single word OK') </dev/null >"$dir/probe.out" 2>&1 &
   fi
@@ -442,7 +430,6 @@ auth_probe() {
   wait "$pid" 2>/dev/null || rc=$?
   last="$(grep -v '^[[:space:]]*$' "$dir/probe.out" | tail -n 1 | cut -c1-200 || true)"
   rm -rf "${dir:?}"
-  [ -z "${tok:-}" ] || last="${last//$tok/[token]}"
   if [ "$rc" = 0 ]; then
     case "$h" in
       copilot) AUTH_PROBE_WHY="a test request through Copilot CLI succeeded" ;;
@@ -641,11 +628,7 @@ auth_alert() { # the incident's one alert; retried each tick while held until it
     r="${r:-$DEFAULT_REPO}"
     [ -z "$r" ] || [ -z "$l" ] || re="https://github.com/$r/issues/$l"
   fi
-  if [ -n "${FLEET_CLAUDE_OAUTH_TOKEN_FILE:-}" ]; then
-    text="The fleet's Claude token stopped working on $HOST_NAME. Regenerate it (\`claude setup-token\`), write the new token to $FLEET_CLAUDE_OAUTH_TOKEN_FILE (mode 600); the fleet resumes on the next supervisor tick. Until then the supervisor relaunches and kills nothing. First seen $(head -n 1 "$AUTH_EXPIRED") in $(sed -n 2p "$AUTH_EXPIRED")."
-  else
-    text="Claude Code login expired on $HOST_NAME. Run \`/login\` in any session (or \`claude /login\`); the fleet resumes on the next supervisor tick. Until then the supervisor relaunches and kills nothing. First seen $(head -n 1 "$AUTH_EXPIRED") in $(sed -n 2p "$AUTH_EXPIRED")."
-  fi
+  text="Claude Code login expired on $HOST_NAME. Run \`/login\` in any session (or \`claude /login\`); the fleet resumes on the next supervisor tick. Until then the supervisor relaunches and kills nothing. First seen $(head -n 1 "$AUTH_EXPIRED") in $(sed -n 2p "$AUTH_EXPIRED")."
   if [ -n "$re" ]; then set -- --level action --re "$re"; else set -- --level alert; fi # action needs a link
   if notify "$@" --incident "$AUTH_INCIDENT" "$text"; then
     date -u +%Y-%m-%dT%H:%M:%SZ >"$AUTH_ALERTED"; log "auth: alert $AUTH_INCIDENT posted"
@@ -938,54 +921,6 @@ if [ -n "$HOST_HEALTH_CMD" ]; then
   fi
 fi
 
-# Long-lived token expiry (engsys#205): FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES (an ISO date, YYYY-MM-DD or a full
-# UTC timestamp) is set by the operator with the token file. One alert at 30 days left and one at 7 (an expired
-# date keeps the 7-day one), each latched per date in logs/fleet-supervisor/token-expiry.<days>; a new date
-# resolves the incident and starts over. A date that can't be read warns once (an alert, latched) and never stops the tick.
-TOKEN_INCIDENT="claude-token-expiry"
-token_expiry_check() {
-  local exp="${FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES:-}" l30="$STATE_DIR/token-expiry.30" l7="$STATE_DIR/token-expiry.7" bad="$STATE_DIR/token-expiry.unreadable" ep days left msg
-  [ -n "${FLEET_CLAUDE_OAUTH_TOKEN_FILE:-}" ] || return 0
-  if [ -z "$exp" ]; then
-    # a date that was removed: nothing left to warn about
-    if [ -f "$l30" ] || [ -f "$l7" ] || [ -f "$bad" ]; then
-      if notify --level info --incident "$TOKEN_INCIDENT" --resolve "Resolved: FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES is no longer set on $HOST_NAME."; then rm -f "${l30:?}" "${l7:?}" "${bad:?}"; fi
-    fi
-    return 0
-  fi
-  if [[ "$exp" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then ep="$(iso_to_epoch "${exp}T00:00:00Z")"
-  elif [[ "$exp" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then ep="$(iso_to_epoch "$exp")"
-  else ep=""; fi
-  if [ -z "$ep" ]; then
-    if [ "$(cat "$bad" 2>/dev/null || true)" != "$exp" ]; then
-      if notify --level alert --incident "$TOKEN_INCIDENT" "fleet-supervisor: FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES on $HOST_NAME is '$exp', which is not a date (want YYYY-MM-DD). The token's expiry is not being watched."; then printf '%s\n' "$exp" >"$bad"; fi
-    fi
-    log "token expiry: FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES '$exp' is not a date (want YYYY-MM-DD): not watched"
-    return 0
-  fi
-  if [ -f "$bad" ]; then
-    if notify --level info --incident "$TOKEN_INCIDENT" --resolve "Resolved: FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES on $HOST_NAME now reads $exp."; then rm -f "${bad:?}"; fi
-  fi
-  # a latch from another date is the old token's: resolve it and start over
-  if { [ -f "$l30" ] && [ "$(cat "$l30")" != "$exp" ]; } || { [ -f "$l7" ] && [ "$(cat "$l7")" != "$exp" ]; }; then
-    if notify --level info --incident "$TOKEN_INCIDENT" --resolve "Resolved: the Claude token's expiry on $HOST_NAME moved to $exp."; then rm -f "${l30:?}" "${l7:?}"; fi
-  fi
-  days=$(( (ep - $(date +%s)) / 86400 ))
-  [ "$(( ep - $(date +%s) ))" -ge 0 ] || days=-1
-  if [ "$days" -le 7 ] && [ "$(cat "$l7" 2>/dev/null || true)" != "$exp" ]; then
-    if [ "$days" -lt 0 ]; then msg="The fleet's Claude token expired on $exp ($HOST_NAME)."; else msg="The fleet's Claude token expires in $days day(s), on $exp ($HOST_NAME)."; fi
-    if notify --level alert --incident "$TOKEN_INCIDENT" "$msg Regenerate it (\`claude setup-token\`) and write it to $FLEET_CLAUDE_OAUTH_TOKEN_FILE (mode 600), then update FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES."; then
-      printf '%s\n' "$exp" >"$l7"; printf '%s\n' "$exp" >"$l30"; log "token expiry: 7-day warning posted ($exp)"
-    fi
-  elif [ "$days" -le 30 ] && [ "$(cat "$l30" 2>/dev/null || true)" != "$exp" ]; then
-    left="$days day(s)"
-    if notify --level alert --incident "$TOKEN_INCIDENT" "The fleet's Claude token expires in $left, on $exp ($HOST_NAME). Plan to regenerate it (\`claude setup-token\`) and write it to $FLEET_CLAUDE_OAUTH_TOKEN_FILE (mode 600), then update FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES."; then
-      printf '%s\n' "$exp" >"$l30"; log "token expiry: 30-day warning posted ($exp)"
-    fi
-  fi
-}
-token_expiry_check
-
 # Claude Code login (header): read the panes, then hold, keep holding, or resume.
 auth_scan
 if [ -f "$AUTH_EXPIRED" ]; then
@@ -1223,9 +1158,7 @@ if [ -n "$HEARTBEAT_CMD" ] && [ $((UP + ROTATING + DOWN)) -gt 0 ]; then
       AUTH_SINCE="$(head -n 1 "$AUTH_EXPIRED")"
       AUTH_HELD_NAMES="$(auth_held_names)"
       SUMMARY="$SUMMARY; auth: expired since $AUTH_SINCE, relaunches held"
-      if [ -n "${FLEET_CLAUDE_OAUTH_TOKEN_FILE:-}" ]; then AUTH_FIX="The fleet's Claude token has not worked on $HOST_NAME since $AUTH_SINCE. Regenerate it (\`claude setup-token\`) and write it to $FLEET_CLAUDE_OAUTH_TOKEN_FILE; the fleet resumes on the next supervisor tick."
-      else AUTH_FIX="Claude Code login expired on $HOST_NAME since $AUTH_SINCE. Run \`/login\` in any session (or \`claude /login\`); the fleet resumes on the next supervisor tick."; fi
-      set -- "$SUMMARY" "$(human_text "$AUTH_FIX${AUTH_HELD_NAMES:+ Relaunches held: $AUTH_HELD_NAMES.}")"
+      set -- "$SUMMARY" "$(human_text "Claude Code login expired on $HOST_NAME since $AUTH_SINCE. Run \`/login\` in any session (or \`claude /login\`); the fleet resumes on the next supervisor tick.${AUTH_HELD_NAMES:+ Relaunches held: $AUTH_HELD_NAMES.}")"
     fi
     # shellcheck disable=SC2086
     if $HEARTBEAT_CMD "$@" >>"$LOG" 2>&1; then

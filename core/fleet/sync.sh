@@ -348,8 +348,7 @@ sync_tmp() { # call in the main shell (not in $(…)) so later calls share it; r
 # what every fleet session loads), else the account's ~/.claude; never an inherited CLAUDE_CONFIG_DIR.
 SYNC_CFG="${FLEET_CLAUDE_CONFIG_DIR:-}"   # the config dir the plugin step works on ('' = ~/.claude)
 fleet_claude() {
-  if [ -n "$SYNC_CFG" ] && [ "$SYNC_CFG" = "${FLEET_CLAUDE_CONFIG_DIR:-}" ]; then CLAUDE_CONFIG_DIR="$SYNC_CFG" fleet_with_token claude "$@"   # token mode: the fleet dir's token (engsys#205)
-  elif [ -n "$SYNC_CFG" ]; then CLAUDE_CONFIG_DIR="$SYNC_CFG" claude "$@"
+  if [ -n "$SYNC_CFG" ]; then CLAUDE_CONFIG_DIR="$SYNC_CFG" claude "$@"
   else env -u CLAUDE_CONFIG_DIR claude "$@"; fi
 }
 plugin_cli() { (cd "$SYNC_TMP/cwd" && fleet_claude plugin "$@"); }
@@ -388,15 +387,6 @@ claude_config_report() {
   if [ -n "$SYNC_CFG" ] && [ ! -d "$SYNC_CFG" ]; then
     [ "$1" = 1 ] || fleet_die "FLEET_CLAUDE_CONFIG_DIR $SYNC_CFG does not exist. One-time setup: fleet config-dir init, log in with CLAUDE_CONFIG_DIR=$SYNC_CFG claude, then fleet sync (fleet guide § 6.1)"
     say "claude config dir: $dir$what does not exist"; return 1
-  fi
-  if [ -n "${FLEET_CLAUDE_OAUTH_TOKEN_FILE:-}" ] && [ -n "$SYNC_CFG" ] && [ "$SYNC_CFG" = "${FLEET_CLAUDE_CONFIG_DIR:-}" ]; then
-    # Token mode (engsys#205): `claude auth status` can't be trusted, so a short test request decides (cached 5 min).
-    if why="$(fleet_oauth_token_problem)"; then li="NOT logged in"; warn "$why"
-    elif fleet_token_login_ok 300; then li="logged in (long-lived token)"
-    else li="NOT logged in"; warn "the fleet's Claude token does not work ($FLEET_LOGIN_WHY). Regenerate it with claude setup-token and update $FLEET_CLAUDE_OAUTH_TOKEN_FILE"; fi
-    say "claude config dir: $dir$what, $li"
-    [ "$li" != "NOT logged in" ] || { warn "Until the token works, fleet verify holds merge and maintain launches (and alerts)."; return 1; }
-    return 0
   fi
   li="$( (cd "$SYNC_TMP/cwd" && fleet_claude auth status --json) 2>/dev/null | jq -r 'if .loggedIn == true then "logged in" elif .loggedIn == false then "NOT logged in" else "login unknown" end' 2>/dev/null || true)"
   say "claude config dir: $dir$what, ${li:-login unknown}"

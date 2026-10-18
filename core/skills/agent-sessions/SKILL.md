@@ -188,13 +188,6 @@ people. The hold ends on the first tick where a pane that showed the error answe
 then resolved and the table runs as usual on that same tick, so each held session gets its one
 relaunch. `fleet status` prints `auth: expired since <time>` while the hold is on.
 
-**Token mode (engsys#205).** With `FLEET_CLAUDE_OAUTH_TOKEN_FILE` in the supervisor's environment (the fleet
-kit sets it from `fleet.conf`: a path, never the token), the login is a long-lived `claude setup-token`
-token, not `/login`. The test request then runs with `CLAUDE_CODE_OAUTH_TOKEN` read from that file for that
-one process, the alert and the heartbeat's line for people say to regenerate the token, and
-`FLEET_CLAUDE_OAUTH_TOKEN_EXPIRES` (an ISO date) makes the supervisor post one `claude-token-expiry` alert at
-30 days left and one at 7, latched per date. See the fleet guide, § 6.1.
-
 **Moved ledger targets.** The supervisor records, per session, the ledger target it
 last launched it against (`logs/fleet-supervisor/<name>.target`). When the
 configured target differs (for example the resource broker moving from a
