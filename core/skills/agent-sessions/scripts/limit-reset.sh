@@ -9,12 +9,13 @@ limit_tz_fmt() {
   if [ "$1" = LOCAL ]; then date -r "$2" "$3" 2>/dev/null || date -d "@$2" "$3"
   else TZ="$1" date -r "$2" "$3" 2>/dev/null || TZ="$1" date -d "@$2" "$3"; fi
 }
-# limit_tz_epoch <zone|LOCAL> <year> <Mon> <day> <H:MM AM> → the epoch of that wall-clock time in the zone
+# limit_tz_epoch <zone|LOCAL> <year> <Mon> <day> <H:MM:SS AM> → the epoch of that wall-clock time in the zone. The seconds are
+# always given: BSD date -j -f takes any missing field from the real clock, which made the result move with wall-clock seconds.
 limit_tz_epoch() {
   if [ "$1" = LOCAL ]; then
-    date -j -f '%Y %b %d %I:%M %p' "$2 $3 $4 $5" +%s 2>/dev/null || date -d "$3 $4 $2 $5" +%s 2>/dev/null
+    date -j -f '%Y %b %d %I:%M:%S %p' "$2 $3 $4 $5" +%s 2>/dev/null || date -d "$3 $4 $2 $5" +%s 2>/dev/null
   else
-    TZ="$1" date -j -f '%Y %b %d %I:%M %p' "$2 $3 $4 $5" +%s 2>/dev/null || TZ="$1" date -d "$3 $4 $2 $5" +%s 2>/dev/null
+    TZ="$1" date -j -f '%Y %b %d %I:%M:%S %p' "$2 $3 $4 $5" +%s 2>/dev/null || TZ="$1" date -d "$3 $4 $2 $5" +%s 2>/dev/null
   fi
 }
 # limit_tz_day <zone|LOCAL> <epoch> <offset days> → "YYYY Mon D" of the calendar day offset from the one containing <epoch>.
@@ -23,7 +24,7 @@ limit_tz_epoch() {
 limit_tz_day() {
   local z="$1" y mo d noon
   read -r y mo d <<<"$(limit_tz_fmt "$z" "$2" '+%Y %b %-d')"
-  noon="$(limit_tz_epoch "$z" "$y" "$mo" "$d" '12:00 PM')" || return 1
+  noon="$(limit_tz_epoch "$z" "$y" "$mo" "$d" '12:00:00 PM')" || return 1
   limit_tz_fmt "$z" $((noon + $3 * 86400)) '+%Y %b %-d'
 }
 
@@ -46,7 +47,7 @@ limit_reset_epoch() {
   mon="${BASH_REMATCH[2]}" day="${BASH_REMATCH[3]}" h="${BASH_REMATCH[5]}" m="${BASH_REMATCH[7]:-00}" ap="${BASH_REMATCH[8]}"
   [ "$((10#$h))" -ge 1 ] && [ "$((10#$h))" -le 12 ] && [ "$((10#$m))" -le 59 ] || return 1
   ap_c="$(printf '%s' "$ap" | tr 'a-z' 'A-Z')"
-  time_s="$((10#$h)):$m $ap_c"
+  time_s="$((10#$h)):$m:00 $ap_c"
   now="$(limit_now)"
   if [ -n "$mon" ]; then
     mon_c="$(printf '%s' "${mon:0:1}" | tr 'a-z' 'A-Z')${mon:1:2}"

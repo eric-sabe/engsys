@@ -857,7 +857,8 @@ done
 # The reset parser, unit-tested on an injected clock (SUPERVISOR_NOW_EPOCH), so nothing here depends on the time of day,
 # the day, or a DST change. America/New_York changes on 2026-03-08 (spring forward) and 2026-11-01 (fall back).
 lre() { ( SUPERVISOR_NOW_EPOCH="$1"; . "$HERE/limit-reset.sh"; limit_reset_epoch "$2" ); }
-ep_in() { TZ="$1" date -j -f '%Y-%m-%d %H:%M' "$2" +%s 2>/dev/null || TZ="$1" date -d "$2" +%s; }
+ep_in() { TZ="$1" date -j -f '%Y-%m-%d %H:%M:%S' "$2:00" +%s 2>/dev/null || TZ="$1" date -d "$2:00" +%s; }   # seconds pinned to :00
+ep_local() { date -j -f '%Y-%m-%d %H:%M:%S' "$1:00" +%s 2>/dev/null || date -d "$1:00" +%s; }
 NY=America/New_York
 eq_ep() { # eq_ep <name> <got> <want>
   if [ "$2" = "$3" ]; then pass=$((pass + 1)); echo "  ok  $1"; else fail=$((fail + 1)); echo "  FAIL $1 (got $2, want $3)"; fi
@@ -871,25 +872,36 @@ eq_ep "a dated reset in the zone" "$(lre "$(ep_in UTC '2026-10-18 12:00')" "⏺ 
 # the fixture wordings, at every hour of a day: always read as due (passed within the hour) or ahead (within a day), never
 # unreadable and never tomorrow's-by-mistake; a 24 h sweep, because a wall-clock fixture is "just passed" once a day
 sweep_bad=0
+# fixture: <line>|<target second of the UTC day>, or |local for the host-local one (range only)
 for hh in 00 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23; do
   now="$(ep_in UTC "2026-10-18 $hh:30")"
-  for line in "⏺ You've hit your limit · resets 9pm ($NY)" "⏺ You've hit your weekly limit · resets 5am" "⏺ You've hit your Opus limit · resets 3pm (UTC)" "⏺ You’ve hit your limit · resets 9pm (UTC)" "⏺ Claude usage limit reached. Your limit will reset at 5pm (UTC)"; do
+  for fx in "⏺ You've hit your limit · resets 9pm ($NY)|3600" "⏺ You've hit your weekly limit · resets 5am|local" "⏺ You've hit your Opus limit · resets 3pm (UTC)|54000" "⏺ You’ve hit your limit · resets 9pm (UTC)|75600" "⏺ Claude usage limit reached. Your limit will reset at 5pm (UTC)|61200"; do
+    line="${fx%|*}" tgt="${fx##*|}"
     got="$(lre "$now" "$line")" || { sweep_bad=$((sweep_bad + 1)); echo "       unreadable at $hh:30Z: $line"; continue; }
-    if [ "$got" -lt $((now - 3600)) ] || [ "$got" -gt $((now + 90000)) ]; then sweep_bad=$((sweep_bad + 1)); echo "       out of range at $hh:30Z: $line ($((got - now)) s)"; fi
+    if [ "$tgt" = local ]; then
+      if [ "$got" -lt $((now - 3600)) ] || [ "$got" -ge $((now + 86400)) ]; then sweep_bad=$((sweep_bad + 1)); echo "       out of range at $hh:30Z: $line ($((got - now)) s)"; fi
+    else
+      # exactly the first occurrence of that time of day at or after one hour ago
+      base=$((now - 3600)); want=$((base + (tgt - base % 86400 + 86400) % 86400))
+      if [ "$got" != "$want" ]; then sweep_bad=$((sweep_bad + 1)); echo "       at $hh:30Z: $line got $((got - now)) s from now, want $((want - now)) s"; fi
+    fi
   done
 done
 eq_ep "24 h sweep: every fixture wording parses to a time within the last hour .. next day, at every hour" "$sweep_bad" 0
 
 # every wording of the limit line parses and holds: session, weekly (no zone: the host's local time), Opus, the
 # curly apostrophe, and "reset at"
-for line in "⏺ You've hit your limit · resets 9pm (America/New_York)" "⏺ You've hit your weekly limit · resets 5am" "⏺ You've hit your Opus limit · resets 3pm (UTC)" "⏺ You’ve hit your limit · resets 9pm (UTC)" "⏺ Claude usage limit reached. Your limit will reset at 5pm (UTC)"; do
+# the clock is injected (noon in each line's own zone), so every one is deterministically "held until the reset"
+for fx in "⏺ You've hit your limit · resets 9pm (America/New_York)|$NY" "⏺ You've hit your weekly limit · resets 5am|local" "⏺ You've hit your Opus limit · resets 3pm (UTC)|UTC" "⏺ You’ve hit your limit · resets 9pm (UTC)|UTC" "⏺ Claude usage limit reached. Your limit will reset at 5pm (UTC)|UTC"; do
+  line="${fx%|*}" z="${fx##*|}"
+  if [ "$z" = local ]; then export SUPERVISOR_NOW_EPOCH="$(ep_local '2026-10-18 12:00')"; else export SUPERVISOR_NOW_EPOCH="$(ep_in "$z" '2026-10-18 12:00')"; fi
   hconf; qreset; launched_by_sup acme-rel; ledger2 90 "ok"; live acme-rel "$line"; run
   hold_has acme-rel "resume_at="
-  # parsed = held until the reset, or (reset passed within the hour, whatever the time of day) re-prompted on the spot
-  if grep -q '^hold:acme-rel:resume_at' "$T/actions" || grep -q '^sendkeys acme-rel' "$T/actions"; then echo "parsed" >>"$T/actions"; fi
-  expect "limit line parses (held, or due now): $line" "^parsed"
+  expect "limit line parses and holds until the reset: $line" "^hold:acme-rel:resume_at"
+  expect "  …not re-prompted" "!^sendkeys"
   expect "  …alerted too" "^notify --level alert --incident seat-limit"
 done
+unset SUPERVISOR_NOW_EPOCH
 # a clock-only reset 13 h ahead is tomorrow-ish, not "passed": held until then (no re-prompt into the limit)
 hconf "LIMIT_RESUME_MARGIN_SEC=0"; qreset; launched_by_sup acme-rel; ledger2 90 "ok"; live acme-rel "⏺ You've hit your limit · $(lclock 780)"; run
 resume_at="$(sed -n 's/^resume_at=//p' "$SLOG/acme-rel.limit-hold")"; d=$(( resume_at - $(date +%s) ))
