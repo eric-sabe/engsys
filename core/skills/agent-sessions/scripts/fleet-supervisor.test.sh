@@ -854,12 +854,40 @@ for bad in "⏺ You've hit your limit · resets soon (UTC)" "⏺ You've hit your
   expect "  …and the stale session escalated as before" "comment 2: .*heartbeat stale"
 done
 
+# The reset parser, unit-tested on an injected clock (SUPERVISOR_NOW_EPOCH), so nothing here depends on the time of day,
+# the day, or a DST change. America/New_York changes on 2026-03-08 (spring forward) and 2026-11-01 (fall back).
+lre() { ( SUPERVISOR_NOW_EPOCH="$1"; . "$HERE/limit-reset.sh"; limit_reset_epoch "$2" ); }
+ep_in() { TZ="$1" date -j -f '%Y-%m-%d %H:%M' "$2" +%s 2>/dev/null || TZ="$1" date -d "$2" +%s; }
+NY=America/New_York
+eq_ep() { # eq_ep <name> <got> <want>
+  if [ "$2" = "$3" ]; then pass=$((pass + 1)); echo "  ok  $1"; else fail=$((fail + 1)); echo "  FAIL $1 (got $2, want $3)"; fi
+}
+eq_ep "DST: 'resets 3am' read the evening before fall back is 03:00 EST, not 02:00" "$(lre "$(ep_in $NY '2026-10-31 23:00')" "⏺ You've hit your limit · resets 3am ($NY)")" "$(ep_in $NY '2026-11-01 03:00')"
+eq_ep "DST: 'resets 3pm' read the evening before spring forward is 15:00 EDT, not 16:00" "$(lre "$(ep_in $NY '2026-03-07 20:00')" "⏺ You've hit your limit · resets 3pm ($NY)")" "$(ep_in $NY '2026-03-08 15:00')"
+eq_ep "DST: 'resets 11:45pm' read at 00:30 on fall-back day passed 45 min ago (due now)" "$(lre "$(ep_in $NY '2026-11-01 00:30')" "⏺ You've hit your limit · resets 11:45pm ($NY)")" "$(ep_in $NY '2026-10-31 23:45')"
+eq_ep "no DST: 'resets 9pm' read at 20:00 is 21:00 today" "$(lre "$(ep_in $NY '2026-06-10 20:00')" "⏺ You've hit your limit · resets 9pm ($NY)")" "$(ep_in $NY '2026-06-10 21:00')"
+eq_ep "a clock-only time 13 h ahead is today's, not passed" "$(lre "$(ep_in $NY '2026-06-10 08:00')" "⏺ You've hit your limit · resets 9pm ($NY)")" "$(ep_in $NY '2026-06-10 21:00')"
+eq_ep "a dated reset in the zone" "$(lre "$(ep_in UTC '2026-10-18 12:00')" "⏺ You've hit your limit · resets Oct 20, 9:30pm (UTC)")" "$(ep_in UTC '2026-10-20 21:30')"
+# the fixture wordings, at every hour of a day: always read as due (passed within the hour) or ahead (within a day), never
+# unreadable and never tomorrow's-by-mistake; a 24 h sweep, because a wall-clock fixture is "just passed" once a day
+sweep_bad=0
+for hh in 00 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23; do
+  now="$(ep_in UTC "2026-10-18 $hh:30")"
+  for line in "⏺ You've hit your limit · resets 9pm ($NY)" "⏺ You've hit your weekly limit · resets 5am" "⏺ You've hit your Opus limit · resets 3pm (UTC)" "⏺ You’ve hit your limit · resets 9pm (UTC)" "⏺ Claude usage limit reached. Your limit will reset at 5pm (UTC)"; do
+    got="$(lre "$now" "$line")" || { sweep_bad=$((sweep_bad + 1)); echo "       unreadable at $hh:30Z: $line"; continue; }
+    if [ "$got" -lt $((now - 3600)) ] || [ "$got" -gt $((now + 90000)) ]; then sweep_bad=$((sweep_bad + 1)); echo "       out of range at $hh:30Z: $line ($((got - now)) s)"; fi
+  done
+done
+eq_ep "24 h sweep: every fixture wording parses to a time within the last hour .. next day, at every hour" "$sweep_bad" 0
+
 # every wording of the limit line parses and holds: session, weekly (no zone: the host's local time), Opus, the
 # curly apostrophe, and "reset at"
 for line in "⏺ You've hit your limit · resets 9pm (America/New_York)" "⏺ You've hit your weekly limit · resets 5am" "⏺ You've hit your Opus limit · resets 3pm (UTC)" "⏺ You’ve hit your limit · resets 9pm (UTC)" "⏺ Claude usage limit reached. Your limit will reset at 5pm (UTC)"; do
   hconf; qreset; launched_by_sup acme-rel; ledger2 90 "ok"; live acme-rel "$line"; run
   hold_has acme-rel "resume_at="
-  expect "limit line parses and holds: $line" "^hold:acme-rel:resume_at"
+  # parsed = held until the reset, or (reset passed within the hour, whatever the time of day) re-prompted on the spot
+  if grep -q '^hold:acme-rel:resume_at' "$T/actions" || grep -q '^sendkeys acme-rel' "$T/actions"; then echo "parsed" >>"$T/actions"; fi
+  expect "limit line parses (held, or due now): $line" "^parsed"
   expect "  …alerted too" "^notify --level alert --incident seat-limit"
 done
 # a clock-only reset 13 h ahead is tomorrow-ish, not "passed": held until then (no re-prompt into the limit)

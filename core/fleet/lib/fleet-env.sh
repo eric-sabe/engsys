@@ -300,7 +300,8 @@ fleet_dir_lock() {
   guard="$lock.reclaim"
   # The holder is the script process ($$, which is the script's pid even inside $(…) and ( … ) subshells and lives as
   # long as the script does), with its start time, so a reused pid is not mistaken for a live holder. (A short-lived
-  # subshell's own pid, e.g. from `sh -c 'echo $PPID'`, would make a live lock look dead.)
+  # subshell's own pid, e.g. from `sh -c 'echo $PPID'`, would make a live lock look dead.) An accepted edge case: if only
+  # the script's own process is SIGKILLed, a surviving $( … ) child can outlive its lock and overlap the next holder.
   me="$$"; mystart="$(ps -o lstart= -p "$me" 2>/dev/null | awk '{$1=$1; print}' || true)"
   mkdir -p "$FLEET_STATE/locks"
   until mkdir "$lock" 2>/dev/null; do

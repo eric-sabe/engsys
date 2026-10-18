@@ -70,8 +70,8 @@
 # the seat-limit alert resolves with one info notice naming what resumed. A session that hits the limit again
 # within 30 minutes of a resume waits an extra 10 minutes, doubling per re-hit up to 4 h, so it cannot loop.
 # A hold also ends when the pane shows something else or is working again (a person got there first), and
-# waits while the login hold is on. A reset time that cannot be read (no zone, no clock time, unknown zone, more
-# than 8 days out) writes no hold: the alert-only behaviour. Panes the supervisor did not launch never count.
+# waits while the login hold is on. A reset time that cannot be read (no clock time, an unknown zone, more than
+# 8 days out; no zone means the host's local time) writes no hold: the alert-only behaviour. Panes the supervisor did not launch never count.
 #
 # Singleton monsters (engsys#62): a session line whose 6th field is `merge` or `maintain` holds that
 # role through the github lease (core/lib/lease/baton.mjs), and the lease, not the shared ledger
@@ -511,60 +511,9 @@ LIMIT_BACKOFF_MAX_SEC=14400
 LIMIT_RESUMED_LIST="$STATE_DIR/limit.resumed" # sessions resumed since the last "limit is over" notice
 LIMIT_PROMPT="Your Claude usage limit has reset. Carry on where you stopped: re-read your ledger and state, then resume your loop."
 
-# limit_reset_epoch <limit line> → the epoch of the reset time the line names, on stdout; rc 1 when it can't be
-# read. The line ends `resets [<Mon> <D>[,] [at] ]<H>[:<MM>]<am|pm> (<IANA zone>)` (`resets 9pm (America/New_York)`,
-# `resets Oct 20, 9:30pm (UTC)`). No zone, no clock time or an unknown zone is unreadable: guessing would resume a
-# monster hours early or never.
-limit_reset_epoch() {
-  local tail tz when re mon day h m ap y now ep mon_c ap_c time_s
-  grep -qi 'reset' <<<"$1" || return 1
-  # what follows the last "reset" / "resets" / "reset at": `9pm (America/New_York)`, `Oct 20, 9:30pm (UTC)`, `5am`
-  tail="$(sed -E 's/.*[Rr]esets? (at )?//' <<<"$1" | head -n 1)"
-  tz="$(sed -n 's/^[^(]*(\([A-Za-z0-9_+/-]*\)).*$/\1/p' <<<"$tail" | head -n 1)"
-  when="$(sed -E 's/\(.*$//; s/[ .]+$//; s/^ +//' <<<"$tail" | tr 'A-Z' 'a-z')"
-  [ -n "$when" ] || return 1
-  # no zone in the message = the host's local time
-  if [ -z "$tz" ]; then tz=LOCAL
-  else case "$tz" in UTC | GMT) ;; *) [ -e "/usr/share/zoneinfo/$tz" ] || return 1 ;; esac; fi
-  re='^(([a-z]+) ([0-9]{1,2}),? (at )?)?([0-9]{1,2})(:([0-9]{2}))?[[:space:]]*(am|pm)$'
-  [[ "$when" =~ $re ]] || return 1
-  mon="${BASH_REMATCH[2]}" day="${BASH_REMATCH[3]}" h="${BASH_REMATCH[5]}" m="${BASH_REMATCH[7]:-00}" ap="${BASH_REMATCH[8]}"
-  [ "$((10#$h))" -ge 1 ] && [ "$((10#$h))" -le 12 ] && [ "$((10#$m))" -le 59 ] || return 1
-  ap_c="$(printf '%s' "$ap" | tr 'a-z' 'A-Z')"
-  time_s="$((10#$h)):$m $ap_c"
-  now="$(date +%s)"
-  if [ -n "$mon" ]; then
-    mon_c="$(printf '%s' "${mon:0:1}" | tr 'a-z' 'A-Z')${mon:1:2}"
-    y="$(limit_tz_date "$tz" +%Y)"
-    ep="$(limit_tz_epoch "$tz" "$y" "$mon_c" "$((10#$day))" "$time_s")" || return 1
-    # a date already well behind us belongs to next year (a December limit read in January)
-    if [ "$ep" -lt $((now - 172800)) ]; then ep="$(limit_tz_epoch "$tz" "$((y + 1))" "$mon_c" "$((10#$day))" "$time_s")" || return 1; fi
-  else
-    read -r y mon_c day <<<"$(limit_tz_date "$tz" '+%Y %b %d')"
-    ep="$(limit_tz_epoch "$tz" "$y" "$mon_c" "$((10#$day))" "$time_s")" || return 1
-    # A clock time with no date is in the future, unless it passed within the last hour (the supervisor was a tick late,
-    # or the message was read just after midnight): then it is due now. A time that passed longer ago is tomorrow's, and
-    # one still ahead, however far, is today's.
-    local yday=$((ep - 86400))
-    if [ "$now" -ge "$yday" ] && [ $((now - yday)) -le 3600 ]; then ep="$yday"
-    elif [ "$ep" -gt "$now" ]; then :
-    elif [ $((now - ep)) -le 3600 ]; then :
-    else ep=$((ep + 86400)); fi
-  fi
-  # a reset more than 8 days out is a misread, not a weekly limit
-  [ "$ep" -le $((now + 691200)) ] || return 1
-  printf '%s' "$ep"
-}
-limit_tz_date() { # limit_tz_date <zone|LOCAL> <date args> → date in that zone
-  if [ "$1" = LOCAL ]; then shift; date "$@"; else local z="$1"; shift; TZ="$z" date "$@"; fi
-}
-limit_tz_epoch() { # limit_tz_epoch <zone|LOCAL> <year> <Mon> <day> <H:MM AM> → epoch (BSD date first, GNU fallback)
-  if [ "$1" = LOCAL ]; then
-    date -j -f '%Y %b %d %I:%M %p' "$2 $3 $4 $5" +%s 2>/dev/null || date -d "$3 $4 $2 $5" +%s 2>/dev/null
-  else
-    TZ="$1" date -j -f '%Y %b %d %I:%M %p' "$2 $3 $4 $5" +%s 2>/dev/null || TZ="$1" date -d "$3 $4 $2 $5" +%s 2>/dev/null
-  fi
-}
+# limit_reset_epoch and its date helpers live in limit-reset.sh (also unit-tested there).
+# shellcheck source=limit-reset.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/limit-reset.sh"
 limit_hold_get() { sed -n "s/^$2=//p" "$STATE_DIR/$1.limit-hold" 2>/dev/null | head -n 1; }
 limit_hold_drop() { rm -f "${STATE_DIR:?}/${1:?}.limit-hold"; }
 limit_held_names() { # the configured sessions on a seat limit hold, one per line (a hold of a session no longer in the conf is orphaned)
@@ -589,7 +538,7 @@ limit_hold_begin() {
     log "$1: seat limit, but the reset time is unreadable ($(printf '%s' "$3" | cut -c1-160)): alert only, no automatic resume"
     return 0
   fi
-  now="$(date +%s)"
+  now="$(limit_now)"
   if [ -f "$rec" ]; then
     IFS='|' read -r last rehits <"$rec" || true
     case "${last:-}" in '' | *[!0-9]*) last=0 ;; esac
@@ -612,7 +561,7 @@ limit_hold_begin() {
 limit_hold_done() {
   local name="$1" rehits names
   rehits="$(limit_hold_get "$name" rehits)"
-  [ "$2" != resumed ] || printf '%s|%s\n' "$(date +%s)" "${rehits:-0}" >"$STATE_DIR/$name.limit-resumed"
+  [ "$2" != resumed ] || printf '%s|%s\n' "$(limit_now)" "${rehits:-0}" >"$STATE_DIR/$name.limit-resumed"
   limit_hold_drop "$name"
   [ "$2" != resumed ] || auth_add_lines "$LIMIT_RESUMED_LIST" "$name"
   log "$name: seat limit hold ended ($2)"
@@ -857,7 +806,7 @@ limit_hold_step() {
   local name="$1" at now text
   at="$(limit_hold_get "$name" resume_at)"
   case "$at" in '' | *[!0-9]*) log "$name: limit hold unreadable, dropped"; limit_hold_drop "$name"; return 1 ;; esac
-  now="$(date +%s)"
+  now="$(limit_now)"
   if [ "$ALIVE" = 1 ]; then
     # somebody got the session going again (a person re-prompted it): the hold has nothing left to do
     if pane_busy "$name"; then limit_hold_done "$name" "the session is working again"; return 1; fi

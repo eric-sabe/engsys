@@ -142,7 +142,9 @@ dir_logged_out() {
 # contacts the API, and verify runs every supervisor tick against each live session's dir, so with --max-age the list
 # is reused for that many minutes while the key is unchanged: the pins (ENGSYS_REF / INSTANCE_REF), the dir, and the
 # mtimes of its plugins/ files and settings and of the pin checkout's settings. A fleet sync, a pin change or any
-# plugin change in the dir changes the key, so a real change is still re-checked at once.
+# plugin change in the dir changes the key, so a real change is still re-checked at once. The cache lives in .fleet/, which
+# a session can write; that is the same trade-off documented at verify-wrappers.mjs (the cache), and it is why a launch
+# (no --max-age) never uses it: the gate that decides whether a monster starts re-checks every time.
 list_plugins() {
   local d="${FLEET_CLAUDE_CONFIG_DIR:-}" cache="$FLEET_STATE/plugin-list$SFX.json" keyf="$FLEET_STATE/plugin-list$SFX.key" key f m
   if [ "$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION" = on ] && [ -n "$max_age" ]; then
