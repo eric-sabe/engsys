@@ -380,6 +380,7 @@ AUTH_HELD=0 AUTH_RESUMED="" AUTH_RESOLVE_TEXT="" RELAUNCH_OK=0
 # this tick and nobody else is. Unset (one shared login): one scope, the files auth.*, as before.
 AUTH_SCOPE="" AUTH_ONLY_WINDOW="" AUTH_PROBE_CFG="" AUTH_HELD_SET=" "
 auth_scope() { # auth_scope <session> → the hold state below is that session's (per-session mode only)
+  case "$1" in '' | .* | */* | *..* | *[!A-Za-z0-9._-]*) log "auth: refusing a per-session scope for the name '$1'"; return 1 ;; esac
   AUTH_SCOPE="$1" AUTH_ONLY_WINDOW="$1" AUTH_PROBE_CFG="${SESSION_CONFIG_DIR_BASE%/}/$1" AUTH_HELD=0 AUTH_RESOLVE_TEXT=""
   AUTH_EXPIRED="$STATE_DIR/auth.$1.expired" AUTH_ALERTED="$STATE_DIR/auth.$1.alerted" AUTH_HELD_LIST="$STATE_DIR/auth.$1.held"
   AUTH_SEEN="$STATE_DIR/auth.$1.panes" AUTH_ACKED="$STATE_DIR/auth.$1.acked" AUTH_INCIDENT="claude-auth-expired-$1"
@@ -1056,6 +1057,7 @@ if [ -n "$SESSION_CONFIG_DIR_BASE" ]; then
   for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
     IFS='|' read -r auth_n _ <<<"$spec"
     [ -n "$auth_n" ] || continue
+    case "$auth_n" in .* | */* | *..* | *[!A-Za-z0-9._-]*) log "auth: session name '$auth_n' can't be a per-session config dir name; no login hold for it"; continue ;; esac
     auth_scope "$auth_n"; auth_tick
   done
   AUTH_HELD=0 AUTH_SCOPE="" AUTH_ONLY_WINDOW="" AUTH_PROBE_CFG=""   # the loop below asks auth_is_held <name>

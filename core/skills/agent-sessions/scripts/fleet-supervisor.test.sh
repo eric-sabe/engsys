@@ -624,6 +624,10 @@ pconf; reset; rm -f "$T"/pane-* "$T"/capture-*; baton free; ledger 90 "ok — me
 echo zsh >"$T/pane-acme-mm"; : >"$T/capture-acme-mm"; wpane acme-w "$(cat "$T/fixture-login-expired")"; run
 expect "205: a login error in an unsupervised window holds no session" "!^notify --level action"
 expect "  …the merge monster is relaunched" "^launch acme-mm"
+# a session name that can't be a dir name gets no per-session scope
+pconf; printf 'acme-a..b|9|60\n' >>"$T/w/sup.conf"; reset; rm -f "$T"/pane-* "$T"/capture-*; baton free; ledger 1 "ok"; ledger2 1 "ok"; run
+grep -q "can't be a per-session config dir name" "$SLOG/supervisor.log" && echo name-refused >>"$T/actions"
+expect "205: a hostile session name gets no per-session login scope" "^name-refused"
 # a login error that shows up right after a relaunch holds that session only, and the heartbeat does not tell the
 # operator to /login "in any session" (another session's login does not repair this one's dir)
 pconf; reset; rm -f "$T"/pane-* "$T"/capture-* "$T/probe-ok"; baton free; ledger 90 "ok — merging #12"; ledger2 1 "ok"

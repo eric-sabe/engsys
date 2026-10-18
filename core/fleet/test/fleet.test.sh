@@ -832,7 +832,7 @@ has "…saying what to run" "$OUT" "fleet config-dir init --session acme-mm"
 has "…and how to log in" "$OUT" "CLAUDE_CONFIG_DIR=$SESS/acme-mm claude"
 eq "…nothing reached tmux" "$(grep -c send-keys "$FAKE/tmux.log" || true)" 0
 mv "$SESS/acme-mm.away" "$SESS/acme-mm"
-rm -f "$FAKE/loggedin/acme-security"; touch "$FAKE/loggedout/acme-security"
+rm -f "$FAKE/loggedin/acme-security" "$STATE/auth-ok.acme-security"; touch "$FAKE/loggedout/acme-security"
 run fleet launch
 rc_is "one logged-out session dir: the whole launch exits non-zero" 1
 has "…naming it and the command" "$OUT" "SKIPPED: acme-security (its own Claude login ($SESS/acme-security) is not logged in: CLAUDE_CONFIG_DIR=$SESS/acme-security claude"
@@ -880,6 +880,13 @@ login_all acme-mm
 # a login that works is not asked about again within --max-age (and a logged-out one never is cached)
 : >"$FAKE/claude.log"; run fleet verify --session acme-mm --max-age 15; run fleet verify --session acme-mm --max-age 15
 eq "verify --max-age: one auth status per dir" "$(grep -c '^auth status' "$FAKE/claude.log" || true)" 1
+# launch reuses verify's logged-in answer, and leaves a running session's credential alone
+date +%s >"$STATE/auth-ok.acme-build"; rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"; : >"$FAKE/claude.log"
+run fleet launch acme-build
+eq "launch: a fresh cached login answer is reused (no auth status for the dir)" "$(grep -c "^auth status.*CFG=$SESS/acme-build" "$FAKE/claude.log" || true)" 0
+rm -f "$STATE"/auth-ok.*; run fleet launch; : >"$FAKE/claude.log"
+run fleet launch
+eq "launch: sessions already running are not asked about" "$(grep -c '^auth status.*CFG='"$SESS" "$FAKE/claude.log" || true)" 0
 # plugin list is not asked on every tick: reused within --max-age while nothing it depends on changed
 pl_calls() { grep -c "^plugin list --json.*CFG=$SESS/acme-mm" "$FAKE/claude.log" || true; }
 rm -f "$STATE"/plugin-list.acme-mm.*; : >"$FAKE/claude.log"

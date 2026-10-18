@@ -234,10 +234,15 @@ harness_refused() { [ "$launch_harness" != claude ] && claude_only "$1"; }
 # held with the command to fix it, never launched into a login prompt. Prints the reason and returns 0 when held.
 session_dir_problem() { # session_dir_problem <name>
   [ "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:-off}" = on ] && [ "$launch_harness" = claude ] && uses_fleet_config_dir "$1" || return 1
-  local d li
+  local d li at
+  # a session that is already running is not a launch candidate (the launcher skips its window): leave its credential alone
+  if tmux list-windows -a -F '#{window_name}' 2>/dev/null | grep -Fxq -- "$1"; then return 1; fi
   d="$(fleet_session_config_dir "$1")" || { echo "its name can't be a per-session config dir name"; return 0; }
   if [ ! -d "$d" ]; then echo "its Claude config dir $d does not exist: run fleet config-dir init --session $1, then CLAUDE_CONFIG_DIR=$d claude (/login, /exit)"; return 0; fi
-  li="$( (cd "${TMPDIR:-/tmp}" && CLAUDE_CONFIG_DIR="$d" fleet_dir_lock "$d" claude auth status --json </dev/null) 2>/dev/null | jq -r 'if .loggedIn == false then "false" else "" end' 2>/dev/null || true)"
+  # a logged-in answer verify cached for this dir (auth-ok.<name>) within VERIFY_MAX_AGE_MIN is reused
+  if at="$(cat "$FLEET_STATE/auth-ok.$1" 2>/dev/null)" && [[ "$at" =~ ^[0-9]+$ ]] && [ $(( $(date +%s) - at )) -lt $(( VERIFY_MAX_AGE_MIN * 60 )) ]; then return 1; fi
+  li="$( (cd "${TMPDIR:-/tmp}" && CLAUDE_CONFIG_DIR="$d" fleet_dir_lock "$d" claude auth status --json </dev/null) 2>/dev/null | jq -r 'if .loggedIn == true then "true" elif .loggedIn == false then "false" else "" end' 2>/dev/null || true)"
+  if [ "$li" = true ]; then mkdir -p "$FLEET_STATE" && date +%s >"$FLEET_STATE/auth-ok.$1"; fi
   if [ "$li" = false ]; then echo "its own Claude login ($d) is not logged in: CLAUDE_CONFIG_DIR=$d claude (/login, then /exit)"; return 0; fi
   return 1
 }
@@ -298,6 +303,12 @@ while IFS= read -r line; do
         printf '# claude-only: %s (HARNESS=%s)\n' "$n" "$launch_harness" >>"$host_roster"
         refused=$((refused + 1))
         continue
+      fi
+      # one login per session: a window that is already up is skipped by the launcher; its dir and plugins are not re-checked
+      # here (each check is a claude process on a credential its session is refreshing)
+      if [ "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:-off}" = on ] && uses_fleet_config_dir "$n" \
+        && tmux list-windows -a -F '#{window_name}' 2>/dev/null | grep -Fxq -- "$n"; then
+        kept=$((kept + 1)); printf '%s\n' "$line" >>"$host_roster"; continue
       fi
       if why_dir="$(session_dir_problem "$n")"; then
         echo "SKIPPED: $n ($why_dir)" >&2

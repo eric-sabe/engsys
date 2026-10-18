@@ -365,7 +365,7 @@ export function validateFederation(doc, { file = '' } = {}) {
       if (!FLEET_ID_RE.test(id)) err(`${at}: fleet id must match ${FLEET_ID_RE.source}`);
       if (!isMap(f)) { err(`${at}: must be a map (at least enabled: true)`); continue; }
       for (const k of Object.keys(f)) if (!FLEET_KEYS.includes(k)) err(`${at}: unknown key ${show(k)} (allowed: ${FLEET_KEYS.join(', ')})`);
-      const fl = { enabled: true };
+      const fl = { enabled: true, supervised: false };
       const str = (k, re, hint) => {
         if (f[k] === undefined || f[k] === null) return;
         if (typeof f[k] !== 'string' || !re.test(f[k])) err(`${at}.${k}: ${hint}, got ${show(f[k])}`);
@@ -394,7 +394,7 @@ export function validateFederation(doc, { file = '' } = {}) {
         if (!isPosInt(f.status_issue)) err(`${at}.status_issue: must be a positive issue number, got ${show(f.status_issue)}`);
         else fl.status_issue = f.status_issue;
       }
-      if (f.supervised !== undefined && f.supervised !== null) {
+      if (f.supervised !== undefined) {
         if (typeof f.supervised !== 'boolean') err(`${at}.supervised: must be true or false, got ${show(f.supervised)}`);
         else fl.supervised = f.supervised;
       }

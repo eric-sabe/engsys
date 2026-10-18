@@ -68,7 +68,7 @@ test('the docs/multi-fleet.md example parses and normalizes', () => {
   assert.equal(reg.operators_team, 'acme/fleet-operators');
   assert.deepEqual(Object.keys(reg.fleets), ['alice', 'bob']);
   assert.deepEqual(reg.fleets.alice, {
-    enabled: true, operator: 'alice', host: 'alice-host', github_app: 'acme-fleet-alice', github_app_id: 1000001,
+    enabled: true, supervised: false, operator: 'alice', host: 'alice-host', github_app: 'acme-fleet-alice', github_app_id: 1000001,
     cloud_identity: 'fleet-alice', slack_operator: 'U0000000001', status_issue: 11,
   });
   assert.deepEqual(reg.repos['acme/app'].merge, { home: 'alice', ledger: 101, standby: ['bob'], failover: 'escalate' });
@@ -79,7 +79,7 @@ test('the docs/multi-fleet.md example parses and normalizes', () => {
 
 test('defaults: enabled true, standby [], failover escalate; ledger and fleet fields optional', () => {
   const reg = parseFederation(minimal('repos:\n  acme/app:\n    merge: { home: alice }\n'));
-  assert.deepEqual(reg.fleets.alice, { enabled: true });
+  assert.deepEqual(reg.fleets.alice, { enabled: true, supervised: false });
   assert.deepEqual(reg.repos['acme/app'].merge, { home: 'alice', standby: [], failover: 'escalate' });
   assert.deepEqual(reg.repos, { 'acme/app': { merge: { home: 'alice', standby: [], failover: 'escalate' } } });
   assert.equal(reg.operators_team, null);
@@ -100,8 +100,7 @@ test('supervised: true and false are accepted, absent means not supervised (#206
   const off = parseFederation(minimal('', '  alice:\n    supervised: false\n    enabled: true\n'));
   assert.equal(off.fleets.alice.supervised, false);
   const absent = parseFederation(minimal());
-  assert.equal(absent.fleets.alice.supervised, undefined);
-  assert.ok(!absent.fleets.alice.supervised);
+  assert.equal(absent.fleets.alice.supervised, false);
 });
 
 test('failover auto and a disabled fleet are valid', () => {
@@ -150,6 +149,7 @@ test('rejects: bad fleet field values', () => {
   assert.match(f('enabled: "true"'), /enabled: must be true or false/);
   assert.match(f('supervised: "true"'), /supervised: must be true or false/);
   assert.match(f('supervised: 1'), /supervised: must be true or false/);
+  assert.match(f('supervised: null'), /supervised: must be true or false/);
   assert.match(f('github_app_id: 0'), /github_app_id: must be the App's numeric id/);
   assert.match(f('github_app_id: "5013025"'), /github_app_id: must be the App's numeric id/);
   assert.match(f('github_app_id: 5013025'), /github_app_id: set github_app/);
