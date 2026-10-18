@@ -536,8 +536,14 @@ limit_reset_epoch() {
   else
     read -r y mon_c day <<<"$(TZ="$tz" date '+%Y %b %d')"
     ep="$(limit_tz_epoch "$tz" "$y" "$mon_c" "$((10#$day))" "$time_s")" || return 1
-    # a clock time with no date that is long past today (over 12 h) is tomorrow's; one that passed minutes ago is due now
-    [ "$ep" -gt $((now - 43200)) ] || ep=$((ep + 86400))
+    # a clock time with no date is the day (yesterday, today or tomorrow in the message's zone) nearest to now: one that
+    # passed minutes ago, even across midnight, is due now; 2am read at 11pm is tomorrow's
+    local best="$ep" cand d
+    for cand in $((ep - 86400)) $((ep + 86400)); do
+      d=$((cand - now)); [ "$d" -ge 0 ] || d=$((-d))
+      if [ "$d" -lt $(( best > now ? best - now : now - best )) ]; then best="$cand"; fi
+    done
+    ep="$best"
   fi
   # a reset more than 8 days out is a misread, not a weekly limit
   [ "$ep" -le $((now + 691200)) ] || return 1

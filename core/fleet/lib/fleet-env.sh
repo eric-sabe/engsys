@@ -295,22 +295,32 @@ export FLEET_CLAUDE_CONFIG_DIR_PER_SESSION
 fleet_dir_lock() {
   local dir="$1"; shift
   if [ "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:-off}" != on ]; then "$@"; return; fi
-  local lock waited=0 rc=0 lm owner
+  local lock guard waited=0 rc=0 lm owner me
   lock="$FLEET_STATE/locks/claude-$(printf '%s' "$dir" | cksum | cut -d' ' -f1).lock"
+  guard="$lock.reclaim"
+  me="$(sh -c 'echo $PPID')"   # this shell's own pid (the callers run us in subshells, where $$ is the parent's)
   mkdir -p "$FLEET_STATE/locks"
   until mkdir "$lock" 2>/dev/null; do
-    # a holder that died (Ctrl-C, a job timeout) leaves its lock behind: its pid says so, and it is reclaimed at once
+    # A holder that died (Ctrl-C, a job timeout) leaves its lock behind: its pid says so. Reclaiming is itself done
+    # under a guard lock, and the pid is read again under it, so two waiters can't both remove a lock one of them
+    # has just taken.
     owner="$(cat "$lock/pid" 2>/dev/null || true)"
-    if [[ "$owner" =~ ^[0-9]+$ ]] && ! kill -0 "$owner" 2>/dev/null; then
-      mv "$lock" "$lock.dead.$$" 2>/dev/null && rm -rf "${lock:?}.dead.$$" 2>/dev/null || true; continue
+    if [[ "$owner" =~ ^[0-9]+$ ]] && ! kill -0 "$owner" 2>/dev/null && mkdir "$guard" 2>/dev/null; then
+      owner="$(cat "$lock/pid" 2>/dev/null || true)"
+      if [[ "$owner" =~ ^[0-9]+$ ]] && ! kill -0 "$owner" 2>/dev/null; then rm -rf "${lock:?}"; fi
+      rmdir "$guard" 2>/dev/null || true
+      continue
     fi
+    lm=$(stat -c %Y "$guard" 2>/dev/null || stat -f %m "$guard" 2>/dev/null || echo 0)   # a reclaimer that died holding the guard
+    case "$lm" in '' | *[!0-9]*) lm=0 ;; esac
+    if [ "$lm" -gt 0 ] && [ $(( $(date +%s) - lm )) -gt 60 ]; then rmdir "$guard" 2>/dev/null || true; continue; fi
     lm=$(stat -c %Y "$lock" 2>/dev/null || stat -f %m "$lock" 2>/dev/null || echo 0)
     case "$lm" in '' | *[!0-9]*) lm=0 ;; esac
-    if [ "$lm" -gt 0 ] && [ $(( $(date +%s) - lm )) -gt 300 ]; then mv "$lock" "$lock.stale.$$" 2>/dev/null && rm -rf "${lock:?}.stale.$$" 2>/dev/null || true; continue; fi
+    if [ "$lm" -gt 0 ] && [ $(( $(date +%s) - lm )) -gt 300 ] && [ ! -s "$lock/pid" ]; then rm -rf "${lock:?}"; continue; fi
     waited=$((waited + 1)); [ "$waited" -lt 240 ] || return 75
     sleep 0.5
   done
-  echo "$$" >"$lock/pid" 2>/dev/null || true
+  echo "$me" >"$lock/pid" 2>/dev/null || true
   "$@" || rc=$?
   rm -f "${lock:?}/pid"; rmdir "$lock" 2>/dev/null || true
   return "$rc"
