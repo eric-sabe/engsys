@@ -144,10 +144,9 @@ uses_fleet_config_dir() { # uses_fleet_config_dir <name>
 # Token mode (engsys#205): a token file that can't be used keeps every session that would read it from starting
 # (the launch line would otherwise fall back to the Keychain login, the refresh path this mode exists to avoid).
 TOKEN_PROBLEM=""
-if [ -n "${FLEET_CLAUDE_OAUTH_TOKEN_FILE:-}" ] && [ "${HARNESS:-claude}" = claude ]; then
-  TOKEN_PROBLEM="$(fleet_oauth_token_problem || true)"
-fi
-token_refused() { [ -n "$TOKEN_PROBLEM" ] && uses_fleet_config_dir "$1"; }
+[ -z "${FLEET_CLAUDE_OAUTH_TOKEN_FILE:-}" ] || TOKEN_PROBLEM="$(fleet_oauth_token_problem || true)"
+# (launch_harness, resolved below from the rendered roster as the launcher reads it, decides whether a session reads the file)
+token_refused() { [ -n "$TOKEN_PROBLEM" ] && [ "${launch_harness:-claude}" = claude ] && uses_fleet_config_dir "$1"; }
 roster_names() { grep -E "$ROSTER_LINE_RE" "$FLEET_STATE/roster" | cut -d'|' -f1; }
 # env_file_users <env file basename> → the roster sessions that source it (5th field, else ENV_FILE)
 env_file_users() {

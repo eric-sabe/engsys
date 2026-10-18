@@ -821,6 +821,13 @@ run fleet launch
 rc_is "…a whole-roster launch exits non-zero" 1
 has "…naming the refused session" "$OUT" "SKIPPED: acme-mm"
 has "…while the interactive role (scope supervised) still starts" "$(tl acme-build)" "claude --name acme-build"
+# the check follows the harness the launcher will use (a roster HARNESS= line wins over the conf), not just $HARNESS
+cp "$INST/fleet/roster.tmpl" "$T/roster.k"; sed -i.x '1a\
+HARNESS=claude' "$INST/fleet/roster.tmpl"; rm -f "$INST/fleet/roster.tmpl.x"
+printf 'HARNESS=copilot\n' >>"$LC"; run fleet launch acme-mm
+rc_is "group-readable token file, conf says copilot but the roster says claude: still refused" 1
+has "…saying why" "$OUT" "accessible to group or others"
+cp "$T/roster.k" "$INST/fleet/roster.tmpl"; sed -i.x '/^HARNESS=copilot$/d' "$LC"; rm -f "$LC.x"
 chmod 600 "$TOK"
 mv "$TOK" "$TOK.gone"; run fleet launch acme-mm
 rc_is "missing token file: refused" 1; has "…saying so" "$OUT" "does not exist"
