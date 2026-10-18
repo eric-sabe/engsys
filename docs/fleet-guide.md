@@ -435,14 +435,19 @@ between the words), any ledger-bearing session, and security-tier lines (an env 
 `nyx` in any case, the roster's default `ENV_FILE` included, or any `--model` in the Claude Opus 4.8
 family). The launcher applies the same rule again: a line it arms as a monster, the broker, a supervised
 session or the security tier never gets `~/.claude`, whatever it was told. It decides the dir last, after
-the env file, and launches `command claude` after `unset -f claude`, so no env-file variable or function
-moves a session to another dir; an env file sourced by an interactive role unsets it as well.
+the env file, and launches `command claude` after `unset -f claude`, so an accidental assignment or a
+function named `claude` in an env file can't move a session to another dir; an env file sourced by an
+interactive role unsets it as well. That is a guard against mistakes, not against a hostile env file: env
+files are trusted, PR-reviewed shell code, and a `PATH` wrapper, a `DEBUG` trap, `enable -n` or
+`NODE_OPTIONS` in one can still change what runs.
 
 `fleet sync` then reconciles the pinned marketplaces and plugins in both dirs, `~/.claude` at user scope.
 In `~/.claude` it moves a marketplace to its pinned ref (Claude Code does that by removing and re-adding
 the marketplace, which uninstalls its plugins) only when that marketplace has nothing installed but the
-fleet's pinned user-scope plugins: if you have another plugin of it, or any project's project-scope
-install of one, sync leaves it, warns naming them, and reports drift. Nothing else in `~/.claude` is
+fleet's own: its pinned plugins at user scope, or at project scope for `PIN_DIR` itself. If you have another
+plugin of it, or another project's project-scope install of one, sync leaves it, warns naming them, and
+reports drift; then uninstall those, or remove and re-add the marketplace yourself (`marketplace update`
+does not move a ref-pinned marketplace). Nothing else in `~/.claude` is
 touched. `fleet sync --check`, `fleet status` and `fleet xray` report drift and login per dir.
 
 `fleet verify` checks the fleet dir as before and, under `supervised`, also the engsys plugin installed in
@@ -452,7 +457,17 @@ other. Your other plugins, skills and MCP servers in `~/.claude` are not checked
 
 The tradeoff, plainly: under `supervised` the interactive roles still carry the fleet's GitHub identity (the
 App token, through the gh shim and the fleet git identity) while they load your personal, unverified
-plugins, skills and MCP servers. Choose `supervised` only if you accept that for the attended roles.
+plugins, skills and MCP servers. A `nyx-review` verdict posted from an interactive role is only as
+trustworthy as that role's unverified `~/.claude`, and merge-monster does not yet tell it apart from a
+security-lane verdict (eric-sabe/engsys#197). Choose `supervised` only if you accept that for the attended
+roles.
+
+**The monster batons.** A session the fleet launched (`ENGSYS_SESSION` and `ENGSYS_SESSION_RUN` set) may
+take, renew or act on the merge or maintain baton only when the launcher armed it for that role
+(`ENGSYS_SINGLETON_ROLE`) and, under `supervised`, only on the fleet's config dir; `mm-baton.sh` /
+`mnt-baton.sh` refuse otherwise. A monster you start by hand, in a session the fleet did not launch, passes
+`--session <name>` and is not affected. This is defence in depth, not a boundary: an interactive fleet
+session holds the App token outside the singleton-write guard, so it could bypass the baton altogether.
 
 While the dir is set but not logged in, `fleet verify` reports "not verified" and alerts
 (`wrapper-integrity-unverified`), which holds every merge and maintain launch and relaunch, so a

@@ -254,22 +254,27 @@ sync_claude_plugins() {
         say "marketplace $m is at '${cur:-absent}' (pin $ref)"; drift=1; continue
       fi
       # remove uninstalls every plugin from this marketplace; running sessions keep their cache dirs.
-      # In ~/.claude under scope supervised (the operator's own dir) that is allowed only when it takes
-      # nothing but the pinned plugins, which are reinstalled right after: another plugin of this
-      # marketplace, or any project-scope install of one, makes the step refuse (drift, not damage).
-      if [ -n "$cur" ] && [ -z "$SYNC_CFG" ] && [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ]; then
-        local keep
-        keep="$(plugin_cli list --json | jq -r --arg m "$m" --arg pins "$(printf '%s\n' "${m_plugins[$i]}")" '
-          ($pins | split("\n") | map(select(length > 0))) as $p
-          | .[] | select((.id // "") | endswith("@" + $m))
-          | select(((.scope // "user") != "user") or ((.id | sub("@" + $m + "$"; "")) as $n | ($p | index($n)) == null))
-          | "\(.id) (\(.scope // "user")\(if .projectPath then " " + .projectPath else "" end))"' | paste -sd, - | sed 's/,/, /g')"
-        if [ -n "$keep" ]; then
-          warn "marketplace $m in ~/.claude is at '$cur' (pin $ref), but moving it would uninstall plugins the fleet doesn't pin: $keep. Not moving it; update it yourself (claude plugin marketplace update $m) or remove those plugins, then fleet sync."
-          drift=1; refused+=" $m "; continue
-        fi
+    # In ~/.claude under scope supervised (the operator's own dir) that is allowed only when it takes
+    # nothing but the fleet's own installs, which are reinstalled at the pin right after: a pinned plugin
+    # at user scope, or at project scope for PIN_DIR itself. Another plugin of this marketplace, or a
+    # project-scope install for any other project, makes the step refuse (drift, not damage).
+    if [ -n "$cur" ] && [ -z "$SYNC_CFG" ] && [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ]; then
+      local keep pin_real
+      pin_real="$(cd "$PIN_DIR" 2>/dev/null && pwd -P || printf '%s' "$PIN_DIR")"
+      keep="$(plugin_cli list --json | jq -r --arg m "$m" --arg pin "$PIN_DIR" --arg pinr "$pin_real" --arg pins "$(printf '%s\n' "${m_plugins[$i]}")" '
+        ($pins | split("\n") | map(select(length > 0))) as $p
+        | .[] | select((.id // "") | endswith("@" + $m))
+        | ((.id | sub("@" + $m + "$"; "")) as $n | ($p | index($n)) != null) as $pinned
+        | ((.scope // "user") == "user") as $user
+        | ((.scope // "") == "project" and ((.projectPath // "") == $pin or (.projectPath // "") == $pinr)) as $ours
+        | select(($pinned and ($user or $ours)) | not)
+        | "\(.id) (\(.scope // "user")\(if .projectPath then " " + .projectPath else "" end))"' | paste -sd, - | sed 's/,/, /g')"
+      if [ -n "$keep" ]; then
+        warn "marketplace $m in ~/.claude is at '$cur' (pin $ref), but moving it would uninstall plugins the fleet doesn't pin: $keep. Not moving it. Either uninstall those plugins (claude plugin uninstall <plugin> --scope <scope>), or move it yourself (claude plugin marketplace remove $m, then claude plugin marketplace add https://github.com/$repo.git#$ref and reinstall what you need), then fleet sync."
+        drift=1; refused+=" $m "; continue
       fi
-      if [ -n "$cur" ]; then plugin_cli marketplace remove "$m" --scope user >/dev/null; settings_guard_check "marketplace remove $m"; fi
+    fi
+    if [ -n "$cur" ]; then plugin_cli marketplace remove "$m" --scope user >/dev/null; settings_guard_check "marketplace remove $m"; fi
       plugin_cli marketplace add "https://github.com/$repo.git#$ref" --scope user >/dev/null \
         || fleet_die "marketplace add $m#$ref failed — $m plugins are UNINSTALLED on this host. Re-run: fleet sync (running sessions are unaffected)."
       settings_guard_check "marketplace add $m"

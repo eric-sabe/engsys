@@ -459,6 +459,7 @@ jq '. + [{id: "engsys-swift@engsys", version: "1.0.0", scope: "user", enabled: t
 m="$(mark)"; run fleet sync
 rc_is "sync with unpinned plugins in ~/.claude still exits 0 (the fleet dir is synced)" 0
 has "…warns that moving it would uninstall unpinned plugins" "$OUT" "would uninstall plugins the fleet doesn't pin:"
+has "…with advice that works for a ref-pinned marketplace" "$OUT" "claude plugin marketplace remove engsys, then claude plugin marketplace add https://github.com/vendor/engsys.git#v1.1.0"
 has "…naming the operator's plugin" "$OUT" "engsys-swift@engsys (user)"
 has "…and the project-scope install" "$OUT" "core@engsys (project /other/proj)"
 has "…while the fleet dir is synced all the same" "$(since "$m" | grep "CFG=$FCFG\$")" "plugin install ctx@acme"
@@ -467,7 +468,22 @@ has "…the operator's own plugin survives" "$(jq -r '.[].id' "$FAKE/claude/plug
 has "…and the other project's install" "$(jq -c '.[] | select(.scope == "project")' "$FAKE/claude/plugins.json")" '"projectPath":"/other/proj"'
 run fleet sync --check
 rc_is "…and --check reports the drift" 1
+# This host's real layout: ~/.claude holds every pinned plugin twice, at user scope and at project scope
+# for PIN_DIR itself (keystone's own installs), beside other marketplaces' plugins. Those PIN_DIR installs
+# are the fleet's own: the pin bump moves them.
+jq --arg pin "$HOME/git/app" '[.[] | select(.id | endswith("@engsys") or endswith("@acme"))] as $fleet
+  | . + [$fleet[] | .scope = "project" | .projectPath = $pin]
+  + [{id: "codex@openai-codex", version: "1.0.6", scope: "user", enabled: true},
+     {id: "design@synced", version: "1.2.0", scope: "synced", enabled: true}]' "$T/user-plugins.bak" >"$FAKE/claude/plugins.json"
+m="$(mark)"; run fleet sync
+rc_is "the real layout (pinned plugins also at project scope for PIN_DIR): sync exits 0" 0
+hasnt "…without refusing" "$OUT" "would uninstall plugins the fleet doesn't pin"
+has "…the marketplace moved in ~/.claude" "$(since "$m" | grep 'CFG=unset$')" "plugin marketplace add https://github.com/vendor/engsys.git#v1.1.0"
+has "…the other marketplaces' plugins survive" "$(jq -r '.[].id' "$FAKE/claude/plugins.json")" "codex@openai-codex"
+run fleet sync --check; rc_is "…and the host is in sync" 0
+run fleet verify; rc_is "…and fleet verify passes on it" 0
 cp "$T/user-plugins.bak" "$FAKE/claude/plugins.json"
+jq 'map(if .name == "engsys" then .ref = "v1.0.0" else . end)' "$FAKE/claude/marketplaces.json" >"$FAKE/m.json" && mv "$FAKE/m.json" "$FAKE/claude/marketplaces.json"
 m="$(mark)"; run fleet sync
 rc_is "sync with scope supervised exits 0" 0
 has "…and reconciled ~/.claude (user scope)" "$(since "$m" | grep 'CFG=unset$')" "plugin marketplace add https://github.com/vendor/engsys.git"
@@ -573,9 +589,9 @@ has "roster: ENV_FILE points at the rendered lane env" "$ROSTER_OUT" "ENV_FILE=$
 has "roster: 5th field rendered" "$ROSTER_OUT" "acme-security|$HOME/git/app|/maintenance-monster|--model claude-opus-4-8|$STATE/env/security.env"
 has "roster: monster line" "$ROSTER_OUT" "acme-mm|$HOME/git/app|/merge-monster|--model model-m --dangerously-skip-permissions"
 tl() { grep -F "[send-keys] [-t] [acme:$1]" "$FAKE/tmux.log" | head -1; } # the launch command line for a window
-has "mm: default env (roster ENV_FILE)" "$(tl acme-mm)" "cd $HOME/git/app && set -a && . $STATE/env/session.env && set +a && unset -f claude 2>/dev/null; unset CLAUDE_CONFIG_DIR && command claude --name acme-mm"
+has "mm: default env (roster ENV_FILE)" "$(tl acme-mm)" "cd $HOME/git/app && set -a && . $STATE/env/session.env && set +a && unset -f claude 2>/dev/null; unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && unset CLAUDE_CONFIG_DIR && command claude --name acme-mm"
 has "mm: prompt before the extra flags" "$(tl acme-mm)" "/merge-monster --model model-m --dangerously-skip-permissions"
-has "security: the 5th field replaces ENV_FILE" "$(tl acme-security)" "set -a && . $STATE/env/security.env && set +a && unset -f claude 2>/dev/null; unset CLAUDE_CONFIG_DIR && command claude --name acme-security"
+has "security: the 5th field replaces ENV_FILE" "$(tl acme-security)" "set -a && . $STATE/env/security.env && set +a && unset -f claude 2>/dev/null; unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && unset CLAUDE_CONFIG_DIR && command claude --name acme-security"
 hasnt "security: the roster-level env is NOT used" "$(tl acme-security)" "session.env"
 has "security: prompt before the extra flags" "$(tl acme-security)" "/maintenance-monster --model claude-opus-4-8"
 has "rel: a relative 5th field resolves against the roster's directory" "$(tl acme-rel)" "set -a && . $STATE/env/rel.env && set +a"
@@ -643,7 +659,7 @@ done
 has "the rendered session env carries it too" "$(cat "$STATE/env/session.env")" "CLAUDE_CONFIG_DIR=$FCFG"
 has "…and the security env" "$(cat "$STATE/env/security.env")" "CLAUDE_CONFIG_DIR=$FCFG"
 for w in acme-mm acme-security acme-build; do
-  has "$w (scope all): the dir is set after the env file, so no env-file variable can move it" "$(tl "$w")" "set +a && unset -f claude 2>/dev/null; export CLAUDE_CONFIG_DIR=$FCFG && command claude"
+  has "$w (scope all): the dir is set after the env file, so no env-file variable can move it" "$(tl "$w")" "set +a && unset -f claude 2>/dev/null; unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && export CLAUDE_CONFIG_DIR=$FCFG && command claude"
 done
 # FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised: monsters and the security lane keep the fleet dir; the
 # interactive roles run on ~/.claude (unset on the launch line and in their env file).
@@ -655,8 +671,10 @@ rc_is "launch with scope supervised exits 0" 0
 for w in acme-mm acme-security acme-audit; do
   has "$w (supervised / security lane): CLAUDE_CONFIG_DIR=<the fleet dir>" "$(tl "$w")" "export CLAUDE_CONFIG_DIR=$FCFG && "
 done
-has "acme-build (interactive): CLAUDE_CONFIG_DIR unset, ~/.claude" "$(tl acme-build)" "set +a && unset -f claude 2>/dev/null; unset CLAUDE_CONFIG_DIR && command claude"
-hasnt "…never the fleet dir" "$(tl acme-build)" "CLAUDE_CONFIG_DIR=$FCFG"
+has "acme-build (interactive): CLAUDE_CONFIG_DIR unset, ~/.claude" "$(tl acme-build)" "FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised && unset CLAUDE_CONFIG_DIR && command claude"
+hasnt "…never the fleet dir" "$(tl acme-build)" "export CLAUDE_CONFIG_DIR=$FCFG"
+has "a monster learns the fleet dir and the scope (the baton refuses a session off it)" "$(tl acme-mm)" "export FLEET_CLAUDE_CONFIG_DIR=$FCFG FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised && "
+has "…an interactive one too, so its baton calls are refused" "$(tl acme-build)" "FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised"
 has "acme-rel (interactive, its own env): unset too" "$(tl acme-rel)" "unset CLAUDE_CONFIG_DIR && "
 has "session.env (interactive users): unsets it" "$(cat "$STATE/env/session.env")" "unset CLAUDE_CONFIG_DIR"
 hasnt "…and doesn't set it" "$(cat "$STATE/env/session.env")" "CLAUDE_CONFIG_DIR=$FCFG"

@@ -37,7 +37,7 @@ f="$FAKE/resp/$key"
 if [ -n "$jq_expr" ]; then jq -r "$jq_expr" "$f"; else cat "$f"; fi
 SH
 chmod +x "$T/bin/gh"
-export PATH="$T/bin:$PATH" FAKE="$T" FLEET_GH="$T/bin/gh" ENGSYS_SESSION=acme-mm ENGSYS_SESSION_RUN=r1
+export PATH="$T/bin:$PATH" FAKE="$T" FLEET_GH="$T/bin/gh" ENGSYS_SESSION=acme-mm ENGSYS_SESSION_RUN=r1 ENGSYS_SINGLETON_ROLE=merge   # armed as the launcher arms a merge monster
 unset FLEET_ID FEDERATION_FILE GH_TOKEN GITHUB_TOKEN GH_APP_ENV_FILE FLEET_INBOX_DIR CLAUDE_CODE_AUTO_COMPACT_WINDOW ANTHROPIC_MODEL CLAUDE_MODEL
 
 ok() { pass=$((pass + 1)); echo "  ok   $1"; }
@@ -70,7 +70,7 @@ bus 2 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --
 hasnt "  …and --no-agents leaves the scan out" "AGENT_OVERDUE"
 rm -rf "$T/state/.watch"
 overdue_row triage-3 "alert#3" >"$T/state/agents.tsv"
-bus 2 "$MNT/mnt-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1
+ENGSYS_SINGLETON_ROLE=maintain bus 2 "$MNT/mnt-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1
 has "mnt-watch.sh reports it too" "AGENT_OVERDUE triage-3 gen=1 task=alert#3"
 rm -rf "$T/state/.watch" "$T/state/agents.tsv"
 bus 2 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1
@@ -162,7 +162,7 @@ rm -rf "$T/state"/baton-* "$T/state/.watch"
 held maintain
 mkdir -p "$T/state/.watch"; date +%s >"$T/state/.watch/last-heartbeat"
 echo '[]' >"$T/resp/pr-list"; echo '[]' >"$T/resp/run-list"
-MTICK=(bash "$MNT/mnt-tick.sh" --repo acme/app --state-dir "$T/state" --issue 8)
+MTICK=(env ENGSYS_SINGLETON_ROLE=maintain bash "$MNT/mnt-tick.sh" --repo acme/app --state-dir "$T/state" --issue 8)
 run env FLEET_ID=alice "${MTICK[@]}"
 rc_is "mnt-tick.sh, held → exit 0" 0
 has "  …first tick reports the surface" '+ {"k":"codeql_alerts","available":true,"count":0}'
@@ -465,7 +465,7 @@ KA_PID2=$!
 BUSES+=("$KA_PID2")
 KA_START2=$(ps -o lstart= -p "$KA_PID2" 2>/dev/null | awk '{$1=$1; print}' || true)
 printf '%s|%s|1|start|r1\n' "$KA_PID2" "$KA_START2" >"$T/state/baton-maintain.keepalive.pid"
-run env FLEET_ID=alice MONSTER_BATON_RELEASE_CMD="$T/bin/mock-release-fail" bash "$MNT/mnt-baton.sh" rotate \
+run env FLEET_ID=alice ENGSYS_SINGLETON_ROLE=maintain MONSTER_BATON_RELEASE_CMD="$T/bin/mock-release-fail" bash "$MNT/mnt-baton.sh" rotate \
   --repo acme/app --state-dir "$T/state" --ledger 8 --session acme-mm
 rc_is "mnt-baton.sh rotate exits non-zero when release fails" 1
 has "  …reports step 2 failure clearly" "step 2 (baton release) failed"

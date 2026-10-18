@@ -421,7 +421,9 @@ launch_one() {
   fi
   # The Claude Code config dir comes from the launcher's own environment (the fleet kit sets it from
   # FLEET_CLAUDE_CONFIG_DIR), never from the tmux server's, which may predate it, and it is decided after
-  # the env file, so no env-file variable can move a session to another dir. With
+  # the env file, so an accidental assignment there can't move a session to another dir. (Env files are
+  # trusted, PR-reviewed shell code: a PATH wrapper, a DEBUG trap, `enable -n` or NODE_OPTIONS in one can
+  # still change what runs. This guards against mistakes, not a hostile env file.) With
   # FLEET_CLAUDE_CONFIG_DIR_INTERACTIVE set (scope supervised), only the sessions it names run with it
   # unset (~/.claude), and never one this launcher itself sees as a monster, the resource broker, a
   # supervised session or a security-tier line: an unknown session fails toward the fleet dir.
@@ -435,6 +437,13 @@ launch_one() {
   fi
   # A function named claude in an env file must not stand in for the binary either.
   cmd+="unset -f claude 2>/dev/null; "
+  # Under scope supervised the session knows the fleet dir and the scope, so the baton can refuse a
+  # session that isn't on it (lib/lease/baton.mjs launchedSessionGate).
+  if [ -n "${FLEET_CLAUDE_CONFIG_DIR_INTERACTIVE+x}" ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+    cmd+="export FLEET_CLAUDE_CONFIG_DIR=$(printf %q "$CLAUDE_CONFIG_DIR") FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised && "
+  else
+    cmd+="unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && "
+  fi
   if [ -n "$cfg_dir" ]; then cmd+="export CLAUDE_CONFIG_DIR=$(printf %q "$cfg_dir") && "; else cmd+="unset CLAUDE_CONFIG_DIR && "; fi
   if [ "$HARNESS" = "copilot" ]; then
     cmd+="copilot --name $(printf %q "$name")"

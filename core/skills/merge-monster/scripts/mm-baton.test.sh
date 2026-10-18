@@ -13,7 +13,7 @@ cat >"$T/bin/gh" <<'SH'
 echo "gh $*" >>"$FAKE/gh.log"
 SH
 chmod +x "$T/bin/gh"
-export PATH="$T/bin:$PATH" FAKE="$T" ENGSYS_SESSION=acme-mm ENGSYS_SESSION_RUN=r1
+export PATH="$T/bin:$PATH" FAKE="$T" ENGSYS_SESSION=acme-mm ENGSYS_SESSION_RUN=r1 ENGSYS_SINGLETON_ROLE=merge   # armed as the launcher arms a merge monster
 unset FLEET_ID FEDERATION_FILE GH_TOKEN GITHUB_TOKEN GH_APP_ENV_FILE
 
 ok() { pass=$((pass + 1)); echo "  ok   $1"; }
@@ -35,7 +35,7 @@ rc_is "a lost baton → exit 1" 1
 has "  …BATON_LOST" "BATON_LOST merge"
 no_gh "  …heartbeat not written"
 lost maintain
-run bash "$MNT/mnt-heartbeat.sh" --repo acme/app --issue 8 --state-dir "$T/state" --status running
+run env ENGSYS_SINGLETON_ROLE=maintain bash "$MNT/mnt-heartbeat.sh" --repo acme/app --issue 8 --state-dir "$T/state" --status running
 rc_is "maintenance heartbeat: a lost baton → exit 1" 1
 has "  …BATON_LOST maintain" "BATON_LOST maintain"
 no_gh "  …heartbeat not written"
@@ -47,7 +47,7 @@ rc_is "mm-baton.sh runs bookkeeping ops only (guard is mm-act.sh)" 2
 run bash "$HERE/mm-baton.sh" fence --repo acme/app --state-dir "$T/state" --role maintain
 rc_is "mm-baton.sh fence with no baton → exit 5" 5
 has "  …the role is always merge, whatever --role says" '"role":"merge"'
-run bash "$MNT/mnt-baton.sh" fence --repo acme/app --state-dir "$T/state"
+run env ENGSYS_SINGLETON_ROLE=maintain bash "$MNT/mnt-baton.sh" fence --repo acme/app --state-dir "$T/state"
 has "mnt-baton.sh speaks for maintain" '"role":"maintain"'
 
 echo "fenced acts"
@@ -67,10 +67,10 @@ rc_is "a guarded git push needs --pr or --new-branch" 2
 run bash "$HERE/mm-act.sh" guard --repo acme/app --state-dir "$T/state" --pr 5 -- git push --receive-pack=x origin agent/1-x
 rc_is "  …and refuses any flag but --force-with-lease" 2
 no_gh "  …nothing ran"
-run bash "$MNT/mnt-act.sh" guard --repo acme/app --state-dir "$T/state" -- gh issue comment 3 --body x
+run env ENGSYS_SINGLETON_ROLE=maintain bash "$MNT/mnt-act.sh" guard --repo acme/app --state-dir "$T/state" -- gh issue comment 3 --body x
 rc_is "mnt-act.sh fences the maintain baton (none here) → exit 5" 5
 no_gh "  …nothing ran"
-run bash "$MNT/mnt-act.sh" merge --repo acme/app --state-dir "$T/state" --pr 1
+run env ENGSYS_SINGLETON_ROLE=maintain bash "$MNT/mnt-act.sh" merge --repo acme/app --state-dir "$T/state" --pr 1
 rc_is "mnt-act.sh never merges" 2
 
 rm -f "$T/state"/baton-*
@@ -90,7 +90,7 @@ rc_is "mm-watch.sh exits at once on a lost baton" 0
 no_gh "  …before polling anything"
 has "  …and tells the Monitor (BATON_LOST from the marker, engsys#87)" "BATON_LOST merge lost"
 lost maintain
-run bash "$MNT/mnt-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1
+run env ENGSYS_SINGLETON_ROLE=maintain bash "$MNT/mnt-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1
 rc_is "mnt-watch.sh too" 0
 no_gh "  …before polling anything"
 has "  …BATON_LOST maintain" "BATON_LOST maintain lost"

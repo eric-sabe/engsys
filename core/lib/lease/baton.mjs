@@ -141,6 +141,28 @@ export function hostSlug(raw) {
 }
 
 /** The holder address for this session: `<FLEET_ID or host>:<session>`. Throws LeaseUsageError. */
+/**
+ * A fleet-launched session (the launcher set ENGSYS_SESSION and ENGSYS_SESSION_RUN) may take, renew or
+ * act on a monster baton only when the launcher armed it for that role (ENGSYS_SINGLETON_ROLE) and, under
+ * FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised, only on the fleet's Claude config dir. A session started by
+ * hand (no ENGSYS_SESSION_RUN; the operator passes --session) is not affected. This is defence in depth,
+ * not a boundary: an interactive fleet session holds the App token outside the singleton-write guard.
+ * → null when allowed, else the refusal text.
+ */
+export const GATED_OPS = ['startup', 'renew', 'fence', 'merge', 'guard', 'keepalive'];
+export function launchedSessionGate({ env = process.env, role, op }) {
+  if (!GATED_OPS.includes(op)) return null;
+  if (!env.ENGSYS_SESSION || !env.ENGSYS_SESSION_RUN) return null;
+  const how = 'To run a monster by hand, start it in a session the fleet did not launch (or relaunch it with `fleet launch <name>`), and pass --session <name>.';
+  if (env.ENGSYS_SINGLETON_ROLE !== role) {
+    return `this fleet session (${env.ENGSYS_SESSION}) was not launched as the ${role} monster (ENGSYS_SINGLETON_ROLE=${env.ENGSYS_SINGLETON_ROLE || 'unset'}), so it may not hold the ${role} baton. ${how}`;
+  }
+  if (env.FLEET_CLAUDE_CONFIG_DIR_SCOPE === 'supervised' && env.FLEET_CLAUDE_CONFIG_DIR && env.CLAUDE_CONFIG_DIR !== env.FLEET_CLAUDE_CONFIG_DIR) {
+    return `this fleet session (${env.ENGSYS_SESSION}) is not on the fleet's Claude config dir (FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised), so it may not hold the ${role} baton. ${how}`;
+  }
+  return null;
+}
+
 export function holderFor({ env = process.env, session, hostname = osHostname() } = {}) {
   const name = session || env.ENGSYS_SESSION;
   if (!name) throw new LeaseUsageError("no session name: pass --session <name>, or run inside a launched session (ENGSYS_SESSION)");
@@ -1614,6 +1636,12 @@ export async function main(argv, deps = {}) {
   try {
     if (!flags.repo || !REPO_PATTERN.test(flags.repo)) throw new LeaseUsageError("--repo owner/repo is required");
     if (!ROLES.includes(flags.role)) throw new LeaseUsageError(`--role must be one of ${ROLES.join(", ")}`);
+    const refusal = launchedSessionGate({ env, role: flags.role, op });
+    if (refusal) {
+      err.write(`baton: refused: ${refusal}\n`);
+      emit({ ok: false, code: "not_armed", reason: refusal });
+      return EXIT.REFUSED;
+    }
     const { holder } = holderFor({ env, session: flags.session, hostname: deps.hostname ?? osHostname() });
     const stateDir = flags["state-dir"] ? resolve(cwd, flags["state-dir"]) : null;
     if (op !== "supervise" && op !== "revoke" && !stateDir) throw new LeaseUsageError(`${op} needs --state-dir`);
