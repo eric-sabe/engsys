@@ -1517,8 +1517,11 @@ const isMain = (() => {
   try { return fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url)); } catch { return false; }
 })();
 if (isMain) {
-  run(process.argv.slice(2)).then((code) => process.exit(code), (e) => {
+  // Exit only once stdout has drained: process.exit() right after a big write to a pipe (the `$(...)` in
+  // verify.sh) drops the tail on a loaded host, losing the summary/fingerprint lines the alert needs (engsys#198).
+  const finish = (code) => process.stdout.write('', () => process.exit(code));
+  run(process.argv.slice(2)).then(finish, (e) => {
     process.stdout.write(`verify: not verified: internal error (${e && e.message})\n`);
-    process.exit(3);
+    finish(3);
   });
 }
