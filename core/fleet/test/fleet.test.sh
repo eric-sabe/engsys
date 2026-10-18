@@ -844,6 +844,9 @@ has "sync: reports the fleet dir as logged in through the token" "$OUT" "claude 
 eq "…never asked claude auth status of the fleet dir" "$(grep "^auth status" "$FAKE/claude.tok" | grep -c "CFG=$FCFG" || true)" 0
 eq "…the fleet dir's calls all ran with the token" "$(grep "CFG=$FCFG" "$FAKE/claude.tok" | grep -vc 'tok=sentinel' || true)" 0
 eq "…and ~/.claude's calls never did" "$(grep 'CFG=unset' "$FAKE/claude.tok" | grep -vc 'tok=none' || true)" 0
+: >"$FAKE/claude.tok"; CLAUDE_CODE_OAUTH_TOKEN=inherited-from-a-session run fleet sync --check
+eq "…even when the caller had a token of its own (a fleet command run inside a session)" "$(grep -vc 'tok=sentinel\|tok=none' "$FAKE/claude.tok" || true)" 0
+eq "…and ~/.claude's calls still carry none" "$(grep 'CFG=unset' "$FAKE/claude.tok" | grep -vc 'tok=none' || true)" 0
 no_sentinel "…and the token string is nowhere (sync)"
 rm -f "$FAKE/probe-ok" "$STATE/token-probe.ok"; run fleet sync --check
 has "a rejected token: sync says the fleet dir is NOT logged in" "$OUT" "NOT logged in"

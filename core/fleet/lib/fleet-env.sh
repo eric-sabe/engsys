@@ -285,6 +285,9 @@ if [ -n "${FLEET_CLAUDE_OAUTH_TOKEN_FILE:-}" ]; then
   case "$FLEET_CLAUDE_OAUTH_TOKEN_FILE" in /*) ;; *) fleet_die "FLEET_CLAUDE_OAUTH_TOKEN_FILE must be an absolute path (or start with ~), got '$FLEET_CLAUDE_OAUTH_TOKEN_FILE'" ;; esac
   [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] || fleet_die "FLEET_CLAUDE_OAUTH_TOKEN_FILE needs FLEET_CLAUDE_CONFIG_DIR: the token belongs to the fleet's own Claude config dir (fleet guide § 6.1)"
   export FLEET_CLAUDE_OAUTH_TOKEN_FILE
+  # A token inherited from the caller (a fleet command run inside a session that has it) must not reach any claude
+  # call: only fleet_with_token and fleet_token_login_ok supply it, for the fleet's config dir alone.
+  unset CLAUDE_CODE_OAUTH_TOKEN
 else
   unset FLEET_CLAUDE_OAUTH_TOKEN_FILE
 fi
