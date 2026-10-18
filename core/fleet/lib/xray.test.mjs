@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   runXray,
+  resolveContext,
   formatXrayReport,
   parseTranscriptSummary,
   parseAgentsTsv,
@@ -22,9 +23,6 @@ const ENGSYS_DIR = path.resolve(__dirname, '..', '..', '..');
  */
 function hermeticEnv(tmpDir, extra = {}) {
   const home = path.join(tmpDir, 'home');
-  // Meta-check (engsys#178): the fixture home must never be the process's real home, or a test would read the
-  // host's own Claude settings and pass or fail by machine (the test below poisons the real home to prove it).
-  assert.notEqual(path.resolve(home), path.resolve(os.homedir()), 'hermeticEnv must not use the real home');
   const logDir = path.join(tmpDir, 'logs');
   fs.mkdirSync(home, { recursive: true });
   fs.mkdirSync(logDir, { recursive: true });
@@ -370,11 +368,14 @@ test('runXray never reads the process\'s real home: a host with its own Claude s
   process.env.HOME = realHome; // os.homedir() now resolves to the poisoned home
   try {
     assert.equal(os.homedir(), realHome, 'precondition: the poisoned home is what the process sees');
+    const env = hermeticEnv(tmpDir, { ENGSYS_HOOK_TELEMETRY_FILE: path.join(tmpDir, 'h.jsonl'), ENGSYS_MEMORY_CACHE_DIR: path.join(tmpDir, 'mem-cache') });
+    assert.notEqual(path.resolve(env.HOME), path.resolve(os.homedir()), 'the env handed to runXray carries the fixture HOME, not the real one');
+    assert.equal(resolveContext({ env, engsysDir: ENGSYS_DIR }).home, env.HOME, 'resolveContext resolves the fixture home, not os.homedir()');
     const report = await runXray({
       engsysDir: ENGSYS_DIR,
       pinDir: path.join(tmpDir, 'nonexistent-pin'),
       skipSelfTest: true,
-      env: hermeticEnv(tmpDir, { ENGSYS_HOOK_TELEMETRY_FILE: path.join(tmpDir, 'h.jsonl'), ENGSYS_MEMORY_CACHE_DIR: path.join(tmpDir, 'mem-cache') }),
+      env,
     });
     const text = JSON.stringify(report);
     assert.ok(!text.includes(realHome), `the report mentions the process's real home:\n${text.split(realHome).length - 1} occurrence(s)`);

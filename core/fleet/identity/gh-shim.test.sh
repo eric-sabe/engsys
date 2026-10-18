@@ -122,6 +122,11 @@ SH
 chmod +x "$T/ckOld/identity/bin/gh"; cp "$HERE/gh-app-token.mjs" "$T/ckOld/identity/gh-app-token.mjs"
 mixed() { (cd "$T/norepo" && env -u GH_APP_OWNER -u ENGSYS_GH_SHIM_HOPS PATH="$T/ckOld/identity/bin:$T/ckA/identity/bin:$T/realbin:$PATH" GH_APP_ENV_FILE="$T/gh-app.env" "$1" "${@:2}"); }
 check "190: new shim skips an old (unmarked) shim on PATH" tok_default "$(mixed "$T/ckA/identity/bin/gh" pr list)"
+mixed_rev() { (cd "$T/norepo" && env -u GH_APP_OWNER -u ENGSYS_GH_SHIM_HOPS PATH="$T/ckA/identity/bin:$T/ckOld/identity/bin:$T/realbin:$PATH" GH_APP_ENV_FILE="$T/gh-app.env" "$1" "${@:2}"); }
+check "190: ...and in the reverse PATH order" tok_default "$(mixed_rev "$T/ckA/identity/bin/gh" pr list)"
+# An old shim recognised only by its error-message prefix (header comment edited away).
+printf '#!/usr/bin/env bash\necho "gh (fleet shim): real gh not found on PATH" >&2; exit 99\n' >"$T/ckOld/identity/bin/gh"
+check "190: an old shim matched by its 'gh (fleet shim):' message prefix is skipped too" tok_default "$(mixed_rev "$T/ckA/identity/bin/gh" pr list)"
 
 if [ "$FAILS" -gt 0 ]; then echo "gh-shim.test.sh: $FAILS failure(s)" >&2; exit 1; fi
 echo "gh-shim.test.sh: all passed"

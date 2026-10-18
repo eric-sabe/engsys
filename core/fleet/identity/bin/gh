@@ -19,9 +19,9 @@ SHIM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 # First `gh` on PATH that is not a copy of this shim. A candidate is a shim copy when it is this
 # script's own directory OR its first 4 KB carries the identity marker, so two checkouts' copies on PATH
 # never resolve each other as "the real gh" and exec in a loop (engsys#190).
-# The second pattern is the header of shims from before the marker existed, so a mixed-version pair on PATH
-# resolves too.
-is_shim_copy() { head -c 4096 "$1" 2>/dev/null | grep -aqE 'engsys-fleet-gh-shim:|^# gh \(fleet shim\) '; }
+# The other patterns are the header and the error-message prefix of shims from before the marker existed, so a
+# mixed-version pair on PATH resolves too, in either order.
+is_shim_copy() { head -c 4096 "$1" 2>/dev/null | grep -aqE 'engsys-fleet-gh-shim:|^# gh \(fleet shim\) |gh \(fleet shim\):'; }
 REAL_GH=""
 IFS=: read -r -a _dirs <<<"${PATH}"
 for d in "${_dirs[@]}"; do

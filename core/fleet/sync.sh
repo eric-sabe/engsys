@@ -352,9 +352,10 @@ plugin_cli() { (cd "$SYNC_TMP/cwd" && fleet_claude plugin "$@"); }
 marketplace_remove() {
   local m="$1" err rc=0
   err="$(plugin_cli marketplace remove "$m" --scope user 2>&1 >/dev/null)" || rc=$?
-  [ "$rc" = 0 ] && return 0
+  if [ "$rc" = 0 ]; then [ -z "$err" ] || printf '%s\n' "$err" >&2; return 0; fi   # warnings stay visible
   case "$err" in
     *"not declared in user settings"*)
+      printf '%s\n' "$err" >&2   # the refusal itself, then the retry below
       # Unscoped remove also uninstalls the marketplace's plugins at project scope. Refuse when another project
       # (anything but PIN_DIR itself, whose installs sync reinstalls) has one, as seen by the config dir being synced.
       local others pin_real
