@@ -558,6 +558,41 @@ expect "  …the heartbeat's machine field stays ISO UTC" "^heartbeat .*auth: ex
 expect "  …its people line shows the operator's clock" "^heartbeat .*since [A-Z][a-z][a-z] [0-9]*, [0-9]*:[0-9][0-9] [AP]M E[SD]T\. Run"
 rm -f "$T"/pane-* "$T"/capture-*
 
+# engsys#207: the 2026-10-18 15:01Z false resume. The hold started on "Login expired"; later the e2e pane's newest message
+# was a Remote Control notice (below, verbatim). It was classed as a normal answer, the hold ended, and the login was still dead.
+RC_LINE="⏺ Remote Control disconnected — OAuth token unavailable — run /login to restore Remote Control"
+authconf; reset; rm -f "$T"/pane-* "$T"/capture-* "$T/probe-ok"; ledger 1 "ok"; ledger2 90 "ok"; rpane
+wpane acme-w "$(cat "$T/fixture-login-expired")"; run
+expect "207: a login error holds" "^notify --level action"
+wpane acme-w "$RC_LINE"; run
+expect "207: the Remote Control disconnect line keeps the hold (no resolve)" "!--resolve"
+expect "  …nothing relaunched" "!^launch"
+for line in "⏺ OAuth token refresh failed" "⏺ Signed out of Claude" "⏺ Failed to refresh OAuth token: another Claude Code process is refreshing it" "⏺ OAuth session expired and could not be refreshed" "⏺ Remote Control disconnected — OAuth token unavailable"; do
+  authcase "207: $line" hold "$line"
+done
+# a notice-only pane is not a resume: only the test request ends the hold
+authconf; reset; rm -f "$T"/pane-* "$T"/capture-* "$T/probe-ok"; ledger 1 "ok"; ledger2 90 "ok"; rpane
+wpane acme-w "$(cat "$T/fixture-login-expired")"; run
+wpane acme-w "⏺ Heads up: a Claude Code notice that is not a login error"; run
+expect "207: a pane that shows a notice, not a login error, does not end the hold" "!--resolve"
+expect "  …the held session is still not relaunched" "!^launch"
+touch "$T/probe-ok"; run
+expect "207: a test request that succeeds ends it" "^notify --level info --incident claude-auth-expired --resolve"
+expect "  …and the held session is relaunched once" "^launch acme-rel"
+rm -f "$T/probe-ok"
+# a session escalated before/during the hold is retried once when it ends (no operator fleet restart)
+authconf; reset; rm -f "$T"/pane-* "$T"/capture-* "$T/probe-ok"; ledger 1 "ok"; ledger2 90 "ok"
+echo 2.1.285 >"$T/pane-acme-rel"; : >"$T/capture-acme-rel"; mkdir -p "$SLOG"; touch "$SLOG/acme-rel.escalated"
+wpane acme-w "$(cat "$T/fixture-login-expired")"; run
+expect "207: an alive, stale, idle session is held (not commented on) while the login is dead" "!comment 2"
+expect "  …and not killed" "!^kill"
+touch "$T/probe-ok"; run
+expect_n "207: the login works again → the escalated session is relaunched once" "^launch acme-rel" 1
+expect "  …through a kill of its idle window" "^kill acme-rel"
+[ ! -f "$SLOG/acme-rel.escalated" ] && echo latch-cleared >>"$T/actions"
+expect "  …and its escalation latch is cleared" "^latch-cleared"
+rm -f "$T"/pane-* "$T"/capture-* "$T/probe-ok"
+
 # CT-14: HARNESS=copilot in launch-agent-sessions.sh and fleet-supervisor.sh auth_probe
 cat >"$T/bin/copilot" <<'SH'
 #!/usr/bin/env bash

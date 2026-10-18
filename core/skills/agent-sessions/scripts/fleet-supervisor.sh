@@ -55,8 +55,9 @@
 #                           would have made is logged and its session listed (auth.held); the stale-but-
 #                           alive ledger comment waits too (the alert already says why). The status-issue
 #                           heartbeat carries `auth: expired since <ISO>` plus a line for people.
-#   held, then a pane that showed the error answers normally (or shows `⎿ Login successful`), or the test
-#                           request succeeds → the hold ends, the alert is resolved, the panes still
+#   held, then the test request succeeds (with AUTH_PROBE=off: a pane that showed the error answers normally;
+#                           with it on a pane's reply is not enough, engsys#207: a Remote Control notice once
+#                           ended a hold while the credential was still empty) → the hold ends, the alert is resolved, the panes still
 #                           showing the old error are acknowledged, and the table runs as usual on the
 #                           same tick, so each held session gets its one relaunch through the normal path.
 #
@@ -346,6 +347,12 @@ CLAUDE_AUTH_ERRORS=(
   'Please run /login · API Error: 401'
   'Failed to authenticate\. API Error: 401'
   'Failed to authenticate with GitHub Copilot'
+  'Remote Control disconnected — OAuth token unavailable'
+  'Remote Control disconnected — .*run /login to restore Remote Control'
+  'OAuth token refresh failed'
+  'Signed out of Claude'
+  'Failed to refresh OAuth token: another Claude Code process is refreshing it'
+  'OAuth session expired and could not be refreshed'
   'No Copilot subscription found'
 )
 AUTH_RE="^($(IFS='|'; printf '%s' "${CLAUDE_AUTH_ERRORS[*]}"))"
@@ -925,7 +932,10 @@ fi
 auth_scan
 if [ -f "$AUTH_EXPIRED" ]; then
   AUTH_HOW=""
-  if [ -f "$AUTH_SEEN" ] && [ -n "$AUTH_ANSWERED" ]; then
+  # A pane that answered is not proof the login works (engsys#207: a Remote Control notice line ended a hold while the
+  # credential was still empty). With the test request on, only the test request ends a hold; with it off a
+  # pane's reply after the error is all the evidence there is.
+  if [ "$AUTH_PROBE" = off ] && [ -f "$AUTH_SEEN" ] && [ -n "$AUTH_ANSWERED" ]; then
     while IFS= read -r p; do
       [ -n "$p" ] && grep -Fxq "$p" <<<"$AUTH_ANSWERED" && { AUTH_HOW="\`${p%%|*}\` answered normally after the error"; break; }
     done <"$AUTH_SEEN"
@@ -1074,11 +1084,16 @@ for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
       # monster idle at its prompt whose baton is forfeited (header). While the login is held, neither:
       # the relaunch waits, and so does the ledger comment (the login alert already says why).
       if [ "$AUTH_HELD" = 1 ]; then
-        if [ -n "$role" ] && ! pane_busy "$name"; then auth_hold "$name" "heartbeat stale (last: ${HB_TS:-never}), session idle at its prompt"
+        # idle at its prompt: listed, so the hold's end gives it its one relaunch even when it was escalated before (engsys#207)
+        if ! pane_busy "$name"; then auth_hold "$name" "heartbeat stale (last: ${HB_TS:-never}), session idle at its prompt"
         else log "$name: STALE+ALIVE — ledger comment deferred while Claude Code's login is expired"; fi
       elif [ -n "$role" ] && ! pane_busy "$name" && singleton_allows "$name" "$REPO_SLUG" "$role" "$ledger"; then
         rm -f "$LATCH"
         relaunch "$name" "$ledger" "$REPO_SLUG" "heartbeat stale (last: ${HB_TS:-never}), session idle at its prompt, $role baton forfeited ($BATON_WHY)"
+      elif [ -z "$role" ] && ! pane_busy "$name" && [ -n "$AUTH_RESUMED" ] && grep -Fxq "$name" <<<"$AUTH_RESUMED"; then
+        # held while the login was expired, stale and idle: one relaunch now that it works, escalated before or not (engsys#207)
+        rm -f "$LATCH"
+        relaunch "$name" "$ledger" "$REPO_SLUG" "heartbeat stale (last: ${HB_TS:-never}), session idle at its prompt"
       elif [ ! -f "$LATCH" ]; then
         gh issue comment "$ledger" -R "$REPO_SLUG" --body "⚠️ fleet-supervisor: heartbeat stale (last: $(human_text "${HB_TS:-never}")) but the \`$name\` process is still alive. Not touching it — a live process is never killed on staleness alone (probe-then-classify is a judgment call, not a script's). Needs a probe: operator or maintenance watchdog." >/dev/null \
           && touch "$LATCH" && log "$name: STALE+ALIVE — escalated on ledger $REPO_SLUG#$ledger"
