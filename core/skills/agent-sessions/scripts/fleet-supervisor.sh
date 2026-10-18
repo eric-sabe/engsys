@@ -515,11 +515,16 @@ LIMIT_PROMPT="Your Claude usage limit has reset. Carry on where you stopped: re-
 # `resets Oct 20, 9:30pm (UTC)`). No zone, no clock time or an unknown zone is unreadable: guessing would resume a
 # monster hours early or never.
 limit_reset_epoch() {
-  local tz when re mon day h m ap y now ep mon_c ap_c time_s
-  tz="$(sed -n 's/.*[Rr]esets[^(]*(\([A-Za-z0-9_+/-]*\)).*/\1/p' <<<"$1" | head -n 1)"
-  when="$(sed -n 's/.*[Rr]esets \([^(]*\)(.*/\1/p' <<<"$1" | head -n 1 | tr 'A-Z' 'a-z' | sed 's/^ *//; s/ *$//')"
-  [ -n "$tz" ] && [ -n "$when" ] || return 1
-  case "$tz" in UTC | GMT) ;; *) [ -e "/usr/share/zoneinfo/$tz" ] || return 1 ;; esac
+  local tail tz when re mon day h m ap y now ep mon_c ap_c time_s
+  grep -qi 'reset' <<<"$1" || return 1
+  # what follows the last "reset" / "resets" / "reset at": `9pm (America/New_York)`, `Oct 20, 9:30pm (UTC)`, `5am`
+  tail="$(sed -E 's/.*[Rr]esets? (at )?//' <<<"$1" | head -n 1)"
+  tz="$(sed -n 's/^[^(]*(\([A-Za-z0-9_+/-]*\)).*$/\1/p' <<<"$tail" | head -n 1)"
+  when="$(sed -E 's/\(.*$//; s/[ .]+$//; s/^ +//' <<<"$tail" | tr 'A-Z' 'a-z')"
+  [ -n "$when" ] || return 1
+  # no zone in the message = the host's local time
+  if [ -z "$tz" ]; then tz=LOCAL
+  else case "$tz" in UTC | GMT) ;; *) [ -e "/usr/share/zoneinfo/$tz" ] || return 1 ;; esac; fi
   re='^(([a-z]+) ([0-9]{1,2}),? (at )?)?([0-9]{1,2})(:([0-9]{2}))?[[:space:]]*(am|pm)$'
   [[ "$when" =~ $re ]] || return 1
   mon="${BASH_REMATCH[2]}" day="${BASH_REMATCH[3]}" h="${BASH_REMATCH[5]}" m="${BASH_REMATCH[7]:-00}" ap="${BASH_REMATCH[8]}"
@@ -529,29 +534,35 @@ limit_reset_epoch() {
   now="$(date +%s)"
   if [ -n "$mon" ]; then
     mon_c="$(printf '%s' "${mon:0:1}" | tr 'a-z' 'A-Z')${mon:1:2}"
-    y="$(TZ="$tz" date +%Y)"
+    y="$(limit_tz_date "$tz" +%Y)"
     ep="$(limit_tz_epoch "$tz" "$y" "$mon_c" "$((10#$day))" "$time_s")" || return 1
     # a date already well behind us belongs to next year (a December limit read in January)
     if [ "$ep" -lt $((now - 172800)) ]; then ep="$(limit_tz_epoch "$tz" "$((y + 1))" "$mon_c" "$((10#$day))" "$time_s")" || return 1; fi
   else
-    read -r y mon_c day <<<"$(TZ="$tz" date '+%Y %b %d')"
+    read -r y mon_c day <<<"$(limit_tz_date "$tz" '+%Y %b %d')"
     ep="$(limit_tz_epoch "$tz" "$y" "$mon_c" "$((10#$day))" "$time_s")" || return 1
-    # a clock time with no date is the day (yesterday, today or tomorrow in the message's zone) nearest to now: one that
-    # passed minutes ago, even across midnight, is due now; 2am read at 11pm is tomorrow's
-    local best="$ep" cand d
-    for cand in $((ep - 86400)) $((ep + 86400)); do
-      d=$((cand - now)); [ "$d" -ge 0 ] || d=$((-d))
-      if [ "$d" -lt $(( best > now ? best - now : now - best )) ]; then best="$cand"; fi
-    done
-    ep="$best"
+    # A clock time with no date is in the future, unless it passed within the last hour (the supervisor was a tick late,
+    # or the message was read just after midnight): then it is due now. A time that passed longer ago is tomorrow's, and
+    # one still ahead, however far, is today's.
+    local yday=$((ep - 86400))
+    if [ "$now" -ge "$yday" ] && [ $((now - yday)) -le 3600 ]; then ep="$yday"
+    elif [ "$ep" -gt "$now" ]; then :
+    elif [ $((now - ep)) -le 3600 ]; then :
+    else ep=$((ep + 86400)); fi
   fi
   # a reset more than 8 days out is a misread, not a weekly limit
   [ "$ep" -le $((now + 691200)) ] || return 1
   printf '%s' "$ep"
 }
-limit_tz_epoch() { # limit_tz_epoch <zone> <year> <Mon> <day> <H:MM AM> → epoch (BSD date first, GNU fallback)
-  TZ="$1" date -j -f '%Y %b %d %I:%M %p' "$2 $3 $4 $5" +%s 2>/dev/null \
-    || TZ="$1" date -d "$3 $4 $2 $5" +%s 2>/dev/null
+limit_tz_date() { # limit_tz_date <zone|LOCAL> <date args> → date in that zone
+  if [ "$1" = LOCAL ]; then shift; date "$@"; else local z="$1"; shift; TZ="$z" date "$@"; fi
+}
+limit_tz_epoch() { # limit_tz_epoch <zone|LOCAL> <year> <Mon> <day> <H:MM AM> → epoch (BSD date first, GNU fallback)
+  if [ "$1" = LOCAL ]; then
+    date -j -f '%Y %b %d %I:%M %p' "$2 $3 $4 $5" +%s 2>/dev/null || date -d "$3 $4 $2 $5" +%s 2>/dev/null
+  else
+    TZ="$1" date -j -f '%Y %b %d %I:%M %p' "$2 $3 $4 $5" +%s 2>/dev/null || TZ="$1" date -d "$3 $4 $2 $5" +%s 2>/dev/null
+  fi
 }
 limit_hold_get() { sed -n "s/^$2=//p" "$STATE_DIR/$1.limit-hold" 2>/dev/null | head -n 1; }
 limit_hold_drop() { rm -f "${STATE_DIR:?}/${1:?}.limit-hold"; }

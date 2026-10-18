@@ -842,13 +842,28 @@ expect "pane answers normally before the reset → hold dropped, no re-prompt" "
 expect "  …no re-prompt" "!^sendkeys"
 
 # unreadable reset time: alert-only, as before (the stale heartbeat is escalated normally)
-for bad in "⏺ You've hit your limit · resets soon (UTC)" "⏺ You've hit your limit · resets 9pm" "⏺ You've hit your limit · resets 9pm (Mars/Olympus)" "⏺ You've hit your limit · resets 25pm (UTC)"; do
+for bad in "⏺ You've hit your limit · resets soon (UTC)" "⏺ You've hit your limit · resets 9pm (Mars/Olympus)" "⏺ You've hit your limit · resets 25pm (UTC)"; do
   hconf; qreset; launched_by_sup acme-rel; ledger2 90 "ok"; live acme-rel "$bad"; run
   hold_gone acme-rel
   expect "unreadable reset ($bad) → no hold" "^nohold:acme-rel"
   expect "  …still alerted" "^notify --level alert --incident seat-limit"
   expect "  …and the stale session escalated as before" "comment 2: .*heartbeat stale"
 done
+
+# every wording of the limit line parses and holds: session, weekly (no zone: the host's local time), Opus, the
+# curly apostrophe, and "reset at"
+for line in "⏺ You've hit your limit · resets 9pm (America/New_York)" "⏺ You've hit your weekly limit · resets 5am" "⏺ You've hit your Opus limit · resets 3pm (UTC)" "⏺ You’ve hit your limit · resets 9pm (UTC)" "⏺ Claude usage limit reached. Your limit will reset at 5pm (UTC)"; do
+  hconf; qreset; launched_by_sup acme-rel; ledger2 90 "ok"; live acme-rel "$line"; run
+  hold_has acme-rel "resume_at="
+  expect "limit line parses and holds: $line" "^hold:acme-rel:resume_at"
+  expect "  …alerted too" "^notify --level alert --incident seat-limit"
+done
+# a clock-only reset 13 h ahead is tomorrow-ish, not "passed": held until then (no re-prompt into the limit)
+hconf "LIMIT_RESUME_MARGIN_SEC=0"; qreset; launched_by_sup acme-rel; ledger2 90 "ok"; live acme-rel "⏺ You've hit your limit · $(lclock 780)"; run
+resume_at="$(sed -n 's/^resume_at=//p' "$SLOG/acme-rel.limit-hold")"; d=$(( resume_at - $(date +%s) ))
+if [ "$d" -ge 42000 ] && [ "$d" -le 48000 ]; then echo "held-13h" >>"$T/actions"; fi
+expect "a clock-only reset 13 h ahead is held until then, not read as past" "^held-13h"
+expect "  …and not re-prompted" "!^sendkeys"
 
 # LIMIT_RESUME=off: alert only
 hconf "LIMIT_RESUME=off"; qreset; launched_by_sup acme-rel; ledger2 90 "ok"; live acme-rel "⏺ You've hit your limit · $(lreset 90)"; run
