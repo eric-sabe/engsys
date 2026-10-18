@@ -22,7 +22,7 @@ import { join, dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { createPool, loadPool, normalizePool, PoolConfigError, renderTemplate, slotEnv } from "./pool.mjs";
-import { LeaseUsageError } from "./durable-lease.mjs";
+import { LeaseUsageError, createLeaseStore } from "./durable-lease.mjs";
 import { scrubbedGitEnv } from "../git-env.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -179,6 +179,32 @@ test("async request returns {queued, position, eta} then fires the injected nudg
   const claimed = pool.claim({ requestId: req.request_id, owner: "acme-agent-b" });
   assert.equal(claimed.state, "ready");
   assert.equal(claimed.slot_id, grant.slot_id);
+});
+
+test("the queue-lock wait is configurable: option and $POOL_QUEUE_LOCK_WAIT_MS (engsys#193)", (t) => {
+  const dir = tempStoreDir(t);
+  // Someone else holds the queue-mutation lock for the whole test.
+  const held = createLeaseStore({ store: dir, ownerPattern: STRICT }).acquire({ kind: FIXTURE.queueLockKind, owner: "acme-holder", ttlMinutes: 5 });
+  assert.equal(held.ok, true);
+  const waiter = { owner: "acme-merge", session: "acme-merge", mode: "blocking" };
+
+  const viaOption = createPool({ pool: FIXTURE, ownerPattern: STRICT, dir, queueLockWaitMs: 300, provision: () => {}, notifier: () => {} });
+  const t0 = Date.now();
+  assert.throws(() => viaOption.enqueue(waiter), /pool queue lock busy >0\.3s \(held by acme-holder\)/);
+  assert.ok(Date.now() - t0 >= 250, "it waited the configured time, not the 10s default");
+
+  const viaEnv = createPool({ pool: FIXTURE, ownerPattern: STRICT, dir, env: { ...process.env, POOL_QUEUE_LOCK_WAIT_MS: "400" }, provision: () => {}, notifier: () => {} });
+  assert.throws(() => viaEnv.enqueue(waiter), /pool queue lock busy >0\.4s/);
+
+  // The option wins over the env; a junk env value falls back to the default (not exercised: it would wait 10s).
+  const both = createPool({ pool: FIXTURE, ownerPattern: STRICT, dir, queueLockWaitMs: 200, env: { ...process.env, POOL_QUEUE_LOCK_WAIT_MS: "60000" }, provision: () => {}, notifier: () => {} });
+  assert.throws(() => both.enqueue(waiter), /busy >0\.2s/);
+
+  // Non-finite / junk values never make the wait unbounded: they fall back to the next source (here the env's 250ms).
+  for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, -5, "abc"]) {
+    const p = createPool({ pool: FIXTURE, ownerPattern: STRICT, dir, queueLockWaitMs: bad, env: { ...process.env, POOL_QUEUE_LOCK_WAIT_MS: "250" }, provision: () => {}, notifier: () => {} });
+    assert.throws(() => p.enqueue(waiter), /busy >0\.25s/, `queueLockWaitMs ${bad} falls back`);
+  }
 });
 
 test("blocking waiters never nudge; grants are FIFO-fair across modes", (t) => {

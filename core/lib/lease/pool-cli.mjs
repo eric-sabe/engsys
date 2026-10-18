@@ -42,7 +42,8 @@
 //   --provision-cmd CMD, --reset-cmd CMD, --health-cmd CMD, --nudge-cmd CMD
 // Env: LEASE_POOL_FILE (pool file), LEASE_STORE (default <git toplevel>/logs/leases), LEASE_OWNER_PATTERN,
 //      POOL_TTL_MINUTES, POOL_POLL_MS, POOL_WAITER_TIMEOUT_MS, POOL_PROVISION_CMD,
-//      POOL_RESET_CMD, POOL_HEALTH_CMD, POOL_NUDGE_CMD. Flags win over env, env over the pool
+//      POOL_RESET_CMD, POOL_HEALTH_CMD, POOL_NUDGE_CMD, POOL_QUEUE_LOCK_WAIT_MS (queue-lock wait, default 10000),
+//      LEASE_GUARD_WAIT_MS / LEASE_GUARD_STALE_MS (see lease-cli). Flags win over env, env over the pool
 //      file. Legacy aliases: E2E_LEASE_TTL_MINUTES, E2E_LEASE_POLL_MS,
 //      E2E_LEASE_WAITER_TIMEOUT_MS, E2E_LEASE_RESET_CMD (= provision), E2E_LEASE_NUDGE_CMD.
 //

@@ -231,6 +231,29 @@ test("a live guard makes callers wait; guardWaitMs timeout throws loudly", (t) =
   );
 });
 
+test("guard wait and staleness are configurable by env; options win (engsys#193)", (t) => {
+  const dir = tempStoreDir(t);
+  mkdirSync(join(dir, ".guard-k")); // fresh guard, never released
+  const viaEnv = createLeaseStore({ dir, env: { LEASE_GUARD_WAIT_MS: "150" } });
+  const t0 = Date.now();
+  assert.throws(() => viaEnv.acquire({ kind: "k", owner: "acme-e2e", ttlMinutes: 5 }), /busy for >150ms/);
+  assert.ok(Date.now() - t0 < 4_000, "the env wait replaced the 5s default");
+  const optWins = createLeaseStore({ dir, guardWaitMs: 120, env: { LEASE_GUARD_WAIT_MS: "60000" } });
+  assert.throws(() => optWins.acquire({ kind: "k", owner: "acme-e2e", ttlMinutes: 5 }), /busy for >120ms/);
+  // Infinity / NaN never make the wait unbounded: ignored, so the next source (here the env's 130ms) applies.
+  for (const bad of [Number.POSITIVE_INFINITY, Number.NaN]) {
+    const s2 = createLeaseStore({ dir, guardWaitMs: bad, env: { LEASE_GUARD_WAIT_MS: "130" } });
+    assert.throws(() => s2.acquire({ kind: "k", owner: "acme-e2e", ttlMinutes: 5 }), /busy for >130ms/);
+  }
+  const envInf = createLeaseStore({ dir, guardWaitMs: 140, env: { LEASE_GUARD_WAIT_MS: "Infinity" } });
+  assert.throws(() => envInf.acquire({ kind: "k", owner: "acme-e2e", ttlMinutes: 5 }), /busy for >140ms/);
+  // LEASE_GUARD_STALE_MS makes an abandoned guard reapable sooner than the 60s default.
+  const old = (Date.now() - 5_000) / 1000;
+  utimesSync(join(dir, ".guard-k"), old, old);
+  const stale = createLeaseStore({ dir, env: { LEASE_GUARD_STALE_MS: "1000" } });
+  assert.equal(stale.acquire({ kind: "k", owner: "acme-e2e", ttlMinutes: 5 }).ok, true);
+});
+
 test("a .json file whose stem is not a lease kind never breaks list/reconcile and is never touched", (t) => {
   const dir = tempStoreDir(t);
   const store = createLeaseStore({ dir });

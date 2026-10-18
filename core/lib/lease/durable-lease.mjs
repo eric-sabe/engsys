@@ -222,9 +222,11 @@ function validateTtl(ttlMinutes) {
  * @param {() => number} [opts.now] clock (ms since epoch) — injectable for tests
  * @param {object} [opts.env] environment to read LEASE_STORE / LEASE_OWNER_PATTERN from (default process.env)
  * @param {number} [opts.guardWaitMs] max time to wait for the guard critical section
+ *   (option > `$LEASE_GUARD_WAIT_MS` > 5s; scale it up in tests on a loaded host, engsys#193)
  * @param {number} [opts.guardStaleMs] guard age past which a crashed guard is reaped —
  *   keep it far above any plausible hold time (holds are single-digit milliseconds;
- *   the default leaves 4 orders of magnitude of headroom for a suspended process)
+ *   the default leaves 4 orders of magnitude of headroom for a suspended process; option >
+ *   `$LEASE_GUARD_STALE_MS` > 60s)
  */
 export function createLeaseStore({
   store: storeOpt,
@@ -232,9 +234,13 @@ export function createLeaseStore({
   ownerPattern: ownerPatternOpt,
   env = process.env,
   now = Date.now,
-  guardWaitMs = 5_000,
-  guardStaleMs = 60_000,
+  guardWaitMs: guardWaitOpt,
+  guardStaleMs: guardStaleOpt,
 } = {}) {
+  // A non-finite value (NaN, Infinity) would make the wait unbounded: ignore it. guardWaitMs may be 0 (no wait); the stale age and env values must be > 0.
+  const finiteMs = (v, min) => (v != null && v !== '' && Number.isFinite(Number(v)) && Number(v) >= min ? Number(v) : null);
+  const guardWaitMs = finiteMs(guardWaitOpt, 0) ?? finiteMs(env.LEASE_GUARD_WAIT_MS, 1) ?? 5_000;
+  const guardStaleMs = finiteMs(guardStaleOpt, 1) ?? finiteMs(env.LEASE_GUARD_STALE_MS, 1) ?? 60_000;
   const dir = resolve(storeOpt ?? dirOpt ?? (env.LEASE_STORE || defaultStoreDir()));
   const ownerPattern = resolveOwnerPattern(ownerPatternOpt ?? env.LEASE_OWNER_PATTERN);
 
