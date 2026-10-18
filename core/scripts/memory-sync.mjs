@@ -1310,7 +1310,10 @@ export async function fetchRepoPrsAndIssues(
   }
 
   const complete = ok && (isInit || (!hitPrCap && !hitIssueCap));
-  return { prs, issues, ok, complete };
+  // `capped`: the fetch itself succeeded but a delta page cap cut it short (a busy repo). Unlike `ok: false`
+  // (a failed call, which is retried over the same window), this is a volume condition (engsys#189).
+  const capped = ok && !isInit && (hitPrCap || hitIssueCap);
+  return { prs, issues, ok, complete, capped };
 }
 
 /**
@@ -1361,6 +1364,8 @@ export async function runMemorySync({
   let resolvedPrNodes = prNodes;
   let resolvedIssueNodes = issueNodes;
   let ghFetchComplete = true;
+  let ghFetchCapped = false;
+  let ghFetched = false; // a GitHub fetch actually ran (not publish mode, not injected nodes)
   if (resolvedPrNodes !== null || resolvedIssueNodes !== null) {
     resolvedPrNodes = resolvedPrNodes ?? [];
     resolvedIssueNodes = resolvedIssueNodes ?? [];
@@ -1373,6 +1378,8 @@ export async function runMemorySync({
     resolvedPrNodes = fetched.prs;
     resolvedIssueNodes = fetched.issues;
     ghFetchComplete = Boolean(fetched.complete);
+    ghFetchCapped = Boolean(fetched.capped);
+    ghFetched = true;
   }
 
   const ghEvents = [];
@@ -1408,8 +1415,18 @@ export async function runMemorySync({
       nextCommitCursor = String(ev.updated_at);
     }
   }
+  // The GraphQL connections are newest-first. A fetch that hit the delta page cap ingested the newest N
+  // items, so its cursor still moves forward to the newest of them; holding it would make every later
+  // heartbeat re-query the same ever-growing window and hit the cap again, forever (engsys#189). That is
+  // the same "newest N" truncation --init accepts: the items between the old cursor and the oldest ingested
+  // one are skipped, so a capped run is counted (ghCappedStreak); `main` warns on stderr from the 3rd, and the
+  // heartbeat path (monster_memory_tail_sync) forwards that line and keeps it in <state>/memory-sync-capped.warn. A failed
+  // fetch (ok: false) keeps the cursor: nothing was lost, and the retry covers the same window.
+  const ghAdvance = ghFetchComplete || ghFetchCapped;
+  const prevCappedStreak = Number.isInteger(repoCursor.ghCappedStreak) ? repoCursor.ghCappedStreak : 0;
+  const ghCappedStreak = ghFetchCapped ? prevCappedStreak + 1 : ghFetched && ghFetchComplete ? 0 : prevCappedStreak;
   let nextGhCursor = prevGhCursor;
-  if (ghFetchComplete) {
+  if (ghAdvance) {
     for (const ev of ghEvents) {
       if (ev.updated_at && String(ev.updated_at) > nextGhCursor) {
         nextGhCursor = String(ev.updated_at);
@@ -1417,12 +1434,13 @@ export async function runMemorySync({
     }
   }
   const effectiveUpdatedAt = hasGhRepo
-    ? nextGhCursor || (ghFetchComplete ? nextCommitCursor || nowIso : prevGhCursor)
+    ? nextGhCursor || (ghAdvance ? nextCommitCursor || nowIso : prevGhCursor)
     : nextCommitCursor || prevCommitCursor || nowIso;
 
   cursors[repo || '_local'] = {
     updatedAt: effectiveUpdatedAt,
     ghUpdatedAt: nextGhCursor || null,
+    ghCappedStreak,
     commitUpdatedAt: nextCommitCursor || null,
     lastMode: mode,
     syncedAt: nowIso,
@@ -1465,8 +1483,19 @@ export async function runMemorySync({
     ghSinceIso,
     commitSinceIso,
     cursorUpdatedAt: effectiveUpdatedAt,
+    ghCapped: ghFetchCapped,
+    ghCappedStreak,
     publishResult,
   };
+}
+
+const CAPPED_STREAK_WARN = 3; // consecutive capped delta runs before `main` warns on stderr
+
+/** The stderr warning for a run of capped delta fetches ('' until the streak reaches CAPPED_STREAK_WARN). */
+export function cappedWarning(res, repoName) {
+  const streak = res?.ghCappedStreak ?? 0;
+  if (streak < CAPPED_STREAK_WARN) return '';
+  return `memory-sync: ${repoName || 'the repo'} hit the GraphQL page cap on ${streak} consecutive delta runs; items between the previous cursor and the newest page were skipped. Run the heartbeat more often or raise the caps.\n`;
 }
 
 export async function main(argv = process.argv.slice(2), { out = process.stdout, err = process.stderr } = {}) {
@@ -1503,6 +1532,8 @@ export async function main(argv = process.argv.slice(2), { out = process.stdout,
       ref: targetRef,
     });
     out.write(JSON.stringify(res) + '\n');
+    const warning = cappedWarning(res, String(values.repo || ''));
+    if (warning) err.write(warning);
     return res.ok ? 0 : 1;
   } catch (e) {
     err.write(`memory-sync error: ${e?.message || e}\n`);
