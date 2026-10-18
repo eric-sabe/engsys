@@ -77,6 +77,20 @@ for f in settings.json .claude.json; do
   chmod 600 "$tmp" && mv "$tmp" "$dir/$f"
   echo "fleet config-dir: wrote $dir/$f ($(jq -c 'keys' "$dir/$f"))"
 done
+if [ -n "${FLEET_CLAUDE_OAUTH_TOKEN_FILE:-}" ]; then
+  # Token mode (engsys#205): the fleet's seat is a long-lived token, not an interactive login.
+  if why="$(fleet_oauth_token_problem)"; then echo "fleet config-dir: WARNING $why"; fi
+  cat <<EOF
+fleet config-dir: next, once (FLEET_CLAUDE_OAUTH_TOKEN_FILE is set, so the fleet logs in with a long-lived token, not /login):
+  1. claude setup-token                         # in a terminal with a browser, signed in as the fleet's seat; prints a token
+  2. write the token to $FLEET_CLAUDE_OAUTH_TOKEN_FILE and chmod 600 it (outside any repo, owned by this user)
+  3. cd $PIN_DIR && CLAUDE_CONFIG_DIR=$dir CLAUDE_CODE_OAUTH_TOKEN="\$(cat $FLEET_CLAUDE_OAUTH_TOKEN_FILE)" claude --dangerously-skip-permissions   # accept workspace trust, /exit
+  4. fleet verify                               # the token works and the file is private
+  5. fleet sync                                 # installs the pinned plugins into $dir
+  6. fleet restart --all                        # the sessions pick up the token
+EOF
+  exit 0
+fi
 cat <<EOF
 fleet config-dir: next, once:
   1. CLAUDE_CONFIG_DIR=$dir claude            # /login with the fleet's seat, then /exit

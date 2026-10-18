@@ -26,6 +26,12 @@
 # (and refuses when the alert can't be delivered).
 # No config file or environment variable turns it on, and the supervisor never passes it.
 #
+# Token mode (engsys#205): with FLEET_CLAUDE_OAUTH_TOKEN_FILE set, each session on the fleet's config dir reads the
+# long-lived token from that file when its launch line runs (the line holds the path, never the token); the
+# interactive roles under scope supervised unset any inherited one. A token file that is missing, empty,
+# group/other-accessible, not owned by the fleet user or inside a git work tree refuses a named launch and is
+# SKIPPED in a whole-roster one, for the sessions that would read it.
+#
 # Claude-only: a merge, maintain, broker (any monster), supervised or security-lane session (5th field
 # security*) is refused when HARNESS is anything but claude, whether it came from fleet.conf,
 # fleet.local.conf, the environment or a HARNESS= line in the roster. A whole-roster launch starts the
@@ -135,6 +141,13 @@ uses_fleet_config_dir() { # uses_fleet_config_dir <name>
   [ "${FLEET_CLAUDE_CONFIG_DIR_SCOPE:-all}" = supervised ] || return 0
   ! is_interactive "$1"
 }
+# Token mode (engsys#205): a token file that can't be used keeps every session that would read it from starting
+# (the launch line would otherwise fall back to the Keychain login, the refresh path this mode exists to avoid).
+TOKEN_PROBLEM=""
+if [ -n "${FLEET_CLAUDE_OAUTH_TOKEN_FILE:-}" ] && [ "${HARNESS:-claude}" = claude ]; then
+  TOKEN_PROBLEM="$(fleet_oauth_token_problem || true)"
+fi
+token_refused() { [ -n "$TOKEN_PROBLEM" ] && uses_fleet_config_dir "$1"; }
 roster_names() { grep -E "$ROSTER_LINE_RE" "$FLEET_STATE/roster" | cut -d'|' -f1; }
 # env_file_users <env file basename> → the roster sessions that source it (5th field, else ENV_FILE)
 env_file_users() {
@@ -271,6 +284,7 @@ cd "$PIN_DIR"
 if [ -n "$name" ]; then
   grep -q "^$name|" "$FLEET_STATE/roster" || fleet_die "no session named '$name' in the roster"
   harness_refused "$name" && fleet_die "not launching $name on HARNESS=$launch_harness: merge, maintain, broker and security sessions run on Claude only"
+  ! token_refused "$name" || fleet_die "not launching $name: $TOKEN_PROBLEM"
   if is_singleton "$name" && [ "$skip_verify" = 1 ]; then
     {
       echo "fleet: ################################################################################"
@@ -307,6 +321,12 @@ while IFS= read -r line; do
         refused=$((refused + 1))
         continue
       fi
+      if token_refused "$n"; then
+        echo "SKIPPED: $n ($TOKEN_PROBLEM)" >&2
+        printf '# token file unusable: %s\n' "$n" >>"$host_roster"
+        refused=$((refused + 1))
+        continue
+      fi
       if is_singleton "$n" && ! singleton_integrity_ok; then
         echo "skip: $n, $why_held (fleet verify)"
         printf '# plugin integrity held: %s (%s)\n' "$n" "$why_held" >>"$host_roster"
@@ -317,12 +337,12 @@ while IFS= read -r line; do
   printf '%s\n' "$line" >>"$host_roster"
 done <"$FLEET_STATE/roster"
 if [ "$kept" = 0 ]; then
-  [ "$refused" = 0 ] || fleet_die "$refused Claude-only session(s) refused on HARNESS=$launch_harness (SKIPPED above); nothing else to launch"
+  [ "$refused" = 0 ] || fleet_die "$refused session(s) refused (SKIPPED above: a Claude-only session on HARNESS=$launch_harness, or an unusable token file); nothing else to launch"
   echo "fleet: no roster session runs on this host; nothing to launch"; exit 0
 fi
 lrc=0; bash "$LAUNCHER" --roster "$host_roster" || lrc=$?
 # shellcheck disable=SC2046 # names are [a-z0-9-] only
 record_panes $(awk -F'|' '/^[A-Za-z0-9][A-Za-z0-9._-]*\|/ { print $1 }' "$host_roster")
 [ "$refused" != 0 ] || exit "$lrc"
-echo "fleet: $refused Claude-only session(s) refused on HARNESS=$launch_harness (SKIPPED above)" >&2
+echo "fleet: $refused session(s) refused (SKIPPED above: a Claude-only session on HARNESS=$launch_harness, or an unusable token file)" >&2
 exit $(( lrc != 0 ? lrc : 1 ))

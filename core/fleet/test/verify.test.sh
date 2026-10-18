@@ -55,8 +55,15 @@ cat >"$T/bin/claude" <<'SH'
 case "$*" in
   "plugin list --json") pwd -P >"$FAKE/claude.cwd"
     if [ -z "${CLAUDE_CONFIG_DIR:-}" ] && [ -f "$FAKE/plugins-user.json" ]; then cat "$FAKE/plugins-user.json"; exit 0; fi   # ~/.claude's own list, when a test sets one
-    printf '%s\n' "${CLAUDE_CONFIG_DIR:-unset}" >"$FAKE/claude.cfg"; cat "$FAKE/plugins.json" ;;
+    printf '%s\n' "${CLAUDE_CONFIG_DIR:-unset}" >"$FAKE/claude.cfg"
+    if [ "${CLAUDE_CODE_OAUTH_TOKEN:-}" = SENTINEL-TOKEN-205 ]; then echo sentinel >"$FAKE/list.tok"; else echo none >"$FAKE/list.tok"; fi
+    cat "$FAKE/plugins.json" ;;
   "auth status --json") [ -f "$FAKE/auth.json" ] || exit 2; cat "$FAKE/auth.json" ;;
+  "-p "*) # the token-mode test request (engsys#205): record the token it ran with; a rejection echoes the token back
+    echo p >>"$FAKE/probe.count"
+    if [ "${CLAUDE_CODE_OAUTH_TOKEN:-}" = SENTINEL-TOKEN-205 ]; then echo sentinel >"$FAKE/probe.tok"; else echo none >"$FAKE/probe.tok"; fi
+    if [ -f "$FAKE/probe-ok" ]; then echo OK; exit 0; fi
+    echo "Failed to authenticate. API Error: 401 token SENTINEL-TOKEN-205 rejected"; exit 1 ;;
   *) echo "stub claude: unsupported: $*" >&2; exit 2 ;;
 esac
 SH
@@ -445,6 +452,72 @@ echo '{"loggedIn": true, "email": "x"}' >"$FAKE/auth.json"
 run fleet verify
 rc_is "…logged in again: passes (positive control)" 0
 rm -f "$FAKE/auth.json"
+
+echo "== a long-lived token (FLEET_CLAUDE_OAUTH_TOKEN_FILE, engsys#205)"
+TOKD="$T/secrets"; mkdir -p "$TOKD"; chmod 700 "$TOKD"; TOK="$TOKD/claude-token"; SENT=SENTINEL-TOKEN-205
+printf '%s\n' "$SENT" >"$TOK"; chmod 600 "$TOK"
+tokconf() { printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\nFLEET_CLAUDE_OAUTH_TOKEN_FILE=%s\n' "$CONF0" "$FCFG" "$1" >"$I/fleet/fleet.conf"; }
+probes() { wc -l <"$FAKE/probe.count" 2>/dev/null | tr -d ' ' || echo 0; }
+no_token_in() { if grep -qF -- "$SENT" <<<"$2"; then bad "$1" "the token string appears in:" "$2"; else ok "$1"; fi; }
+: >"$FAKE/probe.count"; rm -f "$I/.fleet/token-probe.ok"; touch "$FAKE/probe-ok"; rm -f "$FAKE/auth.json"
+tokconf "$TOK"
+run fleet verify
+rc_is "token mode, a good file and a working token: passes" 0
+eq "…claude plugin list ran with the token" "$(cat "$FAKE/list.tok")" sentinel
+eq "…the test request ran with the token" "$(cat "$FAKE/probe.tok")" sentinel
+no_token_in "…and the output never shows it" "$OUT"
+echo '{"loggedIn": false}' >"$FAKE/auth.json"; rm -f "$I/.fleet/token-probe.ok"
+run fleet verify
+rc_is "auth status says logged out but the token works: passes (auth status is not asked)" 0
+echo '{"loggedIn": true}' >"$FAKE/auth.json"; rm -f "$FAKE/probe-ok" "$I/.fleet/token-probe.ok"
+run fleet verify
+rc_is "auth status says logged in but the token is rejected: not verified" 3
+has "…saying the token does not work" "$OUT" "the fleet's Claude token does not work"
+has "…and how to fix it" "$OUT" "claude setup-token"
+no_token_in "…without echoing the token the API error carried" "$OUT"
+touch "$FAKE/probe-ok"; rm -f "$FAKE/auth.json" "$I/.fleet/token-probe.ok"; : >"$FAKE/probe.count"
+run fleet verify --max-age 15
+rc_is "a pass is cached for --max-age" 0
+rm -f "$FAKE/probe-ok"
+run fleet verify --max-age 15
+rc_is "…the next run within it passes without asking again" 0
+eq "…one test request in all" "$(probes)" 1
+run fleet verify
+rc_is "…a run without --max-age asks again, and sees the rejection" 3
+touch "$FAKE/probe-ok"; rm -f "$I/.fleet/token-probe.ok"; : >"$FAKE/probe.count"
+# fail closed: each bad file is "not verified" (3), names the problem, and never reaches the API
+badfile() { # badfile <desc> <expected text>
+  rm -f "$I/.fleet/token-probe.ok"; run fleet verify
+  rc_is "$1: not verified" 3; has "…$2" "$OUT" "$2"; no_token_in "…and no token in the output" "$OUT"
+  eq "…no test request was made" "$(probes)" 0
+}
+mv "$TOK" "$TOK.keep"; badfile "missing token file" "does not exist"
+: >"$TOK"; chmod 600 "$TOK"; badfile "empty token file" "is empty"
+printf '   \n' >"$TOK"; badfile "whitespace-only token file" "is empty"
+printf '%s\n' "$SENT" >"$TOK"; chmod 644 "$TOK"; badfile "group/world-readable token file" "accessible to group or others (mode 644)"
+chmod 620 "$TOK"; badfile "group-writable token file" "(mode 620)"
+chmod 600 "$TOK"
+mkdir -p "$T/idbin"; printf '#!/usr/bin/env bash\nif [ "${1:-}" = -u ]; then echo 99999; exit 0; fi\nexec /usr/bin/id "$@"\n' >"$T/idbin/id"; chmod +x "$T/idbin/id"
+rm -f "$I/.fleet/token-probe.ok"; run env PATH="$T/idbin:$PATH" bash "$E/core/fleet/bin/fleet" --instance "$I" verify
+rc_is "a token file owned by someone else: not verified" 3; has "…saying so" "$OUT" "is not owned by"
+eq "…no test request was made" "$(probes)" 0
+rm -f "$TOK"; ln -s "$TOK.keep" "$TOK"; chmod 600 "$TOK.keep"
+rm -f "$I/.fleet/token-probe.ok"; run fleet verify
+rc_is "a symlink to a private file is followed: passes" 0
+rm -f "$TOK"; mv "$TOK.keep" "$TOK"
+mkdir -p "$E/tokdir"; printf '%s\n' "$SENT" >"$E/tokdir/t"; chmod 600 "$E/tokdir/t"; tokconf "$E/tokdir/t"
+: >"$FAKE/probe.count"; badfile "token file inside a git work tree" "inside a git work tree"
+rm -rf "${E:?}/tokdir"
+tokconf "$TOK"; rm -f "$I/.fleet/token-probe.ok"
+run fleet launch acme-mm
+rc_is "launch: a working token launches the merge monster" 0
+chmod 644 "$TOK"; BEFORE="$(launched 'acme-mm')"
+run fleet launch acme-mm
+rc_is "launch: a bad token file refuses it" 1
+eq "…the launcher was not called again" "$(launched 'acme-mm')" "$BEFORE"
+chmod 600 "$TOK"
+rm -f "$I/.fleet/token-probe.ok" "$FAKE/probe.count"
+printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\n' "$CONF0" "$FCFG" >"$I/fleet/fleet.conf"
 printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\n' "$CONF0" "$T/no-such-dir" >"$I/fleet/fleet.conf"
 run fleet verify
 rc_is "a FLEET_CLAUDE_CONFIG_DIR that doesn't exist is 'not verified'" 3

@@ -38,6 +38,11 @@
 #                    supervisor's throttle; cache: .fleet/verify-wrappers.json). `fleet launch` never
 #                    passes it, so a launch always asks GitHub.
 #
+# With FLEET_CLAUDE_OAUTH_TOKEN_FILE (engsys#205) the fleet's login is a long-lived token: a token file that is
+# missing, empty, group/other-accessible, not owned by the fleet user or inside a git work tree is not verified
+# (3), and so is a token the API rejects. `claude auth status` is not used then; a short test request is (cached
+# for --max-age minutes).
+#
 # Exit: 0 match | 1 MISMATCH | 3 not verified (GitHub unreachable, no pin or not a tag, nothing installed)
 #       | 2 usage. Merge and maintain sessions start only on 0 (engsys#86 review H1).
 #
@@ -105,7 +110,14 @@ elif ! [ -d "$PIN_DIR" ]; then
   out="fleet verify: not verified: PIN_DIR not found: $PIN_DIR"; rc=3
 elif [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] && ! [ -d "$FLEET_CLAUDE_CONFIG_DIR" ]; then
   out="fleet verify: not verified: FLEET_CLAUDE_CONFIG_DIR not found: $FLEET_CLAUDE_CONFIG_DIR (see the fleet guide: a separate Claude config dir)"; rc=3
-elif [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] && [ "${HARNESS:-claude}" = claude ] \
+elif [ -n "${FLEET_CLAUDE_OAUTH_TOKEN_FILE:-}" ] && [ "${HARNESS:-claude}" = claude ] && token_why="$(fleet_oauth_token_problem)"; then
+  # Token mode (engsys#205): a token file that can't be used is a hold, like an expired login, and never read past.
+  out="fleet verify: not verified: $token_why"; rc=3
+elif [ -n "${FLEET_CLAUDE_OAUTH_TOKEN_FILE:-}" ] && [ "${HARNESS:-claude}" = claude ] && ! fleet_token_login_ok "$(( ${max_age:-0} * 60 ))"; then
+  # `claude auth status` is not trusted with a token (it can say logged in for one the API rejects), so the
+  # test request decides. Cached for --max-age minutes, so the supervisor's tick doesn't ask every time.
+  out="fleet verify: not verified: the fleet's Claude token does not work ($FLEET_LOGIN_WHY). Regenerate it with claude setup-token and update $FLEET_CLAUDE_OAUTH_TOKEN_FILE"; rc=3
+elif [ -z "${FLEET_CLAUDE_OAUTH_TOKEN_FILE:-}" ] && [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] && [ "${HARNESS:-claude}" = claude ] \
   && [ "$( (cd "${TMPDIR:-/tmp}" && CLAUDE_CONFIG_DIR="$FLEET_CLAUDE_CONFIG_DIR" claude auth status --json) 2>/dev/null | jq -r 'if .loggedIn == false then "false" else "" end' 2>/dev/null || true)" = false ]; then
   # A rotation must not relaunch a monster into a login prompt: hold until the fleet seat is logged in.
   out="fleet verify: not verified: the fleet's Claude config dir $FLEET_CLAUDE_CONFIG_DIR is not logged in (CLAUDE_CONFIG_DIR=$FLEET_CLAUDE_CONFIG_DIR claude, then /login)"; rc=3
@@ -128,7 +140,7 @@ else
     fi
   else
     # The cwd decides which project-scope installs apply: the sessions start in PIN_DIR (engsys#86 review H2).
-    if ! (cd "$PIN_DIR" && claude plugin list --json) >"$plist" 2>/dev/null; then
+    if ! (cd "$PIN_DIR" && fleet_with_token claude plugin list --json) >"$plist" 2>/dev/null; then
       out="fleet verify: not verified: claude plugin list failed in $PIN_DIR"; rc=3
     fi
   fi

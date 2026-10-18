@@ -445,6 +445,18 @@ launch_one() {
     cmd+="unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && "
   fi
   if [ -n "$cfg_dir" ]; then cmd+="export CLAUDE_CONFIG_DIR=$(printf %q "$cfg_dir") && "; else cmd+="unset CLAUDE_CONFIG_DIR && "; fi
+  # Long-lived token mode (engsys#205): FLEET_CLAUDE_OAUTH_TOKEN_FILE (a path, from the fleet kit) is in the
+  # launcher's environment. A session on the fleet's config dir reads the token from that file when its shell
+  # runs this line, so the token is never in the launch line, an env file, tmux's environment or any log; a
+  # session on ~/.claude (scope supervised) is told to drop any CLAUDE_CODE_OAUTH_TOKEN it would inherit. If the
+  # file can't be read the line stops before claude starts. Unset = no change.
+  if [ -n "${FLEET_CLAUDE_OAUTH_TOKEN_FILE:-}" ] && [ "$HARNESS" = claude ]; then
+    if [ -n "$cfg_dir" ]; then
+      cmd+="CLAUDE_CODE_OAUTH_TOKEN=\"\$(head -n 1 $(printf %q "$FLEET_CLAUDE_OAUTH_TOKEN_FILE") | tr -d '[:space:]')\" && [ -n \"\$CLAUDE_CODE_OAUTH_TOKEN\" ] && export CLAUDE_CODE_OAUTH_TOKEN && "
+    else
+      cmd+="unset CLAUDE_CODE_OAUTH_TOKEN && "
+    fi
+  fi
   if [ "$HARNESS" = "copilot" ]; then
     cmd+="copilot --name $(printf %q "$name")"
     [ -n "$prompt" ] && cmd+=" -i $(printf %q "$prompt")"
