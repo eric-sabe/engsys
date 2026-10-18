@@ -21,7 +21,7 @@ import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { createPool, loadPool, normalizePool, PoolConfigError, renderTemplate, slotEnv } from "./pool.mjs";
+import { MAX_CONFIGURED_WAIT_MS, createPool, loadPool, normalizePool, PoolConfigError, renderTemplate, slotEnv } from "./pool.mjs";
 import { LeaseUsageError, createLeaseStore } from "./durable-lease.mjs";
 import { scrubbedGitEnv } from "../git-env.mjs";
 
@@ -200,6 +200,8 @@ test("the queue-lock wait is configurable: option and $POOL_QUEUE_LOCK_WAIT_MS (
   const both = createPool({ pool: FIXTURE, ownerPattern: STRICT, dir, queueLockWaitMs: 200, env: { ...process.env, POOL_QUEUE_LOCK_WAIT_MS: "60000" }, provision: () => {}, notifier: () => {} });
   assert.throws(() => both.enqueue(waiter), /busy >0\.2s/);
 
+  // A huge finite value is capped (10 min), so it cannot make the wait effectively unbounded.
+  assert.equal(MAX_CONFIGURED_WAIT_MS, 600_000);
   // Non-finite / junk values never make the wait unbounded: they fall back to the next source (here the env's 250ms).
   for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, -5, "abc"]) {
     const p = createPool({ pool: FIXTURE, ownerPattern: STRICT, dir, queueLockWaitMs: bad, env: { ...process.env, POOL_QUEUE_LOCK_WAIT_MS: "250" }, provision: () => {}, notifier: () => {} });

@@ -42,7 +42,7 @@ export TLIB="$LIB" TCFG="$T/fleetcfg/repos/acme/app" TSTORE="$T/store" TPAT='^ac
 export POOL_POLL_MS=200 POOL_WAITER_TIMEOUT_MS=30000 BROKER_WINDOW_POLL_SECS=0.2
 # This sandbox's lease store is already per-run ($TSTORE); a loaded host can still hold the queue lock past
 # the 10s default while several brokers contend, so scale the wait up for tests (engsys#193).
-export POOL_QUEUE_LOCK_WAIT_MS=120000 LEASE_GUARD_WAIT_MS=60000 LEASE_GUARD_STALE_MS=8000   # (a kill -9'd holder's guard is reaped after 8s, well inside the wait)
+export POOL_QUEUE_LOCK_WAIT_MS=120000 LEASE_GUARD_WAIT_MS=60000 LEASE_GUARD_STALE_MS=20000   # (a kill -9'd holder's guard is reaped after 20s, inside the 60s wait; real holds last ms, so a live holder is never reaped even when suspended for seconds)
 printf '[user]\n\tname = Sandbox\n\temail = sandbox@example.invalid\n[init]\n\tdefaultBranch = main\n' >"$HOME/.gitconfig"
 git -C "$T/repo" init -q
 : >"$FAKE/gh.log"; : >"$FAKE/actions.log"

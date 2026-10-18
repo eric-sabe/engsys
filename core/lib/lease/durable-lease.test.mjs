@@ -247,6 +247,12 @@ test("guard wait and staleness are configurable by env; options win (engsys#193)
   }
   const envInf = createLeaseStore({ dir, guardWaitMs: 140, env: { LEASE_GUARD_WAIT_MS: "Infinity" } });
   assert.throws(() => envInf.acquire({ kind: "k", owner: "acme-e2e", ttlMinutes: 5 }), /busy for >140ms/);
+  // A huge finite value is capped at 10 minutes (observable on the stale age: 1e308 would never reap).
+  const hugeStale = createLeaseStore({ dir, env: { LEASE_GUARD_STALE_MS: "1e308" } });
+  mkdirSync(join(dir, ".guard-k3"));
+  const veryOld = (Date.now() - 11 * 60_000) / 1000;
+  utimesSync(join(dir, ".guard-k3"), veryOld, veryOld);
+  assert.equal(hugeStale.acquire({ kind: "k3", owner: "acme-e2e", ttlMinutes: 5 }).ok, true, "a guard older than the 10 min cap is reaped");
   // LEASE_GUARD_STALE_MS makes an abandoned guard reapable sooner than the 60s default.
   const old = (Date.now() - 5_000) / 1000;
   utimesSync(join(dir, ".guard-k"), old, old);

@@ -211,6 +211,8 @@ function validateTtl(ttlMinutes) {
   }
 }
 
+const MAX_CONFIGURED_MS = 600_000; // a configured guard wait / stale age is capped at 10 min
+
 /**
  * Create a lease store rooted at `store`.
  *
@@ -238,7 +240,7 @@ export function createLeaseStore({
   guardStaleMs: guardStaleOpt,
 } = {}) {
   // A non-finite value (NaN, Infinity) would make the wait unbounded: ignore it. guardWaitMs may be 0 (no wait); the stale age and env values must be > 0.
-  const finiteMs = (v, min) => (v != null && v !== '' && Number.isFinite(Number(v)) && Number(v) >= min ? Number(v) : null);
+  const finiteMs = (v, min) => (v != null && v !== '' && Number.isFinite(Number(v)) && Number(v) >= min ? Math.min(Number(v), MAX_CONFIGURED_MS) : null);
   const guardWaitMs = finiteMs(guardWaitOpt, 0) ?? finiteMs(env.LEASE_GUARD_WAIT_MS, 1) ?? 5_000;
   const guardStaleMs = finiteMs(guardStaleOpt, 1) ?? finiteMs(env.LEASE_GUARD_STALE_MS, 1) ?? 60_000;
   const dir = resolve(storeOpt ?? dirOpt ?? (env.LEASE_STORE || defaultStoreDir()));

@@ -64,6 +64,7 @@ import { dirname, join, resolve } from "node:path";
 import { createLeaseStore, KIND_PATTERN, LeaseUsageError } from "./durable-lease.mjs";
 
 export const DEFAULT_TTL_MINUTES = 30; // slot lease TTL — lessees heartbeat long runs
+export const MAX_CONFIGURED_WAIT_MS = 600_000; // a configured lock wait is capped at 10 min (1e308 is not a timeout)
 export const DEFAULT_QUEUE_LOCK_WAIT_MS = 10_000; // how long a queue mutation waits on the queue lock
 export const DEFAULT_WAITER_STALE_MS = 90_000; // queue entry with no heartbeat this long is dropped
 export const DEFAULT_MOVING_AVG_SEED_MS = 8 * 60_000; // ETA seed before any history exists
@@ -404,7 +405,7 @@ export function createPool({
   const SLOTS = pool.slots;
   const QUEUE_LOCK_KIND = pool.queueLockKind;
   // NaN / Infinity / non-positive values are ignored, so the lock wait is always bounded.
-  const positiveMs = (v) => (v != null && v !== '' && Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : null);
+  const positiveMs = (v) => (v != null && v !== '' && Number.isFinite(Number(v)) && Number(v) > 0 ? Math.min(Number(v), MAX_CONFIGURED_WAIT_MS) : null);
   const lockWaitMs = positiveMs(queueLockWaitMs) ?? positiveMs(env.POOL_QUEUE_LOCK_WAIT_MS) ?? DEFAULT_QUEUE_LOCK_WAIT_MS;
 
   // Command resolution: injected function > env override > pool-file command.
