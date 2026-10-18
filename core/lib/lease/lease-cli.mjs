@@ -18,7 +18,8 @@
 //
 // Common flags: --store DIR, --owner-pattern REGEX, --pretty
 // Env: LEASE_STORE (default logs/leases under the git toplevel of the cwd, else the cwd), LEASE_OWNER_PATTERN (anchored regex;
-//      default accepts any safe token). Flags win over env.
+//      default accepts any safe token), LEASE_GUARD_WAIT_MS (how long a contended per-kind guard is waited on, default 5000),
+//      LEASE_GUARD_STALE_MS (guard age after which a crashed holder's guard is reaped, default 60000). Flags win over env.
 //
 // Exit codes:
 //   0  success (for `status`: any state — read the JSON)

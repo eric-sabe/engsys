@@ -543,20 +543,29 @@ echo '{"hasCompletedOnboarding": true, "mcpServers": {"s": {}}, "oauthAccount": 
 CD="$T/fleet-cfg-init"
 run fleet config-dir init --dir "$CD"
 rc_is "config-dir init exits 0" 0
-eq "settings: exactly the allowlisted keys (no autoMode, plugins, hooks, MCP, models)" "$(jq -c 'keys' "$CD/settings.json")" '["effortLevel","env","skipAutoPermissionPrompt","skipDangerousModePermissionPrompt"]'
+eq "settings: exactly the allowlisted keys (no autoMode, plugins, hooks, MCP, models)" "$(jq -c 'keys' "$CD/settings.json")" '["effortLevel","env","skipAutoPermissionPrompt","skipDangerousModePermissionPrompt","syncClaudeAiPlugins","syncClaudeAiSkills"]'
+eq "…the claude.ai skill/plugin sync is off (engsys#200)" "$(jq -c '[.syncClaudeAiSkills, .syncClaudeAiPlugins]' "$CD/settings.json")" '[false,false]'
 eq "…env: only the agent-teams flag" "$(jq -c '.env' "$CD/settings.json")" '{"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS":"1"}'
 eq ".claude.json: only onboarding (no MCP servers, no account)" "$(jq -c . "$CD/.claude.json")" '{"hasCompletedOnboarding":true}'
 eq "the dir is private" "$(stat -f %Lp "$CD" 2>/dev/null || stat -c %a "$CD")" 700
 has "…and prints the next steps" "$OUT" "accept workspace trust"
 echo '{"x":1}' >"$CD/settings.json"
 run fleet config-dir init --dir "$CD"
-eq "an existing settings.json is left alone" "$(cat "$CD/settings.json")" '{"x":1}'
+eq "an existing settings.json is left alone except for the claude.ai sync switches (retrofit)" "$(jq -cS . "$CD/settings.json")" '{"syncClaudeAiPlugins":false,"syncClaudeAiSkills":false,"x":1}'
+echo '{"x":1,"syncClaudeAiSkills":true,"model":"m"}' >"$CD/settings.json"
+run fleet config-dir init --dir "$CD"
+eq "…a true switch is turned off, other keys kept" "$(jq -cS . "$CD/settings.json")" '{"model":"m","syncClaudeAiPlugins":false,"syncClaudeAiSkills":false,"x":1}'
+cp "$CD/settings.json" "$T/cd-before.json"; run fleet config-dir init --dir "$CD"
+eq "…and a second run is a no-op" "$(cat "$CD/settings.json")" "$(cat "$T/cd-before.json")"
+echo '{"x":1}' >"$CD/settings.json"
 run fleet config-dir init --dir "$HOME/.claude"
 rc_is "refuses the operator's own ~/.claude" 1
 printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\n' "$CONF0" "$CD" >"$I/fleet/fleet.conf"
 echo '{"x":1}' >"$CD/settings.json"; run fleet config-dir init --force
 rc_is "with FLEET_CLAUDE_CONFIG_DIR set, --force reseeds it" 0
-eq "…from the allowlist again" "$(jq -c 'keys' "$CD/settings.json")" '["effortLevel","env","skipAutoPermissionPrompt","skipDangerousModePermissionPrompt"]'
+eq "…from the allowlist again" "$(jq -c 'keys' "$CD/settings.json")" '["effortLevel","env","skipAutoPermissionPrompt","skipDangerousModePermissionPrompt","syncClaudeAiPlugins","syncClaudeAiSkills"]'
+rm -f "$HOME/.claude/settings.json"; run fleet config-dir init --dir "$T/fleet-cfg-nosrc"
+eq "…with no ~/.claude/settings.json to copy, the claude.ai sync is still off" "$(jq -c . "$T/fleet-cfg-nosrc/settings.json")" '{"syncClaudeAiSkills":false,"syncClaudeAiPlugins":false}'
 printf '%s\n' "$CONF0" >"$I/fleet/fleet.conf"; rm -f "$HOME/.claude/settings.json" "$HOME/.claude.json"
 
 echo "== a large user-scope mismatch: one grouped alert, exit 1 (never a broken pipe)"

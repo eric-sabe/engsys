@@ -26,6 +26,7 @@ import { isEventTrusted as sharedIsEventTrusted } from '../lib/memory/trust.mjs'
 import { loadConfig } from './memory-brief.mjs';
 import { buildMarkerMatchers, isMarkerBody, parseFindingAcks } from './harvest-findings.mjs';
 import { parseReviewComment } from './review-bakeoff.mjs';
+import { exitAfterFlush } from '../lib/exit-after-flush.mjs';
 
 const execFileP = promisify(execFile);
 
@@ -1198,15 +1199,19 @@ query($owner: String!, $name: String!, $prCount: Int!, $issueCount: Int!, $prAft
  */
 export async function fetchRepoPrsAndIssues(
   repo,
-  { gh = defaultGh, isInit = false, sinceIso = null } = {},
+  { gh = defaultGh, isInit = false, sinceIso = null, cursorIso = null } = {},
 ) {
   const normRepo = normalizeOptionalRepo(repo);
   if (!normRepo || typeof gh !== 'function') {
     return { prs: [], issues: [], ok: false, complete: false };
   }
   const [owner, name] = normRepo.split('/');
-  const maxPrs = isInit ? INIT_CAPS.prs : 100;
-  const maxIssues = isInit ? INIT_CAPS.issues : 100;
+  // A delta fetches one item past its cap of 100 as a probe: only an item that really exists (and is newer than
+  // sinceIso, since older ones stop the paging) proves the cap cut the window short.
+  const prCap = isInit ? INIT_CAPS.prs : 100;
+  const issueCap = isInit ? INIT_CAPS.issues : 100;
+  const maxPrs = isInit ? prCap : prCap + 1;
+  const maxIssues = isInit ? issueCap : issueCap + 1;
   const sinceMs = sinceIso ? Date.parse(sinceIso) : null;
 
   const prs = [];
@@ -1309,8 +1314,22 @@ export async function fetchRepoPrsAndIssues(
     }
   }
 
-  const complete = ok && (isInit || (!hitPrCap && !hitIssueCap));
-  return { prs, issues, ok, complete };
+  // `capped`: the fetch succeeded but the delta cap left items NEWER THAN THE CURSOR unfetched (a busy repo).
+  // Unlike `ok: false` (a failed call, retried over the same window), this is a volume condition (engsys#189).
+  // Items past the cap that are only inside the 48h overlap (at or before the cursor) were already ingested on an
+  // earlier run, so they don't count: nothing is lost and the run is complete.
+  const cursorMs = cursorIso ? Date.parse(cursorIso) : NaN;
+  const lossy = (nodes, cap) => {
+    if (nodes.length <= cap) return false;
+    nodes.length = cap; // drop the probe item
+    const oldestKept = Date.parse(nodes[cap - 1]?.updatedAt ?? '');
+    return Number.isNaN(cursorMs) || Number.isNaN(oldestKept) || oldestKept > cursorMs;
+  };
+  const prLossy = !isInit && lossy(prs, prCap);
+  const issueLossy = !isInit && lossy(issues, issueCap);
+  const capped = ok && (prLossy || issueLossy);
+  const complete = ok && (isInit || !capped);
+  return { prs, issues, ok, complete, capped };
 }
 
 /**
@@ -1361,6 +1380,8 @@ export async function runMemorySync({
   let resolvedPrNodes = prNodes;
   let resolvedIssueNodes = issueNodes;
   let ghFetchComplete = true;
+  let ghFetchCapped = false;
+  let ghFetched = false; // a GitHub fetch actually ran (not publish mode, not injected nodes)
   if (resolvedPrNodes !== null || resolvedIssueNodes !== null) {
     resolvedPrNodes = resolvedPrNodes ?? [];
     resolvedIssueNodes = resolvedIssueNodes ?? [];
@@ -1369,10 +1390,13 @@ export async function runMemorySync({
       gh: gh || defaultGh,
       isInit,
       sinceIso: ghSinceIso,
+      cursorIso: prevGhCursor || null,
     });
     resolvedPrNodes = fetched.prs;
     resolvedIssueNodes = fetched.issues;
     ghFetchComplete = Boolean(fetched.complete);
+    ghFetchCapped = Boolean(fetched.capped);
+    ghFetched = true;
   }
 
   const ghEvents = [];
@@ -1408,8 +1432,18 @@ export async function runMemorySync({
       nextCommitCursor = String(ev.updated_at);
     }
   }
+  // The GraphQL connections are newest-first. A fetch that hit the delta page cap ingested the newest N
+  // items, so its cursor still moves forward to the newest of them; holding it would make every later
+  // heartbeat re-query the same ever-growing window and hit the cap again, forever (engsys#189). That is
+  // the same "newest N" truncation --init accepts: the items between the old cursor and the oldest ingested
+  // one are skipped, so a capped run is counted (ghCappedStreak); `main` warns on stderr from the 3rd, and the
+  // heartbeat path (monster_memory_tail_sync) forwards that line and keeps it in <state>/memory-sync-capped.warn. A failed
+  // fetch (ok: false) keeps the cursor: nothing was lost, and the retry covers the same window.
+  const ghAdvance = ghFetchComplete || ghFetchCapped;
+  const prevCappedStreak = Number.isInteger(repoCursor.ghCappedStreak) ? repoCursor.ghCappedStreak : 0;
+  const ghCappedStreak = ghFetchCapped ? prevCappedStreak + 1 : ghFetched && ghFetchComplete ? 0 : prevCappedStreak;
   let nextGhCursor = prevGhCursor;
-  if (ghFetchComplete) {
+  if (ghAdvance) {
     for (const ev of ghEvents) {
       if (ev.updated_at && String(ev.updated_at) > nextGhCursor) {
         nextGhCursor = String(ev.updated_at);
@@ -1417,12 +1451,13 @@ export async function runMemorySync({
     }
   }
   const effectiveUpdatedAt = hasGhRepo
-    ? nextGhCursor || (ghFetchComplete ? nextCommitCursor || nowIso : prevGhCursor)
+    ? nextGhCursor || (ghAdvance ? nextCommitCursor || nowIso : prevGhCursor)
     : nextCommitCursor || prevCommitCursor || nowIso;
 
   cursors[repo || '_local'] = {
     updatedAt: effectiveUpdatedAt,
     ghUpdatedAt: nextGhCursor || null,
+    ghCappedStreak,
     commitUpdatedAt: nextCommitCursor || null,
     lastMode: mode,
     syncedAt: nowIso,
@@ -1465,8 +1500,19 @@ export async function runMemorySync({
     ghSinceIso,
     commitSinceIso,
     cursorUpdatedAt: effectiveUpdatedAt,
+    ghCapped: ghFetchCapped,
+    ghCappedStreak,
     publishResult,
   };
+}
+
+const CAPPED_STREAK_WARN = 3; // consecutive capped delta runs before `main` warns on stderr
+
+/** The stderr warning for a run of capped delta fetches ('' until the streak reaches CAPPED_STREAK_WARN). */
+export function cappedWarning(res, repoName) {
+  const streak = res?.ghCappedStreak ?? 0;
+  if (streak < CAPPED_STREAK_WARN) return '';
+  return `memory-sync: ${repoName || 'the repo'} hit the GraphQL page cap on ${streak} consecutive delta runs; items newer than the cursor may have been skipped. Run the heartbeat more often or raise the caps.\n`;
 }
 
 export async function main(argv = process.argv.slice(2), { out = process.stdout, err = process.stderr } = {}) {
@@ -1503,6 +1549,8 @@ export async function main(argv = process.argv.slice(2), { out = process.stdout,
       ref: targetRef,
     });
     out.write(JSON.stringify(res) + '\n');
+    const warning = cappedWarning(res, String(values.repo || ''));
+    if (warning) err.write(warning);
     return res.ok ? 0 : 1;
   } catch (e) {
     err.write(`memory-sync error: ${e?.message || e}\n`);
@@ -1511,5 +1559,5 @@ export async function main(argv = process.argv.slice(2), { out = process.stdout,
 }
 
 if (isMainEntry(import.meta.url)) {
-  main().then((code) => process.exit(code));
+  main().then((code) => exitAfterFlush(code));
 }

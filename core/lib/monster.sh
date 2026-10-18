@@ -524,7 +524,18 @@ monster_memory_tail_sync() {
   [ "${ENGSYS_MEMORY_SYNC:-0}" = 1 ] || [ -f "${CLAUDE_PROJECT_DIR:-.}/.claude/memory.yml" ] || return 0
   mem_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../scripts/memory-sync.mjs"
   [ -f "$mem_script" ] || return 0
-  node "$mem_script" --delta --repo "$repo" ${state_dir:+--state-dir "$state_dir"} ${FLEET_ID:+--role "$role" --fleet "$FLEET_ID"} >/dev/null 2>&1 || true
+  # stderr is kept only for the capped-fetch warning (engsys#189): it goes to this heartbeat's stderr and to
+  # <state_dir>/memory-sync-capped.warn (latest wins, removed once a run no longer warns), so the operator sees a
+  # repo whose delta keeps hitting the GraphQL page cap. Everything else stays best-effort and silent.
+  local errout warn nrc=0
+  errout="$(node "$mem_script" --delta --repo "$repo" ${state_dir:+--state-dir "$state_dir"} ${FLEET_ID:+--role "$role" --fleet "$FLEET_ID"} 2>&1 >/dev/null)" || nrc=$?
+  warn="$(printf '%s\n' "$errout" | grep 'hit the GraphQL page cap' | tail -n 1 || true)"
+  if [ -n "$warn" ]; then
+    printf '%s\n' "$warn" >&2
+    [ -z "$state_dir" ] || [ ! -d "$state_dir" ] || printf '%s\n' "$warn" >"$state_dir/memory-sync-capped.warn" 2>/dev/null || true
+  elif [ "$nrc" = 0 ] && [ -n "$state_dir" ]; then   # a failed run proves nothing: keep an earlier warning
+    rm -f "$state_dir/memory-sync-capped.warn" 2>/dev/null || true
+  fi
   return 0
 }
 

@@ -407,7 +407,11 @@ reports them as a mismatch until the fleet has its own directory (or you allow t
    (mode 700) and writes a `settings.json` with only the keys unattended sessions need, copied from your
    `~/.claude/settings.json`: `skipDangerousModePermissionPrompt`, `skipAutoPermissionPrompt`,
    `effortLevel` and the `env` key `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, plus `hasCompletedOnboarding`
-   in its `.claude.json`. No plugins, hooks, MCP servers, permissions, models or `autoMode` are copied.
+   in its `.claude.json`. It also always writes `syncClaudeAiSkills: false` and `syncClaudeAiPlugins: false`,
+   so the first login doesn't sync the account's claude.ai skills and plugins into this directory (they
+   would show up as user-scope items in `fleet verify` and cost prompt tokens every turn). Re-running
+   `init` on an existing directory, or `fleet sync`, adds just those two keys to its `settings.json` if
+   they are missing, or sets them to `false` if they were `true`, and leaves every other key alone; `~/.claude` is never touched. No plugins, hooks, MCP servers, permissions, models or `autoMode` are copied.
    Without these a relaunched monster can stop at a first-run or permission dialog. The monsters run with
    `--dangerously-skip-permissions`, so auto-mode classifier config doesn't apply to them; if the fleet's
    interactive sessions ever need one, add a fleet-specific `autoMode` to `<dir>/settings.json` by hand.

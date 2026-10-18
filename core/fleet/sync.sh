@@ -244,6 +244,14 @@ main() {
 # main's locals (check, markets, m_refs, m_repos, m_plugins, changed, drift) through bash's dynamic scope.
 sync_claude_plugins() {
   local i m ref repo cur installed p refused=" "
+  # A fleet config dir (never ~/.claude) gets the claude.ai sync switches off, idempotently (engsys#200): without
+  # them the first login syncs the account's claude.ai skills and plugins into the fleet dir.
+  if [ "$check" != 1 ] && [ -n "$SYNC_CFG" ] && [ -f "$SYNC_CFG/settings.json" ] && jq -e 'type == "object"' "$SYNC_CFG/settings.json" >/dev/null 2>&1 \
+    && ! jq -e '.syncClaudeAiSkills == false and .syncClaudeAiPlugins == false' "$SYNC_CFG/settings.json" >/dev/null 2>&1; then
+    local sj_tmp; sj_tmp="$(mktemp "$SYNC_CFG/.settings.json.XXXXXX")"   # mktemp makes it 0600, like the seeded file
+    jq '. + {syncClaudeAiSkills: false, syncClaudeAiPlugins: false}' "$SYNC_CFG/settings.json" >"$sj_tmp" \
+      && mv "$sj_tmp" "$SYNC_CFG/settings.json" && say "$SYNC_CFG/settings.json: syncClaudeAiSkills / syncClaudeAiPlugins set to false"
+  fi
   [ "$check" = 1 ] || settings_guard_begin
   installed="$(user_plugins)"
   for i in "${!markets[@]}"; do
@@ -274,7 +282,7 @@ sync_claude_plugins() {
         drift=1; refused+=" $m "; continue
       fi
     fi
-    if [ -n "$cur" ]; then plugin_cli marketplace remove "$m" --scope user >/dev/null; settings_guard_check "marketplace remove $m"; fi
+    if [ -n "$cur" ]; then marketplace_remove "$m"; settings_guard_check "marketplace remove $m"; fi
       plugin_cli marketplace add "https://github.com/$repo.git#$ref" --scope user >/dev/null \
         || fleet_die "marketplace add $m#$ref failed — $m plugins are UNINSTALLED on this host. Re-run: fleet sync (running sessions are unaffected)."
       settings_guard_check "marketplace add $m"
@@ -337,6 +345,31 @@ fleet_claude() {
   else env -u CLAUDE_CONFIG_DIR claude "$@"; fi
 }
 plugin_cli() { (cd "$SYNC_TMP/cwd" && fleet_claude plugin "$@"); }
+# A marketplace that only a project's settings declare (extraKnownMarketplaces) is not "declared in user
+# settings", so `remove --scope user` refuses it (engsys#200). Retry once without --scope, which removes it
+# from every scope; still from the empty cwd, and the pre-remove check above has already ruled out losing
+# plugins the fleet doesn't reinstall. Any other failure stays fatal.
+marketplace_remove() {
+  local m="$1" err rc=0
+  err="$(plugin_cli marketplace remove "$m" --scope user 2>&1 >/dev/null)" || rc=$?
+  if [ "$rc" = 0 ]; then [ -z "$err" ] || printf '%s\n' "$err" >&2; return 0; fi   # warnings stay visible
+  case "$err" in
+    *"not declared in user settings"*)
+      printf '%s\n' "$err" >&2   # the refusal itself, then the retry below
+      # Unscoped remove also uninstalls the marketplace's plugins at project scope. Refuse when another project
+      # (anything but PIN_DIR itself, whose installs sync reinstalls) has one, as seen by the config dir being synced.
+      local others pin_real
+      pin_real="$(cd "$PIN_DIR" 2>/dev/null && pwd -P || printf '%s' "$PIN_DIR")"
+      others="$(plugin_cli list --json | jq -r --arg m "$m" --arg pin "$PIN_DIR" --arg pinr "$pin_real" '
+        .[] | select((.id // "") | endswith("@" + $m)) | select((.scope // "") == "project" and (.projectPath // "") != $pin and (.projectPath // "") != $pinr)
+        | "\(.id) (\(.projectPath // "?"))"' | paste -sd, - | sed 's/,/, /g')"
+      if [ -n "$others" ]; then
+        fleet_die "marketplace $m is declared only by project settings, and removing it from every scope would uninstall plugins of other projects: $others. Not moving it. Uninstall those (claude plugin uninstall <plugin> --scope project, from that project), then fleet sync."
+      fi
+      plugin_cli marketplace remove "$m" >/dev/null ;;
+    *) printf '%s\n' "$err" >&2; return "$rc" ;;
+  esac
+}
 # claude_config_report <check> → which config dir the fleet uses and whether it is logged in (no account
 # details, no token). A FLEET_CLAUDE_CONFIG_DIR that doesn't exist stops a sync: create it and log in first.
 claude_config_report() {

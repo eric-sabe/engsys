@@ -64,6 +64,8 @@ import { dirname, join, resolve } from "node:path";
 import { createLeaseStore, KIND_PATTERN, LeaseUsageError } from "./durable-lease.mjs";
 
 export const DEFAULT_TTL_MINUTES = 30; // slot lease TTL — lessees heartbeat long runs
+export const MAX_CONFIGURED_WAIT_MS = 600_000; // a configured lock wait is capped at 10 min (1e308 is not a timeout)
+export const DEFAULT_QUEUE_LOCK_WAIT_MS = 10_000; // how long a queue mutation waits on the queue lock
 export const DEFAULT_WAITER_STALE_MS = 90_000; // queue entry with no heartbeat this long is dropped
 export const DEFAULT_MOVING_AVG_SEED_MS = 8 * 60_000; // ETA seed before any history exists
 const MOVING_AVG_WINDOW = 10; // last N lease durations feed the moving average
@@ -361,6 +363,8 @@ function envCommand(env, ...names) {
  * @param {number} [opts.ttlMinutes] slot lease TTL
  * @param {number} [opts.waiterStaleMs] queue-entry heartbeat staleness cutoff
  * @param {number} [opts.movingAvgSeedMs] ETA seed before history exists
+ * @param {number} [opts.queueLockWaitMs] how long a queue mutation waits for the queue lock before giving up
+ *   (option > $POOL_QUEUE_LOCK_WAIT_MS > 10s). Raise it on a loaded host or in tests (engsys#193).
  * @param {object} [opts.env] environment for command overrides (default process.env)
  */
 export function createPool({
@@ -376,6 +380,7 @@ export function createPool({
   ttlMinutes,
   waiterStaleMs,
   movingAvgSeedMs,
+  queueLockWaitMs,
   env = process.env,
 } = {}) {
   if (poolInput === undefined) throw new PoolConfigError("createPool needs a pool (definition, normalized pool, or pool file path)");
@@ -399,6 +404,9 @@ export function createPool({
   const notify = notifier ?? defaultNotifier(poolDir, nudgeCommand);
   const SLOTS = pool.slots;
   const QUEUE_LOCK_KIND = pool.queueLockKind;
+  // NaN / Infinity / non-positive values are ignored, so the lock wait is always bounded.
+  const positiveMs = (v) => (v != null && v !== '' && Number.isFinite(Number(v)) && Number(v) > 0 ? Math.min(Number(v), MAX_CONFIGURED_WAIT_MS) : null);
+  const lockWaitMs = positiveMs(queueLockWaitMs) ?? positiveMs(env.POOL_QUEUE_LOCK_WAIT_MS) ?? DEFAULT_QUEUE_LOCK_WAIT_MS;
 
   // Command resolution: injected function > env override > pool-file command.
   const provisionCmd = envCommand(env, "POOL_PROVISION_CMD", "E2E_LEASE_RESET_CMD") ?? pool.commands.provision ?? pool.commands.reset;
@@ -452,13 +460,13 @@ export function createPool({
    * caller takes over (loudly, via the primitive's journal).
    */
   function withQueueLock(owner, fn) {
-    const deadline = Date.now() + 10_000;
+    const deadline = Date.now() + lockWaitMs;
     let lock;
     for (;;) {
       lock = store.acquire({ kind: QUEUE_LOCK_KIND, owner, ttlMinutes: 1 });
       if (lock.ok) break;
       if (Date.now() >= deadline) {
-        throw new Error(`pool queue lock busy >10s (held by ${lock.holder}) — investigate ${join(dir, `${QUEUE_LOCK_KIND}.json`)}`);
+        throw new Error(`pool queue lock busy >${lockWaitMs / 1000}s (held by ${lock.holder}) — investigate ${join(dir, `${QUEUE_LOCK_KIND}.json`)}`);
       }
       const jitter = 25 + Math.floor(Math.random() * 75);
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, jitter);

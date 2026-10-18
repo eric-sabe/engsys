@@ -36,10 +36,13 @@ rc_is() { if [ "$RC" = "$2" ]; then ok "$1"; else bad "$1" "want rc $2, got $RC;
 # --- sandbox ---------------------------------------------------------------------------------
 export HOME="$T/home" FAKE="$T/fake" GIT_CONFIG_GLOBAL="$T/home/.gitconfig" GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
 mkdir -p "$HOME" "$FAKE" "$T/bin" "$T/repo/sub" "$T/fleetcfg/repos/acme/app"
-unset LEASE_STORE LEASE_OWNER_PATTERN LEASE_POOL_FILE POOL_CLI LEASE_CLI POOL_PROVISION_CMD POOL_RESET_CMD POOL_HEALTH_CMD POOL_NUDGE_CMD
+unset LEASE_STORE LEASE_OWNER_PATTERN LEASE_GUARD_WAIT_MS LEASE_GUARD_STALE_MS POOL_QUEUE_LOCK_WAIT_MS LEASE_POOL_FILE POOL_CLI LEASE_CLI POOL_PROVISION_CMD POOL_RESET_CMD POOL_HEALTH_CMD POOL_NUDGE_CMD
 unset FLEET_ID FEDERATION_FILE FEDERATION_CLI FLEET_REPO FLEET_INSTANCE FLEET_INSTANCE_REPO
 export TLIB="$LIB" TCFG="$T/fleetcfg/repos/acme/app" TSTORE="$T/store" TPAT='^acme-[a-z0-9][a-z0-9-]{0,62}$'
 export POOL_POLL_MS=200 POOL_WAITER_TIMEOUT_MS=30000 BROKER_WINDOW_POLL_SECS=0.2
+# This sandbox's lease store is already per-run ($TSTORE); a loaded host can still hold the queue lock past
+# the 10s default while several brokers contend, so scale the wait up for tests (engsys#193).
+export POOL_QUEUE_LOCK_WAIT_MS=120000 LEASE_GUARD_WAIT_MS=60000 LEASE_GUARD_STALE_MS=20000   # (a kill -9'd holder's guard is reaped after 20s, inside the 60s wait; real holds last ms, so a live holder is never reaped even when suspended for seconds)
 printf '[user]\n\tname = Sandbox\n\temail = sandbox@example.invalid\n[init]\n\tdefaultBranch = main\n' >"$HOME/.gitconfig"
 git -C "$T/repo" init -q
 : >"$FAKE/gh.log"; : >"$FAKE/actions.log"
@@ -156,6 +159,14 @@ pc() { node "$LIB/pool-cli.mjs" "$@" --pool "$CFG/acme-pool.json" --store "$STOR
 slot_of() { jq -r .slot_id <<<"$1"; }
 tok_of() { jq -r .token <<<"$1"; }
 states() { pc status | jq -r '[.slots[] | "\(.slot_id)=\(.state)"] | join(" ")'; }
+# age_lease <slot>: make that slot's lease expire NOW by backdating its heartbeat past its TTL, instead of a
+# ~1s TTL and a sleep, which a loaded host can outrun in either direction (engsys#193).
+age_lease() {
+  local kind f
+  kind="$(pc status | jq -r --arg s "$1" '.slots[] | select((.slot_id|tostring) == $s) | .kind')"
+  f="$STORE/$kind.json"
+  jq --arg h "$(date -u -v-3H +%Y-%m-%dT%H:%M:%S.000Z 2>/dev/null || date -u -d '3 hours ago' +%Y-%m-%dT%H:%M:%S.000Z)" '.heartbeat = $h' "$f" >"$f.new" && mv "$f.new" "$f"
+}
 release_all_slots() { local s; for s in 1 2; do pc release --slot "$s" --force >/dev/null 2>&1 || true; done; }
 
 # =============================================================================================
@@ -391,11 +402,11 @@ run $W
 rc_is "the first tick (baseline) exits 0" 0
 eq "…and emits nothing for an idle pool" "$OUT" ""
 A="$(pc acquire --owner acme-build --no-wait)"
-B="$(pc acquire --owner acme-worker --no-wait --ttl 0.02)"   # dies at once: its lease expires in ~1s
+B="$(pc acquire --owner acme-worker --no-wait)"
 eq "two grants take both slots" "$(states | tr ' ' '\n' | sort | paste -sd' ' -)" "1=held 2=held"
 has "the grant was provisioned before it was handed out" "$(cat "$FAKE/actions.log")" "provision slot=$(slot_of "$A") db=acme_test_$(slot_of "$A")"
 has "…and health-checked" "$(cat "$FAKE/actions.log")" "health slot=$(slot_of "$A")"
-sleep 1.6
+age_lease "$(slot_of "$B")"   # acme-worker died at once: its lease is past its TTL
 run $W
 rc_is "the next tick exits 0" 0
 JM="$STATE/journal-$(date -u +%Y-%m)"
@@ -530,12 +541,13 @@ echo "== G. reconcile classifies state after a crash"
 rm -rf "$STORE" "$STATE"
 : >"$FAKE/actions.log"
 A="$(pc acquire --owner acme-build --no-wait)"                     # alive: heartbeating
-B="$(pc acquire --owner acme-crashed --no-wait --ttl 0.02)"        # died mid-run: lease expires in ~1s
+B="$(pc acquire --owner acme-crashed --no-wait)"                   # died mid-run
 REQ="$(pc request --owner acme-agent --session acme-agent)"        # a waiter that then died too
 kill -9 "$(jq -r .waiter_pid <<<"$REQ")" 2>/dev/null || true
 OUTSIDER='^outsider$'
 LEASE_OWNER_PATTERN="$OUTSIDER" node "$LIB/lease-cli.mjs" acquire --kind other-tool --owner outsider --ttl 0.001 --store "$STORE" >/dev/null
-sleep 2
+age_lease "$(slot_of "$B")"
+sleep 2   # the killed waiter goes silent past the stale-waiter cutoff (waiting longer is always safe)
 run bash "$S/broker-reconcile.sh" --config-dir "$CFG"
 rc_is "reconcile exits 0" 0
 has "it reaped the dead slot lease" "$OUT" "reaped 1 dead lease(s)"

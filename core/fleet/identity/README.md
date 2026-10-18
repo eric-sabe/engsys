@@ -10,7 +10,7 @@ fleet its own identity, a **GitHub App** (for example `acme-fleet[bot]`), so tha
 | File | Role |
 |---|---|
 | `gh-app-token.mjs` | Mints and caches a 1-hour installation token. Also a `git` credential helper. Zero dependencies. |
-| `bin/gh` | A `gh` shim: runs the real `gh` with a fresh App token in `GH_TOKEN`. |
+| `bin/gh` | A `gh` shim: runs the real `gh` with a fresh App token in `GH_TOKEN`. It skips every shim copy on `PATH` (identity marker `engsys-fleet-gh-shim:`) when looking for the real `gh`, and `ENGSYS_GH_SHIM_HOPS` (set by the shim itself, not by you) bounds any residual exec loop at 8 hops (exit 126). |
 | `git-env.sh` | `fleet_git_env` / `fleet_git_env_lines`: the bot's git identity, scoped to the fleet's own processes. |
 | `gh-app-login.sh` | Health check: token + permissions + env-scoped identity. Safe to run from a scheduler. |
 

@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   runXray,
+  resolveContext,
   formatXrayReport,
   parseTranscriptSummary,
   parseAgentsTsv,
@@ -350,6 +351,40 @@ test('runXray deep-dives into sessions, parses transcripts/agents.tsv/federation
     assert.match(formatted, /\[BEHAVIOR TIMELINE/);
     assert.match(formatted, /\[DIAGNOSIS & REMEDIATION PLAYBOOK\]/);
   } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('runXray never reads the process\'s real home: a host with its own Claude settings gives the same report (engsys#178)', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'engsys-xray-realhome-'));
+  const realHome = path.join(tmpDir, 'host-home'); // stands in for the machine's real $HOME, with settings that WOULD drift
+  fs.mkdirSync(path.join(realHome, '.claude'), { recursive: true });
+  fs.writeFileSync(path.join(realHome, '.claude', 'settings.json'), JSON.stringify({
+    enabledPlugins: { 'unpinned-plugin@somewhere': true },
+    env: { ANTHROPIC_BASE_URL: 'https://example.invalid' },
+    model: 'opus',
+  }));
+  const savedHome = process.env.HOME;
+  process.env.HOME = realHome; // os.homedir() now resolves to the poisoned home
+  try {
+    assert.equal(os.homedir(), realHome, 'precondition: the poisoned home is what the process sees');
+    const env = hermeticEnv(tmpDir, { ENGSYS_HOOK_TELEMETRY_FILE: path.join(tmpDir, 'h.jsonl'), ENGSYS_MEMORY_CACHE_DIR: path.join(tmpDir, 'mem-cache') });
+    assert.notEqual(path.resolve(env.HOME), path.resolve(os.homedir()), 'the env handed to runXray carries the fixture HOME, not the real one');
+    assert.equal(resolveContext({ env, engsysDir: ENGSYS_DIR }).home, env.HOME, 'resolveContext resolves the fixture home, not os.homedir()');
+    const report = await runXray({
+      engsysDir: ENGSYS_DIR,
+      pinDir: path.join(tmpDir, 'nonexistent-pin'),
+      skipSelfTest: true,
+      env,
+    });
+    const text = JSON.stringify(report);
+    assert.ok(!text.includes(realHome), `the report mentions the process's real home:\n${text.split(realHome).length - 1} occurrence(s)`);
+    assert.doesNotMatch(text, /Settings drift detected/);
+    assert.doesNotMatch(text, /unpinned-plugin@somewhere/);
+    const cfgItem = report.sections.flatMap((sec) => sec.items).find((i) => i.name === 'Claude config dir (fleet sessions)');
+    assert.equal(cfgItem.meta.dir, path.join(tmpDir, 'home', '.claude'));
+  } finally {
+    if (savedHome === undefined) delete process.env.HOME; else process.env.HOME = savedHome;
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });

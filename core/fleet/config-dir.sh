@@ -6,11 +6,15 @@
 # Seeded, from the operator's ~/.claude/settings.json (an explicit allowlist; anything absent is skipped):
 #   skipDangerousModePermissionPrompt, skipAutoPermissionPrompt, effortLevel,
 #   env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS
+# and always syncClaudeAiSkills / syncClaudeAiPlugins = false: otherwise the first login syncs the account's
+# claude.ai skills and plugins into the fleet dir, where verify flags them as user-scope items and they cost
+# prompt tokens every turn (engsys#200).
 # and hasCompletedOnboarding into <dir>/.claude.json (where Claude Code keeps it). Never copied: plugins,
 # marketplaces, hooks, statusLine or other commands, MCP servers, permissions, models, autoMode (the
 # monsters run with --dangerously-skip-permissions; add a fleet-specific one by hand if ever needed), any
 # other env.
-# An existing settings.json or .claude.json is left alone unless --force.
+# An existing settings.json or .claude.json is left alone unless --force (an existing settings.json still gets
+# the two claude.ai sync switches added, nothing else changed).
 #
 # Then (fleet-guide.md § 6.1): log in with the fleet seat, accept workspace trust in PIN_DIR once, run
 # fleet sync, set FLEET_CLAUDE_CONFIG_DIR, restart.
@@ -45,13 +49,26 @@ seed_settings() {
   if [ -f "$src" ]; then
     jq '{skipDangerousModePermissionPrompt, skipAutoPermissionPrompt, effortLevel,
          env: ({CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: (.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS // null)})}
-        | .env |= with_entries(select(.value != null)) | with_entries(select(.value != null and .value != {}))' "$src"
+        | .env |= with_entries(select(.value != null)) | with_entries(select(.value != null and .value != {}))
+        | . + {syncClaudeAiSkills: false, syncClaudeAiPlugins: false}' "$src"
   else
-    echo '{}'
+    echo '{"syncClaudeAiSkills": false, "syncClaudeAiPlugins": false}'
   fi
 }
 for f in settings.json .claude.json; do
-  if [ -e "$dir/$f" ] && [ "$force" != 1 ]; then echo "fleet config-dir: $dir/$f exists, left alone (--force to reseed)"; continue; fi
+  if [ -e "$dir/$f" ] && [ "$force" != 1 ]; then
+    # An existing settings.json is left alone except for the claude.ai sync switches (engsys#200): added when
+    # missing or not false, every other key untouched. Re-running init retrofits a fleet dir seeded before them.
+    if [ "$f" = settings.json ] && jq -e 'type == "object"' "$dir/$f" >/dev/null 2>&1 \
+      && ! jq -e '.syncClaudeAiSkills == false and .syncClaudeAiPlugins == false' "$dir/$f" >/dev/null 2>&1; then
+      tmp="$(mktemp "$dir/.$f.XXXXXX")"
+      jq '. + {syncClaudeAiSkills: false, syncClaudeAiPlugins: false}' "$dir/$f" >"$tmp" && chmod 600 "$tmp" && mv "$tmp" "$dir/$f"
+      echo "fleet config-dir: $dir/$f exists, left alone except syncClaudeAiSkills/syncClaudeAiPlugins set to false"
+    else
+      echo "fleet config-dir: $dir/$f exists, left alone (--force to reseed)"
+    fi
+    continue
+  fi
   tmp="$(mktemp "$dir/.$f.XXXXXX")"
   if [ "$f" = settings.json ]; then seed_settings >"$tmp"
   else

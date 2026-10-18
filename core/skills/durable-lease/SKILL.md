@@ -209,7 +209,7 @@ $POOL pump --owner broker                           # one reap + drop-stale main
 Common flags: `--pool`, `--store`, `--owner-pattern`, `--pretty`, `--provision-cmd`, `--reset-cmd`,
 `--health-cmd`, `--nudge-cmd`. Env: `LEASE_POOL_FILE`, `LEASE_STORE`, `LEASE_OWNER_PATTERN`,
 `POOL_TTL_MINUTES`, `POOL_POLL_MS`, `POOL_WAITER_TIMEOUT_MS`, `POOL_PROVISION_CMD`, `POOL_RESET_CMD`,
-`POOL_HEALTH_CMD`, `POOL_NUDGE_CMD` (flags beat env, env beats the pool file). Exit codes: `0` ok · `1`
+`POOL_HEALTH_CMD`, `POOL_NUDGE_CMD`, `POOL_QUEUE_LOCK_WAIT_MS` (how long a queue mutation waits for the queue lock, default 10000), `LEASE_GUARD_WAIT_MS` (default 5000) and `LEASE_GUARD_STALE_MS` (default 60000) for the per-kind guard; raise the waits on a loaded host or in tests (flags beat env, env beats the pool file). Exit codes: `0` ok · `1`
 refusal (saturated, timeout, not owner, provision or health failed) · `2` usage · `3` internal.
 
 ### Waiters, queue and nudges

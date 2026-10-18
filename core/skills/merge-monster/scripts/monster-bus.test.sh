@@ -474,6 +474,38 @@ grep -q "status: rotation requested" "$T/last-body" && ok "  …heartbeat still 
   && ok "  …still stops the keepalive even when release fails" || bad "  …keepalive not stopped on release failure"
 rm -f "$T/resp"/*
 
+echo "memory tail sync surfaces a capped-fetch warning (engsys#189)"
+mkdir -p "$T/nodebin" "$T/mstate"
+cat >"$T/nodebin/node" <<'SH'
+#!/usr/bin/env bash
+case "${STUB_NODE_MODE:-quiet}" in
+  warn) echo "memory-sync: acme/app hit the GraphQL page cap on 3 consecutive delta runs; items between the previous cursor and the newest page were skipped." >&2 ;;
+  noise) echo "some unrelated stderr" >&2 ;;
+esac
+exit 0
+SH
+chmod +x "$T/nodebin/node"
+tail_sync() { RC=0; OUT="$(PATH="$T/nodebin:$PATH" ENGSYS_MEMORY_SYNC=1 STUB_NODE_MODE="$1" monster_memory_tail_sync merge acme/app "$T/mstate" 2>&1 >/dev/null)" || RC=$?; }
+tail_sync warn
+[ "$RC" = 0 ] && ok "  …a capped warning never fails the heartbeat" || bad "  …heartbeat failed" "$OUT"
+case "$OUT" in *"hit the GraphQL page cap"*) ok "  …it reaches the heartbeat's stderr" ;; *) bad "  …warning not forwarded" "$OUT" ;; esac
+grep -q "hit the GraphQL page cap" "$T/mstate/memory-sync-capped.warn" 2>/dev/null && ok "  …and is kept in <state>/memory-sync-capped.warn" || bad "  …no durable warning file"
+printf 'old warning\n' >"$T/mstate/memory-sync-capped.warn"
+cat >"$T/nodebin/node" <<'SH'
+#!/usr/bin/env bash
+echo "boom" >&2; exit 1
+SH
+tail_sync x
+[ -f "$T/mstate/memory-sync-capped.warn" ] && ok "  …a failed run keeps an earlier warning" || bad "  …failed run cleared the warning"
+cat >"$T/nodebin/node" <<'SH'
+#!/usr/bin/env bash
+[ "${STUB_NODE_MODE:-quiet}" != noise ] || echo "some unrelated stderr" >&2
+exit 0
+SH
+tail_sync noise
+[ -z "$OUT" ] && ok "  …other stderr stays silent" || bad "  …unrelated stderr leaked" "$OUT"
+[ ! -e "$T/mstate/memory-sync-capped.warn" ] && ok "  …and a run without the warning clears the file" || bad "  …stale warning file kept"
+
 echo "monster-bus.test: $pass passed, $fail failed"
 [ "$fail" = 0 ]
 

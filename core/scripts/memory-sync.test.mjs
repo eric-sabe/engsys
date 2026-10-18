@@ -19,6 +19,8 @@ import {
   fetchCommitTrustBatch,
   computeOverlapSince,
   runMemorySync,
+  readCursors,
+  cappedWarning,
 } from './memory-sync.mjs';
 
 describe('memory-sync (#131)', () => {
@@ -822,6 +824,130 @@ describe('memory-sync (#131)', () => {
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
+  });
+
+  describe('delta cursor on an incomplete GraphQL fetch (engsys#189)', () => {
+    const config = { operator_user_ids: [900], trusted_bot_user_ids: [500] };
+    const prNode = (n, updatedAt) => ({
+      number: n,
+      title: `PR ${n}`,
+      body: 'body',
+      updatedAt,
+      mergedAt: updatedAt,
+      authorAssociation: 'OWNER',
+      author: { __typename: 'User', login: 'eric', databaseId: 900 },
+      files: { pageInfo: { hasNextPage: false }, nodes: [] },
+      comments: { pageInfo: { hasNextPage: false }, nodes: [] },
+      reviews: { pageInfo: { hasNextPage: false }, nodes: [] },
+      reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [] },
+    });
+    // `total` PRs, newest first, one minute apart ending at `newest`; pages honour prCount / prAfter.
+    const ghWith = (total, newest, { failOnPage = 0 } = {}) => {
+      const all = Array.from({ length: total }, (_, i) => prNode(1000 - i, new Date(Date.parse(newest) - i * 60_000).toISOString()));
+      let call = 0;
+      return async (args) => {
+        call += 1;
+        if (failOnPage && call === failOnPage) throw new Error('boom');
+        const val = (k) => args.find((a) => typeof a === 'string' && a.startsWith(`${k}=`))?.split('=')[1];
+        const count = Number(val('prCount'));
+        const after = Number(val('prAfter') || 0);
+        const nodes = all.slice(after, after + count);
+        const next = after + nodes.length;
+        return JSON.stringify({ data: { repository: {
+          pullRequests: { pageInfo: { hasNextPage: next < all.length, endCursor: String(next) }, nodes },
+          issues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] },
+        } } });
+      };
+    };
+    const seed = (dir, ghUpdatedAt, extra = {}) => fs.writeFileSync(path.join(dir, 'cursors.json'), JSON.stringify({ 'owner/repo': { updatedAt: ghUpdatedAt, ghUpdatedAt, ...extra } }));
+    const delta = (dir, gh) => runMemorySync({ mode: 'delta', repo: 'owner/repo', repoRoot: dir, cacheDir: dir, config, exec: () => '', gh, now: () => Date.parse('2026-07-20T00:00:00Z'), rebuildIndex: false });
+
+    it('a capped delta still moves the cursor forward, counts the streak, and a complete one resets it', async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-sync-capped-'));
+      try {
+        seed(dir, '2026-07-01T00:00:00Z');
+        const newest = '2026-07-19T12:00:00.000Z';
+        const r1 = await delta(dir, ghWith(250, newest)); // 250 updated since the watermark: the 100-item cap is hit
+        assert.equal(r1.ok, true);
+        assert.equal(r1.ghCapped, true);
+        assert.equal(r1.ghCappedStreak, 1);
+        assert.equal(r1.cursorUpdatedAt, newest, 'the cursor advances to the newest ingested item, not stuck at the old watermark');
+        assert.equal(readCursors(dir)['owner/repo'].ghUpdatedAt, newest);
+        const r2 = await delta(dir, ghWith(250, '2026-07-19T20:00:00.000Z'));
+        assert.equal(r2.ghCappedStreak, 2);
+        assert.equal(r2.ghSinceIso, computeOverlapSince(newest), 'the next query window starts at the advanced cursor, not the old one');
+        // Few enough items to finish below the cap: complete, streak back to 0.
+        const r3 = await delta(dir, ghWith(5, '2026-07-19T21:00:00.000Z'));
+        assert.equal(r3.ghCapped, false);
+        assert.equal(r3.ghCappedStreak, 0);
+        assert.equal(r3.cursorUpdatedAt, '2026-07-19T21:00:00.000Z');
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('capped means newer-than-cursor items were left unfetched: exactly the cap, or overflow only inside the overlap, is complete', async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-sync-nofalse-'));
+      try {
+        seed(dir, '2026-07-19T00:00:00Z');
+        // Exactly 100 PRs: a next page may exist but holds nothing, so the cap cut nothing short.
+        const exact = await delta(dir, ghWith(100, '2026-07-19T12:00:00.000Z'));
+        assert.equal(exact.ghCapped, false);
+        assert.equal(exact.ghCappedStreak, 0);
+        // 250 PRs, but the 100th newest (about 10:21) is already older than the cursor: the rest sit in the
+        // 48h overlap and were ingested before, so nothing is lost.
+        seed(dir, '2026-07-19T11:00:00Z');
+        const overlap = await delta(dir, ghWith(250, '2026-07-19T12:00:00.000Z'));
+        assert.equal(overlap.ghCapped, false);
+        assert.equal(overlap.ghCappedStreak, 0);
+        // 250 PRs with the 100th still newer than the cursor: a real skip.
+        seed(dir, '2026-07-19T00:00:00Z');
+        const real = await delta(dir, ghWith(250, '2026-07-19T12:00:00.000Z'));
+        assert.equal(real.ghCapped, true);
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('a failed fetch (gh error) keeps the cursor and the streak: nothing was ingested, the retry covers the same window', async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-sync-failed-'));
+      try {
+        seed(dir, '2026-07-01T00:00:00Z', { ghCappedStreak: 2 });
+        const r = await delta(dir, ghWith(250, '2026-07-19T12:00:00Z', { failOnPage: 1 }));
+        assert.equal(r.ghCapped, false);
+        assert.equal(r.ghCappedStreak, 2);
+        assert.equal(readCursors(dir)['owner/repo'].ghUpdatedAt, '2026-07-01T00:00:00Z');
+        // Page 1 succeeds, page 2 fails: still not capped, so the cursor is held.
+        const r2 = await delta(dir, ghWith(250, '2026-07-19T12:00:00Z', { failOnPage: 2 }));
+        assert.equal(r2.ghCapped, false);
+        assert.equal(readCursors(dir)['owner/repo'].ghUpdatedAt, '2026-07-01T00:00:00Z');
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('a publish run in between does not reset the capped streak', async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-sync-publish-streak-'));
+      try {
+        seed(dir, '2026-07-01T00:00:00Z');
+        const r1 = await delta(dir, ghWith(250, '2026-07-19T12:00:00.000Z'));
+        assert.equal(r1.ghCappedStreak, 1);
+        const fake = fakeGitApi({ repo: 'owner/repo' });
+        const refStore = createMemoryRefStore({ repo: 'owner/repo', client: fake, sleep: async () => {} });
+        const pub = await runMemorySync({ mode: 'publish', repo: 'owner/repo', repoRoot: dir, cacheDir: dir, config, exec: () => '', refStore, now: () => Date.parse('2026-07-20T00:00:00Z'), rebuildIndex: false });
+        assert.equal(pub.ghCappedStreak, 1, 'publish ran no GitHub fetch, so the streak is untouched');
+        const r2 = await delta(dir, ghWith(250, '2026-07-19T20:00:00.000Z'));
+        assert.equal(r2.ghCappedStreak, 2);
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('cappedWarning speaks only from the 3rd consecutive capped delta run', () => {
+      assert.equal(cappedWarning({ ghCappedStreak: 2 }, 'owner/repo'), '');
+      assert.equal(cappedWarning({}, 'owner/repo'), '');
+      assert.match(cappedWarning({ ghCappedStreak: 3 }, 'owner/repo'), /owner\/repo hit the GraphQL page cap on 3 consecutive delta runs/);
+    });
   });
 });
 
