@@ -93,13 +93,14 @@ if [ "$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION" = on ]; then
     [ "$worst" != 1 ] || result=mismatch
     exit "$worst"
   fi
-  sdir="$(fleet_session_config_dir "$session")" || fleet_die "--session $session: not a name that can have its own config dir"
+  # a refused --session is a usage error (2), never the verifier's MISMATCH (1) that callers read as tampering
+  sdir="$(fleet_session_config_dir "$session")" || { echo "fleet verify: --session $session: not a name that can have its own config dir" >&2; exit 2; }
   names="$(fleet_session_dir_names)"
-  grep -Fxq -- "$session" <<<"$names" || fleet_die "--session $session: not a session on this host that uses the fleet's config dir"
+  grep -Fxq -- "$session" <<<"$names" || { echo "fleet verify: --session $session: not a session on this host that uses the fleet's config dir" >&2; exit 2; }
   FLEET_CLAUDE_CONFIG_DIR="$sdir" CLAUDE_CONFIG_DIR="$sdir"; export FLEET_CLAUDE_CONFIG_DIR CLAUDE_CONFIG_DIR
   SFX=".$session" INC="-$session"
 elif [ -n "$session" ]; then
-  fleet_die "--session needs FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on"
+  echo "fleet verify: --session needs FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on" >&2; exit 2
 fi
 
 LATCH="$FLEET_STATE/verify-wrappers.alerted$SFX"

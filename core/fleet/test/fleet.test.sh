@@ -891,6 +891,19 @@ setconf "FLEET_CLAUDE_CONFIG_DIR=$FCFG" "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on"
   wait
 )
 eq "per-dir lock: two calls on one dir run one after the other" "$(paste -sd' ' "$T/lock.order")" "start end start end"
+# a lock left behind by a holder that died is reclaimed at once (not after minutes)
+mkdir -p "$STATE/locks"; lk="$STATE/locks/claude-$(printf '%s' "$SESS/acme-mm" | cksum | cut -d' ' -f1).lock"
+mkdir "$lk"; echo 999999 >"$lk/pid"
+s0=$(date +%s)
+(
+  export FLEET_INSTANCE="$INST"
+  # shellcheck source=/dev/null
+  . "$ENGSYS_HOST/core/fleet/lib/fleet-env.sh"
+  fleet_dir_lock "$SESS/acme-mm" true
+) && ok "per-dir lock: an orphaned lock (dead pid) does not block" || bad "per-dir lock: an orphaned lock (dead pid) does not block"
+[ $(( $(date +%s) - s0 )) -lt 20 ] && ok "…and is reclaimed at once" || bad "…and is reclaimed at once"
+run fleet verify --session acme-nope
+rc_is "verify --session for a name it refuses is a usage error (2), not a mismatch" 2
 # path safety
 (
   export FLEET_INSTANCE="$INST"
