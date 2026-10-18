@@ -880,6 +880,21 @@ login_all acme-mm
 # a login that works is not asked about again within --max-age (and a logged-out one never is cached)
 : >"$FAKE/claude.log"; run fleet verify --session acme-mm --max-age 15; run fleet verify --session acme-mm --max-age 15
 eq "verify --max-age: one auth status per dir" "$(grep -c '^auth status' "$FAKE/claude.log" || true)" 1
+# plugin list is not asked on every tick: reused within --max-age while nothing it depends on changed
+pl_calls() { grep -c "^plugin list --json.*CFG=$SESS/acme-mm" "$FAKE/claude.log" || true; }
+rm -f "$STATE"/plugin-list.acme-mm.*; : >"$FAKE/claude.log"
+run fleet verify --session acme-mm --max-age 15; run fleet verify --session acme-mm --max-age 15
+eq "verify --max-age: one plugin list per dir while nothing changed" "$(pl_calls)" 1
+mkdir -p "$SESS/acme-mm/plugins"; sleep 1; echo '{}' >"$SESS/acme-mm/plugins/installed_plugins.json"
+run fleet verify --session acme-mm --max-age 15
+eq "…listed again once the dir's plugins changed (what fleet sync does)" "$(pl_calls)" 2
+sleep 1; touch "$HOME/git/app/.claude/settings.json"
+run fleet verify --session acme-mm --max-age 15
+eq "…and once the pin checkout's settings changed (a pin change)" "$(pl_calls)" 3
+run fleet verify --session acme-mm
+eq "…and a run without --max-age (a launch) always asks" "$(pl_calls)" 4
+run fleet verify --session acme-mm --max-age 15; run fleet verify --session acme-mm --max-age 15
+eq "…and the cache is still used after that" "$(pl_calls)" 4
 # claude calls fleet commands make against one session dir never overlap (the CLI contacts the API even for status/list).
 # Mutual exclusion is checked under bash 5 and under /bin/bash (3.2 on macOS, what the supervisor job runs), with the lock
 # taken inside $( ( … ) ) subshells like the real callers: the holder must stay "alive" for as long as it holds the lock.

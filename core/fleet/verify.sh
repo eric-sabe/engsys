@@ -138,6 +138,27 @@ dir_logged_out() {
   [ "$li" = false ]
 }
 
+# list_plugins → `claude plugin list --json` for the fleet's config dir into $plist. In per-session mode the call
+# contacts the API, and verify runs every supervisor tick against each live session's dir, so with --max-age the list
+# is reused for that many minutes while the key is unchanged: the pins (ENGSYS_REF / INSTANCE_REF), the dir, and the
+# mtimes of its plugins/ files and settings and of the pin checkout's settings. A fleet sync, a pin change or any
+# plugin change in the dir changes the key, so a real change is still re-checked at once.
+list_plugins() {
+  local d="${FLEET_CLAUDE_CONFIG_DIR:-}" cache="$FLEET_STATE/plugin-list$SFX.json" keyf="$FLEET_STATE/plugin-list$SFX.key" key f m
+  if [ "$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION" = on ] && [ -n "$max_age" ]; then
+    key="${ENGSYS_REF:-}|${INSTANCE_REF:-}|$d"
+    for f in "$d/plugins" "$d/plugins/installed_plugins.json" "$d/plugins/known_marketplaces.json" "$d/settings.json" "$d/.claude.json" "$PIN_DIR/.claude/settings.json" "${PIN_SETTINGS:-}"; do
+      m="$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || echo 0)"; key="$key|$m"
+    done
+    if [ -s "$cache" ] && [ "$(cat "$keyf" 2>/dev/null)" = "$key" ]; then
+      m="$(stat -c %Y "$cache" 2>/dev/null || stat -f %m "$cache" 2>/dev/null || echo 0)"
+      if [ $(( $(date +%s) - m )) -lt $(( max_age * 60 )) ]; then cp "$cache" "$plist"; return 0; fi
+    fi
+  fi
+  (cd "$PIN_DIR" && fleet_dir_lock "$d" claude plugin list --json </dev/null) >"$plist" 2>/dev/null || return 1
+  if [ -n "${key:-}" ]; then cp "$plist" "$cache" && printf '%s' "$key" >"$keyf"; fi
+}
+
 rc=0 out="" plist=""
 # The Claude Code config dir the fleet's sessions run with: FLEET_CLAUDE_CONFIG_DIR (fleet-env.sh exports
 # it as CLAUDE_CONFIG_DIR for every fleet command and session, so `claude plugin list` below reads it
@@ -179,7 +200,7 @@ else
     fi
   else
     # The cwd decides which project-scope installs apply: the sessions start in PIN_DIR (engsys#86 review H2).
-    if ! (cd "$PIN_DIR" && fleet_dir_lock "${FLEET_CLAUDE_CONFIG_DIR:-}" claude plugin list --json </dev/null) >"$plist" 2>/dev/null; then
+    if ! list_plugins; then
       out="fleet verify: not verified: claude plugin list failed in $PIN_DIR"; rc=3
     fi
   fi
