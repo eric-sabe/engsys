@@ -94,5 +94,34 @@ chmod +x "$T/envbin/gh"
 check "v2.0.1 round 2 F5: GH_TOKEN_COPILOT_CLI is unset before every gh invocation (auth status included — no relay branch exists any more)" "seen=" "$(cd "$T/norepo" && env -u GH_TOKEN GH_TOKEN_COPILOT_CLI=gho_seat PATH="$HERE/bin:$T/envbin:$PATH" GH_APP_ENV_FILE="$T/gh-app.env" "$T/relay.sh" "$SHIM" auth status)"
 check "CT-09: copilot parent calling gh pr list still gets App token (NA-6)" tok_pat "$(cd "$T/repo-pat" && env -u GH_TOKEN GH_TOKEN_COPILOT_CLI=gho_seat PATH="$HERE/bin:$T/copilotps:$T/realbin:$PATH" GH_APP_ENV_FILE="$T/gh-app.env" "$SHIM" pr list)"
 
+# engsys#190: two checkouts' copies of the shim on PATH must not exec each other forever. Each copy skips
+# EVERY shim copy (by identity marker), not only its own directory, and reaches the real gh.
+mkdir -p "$T/ckA/identity/bin" "$T/ckB/identity/bin"
+for ck in ckA ckB; do cp "$SHIM" "$T/$ck/identity/bin/gh"; cp "$HERE/gh-app-token.mjs" "$T/$ck/identity/gh-app-token.mjs"; done
+twin() { (cd "$T/norepo" && env -u GH_APP_OWNER -u ENGSYS_GH_SHIM_HOPS PATH="$T/ckA/identity/bin:$T/ckB/identity/bin:$T/realbin:$PATH" GH_APP_ENV_FILE="$T/gh-app.env" "$1" "${@:2}"); }
+check "190: shim copy A (B also on PATH) reaches the real gh"  tok_default "$(twin "$T/ckA/identity/bin/gh" pr list)"
+check "190: shim copy B (A first on PATH) reaches the real gh" tok_default "$(twin "$T/ckB/identity/bin/gh" pr list)"
+check "190: the in-tree shim with both copies ahead of the real gh" tok_default "$(twin "$SHIM" pr list)"
+check "190: only shim copies on PATH: no real gh found, exit 127 (never a hang)" "127" "$(cd "$T/norepo" && env -u GH_APP_OWNER PATH="$T/ckA/identity/bin:$T/ckB/identity/bin:/usr/bin:/bin" GH_APP_ENV_FILE="$T/gh-app.env" "$T/ckA/identity/bin/gh" pr list >/dev/null 2>&1; echo $?)"
+# Backstop: a wrapper that is not marked (here a copy with the marker stripped) is still bounded by the hop count.
+mkdir -p "$T/ckC/identity/bin" "$T/ckD/identity/bin"
+for ck in ckC ckD; do sed 's/engsys-fleet-gh-shim:/unmarked:/g' "$SHIM" >"$T/$ck/identity/bin/gh"; chmod +x "$T/$ck/identity/bin/gh"; cp "$HERE/gh-app-token.mjs" "$T/$ck/identity/gh-app-token.mjs"; done
+sed -i.bak 's/^is_shim_copy() .*/is_shim_copy() { return 1; }/' "$T/ckC/identity/bin/gh" "$T/ckD/identity/bin/gh"; rm -f "$T"/ck?/identity/bin/gh.bak
+loop_out="$(cd "$T/norepo" && env -u GH_APP_OWNER -u ENGSYS_GH_SHIM_HOPS PATH="$T/ckC/identity/bin:$T/ckD/identity/bin:$T/realbin:$PATH" GH_APP_ENV_FILE="$T/gh-app.env" "$T/ckC/identity/bin/gh" pr list 2>&1; echo "rc=$?")"
+check "190: unmarked shim copies are stopped by the hop guard (exit 126)" "rc=126" "$(printf '%s\n' "$loop_out" | tail -n 1)"
+check "190: ...with an exec-loop message" "yes" "$(printf '%s' "$loop_out" | grep -q 'exec loop detected' && echo yes || echo no)"
+
+# Mixed versions: a shim from before the marker (identified by its header) beside the new one.
+mkdir -p "$T/ckOld/identity/bin"
+cat >"$T/ckOld/identity/bin/gh" <<'SH'
+#!/usr/bin/env bash
+# gh (fleet shim) — run the real GitHub CLI as the fleet's GitHub App bot.
+# (stand-in for a shim from before the identity marker: same header, dir-only "real gh" search)
+echo "old shim reached: it should have been skipped" >&2; exit 99
+SH
+chmod +x "$T/ckOld/identity/bin/gh"; cp "$HERE/gh-app-token.mjs" "$T/ckOld/identity/gh-app-token.mjs"
+mixed() { (cd "$T/norepo" && env -u GH_APP_OWNER -u ENGSYS_GH_SHIM_HOPS PATH="$T/ckOld/identity/bin:$T/ckA/identity/bin:$T/realbin:$PATH" GH_APP_ENV_FILE="$T/gh-app.env" "$1" "${@:2}"); }
+check "190: new shim skips an old (unmarked) shim on PATH" tok_default "$(mixed "$T/ckA/identity/bin/gh" pr list)"
+
 if [ "$FAILS" -gt 0 ]; then echo "gh-shim.test.sh: $FAILS failure(s)" >&2; exit 1; fi
 echo "gh-shim.test.sh: all passed"

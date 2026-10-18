@@ -10,20 +10,33 @@
 # Break-glass: call the real gh by absolute path (e.g. /opt/homebrew/bin/gh) to
 # act as whoever that gh is logged in as. Note that installation tokens have no
 # "user": `gh api /user`, `@me`, and `gh auth status` don't describe the bot.
+# engsys-fleet-gh-shim: identity marker. Every copy of this shim carries it, and the search below skips any
+# candidate that does (see "First gh on PATH"). Keep it in the first 4 KB of the file.
 set -euo pipefail
 
 SHIM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
-# First `gh` on PATH that is not this shim.
+# First `gh` on PATH that is not a copy of this shim. A candidate is a shim copy when it is this
+# script's own directory OR its first 4 KB carries the identity marker, so two checkouts' copies on PATH
+# never resolve each other as "the real gh" and exec in a loop (engsys#190).
+# The second pattern is the header of shims from before the marker existed, so a mixed-version pair on PATH
+# resolves too.
+is_shim_copy() { head -c 4096 "$1" 2>/dev/null | grep -aqE 'engsys-fleet-gh-shim:|^# gh \(fleet shim\) '; }
 REAL_GH=""
 IFS=: read -r -a _dirs <<<"${PATH}"
 for d in "${_dirs[@]}"; do
   [ -n "$d" ] || continue
-  if [ -x "$d/gh" ] && [ "$(cd "$d" 2>/dev/null && pwd -P)" != "$SHIM_DIR" ]; then
+  if [ -x "$d/gh" ] && [ "$(cd "$d" 2>/dev/null && pwd -P)" != "$SHIM_DIR" ] && ! is_shim_copy "$d/gh"; then
     REAL_GH="$d/gh"
     break
   fi
 done
+# Backstop for anything the marker misses (a hand-edited copy, a wrapper around the shim): a bounded hop
+# count instead of an unbounded exec chain.
+SHIM_HOPS="${ENGSYS_GH_SHIM_HOPS:-0}"
+case "$SHIM_HOPS" in '' | *[!0-9]*) SHIM_HOPS=0 ;; esac
+if [ "$SHIM_HOPS" -ge 8 ]; then echo "gh (fleet shim): exec loop detected ($SHIM_HOPS hops) — two gh wrappers on PATH resolve each other. gh on PATH: $(IFS=:; for d in $PATH; do [ -x "$d/gh" ] && printf '%s ' "$d/gh"; done). Remove all but the real gh and one fleet shim." >&2; exit 126; fi
+export ENGSYS_GH_SHIM_HOPS=$((SHIM_HOPS + 1))
 [ -n "$REAL_GH" ] || { echo "gh (fleet shim): real gh not found on PATH" >&2; exit 127; }
 
 # engsys v2.0.1 round 2 (F5, Nyx F3): the Copilot-CLI seat-token relay that used to live here is
