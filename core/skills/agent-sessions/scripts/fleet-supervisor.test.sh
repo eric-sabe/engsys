@@ -736,6 +736,16 @@ expect_n "exited + reset passed → relaunched once" "^launch acme-rel" 1
 hold_gone acme-rel
 expect "  …hold cleared" "^nohold:acme-rel"
 
+# a held session whose ledger is then closed (kill switch) drops its hold, so the alert can resolve
+hconf; qreset; launched_by_sup acme-rel; ledger2 2 "ok"; live acme-rel "⏺ You've hit your limit · $(lreset 90)"; run
+hold_has acme-rel "resume_at="
+expect "closed ledger: a hold exists first" "^hold:acme-rel:resume_at"
+echo '{"state":"CLOSED","body":""}' >"$T/ledger-2.json"; rm -f "$T"/pane-acme-rel "$T"/capture-acme-rel; run
+hold_gone acme-rel
+expect "closed ledger (kill switch) → the orphaned hold is dropped" "^nohold:acme-rel"
+run
+expect "  …and the seat-limit alert resolves on the next tick" "^notify --level info --incident seat-limit --resolve"
+
 # the session is working again before the reset (a person re-prompted it): the hold just ends
 hconf; qreset; launched_by_sup acme-rel; ledger2 2 "ok"; live acme-rel "⏺ You've hit your limit · $(lreset 90)"; run
 live acme-rel "⏺ Back on the ledger."; run

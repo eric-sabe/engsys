@@ -528,7 +528,14 @@ limit_tz_epoch() { # limit_tz_epoch <zone> <year> <Mon> <day> <H:MM AM> → epoc
 }
 limit_hold_get() { sed -n "s/^$2=//p" "$STATE_DIR/$1.limit-hold" 2>/dev/null | head -n 1; }
 limit_hold_drop() { rm -f "${STATE_DIR:?}/${1:?}.limit-hold"; }
-limit_holds_remaining() { ls "$STATE_DIR"/*.limit-hold >/dev/null 2>&1; }
+limit_held_names() { # the configured sessions on a seat limit hold, one per line (a hold of a session no longer in the conf is orphaned)
+  local s n
+  for s in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
+    IFS='|' read -r n _ <<<"$s"
+    [ -z "$n" ] || [ ! -f "$STATE_DIR/$n.limit-hold" ] || printf '%s\n' "$n"
+  done
+}
+limit_holds_remaining() { [ -n "$(limit_held_names)" ]; }
 epoch_iso() { date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ; }
 
 # limit_hold_begin <name> <pane> <limit line> → record the hold: logs/fleet-supervisor/<name>.limit-hold, with the reset
@@ -1024,6 +1031,7 @@ for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
     # shellcheck disable=SC2086
     if ! WHY=$($HOST_CHECK_CMD "$name" 2>&1); then
       log "$name: not on this host, never touched here ($(printf '%s' "${WHY:-host check failed}" | tail -n 1 | cut -c1-200))"
+      limit_hold_drop "$name" # a hold nobody here will resume must not keep the seat-limit alert open
       continue
     fi
   fi
@@ -1039,6 +1047,7 @@ for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
   STATE=$(jq -r .state <<<"$ISSUE")
   if [ "$STATE" = "CLOSED" ]; then
     log "$name: ledger $REPO_SLUG#$ledger CLOSED (kill switch) — not touching"
+    limit_hold_drop "$name"
     continue
   fi
   # only the line inside this session's own block when a marker is given (a shared status issue)
@@ -1207,7 +1216,7 @@ if [ -n "$HEARTBEAT_CMD" ] && [ $((UP + ROTATING + DOWN)) -gt 0 ]; then
   if [ ! -f "$MINUTE_LATCH" ] || [ "$(cat "$MINUTE_LATCH")" != "$MINUTE_NOW" ]; then
     SUMMARY="sessions: $UP up, $ROTATING rotating, $DOWN down"
     if [ -f "$QUOTA_ALERTED" ]; then SUMMARY="$SUMMARY; seat limit reached since $(head -n 1 "$QUOTA_ALERTED")"; fi
-    if limit_holds_remaining; then SUMMARY="$SUMMARY; limit hold: $(for h in "$STATE_DIR"/*.limit-hold; do b="${h##*/}"; printf '%s ' "${b%.limit-hold}"; done | sed 's/ $//; s/ /, /g')"; fi
+    if limit_holds_remaining; then SUMMARY="$SUMMARY; limit hold: $(limit_held_names | paste -sd, - | sed 's/,/, /g')"; fi
     set -- "$SUMMARY"
     if [ "$AUTH_HELD" = 1 ]; then
       # the summary keeps machine fields in ISO UTC; the second line is for people (operator's time, #89)
