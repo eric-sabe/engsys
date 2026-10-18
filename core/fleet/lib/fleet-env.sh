@@ -295,19 +295,19 @@ export FLEET_CLAUDE_CONFIG_DIR_PER_SESSION
 fleet_dir_lock() {
   local dir="$1"; shift
   if [ "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:-off}" != on ]; then "$@"; return; fi
-  local lock guard waited=0 rc=0 lm owner me
+  local lock guard waited=0 rc=0 lm owner ostart me mystart
   lock="$FLEET_STATE/locks/claude-$(printf '%s' "$dir" | cksum | cut -d' ' -f1).lock"
   guard="$lock.reclaim"
-  me="$(sh -c 'echo $PPID')"   # this shell's own pid (the callers run us in subshells, where $$ is the parent's)
+  # The holder is the script process ($$, which is the script's pid even inside $(…) and ( … ) subshells and lives as
+  # long as the script does), with its start time, so a reused pid is not mistaken for a live holder. (A short-lived
+  # subshell's own pid, e.g. from `sh -c 'echo $PPID'`, would make a live lock look dead.)
+  me="$$"; mystart="$(ps -o lstart= -p "$me" 2>/dev/null | awk '{$1=$1; print}' || true)"
   mkdir -p "$FLEET_STATE/locks"
   until mkdir "$lock" 2>/dev/null; do
-    # A holder that died (Ctrl-C, a job timeout) leaves its lock behind: its pid says so. Reclaiming is itself done
-    # under a guard lock, and the pid is read again under it, so two waiters can't both remove a lock one of them
-    # has just taken.
-    owner="$(cat "$lock/pid" 2>/dev/null || true)"
-    if [[ "$owner" =~ ^[0-9]+$ ]] && ! kill -0 "$owner" 2>/dev/null && mkdir "$guard" 2>/dev/null; then
-      owner="$(cat "$lock/pid" 2>/dev/null || true)"
-      if [[ "$owner" =~ ^[0-9]+$ ]] && ! kill -0 "$owner" 2>/dev/null; then rm -rf "${lock:?}"; fi
+    # A holder that died (Ctrl-C, a job timeout) leaves its lock behind. Reclaiming is itself done under a guard lock,
+    # and the holder is read again under it, so two waiters can't both remove a lock one of them has just taken.
+    if fleet_lock_holder_dead "$lock" && mkdir "$guard" 2>/dev/null; then
+      if fleet_lock_holder_dead "$lock"; then rm -rf "${lock:?}"; fi
       rmdir "$guard" 2>/dev/null || true
       continue
     fi
@@ -316,12 +316,25 @@ fleet_dir_lock() {
     if [ "$lm" -gt 0 ] && [ $(( $(date +%s) - lm )) -gt 60 ]; then rmdir "$guard" 2>/dev/null || true; continue; fi
     lm=$(stat -c %Y "$lock" 2>/dev/null || stat -f %m "$lock" 2>/dev/null || echo 0)
     case "$lm" in '' | *[!0-9]*) lm=0 ;; esac
-    if [ "$lm" -gt 0 ] && [ $(( $(date +%s) - lm )) -gt 300 ] && [ ! -s "$lock/pid" ]; then rm -rf "${lock:?}"; continue; fi
+    if [ "$lm" -gt 0 ] && [ $(( $(date +%s) - lm )) -gt 300 ] && [ ! -s "$lock/holder" ]; then rm -rf "${lock:?}"; continue; fi
     waited=$((waited + 1)); [ "$waited" -lt 240 ] || return 75
     sleep 0.5
   done
-  echo "$me" >"$lock/pid" 2>/dev/null || true
+  printf '%s|%s\n' "$me" "$mystart" >"$lock/holder" 2>/dev/null || true
   "$@" || rc=$?
-  rm -f "${lock:?}/pid"; rmdir "$lock" 2>/dev/null || true
+  rm -f "${lock:?}/holder"; rmdir "$lock" 2>/dev/null || true
   return "$rc"
+}
+# fleet_lock_holder_dead <lock dir> → 0 when its holder file names a process that is gone, or one that started at a
+# different time than the file says (the pid was reused).
+fleet_lock_holder_dead() {
+  local rec owner ostart now_start
+  rec="$(cat "$1/holder" 2>/dev/null || true)"
+  owner="${rec%%|*}" ostart="${rec#*|}"
+  [[ "$owner" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$owner" 2>/dev/null || return 0
+  [ -n "$ostart" ] || return 1
+  now_start="$(ps -o lstart= -p "$owner" 2>/dev/null | awk '{$1=$1; print}' || true)"
+  [ -z "$now_start" ] || [ "$now_start" = "$ostart" ] || return 0
+  return 1
 }

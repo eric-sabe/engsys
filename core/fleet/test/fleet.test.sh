@@ -880,28 +880,36 @@ login_all acme-mm
 # a login that works is not asked about again within --max-age (and a logged-out one never is cached)
 : >"$FAKE/claude.log"; run fleet verify --session acme-mm --max-age 15; run fleet verify --session acme-mm --max-age 15
 eq "verify --max-age: one auth status per dir" "$(grep -c '^auth status' "$FAKE/claude.log" || true)" 1
-# claude calls fleet commands make against one session dir never overlap (the CLI contacts the API even for status/list)
+# claude calls fleet commands make against one session dir never overlap (the CLI contacts the API even for status/list).
+# Mutual exclusion is checked under bash 5 and under /bin/bash (3.2 on macOS, what the supervisor job runs), with the lock
+# taken inside $( ( … ) ) subshells like the real callers: the holder must stay "alive" for as long as it holds the lock.
 setconf "FLEET_CLAUDE_CONFIG_DIR=$FCFG" "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on"
-: >"$T/lock.order"
-(
-  export FLEET_INSTANCE="$INST"
-  # shellcheck source=/dev/null
-  . "$ENGSYS_HOST/core/fleet/lib/fleet-env.sh"
-  for i in 1 2; do fleet_dir_lock "$SESS/acme-mm" bash -c "echo start >>'$T/lock.order'; sleep 1; echo end >>'$T/lock.order'" & done
-  wait
-)
-eq "per-dir lock: two calls on one dir run one after the other" "$(paste -sd' ' "$T/lock.order")" "start end start end"
-# a lock left behind by a holder that died is reclaimed at once (not after minutes)
+cat >"$T/lock-case.sh" <<'SH'
+. "$ENGSYS_HOST/core/fleet/lib/fleet-env.sh"
+hold() { echo "start $1" >>"$LOCK_ORDER"; sleep 2; echo "end $1" >>"$LOCK_ORDER"; }
+a="$( (fleet_dir_lock "$LOCK_DIR" hold A) )" &
+sleep 0.3
+b="$( (fleet_dir_lock "$LOCK_DIR" hold B) )" &
+wait
+SH
+for sh in bash /bin/bash; do
+  : >"$T/lock.order"
+  FLEET_INSTANCE="$INST" LOCK_ORDER="$T/lock.order" LOCK_DIR="$SESS/acme-mm" ENGSYS_HOST="$ENGSYS_HOST" "$sh" "$T/lock-case.sh"
+  eq "per-dir lock under $sh: the second caller waits for the first" "$(paste -sd' ' "$T/lock.order")" "start A end A start B end B"
+done
+# a lock left behind by a holder that died is reclaimed at once (not after minutes); so is one whose pid was reused
 mkdir -p "$STATE/locks"; lk="$STATE/locks/claude-$(printf '%s' "$SESS/acme-mm" | cksum | cut -d' ' -f1).lock"
-mkdir "$lk"; echo 999999 >"$lk/pid"
-s0=$(date +%s)
-(
-  export FLEET_INSTANCE="$INST"
-  # shellcheck source=/dev/null
-  . "$ENGSYS_HOST/core/fleet/lib/fleet-env.sh"
-  fleet_dir_lock "$SESS/acme-mm" true
-) && ok "per-dir lock: an orphaned lock (dead pid) does not block" || bad "per-dir lock: an orphaned lock (dead pid) does not block"
-[ $(( $(date +%s) - s0 )) -lt 20 ] && ok "…and is reclaimed at once" || bad "…and is reclaimed at once"
+for rec in "999999|" "$$|Thu Jan  1 00:00:00 1970"; do
+  rm -rf "$lk"; mkdir "$lk"; echo "$rec" >"$lk/holder"
+  s0=$(date +%s)
+  (
+    export FLEET_INSTANCE="$INST"
+    # shellcheck source=/dev/null
+    . "$ENGSYS_HOST/core/fleet/lib/fleet-env.sh"
+    fleet_dir_lock "$SESS/acme-mm" true
+  ) && ok "per-dir lock: a lock whose holder is gone ($rec) does not block" || bad "per-dir lock: a lock whose holder is gone ($rec) does not block"
+  [ $(( $(date +%s) - s0 )) -lt 20 ] && ok "…and is reclaimed at once" || bad "…and is reclaimed at once"
+done
 run fleet verify --session acme-nope
 rc_is "verify --session for a name it refuses is a usage error (2), not a mismatch" 2
 # path safety
