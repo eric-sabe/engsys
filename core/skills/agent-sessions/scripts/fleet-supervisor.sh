@@ -906,7 +906,7 @@ fi
 # Singleton monsters: the integrity check (INTEGRITY_CMD, once per tick) and then the lease. Sets BATON_WHY.
 # A relaunch held by the integrity check is said once on the session's ledger (latch:
 # <name>.integrity-held), cleared by the first passing check (engsys#86 review L1).
-INTEGRITY_BLOCKED=0 INTEGRITY_WHY="" INTEGRITY_SESSION_DONE=""
+INTEGRITY_BLOCKED=0 INTEGRITY_WHY="" INTEGRITY_SESSION_DONE="" INTEGRITY_GLOBAL_BLOCKED=0 INTEGRITY_GLOBAL_WHY=""
 # One login per session (engsys#205): the plugin check is per session (each has its own config dir), run at most once
 # per tick for each, so one tampered, behind or logged-out dir holds only its own session. Sets
 # INTEGRITY_BLOCKED / INTEGRITY_WHY for <name>.
@@ -928,6 +928,8 @@ integrity_session_check() { # integrity_session_check <name>
       esac
       INTEGRITY_SESSION_DONE="$INTEGRITY_SESSION_DONE|$1:$INTEGRITY_BLOCKED:$INTEGRITY_WHY|" ;;
   esac
+  # a conf that also sets INTEGRITY_CMD: its verdict holds every singleton session too
+  if [ "$INTEGRITY_GLOBAL_BLOCKED" = 1 ]; then INTEGRITY_BLOCKED=1 INTEGRITY_WHY="$INTEGRITY_GLOBAL_WHY"; fi
 }
 singleton_allows() { # singleton_allows <name> <repo> <role> <ledger> [rotation_idle] → 0 may relaunch
   local held="$STATE_DIR/$1.integrity-held"
@@ -971,6 +973,7 @@ if [ -n "$INTEGRITY_CMD" ]; then
     break
   done
 fi
+INTEGRITY_GLOBAL_BLOCKED=$INTEGRITY_BLOCKED INTEGRITY_GLOBAL_WHY=$INTEGRITY_WHY
 
 if [ -n "$HOST_HEALTH_CMD" ]; then
   HEALTH_LATCH="$STATE_DIR/host-health.alerted"

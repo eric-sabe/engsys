@@ -639,6 +639,10 @@ expect "  …a mismatch in acme-mm's dir holds acme-mm" "!^launch acme-mm"
 expect "  …and not the other session" "!^integrity-session acme-rel"
 rm -f "$T/integrity-bad-acme-mm"; run
 expect "  …once its dir verifies again, it is relaunched" "^launch acme-mm"
+# a conf that sets both commands: the global verdict still holds the singleton sessions
+printf 'INTEGRITY_CMD=bash %s/integrity-global.sh\n' "$T" >>"$T/w/sup.conf"; printf '#!/usr/bin/env bash\necho "integrity-global" >>"$FAKE/actions"; exit 1\n' >"$T/integrity-global.sh"
+reset; baton free; ledger 90 "ok — merging #12"; echo zsh >"$T/pane-acme-mm"; : >"$T/capture-acme-mm"; run
+expect "205: INTEGRITY_CMD and INTEGRITY_SESSION_CMD both set: the global mismatch still holds the relaunch" "!^launch acme-mm"
 rm -f "$T"/pane-* "$T"/capture-*
 
 # CT-14: HARNESS=copilot in launch-agent-sessions.sh and fleet-supervisor.sh auth_probe

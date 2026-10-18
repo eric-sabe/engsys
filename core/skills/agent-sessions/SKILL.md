@@ -184,9 +184,10 @@ is old, and that pane is ignored until it shows something else. Otherwise relaun
 every session, nothing is killed, one action-level alert goes out, the stale-but-alive ledger
 comments wait, and the status-issue heartbeat reads `auth: expired since <ISO>` plus a line for
 people. The hold ends on the first tick where the test request succeeds (with `AUTH_PROBE=off`, where a
-pane that showed the error answers normally); a pane's reply alone does not end it, because notices such as
-`Remote Control disconnected — OAuth token unavailable` are not login errors but are not a working login
-either (engsys#207). Every idle session that was stale during the hold, escalated before it or not, gets
+pane that showed the error answers normally); a pane's reply alone does not end it, because a pane can print a
+message that is no proof of a working login (engsys#207: `Remote Control disconnected — OAuth token unavailable`
+once counted as an answer and ended a hold while the credential was empty; it, `OAuth token refresh failed`,
+`Signed out of Claude` and the other known phrases are now login errors that start or keep a hold). Every idle session that was stale during the hold, escalated before it or not, gets
 its one relaunch when it ends. The alert is
 then resolved and the table runs as usual on that same tick, so each held session gets its one
 relaunch. `fleet status` prints `auth: expired since <time>` while the hold is on.

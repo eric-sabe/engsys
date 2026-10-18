@@ -55,5 +55,5 @@ REPO=owner/name
 #   header). Under the fleet kit `fleet supervise` writes it.
 acme-mm|0|45|||merge
 acme-maintain|0|45|||maintain
-# acme-<role>|0|60
-# other-mm|0|60|owner/other-repo
+# acme-<role>|0|45
+# other-mm|0|45|owner/other-repo
