@@ -45,7 +45,7 @@ const SLACK_MEMBER_RE = /^[UW][A-Z0-9]{2,20}$/;
 const TOKEN_RE = /^[^\s'"`<>]{1,200}$/;
 export const ROLES = ['merge', 'maintain'];
 export const FAILOVER = ['escalate', 'auto'];
-const FLEET_KEYS = ['operator', 'host', 'github_app', 'github_app_id', 'cloud_identity', 'slack_operator', 'status_issue', 'enabled', 'timezone', 'clock'];
+const FLEET_KEYS = ['operator', 'host', 'github_app', 'github_app_id', 'cloud_identity', 'slack_operator', 'status_issue', 'enabled', 'timezone', 'clock', 'supervised'];
 const ROLE_KEYS = ['home', 'ledger', 'standby', 'failover'];
 const TOP_KEYS = ['version', 'operators_team', 'operators', 'fleets', 'repos'];
 const EXIT = { OK: 0, ERROR: 1, ABSENT: 3 };
@@ -393,6 +393,10 @@ export function validateFederation(doc, { file = '' } = {}) {
       if (f.status_issue !== undefined && f.status_issue !== null) {
         if (!isPosInt(f.status_issue)) err(`${at}.status_issue: must be a positive issue number, got ${show(f.status_issue)}`);
         else fl.status_issue = f.status_issue;
+      }
+      if (f.supervised !== undefined && f.supervised !== null) {
+        if (typeof f.supervised !== 'boolean') err(`${at}.supervised: must be true or false, got ${show(f.supervised)}`);
+        else fl.supervised = f.supervised;
       }
       if (f.enabled !== undefined) {
         if (typeof f.enabled !== 'boolean') err(`${at}.enabled: must be true or false, got ${show(f.enabled)}`);

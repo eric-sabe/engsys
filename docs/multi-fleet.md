@@ -110,6 +110,7 @@ fleets:
     status_issue: 11                        # this fleet's own heartbeat/digest issue in acme/acme-fleet
     timezone: America/New_York              # optional: IANA zone for times shown to people (default UTC)
     clock: 12h                              # optional: 12h or 24h (default 24h); machine timestamps stay ISO UTC
+    supervised: true                        # optional: this fleet runs a supervisor (default false), so the heartbeat watch expects its heartbeat block
     enabled: true
   bob:
     operator: bob
@@ -136,6 +137,9 @@ repos:
   that role for every fleet. From engsys v1.9.0 the kit enforces it on that fleet's hosts: no monster
   (merge, maintain, broker, any supervised session) launches or is supervised; interactive roles run
   ([`fleet-guide.md` § 6.11](fleet-guide.md#611-host-roles-which-sessions-run-on-this-host)).
+- **`supervised: true`** (optional boolean, default `false`; anything but `true`/`false` is rejected) says
+  this fleet runs a supervisor, so the heartbeat watch expects its `<!-- fleet-heartbeat -->` block on the
+  status issue: a missing block then counts as stale, not as unmonitored. The default is not supervised.
 - **`operators_team`** is the operator source `gate-check` reads (section 6). A user-owned repo has no
   teams, so `operators: [login:account-id, ...]` is accepted instead, with the same rules as
   [gate-check.md](gate-check.md#configuration-and-permissions).

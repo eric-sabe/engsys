@@ -94,6 +94,16 @@ test('operators allowlist is accepted for user-owned repos (gate-check format)',
   assert.deepEqual(block.operators, ['alice:1234567']);
 });
 
+test('supervised: true and false are accepted, absent means not supervised (#206)', () => {
+  const on = parseFederation(minimal('', '  alice:\n    supervised: true\n    enabled: true\n'));
+  assert.equal(on.fleets.alice.supervised, true);
+  const off = parseFederation(minimal('', '  alice:\n    supervised: false\n    enabled: true\n'));
+  assert.equal(off.fleets.alice.supervised, false);
+  const absent = parseFederation(minimal());
+  assert.equal(absent.fleets.alice.supervised, undefined);
+  assert.ok(!absent.fleets.alice.supervised);
+});
+
 test('failover auto and a disabled fleet are valid', () => {
   const reg = parseFederation(minimal('repos:\n  acme/app:\n    merge: { home: alice, standby: [bob], failover: auto }\n',
     '  alice:\n    enabled: true\n  bob:\n    enabled: false\n'));
@@ -138,6 +148,8 @@ test('rejects: bad fleet field values', () => {
   assert.match(f('status_issue: 0'), /status_issue: must be a positive issue number, got 0/);
   assert.match(f('status_issue: "11"'), /status_issue: must be a positive issue number, got "11"/);
   assert.match(f('enabled: "true"'), /enabled: must be true or false/);
+  assert.match(f('supervised: "true"'), /supervised: must be true or false/);
+  assert.match(f('supervised: 1'), /supervised: must be true or false/);
   assert.match(f('github_app_id: 0'), /github_app_id: must be the App's numeric id/);
   assert.match(f('github_app_id: "5013025"'), /github_app_id: must be the App's numeric id/);
   assert.match(f('github_app_id: 5013025'), /github_app_id: set github_app/);
