@@ -423,16 +423,16 @@ auth_probe() {
   local dir pid rc=0 waited=0 last
   dir="$(mktemp -d "${TMPDIR:-/tmp}/fleet-supervisor-auth.XXXXXX")"
   if [ "$h" = "copilot" ]; then
-    (cd "$dir" && exec copilot -p 'Reply with the single word OK' -s --no-custom-instructions --disable-builtin-mcps --model claude-haiku-5.5) </dev/null >"$dir.out" 2>&1 &
+    (cd "$dir" && exec copilot -p 'Reply with the single word OK' -s --no-custom-instructions --disable-builtin-mcps --model claude-haiku-5.5) </dev/null >"$dir/probe.out" 2>&1 &
   elif [ "$h" = "antigravity" ]; then
-    (cd "$dir" && exec agy -p 'Reply with the single word OK') </dev/null >"$dir.out" 2>&1 &
+    (cd "$dir" && exec agy -p 'Reply with the single word OK') </dev/null >"$dir/probe.out" 2>&1 &
   elif [ -n "${FLEET_CLAUDE_OAUTH_TOKEN_FILE:-}" ]; then
     # Token mode (engsys#205): the long-lived token comes from its file, for this one process only.
     local tok; tok="$(head -n 1 "$FLEET_CLAUDE_OAUTH_TOKEN_FILE" 2>/dev/null | tr -d '[:space:]' || true)"
     if [ -z "$tok" ]; then rm -rf "${dir:?}"; AUTH_PROBE_WHY="the token file $FLEET_CLAUDE_OAUTH_TOKEN_FILE is missing, empty or unreadable"; return 1; fi
-    (cd "$dir" && CLAUDE_CODE_OAUTH_TOKEN="$tok" exec claude -p --setting-sources project --strict-mcp-config --no-session-persistence --model haiku 'Reply with the single word OK') </dev/null >"$dir.out" 2>&1 &
+    (cd "$dir" && CLAUDE_CODE_OAUTH_TOKEN="$tok" exec claude -p --setting-sources project --strict-mcp-config --no-session-persistence --model haiku 'Reply with the single word OK') </dev/null >"$dir/probe.out" 2>&1 &
   else
-    (cd "$dir" && exec claude -p --setting-sources project --strict-mcp-config --no-session-persistence --model haiku 'Reply with the single word OK') </dev/null >"$dir.out" 2>&1 &
+    (cd "$dir" && exec claude -p --setting-sources project --strict-mcp-config --no-session-persistence --model haiku 'Reply with the single word OK') </dev/null >"$dir/probe.out" 2>&1 &
   fi
   pid=$!
   while kill -0 "$pid" 2>/dev/null; do
@@ -440,8 +440,8 @@ auth_probe() {
     sleep 0.5; waited=$((waited + 1))
   done
   wait "$pid" 2>/dev/null || rc=$?
-  last="$(grep -v '^[[:space:]]*$' "$dir.out" | tail -n 1 | cut -c1-200 || true)"
-  rm -rf "${dir:?}" "${dir:?}.out"
+  last="$(grep -v '^[[:space:]]*$' "$dir/probe.out" | tail -n 1 | cut -c1-200 || true)"
+  rm -rf "${dir:?}"
   [ -z "${tok:-}" ] || last="${last//$tok/[token]}"
   if [ "$rc" = 0 ]; then
     case "$h" in
@@ -570,7 +570,8 @@ limit_hold_done() {
   limit_hold_drop "$name"
   [ "$2" != resumed ] || auth_add_lines "$LIMIT_RESUMED_LIST" "$name"
   log "$name: seat limit hold ended ($2)"
-  if ! limit_holds_remaining; then
+  # another pane can still show the limit with no hold (an unreadable reset): the tick's own resolve handles that
+  if ! limit_holds_remaining && ! { cat "$QUOTA_ACKED" 2>/dev/null; printf '%s' "$QUOTA_BLOCKED"; } | grep -v -F -- "$name|" | grep -q .; then
     names="$(paste -sd, - <"$LIMIT_RESUMED_LIST" 2>/dev/null | sed 's/,/, /g' || true)"
     if [ ! -f "$QUOTA_ALERTED" ]; then rm -f "${LIMIT_RESUMED_LIST:?}"
     elif notify --level info --incident "$QUOTA_INCIDENT" --resolve "Resolved: the Claude usage limit has reset on $HOST_NAME${names:+; resumed on their own: $names}."; then
@@ -830,6 +831,11 @@ limit_hold_step() {
     log "$name: seat limit has reset, but the relaunch is held (baton or integrity) — waiting ($BATON_WHY)"
     return 0
   fi
+  # the table re-reads the pane right before it kills a window: a person may have started the session meanwhile
+  case "$(pane_cmd "$name")" in
+    '' | zsh | -zsh | bash | -bash | sh | -sh | fish | -fish) : ;;
+    *) log "$name: pane became live before the seat-limit relaunch — aborting it"; limit_hold_done "$name" "the session is running again"; return 0 ;;
+  esac
   relaunch "$name" "$2" "$3" "seat limit has reset; the session had exited"
   if [ "$RELAUNCH_OK" = 1 ]; then limit_hold_done "$name" resumed
   else log "$name: seat limit has reset, but the relaunch failed: keeping the hold, retrying next tick"; fi

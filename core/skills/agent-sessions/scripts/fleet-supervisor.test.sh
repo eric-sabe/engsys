@@ -684,21 +684,29 @@ expect "  …the hold is cleared" "^nohold:acme-rel"
 expect "  …one info notice (the alert's resolve) naming the session" "^notify --level info --incident seat-limit --resolve Resolved: the Claude usage limit has reset on .*resumed on their own: acme-rel"
 expect "  …still no ledger escalation" "!comment"
 
-# back-off: the pane still shows the limit after the re-prompt (it hit the limit again immediately)
-run
+# back-off: the pane still shows the limit after the re-prompt (it hit the limit again immediately); its reset
+# time is already past, so the resume time is exactly the back-off
+hconf "LIMIT_RESUME_MARGIN_SEC=0"; live acme-rel "⏺ You've hit your limit · $(lreset -1)"; run
 hold_has acme-rel "rehits=1"
 expect "re-hit: held again with back-off (rehits=1), not re-prompted in a loop" "^hold:acme-rel:rehits=1"
 expect "  …and a repeat limit is a new incident: alerted again" "^notify --level alert --incident seat-limit"
 expect "  …no re-prompt this tick" "!^sendkeys"
 resume_at="$(sed -n 's/^resume_at=//p' "$SLOG/acme-rel.limit-hold")"
-if [ "$resume_at" -ge $(( $(date +%s) + 500 )) ]; then echo "backoff-10m" >>"$T/actions"; fi
-expect "  …the resume waits at least the back-off (10m) past now" "^backoff-10m"
+d=$(( resume_at - $(date +%s) )); if [ "$d" -ge 550 ] && [ "$d" -le 610 ]; then echo "backoff-10m" >>"$T/actions"; fi
+expect "  …the resume waits exactly the back-off (10m) past now" "^backoff-10m"
 mkhold_due acme-rel; run; run
 hold_has acme-rel "rehits=2"
 expect "second re-hit: back-off doubles (rehits=2)" "^hold:acme-rel:rehits=2"
 resume_at="$(sed -n 's/^resume_at=//p' "$SLOG/acme-rel.limit-hold")"
-if [ "$resume_at" -ge $(( $(date +%s) + 1100 )) ]; then echo "backoff-20m" >>"$T/actions"; fi
+d=$(( resume_at - $(date +%s) )); if [ "$d" -ge 1150 ] && [ "$d" -le 1210 ]; then echo "backoff-20m" >>"$T/actions"; fi
 expect "  …to 20m" "^backoff-20m"
+
+# two sessions limited, one with an unreadable reset: the first one's resume does not resolve the alert
+hconf; qreset; launched_by_sup acme-rel; launched_by_sup acme-broker; ledger2 2 "ok"; ledger3 2 "ok"
+live acme-rel "⏺ You've hit your limit · $(lreset 90)"; live acme-broker "⏺ You've hit your limit · resets whenever"; run
+mkhold_due acme-rel; run
+expect_n "resume of one while another is limited with no readable reset: re-prompted" "^sendkeys acme-rel .*usage limit has reset" 1
+expect "  …but no false \"limit is over\" notice" "!--resolve"
 
 # a reset that is already past (with margin 0): resumed on the same tick the limit is seen
 hconf "LIMIT_RESUME_MARGIN_SEC=0"; qreset; launched_by_sup acme-rel; ledger2 90 "ok"; live acme-rel "⏺ You've hit your limit · $(lreset -30)"; run

@@ -341,15 +341,15 @@ fleet_token_login_ok() {
   t="$(fleet_oauth_token_read)"
   [ -n "$t" ] || { FLEET_LOGIN_WHY="the token file is empty or unreadable"; return 1; }
   dir="$(mktemp -d "${TMPDIR:-/tmp}/fleet-token-probe.XXXXXX")"
-  (cd "$dir" && CLAUDE_CODE_OAUTH_TOKEN="$t" exec claude -p --setting-sources project --strict-mcp-config --no-session-persistence --model haiku 'Reply with the single word OK') </dev/null >"$dir.out" 2>&1 &
+  (cd "$dir" && CLAUDE_CODE_OAUTH_TOKEN="$t" exec claude -p --setting-sources project --strict-mcp-config --no-session-persistence --model haiku 'Reply with the single word OK') </dev/null >"$dir/probe.out" 2>&1 &
   pid=$!
   while kill -0 "$pid" 2>/dev/null; do
     if [ "$waited" -ge $((limit * 2)) ]; then kill "$pid" 2>/dev/null || true; break; fi
     sleep 0.5; waited=$((waited + 1))
   done
   wait "$pid" 2>/dev/null || rc=$?
-  last="$(grep -v '^[[:space:]]*$' "$dir.out" | tail -n 1 | cut -c1-200 || true)"
-  rm -rf "${dir:?}" "${dir:?}.out"
+  last="$(grep -v '^[[:space:]]*$' "$dir/probe.out" | tail -n 1 | cut -c1-200 || true)"
+  rm -rf "${dir:?}"
   last="${last//$t/[token]}"
   if [ "$rc" = 0 ]; then mkdir -p "$FLEET_STATE" && date +%s >"$cache"; return 0; fi
   rm -f "${cache:?}"
