@@ -484,6 +484,11 @@ rc_is "…the next run within it passes without asking again" 0
 eq "…one test request in all" "$(probes)" 1
 run fleet verify
 rc_is "…a run without --max-age asks again, and sees the rejection" 3
+touch "$FAKE/probe-ok"; run fleet verify --max-age 15
+rc_is "…(positive control: the token works again, cached)" 0
+rm -f "$FAKE/probe-ok"; sleep 1; touch "$TOK"
+run fleet verify --max-age 15
+rc_is "…a token file written since the cached pass makes the cache stale (a rotation to a bad token is caught)" 3
 touch "$FAKE/probe-ok"; rm -f "$I/.fleet/token-probe.ok"; : >"$FAKE/probe.count"
 # fail closed: each bad file is "not verified" (3), names the problem, and never reaches the API
 badfile() { # badfile <desc> <expected text>

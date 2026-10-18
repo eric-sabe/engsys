@@ -718,7 +718,12 @@ hold_has acme-rel "resume_at=[0-9]"
 expect "  …the hold is recorded" "^hold:acme-rel:resume_at"
 run
 expect "  …still not relaunched next tick" "!^launch acme-rel"
-mkhold_due acme-rel; run
+touch "$T/launch-fail"; mkhold_due acme-rel; run
+expect "exited + reset passed, but the launcher fails → the hold is kept" "^attempt acme-rel"
+hold_has acme-rel "resume_at="
+expect "  …still held (not recorded as resumed)" "^hold:acme-rel:resume_at"
+expect "  …and no \"limit is over\" notice" "!--resolve"
+rm -f "$T/launch-fail"; run
 expect_n "exited + reset passed → relaunched once" "^launch acme-rel" 1
 hold_gone acme-rel
 expect "  …hold cleared" "^nohold:acme-rel"

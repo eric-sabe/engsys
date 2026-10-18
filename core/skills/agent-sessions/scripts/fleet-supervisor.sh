@@ -364,7 +364,7 @@ AUTH_HELD_LIST="$STATE_DIR/auth.held"      # sessions whose relaunch was held, o
 AUTH_SEEN="$STATE_DIR/auth.panes"          # panes (<window>|<pane id>) that showed the error while held
 AUTH_ACKED="$STATE_DIR/auth.acked"         # panes whose error is older than a working login
 AUTH_INCIDENT="claude-auth-expired"
-AUTH_HELD=0 AUTH_RESUMED="" AUTH_RESOLVE_TEXT=""
+AUTH_HELD=0 AUTH_RESUMED="" AUTH_RESOLVE_TEXT="" RELAUNCH_OK=0
 HOST_NAME="$(hostname -s 2>/dev/null || echo "this host")"
 
 # auth_state_of <pane text> → error | ok | none: what the pane's last message says. A message that
@@ -709,6 +709,7 @@ auth_after_launch() { # auth_after_launch <name> → watch the fresh pane for it
 # every tick and buries the alert.
 relaunch() { # relaunch <name> <ledger> <repo> <reason>
   local name="$1" ledger="$2" repo="$3" reason="$4" out failed="$STATE_DIR/$1.launch-failed"
+  RELAUNCH_OK=0 # set to 1 below when the launcher succeeded; the seat limit resume reads it
   # the last line of defence for the login hold: whatever path got here, nothing is killed or relaunched
   if [ "$AUTH_HELD" = 1 ]; then auth_hold "$name" "relaunch due ($reason)"; return 0; fi
   if [ -n "$AUTH_RESUMED" ] && grep -Fxq "$name" <<<"$AUTH_RESUMED"; then
@@ -726,6 +727,7 @@ relaunch() { # relaunch <name> <ledger> <repo> <reason>
   if FLEET_ACTIVE_HARNESS="$use_h" HARNESS="$use_h" $LAUNCH_CMD "$name" >"$out" 2>&1; then
     cat "$out" >>"$LOG"; rm -f "$out"
     log "$name: relaunched${use_h:+ (HARNESS=$use_h)}"
+    RELAUNCH_OK=1
     printf '%s|%s\n' "${CUR_TARGET:-$repo|$ledger|}" "$(date +%s)" >"$STATE_DIR/$name.target"
     printf '%s\n' "$use_h" >"$STATE_DIR/$name.harness"
     # the pane this supervisor launched: the only one whose seat-limit line quota_scan reads
@@ -829,7 +831,8 @@ limit_hold_step() {
     return 0
   fi
   relaunch "$name" "$2" "$3" "seat limit has reset; the session had exited"
-  limit_hold_done "$name" resumed
+  if [ "$RELAUNCH_OK" = 1 ]; then limit_hold_done "$name" resumed
+  else log "$name: seat limit has reset, but the relaunch failed: keeping the hold, retrying next tick"; fi
   return 0
 }
 

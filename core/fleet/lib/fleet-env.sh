@@ -335,7 +335,8 @@ fleet_with_token() {
 fleet_token_login_ok() {
   local max="${1:-0}" cache="$FLEET_STATE/token-probe.ok" at dir t pid rc=0 waited=0 last limit="${FLEET_TEST_REQUEST_TIMEOUT_SEC:-60}"
   FLEET_LOGIN_WHY=""
-  if [ "$max" -gt 0 ] && at="$(cat "$cache" 2>/dev/null)" && [[ "$at" =~ ^[0-9]+$ ]] && [ $(( $(date +%s) - at )) -lt "$max" ]; then return 0; fi
+  # a pass is only good for the token it tested: a file written since (a rotation) makes the cache stale
+  if [ "$max" -gt 0 ] && ! [ "$FLEET_CLAUDE_OAUTH_TOKEN_FILE" -nt "$cache" ] && at="$(cat "$cache" 2>/dev/null)" && [[ "$at" =~ ^[0-9]+$ ]] && [ $(( $(date +%s) - at )) -lt "$max" ]; then return 0; fi
   command -v claude >/dev/null 2>&1 || { FLEET_LOGIN_WHY="claude is not on PATH"; return 1; }
   t="$(fleet_oauth_token_read)"
   [ -n "$t" ] || { FLEET_LOGIN_WHY="the token file is empty or unreadable"; return 1; }
