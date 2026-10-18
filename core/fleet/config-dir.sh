@@ -19,31 +19,37 @@
 # Then (fleet-guide.md § 6.1): log in with the fleet seat, accept workspace trust in PIN_DIR once, run
 # fleet sync, set FLEET_CLAUDE_CONFIG_DIR, restart.
 #
-# Usage: config-dir.sh [--instance <dir>] init [--dir <path>] [--force]
+# With FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on (engsys#205) `init` seeds one dir per session that uses the fleet's
+# config dir, <FLEET_CLAUDE_CONFIG_DIR>.sessions/<name> (--session <name> for just one), the same way and
+# idempotently, and prints the one-time login command for each dir that is not logged in yet. Each session has
+# its own login, so no two long-lived processes share a refresh token (anthropics/claude-code#88583).
+#
+# Usage: config-dir.sh [--instance <dir>] init [--dir <path>] [--session <name>] [--force]
 set -euo pipefail
 if [ "${1:-}" = --instance ]; then FLEET_INSTANCE="${2:?--instance needs a directory}"; export FLEET_INSTANCE; shift 2; fi
 case "${1:-}" in -h | --help | '') sed -n '2,/^set -/{/^set -/!p;}' "$0"; exit 0 ;; esac
 sub="$1"; shift
 [ "$sub" = init ] || { echo "fleet config-dir: unknown subcommand: $sub (init)" >&2; exit 2; }
-dir="" force=0
+dir="" force=0 only_session=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --dir) dir="${2:?--dir needs a path}"; shift ;;
     --force) force=1 ;;
+    --session) only_session="${2:?--session needs a name}"; shift ;;
     *) echo "fleet config-dir: unknown arg: $1" >&2; exit 2 ;;
   esac
   shift
 done
 # shellcheck source=lib/fleet-env.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib/fleet-env.sh"
-dir="${dir:-${FLEET_CLAUDE_CONFIG_DIR:-}}"
+# shellcheck source=lib/session-dirs.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/session-dirs.sh"
 dir="${dir/#\~/$HOME}"
-[ -n "$dir" ] || fleet_die "no config dir: pass --dir <path> or set FLEET_CLAUDE_CONFIG_DIR in fleet.conf"
-case "$dir" in /*) ;; *) fleet_die "the config dir must be an absolute path (got '$dir')" ;; esac
-[ "$(cd "$dir" 2>/dev/null && pwd -P || echo "$dir")" != "$(cd "$HOME/.claude" 2>/dev/null && pwd -P || echo "$HOME/.claude")" ] \
-  || fleet_die "$dir is your own ~/.claude: the fleet's config dir must be a separate one"
-
-mkdir -p "$dir" && chmod 700 "$dir"
+check_dir() { # check_dir <dir>
+  case "$1" in /*) ;; *) fleet_die "the config dir must be an absolute path (got '$1')" ;; esac
+  [ "$(cd "$1" 2>/dev/null && pwd -P || echo "$1")" != "$(cd "$HOME/.claude" 2>/dev/null && pwd -P || echo "$HOME/.claude")" ] \
+    || fleet_die "$1 is your own ~/.claude: the fleet's config dir must be a separate one"
+}
 src="$HOME/.claude/settings.json" srcj="$HOME/.claude.json"
 seed_settings() {
   if [ -f "$src" ]; then
@@ -55,6 +61,10 @@ seed_settings() {
     echo '{"syncClaudeAiSkills": false, "syncClaudeAiPlugins": false}'
   fi
 }
+init_dir() { # init_dir <dir> → creates and seeds it (idempotent)
+local dir="$1" f tmp
+check_dir "$dir"
+mkdir -p "$dir" && chmod 700 "$dir"
 for f in settings.json .claude.json; do
   if [ -e "$dir/$f" ] && [ "$force" != 1 ]; then
     # An existing settings.json is left alone except for the claude.ai sync switches (engsys#200): added when
@@ -77,6 +87,43 @@ for f in settings.json .claude.json; do
   chmod 600 "$tmp" && mv "$tmp" "$dir/$f"
   echo "fleet config-dir: wrote $dir/$f ($(jq -c 'keys' "$dir/$f"))"
 done
+}
+# logged_in <dir> → 0 only when claude says so explicitly (an unknown answer prints the login command too)
+logged_in() { [ "$( (cd "${TMPDIR:-/tmp}" && CLAUDE_CONFIG_DIR="$1" fleet_dir_lock "$1" claude auth status --json </dev/null) 2>/dev/null | jq -r '.loggedIn // empty' 2>/dev/null || true)" = true ]; }
+
+if [ "$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION" = on ] && [ -z "$dir" ]; then
+  fleet_roster_prepare
+  names="$(fleet_session_dir_names)"
+  if [ -n "$only_session" ]; then
+    grep -Fxq -- "$only_session" <<<"$names" || fleet_die "--session $only_session: not a session on this host that uses the fleet's config dir (per session: $(paste -sd' ' - <<<"$names"))"
+    names="$only_session"
+  fi
+  [ -n "$names" ] || fleet_die "no session on this host uses the fleet's config dir, so there is nothing to create"
+  login_needed=""
+  while IFS= read -r n; do
+    d="$(fleet_session_config_dir "$n")"
+    echo "fleet config-dir: session $n -> $d"
+    init_dir "$d"
+    logged_in "$d" || login_needed="$login_needed$n|$d"$'\n'
+  done <<<"$names"
+  echo "fleet config-dir: one Claude login per session (FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on): no two long-lived sessions share a refresh token (anthropics/claude-code#88583)."
+  if [ -n "$login_needed" ]; then
+    echo "fleet config-dir: log each of these in once, with the fleet's seat (then /exit), and accept workspace trust in PIN_DIR for each:"
+    while IFS='|' read -r n d; do
+      [ -n "$n" ] || continue
+      echo "  $n: CLAUDE_CONFIG_DIR=$d claude                      # /login, then /exit"
+      echo "  $n: cd $PIN_DIR && CLAUDE_CONFIG_DIR=$d claude --dangerously-skip-permissions   # trust, /exit"
+    done <<<"$login_needed"
+  else
+    echo "fleet config-dir: every session dir is logged in"
+  fi
+  echo "fleet config-dir: then fleet sync (plugins into every dir), fleet verify, fleet restart --all"
+  exit 0
+fi
+[ -z "$only_session" ] || fleet_die "--session needs FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on"
+dir="${dir:-${FLEET_CLAUDE_CONFIG_DIR:-}}"
+[ -n "$dir" ] || fleet_die "no config dir: pass --dir <path> or set FLEET_CLAUDE_CONFIG_DIR in fleet.conf"
+init_dir "$dir"
 cat <<EOF
 fleet config-dir: next, once:
   1. CLAUDE_CONFIG_DIR=$dir claude            # /login with the fleet's seat, then /exit

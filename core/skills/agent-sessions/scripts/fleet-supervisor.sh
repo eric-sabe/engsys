@@ -154,6 +154,12 @@
 #                              line; exit 0 = may relaunch, 1 = held / not home, anything else =
 #                              error (no relaunch, alert once). Default: node core/lib/lease/baton.mjs
 #                              supervise (reads FLEET_ID / FEDERATION_FILE from the environment).
+#   SESSION_CONFIG_DIR_BASE=<dir> optional (engsys#205, one login per session): every supervised session has its own Claude
+#                              config dir <dir>/<name>. The login hold, its alert (claude-auth-expired-<name>) and its
+#                              test request then run per session, on that dir; the others keep running.
+#   INTEGRITY_SESSION_CMD=<cmd> optional, with SESSION_CONFIG_DIR_BASE: instead of INTEGRITY_CMD, asked as `<cmd> <session>`
+#                              for each singleton session once per tick (the fleet kit: `fleet verify ... --session`);
+#                              the verdict holds only that session's relaunch.
 #   INTEGRITY_CMD=<command>    optional: run once per tick, before the sessions, when any session
 #                              line has a 6th field. Exit 0 = the plugin files that guard the
 #                              singleton monsters are intact. Anything else (1 = they don't match
@@ -251,6 +257,7 @@ TMUX_SESSION="" LAUNCH_CMD="" DEFAULT_REPO="" ROTATE_GRACE_MIN=3 HOST_CHECK_CMD=
 HOST_HEALTH_CMD="" HOST_HEALTH_INCIDENT="host-health" NOTIFY_CMD="" HEARTBEAT_CMD="" BATON_CMD="" INTEGRITY_CMD=""
 AUTH_PROBE=on AUTH_PROBE_TIMEOUT_SEC=90 AUTH_CHECK_WAIT_SEC=45 STATUS_URL=""
 LIMIT_RESUME=on LIMIT_RESUME_MARGIN_SEC=120
+INTEGRITY_SESSION_CMD="" SESSION_CONFIG_DIR_BASE=""
 HARNESS="${HARNESS:-${FLEET_HARNESS:-claude}}"
 SESSIONS=()
 while IFS= read -r line; do
@@ -273,6 +280,8 @@ while IFS= read -r line; do
     AUTH_PROBE_TIMEOUT_SEC=*) AUTH_PROBE_TIMEOUT_SEC="${line#AUTH_PROBE_TIMEOUT_SEC=}" ;;
     AUTH_CHECK_WAIT_SEC=*) AUTH_CHECK_WAIT_SEC="${line#AUTH_CHECK_WAIT_SEC=}" ;;
     STATUS_URL=*) STATUS_URL="${line#STATUS_URL=}" ;;
+    INTEGRITY_SESSION_CMD=*) INTEGRITY_SESSION_CMD="${line#INTEGRITY_SESSION_CMD=}" ;;
+    SESSION_CONFIG_DIR_BASE=*) SESSION_CONFIG_DIR_BASE="${line#SESSION_CONFIG_DIR_BASE=}" ;;
     LIMIT_RESUME=*) LIMIT_RESUME="${line#LIMIT_RESUME=}" ;;
     LIMIT_RESUME_MARGIN_SEC=*) LIMIT_RESUME_MARGIN_SEC="${line#LIMIT_RESUME_MARGIN_SEC=}" ;;
     HARNESS=*) HARNESS="${line#HARNESS=}" ;;
@@ -365,6 +374,20 @@ AUTH_SEEN="$STATE_DIR/auth.panes"          # panes (<window>|<pane id>) that sho
 AUTH_ACKED="$STATE_DIR/auth.acked"         # panes whose error is older than a working login
 AUTH_INCIDENT="claude-auth-expired"
 AUTH_HELD=0 AUTH_RESUMED="" AUTH_RESOLVE_TEXT="" RELAUNCH_OK=0
+# One login per session (SESSION_CONFIG_DIR_BASE set by the fleet kit, engsys#205): each supervised session has its own
+# config dir <base>/<name>, so its login expires on its own. The same hold machinery then runs once per session, on
+# state files named auth.<name>.* and the incident claude-auth-expired-<name>; AUTH_HELD_SET lists the sessions held
+# this tick and nobody else is. Unset (one shared login): one scope, the files auth.*, as before.
+AUTH_SCOPE="" AUTH_ONLY_WINDOW="" AUTH_PROBE_CFG="" AUTH_HELD_SET=" "
+auth_scope() { # auth_scope <session> → the hold state below is that session's (per-session mode only)
+  AUTH_SCOPE="$1" AUTH_ONLY_WINDOW="$1" AUTH_PROBE_CFG="${SESSION_CONFIG_DIR_BASE%/}/$1" AUTH_HELD=0
+  AUTH_EXPIRED="$STATE_DIR/auth.$1.expired" AUTH_ALERTED="$STATE_DIR/auth.$1.alerted" AUTH_HELD_LIST="$STATE_DIR/auth.$1.held"
+  AUTH_SEEN="$STATE_DIR/auth.$1.panes" AUTH_ACKED="$STATE_DIR/auth.$1.acked" AUTH_INCIDENT="claude-auth-expired-$1"
+}
+auth_is_held() { # auth_is_held <session> → 0 when its relaunch is held for a login
+  if [ -n "$SESSION_CONFIG_DIR_BASE" ]; then case "$AUTH_HELD_SET" in *" $1 "*) return 0 ;; esac; return 1; fi
+  [ "$AUTH_HELD" = 1 ]
+}
 HOST_NAME="$(hostname -s 2>/dev/null || echo "this host")"
 
 # auth_state_of <pane text> → error | ok | none: what the pane's last message says. A message that
@@ -386,6 +409,7 @@ auth_scan() {
   panes="$(tmux list-panes -s -t "$TMUX_SESSION" -F '#{window_name}|#{pane_id}|#{pane_current_command}' 2>/dev/null || true)"
   while IFS='|' read -r w id cmd; do
     [ -n "$id" ] || continue
+    [ -z "$AUTH_ONLY_WINDOW" ] || [ "$w" = "$AUTH_ONLY_WINDOW" ] || continue
     case "$cmd" in '' | zsh | -zsh | bash | -bash | sh | -sh | fish | -fish) continue ;; esac
     text="$(tmux capture-pane -p -t "$id" -S -60 2>/dev/null || true)"
     grep -q 'esc to interrupt' <<<"$(tail -n 15 <<<"$text")" && continue
@@ -426,6 +450,9 @@ auth_probe() {
     (cd "$dir" && exec copilot -p 'Reply with the single word OK' -s --no-custom-instructions --disable-builtin-mcps --model claude-haiku-5.5) </dev/null >"$dir/probe.out" 2>&1 &
   elif [ "$h" = "antigravity" ]; then
     (cd "$dir" && exec agy -p 'Reply with the single word OK') </dev/null >"$dir/probe.out" 2>&1 &
+  elif [ -n "$AUTH_PROBE_CFG" ]; then
+    # per-session mode: the test request runs on that session's own dir, never on another session's credential
+    (cd "$dir" && CLAUDE_CONFIG_DIR="$AUTH_PROBE_CFG" exec claude -p --setting-sources project --strict-mcp-config --no-session-persistence --model haiku 'Reply with the single word OK') </dev/null >"$dir/probe.out" 2>&1 &
   else
     (cd "$dir" && exec claude -p --setting-sources project --strict-mcp-config --no-session-persistence --model haiku 'Reply with the single word OK') </dev/null >"$dir/probe.out" 2>&1 &
   fi
@@ -635,7 +662,11 @@ auth_alert() { # the incident's one alert; retried each tick while held until it
     r="${r:-$DEFAULT_REPO}"
     [ -z "$r" ] || [ -z "$l" ] || re="https://github.com/$r/issues/$l"
   fi
-  text="Claude Code login expired on $HOST_NAME. Run \`/login\` in any session (or \`claude /login\`); the fleet resumes on the next supervisor tick. Until then the supervisor relaunches and kills nothing. First seen $(head -n 1 "$AUTH_EXPIRED") in $(sed -n 2p "$AUTH_EXPIRED")."
+  if [ -n "$AUTH_SCOPE" ]; then
+    text="The Claude Code login of session \`$AUTH_SCOPE\` expired on $HOST_NAME (its own config dir ${SESSION_CONFIG_DIR_BASE%/}/$AUTH_SCOPE). Log it in: \`CLAUDE_CONFIG_DIR=${SESSION_CONFIG_DIR_BASE%/}/$AUTH_SCOPE claude\`, then \`/login\` and \`/exit\` (or \`/login\` in its own window); the session resumes on the next supervisor tick. Only \`$AUTH_SCOPE\` is held: the other sessions keep running, and nothing is killed. First seen $(head -n 1 "$AUTH_EXPIRED") in $(sed -n 2p "$AUTH_EXPIRED")."
+  else
+    text="Claude Code login expired on $HOST_NAME. Run \`/login\` in any session (or \`claude /login\`); the fleet resumes on the next supervisor tick. Until then the supervisor relaunches and kills nothing. First seen $(head -n 1 "$AUTH_EXPIRED") in $(sed -n 2p "$AUTH_EXPIRED")."
+  fi
   if [ -n "$re" ]; then set -- --level action --re "$re"; else set -- --level alert; fi # action needs a link
   if notify "$@" --incident "$AUTH_INCIDENT" "$text"; then
     date -u +%Y-%m-%dT%H:%M:%SZ >"$AUTH_ALERTED"; log "auth: alert $AUTH_INCIDENT posted"
@@ -646,7 +677,7 @@ auth_alert() { # the incident's one alert; retried each tick while held until it
 
 auth_resolve_post() { # resolve the alert; retried each tick until it goes out
   [ -f "$AUTH_ALERTED" ] || return 0
-  if notify --level info --incident "$AUTH_INCIDENT" --resolve "${AUTH_RESOLVE_TEXT:-Resolved: Claude Code login works again on $HOST_NAME.}"; then
+  if notify --level info --incident "$AUTH_INCIDENT" --resolve "${AUTH_RESOLVE_TEXT:-Resolved: Claude Code login${AUTH_SCOPE:+ of session \`$AUTH_SCOPE\`} works again on $HOST_NAME.}"; then
     rm -f "$AUTH_ALERTED"; log "auth: alert $AUTH_INCIDENT resolved"
   else
     log "auth: resolving alert $AUTH_INCIDENT failed (NOTIFY_CMD unset or failing); retrying next tick"
@@ -657,8 +688,10 @@ auth_begin() { # auth_begin <where it was seen> <panes> → hold from now on
   [ "$AUTH_HELD" = 0 ] || return 0
   [ -f "$AUTH_EXPIRED" ] || printf '%s\n%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >"$AUTH_EXPIRED"
   AUTH_HELD=1
+  [ -z "$AUTH_SCOPE" ] || AUTH_HELD_SET="$AUTH_HELD_SET$AUTH_SCOPE "
   auth_add_lines "$AUTH_SEEN" "$2"
-  log "auth: Claude Code login expired (seen in $1; $AUTH_PROBE_WHY). Holding every relaunch until it works; nothing is killed"
+  if [ -n "$AUTH_SCOPE" ]; then log "auth: Claude Code login of session $AUTH_SCOPE expired (seen in $1; $AUTH_PROBE_WHY). Holding its relaunch only; nothing is killed"
+  else log "auth: Claude Code login expired (seen in $1; $AUTH_PROBE_WHY). Holding every relaunch until it works; nothing is killed"; fi
   auth_alert
 }
 
@@ -672,14 +705,15 @@ auth_resume() { # auth_resume <how we know> → the hold ends; the table runs as
   since="$(head -n 1 "$AUTH_EXPIRED")"
   held="$(auth_held_names)"
   auth_add_lines "$AUTH_ACKED" "$AUTH_BLOCKED" # panes still showing the old error must not start a new hold
-  AUTH_RESUMED="$(cat "$AUTH_HELD_LIST" 2>/dev/null || true)"
-  AUTH_RESOLVE_TEXT="Resolved: Claude Code login works again on $HOST_NAME ($1); it had been expired since $since. ${held:+Relaunching the held sessions once each: $held.}"
+  AUTH_RESUMED="$AUTH_RESUMED$(cat "$AUTH_HELD_LIST" 2>/dev/null || true)"$'\n'
+  AUTH_RESOLVE_TEXT="Resolved: Claude Code login${AUTH_SCOPE:+ of session \`$AUTH_SCOPE\`} works again on $HOST_NAME ($1); it had been expired since $since. ${held:+Relaunching the held sessions once each: $held.}"
   rm -f "$AUTH_EXPIRED" "$AUTH_SEEN" "$AUTH_HELD_LIST"
   log "auth: Claude Code login works again ($1); relaunches resume${held:+, held sessions go through the table once: $held}"
   auth_resolve_post
 }
 
 auth_hold() { # auth_hold <name> <what the table would have done> → logged and listed, nothing touched
+  [ -z "$SESSION_CONFIG_DIR_BASE" ] || { local keep_held="$AUTH_HELD"; auth_scope "$1"; AUTH_HELD="$keep_held"; }
   log "$1: $2, but held: Claude Code login expired since $(head -n 1 "$AUTH_EXPIRED" 2>/dev/null) (nothing is killed or relaunched until it works)"
   auth_add_lines "$AUTH_HELD_LIST" "$1"
 }
@@ -691,6 +725,7 @@ auth_after_launch() { # auth_after_launch <name> → watch the fresh pane for it
     case "$(auth_state_of "$text")" in
       error)
         AUTH_PROBE_WHY="its first reply was a login error"
+        [ -z "$SESSION_CONFIG_DIR_BASE" ] || auth_scope "$1"
         auth_begin "\`$1\`, right after its relaunch" "$1|$(tmux list-panes -t "${TMUX_SESSION}:$1" -F '#{pane_id}' 2>/dev/null | head -1 || true)"
         return 0 ;;
       ok) return 0 ;; # a seat-limit reply is read by the next tick's quota_scan (this pane is recorded)
@@ -709,7 +744,7 @@ relaunch() { # relaunch <name> <ledger> <repo> <reason>
   local name="$1" ledger="$2" repo="$3" reason="$4" out failed="$STATE_DIR/$1.launch-failed"
   RELAUNCH_OK=0 # set to 1 below when the launcher succeeded; the seat limit resume reads it
   # the last line of defence for the login hold: whatever path got here, nothing is killed or relaunched
-  if [ "$AUTH_HELD" = 1 ]; then auth_hold "$name" "relaunch due ($reason)"; return 0; fi
+  if auth_is_held "$name"; then auth_hold "$name" "relaunch due ($reason)"; return 0; fi
   if [ -n "$AUTH_RESUMED" ] && grep -Fxq "$name" <<<"$AUTH_RESUMED"; then
     reason="$reason; held while Claude Code's login was expired"
   fi
@@ -815,7 +850,7 @@ limit_hold_step() {
     log "$name: held for the seat limit until $(epoch_iso "$at"): no stale or relaunch escalation meanwhile"
     return 0
   fi
-  if [ "$AUTH_HELD" = 1 ]; then auth_hold "$name" "the seat limit has reset, resume due"; return 0; fi
+  if auth_is_held "$name"; then auth_hold "$name" "the seat limit has reset, resume due"; return 0; fi
   if [ "$ALIVE" = 1 ]; then
     log "$name: seat limit has reset: re-prompting the idle session"
     tmux send-keys -t "${TMUX_SESSION}:$name" -l "$LIMIT_PROMPT" 2>/dev/null && tmux send-keys -t "${TMUX_SESSION}:$name" Enter 2>/dev/null \
@@ -871,9 +906,32 @@ fi
 # Singleton monsters: the integrity check (INTEGRITY_CMD, once per tick) and then the lease. Sets BATON_WHY.
 # A relaunch held by the integrity check is said once on the session's ledger (latch:
 # <name>.integrity-held), cleared by the first passing check (engsys#86 review L1).
-INTEGRITY_BLOCKED=0 INTEGRITY_WHY=""
+INTEGRITY_BLOCKED=0 INTEGRITY_WHY="" INTEGRITY_SESSION_DONE=""
+# One login per session (engsys#205): the plugin check is per session (each has its own config dir), run at most once
+# per tick for each, so one tampered, behind or logged-out dir holds only its own session. Sets
+# INTEGRITY_BLOCKED / INTEGRITY_WHY for <name>.
+integrity_session_check() { # integrity_session_check <name>
+  local irc=0 iout
+  INTEGRITY_BLOCKED=0 INTEGRITY_WHY=""
+  case "$INTEGRITY_SESSION_DONE" in
+    *"|$1:"*) INTEGRITY_BLOCKED="$(sed -n "s/.*|$1:\([01]\):.*/\1/p" <<<"$INTEGRITY_SESSION_DONE")"; INTEGRITY_WHY="$(sed -n "s/.*|$1:[01]:\([^|]*\)|.*/\1/p" <<<"$INTEGRITY_SESSION_DONE")" ;;
+    *)
+      # shellcheck disable=SC2086 # a command line, like LAUNCH_CMD
+      iout=$($INTEGRITY_SESSION_CMD "$1" 2>&1 </dev/null) || irc=$?
+      printf '%s\n' "$iout" >>"$LOG"
+      case "$irc" in
+        0) log "integrity ($1): ok" ;;
+        1) INTEGRITY_BLOCKED=1 INTEGRITY_WHY="the engsys plugin in $1's own config dir does not match its release"
+           log "integrity ($1): MISMATCH, its relaunch is held this tick; running sessions and batons are left alone" ;;
+        *) INTEGRITY_BLOCKED=1 INTEGRITY_WHY="the engsys plugin check for $1's own config dir could not run (exit $irc)"
+           log "integrity ($1): the check could not run (exit $irc), so its relaunch is held this tick (fail closed): $(printf '%s' "$iout" | tail -n 1 | cut -c1-200)" ;;
+      esac
+      INTEGRITY_SESSION_DONE="$INTEGRITY_SESSION_DONE|$1:$INTEGRITY_BLOCKED:$INTEGRITY_WHY|" ;;
+  esac
+}
 singleton_allows() { # singleton_allows <name> <repo> <role> <ledger> [rotation_idle] → 0 may relaunch
   local held="$STATE_DIR/$1.integrity-held"
+  [ -z "$INTEGRITY_SESSION_CMD" ] || integrity_session_check "$1"
   if [ "$INTEGRITY_BLOCKED" = 1 ]; then
     BATON_WHY="plugin integrity: $INTEGRITY_WHY (fleet verify)"
     if [ ! -f "$held" ]; then
@@ -885,6 +943,15 @@ singleton_allows() { # singleton_allows <name> <repo> <role> <ledger> [rotation_
   rm -f "$held"
   baton_allows "$1" "$2" "$3" "${5:-}"
 }
+if [ -n "$INTEGRITY_SESSION_CMD" ]; then
+  # every tick, for every singleton session: this is what alerts, resolves and auto-syncs (the global check's job)
+  for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
+    IFS='|' read -r s_name _ _ _ _ s_role <<<"$spec"
+    [ -n "$s_role" ] && [ -n "$s_name" ] || continue
+    integrity_session_check "$s_name"
+  done
+  INTEGRITY_BLOCKED=0 INTEGRITY_WHY=""
+fi
 if [ -n "$INTEGRITY_CMD" ]; then
   for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
     IFS='|' read -r _ _ _ _ _ s_role <<<"$spec"
@@ -928,37 +995,52 @@ if [ -n "$HOST_HEALTH_CMD" ]; then
   fi
 fi
 
-# Claude Code login (header): read the panes, then hold, keep holding, or resume.
-auth_scan
-if [ -f "$AUTH_EXPIRED" ]; then
-  AUTH_HOW=""
-  # A pane that answered is not proof the login works (engsys#207: a Remote Control notice line ended a hold while the
-  # credential was still empty). With the test request on, only the test request ends a hold; with it off a
-  # pane's reply after the error is all the evidence there is.
-  if [ "$AUTH_PROBE" = off ] && [ -f "$AUTH_SEEN" ] && [ -n "$AUTH_ANSWERED" ]; then
-    while IFS= read -r p; do
-      [ -n "$p" ] && grep -Fxq "$p" <<<"$AUTH_ANSWERED" && { AUTH_HOW="\`${p%%|*}\` answered normally after the error"; break; }
-    done <"$AUTH_SEEN"
-  fi
-  if [ -z "$AUTH_HOW" ] && auth_probe; then AUTH_HOW="$AUTH_PROBE_WHY"; fi
-  if [ -n "$AUTH_HOW" ]; then
-    auth_resume "$AUTH_HOW"
+# Claude Code login (header): read the panes, then hold, keep holding, or resume. With one login per session
+# (SESSION_CONFIG_DIR_BASE) this runs once per supervised session, each on its own state and its own pane.
+auth_tick() {
+  auth_scan
+  if [ -f "$AUTH_EXPIRED" ]; then
+    AUTH_HOW=""
+    # A pane that answered is not proof the login works (engsys#207: a Remote Control notice line ended a hold while the
+    # credential was still empty). With the test request on, only the test request ends a hold; with it off a
+    # pane's reply after the error is all the evidence there is.
+    if [ "$AUTH_PROBE" = off ] && [ -f "$AUTH_SEEN" ] && [ -n "$AUTH_ANSWERED" ]; then
+      while IFS= read -r p; do
+        [ -n "$p" ] && grep -Fxq "$p" <<<"$AUTH_ANSWERED" && { AUTH_HOW="\`${p%%|*}\` answered normally after the error"; break; }
+      done <"$AUTH_SEEN"
+    fi
+    if [ -z "$AUTH_HOW" ] && auth_probe; then AUTH_HOW="$AUTH_PROBE_WHY"; fi
+    if [ -n "$AUTH_HOW" ]; then
+      auth_resume "$AUTH_HOW"
+    else
+      AUTH_HELD=1
+      [ -z "$AUTH_SCOPE" ] || AUTH_HELD_SET="$AUTH_HELD_SET$AUTH_SCOPE "
+      auth_add_lines "$AUTH_SEEN" "$AUTH_BLOCKED"
+      if [ -n "$AUTH_SCOPE" ]; then log "auth: session $AUTH_SCOPE still expired (since $(head -n 1 "$AUTH_EXPIRED")): holding its relaunch only; $AUTH_PROBE_WHY"
+      else log "auth: still expired (since $(head -n 1 "$AUTH_EXPIRED")): holding every relaunch; $AUTH_PROBE_WHY"; fi
+      auth_alert
+    fi
+  elif [ -n "$AUTH_BLOCKED" ]; then
+    AUTH_FIRST="${AUTH_BLOCKED%%$'\n'*}"
+    if auth_probe; then
+      auth_add_lines "$AUTH_ACKED" "$AUTH_BLOCKED"
+      log "auth: \`${AUTH_FIRST%%|*}\` shows a login error, but $AUTH_PROBE_WHY: an old error, ignored until that pane shows something else"
+    else
+      auth_begin "the \`${AUTH_FIRST%%|*}\` window" "$AUTH_BLOCKED"
+    fi
   else
-    AUTH_HELD=1
-    auth_add_lines "$AUTH_SEEN" "$AUTH_BLOCKED"
-    log "auth: still expired (since $(head -n 1 "$AUTH_EXPIRED")): holding every relaunch; $AUTH_PROBE_WHY"
-    auth_alert
+    auth_resolve_post # a resolve that failed to post on the tick the hold ended
   fi
-elif [ -n "$AUTH_BLOCKED" ]; then
-  AUTH_FIRST="${AUTH_BLOCKED%%$'\n'*}"
-  if auth_probe; then
-    auth_add_lines "$AUTH_ACKED" "$AUTH_BLOCKED"
-    log "auth: \`${AUTH_FIRST%%|*}\` shows a login error, but $AUTH_PROBE_WHY: an old error, ignored until that pane shows something else"
-  else
-    auth_begin "the \`${AUTH_FIRST%%|*}\` window" "$AUTH_BLOCKED"
-  fi
+}
+if [ -n "$SESSION_CONFIG_DIR_BASE" ]; then
+  for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
+    IFS='|' read -r auth_n _ <<<"$spec"
+    [ -n "$auth_n" ] || continue
+    auth_scope "$auth_n"; auth_tick
+  done
+  AUTH_HELD=0 AUTH_SCOPE="" AUTH_ONLY_WINDOW="" AUTH_PROBE_CFG=""   # the loop below asks auth_is_held <name>
 else
-  auth_resolve_post # a resolve that failed to post on the tick the hold ended
+  auth_tick
 fi
 
 # Tallied as each session is classified below, for the once-per-tick heartbeat summary. A session
@@ -1070,7 +1152,7 @@ for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
         log "$name: rotation requested ${AGE}m ago — letting it settle (grace ${ROTATE_GRACE_MIN}m)"
       elif pane_busy "$name"; then
         log "$name: rotation requested but the session is still mid-turn — waiting"
-      elif [ "$AUTH_HELD" = 1 ]; then
+      elif auth_is_held "$name"; then
         auth_hold "$name" "rotation requested ${AGE}m ago, session idle at its prompt"
       elif [ -n "$role" ] && ! singleton_allows "$name" "$REPO_SLUG" "$role" "$ledger" rotation_idle; then
         log "$name: rotation requested, but a relaunch is held (baton or integrity) — waiting ($BATON_WHY)"
@@ -1083,7 +1165,7 @@ for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
       # hung-or-thinking: never kill; escalate once per incident. The one exception is a singleton
       # monster idle at its prompt whose baton is forfeited (header). While the login is held, neither:
       # the relaunch waits, and so does the ledger comment (the login alert already says why).
-      if [ "$AUTH_HELD" = 1 ]; then
+      if auth_is_held "$name"; then
         # idle at its prompt: listed, so the hold's end gives it its one relaunch even when it was escalated before (engsys#207)
         if ! pane_busy "$name"; then auth_hold "$name" "heartbeat stale (last: ${HB_TS:-never}), session idle at its prompt"
         else log "$name: STALE+ALIVE — ledger comment deferred while Claude Code's login is expired"; fi
@@ -1109,7 +1191,7 @@ for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
       # lease still reads "expired, naming this session"; if it never does, the stale branch takes over.
       DOWN=$((DOWN + 1))
       rm -f "$LATCH"
-      if [ "$AUTH_HELD" = 1 ]; then
+      if auth_is_held "$name"; then
         auth_hold "$name" "the $role baton expired still naming this session, session idle at its prompt"
       else
         relaunch "$name" "$ledger" "$REPO_SLUG" "the $role baton expired still naming this session (last heartbeat ${HB_TS}), session idle at its prompt ($BATON_WHY)"
@@ -1130,7 +1212,7 @@ for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
     if [ "$ROTATION" = "1" ]; then REASON="rotation requested"
     elif [ "$HANDOVER" = "1" ]; then REASON="handover (${HB_STATUS})"
     else REASON="crash recovery (stale heartbeat, process gone)"; fi
-    if [ "$AUTH_HELD" = 1 ]; then auth_hold "$name" "$REASON"; continue; fi
+    if auth_is_held "$name"; then auth_hold "$name" "$REASON"; continue; fi
     if [ -n "$role" ] && ! singleton_allows "$name" "$REPO_SLUG" "$role" "$ledger"; then
       log "$name: $REASON, but a relaunch is held (baton or integrity) — waiting ($BATON_WHY)"
       continue
@@ -1174,6 +1256,10 @@ if [ -n "$HEARTBEAT_CMD" ] && [ $((UP + ROTATING + DOWN)) -gt 0 ]; then
       AUTH_HELD_NAMES="$(auth_held_names)"
       SUMMARY="$SUMMARY; auth: expired since $AUTH_SINCE, relaunches held"
       set -- "$SUMMARY" "$(human_text "Claude Code login expired on $HOST_NAME since $AUTH_SINCE. Run \`/login\` in any session (or \`claude /login\`); the fleet resumes on the next supervisor tick.${AUTH_HELD_NAMES:+ Relaunches held: $AUTH_HELD_NAMES.}")"
+    elif [ -n "$SESSION_CONFIG_DIR_BASE" ] && [ "$AUTH_HELD_SET" != " " ]; then
+      AUTH_HELD_NAMES="$(printf '%s' "$AUTH_HELD_SET" | xargs | sed 's/ /, /g')"
+      SUMMARY="$SUMMARY; auth: own login expired for $AUTH_HELD_NAMES (only those are held)"
+      set -- "$SUMMARY" "$(human_text "The Claude Code login of $AUTH_HELD_NAMES expired on $HOST_NAME (each session has its own login; the other sessions keep running). Log each in with CLAUDE_CONFIG_DIR=${SESSION_CONFIG_DIR_BASE%/}/<session> claude, then /login; it resumes on the next supervisor tick.")"
     fi
     # shellcheck disable=SC2086
     if $HEARTBEAT_CMD "$@" >>"$LOG" 2>&1; then

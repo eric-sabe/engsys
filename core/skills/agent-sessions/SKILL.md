@@ -191,6 +191,14 @@ its one relaunch when it ends. The alert is
 then resolved and the table runs as usual on that same tick, so each held session gets its one
 relaunch. `fleet status` prints `auth: expired since <time>` while the hold is on.
 
+**One login per session (engsys#205).** With `SESSION_CONFIG_DIR_BASE=<dir>` in the conf (the fleet kit sets it when
+`FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on`), each supervised session has its own Claude config dir `<base>/<name>` and
+so its own login. The login hold above then runs per session, on `auth.<name>.*` state: a login error in a session's
+pane holds that session only, the test request runs with that session's `CLAUDE_CONFIG_DIR`, the alert
+(`claude-auth-expired-<name>`) names the session, its dir and the login command, and the other sessions keep
+running. `INTEGRITY_SESSION_CMD=<cmd>` replaces `INTEGRITY_CMD`: it is asked as `<cmd> <session>` for each singleton
+session once per tick, and its verdict holds only that session.
+
 **Moved ledger targets.** The supervisor records, per session, the ledger target it
 last launched it against (`logs/fleet-supervisor/<name>.target`). When the
 configured target differs (for example the resource broker moving from a

@@ -47,6 +47,7 @@ SH
 cat >"$T/bin/claude" <<'SH'
 #!/usr/bin/env bash
 echo "probe $*" >>"$FAKE/actions"
+echo "probe-cfg ${CLAUDE_CONFIG_DIR:-unset}" >>"$FAKE/actions"
 if [ -f "$FAKE/probe-ok" ]; then echo OK; exit 0; fi
 echo "Login expired · Please run /login"; exit 1
 SH
@@ -592,6 +593,46 @@ expect "  …through a kill of its idle window" "^kill acme-rel"
 [ ! -f "$SLOG/acme-rel.escalated" ] && echo latch-cleared >>"$T/actions"
 expect "  …and its escalation latch is cleared" "^latch-cleared"
 rm -f "$T"/pane-* "$T"/capture-* "$T/probe-ok"
+
+# engsys#205: one Claude login per session. With SESSION_CONFIG_DIR_BASE the login hold is per session: its own state,
+# alert and test request (on that session's dir); the other sessions keep going.
+CFGB="$T/cfg.sessions"
+pconf() { authconf "SESSION_CONFIG_DIR_BASE=$CFGB
+INTEGRITY_SESSION_CMD=bash $T/integrity.sh"; }
+printf '#!/usr/bin/env bash\necho "integrity-session $*" >>"$FAKE/actions"\n[ -f "$FAKE/integrity-bad-$1" ] && { echo "mismatch in $1"; exit 1; }\nexit 0\n' >"$T/integrity.sh"
+pconf; reset; rm -f "$T"/pane-* "$T"/capture-* "$T/probe-ok" "$T"/integrity-bad-*; baton free; ledger 90 "ok — merging #12"; ledger2 90 "ok"
+echo zsh >"$T/pane-acme-mm"; : >"$T/capture-acme-mm"
+echo 2.1.285 >"$T/pane-acme-rel"; cp "$T/fixture-login-expired" "$T/capture-acme-rel"; run
+expect "205: a login error in one session's pane starts a hold for that session" "^notify --level action .*--incident claude-auth-expired-acme-rel "
+expect "  …the alert names the session, its dir and the login command" "^notify .*claude-auth-expired-acme-rel .*session .acme-rel. expired .*$CFGB/acme-rel.*CLAUDE_CONFIG_DIR=$CFGB/acme-rel claude"
+expect "  …and says only that session is held" "^notify .*Only .acme-rel. is held: the other sessions keep running"
+expect "  …no global alert" "!--incident claude-auth-expired "
+expect "  …the test request ran on that session's own dir" "^probe-cfg $CFGB/acme-rel"
+expect "  …the other session (merge monster, crashed) is relaunched all the same" "^launch acme-mm"
+expect "  …the held session is neither killed nor commented on" "!^kill acme-rel\|comment 2"
+[ -f "$SLOG/auth.acme-rel.expired" ] && [ ! -f "$SLOG/auth.expired" ] && echo own-state >>"$T/actions"
+expect "  …its hold state is its own file" "^own-state"
+expect "  …the heartbeat names only that session" "^heartbeat .*auth: own login expired for acme-rel (only those are held)"
+run
+expect "205: next tick: no second alert, still no relaunch of the held one" "!^notify --level action\|^launch acme-rel"
+touch "$T/probe-ok"; run
+expect "205: its own test request succeeding resolves its own incident" "^notify --level info --incident claude-auth-expired-acme-rel --resolve Resolved: Claude Code login of session .acme-rel. works again"
+expect "  …and the session is relaunched once" "^launch acme-rel"
+rm -f "$T/probe-ok"
+# a login error in a pane that is not a supervised session's does not hold anything in per-session mode
+pconf; reset; rm -f "$T"/pane-* "$T"/capture-*; baton free; ledger 90 "ok — merging #12"; ledger2 1 "ok"
+echo zsh >"$T/pane-acme-mm"; : >"$T/capture-acme-mm"; wpane acme-w "$(cat "$T/fixture-login-expired")"; run
+expect "205: a login error in an unsupervised window holds no session" "!^notify --level action"
+expect "  …the merge monster is relaunched" "^launch acme-mm"
+# the plugin check is per session: one session's bad dir holds only its relaunch
+pconf; reset; rm -f "$T"/pane-* "$T"/capture-*; baton free; ledger 90 "ok — merging #12"; ledger2 90 "ok"; echo zsh >"$T/pane-acme-mm"; : >"$T/capture-acme-mm"
+touch "$T/integrity-bad-acme-mm"; run
+expect "205: INTEGRITY_SESSION_CMD is asked per session" "^integrity-session acme-mm"
+expect "  …a mismatch in acme-mm's dir holds acme-mm" "!^launch acme-mm"
+expect "  …and not the other session" "!^integrity-session acme-rel"
+rm -f "$T/integrity-bad-acme-mm"; run
+expect "  …once its dir verifies again, it is relaunched" "^launch acme-mm"
+rm -f "$T"/pane-* "$T"/capture-*
 
 # CT-14: HARNESS=copilot in launch-agent-sessions.sh and fleet-supervisor.sh auth_probe
 cat >"$T/bin/copilot" <<'SH'

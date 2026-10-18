@@ -88,54 +88,8 @@ LAUNCHER="$ENGSYS_DIR/core/skills/agent-sessions/scripts/launch-agent-sessions.s
 
 # The rendered roster first: classification below reads its 5th fields and flags with __TOKENS__ resolved.
 fleet_render "$FLEET_REPO/fleet/roster.tmpl" "$FLEET_STATE/roster"
-ROSTER_LINE_RE='^[A-Za-z0-9][A-Za-z0-9._-]*\|'
-roster_field() { # roster_field <name> <n> → field n of <name>'s rendered roster line
-  awk -F'|' -v n="$1" -v k="$2" '$1 == n { print $k; exit }' "$FLEET_STATE/roster"
-}
-roster_default_env() { sed -n 's/^ENV_FILE=//p' "$FLEET_STATE/roster" | tail -n 1 | sed -e 's/[[:space:]][[:space:]]*#.*$//' -e 's/[[:space:]]*$//'; }
-roster_model_header() { sed -n 's/^MODEL=//p' "$FLEET_STATE/roster" | tail -n 1 | sed -e 's/[[:space:]][[:space:]]*#.*$//' -e 's/[[:space:]]*$//'; }
-norm_words() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr '_ ' '--'; }
-# A security-tier line, as the launcher reads it (launch-agent-sessions.sh is_security_line): its env file
-# (5th field, else the roster's ENV_FILE) is named security or nyx in any case, or any --model in its flags
-# (or the roster's MODEL=) names Claude Opus 4.8.
-is_security_session() { # is_security_session <name>
-  local envf flags b tok prev="" m
-  envf="$(roster_field "$1" 5)"; [ -n "$envf" ] || envf="$(roster_default_env)"
-  b="${envf##*/}"; b="${b%.*}"; b="$(printf '%s' "$b" | tr '[:upper:]' '[:lower:]' | tr -d "\"' ")"
-  case "$b" in security | nyx) return 0 ;; esac
-  flags="$(roster_model_header) $(roster_field "$1" 4)"
-  set -f
-  # shellcheck disable=SC2086
-  for tok in $flags; do
-    m=""; [ "$prev" = --model ] && m="$tok"; case "$tok" in --model=*) m="${tok#--model=}" ;; esac
-    if [ -n "$m" ]; then
-      m="$(printf '%s' "$m" | tr '[:upper:]' '[:lower:]' | tr -d "\"'")"
-      case "$m" in claude-opus-4-8* | claude-opus-4.8* | security) set +f; return 0 ;; esac
-    fi
-    prev="$tok"
-  done
-  set +f
-  return 1
-}
-# Supervised (and security-lane) sessions: merge, maintain, broker, any monster, any ledger-bearing
-# session, any prompt that names a monster (with the launcher's tolerance for case, `_` and spaces), and
-# any security-tier line. They run on Claude only.
-claude_only() { # claude_only <name> → 0 when <name> is a supervised or security-lane session
-  case "$(fleet_host_kind_of "$1")" in merge | maintain | broker | monster) return 0 ;; esac
-  fleet_ledger_sessions | grep -Fxq -- "$1" && return 0
-  case "$(norm_words "$(roster_field "$1" 3)")" in *merge-monster* | *maintenance-monster* | *resource-broker*) return 0 ;; esac
-  is_security_session "$1"
-}
-# Positively interactive: a roster line this host classifies as interactive and that is none of the above.
-# Anything else (an unknown or unclassified name) is treated as supervised: it fails toward the fleet dir.
-is_interactive() { [ "$(fleet_host_kind_of "$1")" = interactive ] && ! claude_only "$1"; }
-# Which sessions get CLAUDE_CONFIG_DIR=<fleet dir>: every one (scope all), or every non-interactive one.
-uses_fleet_config_dir() { # uses_fleet_config_dir <name>
-  [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] || return 1
-  [ "${FLEET_CLAUDE_CONFIG_DIR_SCOPE:-all}" = supervised ] || return 0
-  ! is_interactive "$1"
-}
-roster_names() { grep -E "$ROSTER_LINE_RE" "$FLEET_STATE/roster" | cut -d'|' -f1; }
+# shellcheck source=lib/session-dirs.sh
+. "$FLEET_KIT_DIR/lib/session-dirs.sh"
 # env_file_users <env file basename> → the roster sessions that source it (5th field, else ENV_FILE)
 env_file_users() {
   local def
@@ -155,6 +109,15 @@ env_config_dir_line() { # env_config_dir_line <env file basename>
   done < <(env_file_users "$1")
   if [ "$interactive" = 1 ]; then
     printf '# FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised: interactive sessions use ~/.claude\nunset CLAUDE_CONFIG_DIR\n'
+  elif [ "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:-off}" = on ]; then
+    # one login per session (engsys#205): a file only one session sources names that session's own dir; a shared
+    # one can't, and the launch line (decided last) sets it
+    local users; users="$(env_file_users "$1")"
+    if [ "$(grep -c . <<<"$users")" = 1 ] && fleet_session_config_dir "$users" >/dev/null; then
+      printf 'CLAUDE_CONFIG_DIR=%q\n' "$(fleet_session_config_dir "$users")"
+    else
+      printf '# FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on: each session gets its own dir on its launch line\nunset CLAUDE_CONFIG_DIR\n'
+    fi
   else
     printf 'CLAUDE_CONFIG_DIR=%q\n' "$FLEET_CLAUDE_CONFIG_DIR"
   fi
@@ -172,6 +135,12 @@ else
   unset FLEET_CLAUDE_CONFIG_DIR_INTERACTIVE
 fi
 unset FLEET_CLAUDE_CONFIG_DIR_SESSIONS
+# One login per session (engsys#205): the launcher puts each session on <base>.sessions/<its name>.
+if [ "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:-off}" = on ]; then
+  ENGSYS_CONFIG_DIR_SESSIONS="${FLEET_CLAUDE_CONFIG_DIR%/}.sessions"; export ENGSYS_CONFIG_DIR_SESSIONS
+else
+  unset ENGSYS_CONFIG_DIR_SESSIONS
+fi
 
 mkdir -p "$ENV_DIR" && chmod 700 "$ENV_DIR"
 shopt -s nullglob
@@ -229,7 +198,18 @@ fi
 # Plugin integrity (engsys#70), asked once per launch and only when a merge or maintain session is in it.
 # Fails closed: only a pass lets them start (engsys#86 review H1).
 integrity="" why_held="" # integrity: '' = not asked yet | ok | held
-singleton_integrity_ok() { # → 0 when merge/maintain sessions may start
+singleton_integrity_ok() { # singleton_integrity_ok [<name>] → 0 when merge/maintain sessions may start
+  # one login per session (engsys#205): each session's own dir is verified on its own, so one bad dir holds one session
+  if [ "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:-off}" = on ] && [ -n "${1:-}" ] && fleet_session_config_dir "$1" >/dev/null; then
+    local prc=0
+    bash "$FLEET_KIT_DIR/verify.sh" --instance "$FLEET_REPO" --alert --session "$1" </dev/null >&2 || prc=$?
+    case "$prc" in
+      0) return 0 ;;
+      1) why_held="its engsys plugin (in $(fleet_session_config_dir "$1")) does not match $ENGSYS_REF" ;;
+      *) why_held="the engsys plugin check for $(fleet_session_config_dir "$1") could not run (exit $prc), so the plugin is unverified" ;;
+    esac
+    return 1
+  fi
   if [ -z "$integrity" ]; then
     local rc=0
     bash "$FLEET_KIT_DIR/verify.sh" --instance "$FLEET_REPO" --alert </dev/null >&2 || rc=$?
@@ -250,6 +230,17 @@ launch_harness="$(sed -n 's/^HARNESS=//p' "$FLEET_STATE/roster" | tail -n 1 | tr
 launch_harness="${launch_harness:-${HARNESS:-claude}}"
 case "$launch_harness" in agy) launch_harness=antigravity ;; esac
 harness_refused() { [ "$launch_harness" != claude ] && claude_only "$1"; }
+# One login per session (engsys#205): a session whose own config dir does not exist yet, or is not logged in, is
+# held with the command to fix it, never launched into a login prompt. Prints the reason and returns 0 when held.
+session_dir_problem() { # session_dir_problem <name>
+  [ "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:-off}" = on ] && [ "$launch_harness" = claude ] && uses_fleet_config_dir "$1" || return 1
+  local d li
+  d="$(fleet_session_config_dir "$1")" || { echo "its name can't be a per-session config dir name"; return 0; }
+  if [ ! -d "$d" ]; then echo "its Claude config dir $d does not exist: run fleet config-dir init --session $1, then CLAUDE_CONFIG_DIR=$d claude (/login, /exit)"; return 0; fi
+  li="$( (cd "${TMPDIR:-/tmp}" && CLAUDE_CONFIG_DIR="$d" fleet_dir_lock "$d" claude auth status --json </dev/null) 2>/dev/null | jq -r 'if .loggedIn == false then "false" else "" end' 2>/dev/null || true)"
+  if [ "$li" = false ]; then echo "its own Claude login ($d) is not logged in: CLAUDE_CONFIG_DIR=$d claude (/login, then /exit)"; return 0; fi
+  return 1
+}
 # The supervisor reads a seat-limit line only from a pane it knows it launched: record the pane of every
 # supervised session started here (the supervisor's own relaunches come through here too).
 record_panes() { # record_panes <name>...
@@ -271,6 +262,7 @@ cd "$PIN_DIR"
 if [ -n "$name" ]; then
   grep -q "^$name|" "$FLEET_STATE/roster" || fleet_die "no session named '$name' in the roster"
   harness_refused "$name" && fleet_die "not launching $name on HARNESS=$launch_harness: merge, maintain, broker and security sessions run on Claude only"
+  if why_dir="$(session_dir_problem "$name")"; then fleet_die "not launching $name: $why_dir"; fi
   if is_singleton "$name" && [ "$skip_verify" = 1 ]; then
     {
       echo "fleet: ################################################################################"
@@ -281,7 +273,7 @@ if [ -n "$name" ]; then
     # The alert is the control here, so the launch waits on it: no alert delivered, no launch.
     node "$FLEET_KIT_DIR/notify.mjs" --level alert --require-delivery --incident wrapper-integrity-skipped "Plugin check skipped on $(hostname -s 2>/dev/null || echo this host): someone launched $name with --skip-verify, so its engsys plugin was not checked against $ENGSYS_REF. If that wasn't planned, please stop the session and run fleet verify." >&2 \
       || fleet_die "not launching $name: the --skip-verify alert could not be posted (Slack and NOTIFY_FALLBACK_ISSUE both failed, above). Fix the alert path first."
-  elif is_singleton "$name" && ! singleton_integrity_ok; then
+  elif is_singleton "$name" && ! singleton_integrity_ok "$name"; then
     fleet_die "not launching $name: $why_held (above). Check the running sessions, fix or reinstall the plugin, then: fleet verify"
   fi
   lrc=0; bash "$LAUNCHER" --roster "$FLEET_STATE/roster" "$name" || lrc=$?
@@ -307,7 +299,13 @@ while IFS= read -r line; do
         refused=$((refused + 1))
         continue
       fi
-      if is_singleton "$n" && ! singleton_integrity_ok; then
+      if why_dir="$(session_dir_problem "$n")"; then
+        echo "SKIPPED: $n ($why_dir)" >&2
+        printf '# own Claude login missing: %s\n' "$n" >>"$host_roster"
+        refused=$((refused + 1))
+        continue
+      fi
+      if is_singleton "$n" && ! singleton_integrity_ok "$n"; then
         echo "skip: $n, $why_held (fleet verify)"
         printf '# plugin integrity held: %s (%s)\n' "$n" "$why_held" >>"$host_roster"
         continue
@@ -317,12 +315,12 @@ while IFS= read -r line; do
   printf '%s\n' "$line" >>"$host_roster"
 done <"$FLEET_STATE/roster"
 if [ "$kept" = 0 ]; then
-  [ "$refused" = 0 ] || fleet_die "$refused Claude-only session(s) refused on HARNESS=$launch_harness (SKIPPED above); nothing else to launch"
+  [ "$refused" = 0 ] || fleet_die "$refused session(s) refused (SKIPPED above: a Claude-only session on HARNESS=$launch_harness, or a session without its own Claude login); nothing else to launch"
   echo "fleet: no roster session runs on this host; nothing to launch"; exit 0
 fi
 lrc=0; bash "$LAUNCHER" --roster "$host_roster" || lrc=$?
 # shellcheck disable=SC2046 # names are [a-z0-9-] only
 record_panes $(awk -F'|' '/^[A-Za-z0-9][A-Za-z0-9._-]*\|/ { print $1 }' "$host_roster")
 [ "$refused" != 0 ] || exit "$lrc"
-echo "fleet: $refused Claude-only session(s) refused on HARNESS=$launch_harness (SKIPPED above)" >&2
+echo "fleet: $refused session(s) refused (SKIPPED above: a Claude-only session on HARNESS=$launch_harness, or a session without its own Claude login)" >&2
 exit $(( lrc != 0 ? lrc : 1 ))

@@ -26,6 +26,8 @@ if [ "${1:-}" = --instance ]; then FLEET_INSTANCE="${2:?--instance needs a direc
 case "${1:-}" in -h | --help) sed -n '2,/^set -/{/^set -/!p;}' "$0"; exit 0 ;; esac
 # shellcheck source=lib/fleet-env.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib/fleet-env.sh"
+# shellcheck source=lib/session-dirs.sh
+. "$FLEET_KIT_DIR/lib/session-dirs.sh"
 
 mode=status force=0 names=()
 while [ $# -gt 0 ]; do
@@ -111,6 +113,15 @@ status() {
     [ "${HARNESS:-claude}" = copilot ] && login_hint="gh auth login"
     echo "auth: expired since $since. The supervisor relaunches and kills nothing until it works${held:+ (held: $held)}; run /login in any session, or $login_hint"
   fi
+  # one login per session (engsys#205): the supervisor holds each session whose own login expired separately
+  local f sess dirp
+  for f in "$sup_state"/auth.*.expired; do
+    [ -f "$f" ] || continue
+    sess="${f##*/auth.}"; sess="${sess%.expired}"
+    since="$(head -n 1 "$f")"; since="$(node "$FLEET_KIT_DIR/../lib/operator-time.mjs" "$since" 2>/dev/null || printf '%s' "$since")"
+    dirp="$(fleet_session_config_dir "$sess" 2>/dev/null || true)"
+    echo "auth ($sess): expired since $since. Only $sess is held; the others keep running. Log it in: CLAUDE_CONFIG_DIR=${dirp:-<its dir>} claude, then /login"
+  done
   if [ "$LAST_CHANGE" != 0 ]; then
     echo "last host change: $(date -r "$LAST_CHANGE" '+%Y-%m-%d %H:%M' 2>/dev/null || date -d "@$LAST_CHANGE" '+%Y-%m-%d %H:%M')  ($(tail -1 "$FLEET_STATE/sync.log" 2>/dev/null | cut -d' ' -f2-))"
   fi

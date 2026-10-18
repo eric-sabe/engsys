@@ -37,19 +37,31 @@
 #   --max-age <min>  reuse a pass from the last <min> minutes while the local files are unchanged (the
 #                    supervisor's throttle; cache: .fleet/verify-wrappers.json). `fleet launch` never
 #                    passes it, so a launch always asks GitHub.
+#   --session <name> (per-session mode) verify only that session's own config dir
+#
+# One login per session (FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on, engsys#205): every session that uses the fleet's
+# config dir has its own, <FLEET_CLAUDE_CONFIG_DIR>.sessions/<name>. `fleet verify` then checks each of them (plugins
+# against the release, user-scope items, login) and prints one block per dir; the verdict, the latches and the
+# alerts are per session (incidents wrapper-integrity-<name> and wrapper-integrity-unverified-<name>), so one
+# logged-out or tampered dir holds only that session. `--session <name>` checks just one (what a launch and the
+# supervisor ask). The exit code of the whole run is 1 if any dir mismatches, else 3 if any could not be
+# verified, else 0. The auth status call and the plugin list on a dir are serialized per dir (fleet_dir_lock) and
+# a logged-in answer is reused for --max-age minutes: the CLI contacts the API even for those, so they are
+# extra processes on a credential that the session's own process already refreshes.
 #
 # Exit: 0 match | 1 MISMATCH | 3 not verified (GitHub unreachable, no pin or not a tag, nothing installed)
 #       | 2 usage. Merge and maintain sessions start only on 0 (engsys#86 review H1).
 #
-# Usage: verify.sh [--instance <dir>] [--alert] [--auto-sync] [--max-age <minutes>]
+# Usage: verify.sh [--instance <dir>] [--alert] [--auto-sync] [--max-age <minutes>] [--session <name>]
 set -euo pipefail
 if [ "${1:-}" = --instance ]; then FLEET_INSTANCE="${2:?--instance needs a directory}"; export FLEET_INSTANCE; shift 2; fi
-alert=0 max_age="" auto_sync=0
+alert=0 max_age="" auto_sync=0 session=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --alert) alert=1 ;;
     --auto-sync) auto_sync=1 ;;
     --max-age) max_age="${2:?--max-age needs minutes}"; shift ;;
+    --session) session="${2:?--session needs a session name}"; shift ;;
     -h | --help) sed -n '2,/^set -/{/^set -/!p;}' "$0"; exit 0 ;;
     *) echo "fleet verify: unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -63,9 +75,35 @@ trap 'rc=$?; trap - EXIT; [ -z "${plist:-}" ] || rm -f "$plist"; if [ "$rc" = 1 
 # shellcheck source=lib/fleet-env.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib/fleet-env.sh"
 mkdir -p "$FLEET_STATE" && chmod 700 "$FLEET_STATE"
+# shellcheck source=lib/session-dirs.sh
+. "$FLEET_KIT_DIR/lib/session-dirs.sh"
+SFX="" INC=""   # per-session mode: a suffix for this session's latches and cache, and for its incident keys
+if [ "$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION" = on ]; then
+  fleet_roster_prepare
+  if [ -z "$session" ]; then
+    names="$(fleet_session_dir_names)"
+    if [ -z "$names" ]; then echo "fleet verify: not verified: FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on, but no session on this host uses the fleet's config dir"; exit 3; fi
+    worst=0
+    reargs=(--instance "$FLEET_REPO"); [ "$alert" = 0 ] || reargs+=(--alert); [ "$auto_sync" = 0 ] || reargs+=(--auto-sync); [ -z "$max_age" ] || reargs+=(--max-age "$max_age")
+    while IFS= read -r n; do
+      echo "== session $n ($(fleet_session_config_dir "$n")) =="
+      r=0; bash "$FLEET_KIT_DIR/verify.sh" "${reargs[@]}" --session "$n" </dev/null || r=$?
+      case "$r" in 0) ;; 1) worst=1 ;; *) [ "$worst" = 1 ] || worst=3 ;; esac
+    done <<<"$names"
+    [ "$worst" != 1 ] || result=mismatch
+    exit "$worst"
+  fi
+  sdir="$(fleet_session_config_dir "$session")" || fleet_die "--session $session: not a name that can have its own config dir"
+  names="$(fleet_session_dir_names)"
+  grep -Fxq -- "$session" <<<"$names" || fleet_die "--session $session: not a session on this host that uses the fleet's config dir"
+  FLEET_CLAUDE_CONFIG_DIR="$sdir" CLAUDE_CONFIG_DIR="$sdir"; export FLEET_CLAUDE_CONFIG_DIR CLAUDE_CONFIG_DIR
+  SFX=".$session" INC="-$session"
+elif [ -n "$session" ]; then
+  fleet_die "--session needs FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on"
+fi
 
-LATCH="$FLEET_STATE/verify-wrappers.alerted"
-UNVERIFIED_LATCH="$FLEET_STATE/verify-wrappers.unverified"
+LATCH="$FLEET_STATE/verify-wrappers.alerted$SFX"
+UNVERIFIED_LATCH="$FLEET_STATE/verify-wrappers.unverified$SFX"
 FORCED_LATCH="$FLEET_STATE/verify-ref-forced.alerted"
 host="$(hostname -s 2>/dev/null || echo this host)"
 notify() { node "$FLEET_KIT_DIR/notify.mjs" --require-delivery "$@" >&2; } # undelivered: its latch stays as it was, retried next run
@@ -86,6 +124,19 @@ elif [ "$alert" = 1 ] && [ -f "$FORCED_LATCH" ]; then
   notify --level info --incident engsys-ref-forced --resolve "Resolved: ENGSYS_REF on $host follows the pin ($pinned) again." && rm -f "$FORCED_LATCH"
 fi
 
+# dir_logged_out → 0 only when claude says explicitly that the fleet's config dir is not logged in. In per-session mode
+# the call is serialized per dir, and a logged-in answer is kept for --max-age minutes (a logged-out one never is).
+dir_logged_out() {
+  local ok="$FLEET_STATE/auth-ok$SFX" li at
+  if [ "$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION" = on ] && [ -n "$max_age" ] && at="$(cat "$ok" 2>/dev/null)" && [[ "$at" =~ ^[0-9]+$ ]] \
+    && [ $(( $(date +%s) - at )) -lt $(( max_age * 60 )) ]; then return 1; fi
+  li="$( (cd "${TMPDIR:-/tmp}" && CLAUDE_CONFIG_DIR="$FLEET_CLAUDE_CONFIG_DIR" fleet_dir_lock "$FLEET_CLAUDE_CONFIG_DIR" claude auth status --json </dev/null) 2>/dev/null | jq -r 'if .loggedIn == true then "true" elif .loggedIn == false then "false" else "" end' 2>/dev/null || true)"
+  if [ "$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION" = on ]; then
+    if [ "$li" = true ]; then date +%s >"$ok"; else rm -f "${ok:?}"; fi
+  fi
+  [ "$li" = false ]
+}
+
 rc=0 out="" plist=""
 # The Claude Code config dir the fleet's sessions run with: FLEET_CLAUDE_CONFIG_DIR (fleet-env.sh exports
 # it as CLAUDE_CONFIG_DIR for every fleet command and session, so `claude plugin list` below reads it
@@ -105,8 +156,7 @@ elif ! [ -d "$PIN_DIR" ]; then
   out="fleet verify: not verified: PIN_DIR not found: $PIN_DIR"; rc=3
 elif [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] && ! [ -d "$FLEET_CLAUDE_CONFIG_DIR" ]; then
   out="fleet verify: not verified: FLEET_CLAUDE_CONFIG_DIR not found: $FLEET_CLAUDE_CONFIG_DIR (see the fleet guide: a separate Claude config dir)"; rc=3
-elif [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] && [ "${HARNESS:-claude}" = claude ] \
-  && [ "$( (cd "${TMPDIR:-/tmp}" && CLAUDE_CONFIG_DIR="$FLEET_CLAUDE_CONFIG_DIR" claude auth status --json) 2>/dev/null | jq -r 'if .loggedIn == false then "false" else "" end' 2>/dev/null || true)" = false ]; then
+elif [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] && [ "${HARNESS:-claude}" = claude ] && dir_logged_out; then
   # A rotation must not relaunch a monster into a login prompt: hold until the fleet seat is logged in.
   out="fleet verify: not verified: the fleet's Claude config dir $FLEET_CLAUDE_CONFIG_DIR is not logged in (CLAUDE_CONFIG_DIR=$FLEET_CLAUDE_CONFIG_DIR claude, then /login)"; rc=3
 else
@@ -128,7 +178,7 @@ else
     fi
   else
     # The cwd decides which project-scope installs apply: the sessions start in PIN_DIR (engsys#86 review H2).
-    if ! (cd "$PIN_DIR" && claude plugin list --json) >"$plist" 2>/dev/null; then
+    if ! (cd "$PIN_DIR" && fleet_dir_lock "${FLEET_CLAUDE_CONFIG_DIR:-}" claude plugin list --json </dev/null) >"$plist" 2>/dev/null; then
       out="fleet verify: not verified: claude plugin list failed in $PIN_DIR"; rc=3
     fi
   fi
@@ -155,7 +205,7 @@ else
     else
       echo "fleet verify: WARNING PIN_DIR ($PIN_DIR) is not a git checkout, so its .claude/ can't be checked against $PIN_REPO; any settings hook there is a mismatch"
     fi
-    [ -z "$max_age" ] || args+=(--cache "$FLEET_STATE/verify-wrappers.json" --max-age-min "$max_age")
+    [ -z "$max_age" ] || args+=(--cache "$FLEET_STATE/verify-wrappers$SFX.json" --max-age-min "$max_age")
     out="$(node "$FLEET_KIT_DIR/lib/verify-wrappers.mjs" "${args[@]}" 2>&1)" || rc=$?
     # node exits 1 on its own crash (a missing module, a syntax error): only the verifier's MISMATCH line counts.
     if [ "$rc" = 1 ] && ! grep -q '^verify: MISMATCH' <<<"$out"; then
@@ -211,7 +261,7 @@ if [ "$only_stale" = 1 ] && [ "$auto_sync" = 1 ]; then
     # --no-jobs: this runs inside the supervisor's own launchd job, which a job reload would kill.
     if bash "$FLEET_KIT_DIR/sync.sh" --instance "$FLEET_REPO" --no-jobs </dev/null >&2; then
       [ -z "${plist:-}" ] || rm -f "$plist"
-      reargs=(--instance "$FLEET_REPO"); [ "$alert" = 0 ] || reargs+=(--alert); [ -z "$max_age" ] || reargs+=(--max-age "$max_age")
+      reargs=(--instance "$FLEET_REPO"); [ "$alert" = 0 ] || reargs+=(--alert); [ -z "$max_age" ] || reargs+=(--max-age "$max_age"); [ -z "$session" ] || reargs+=(--session "$session")
       exec bash "$FLEET_KIT_DIR/verify.sh" "${reargs[@]}"   # once: the re-run has no --auto-sync
     fi
     sync_why="fleet sync failed (above)"
@@ -224,29 +274,29 @@ if [ "$alert" = 1 ]; then
   case "$rc" in
     0)
       if [ -f "$LATCH" ]; then
-        notify --level info --incident wrapper-integrity --resolve "Resolved: the engsys plugin files on $host match $repo@$ref again." && rm -f "$LATCH"
+        notify --level info --incident "wrapper-integrity$INC" --resolve "Resolved: the engsys plugin files on $host match $repo@$ref again." && rm -f "$LATCH"
       fi
       if [ -f "$UNVERIFIED_LATCH" ]; then
-        notify --level info --incident wrapper-integrity-unverified --resolve "Resolved: the engsys plugin check on $host runs again, and passes." && rm -f "$UNVERIFIED_LATCH"
+        notify --level info --incident "wrapper-integrity-unverified$INC" --resolve "Resolved: the engsys plugin check on $host runs again, and passes." && rm -f "$UNVERIFIED_LATCH"
       fi ;;
     1)
       fp="$(sed -n 's/^fingerprint: //p' <<<"$out" | tail -1)"
       if [ "$only_stale" = 1 ] && [ "$(cat "$LATCH" 2>/dev/null)" != "$fp|$auto_sync|$sync_why" ]; then
         lines="$(sed -n 's/^  \(.*\)$/\1/p' <<<"$out" | awk 'NR <= 8')"
-        notify --level alert --incident wrapper-integrity "Plugin check on $host: the pin checkout ($PIN_DIR) is behind main, and files the sessions load changed there. $(if [ -n "$sync_why" ]; then printf 'Auto-sync could not fast-forward it: %s. Please bring the checkout back to main and run fleet sync.' "$sync_why"; elif [ "$auto_sync" = 1 ]; then printf 'Auto-syncing: fleet sync is running for it now.'; else printf 'Run fleet sync (a supervised host also does it on its own, through fleet verify --auto-sync).'; fi) Merge and maintain sessions are held until it matches; running sessions are left as they are. This is not a sign of tampering. Behind on:
+        notify --level alert --incident "wrapper-integrity$INC" "Plugin check on $host${session:+ (session $session)}: the pin checkout ($PIN_DIR) is behind main, and files the sessions load changed there. $(if [ -n "$sync_why" ]; then printf 'Auto-sync could not fast-forward it: %s. Please bring the checkout back to main and run fleet sync.' "$sync_why"; elif [ "$auto_sync" = 1 ]; then printf 'Auto-syncing: fleet sync is running for it now.'; else printf 'Run fleet sync (a supervised host also does it on its own, through fleet verify --auto-sync).'; fi) Merge and maintain sessions are held until it matches; running sessions are left as they are. This is not a sign of tampering. Behind on:
 $lines
 Details: fleet verify" && printf '%s\n' "$fp|$auto_sync|$sync_why" >"$LATCH"
       elif [ "$only_stale" = 0 ] && [ "$(cat "$LATCH" 2>/dev/null)" != "$fp" ]; then
         summary="$(sed -n 's/^summary: //p' <<<"$out" | tail -1)"
         hint="$(sed -n 's/^hint: //p' <<<"$out" | tail -1)"
         lines="$(sed -n 's/^  \(.*\)$/\1/p' <<<"$out" | awk 'NR <= 5')"
-        notify --level alert --incident wrapper-integrity "Plugin check on $host: ${summary:-a mismatch}. What the merge and maintain monsters load does not match $repo@$ref (the engsys plugin and host kit), $PIN_REPO's default branch on GitHub (the pin checkout), or the allowed Claude settings in $claude_cfg. Merge and maintain sessions will not be launched or relaunched here until it matches; running sessions and their batons were left as they are.${hint:+ For the user-scope items: $hint.} To fix: for plugin files, reinstall (claude plugin uninstall --scope user engsys@$ENGSYS_MARKETPLACE from outside any project, delete its cache directory, fleet sync); for the pin checkout, restore it to GitHub's main and check who changed it; for a user-scope item, remove it or allowlist it (VERIFY_ALLOWED_USER_PLUGINS / _HOOKS / _FILES). First of them:
+        notify --level alert --incident "wrapper-integrity$INC" "Plugin check on $host${session:+ (session $session)}: ${summary:-a mismatch}. What the merge and maintain monsters load does not match $repo@$ref (the engsys plugin and host kit), $PIN_REPO's default branch on GitHub (the pin checkout), or the allowed Claude settings in $claude_cfg. Merge and maintain sessions will not be launched or relaunched here until it matches; running sessions and their batons were left as they are.${hint:+ For the user-scope items: $hint.} To fix: for plugin files, reinstall (claude plugin uninstall --scope user engsys@$ENGSYS_MARKETPLACE from outside any project, delete its cache directory, fleet sync); for the pin checkout, restore it to GitHub's main and check who changed it; for a user-scope item, remove it or allowlist it (VERIFY_ALLOWED_USER_PLUGINS / _HOOKS / _FILES). First of them:
 $lines
 Details: fleet verify" && printf '%s\n' "$fp" >"$LATCH"
       fi ;;
     3)
       if [ ! -f "$UNVERIFIED_LATCH" ]; then
-        notify --level alert --incident wrapper-integrity-unverified "Plugin check on $host could not run: $(tail -n 1 <<<"$out" | sed 's/^.*not verified[^:]*: //' | cut -c1-300). Merge and maintain sessions are held until it can confirm the plugin matches $repo@${ref:-the pin}. If GitHub is having trouble this resolves on its own; otherwise see fleet verify." \
+        notify --level alert --incident "wrapper-integrity-unverified$INC" "Plugin check on $host${session:+ (session $session)} could not run: $(tail -n 1 <<<"$out" | sed 's/^.*not verified[^:]*: //' | cut -c1-300). Merge and maintain sessions are held until it can confirm the plugin matches $repo@${ref:-the pin}. If GitHub is having trouble this resolves on its own; otherwise see fleet verify." \
           && now >"$UNVERIFIED_LATCH"
       fi ;;
   esac

@@ -39,6 +39,10 @@
 # run) alerts once per incident and holds every relaunch of those sessions (engsys#86 review H1);
 # running ones are left alone: never killed, and their batons are never revoked or broken for it.
 #
+# One login per session (FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on, engsys#205): the conf gets INTEGRITY_SESSION_CMD (the
+# same check, `--session <name>`, asked per session) instead of INTEGRITY_CMD, and SESSION_CONFIG_DIR_BASE, so the
+# supervisor's login hold, test request and alerts are per session and one lost login stops one session only.
+#
 # The fleet is Claude-only: the supervisor relaunches every supervised session on the primary harness
 # and never fails one over to another, whatever HARNESS_FALLBACK says; a seat limit is only alerted
 # (fleet-supervisor.sh "Seat limit").
@@ -67,6 +71,7 @@ if [ -n "$FLEET_ID" ] && [ -f "$FEDERATION_FILE" ]; then
 fi
 while IFS= read -r line; do
   case "$line" in
+    INTEGRITY_SESSION_CMD=* | SESSION_CONFIG_DIR_BASE=*) printf '# ignored template %s (the kit sets its own)\n' "${line%%=*}"; continue ;;
     INTEGRITY_CMD=*)
       # engsys#96 L3: a template setting INTEGRITY_CMD=true cannot disable the supervisor integrity check.
       [ "${FLEET_ALLOW_CUSTOM_INTEGRITY_CMD:-0}" = 1 ] || { printf '# ignored template INTEGRITY_CMD (kit enforces its own)\n'; continue; } ;;
@@ -112,7 +117,14 @@ grep -q '^HOST_CHECK_CMD=' "$conf" || printf 'HOST_CHECK_CMD=bash %s/bin/fleet -
 grep -q '^HOST_HEALTH_CMD=' "$conf" || printf 'HOST_HEALTH_CMD=bash %s/bin/fleet --instance %s launch --host-health\n' "$FLEET_KIT_DIR" "$FLEET_REPO" >>"$conf"
 grep -q '^HOST_HEALTH_INCIDENT=' "$conf" || printf 'HOST_HEALTH_INCIDENT=fleet-registry-unreadable\n' >>"$conf"
 grep -q '^NOTIFY_CMD=' "$conf" || printf 'NOTIFY_CMD=bash %s/bin/fleet --instance %s notify\n' "$FLEET_KIT_DIR" "$FLEET_REPO" >>"$conf"
-grep -q '^INTEGRITY_CMD=' "$conf" || printf 'INTEGRITY_CMD=bash %s/bin/fleet --instance %s verify --alert --auto-sync --max-age %s\n' "$FLEET_KIT_DIR" "$FLEET_REPO" "$VERIFY_MAX_AGE_MIN" >>"$conf"
+if [ "$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION" = on ]; then
+  # One login per session (engsys#205): the integrity verdict is per session (each has its own config dir), and the
+  # login hold is per session too, with each session's probe run against its own dir.
+  grep -q '^INTEGRITY_SESSION_CMD=' "$conf" || printf 'INTEGRITY_SESSION_CMD=bash %s/bin/fleet --instance %s verify --alert --auto-sync --max-age %s --session\n' "$FLEET_KIT_DIR" "$FLEET_REPO" "$VERIFY_MAX_AGE_MIN" >>"$conf"
+  grep -q '^SESSION_CONFIG_DIR_BASE=' "$conf" || printf 'SESSION_CONFIG_DIR_BASE=%s.sessions\n' "${FLEET_CLAUDE_CONFIG_DIR%/}" >>"$conf"
+else
+  grep -q '^INTEGRITY_CMD=' "$conf" || printf 'INTEGRITY_CMD=bash %s/bin/fleet --instance %s verify --alert --auto-sync --max-age %s\n' "$FLEET_KIT_DIR" "$FLEET_REPO" "$VERIFY_MAX_AGE_MIN" >>"$conf"
+fi
 grep -q '^HEARTBEAT_CMD=' "$conf" || printf 'HEARTBEAT_CMD=bash %s/bin/fleet --instance %s heartbeat\n' "$FLEET_KIT_DIR" "$FLEET_REPO" >>"$conf"
 grep -q '^HARNESS=' "$conf" || printf 'HARNESS=%s\n' "${PRIMARY_HARNESS:-$HARNESS}" >>"$conf"
 # The expired-login alert (engsys#103) links the fleet's status issue, where the heartbeat says the same.

@@ -15,6 +15,9 @@
 #   5. re-installs the launchd jobs if their templates changed, or the files that decide which sessions
 #      run on this host (roster, supervisor conf, registry); and, whatever changed, unloads a supervisor
 #      job left installed on a host where no supervised session runs (lib/host-roles.sh)
+# With FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on (engsys#205) step 4 runs in every session's own config dir
+# (<FLEET_CLAUDE_CONFIG_DIR>.sessions/<name>; one that does not exist yet is reported as drift and skipped),
+# each with its own login report.
 # Anything that changed is stamped in .fleet/last-change; `fleet restart` uses that stamp to tell which
 # running sessions are behind. Running sessions keep their loaded plugins (the old cache dirs stay on
 # disk) until restarted.
@@ -40,6 +43,8 @@ main() {
   done
   # shellcheck source=lib/fleet-env.sh
   . "$(dirname "${BASH_SOURCE[0]}")/lib/fleet-env.sh"
+  # shellcheck source=lib/session-dirs.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/lib/session-dirs.sh"
   if [ "${PRIMARY_HARNESS:-${HARNESS:-claude}}" = "claude" ]; then
     command -v claude >/dev/null || fleet_die "claude is required"
   fi
@@ -174,11 +179,26 @@ main() {
     sync_tmp
     # The fleet's config dir (or ~/.claude when none is set); with FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised
     # the interactive roles run on ~/.claude, so that one gets the pinned plugins too (user scope only).
-    local cfg_dirs=("${FLEET_CLAUDE_CONFIG_DIR:-}")
+    local cfg_dirs=("${FLEET_CLAUDE_CONFIG_DIR:-}") sess_n
+    if [ "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:-off}" = on ]; then
+      # one login per session (engsys#205): the pinned plugins go into every session's own dir, not a shared one
+      cfg_dirs=()
+      fleet_roster_prepare
+      while IFS= read -r sess_n; do
+        [ -z "$sess_n" ] || cfg_dirs+=("$(fleet_session_config_dir "$sess_n")")
+      done < <(fleet_session_dir_names)
+      [ "${#cfg_dirs[@]}" -gt 0 ] || fleet_die "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on, but no session on this host uses the fleet's config dir"
+    fi
     if [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] && [ "${FLEET_CLAUDE_CONFIG_DIR_SCOPE:-all}" = supervised ]; then cfg_dirs+=(""); fi
     local cfg_dir
     for cfg_dir in "${cfg_dirs[@]}"; do
       SYNC_CFG="$cfg_dir"
+      # a session dir that does not exist yet must not stop the other sessions' sync: report it as drift
+      if [ -n "$cfg_dir" ] && [ "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:-off}" = on ] && [ ! -d "$cfg_dir" ]; then
+        say "claude config dir: $cfg_dir (session ${cfg_dir##*/}) does not exist"
+        warn "session ${cfg_dir##*/} has no config dir yet: fleet config-dir init --session ${cfg_dir##*/}, then log in with CLAUDE_CONFIG_DIR=$cfg_dir claude (fleet guide § 6.1). Its plugins are not synced."
+        drift=1; continue
+      fi
       claude_config_report "$check" || drift=1
       sync_claude_plugins
     done
@@ -348,7 +368,7 @@ sync_tmp() { # call in the main shell (not in $(…)) so later calls share it; r
 # what every fleet session loads), else the account's ~/.claude; never an inherited CLAUDE_CONFIG_DIR.
 SYNC_CFG="${FLEET_CLAUDE_CONFIG_DIR:-}"   # the config dir the plugin step works on ('' = ~/.claude)
 fleet_claude() {
-  if [ -n "$SYNC_CFG" ]; then CLAUDE_CONFIG_DIR="$SYNC_CFG" claude "$@"
+  if [ -n "$SYNC_CFG" ]; then CLAUDE_CONFIG_DIR="$SYNC_CFG" fleet_dir_lock "$SYNC_CFG" claude "$@"
   else env -u CLAUDE_CONFIG_DIR claude "$@"; fi
 }
 plugin_cli() { (cd "$SYNC_TMP/cwd" && fleet_claude plugin "$@"); }
@@ -382,6 +402,7 @@ marketplace_remove() {
 claude_config_report() {
   local dir="${SYNC_CFG:-$HOME/.claude}" li what
   if [ -n "$SYNC_CFG" ] && [ "$SYNC_CFG" = "${FLEET_CLAUDE_CONFIG_DIR:-}" ]; then what=" (FLEET_CLAUDE_CONFIG_DIR)"; [ "${FLEET_CLAUDE_CONFIG_DIR_SCOPE:-all}" != supervised ] || what=" (FLEET_CLAUDE_CONFIG_DIR, scope supervised)"
+  elif [ "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:-off}" = on ] && [ -n "$SYNC_CFG" ]; then what=" (session ${SYNC_CFG##*/}, own login)"
   elif [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ]; then what=" (interactive roles)"
   else what=""; fi
   if [ -n "$SYNC_CFG" ] && [ ! -d "$SYNC_CFG" ]; then

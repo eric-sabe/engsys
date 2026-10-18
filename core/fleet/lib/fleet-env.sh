@@ -44,7 +44,7 @@ unset TMUX_SESSION LOG_DIR
 unset FLEET_ID FEDERATION_FILE FLEET_INSTANCE_REPO ROLES ROSTER_EXCLUDE OPERATOR_TIMEZONE OPERATOR_CLOCK
 # So do the fleet's Claude config dir and the integrity check's user-plugin allowlist: what `fleet verify`
 # accepts must come from the operator's config files, never from whoever ran the command.
-unset FLEET_CLAUDE_CONFIG_DIR FLEET_CLAUDE_CONFIG_DIR_SCOPE VERIFY_ALLOWED_USER_PLUGINS VERIFY_ALLOWED_USER_HOOKS VERIFY_ALLOWED_USER_FILES
+unset FLEET_CLAUDE_CONFIG_DIR FLEET_CLAUDE_CONFIG_DIR_SCOPE FLEET_CLAUDE_CONFIG_DIR_PER_SESSION VERIFY_ALLOWED_USER_PLUGINS VERIFY_ALLOWED_USER_HOOKS VERIFY_ALLOWED_USER_FILES
 # PIN_SETTINGS (where the pins are read) too: only a conf file, or sync's own pins copy in .fleet/
 # (FLEET_SYNC_PINS, set by sync.sh across its re-execs), may point it somewhere else.
 _pin_settings_sync="${FLEET_SYNC_RESUMED:+${PIN_SETTINGS:-}}"
@@ -272,3 +272,40 @@ if [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ]; then
 else
   unset CLAUDE_CONFIG_DIR
 fi
+
+# FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on (engsys#205): every session that uses the fleet's config dir gets its own,
+# <FLEET_CLAUDE_CONFIG_DIR>.sessions/<name>, with its own login, so no two long-lived processes share a refresh
+# token (anthropics/claude-code#88583; lib/session-dirs.sh). Off or unset = one shared dir, as before. Only the
+# conf files set it.
+: "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:=off}"
+case "$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION" in
+  on | off) ;;
+  *) fleet_die "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION must be on or off (got '$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION')" ;;
+esac
+if [ "$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION" = on ] && [ -z "${FLEET_CLAUDE_CONFIG_DIR:-}" ]; then
+  fleet_die "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on needs FLEET_CLAUDE_CONFIG_DIR (the base the per-session dirs hang off)"
+fi
+export FLEET_CLAUDE_CONFIG_DIR_PER_SESSION
+
+# fleet_dir_lock <dir> <command...> → runs the command holding a per-config-dir lock, in per-session mode; plain
+# otherwise. Fleet commands that run `claude` against a session's dir (verify's auth status and plugin list) are
+# extra processes on that credential, and the CLI contacts api.anthropic.com for them even when logged out, so
+# they are serialized per dir and never overlap one another (a session's own process can't be locked). rc 75 when
+# the lock stays busy for two minutes.
+fleet_dir_lock() {
+  local dir="$1"; shift
+  if [ "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:-off}" != on ]; then "$@"; return; fi
+  local lock waited=0 rc=0 lm
+  lock="$FLEET_STATE/locks/claude-$(printf '%s' "$dir" | cksum | cut -d' ' -f1).lock"
+  mkdir -p "$FLEET_STATE/locks"
+  until mkdir "$lock" 2>/dev/null; do
+    lm=$(stat -c %Y "$lock" 2>/dev/null || stat -f %m "$lock" 2>/dev/null || echo 0)
+    case "$lm" in '' | *[!0-9]*) lm=0 ;; esac
+    if [ "$lm" -gt 0 ] && [ $(( $(date +%s) - lm )) -gt 300 ]; then mv "$lock" "$lock.stale.$$" 2>/dev/null && rmdir "$lock.stale.$$" 2>/dev/null || true; continue; fi
+    waited=$((waited + 1)); [ "$waited" -lt 240 ] || return 75
+    sleep 0.5
+  done
+  "$@" || rc=$?
+  rmdir "$lock" 2>/dev/null || true
+  return "$rc"
+}
