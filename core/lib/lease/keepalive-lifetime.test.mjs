@@ -277,7 +277,7 @@ test("L1: the owner travels in a one-time nonce file: consumed once, never forge
   // The renewer's own entry point refuses to run without a valid nonce, before any request.
   const errs = [];
   const io = { out: { write: () => {} }, err: { write: (t) => errs.push(t) } };
-  const env = { ENGSYS_SESSION: "acme-maintain", ENGSYS_SESSION_RUN: "run-1" };
+  const env = { ENGSYS_SESSION: "acme-maintain", ENGSYS_SESSION_RUN: "run-1", ENGSYS_SINGLETON_ROLE: "maintain" };
   const argv = ["keepalive", "--repo", REPO, "--role", "maintain", "--state-dir", s.stateDir, "--session", "acme-maintain", "--detached-child"];
   const before = w.api.state.log.length;
   assert.equal(await main(argv, { ...io, env, hostname: "mini", api: w.api }), EXIT.REFUSED);
@@ -353,6 +353,7 @@ test("real processes: kill the bus → the renewer keeps renewing; a new bus ado
     HOME: T,
     ENGSYS_SESSION: "acme-maintain",
     ENGSYS_SESSION_RUN: "run-life",
+    ENGSYS_SINGLETON_ROLE: "maintain",
     GH_TOKEN: "test-token",
     FAKE_GITHUB_URL: gh.url,
     BATON_TEST_TIME_SCALE: "1000", // 150 s → 150 ms, 30 s → 30 ms in the renewer only

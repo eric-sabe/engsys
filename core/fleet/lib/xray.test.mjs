@@ -323,6 +323,7 @@ test('runXray deep-dives into sessions, parses transcripts/agents.tsv/federation
     assert.ok(cfgItem2, 'reports the Claude config dir');
     assert.equal(cfgItem2.meta.dir, path.join(tmpDir, 'fleet-claude'), 'FLEET_CLAUDE_CONFIG_DIR from fleet.conf');
     assert.equal(cfgItem2.status, 'fail', 'a configured dir that does not exist fails');
+    assert.ok(!report.sections.flatMap((sec) => sec.items).some((i) => i.name === 'Claude config dir (interactive roles)'), 'scope all: one dir only');
     assert.doesNotMatch(JSON.stringify(cfgItem2), /token|oauth/i, 'no credential material in the report');
 
     // Must flag state.md > 4096B as a failure
@@ -348,6 +349,27 @@ test('runXray deep-dives into sessions, parses transcripts/agents.tsv/federation
     assert.match(formatted, /\[SESSION DEEP-DIVE: keystone-merge \(role=merge\)\]/);
     assert.match(formatted, /\[BEHAVIOR TIMELINE/);
     assert.match(formatted, /\[DIAGNOSIS & REMEDIATION PLAYBOOK\]/);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('xray reports both Claude config dirs under FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'engsys-xray-scope-'));
+  try {
+    const fleetDir = path.join(tmpDir, 'inst');
+    fs.mkdirSync(path.join(fleetDir, 'fleet'), { recursive: true });
+    fs.mkdirSync(path.join(tmpDir, 'fleet-claude'), { recursive: true });
+    fs.writeFileSync(path.join(fleetDir, 'fleet', 'fleet.conf'), ['FLEET_ORG=acme', 'PIN_REPO=acme/app', `PIN_DIR=${path.join(tmpDir, 'nope')}`,
+      `FLEET_CLAUDE_CONFIG_DIR=${path.join(tmpDir, 'fleet-claude')}`, 'FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised'].join('\n') + '\n');
+    const report = await runXray({ engsysDir: ENGSYS_DIR, fleetInstance: fleetDir, skipSelfTest: true, env: hermeticEnv(tmpDir, { ENGSYS_HOOK_TELEMETRY_FILE: path.join(tmpDir, 'h.jsonl') }) });
+    const items = report.sections.flatMap((sec) => sec.items);
+    const sup = items.find((i) => i.name === 'Claude config dir (supervised sessions)');
+    const ia = items.find((i) => i.name === 'Claude config dir (interactive roles)');
+    assert.ok(sup, 'the fleet dir, for the supervised sessions');
+    assert.equal(sup.meta.dir, path.join(tmpDir, 'fleet-claude'));
+    assert.ok(ia, 'and ~/.claude, for the interactive roles');
+    assert.equal(ia.meta.dir, path.join(tmpDir, 'home', '.claude'));
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

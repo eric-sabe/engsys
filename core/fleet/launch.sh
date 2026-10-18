@@ -86,6 +86,93 @@ LAUNCHER="$ENGSYS_DIR/core/skills/agent-sessions/scripts/launch-agent-sessions.s
 
 [ -z "${WORKTREES_DIR:-}" ] || mkdir -p "$WORKTREES_DIR"   # --add-dir target for interactive roles
 
+# The rendered roster first: classification below reads its 5th fields and flags with __TOKENS__ resolved.
+fleet_render "$FLEET_REPO/fleet/roster.tmpl" "$FLEET_STATE/roster"
+ROSTER_LINE_RE='^[A-Za-z0-9][A-Za-z0-9._-]*\|'
+roster_field() { # roster_field <name> <n> → field n of <name>'s rendered roster line
+  awk -F'|' -v n="$1" -v k="$2" '$1 == n { print $k; exit }' "$FLEET_STATE/roster"
+}
+roster_default_env() { sed -n 's/^ENV_FILE=//p' "$FLEET_STATE/roster" | tail -n 1 | sed -e 's/[[:space:]][[:space:]]*#.*$//' -e 's/[[:space:]]*$//'; }
+roster_model_header() { sed -n 's/^MODEL=//p' "$FLEET_STATE/roster" | tail -n 1 | sed -e 's/[[:space:]][[:space:]]*#.*$//' -e 's/[[:space:]]*$//'; }
+norm_words() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr '_ ' '--'; }
+# A security-tier line, as the launcher reads it (launch-agent-sessions.sh is_security_line): its env file
+# (5th field, else the roster's ENV_FILE) is named security or nyx in any case, or any --model in its flags
+# (or the roster's MODEL=) names Claude Opus 4.8.
+is_security_session() { # is_security_session <name>
+  local envf flags b tok prev="" m
+  envf="$(roster_field "$1" 5)"; [ -n "$envf" ] || envf="$(roster_default_env)"
+  b="${envf##*/}"; b="${b%.*}"; b="$(printf '%s' "$b" | tr '[:upper:]' '[:lower:]' | tr -d "\"' ")"
+  case "$b" in security | nyx) return 0 ;; esac
+  flags="$(roster_model_header) $(roster_field "$1" 4)"
+  set -f
+  # shellcheck disable=SC2086
+  for tok in $flags; do
+    m=""; [ "$prev" = --model ] && m="$tok"; case "$tok" in --model=*) m="${tok#--model=}" ;; esac
+    if [ -n "$m" ]; then
+      m="$(printf '%s' "$m" | tr '[:upper:]' '[:lower:]' | tr -d "\"'")"
+      case "$m" in claude-opus-4-8* | claude-opus-4.8* | security) set +f; return 0 ;; esac
+    fi
+    prev="$tok"
+  done
+  set +f
+  return 1
+}
+# Supervised (and security-lane) sessions: merge, maintain, broker, any monster, any ledger-bearing
+# session, any prompt that names a monster (with the launcher's tolerance for case, `_` and spaces), and
+# any security-tier line. They run on Claude only.
+claude_only() { # claude_only <name> → 0 when <name> is a supervised or security-lane session
+  case "$(fleet_host_kind_of "$1")" in merge | maintain | broker | monster) return 0 ;; esac
+  fleet_ledger_sessions | grep -Fxq -- "$1" && return 0
+  case "$(norm_words "$(roster_field "$1" 3)")" in *merge-monster* | *maintenance-monster* | *resource-broker*) return 0 ;; esac
+  is_security_session "$1"
+}
+# Positively interactive: a roster line this host classifies as interactive and that is none of the above.
+# Anything else (an unknown or unclassified name) is treated as supervised: it fails toward the fleet dir.
+is_interactive() { [ "$(fleet_host_kind_of "$1")" = interactive ] && ! claude_only "$1"; }
+# Which sessions get CLAUDE_CONFIG_DIR=<fleet dir>: every one (scope all), or every non-interactive one.
+uses_fleet_config_dir() { # uses_fleet_config_dir <name>
+  [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] || return 1
+  [ "${FLEET_CLAUDE_CONFIG_DIR_SCOPE:-all}" = supervised ] || return 0
+  ! is_interactive "$1"
+}
+roster_names() { grep -E "$ROSTER_LINE_RE" "$FLEET_STATE/roster" | cut -d'|' -f1; }
+# env_file_users <env file basename> → the roster sessions that source it (5th field, else ENV_FILE)
+env_file_users() {
+  local def
+  def="$(roster_default_env)"
+  awk -F'|' -v f="$1" -v def="${def##*/}" '/^[A-Za-z0-9][A-Za-z0-9._-]*[|]/ {
+    e = $5; sub(/.*\//, "", e); if (e == "") e = def; if (e == f) print $1 }' "$FLEET_STATE/roster"
+}
+# The fleet dir goes into an env file only when no interactive session sources it; a file an interactive
+# role sources unsets it. Either way the launch line decides last (the launcher sets or unsets it after
+# the env file), so a supervised session that shares a file with an interactive one still gets the dir.
+env_config_dir_line() { # env_config_dir_line <env file basename>
+  [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] || return 0
+  local n interactive=0
+  while IFS= read -r n; do
+    [ -n "$n" ] || continue
+    uses_fleet_config_dir "$n" || interactive=1
+  done < <(env_file_users "$1")
+  if [ "$interactive" = 1 ]; then
+    printf '# FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised: interactive sessions use ~/.claude\nunset CLAUDE_CONFIG_DIR\n'
+  else
+    printf 'CLAUDE_CONFIG_DIR=%q\n' "$FLEET_CLAUDE_CONFIG_DIR"
+  fi
+}
+if [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] && [ "${FLEET_CLAUDE_CONFIG_DIR_SCOPE:-all}" = supervised ]; then
+  # The launcher unsets CLAUDE_CONFIG_DIR only for these names (and only when it doesn't itself see a
+  # monster or security line); every other session keeps the fleet dir.
+  FLEET_CLAUDE_CONFIG_DIR_INTERACTIVE=" "
+  while IFS= read -r n; do
+    [ -n "$n" ] || continue
+    if is_interactive "$n"; then FLEET_CLAUDE_CONFIG_DIR_INTERACTIVE+="$n "; fi
+  done < <(roster_names)
+  export FLEET_CLAUDE_CONFIG_DIR_INTERACTIVE
+else
+  unset FLEET_CLAUDE_CONFIG_DIR_INTERACTIVE
+fi
+unset FLEET_CLAUDE_CONFIG_DIR_SESSIONS
+
 mkdir -p "$ENV_DIR" && chmod 700 "$ENV_DIR"
 shopt -s nullglob
 for tmpl in "$FLEET_REPO"/fleet/env/*.env.tmpl; do
@@ -104,10 +191,12 @@ for tmpl in "$FLEET_REPO"/fleet/env/*.env.tmpl; do
   # The fleet state dir (<instance>/.fleet): hooks and the Fleet Health Desk read fleet-owned state
   # (weather cache, trusted fleet-health.yml) only from here, never from the session's working tree.
   printf 'FLEET_STATE=%q\n' "$FLEET_STATE" >>"$dest"
-  if [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ]; then printf 'CLAUDE_CONFIG_DIR=%q\n' "$FLEET_CLAUDE_CONFIG_DIR" >>"$dest"; fi
+  env_config_dir_line "$(basename "$dest")" >>"$dest"
   # The security lane never inherits a subagent model override: it would move pinned security agents
   # (model: claude-opus-4-8) onto another model. (fleet verify flags the same keys in settings files.)
-  case "$(basename "$dest")" in security*) printf '# Security lane: no inherited subagent model override.\nunset CLAUDE_CODE_SUBAGENT_MODEL CLAUDE_CODE_SUBAGENT_MODEL_FORCE\n' >>"$dest" ;; esac
+  # (Named as is_security_session reads it: security or nyx, any case, any prefix of security*.)
+  _lane="$(basename "$dest" .env | tr '[:upper:]' '[:lower:]')"
+  case "$_lane" in security* | nyx) printf '# Security lane: no inherited subagent model override.\nunset CLAUDE_CODE_SUBAGENT_MODEL CLAUDE_CODE_SUBAGENT_MODEL_FORCE\n' >>"$dest" ;; esac
   if [ "${HARNESS:-claude}" != claude ]; then printf 'HARNESS=%q\n' "$HARNESS" >>"$dest"; fi
   if [ "${HARNESS:-claude}" = copilot ] && [ -n "${COPILOT_HOME:-}" ]; then printf 'COPILOT_HOME=%q\n' "$COPILOT_HOME" >>"$dest"; fi
   if [ -n "$FLEET_ID" ]; then
@@ -124,7 +213,6 @@ for tmpl in "$FLEET_REPO"/fleet/env/*.env.tmpl; do
     if [ -n "$OPERATOR_CLOCK" ]; then printf 'OPERATOR_CLOCK=%q\n' "$OPERATOR_CLOCK" >>"$dest"; fi
   fi
 done
-fleet_render "$FLEET_REPO/fleet/roster.tmpl" "$FLEET_STATE/roster"
 
 # A registry that doesn't parse, or doesn't list this fleet, is reported but never blocks a launch
 # (the supervisor relaunches through here).
@@ -161,14 +249,6 @@ is_singleton() { case "$(fleet_host_kind_of "$1")" in merge | maintain) return 0
 launch_harness="$(sed -n 's/^HARNESS=//p' "$FLEET_STATE/roster" | tail -n 1 | tr -d '\r' | sed -e 's/[[:space:]][[:space:]]*#.*$//' -e 's/[[:space:]]*$//')"
 launch_harness="${launch_harness:-${HARNESS:-claude}}"
 case "$launch_harness" in agy) launch_harness=antigravity ;; esac
-claude_only() { # claude_only <name> → 0 when <name> may only run on Claude
-  case "$(fleet_host_kind_of "$1")" in merge | maintain | broker | monster) return 0 ;; esac
-  fleet_ledger_sessions | grep -Fxq -- "$1" && return 0   # any supervised session
-  local envf
-  envf="$(awk -F'|' -v n="$1" '$1 == n { print $5; exit }' "$FLEET_STATE/roster")"
-  case "${envf##*/}" in security*) return 0 ;; esac
-  return 1
-}
 harness_refused() { [ "$launch_harness" != claude ] && claude_only "$1"; }
 # The supervisor reads a seat-limit line only from a pane it knows it launched: record the pane of every
 # supervised session started here (the supervisor's own relaunches come through here too).
@@ -214,7 +294,7 @@ host_roster="$FLEET_STATE/roster.host" kept=0 refused=0
 : >"$host_roster"; chmod 600 "$host_roster"
 while IFS= read -r line; do
   case "$line" in
-    [a-z0-9]*\|*)
+    [A-Za-z0-9]*\|*)
       n="${line%%|*}"
       if why="$(fleet_host_excluded "$n")"; then
         echo "skip: $n is not on this host ($why)"
@@ -242,7 +322,7 @@ if [ "$kept" = 0 ]; then
 fi
 lrc=0; bash "$LAUNCHER" --roster "$host_roster" || lrc=$?
 # shellcheck disable=SC2046 # names are [a-z0-9-] only
-record_panes $(awk -F'|' '/^[a-z0-9][a-z0-9-]*\|/ { print $1 }' "$host_roster")
+record_panes $(awk -F'|' '/^[A-Za-z0-9][A-Za-z0-9._-]*\|/ { print $1 }' "$host_roster")
 [ "$refused" != 0 ] || exit "$lrc"
 echo "fleet: $refused Claude-only session(s) refused on HARNESS=$launch_harness (SKIPPED above)" >&2
 exit $(( lrc != 0 ? lrc : 1 ))

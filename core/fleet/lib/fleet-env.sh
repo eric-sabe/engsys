@@ -44,7 +44,7 @@ unset TMUX_SESSION LOG_DIR
 unset FLEET_ID FEDERATION_FILE FLEET_INSTANCE_REPO ROLES ROSTER_EXCLUDE OPERATOR_TIMEZONE OPERATOR_CLOCK
 # So do the fleet's Claude config dir and the integrity check's user-plugin allowlist: what `fleet verify`
 # accepts must come from the operator's config files, never from whoever ran the command.
-unset FLEET_CLAUDE_CONFIG_DIR VERIFY_ALLOWED_USER_PLUGINS VERIFY_ALLOWED_USER_HOOKS VERIFY_ALLOWED_USER_FILES
+unset FLEET_CLAUDE_CONFIG_DIR FLEET_CLAUDE_CONFIG_DIR_SCOPE VERIFY_ALLOWED_USER_PLUGINS VERIFY_ALLOWED_USER_HOOKS VERIFY_ALLOWED_USER_FILES
 # PIN_SETTINGS (where the pins are read) too: only a conf file, or sync's own pins copy in .fleet/
 # (FLEET_SYNC_PINS, set by sync.sh across its re-execs), may point it somewhere else.
 _pin_settings_sync="${FLEET_SYNC_RESUMED:+${PIN_SETTINGS:-}}"
@@ -211,7 +211,7 @@ fleet_ledger_sessions() { # names of the ledger-bearing (supervised) sessions
 }
 fleet_roster_sessions() { # every session name in the roster template
   [ -f "$FLEET_REPO/fleet/roster.tmpl" ] || return 0
-  grep -E '^[a-z0-9-]+\|' "$FLEET_REPO/fleet/roster.tmpl" | cut -d'|' -f1 || true
+  grep -E '^[A-Za-z0-9][A-Za-z0-9._-]*\|' "$FLEET_REPO/fleet/roster.tmpl" | cut -d'|' -f1 || true
 }
 fleet_roster_header() { # fleet_roster_header <KEY> → its value from the roster template ('' if absent), rendered
   local raw
@@ -254,10 +254,18 @@ fi
 # Optional separate Claude Code config dir for the fleet (a machine shared with a person's own Claude
 # use): its own login (the fleet's seat), user settings and plugin installs. Set = every fleet command
 # (`claude plugin` in sync, `claude plugin list` in verify, the supervisor's login probe) and every
-# session the fleet launches run with CLAUDE_CONFIG_DIR=<it>. Unset = the account's default ~/.claude,
+# session the fleet launches (or, with FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised, only the supervised and
+# security-lane ones) run with CLAUDE_CONFIG_DIR=<it>. Unset = the account's default ~/.claude,
 # and an inherited CLAUDE_CONFIG_DIR is dropped so what verify checks is what the sessions load.
 : "${VERIFY_ALLOWED_USER_PLUGINS:=}" "${VERIFY_ALLOWED_USER_HOOKS:=}" "${VERIFY_ALLOWED_USER_FILES:=}"
 export VERIFY_ALLOWED_USER_PLUGINS VERIFY_ALLOWED_USER_HOOKS VERIFY_ALLOWED_USER_FILES
+# FLEET_CLAUDE_CONFIG_DIR_SCOPE: which launched sessions run with the fleet's dir. all (default) = every
+# one; supervised = only the sessions the host classifies as supervised (merge, maintain, broker, any
+# monster, a ledger-bearing session) and security-lane lines, while the interactive roles keep ~/.claude
+# (CLAUDE_CONFIG_DIR unset). Fleet commands (verify, sync, the supervisor) always use the fleet's dir.
+: "${FLEET_CLAUDE_CONFIG_DIR_SCOPE:=all}"
+case "$FLEET_CLAUDE_CONFIG_DIR_SCOPE" in all | supervised) ;; *) fleet_die "FLEET_CLAUDE_CONFIG_DIR_SCOPE must be all or supervised (got '$FLEET_CLAUDE_CONFIG_DIR_SCOPE')" ;; esac
+export FLEET_CLAUDE_CONFIG_DIR_SCOPE
 if [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ]; then
   case "$FLEET_CLAUDE_CONFIG_DIR" in /*) ;; *) fleet_die "FLEET_CLAUDE_CONFIG_DIR must be an absolute path (or start with ~), got '$FLEET_CLAUDE_CONFIG_DIR'" ;; esac
   export FLEET_CLAUDE_CONFIG_DIR CLAUDE_CONFIG_DIR="$FLEET_CLAUDE_CONFIG_DIR"

@@ -425,6 +425,50 @@ reports them as a mismatch until the fleet has its own directory (or you allow t
    fleet launches (monsters, interactive and security sessions, and the supervisor's relaunches) gets
    `CLAUDE_CONFIG_DIR=<dir>`, and `fleet verify` checks that directory instead of `~/.claude`.
 
+**Only the monsters on the fleet dir: `FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised`.** By default (`all`)
+every session the fleet launches runs on the fleet's dir. With `supervised` (set it in `fleet.conf` or
+`fleet.local.conf`; the environment is ignored), only the roster lines this host positively classifies as
+interactive run with `CLAUDE_CONFIG_DIR` unset, on `~/.claude` with your own plugins, skills, MCP servers
+and auto-memory. Every other line keeps the fleet dir, so an unknown or oddly spelled one fails toward the
+verified dir: merge, maintain, broker and any other monster (prompts matched in any case, with `_` or spaces
+between the words), any ledger-bearing session, and security-tier lines (an env file named `security` or
+`nyx` in any case, the roster's default `ENV_FILE` included, or any `--model` in the Claude Opus 4.8
+family). The launcher applies the same rule again: a line it arms as a monster, the broker, a supervised
+session or the security tier never gets `~/.claude`, whatever it was told. It decides the dir last, after
+the env file, and launches `command claude` after `unset -f claude`, so an accidental assignment or a
+function named `claude` in an env file can't move a session to another dir; an env file sourced by an
+interactive role unsets it as well. That is a guard against mistakes, not against a hostile env file: env
+files are trusted, PR-reviewed shell code, and a `PATH` wrapper, a `DEBUG` trap, `enable -n` or
+`NODE_OPTIONS` in one can still change what runs.
+
+`fleet sync` then reconciles the pinned marketplaces and plugins in both dirs, `~/.claude` at user scope.
+In `~/.claude` it moves a marketplace to its pinned ref (Claude Code does that by removing and re-adding
+the marketplace, which uninstalls its plugins) only when that marketplace has nothing installed but the
+fleet's own: its pinned plugins at user scope, or at project scope for `PIN_DIR` itself. If you have another
+plugin of it, or another project's project-scope install of one, sync leaves it, warns naming them, and
+reports drift; then uninstall those, or remove and re-add the marketplace yourself (`marketplace update`
+does not move a ref-pinned marketplace). Nothing else in `~/.claude` is
+touched. `fleet sync --check`, `fleet status` and `fleet xray` report drift and login per dir.
+
+`fleet verify` checks the fleet dir as before and, under `supervised`, also the engsys plugin installed in
+`~/.claude`, against the same release: the interactive roles dispatch security reviews (Nyx) whose verdicts
+gate merges, and those load the engsys plugin from `~/.claude`. A mismatch there holds the monsters like any
+other. Your other plugins, skills and MCP servers in `~/.claude` are not checked.
+
+The tradeoff, plainly: under `supervised` the interactive roles still carry the fleet's GitHub identity (the
+App token, through the gh shim and the fleet git identity) while they load your personal, unverified
+plugins, skills and MCP servers. A `nyx-review` verdict posted from an interactive role is only as
+trustworthy as that role's unverified `~/.claude`, and merge-monster does not yet tell it apart from a
+security-lane verdict (eric-sabe/engsys#197). Choose `supervised` only if you accept that for the attended
+roles.
+
+**The monster batons.** A session the fleet launched (`ENGSYS_SESSION` and `ENGSYS_SESSION_RUN` set) may
+take, renew or act on the merge or maintain baton only when the launcher armed it for that role
+(`ENGSYS_SINGLETON_ROLE`) and, under `supervised`, only on the fleet's config dir; `mm-baton.sh` /
+`mnt-baton.sh` refuse otherwise. A monster you start by hand, in a session the fleet did not launch, passes
+`--session <name>` and is not affected. This is defence in depth, not a boundary: an interactive fleet
+session holds the App token outside the singleton-write guard, so it could bypass the baton altogether.
+
 While the dir is set but not logged in, `fleet verify` reports "not verified" and alerts
 (`wrapper-integrity-unverified`), which holds every merge and maintain launch and relaunch, so a
 rotation never relaunches a monster into a login prompt; `fleet sync --check` (in `fleet status`) reports
@@ -1252,6 +1296,11 @@ interpreter flags that run inline code (`-c` / `-e` / `-m` / `--require` …), a
 once. A script's own imports or `source`s are not followed: keep each allowlisted hook a single
 self-contained file. The same rules apply to project hooks, whose files must also be inside the repo.
 
+**The launcher's messaging settings.** Every session starts with
+`--settings ~/.claude/<namespace>-messaging-settings.json`, which the launcher writes. `fleet verify` requires
+it to hold only the keys the launcher sets (`crossSessionInbound`); any other key (`hooks`, `env`, `model`,
+`statusLine`, …) is a mismatch.
+
 **User-scope configuration besides settings.** Every file under `<config dir>/agents`, `commands`,
 `skills` and `rules`, a `<config dir>/CLAUDE.md`, and every MCP server definition (`mcpServers` in the user
 state file, which is `<config dir>/.claude.json` with `FLEET_CLAUDE_CONFIG_DIR` and `~/.claude.json`
@@ -1497,6 +1546,7 @@ format) overrides it per machine. Environment values for `ENGSYS_REF` / `INSTANC
 | `WORKTREES_DIR` | no | Agent worktrees directory; created by `launch`; available to templates for `--add-dir` |
 | `GH_APP_ENV` | no | Path to the GitHub App env file. Set means identity kit on |
 | `FLEET_CLAUDE_CONFIG_DIR` | no | A separate Claude Code config dir for the fleet, with its own login (§ 6.1). Every fleet command and every launched session runs with `CLAUDE_CONFIG_DIR` set to it; `fleet sync` installs the plugins there and `fleet verify` checks it. An absolute path (or `~/…`). Never inherited from the caller's environment. Unset means `~/.claude` |
+| `FLEET_CLAUDE_CONFIG_DIR_SCOPE` | no | `all` (default): every launched session runs on `FLEET_CLAUDE_CONFIG_DIR`. `supervised`: only the lines positively classified as interactive keep `~/.claude`; everything else (monsters, supervised and security-tier lines, anything unclassified) runs on the fleet dir. `fleet sync` keeps the pinned plugins in both, and `fleet verify` also checks the engsys install in `~/.claude` (§ 6.1). Never inherited from the caller's environment |
 | `VERIFY_ALLOWED_USER_PLUGINS` | no | Space-separated `name@marketplace` user-scope plugins `fleet verify` reports as `allowed` instead of a mismatch (§ 6.1). Never inherited from the caller's environment |
 | `VERIFY_ALLOWED_USER_FILES` | no | Space-separated sha256 hashes of user-scope agents, commands, skills, rules, memory files and MCP server definitions that `fleet verify` accepts (§ 7, "User-scope configuration besides settings"). Never inherited from the caller's environment |
 | `VERIFY_ALLOWED_USER_HOOKS` | no | Space-separated sha256 content hashes of user-scope hooks and settings commands (`statusLine`, `apiKeyHelper`, any `*Helper` / `*Command`, …) that `fleet verify` accepts (§ 7, "User-scope settings"). The hash covers the command and every file it runs, and is printed in the mismatch line. Never inherited from the caller's environment |

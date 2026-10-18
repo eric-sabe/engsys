@@ -47,6 +47,7 @@ import {
   NO_TRUSTED_GIT,
   pushGit,
   trustedPushDirs,
+  launchedSessionGate,
 } from "./baton.mjs";
 
 const MIN = 60_000;
@@ -873,7 +874,7 @@ test("CLI: startup → fence → guard → merge → release, one JSON line each
   const notes = [];
   const merges = [];
   const deps = {
-    env: { ENGSYS_SESSION: "acme-mm", ENGSYS_SESSION_RUN: "r1" },
+    env: { ENGSYS_SESSION: "acme-mm", ENGSYS_SESSION_RUN: "r1", ENGSYS_SINGLETON_ROLE: "merge" },
     hostname: "mini",
     api: w.api,
     out: { write: (s) => out.push(s) },
@@ -1512,3 +1513,35 @@ test("#96 M4 & L1: revoke frees a self-held baton on integrity mismatch, and roo
 });
 
 
+
+test("a fleet-launched session holds a monster baton only when armed for that role (and on the fleet dir under scope supervised)", () => {
+  const launched = { ENGSYS_SESSION: "acme-build", ENGSYS_SESSION_RUN: "r1" };
+  for (const op of ["startup", "renew", "fence", "merge", "guard", "keepalive"]) {
+    assert.match(launchedSessionGate({ env: launched, role: "merge", op }) ?? "", /was not launched as the merge monster/, op);
+  }
+  assert.match(launchedSessionGate({ env: { ...launched, ENGSYS_SINGLETON_ROLE: "maintain" }, role: "merge", op: "startup" }) ?? "", /not launched as the merge monster/);
+  assert.match(launchedSessionGate({ env: launched, role: "merge", op: "startup" }), /pass --session <name>/, "says how to run one by hand");
+  // positive controls: the armed monster; read-only ops; a session started by hand (no ENGSYS_SESSION_RUN)
+  assert.equal(launchedSessionGate({ env: { ...launched, ENGSYS_SINGLETON_ROLE: "merge" }, role: "merge", op: "startup" }), null);
+  for (const op of ["status", "release", "supervise", "revoke"]) assert.equal(launchedSessionGate({ env: launched, role: "merge", op }), null, op);
+  assert.equal(launchedSessionGate({ env: { ENGSYS_SESSION: "manual-mm" }, role: "merge", op: "startup" }), null, "manual: no launch id");
+  assert.equal(launchedSessionGate({ env: {}, role: "merge", op: "startup" }), null, "manual: --session only");
+  // scope supervised: also on the fleet's Claude config dir
+  const sup = { ...launched, ENGSYS_SINGLETON_ROLE: "merge", FLEET_CLAUDE_CONFIG_DIR: "/f", FLEET_CLAUDE_CONFIG_DIR_SCOPE: "supervised" };
+  assert.match(launchedSessionGate({ env: sup, role: "merge", op: "renew" }) ?? "", /not on the fleet's Claude config dir/);
+  assert.match(launchedSessionGate({ env: { ...sup, CLAUDE_CONFIG_DIR: "/home/.claude" }, role: "merge", op: "renew" }) ?? "", /not on the fleet's Claude config dir/);
+  assert.equal(launchedSessionGate({ env: { ...sup, CLAUDE_CONFIG_DIR: "/f" }, role: "merge", op: "renew" }), null, "positive control: on the fleet dir");
+});
+
+test("CLI: an unarmed fleet session's startup is refused before any request", async () => {
+  const w = world();
+  const dir = mkdtempSync(join(tmpdir(), "baton-gate-"));
+  const out = [];
+  const errs = [];
+  const before = w.api.state.log.length;
+  const code = await main(["startup", "--repo", REPO, "--role", "merge", "--state-dir", dir],
+    { env: { ENGSYS_SESSION: "acme-build", ENGSYS_SESSION_RUN: "r1" }, hostname: "mini", api: w.api, out: { write: (s) => out.push(s) }, err: { write: (s) => errs.push(s) } });
+  assert.equal(code, EXIT.REFUSED);
+  assert.equal(JSON.parse(out.at(-1)).code, "not_armed");
+  assert.equal(w.api.state.log.length, before, "no GitHub request");
+});
