@@ -344,7 +344,7 @@ supervisor parses exactly that line. Statuses it reads: **"rotation requested"**
 end"** (a deliberate stop; leave me). Anything else is a working status. Closing the ledger issue is the
 **kill switch**: the watcher emits `STOP` and the supervisor never touches a closed ledger. Register the
 session in the fleet's supervisor conf as `<ns>-broker|<ledger issue>|<stale minutes>` (stale minutes are
-`stale_lock_minutes` plus grace). The script refuses to edit a body without exactly one marker pair,
+exactly `stale_lock_minutes`, no grace). The script refuses to edit a body without exactly one marker pair,
 except on a fleet status issue with no broker block yet, where it appends one (see **Multi-fleet**).
 
 ## Multi-fleet: one broker per host, on its fleet's status issue

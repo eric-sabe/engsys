@@ -165,6 +165,7 @@ runs under launchd/cron every ~5 minutes with **no LLM in the restart path**
 | (per tick, not per session) `HOST_HEALTH_CMD` fails | | one alert through `NOTIFY_CMD` per incident, resolved once the check passes again; a failed post is retried next tick |
 | stale | **alive** | never kill; escalate once on the ledger |
 | any relaunch **fails** | | escalate once on the ledger with the launcher's error, retry each tick without commenting, comment once on recovery |
+| a supervisor-launched pane's last message is the usage-limit line (`You've hit your [weekly ]limit · resets …`) | any | hold the session (`<name>.limit-hold`, reset time parsed from the line): no stale or relaunch escalation; after the reset plus `LIMIT_RESUME_MARGIN_SEC` re-prompt an idle pane, or relaunch an exited one, once; re-hit within 30 min backs off; an unreadable reset time is alert-only |
 | (per tick, not per session) a pane shows Claude Code's login error | any | hold **every** relaunch and kill nothing; one `NOTIFY_CMD --level action --incident claude-auth-expired`; resume, and resolve the alert, once the login works |
 
 **An expired Claude Code login (engsys#103).** A session whose login has expired answers its

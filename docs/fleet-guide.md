@@ -223,7 +223,14 @@ relaunches each held session once. Details: the agent-sessions skill and the hea
 When a seat hits its usage or rate limit (`You've hit your limit · resets …`, `Usage limit reached`), the
 supervisor does not move any supervised session to another harness: the fleet is Claude-only, whatever
 `HARNESS_FALLBACK` says. It posts one `fleet notify --level alert --incident seat-limit`, resolved once no
-supervised pane shows the limit, and every relaunch stays on the primary harness. Only Claude Code's own
+supervised pane shows the limit, and every relaunch stays on the primary harness. The supervisor also
+holds a limited session and resumes it on its own: it reads the reset time from the limit line
+(`resets Oct 20, 9pm (America/New_York)`), records `logs/fleet-supervisor/<session>.limit-hold`, and meanwhile
+raises no stale-heartbeat comment and relaunches nothing for that session. After the reset plus
+`LIMIT_RESUME_MARGIN_SEC` (default 120) it re-prompts an idle pane, or relaunches one that exited, then posts one
+info notice (the alert's resolve). A session that hits the limit again within 30 minutes of a resume backs off
+(10 minutes, doubling, up to 4 hours). If the reset time cannot be read, or `LIMIT_RESUME=off`, the behaviour is
+the alert only. Only Claude Code's own
 limit line, as the last message of a pane the fleet launched (`fleet launch` and the supervisor record
 each supervised session's pane), counts: text in tool output or in
 another pane never does. (`HARNESS_FALLBACK` only makes `fleet sync` pre-stage those harnesses' plugin

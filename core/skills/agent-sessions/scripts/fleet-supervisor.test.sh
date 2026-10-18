@@ -32,6 +32,7 @@ case "$1" in
     case "$*" in *pane_id*) echo "%$w" ;; *) cat "$FAKE/pane-$w" ;; esac ;;
   capture-pane) cat "$FAKE/capture-$w" 2>/dev/null || true ;;
   kill-window) echo "kill $w" >>"$FAKE/actions"; rm -f "$FAKE/pane-$w" ;;
+  send-keys) shift; shift; shift; shift; echo "sendkeys $w $*" >>"$FAKE/actions" ;;
 esac
 SH
 cat >"$T/launch.sh" <<'SH'
@@ -648,6 +649,96 @@ if [ ! -f "$SLOG/harness.fallback" ]; then pass=$((pass + 1)); echo "  ok    …
 # Positive control: without any fallback config, a crashed session is still relaunched normally.
 qconf; qreset; ledger 90 "ok — merging #12"; echo zsh >"$T/pane-acme-mm"; run
 expect "no fallback config: a stale exited monster is relaunched as before" "^launch acme-mm harness=claude"
+rm -f "$T"/pane-* "$T"/capture-*
+
+# Seat limit hold and automatic resume (ff-engsys-fleet#54): the reset time is read from the limit line, the session
+# is held (no stale or relaunch escalation), and resumed once the reset has passed.
+lreset() { # lreset <minutes from now> → the "resets …" text of a limit line, in UTC
+  local e=$(( $(date +%s) + $1 * 60 ))
+  printf 'resets %s (UTC)' "$(date -u -r "$e" '+%b %-d, %-I:%M%p' 2>/dev/null || date -u -d "@$e" '+%b %-d, %-I:%M%p')"
+}
+hold_has() { grep -q -- "^$2" "$SLOG/$1.limit-hold" 2>/dev/null && echo "hold:$1:$2" >>"$T/actions" || true; }
+hold_gone() { [ ! -f "$SLOG/$1.limit-hold" ] && echo "nohold:$1" >>"$T/actions" || true; }
+mkhold_due() { sed -i.bak 's/^resume_at=.*/resume_at=1/' "$SLOG/$1.limit-hold" && rm -f "$SLOG/$1.limit-hold.bak"; }
+hconf() { qconf "$@"; }
+
+hconf; qreset; launched_by_sup acme-rel; ledger2 90 "ok"; live acme-rel "⏺ You've hit your weekly limit · $(lreset 90)"; run
+expect "hold: a (weekly) limit line is recognised and alerted" "^notify --level alert --incident seat-limit"
+expect "  …the alert says it resumes on its own" "^notify .*seat-limit .*resumes on its own after "
+hold_has acme-rel "reset=20"
+hold_has acme-rel "resume_at=[0-9]"
+expect "  …the hold is on disk with the parsed reset time" "^hold:acme-rel:reset=20"
+expect "  …no stale-heartbeat escalation on the ledger" "!comment 2"
+run; run
+expect "hold: next ticks: still no escalation" "!comment"
+expect "  …no re-prompt before the reset" "!^sendkeys"
+expect "  …nothing relaunched or killed" "!^launch acme-rel\|^kill"
+expect "  …no second alert" "!^notify --level alert"
+
+# after the reset: re-prompted once (the session is alive and idle), the hold cleared, one info notice
+mkhold_due acme-rel; run
+expect_n "resume: the idle session is re-prompted once" "^sendkeys acme-rel .*usage limit has reset" 1
+hold_gone acme-rel
+expect "  …the hold is cleared" "^nohold:acme-rel"
+expect "  …one info notice (the alert's resolve) naming the session" "^notify --level info --incident seat-limit --resolve Resolved: the Claude usage limit has reset on .*resumed on their own: acme-rel"
+expect "  …still no ledger escalation" "!comment"
+
+# back-off: the pane still shows the limit after the re-prompt (it hit the limit again immediately)
+run
+hold_has acme-rel "rehits=1"
+expect "re-hit: held again with back-off (rehits=1), not re-prompted in a loop" "^hold:acme-rel:rehits=1"
+expect "  …no re-prompt this tick" "!^sendkeys"
+resume_at="$(sed -n 's/^resume_at=//p' "$SLOG/acme-rel.limit-hold")"
+if [ "$resume_at" -ge $(( $(date +%s) + 500 )) ]; then echo "backoff-10m" >>"$T/actions"; fi
+expect "  …the resume waits at least the back-off (10m) past now" "^backoff-10m"
+mkhold_due acme-rel; run; run
+hold_has acme-rel "rehits=2"
+expect "second re-hit: back-off doubles (rehits=2)" "^hold:acme-rel:rehits=2"
+resume_at="$(sed -n 's/^resume_at=//p' "$SLOG/acme-rel.limit-hold")"
+if [ "$resume_at" -ge $(( $(date +%s) + 1100 )) ]; then echo "backoff-20m" >>"$T/actions"; fi
+expect "  …to 20m" "^backoff-20m"
+
+# a reset that is already past (with margin 0): resumed on the same tick the limit is seen
+hconf "LIMIT_RESUME_MARGIN_SEC=0"; qreset; launched_by_sup acme-rel; ledger2 90 "ok"; live acme-rel "⏺ You've hit your limit · $(lreset -30)"; run
+expect "reset already past → re-prompted on the spot" "^sendkeys acme-rel"
+
+# an exited session: held (not relaunched by crash recovery) until the reset, then relaunched once
+hconf; qreset; launched_by_sup acme-rel; ledger2 90 "ok"; live acme-rel "⏺ You've hit your limit · $(lreset 90)"; echo zsh >"$T/pane-acme-rel"; run
+expect "exited + limit hold → not relaunched before the reset" "!^launch acme-rel"
+hold_has acme-rel "resume_at=[0-9]"
+expect "  …the hold is recorded" "^hold:acme-rel:resume_at"
+run
+expect "  …still not relaunched next tick" "!^launch acme-rel"
+mkhold_due acme-rel; run
+expect_n "exited + reset passed → relaunched once" "^launch acme-rel" 1
+hold_gone acme-rel
+expect "  …hold cleared" "^nohold:acme-rel"
+
+# the session is working again before the reset (a person re-prompted it): the hold just ends
+hconf; qreset; launched_by_sup acme-rel; ledger2 2 "ok"; live acme-rel "⏺ You've hit your limit · $(lreset 90)"; run
+live acme-rel "⏺ Back on the ledger."; run
+hold_gone acme-rel
+expect "pane answers normally before the reset → hold dropped, no re-prompt" "^nohold:acme-rel"
+expect "  …no re-prompt" "!^sendkeys"
+
+# unreadable reset time: alert-only, as before (the stale heartbeat is escalated normally)
+for bad in "⏺ You've hit your limit · resets soon (UTC)" "⏺ You've hit your limit · resets 9pm" "⏺ You've hit your limit · resets 9pm (Mars/Olympus)" "⏺ You've hit your limit · resets 25pm (UTC)"; do
+  hconf; qreset; launched_by_sup acme-rel; ledger2 90 "ok"; live acme-rel "$bad"; run
+  hold_gone acme-rel
+  expect "unreadable reset ($bad) → no hold" "^nohold:acme-rel"
+  expect "  …still alerted" "^notify --level alert --incident seat-limit"
+  expect "  …and the stale session escalated as before" "comment 2: .*heartbeat stale"
+done
+
+# LIMIT_RESUME=off: alert only
+hconf "LIMIT_RESUME=off"; qreset; launched_by_sup acme-rel; ledger2 90 "ok"; live acme-rel "⏺ You've hit your limit · $(lreset 90)"; run
+hold_gone acme-rel
+expect "LIMIT_RESUME=off → no hold, alert only" "^nohold:acme-rel"
+
+# the auth hold wins: a resume that is due waits for the login
+hconf; qreset; launched_by_sup acme-rel; ledger2 2 "ok"; live acme-rel "⏺ You've hit your limit · $(lreset 90)"; run
+mkhold_due acme-rel; wpane acme-w "⏺ Login expired · Please run /login"; run
+expect "resume due while the login is expired → held, not re-prompted" "!^sendkeys"
 rm -f "$T"/pane-* "$T"/capture-*
 
 # launch-agent-sessions.sh harness policy and flag translation: launch-agent-sessions.test.sh.

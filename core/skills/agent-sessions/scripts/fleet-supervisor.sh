@@ -60,6 +60,18 @@
 #                           showing the old error are acknowledged, and the table runs as usual on the
 #                           same tick, so each held session gets its one relaunch through the normal path.
 #
+# Seat limit hold (ff-engsys-fleet#54). When the LAST message of a pane the supervisor launched is Claude Code's
+# usage-limit line (`You've hit your [weekly ]limit · resets Oct 20, 9pm (America/New_York)`), the supervisor
+# parses the reset time and records logs/fleet-supervisor/<session>.limit-hold (reset, resume_at, rehits).
+# While it lasts the decision table skips that session: no stale-heartbeat escalation, no relaunch. After the
+# reset plus LIMIT_RESUME_MARGIN_SEC it resumes the session: an idle pane is re-prompted (tmux send-keys), an
+# exited one is relaunched (through the same baton/integrity gates as any relaunch), the hold is cleared and
+# the seat-limit alert resolves with one info notice naming what resumed. A session that hits the limit again
+# within 30 minutes of a resume waits an extra 10 minutes, doubling per re-hit up to 4 h, so it cannot loop.
+# A hold also ends when the pane shows something else or is working again (a person got there first), and
+# waits while the login hold is on. A reset time that cannot be read (no zone, no clock time, unknown zone, more
+# than 8 days out) writes no hold: the alert-only behaviour. Panes the supervisor did not launch never count.
+#
 # Singleton monsters (engsys#62): a session line whose 6th field is `merge` or `maintain` holds that
 # role through the github lease (core/lib/lease/baton.mjs), and the lease, not the shared ledger
 # heartbeat, says who holds it. Before ANY relaunch of such a session the supervisor asks the lease
@@ -152,6 +164,10 @@
 #                              incident (the fleet kit: `fleet verify --alert --auto-sync --max-age N`,
 #                              engsys#70); a held relaunch is also said once on that session's
 #                              ledger.
+#   LIMIT_RESUME=on|off        optional (default on): hold a session that hit the Claude usage limit and resume it
+#                              after the reset (see "Seat limit hold" above); off = alert only
+#   LIMIT_RESUME_MARGIN_SEC=<s> optional (default 120): how long after the reset time in the limit message the
+#                              session is resumed
 #   AUTH_PROBE=on|off          optional (default on): the test request that tells a working login from an
 #                              old error line: `claude -p` with one short Haiku prompt, run from an empty
 #                              temp dir with only project settings (no plugins, hooks or MCP servers). It
@@ -233,6 +249,7 @@ trap 'rmdir "$LOCKDIR" 2>/dev/null || true' EXIT
 TMUX_SESSION="" LAUNCH_CMD="" DEFAULT_REPO="" ROTATE_GRACE_MIN=3 HOST_CHECK_CMD=""
 HOST_HEALTH_CMD="" HOST_HEALTH_INCIDENT="host-health" NOTIFY_CMD="" HEARTBEAT_CMD="" BATON_CMD="" INTEGRITY_CMD=""
 AUTH_PROBE=on AUTH_PROBE_TIMEOUT_SEC=90 AUTH_CHECK_WAIT_SEC=45 STATUS_URL=""
+LIMIT_RESUME=on LIMIT_RESUME_MARGIN_SEC=120
 HARNESS="${HARNESS:-${FLEET_HARNESS:-claude}}"
 SESSIONS=()
 while IFS= read -r line; do
@@ -255,6 +272,8 @@ while IFS= read -r line; do
     AUTH_PROBE_TIMEOUT_SEC=*) AUTH_PROBE_TIMEOUT_SEC="${line#AUTH_PROBE_TIMEOUT_SEC=}" ;;
     AUTH_CHECK_WAIT_SEC=*) AUTH_CHECK_WAIT_SEC="${line#AUTH_CHECK_WAIT_SEC=}" ;;
     STATUS_URL=*) STATUS_URL="${line#STATUS_URL=}" ;;
+    LIMIT_RESUME=*) LIMIT_RESUME="${line#LIMIT_RESUME=}" ;;
+    LIMIT_RESUME_MARGIN_SEC=*) LIMIT_RESUME_MARGIN_SEC="${line#LIMIT_RESUME_MARGIN_SEC=}" ;;
     HARNESS=*) HARNESS="${line#HARNESS=}" ;;
     # Accepted from older confs and ignored: the supervisor never fails a supervised session over.
     HARNESS_FALLBACK=* | QUOTA_COOLDOWN_MIN=* | SECURITY_SESSIONS=* | GATE_ISSUE=* | GATE_OPERATORS_TEAM=* | GATE_OPERATORS=* | GATE_CMD=*) ;;
@@ -265,7 +284,8 @@ done < "$CONF"
 PRIMARY_HARNESS="${PRIMARY_HARNESS:-$HARNESS}"
 [ -n "$TMUX_SESSION" ] && [ -n "$LAUNCH_CMD" ] || { echo "fleet-supervisor: conf must set TMUX_SESSION and LAUNCH_CMD" >&2; exit 1; }
 case "$AUTH_PROBE" in on | off) ;; *) echo "fleet-supervisor: AUTH_PROBE must be on or off" >&2; exit 1 ;; esac
-for v in AUTH_PROBE_TIMEOUT_SEC AUTH_CHECK_WAIT_SEC; do
+case "$LIMIT_RESUME" in on | off) ;; *) echo "fleet-supervisor: LIMIT_RESUME must be on or off" >&2; exit 1 ;; esac
+for v in AUTH_PROBE_TIMEOUT_SEC AUTH_CHECK_WAIT_SEC LIMIT_RESUME_MARGIN_SEC; do
   case "${!v}" in '' | *[!0-9]*) echo "fleet-supervisor: $v must be a whole number" >&2; exit 1 ;; esac
 done
 
@@ -433,7 +453,8 @@ auth_probe() {
 # same line doesn't alert again; the alert resolves once no supervised pane shows a limit. A
 # harness.fallback file left by an older version is removed: every relaunch uses the primary harness.
 HARNESS_QUOTA_ERRORS=(
-  "You've hit your limit · resets"
+  "You've hit your( [A-Za-z0-9-]+)* limit"
+  "You’ve hit your( [A-Za-z0-9-]+)* limit"
   'Claude usage limit reached'
   'Usage limit reached'
   'Session limit reached'
@@ -449,6 +470,100 @@ QUOTA_ALERTED="$STATE_DIR/seat-limit.alerted"
 QUOTA_ACKED="$STATE_DIR/quota.acked"
 QUOTA_INCIDENT="seat-limit"
 QUOTA_BLOCKED=""
+LIMIT_REHIT_WINDOW_SEC=1800 # a session that hits the limit again within this long of a resume is backing off
+LIMIT_BACKOFF_BASE_SEC=600  # …by this much on the first re-hit, doubling each time, up to LIMIT_BACKOFF_MAX_SEC
+LIMIT_BACKOFF_MAX_SEC=14400
+LIMIT_RESUMED_LIST="$STATE_DIR/limit.resumed" # sessions resumed since the last "limit is over" notice
+LIMIT_PROMPT="Your Claude usage limit has reset. Carry on where you stopped: re-read your ledger and state, then resume your loop."
+
+# limit_reset_epoch <limit line> → the epoch of the reset time the line names, on stdout; rc 1 when it can't be
+# read. The line ends `resets [<Mon> <D>[,] [at] ]<H>[:<MM>]<am|pm> (<IANA zone>)` (`resets 9pm (America/New_York)`,
+# `resets Oct 20, 9:30pm (UTC)`). No zone, no clock time or an unknown zone is unreadable: guessing would resume a
+# monster hours early or never.
+limit_reset_epoch() {
+  local tz when re mon day h m ap y now ep mon_c ap_c time_s
+  tz="$(sed -n 's/.*[Rr]esets[^(]*(\([A-Za-z0-9_+/-]*\)).*/\1/p' <<<"$1" | head -n 1)"
+  when="$(sed -n 's/.*[Rr]esets \([^(]*\)(.*/\1/p' <<<"$1" | head -n 1 | tr 'A-Z' 'a-z' | sed 's/^ *//; s/ *$//')"
+  [ -n "$tz" ] && [ -n "$when" ] || return 1
+  case "$tz" in UTC | GMT) ;; *) [ -e "/usr/share/zoneinfo/$tz" ] || return 1 ;; esac
+  re='^(([a-z]+) ([0-9]{1,2}),? (at )?)?([0-9]{1,2})(:([0-9]{2}))?[[:space:]]*(am|pm)$'
+  [[ "$when" =~ $re ]] || return 1
+  mon="${BASH_REMATCH[2]}" day="${BASH_REMATCH[3]}" h="${BASH_REMATCH[5]}" m="${BASH_REMATCH[7]:-00}" ap="${BASH_REMATCH[8]}"
+  [ "$((10#$h))" -ge 1 ] && [ "$((10#$h))" -le 12 ] && [ "$((10#$m))" -le 59 ] || return 1
+  ap_c="$(printf '%s' "$ap" | tr 'a-z' 'A-Z')"
+  time_s="$((10#$h)):$m $ap_c"
+  now="$(date +%s)"
+  if [ -n "$mon" ]; then
+    mon_c="$(printf '%s' "${mon:0:1}" | tr 'a-z' 'A-Z')${mon:1:2}"
+    y="$(TZ="$tz" date +%Y)"
+    ep="$(limit_tz_epoch "$tz" "$y" "$mon_c" "$((10#$day))" "$time_s")" || return 1
+    # a date already well behind us belongs to next year (a December limit read in January)
+    if [ "$ep" -lt $((now - 172800)) ]; then ep="$(limit_tz_epoch "$tz" "$((y + 1))" "$mon_c" "$((10#$day))" "$time_s")" || return 1; fi
+  else
+    read -r y mon_c day <<<"$(TZ="$tz" date '+%Y %b %d')"
+    ep="$(limit_tz_epoch "$tz" "$y" "$mon_c" "$((10#$day))" "$time_s")" || return 1
+    [ "$ep" -gt "$now" ] || ep=$((ep + 86400)) # a clock time with no date that already passed today is tomorrow's
+  fi
+  # a reset more than 8 days out is a misread, not a weekly limit
+  [ "$ep" -le $((now + 691200)) ] || return 1
+  printf '%s' "$ep"
+}
+limit_tz_epoch() { # limit_tz_epoch <zone> <year> <Mon> <day> <H:MM AM> → epoch (BSD date first, GNU fallback)
+  TZ="$1" date -j -f '%Y %b %d %I:%M %p' "$2 $3 $4 $5" +%s 2>/dev/null \
+    || TZ="$1" date -d "$3 $4 $2 $5" +%s 2>/dev/null
+}
+limit_hold_get() { sed -n "s/^$2=//p" "$STATE_DIR/$1.limit-hold" 2>/dev/null | head -n 1; }
+limit_hold_drop() { rm -f "${STATE_DIR:?}/${1:?}.limit-hold"; }
+limit_holds_remaining() { ls "$STATE_DIR"/*.limit-hold >/dev/null 2>&1; }
+epoch_iso() { date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ; }
+
+# limit_hold_begin <name> <pane> <limit line> → record the hold: logs/fleet-supervisor/<name>.limit-hold, with the reset
+# time parsed from the line. Nothing is written (alert-only, as before) when LIMIT_RESUME=off or the time is unreadable.
+# A session that hits the limit again within LIMIT_REHIT_WINDOW_SEC of a resume backs off: the resume waits an extra
+# LIMIT_BACKOFF_BASE_SEC, doubling per re-hit up to LIMIT_BACKOFF_MAX_SEC, so a limit that did not really lift cannot loop.
+limit_hold_begin() {
+  [ "$LIMIT_RESUME" = on ] || return 0
+  local f="$STATE_DIR/$1.limit-hold" reset resume now last rehits=0 extra=0 rec="$STATE_DIR/$1.limit-resumed" why=""
+  [ ! -f "$f" ] || return 0
+  if ! reset="$(limit_reset_epoch "$3")"; then
+    log "$1: seat limit, but the reset time is unreadable ($(printf '%s' "$3" | cut -c1-160)): alert only, no automatic resume"
+    return 0
+  fi
+  now="$(date +%s)"
+  if [ -f "$rec" ]; then
+    IFS='|' read -r last rehits <"$rec" || true
+    case "${last:-}" in '' | *[!0-9]*) last=0 ;; esac
+    case "${rehits:-}" in '' | *[!0-9]*) rehits=0 ;; esac
+    if [ $((now - last)) -lt "$LIMIT_REHIT_WINDOW_SEC" ]; then
+      rehits=$((rehits + 1)); extra=$((LIMIT_BACKOFF_BASE_SEC * (1 << (rehits - 1))))
+      [ "$extra" -le "$LIMIT_BACKOFF_MAX_SEC" ] || extra=$LIMIT_BACKOFF_MAX_SEC
+      why=" (re-hit $rehits, backing off ${extra}s)"
+    else rehits=0; fi
+  fi
+  resume=$((reset + LIMIT_RESUME_MARGIN_SEC)); [ "$resume" -ge "$now" ] || resume=$now
+  resume=$((resume + extra))
+  printf 'reset=%s\nresume_at=%s\nresume=%s\nseen=%s\nrehits=%s\npane=%s\nline=%s\n' "$(epoch_iso "$reset")" "$resume" "$(epoch_iso "$resume")" \
+    "$(epoch_iso "$now")" "$rehits" "$2" "$(printf '%s' "$3" | tr -d '\n' | cut -c1-200)" >"$f"
+  log "$1: seat limit, resets $(epoch_iso "$reset"): holding it (no stale or relaunch escalation), resuming at $(epoch_iso "$resume")$why"
+}
+
+# limit_hold_done <name> <how> → the hold ends; the backoff record keeps the resume time. When it was the last hold, the
+# one "limit is over" notice goes out (it is the seat-limit alert's resolve).
+limit_hold_done() {
+  local name="$1" rehits names
+  rehits="$(limit_hold_get "$name" rehits)"
+  [ "$2" != resumed ] || printf '%s|%s\n' "$(date +%s)" "${rehits:-0}" >"$STATE_DIR/$name.limit-resumed"
+  limit_hold_drop "$name"
+  [ "$2" != resumed ] || auth_add_lines "$LIMIT_RESUMED_LIST" "$name"
+  log "$name: seat limit hold ended ($2)"
+  if ! limit_holds_remaining; then
+    names="$(paste -sd, - <"$LIMIT_RESUMED_LIST" 2>/dev/null | sed 's/,/, /g' || true)"
+    if [ ! -f "$QUOTA_ALERTED" ]; then rm -f "${LIMIT_RESUMED_LIST:?}"
+    elif notify --level info --incident "$QUOTA_INCIDENT" --resolve "Resolved: the Claude usage limit has reset on $HOST_NAME${names:+; resumed on their own: $names}."; then
+      rm -f "${QUOTA_ALERTED:?}" "${LIMIT_RESUMED_LIST:?}"
+    fi
+  fi
+}
 
 # quota_state_of <pane text> → quota | ok | none: what the pane's LAST message (a reply-marker line) says.
 quota_state_of() {
@@ -456,6 +571,11 @@ quota_state_of() {
     { sub(/\r$/, ""); sub(/ +$/, "") }
     $0 ~ ENVIRON["MSG_RE"] { m = $0; sub(ENVIRON["MSG_RE"], "", m); s = (m ~ ENVIRON["QUOTA_RE"]) ? "quota" : "ok" }
     END { print (s == "" ? "none" : s) }' <<<"$1"
+}
+
+# quota_line_of <pane text> → the pane's last message line (the limit line, when quota_state_of said quota).
+quota_line_of() {
+  MSG_RE="$AUTH_MSG_RE" awk '{ sub(/\r$/, ""); sub(/ +$/, "") } $0 ~ ENVIRON["MSG_RE"] { m = $0 } END { print m }' <<<"$1"
 }
 
 # launched_pane_of <name> → the pane id the supervisor launched for <name>, if that pane is still its window's.
@@ -481,6 +601,7 @@ quota_scan() {
     grep -q 'esc to interrupt' <<<"$(tail -n 15 <<<"$text")" && continue
     if [ "$(quota_state_of "$text")" = quota ]; then
       QUOTA_ANY=1
+      limit_hold_begin "$n" "$id" "$(quota_line_of "$text")"
       if [ -f "$QUOTA_ACKED" ] && grep -Fxq "$n|$id" "$QUOTA_ACKED"; then keep="$keep$n|$id"$'\n'
       else QUOTA_BLOCKED="$QUOTA_BLOCKED$n|$id"$'\n'; fi
     fi
@@ -659,25 +780,68 @@ baton_allows() { # baton_allows <name> <repo> <role> [rotation_idle] → 0 may r
 
 NOW=$(date +%s)
 
+# limit_hold_step <name> <ledger> <repo> <role> → 0: handled this tick (held, or resumed; skip the table), 1: no hold
+# any more (run the table). Reads the loop's ALIVE / ENDED.
+limit_hold_step() {
+  local name="$1" at now text
+  at="$(limit_hold_get "$name" resume_at)"
+  case "$at" in '' | *[!0-9]*) log "$name: limit hold unreadable, dropped"; limit_hold_drop "$name"; return 1 ;; esac
+  now="$(date +%s)"
+  if [ "$ALIVE" = 1 ]; then
+    # somebody got the session going again (a person re-prompted it): the hold has nothing left to do
+    if pane_busy "$name"; then limit_hold_done "$name" "the session is working again"; return 1; fi
+    text="$(tmux capture-pane -p -t "${TMUX_SESSION}:$name" -S -60 2>/dev/null || true)"
+    if [ "$(quota_state_of "$text")" != quota ]; then limit_hold_done "$name" "the pane no longer shows the limit"; return 1; fi
+  fi
+  if [ "$now" -lt "$at" ]; then
+    log "$name: held for the seat limit until $(epoch_iso "$at"): no stale or relaunch escalation meanwhile"
+    return 0
+  fi
+  if [ "$AUTH_HELD" = 1 ]; then auth_hold "$name" "the seat limit has reset, resume due"; return 0; fi
+  if [ "$ALIVE" = 1 ]; then
+    log "$name: seat limit has reset: re-prompting the idle session"
+    tmux send-keys -t "${TMUX_SESSION}:$name" -l "$LIMIT_PROMPT" 2>/dev/null && tmux send-keys -t "${TMUX_SESSION}:$name" Enter 2>/dev/null \
+      || { log "$name: re-prompt failed (tmux send-keys), retrying next tick"; return 0; }
+    limit_hold_done "$name" resumed
+    return 0
+  fi
+  if [ "$ENDED" = 1 ]; then limit_hold_done "$name" "process exited after 'session end': left alone"; return 1; fi
+  if [ -n "$4" ] && ! singleton_allows "$name" "$3" "$4" "$2"; then
+    log "$name: seat limit has reset, but the relaunch is held (baton or integrity) — waiting ($BATON_WHY)"
+    return 0
+  fi
+  relaunch "$name" "$2" "$3" "seat limit has reset; the session had exited"
+  limit_hold_done "$name" resumed
+  return 0
+}
+
 # Seat limit (Claude-only, header of that section): report it, never switch harness.
 HARNESS="$PRIMARY_HARNESS"; unset FLEET_ACTIVE_HARNESS; export HARNESS
 if [ -f "$FALLBACK_FILE" ]; then
   log "quota: removing a harness.fallback left by an older version ($(head -n 1 "$FALLBACK_FILE")): supervised sessions run on $PRIMARY_HARNESS only"
   rm -f "$FALLBACK_FILE"
 fi
+limit_alert_tail() { # limit_alert_tail <blocked list> → what the alert adds when a session is on hold
+  local n t="" r
+  while IFS='|' read -r n _; do
+    [ -n "$n" ] && [ -f "$STATE_DIR/$n.limit-hold" ] || continue
+    r="$(limit_hold_get "$n" resume)"; t="$t \`$n\` ${r:+resumes on its own after $r}"
+  done <<<"$1"
+  [ -z "$t" ] || printf ' With LIMIT_RESUME on, the supervisor re-prompts each held session once the limit resets:%s.' "$t"
+}
 quota_scan
 if [ -n "$QUOTA_BLOCKED" ]; then
   QUOTA_FIRST="${QUOTA_BLOCKED%%$'\n'*}"
   log "quota: seat limit reached in \`${QUOTA_FIRST%%|*}\`; supervised sessions never fail over to another harness (Claude-only), so it stays on $PRIMARY_HARNESS"
   if [ ! -f "$QUOTA_ALERTED" ]; then
-    if notify --level alert --incident "$QUOTA_INCIDENT" "Seat limit reached on \`$PRIMARY_HARNESS\` on $HOST_NAME (seen in \`${QUOTA_FIRST%%|*}\`). The fleet is Claude-only, so no session is moved to another harness: the sessions wait for the limit to reset, or for an operator."; then
+    if notify --level alert --incident "$QUOTA_INCIDENT" "Seat limit reached on \`$PRIMARY_HARNESS\` on $HOST_NAME (seen in \`${QUOTA_FIRST%%|*}\`). The fleet is Claude-only, so no session is moved to another harness: the sessions wait for the limit to reset, or for an operator.$(limit_alert_tail "$QUOTA_BLOCKED")"; then
       date -u +%Y-%m-%dT%H:%M:%SZ >"$QUOTA_ALERTED"
     fi
   fi
   # acknowledged only once the alert is out (an undelivered one is retried next tick)
   [ ! -f "$QUOTA_ALERTED" ] || auth_add_lines "$QUOTA_ACKED" "$QUOTA_BLOCKED"
-elif [ "$QUOTA_ANY" = 0 ] && [ -f "$QUOTA_ALERTED" ]; then
-  if notify --level info --incident "$QUOTA_INCIDENT" --resolve "Resolved: no supervised session on $HOST_NAME shows a seat limit any more."; then rm -f "$QUOTA_ALERTED"; fi
+elif [ "$QUOTA_ANY" = 0 ] && [ -f "$QUOTA_ALERTED" ] && ! limit_holds_remaining; then
+  if notify --level info --incident "$QUOTA_INCIDENT" --resolve "Resolved: no supervised session on $HOST_NAME shows a seat limit any more."; then rm -f "${QUOTA_ALERTED:?}" "${LIMIT_RESUMED_LIST:?}"; fi
 fi
 
 # Singleton monsters: the integrity check (INTEGRITY_CMD, once per tick) and then the lease. Sets BATON_WHY.
@@ -858,6 +1022,13 @@ for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
   ROTATED="$STATE_DIR/$name.rotated" # the rotation heartbeat we already relaunched for
   MARKED=0; [ -f "$ROTATED" ] && [ "$(cat "$ROTATED")" = "$HB_TS" ] && MARKED=1
 
+  # A seat limit hold (header): no escalation or relaunch from the table while it lasts; once the reset time plus
+  # the margin has passed, the session is resumed instead (re-prompted if alive, relaunched if it exited).
+  if [ -f "$STATE_DIR/$name.limit-hold" ] && limit_hold_step "$name" "$ledger" "$REPO_SLUG" "$role"; then
+    DOWN=$((DOWN + 1))
+    continue
+  fi
+
   if [ "$ALIVE" = "1" ]; then
     # (relaunched for this rotation but the new session never heartbeated → falls to the stale branch)
     if [ "$ROTATION" = "1" ] && ! { [ "$MARKED" = "1" ] && [ "$STALE" = "1" ]; }; then
@@ -945,7 +1116,7 @@ for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
     log "$name: process exited after 'session end' — deliberate stop, leaving it"
   else
     DOWN=$((DOWN + 1))
-    log "$name: process exited, heartbeat fresh (${HB_TS:-?}) — within grace, waiting"
+    log "$name: process exited, heartbeat fresh (${HB_TS:-?}) — not stale yet, waiting"
   fi
 done
 
@@ -961,6 +1132,7 @@ if [ -n "$HEARTBEAT_CMD" ] && [ $((UP + ROTATING + DOWN)) -gt 0 ]; then
   if [ ! -f "$MINUTE_LATCH" ] || [ "$(cat "$MINUTE_LATCH")" != "$MINUTE_NOW" ]; then
     SUMMARY="sessions: $UP up, $ROTATING rotating, $DOWN down"
     if [ -f "$QUOTA_ALERTED" ]; then SUMMARY="$SUMMARY; seat limit reached since $(head -n 1 "$QUOTA_ALERTED")"; fi
+    if limit_holds_remaining; then SUMMARY="$SUMMARY; limit hold: $(for h in "$STATE_DIR"/*.limit-hold; do b="${h##*/}"; printf '%s ' "${b%.limit-hold}"; done | sed 's/ $//; s/ /, /g')"; fi
     set -- "$SUMMARY"
     if [ "$AUTH_HELD" = 1 ]; then
       # the summary keeps machine fields in ISO UTC; the second line is for people (operator's time, #89)

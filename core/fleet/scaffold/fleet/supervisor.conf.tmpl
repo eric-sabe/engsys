@@ -17,7 +17,7 @@ REPO={{PIN_REPO}}
 # Each prints its ledger issue number: put it in place of the 0 below AND in that monster's config
 # (ledger_issue in the repo's merge-monster.yml / maintenance-monster.yml). The supervisor skips a
 # session whose ledger it cannot read, so a 0 is skipped (and logged) every cycle until it is filled in.
-# Stale minutes = the monster's stale_lock_minutes plus a grace period (its config default is 45).
+# Stale minutes = the monster's stale_lock_minutes, exactly: no grace period (its config default is 45).
 # A monster for another repo takes the optional 4th field: acme-other-mm|0|60|owner/other-repo
 # `fleet supervise` appends the role (merge / maintain) to the monster lines as a 6th field: before any
 # relaunch the supervisor reads that role's holder from the github lease and relaunches only where this
