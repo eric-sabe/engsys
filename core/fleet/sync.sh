@@ -246,7 +246,14 @@ sync_claude_plugins() {
   local i m ref repo cur installed p refused=" "
   # A fleet config dir (never ~/.claude) gets the claude.ai sync switches off, idempotently (engsys#200): without
   # them the first login syncs the account's claude.ai skills and plugins into the fleet dir.
-  if [ "$check" != 1 ] && [ -n "$SYNC_CFG" ] && [ -f "$SYNC_CFG/settings.json" ] && jq -e 'type == "object"' "$SYNC_CFG/settings.json" >/dev/null 2>&1 \
+  # An explicit FLEET_CLAUDE_CONFIG_DIR that resolves (realpath, so a symlink too) to ~/.claude is the operator's own
+  # dir: never rewrite its settings.json (engsys#204; config-dir.sh refuses it the same way).
+  local own_cfg=0
+  if [ -n "$SYNC_CFG" ] && [ "$(cd "$SYNC_CFG" 2>/dev/null && pwd -P || echo "$SYNC_CFG")" = "$(cd "$HOME/.claude" 2>/dev/null && pwd -P || echo "$HOME/.claude")" ]; then
+    own_cfg=1
+    [ "$check" = 1 ] || warn "FLEET_CLAUDE_CONFIG_DIR $SYNC_CFG is your own ~/.claude: leaving its settings.json alone (the claude.ai sync switches stay as they are). Point it at a separate dir (fleet config-dir init)."
+  fi
+  if [ "$check" != 1 ] && [ "$own_cfg" = 0 ] && [ -n "$SYNC_CFG" ] && [ -f "$SYNC_CFG/settings.json" ] && jq -e 'type == "object"' "$SYNC_CFG/settings.json" >/dev/null 2>&1 \
     && ! jq -e '.syncClaudeAiSkills == false and .syncClaudeAiPlugins == false' "$SYNC_CFG/settings.json" >/dev/null 2>&1; then
     local sj_tmp; sj_tmp="$(mktemp "$SYNC_CFG/.settings.json.XXXXXX")"   # mktemp makes it 0600, like the seeded file
     jq '. + {syncClaudeAiSkills: false, syncClaudeAiPlugins: false}' "$SYNC_CFG/settings.json" >"$sj_tmp" \

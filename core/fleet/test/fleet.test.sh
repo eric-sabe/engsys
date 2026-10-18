@@ -455,6 +455,18 @@ cp "$FCFG/settings.json" "$T/fcfg-settings.1"; run fleet sync
 eq "…a second sync leaves it byte-identical" "$(cat "$FCFG/settings.json")" "$(cat "$T/fcfg-settings.1")"
 rm -f "$HOME/.claude/settings.json" "$FCFG/settings.json"
 cp "$T/flc.bak" "$LC"
+# FLEET_CLAUDE_CONFIG_DIR pointing at the operator's own ~/.claude (directly, or through a symlink): the sync-off
+# retrofit must not touch its settings.json (engsys#204).
+for how in direct symlink; do
+  if [ "$how" = direct ]; then OWN="$HOME/.claude"; else OWN="$T/own-link"; ln -sfn "$HOME/.claude" "$OWN"; fi
+  cp "$T/flc.bak" "$LC"; printf 'FLEET_CLAUDE_CONFIG_DIR=%s\n' "$OWN" >>"$LC"
+  echo '{"keep":"me"}' >"$HOME/.claude/settings.json"
+  run fleet sync
+  eq "$how ~/.claude as FLEET_CLAUDE_CONFIG_DIR: settings.json untouched (#204)" "$(cat "$HOME/.claude/settings.json")" '{"keep":"me"}'
+  has "…and sync warns about it" "$OUT" "is your own ~/.claude"
+  rm -f "$HOME/.claude/settings.json"
+done
+rm -f "$T/own-link"; cp "$T/flc.bak" "$LC"
 
 echo "== D3. FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised: sync reconciles both the fleet dir and ~/.claude"
 FS="$FAKE/claude-cfg/$(printf '%s' "$FCFG" | tr '/' '_')"
