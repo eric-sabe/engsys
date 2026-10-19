@@ -208,6 +208,11 @@ list_plugins() {
 # the release's marketplace file, read by the verifier from GitHub. A plugin the pin enables but no pin repo/ref can name is
 # "not verified" below, never skipped.
 market_args=() inst_plugins="" inst_repo=""
+case "${INSTANCE_OFF_MAIN:-warn}" in
+  warn) ;;
+  enforce) market_args+=(--enforce-instance-on-main) ;;
+  *) echo "fleet verify: INSTANCE_OFF_MAIN must be 'warn' or 'enforce' (got '${INSTANCE_OFF_MAIN}')" >&2; exit 2 ;;
+esac
 if [ -n "${INSTANCE_MARKETPLACE:-}" ]; then
   inst_plugins="$(fleet_enabled_plugins "$INSTANCE_MARKETPLACE")"
   inst_repo="$(fleet_pin_repo "$INSTANCE_MARKETPLACE")"

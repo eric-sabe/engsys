@@ -930,6 +930,27 @@ test('instance marketplace plugin: fail closed when it cannot be checked (engsys
   // the one switch: enforced, the same tag is a MISMATCH like engsys
   r = await run3(pluginList([userEntry(eng), instEntry(acme)]), { ...offMain, instanceOffMainEnforced: true });
   assert.equal(r.rc, 1); assert.match(r.text, /release\s+acme@acme-fleet: v3\.4\.5 of acme\/fleet is commit d+, which is not on main/);
+  // --enforce-instance-on-main (fleet.conf INSTANCE_OFF_MAIN=enforce) is the same switch, and only ever tightens
+  r = await run3(pluginList([userEntry(eng), instEntry(acme)]), offMain, ['--enforce-instance-on-main', ...MARKET]);
+  assert.equal(r.rc, 1); assert.match(r.text, /release\s+acme@acme-fleet: v3\.4\.5 of acme\/fleet is commit d+, which is not on main/);
+  assert.match(r.text, /^components: instance release \(acme@acme-fleet\)$/m); assert.doesNotMatch(r.text, /WARNING instance release/);
+  r = await run3(pluginList([userEntry(eng), instEntry(acme)]), { ...offMain, instanceOffMainEnforced: true }, ['--enforce-instance-on-main', ...MARKET]);
+  assert.equal(r.rc, 1, 'both on is still enforced');
+  r = await run3(pluginList([userEntry(eng), instEntry(acme)]), {}, ['--enforce-instance-on-main', ...MARKET]);
+  assert.equal(r.rc, 0, 'positive control: an ahead (or identical) instance tag passes when enforced\n' + r.text);
+  for (const status of ['identical', 'behind']) {
+    r = await run3(pluginList([userEntry(eng), instEntry(acme)]), { fetch: async ({ repo }) => (repo === 'acme/fleet' ? instanceRelease({ status }) : release) }, ['--enforce-instance-on-main', ...MARKET]);
+    assert.equal(r.rc, status === 'identical' ? 0 : 1, `enforced, compare ${status}`);
+  }
+  // a pass cached while the tag was only a warning is not reused once enforcement is on
+  {
+    const cacheFile = path.join(tmp('verify-cache-file-'), 'c.json');
+    const plugins = pluginList([userEntry(eng), instEntry(acme)]);
+    const withCache = ['--cache', cacheFile, '--max-age-min', '30'];
+    assert.equal((await run3(plugins, offMain, [...MARKET, ...withCache])).rc, 0);
+    assert.equal((await run3(plugins, offMain, [...MARKET, ...withCache])).rc, 0, 'warn mode: cached');
+    assert.equal((await run3(plugins, offMain, ['--enforce-instance-on-main', ...MARKET, ...withCache])).rc, 1, 'enforcing: the cached warning pass is not served');
+  }
   // the engsys tag off the default branch is still a MISMATCH, whatever the switch says
   r = await run3(pluginList([userEntry(eng), instEntry(acme)]), { fetch: async ({ repo }) => (repo === 'acme/fleet' ? inst : { ...release, status: 'diverged' }) });
   assert.equal(r.rc, 1); assert.match(r.text, /release\s+v9\.9\.9 is commit c+, which is not on main/);

@@ -810,6 +810,42 @@ echo ahead >"$FAKE/inst-compare"
 run fleet verify --alert
 rc_is "back on the default branch: passes" 0
 if [ ! -e "$I/.fleet/verify-instance-offmain.alerted" ]; then ok "…and the alert latch is cleared"; else bad "…and the alert latch is cleared"; fi
+# engsys#227: INSTANCE_OFF_MAIN=enforce in fleet.conf makes the same off-main tag a mismatch that holds the launch
+printf '%s\nINSTANCE_MARKETPLACE=acme-fleet\nINSTANCE_OFF_MAIN=enforce\n' "$CONF0" >"$I/fleet/fleet.conf"
+echo diverged >"$FAKE/inst-compare"
+run fleet verify
+rc_is "INSTANCE_OFF_MAIN=enforce: an off-main instance tag is a mismatch" 1
+has "…naming the release" "$OUT" "release    acme@acme-fleet: v3.4.5 of acme/fleet is commit"
+has "…as the instance release" "$OUT" "components: instance release (acme@acme-fleet)"
+hasnt "…not as a warning" "$OUT" "WARNING instance release"
+run fleet launch acme-mm
+rc_is "…and holds the launch" 1
+has "…naming the instance release as what failed" "$OUT" "(instance release (acme@acme-fleet))"
+# the throttle must not reuse a pass that was cached while the tag was a warning
+printf '%s\nINSTANCE_MARKETPLACE=acme-fleet\n' "$CONF0" >"$I/fleet/fleet.conf"
+run fleet verify --max-age 30
+rc_is "warn mode, throttled: the off-main tag passes and is cached" 0
+printf '%s\nINSTANCE_MARKETPLACE=acme-fleet\nINSTANCE_OFF_MAIN=enforce\n' "$CONF0" >"$I/fleet/fleet.conf"
+run fleet verify --max-age 30
+rc_is "…and flipping to enforce is not served from that cache" 1
+echo ahead >"$FAKE/inst-compare"
+run fleet verify
+rc_is "INSTANCE_OFF_MAIN=enforce: an instance tag on the default branch passes" 0
+has "…the instance plugin was checked" "$OUT" "files of acme@acme-fleet in $ACME match acme/fleet@v3.4.5"
+echo diverged >"$FAKE/compare-status"
+run fleet verify
+rc_is "enforce: an engsys tag off the default branch is a mismatch too" 1
+echo ahead >"$FAKE/compare-status"
+printf '%s\nINSTANCE_MARKETPLACE=acme-fleet\nINSTANCE_OFF_MAIN=enfroce\n' "$CONF0" >"$I/fleet/fleet.conf"
+run fleet verify
+rc_is "a misspelt INSTANCE_OFF_MAIN is a usage error, never silently warn-only" 2
+has "…named" "$OUT" "INSTANCE_OFF_MAIN must be 'warn' or 'enforce'"
+printf '%s\nINSTANCE_MARKETPLACE=acme-fleet\n' "$CONF0" >"$I/fleet/fleet.conf"
+echo diverged >"$FAKE/inst-compare"
+rm -f "$I/.fleet"/verify-wrappers*.json
+run fleet verify
+rc_is "the default is still warn: an off-main instance tag passes" 0
+echo ahead >"$FAKE/inst-compare"
 echo diverged >"$FAKE/compare-status"
 run fleet verify
 rc_is "an engsys tag off the default branch is still a mismatch" 1
