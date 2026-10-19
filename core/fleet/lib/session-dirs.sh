@@ -110,3 +110,17 @@ fleet_config_dir_fix() {
     echo "fleet config-dir init, then log in once and accept workspace trust (CLAUDE_CONFIG_DIR=<dir> claude: /login, /exit) from a terminal in the Mac's own GUI session, not SSH, then fleet sync and fleet restart --all (fleet guide § 6.1)"
   fi
 }
+
+# fleet_session_alive <name> → 0 when a claude process is running in the session's tmux window: the window exists in
+# $TMUX_SESSION and its pane's foreground command is not a login shell (the launcher runs claude from the window's
+# shell, so a shell in the foreground means it exited; the same rule as `fleet restart`). Anything unreadable (no
+# tmux server, no window) is "not running": the caller then asks the CLI, which is safe only because nothing else
+# holds that credential. Used by verify.sh to keep its periodic check off a live session's credential (engsys#223).
+fleet_session_alive() {
+  local w cmd
+  w="$(tmux list-windows -t "$TMUX_SESSION" -F '#{window_name}' 2>/dev/null)" || return 1
+  grep -Fxq -- "$1" <<<"$w" || return 1
+  cmd="$(tmux list-panes -t "${TMUX_SESSION}:$1" -F '#{pane_current_command}' 2>/dev/null | head -n 1)"
+  case "$cmd" in '' | zsh | -zsh | bash | -bash | sh | -sh | fish | -fish) return 1 ;; esac
+  return 0
+}

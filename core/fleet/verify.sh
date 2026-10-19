@@ -52,6 +52,16 @@
 # a logged-in answer is reused for --max-age minutes: the CLI contacts the API even for those, so they are
 # extra processes on a credential that the session's own process already refreshes.
 #
+# A running session's credential is never touched by a periodic check (engsys#223). With --max-age (the supervisor's
+# tick) and --session, when the session is running (a claude process in its tmux window, fleet_session_alive), verify
+# spawns NO claude process on its dir: the plugin list is built from the dir's files (lib/plugin-list-from-files.mjs:
+# plugins/installed_plugins.json plus enabledPlugins in the user, project and local settings; unreadable or malformed
+# is "not verified", exit 3), and `claude auth status` is skipped (the supervisor's pane watch catches an expired
+# login of a running session). A short-lived claude refreshing the access token near expiry rotates the refresh token
+# out from under the live process (anthropics/claude-code#88583). Without --max-age (a launch), or when the session
+# is not running, nothing shares the token, so the CLI is used and the check fails closed as before. Residual: a
+# claude started by hand on that dir outside tmux is not seen.
+#
 # Exit: 0 match | 1 MISMATCH | 3 not verified (GitHub unreachable, no pin or not a tag, nothing installed)
 #       | 2 usage. Merge and maintain sessions start only on 0 (engsys#86 review H1).
 #
@@ -133,10 +143,22 @@ elif [ "$alert" = 1 ] && [ -f "$FORCED_LATCH" ]; then
   notify --level info --incident engsys-ref-forced --resolve "Resolved: ENGSYS_REF on $host follows the pin ($pinned) again." && rm -f "$FORCED_LATCH"
 fi
 
+# live_session → 0 when this is a periodic check (--max-age) of a session that is running: its credential belongs to that
+# process, so verify must not start a claude on it. Evaluated once.
+LIVE=""
+live_session() {
+  if [ -z "$LIVE" ]; then
+    LIVE=0
+    if [ "$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION" = on ] && [ -n "$max_age" ] && [ -n "$session" ] && fleet_session_alive "$session"; then LIVE=1; fi
+  fi
+  [ "$LIVE" = 1 ]
+}
+
 # dir_logged_out → 0 only when claude says explicitly that the fleet's config dir is not logged in. In per-session mode
 # the call is serialized per dir, and a logged-in answer is kept for --max-age minutes (a logged-out one never is).
 dir_logged_out() {
   local ok="$FLEET_STATE/auth-ok$SFX" li at
+  if live_session; then return 1; fi   # engsys#223: the running session owns the credential; the supervisor's pane watch sees its expiry
   if [ "$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION" = on ] && [ -n "$max_age" ] && at="$(cat "$ok" 2>/dev/null)" && [[ "$at" =~ ^[0-9]+$ ]] \
     && [ $(( $(date +%s) - at )) -lt $(( max_age * 60 )) ]; then return 1; fi
   li="$( (cd "${TMPDIR:-/tmp}" && CLAUDE_CONFIG_DIR="$FLEET_CLAUDE_CONFIG_DIR" fleet_dir_lock "$FLEET_CLAUDE_CONFIG_DIR" claude auth status --json </dev/null) 2>/dev/null | jq -r 'if .loggedIn == true then "true" elif .loggedIn == false then "false" else "" end' 2>/dev/null || true)"
@@ -160,6 +182,10 @@ dir_logged_out() {
 # (no --max-age) never uses it: the gate that decides whether a monster starts re-checks every time.
 list_plugins() {
   local d="${FLEET_CLAUDE_CONFIG_DIR:-}" cache="$FLEET_STATE/plugin-list$SFX.json" keyf="$FLEET_STATE/plugin-list$SFX.key" key f m
+  if live_session; then   # engsys#223: from the dir's files, no claude process; a failure is "not verified" (the caller's rc 3)
+    node "$FLEET_KIT_DIR/lib/plugin-list-from-files.mjs" --config-dir "$d" --project-dir "$PIN_DIR" >"$plist" 2>"$plist.err" || { tail -n 1 "$plist.err" >&2; rm -f "$plist.err"; return 1; }
+    rm -f "$plist.err"; return 0
+  fi
   if [ "$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION" = on ] && [ -n "$max_age" ]; then
     key="${ENGSYS_REF:-}|${INSTANCE_REF:-}|$d"
     for f in "$d/plugins" "$d/plugins/installed_plugins.json" "$d/plugins/known_marketplaces.json" "$d/settings.json" "$d/.claude.json" "$PIN_DIR/.claude/settings.json" "${PIN_SETTINGS:-}"; do
@@ -232,7 +258,9 @@ else
   else
     # The cwd decides which project-scope installs apply: the sessions start in PIN_DIR (engsys#86 review H2).
     if ! list_plugins; then
-      out="fleet verify: not verified: claude plugin list failed in $PIN_DIR"; rc=3
+      if live_session; then out="fleet verify: not verified: the plugin list could not be read from the files of $FLEET_CLAUDE_CONFIG_DIR (a running session's login is not touched)"
+      else out="fleet verify: not verified: claude plugin list failed in $PIN_DIR"; fi
+      rc=3
     fi
   fi
   if [ "$rc" = 0 ]; then
@@ -279,7 +307,10 @@ else
     if [ "$rc" = 0 ] && [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] && [ "${FLEET_CLAUDE_CONFIG_DIR_SCOPE:-all}" = supervised ] \
       && [ "${HARNESS:-claude}" = claude ]; then
       plist_u="$(mktemp "$FLEET_STATE/plugin-list-user.XXXXXX")"
-      if ! (cd "$PIN_DIR" && env -u CLAUDE_CONFIG_DIR claude plugin list --json) >"$plist_u" 2>/dev/null; then
+      # ~/.claude belongs to the live interactive roles: a periodic check (--max-age) reads its files, never starts a claude on it (engsys#223)
+      if [ -n "$max_age" ]; then u_list=(node "$FLEET_KIT_DIR/lib/plugin-list-from-files.mjs" --config-dir "$HOME/.claude" --project-dir "$PIN_DIR")
+      else u_list=(env -u CLAUDE_CONFIG_DIR claude plugin list --json); fi
+      if ! (cd "$PIN_DIR" && "${u_list[@]}") >"$plist_u" 2>/dev/null; then
         out="$out"$'\n'"fleet verify: not verified: claude plugin list failed in $PIN_DIR for ~/.claude (the interactive roles)"; rc=3
       else
         uargs=(--repo "$repo" --tag "$ref" --plugin-id "engsys@$ENGSYS_MARKETPLACE" --project-dir "$PIN_DIR" --plugins "$plist_u" --harness claude)

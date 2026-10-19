@@ -13,6 +13,12 @@
 #   interactive roles (everything else in the roster) — if idle: `/exit`, then relaunched. If busy
 #       (mid-turn) they're skipped unless --force (which interrupts the turn first).
 #   exited or missing windows — relaunched directly.
+#   a live session whose login expired (the supervisor holds it: auth.<name>.expired, or the shared auth.expired, or its
+#       pane's last message is a Claude auth error) — NOT cycled, and no rotation request is typed (engsys#223): its
+#       Claude process can't reach the API, so it can't act on the request, and a relaunch now would be refused by the
+#       launch gate (not logged in) after killing the pane that shows the error. It prints the dir to re-login; once
+#       that works the supervisor's probe ends the hold and relaunches the session itself, through the baton and
+#       integrity gates, on its next tick.
 # Sessions that are not on this host (ROLES / ROSTER_EXCLUDE, or a monster whose registry home is
 # another fleet: lib/host-roles.sh) are never cycled; status lists them as "not on this host".
 #
@@ -137,15 +143,36 @@ pins_text="engsys ${ENGSYS_REF:-?}"
 [ -z "$INSTANCE_MARKETPLACE" ] || pins_text="$pins_text, $INSTANCE_MARKETPLACE ${INSTANCE_REF:-?}"
 ROTATE_MSG="Operator: the fleet host was upgraded (pins: $pins_text). Rotate at your next safe point — finish the current step, never mid-merge: post your digest and a final ledger heartbeat with status \`rotation requested\`, then exit. The supervisor relaunches you on the new versions."
 
+# login_expired <name> → 0 (and prints why) when the session's own login is expired: the supervisor holds it, or its
+# pane's last Claude message is an auth error. The pane patterns are a subset of CLAUDE_AUTH_ERRORS in
+# skills/agent-sessions/scripts/fleet-supervisor.sh, which does the real detection; this only keeps restart from
+# typing into a pane that can't answer.
+login_expired() {
+  local n="$1" sup="$FLEET_REPO/logs/fleet-supervisor" last=""
+  if [ -f "$sup/auth.$n.expired" ]; then echo "its own login is on the supervisor's auth hold since $(head -n 1 "$sup/auth.$n.expired")"
+  elif [ -f "$sup/auth.expired" ]; then echo "the fleet's login is on the supervisor's auth hold since $(head -n 1 "$sup/auth.expired")"
+  else
+    last="$(tmux capture-pane -p -t "$(win "$n")" -S -200 2>/dev/null | grep -E '^(⏺|●) ' | tail -n 1 || true)"
+    grep -Eq '^(⏺|●) (API Error: 401|Please run /login|OAuth session expired and could not be refreshed|OAuth token refresh failed|Signed out of Claude|Invalid API key|Failed to authenticate)' <<<"$last" || return 1
+    echo "its pane shows a Claude auth error: ${last:0:120}"
+  fi
+  return 0
+}
+
 cycle() {
   local n="$1" st
   grep -Fxq "$n" <<<"$ROSTER" || { echo "$n: not in the roster — skipped" >&2; return 0; }
-  local why
+  local why dir
   if why="$(fleet_host_excluded "$n")"; then echo "$n: not on this host ($why), skipped (fleet launch $n --force-excluded starts it anyway)"; return 0; fi
   st="$(state_of "$n")"
   case "$st" in
     missing | exited) relaunch "$n"; return 0 ;;
   esac
+  if why="$(login_expired "$n")"; then
+    dir="$(fleet_session_config_dir "$n" 2>/dev/null || true)"
+    echo "$n: login expired, not cycled ($why). Re-login: CLAUDE_CONFIG_DIR=${dir:-${FLEET_CLAUDE_CONFIG_DIR:-~/.claude}} claude, then /login. The supervisor relaunches it on its next tick once the login works."
+    return 0
+  fi
   if is_monster "$n"; then
     tmux send-keys -t "$(win "$n")" -l "$ROTATE_MSG"; tmux send-keys -t "$(win "$n")" Enter
     echo "$n: rotation requested (it exits at its next safe point; the supervisor relaunches it)"

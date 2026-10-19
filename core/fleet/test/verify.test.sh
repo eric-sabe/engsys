@@ -52,6 +52,7 @@ plugins "$DEFAULT_PLUGINS"
 cp "$HERE/fake-github.sh" "$FAKE/fake-github.sh"
 cat >"$T/bin/claude" <<'SH'
 #!/usr/bin/env bash
+printf '%s|%s\n' "${CLAUDE_CONFIG_DIR:-unset}" "$*" >>"$FAKE/claude.calls"   # every start, recorded (engsys#223)
 case "$*" in
   "plugin list --json") pwd -P >"$FAKE/claude.cwd"
     if [ -z "${CLAUDE_CONFIG_DIR:-}" ] && [ -f "$FAKE/plugins-user.json" ]; then cat "$FAKE/plugins-user.json"; exit 0; fi   # ~/.claude's own list, when a test sets one
@@ -59,6 +60,15 @@ case "$*" in
   "auth status --json") [ -f "$FAKE/auth.json" ] || exit 2; cat "$FAKE/auth.json" ;;
   *) echo "stub claude: unsupported: $*" >&2; exit 2 ;;
 esac
+SH
+cat >"$T/bin/tmux" <<'SH'
+#!/usr/bin/env bash
+# stub tmux: $FAKE/tmux-windows lists the windows, $FAKE/tmux-cmd is every pane's foreground command
+case "${1:-}" in
+  list-windows) cat "$FAKE/tmux-windows" 2>/dev/null || exit 1 ;;
+  list-panes) cat "$FAKE/tmux-cmd" 2>/dev/null || exit 1 ;;
+esac
+exit 0
 SH
 cat >"$T/bin/gh" <<'SH'
 #!/usr/bin/env bash
@@ -816,5 +826,106 @@ run fleet verify
 rc_is "an enabled instance plugin with no marketplace pin is 'not verified'" 3
 has "…named" "$OUT" "no 'acme-fleet' marketplace with a repo and ref"
 printf '%s\n' "$CONF0" >"$I/fleet/fleet.conf"; git -C "$APP" reset -q --hard "$APP_START"; git -C "$APP" push -q -f origin HEAD:main; git -C "$APP" fetch -q origin; plugins "$DEFAULT_PLUGINS"
+
+echo "== engsys#223: a periodic check of a running session starts no claude on its credential"
+PCFG="$T/pcfg"; PS="$PCFG.sessions/acme-mm"; mkdir -p "$PS/plugins" "$PCFG"
+printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\nFLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on\n' "$CONF0" "$PCFG" >"$I/fleet/fleet.conf"
+mkdir -p "$PCFG.sessions/acme-security"
+# files_from_fixture: write $FAKE/plugins.json (what the CLI stub reports) as the dir's own files
+files_from_fixture() {
+  jq '{version: 2, plugins: (group_by(.id) | map({key: .[0].id, value: map({scope, version, installPath} + (if .projectPath then {projectPath} else {} end))}) | from_entries)}' "$FAKE/plugins.json" >"$PS/plugins/installed_plugins.json"
+  jq '{enabledPlugins: (map(select(.id == "engsys@engsys")) | map({key: .id, value: .enabled}) | from_entries)}' "$FAKE/plugins.json" >"$PS/settings.json"
+}
+files_from_fixture
+echo '{"loggedIn": true}' >"$FAKE/auth.json"
+echo acme-mm >"$FAKE/tmux-windows"; echo node >"$FAKE/tmux-cmd"
+rm -f "$I/.fleet/claude-invocations.log"
+calls() { grep -c . "$FAKE/claude.calls" 2>/dev/null || true; }
+: >"$FAKE/claude.calls"
+run fleet verify --max-age 15 --session acme-mm
+rc_is "periodic verify of a running session passes" 0
+has "…and says the files match" "$OUT" "match vendor/engsys@v1.0.0"
+eq "…with NO claude process started (recording stub)" "$(calls)" 0
+rm -f "$I/.fleet"/verify-wrappers.acme-mm.json
+: >"$FAKE/claude.calls"
+run fleet verify --max-age 0 --session acme-mm
+rc_is "--max-age 0 (no cache) passes too" 0
+eq "…still no claude process" "$(calls)" 0
+eq "…and none is logged in the invocation log" "$(cat "$I/.fleet/claude-invocations.log" 2>/dev/null || echo none)" "none"
+
+echo "…the launch gate (no --max-age) still uses the CLI, though the session is running"
+: >"$FAKE/claude.calls"
+run fleet verify --session acme-mm
+rc_is "launch-style verify passes" 0
+has "…asked claude auth status on the session's dir" "$(cat "$FAKE/claude.calls")" "$PS|auth status --json"
+has "…and claude plugin list on the session's dir" "$(cat "$FAKE/claude.calls")" "$PS|plugin list --json"
+has "…each logged with a timestamp" "$(cat "$I/.fleet/claude-invocations.log")" "$PS claude auth status --json"
+matches "…ISO time first" "$(head -n 1 "$I/.fleet/claude-invocations.log")" '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z '
+echo '{"loggedIn": false}' >"$FAKE/auth.json"; rm -f "$I/.fleet"/auth-ok.acme-mm
+run fleet verify --session acme-mm
+rc_is "…and fails closed on a logged-out dir" 3
+has "…saying so" "$OUT" "is not logged in"
+run fleet verify --max-age 15 --session acme-mm
+rc_is "a periodic check of the running session does not read its login at all" 0
+echo '{"loggedIn": true}' >"$FAKE/auth.json"
+
+echo "…not running: the periodic check falls back to the CLI"
+: >"$FAKE/tmux-windows"; : >"$FAKE/claude.calls"
+run fleet verify --max-age 0 --session acme-mm
+rc_is "a session with no window is checked through the CLI" 0
+has "…auth status ran" "$(cat "$FAKE/claude.calls")" "auth status --json"
+has "…plugin list ran" "$(cat "$FAKE/claude.calls")" "plugin list --json"
+echo zsh >"$FAKE/tmux-cmd"; echo acme-mm >"$FAKE/tmux-windows"; : >"$FAKE/claude.calls"
+run fleet verify --max-age 0 --session acme-mm
+has "a window at a shell prompt (claude exited) is not running either" "$(cat "$FAKE/claude.calls")" "plugin list --json"
+echo node >"$FAKE/tmux-cmd"
+
+echo "…the file-derived verdict equals the CLI's, fixture by fixture"
+parity() { # parity <name> <jq fixture>
+  plugins "$2"; files_from_fixture
+  : >"$FAKE/claude.calls"
+  echo acme-mm >"$FAKE/tmux-windows"; run fleet verify --max-age 0 --session acme-mm
+  local frc="$RC" fp; fp="$(grep '^  ' <<<"$OUT" | grep -v '^  settings ' || true)"   # the user-scope settings check reads the same file on both paths
+  eq "$1: file path started no claude" "$(calls)" 0
+  : >"$FAKE/tmux-windows"; run fleet verify --max-age 0 --session acme-mm
+  eq "$1: same exit code as the CLI path ($RC)" "$frc" "$RC"
+  eq "$1: same problem lines" "$fp" "$(grep '^  ' <<<"$OUT" | grep -v '^  settings ' || true)"
+}
+parity default "$DEFAULT_PLUGINS"
+parity wrong-version '[{id: "engsys@engsys", version: "0.9.0", scope: "user", enabled: true, installPath: $c}]'
+parity disabled '[{id: "engsys@engsys", version: "1.0.0", scope: "user", enabled: false, installPath: $c}]'
+parity not-installed '[{id: "other@engsys", version: "1.0.0", scope: "user", enabled: true, installPath: "/nowhere"}]'
+parity empty '[]'
+parity two-paths '[{id: "engsys@engsys", version: "1.0.0", scope: "user", enabled: true, installPath: $c}, {id: "engsys@engsys", version: "1.0.0", scope: "project", enabled: true, installPath: "/elsewhere", projectPath: $app}]'
+parity other-project '[{id: "engsys@engsys", version: "1.0.0", scope: "user", enabled: true, installPath: $c}, {id: "engsys@engsys", version: "0.1.0", scope: "project", enabled: true, installPath: "/x", projectPath: "/not/this/project"}]'
+plugins "$DEFAULT_PLUGINS"; files_from_fixture
+tamper
+echo acme-mm >"$FAKE/tmux-windows"; : >"$FAKE/claude.calls"
+run fleet verify --max-age 0 --session acme-mm
+rc_is "a tampered wrapper is still a MISMATCH on the file path" 1
+eq "…without claude" "$(calls)" 0
+restore
+
+echo "…fail closed: an unreadable or malformed file-derived list is 'not verified', never ok"
+cp "$PS/plugins/installed_plugins.json" "$T/ip.good"; cp "$PS/settings.json" "$T/st.good"
+bad_case() { # bad_case <desc> — the last run must be exit 3 with no claude
+  rc_is "$1: not verified (exit 3)" 3
+  has "…naming the file path" "$OUT" "could not be read from the files of $PS"
+  eq "…no claude fallback" "$(calls)" 0
+  cp "$T/ip.good" "$PS/plugins/installed_plugins.json"; cp "$T/st.good" "$PS/settings.json"
+}
+echo '{not json' >"$PS/plugins/installed_plugins.json"; : >"$FAKE/claude.calls"; run fleet verify --max-age 0 --session acme-mm; bad_case "garbage installed_plugins.json"
+echo '[]' >"$PS/plugins/installed_plugins.json"; run fleet verify --max-age 0 --session acme-mm; bad_case "installed_plugins.json of the wrong shape"
+echo '{"plugins": {"engsys@engsys": [7]}}' >"$PS/plugins/installed_plugins.json"; run fleet verify --max-age 0 --session acme-mm; bad_case "an install that is not an object"
+echo '{"plugins": {"engsys@engsys": [{"version": 1}]}}' >"$PS/plugins/installed_plugins.json"; run fleet verify --max-age 0 --session acme-mm; bad_case "a non-string version"
+echo '{oops' >"$PS/settings.json"; run fleet verify --max-age 0 --session acme-mm; bad_case "garbage settings.json"
+echo '{"enabledPlugins": []}' >"$PS/settings.json"; run fleet verify --max-age 0 --session acme-mm; bad_case "enabledPlugins of the wrong type"
+rm -rf "$PS/plugins/installed_plugins.json"; mkdir "$PS/plugins/installed_plugins.json"; run fleet verify --max-age 0 --session acme-mm
+rm -rf "$PS/plugins/installed_plugins.json"; bad_case "an unreadable installed_plugins.json (a directory)"
+rm -f "$PS/plugins/installed_plugins.json"; run fleet verify --max-age 0 --session acme-mm
+rc_is "no installed_plugins.json: nothing installed, not verified" 3
+cp "$T/ip.good" "$PS/plugins/installed_plugins.json"
+rm -f "$I/.fleet"/verify-wrappers*.json
+printf '%s\n' "$CONF0" >"$I/fleet/fleet.conf"; rm -f "$FAKE/auth.json" "$FAKE/tmux-windows" "$FAKE/tmux-cmd"
 
 finish verify.test.sh
