@@ -63,9 +63,10 @@ export function isEventTrusted(event, config) {
 			if (!ev || ev.kind !== 'commit') return false;
 			const text = String(ev.text || '');
 			// engsys#192: SINGLE-LINE text only. A legitimate unlabeled pointer is subject + "(refs: #N)",
-			// both single-line; rejecting any line break (not just a blank line) closes a
+			// both single-line; rejecting any line break (CR, LF, NEL U+0085, LS U+2028, PS U+2029; not
+			// just a blank line) closes a
 			// one-newline "subject\nbody" shape that the old `\n\n` check let through.
-			return !/[\r\n]/.test(text);
+			return !/[\r\n\u0085\u2028\u2029]/.test(text);
 		}
 		return false;
 	}

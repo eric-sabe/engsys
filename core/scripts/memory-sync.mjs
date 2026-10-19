@@ -767,8 +767,9 @@ export function extractEventsFromIssueNode(
 
 /**
  * Normalize a signing-key identifier for comparison (engsys#187). Returns `{ type, id }` or `null`.
- *   - SSH: `SHA256:<base64>` (GitHub's `SshSignature.keyFingerprint`) — base64 is case-sensitive,
- *     so only the prefix is case-folded and trailing `=` padding is dropped.
+ *   - SSH: `SHA256:<base64>` (what `ssh-keygen -l` prints, and how an operator lists a key) — base64 is
+ *     case-sensitive, so only the prefix is case-folded and trailing `=` padding is dropped. GitHub's
+ *     `SshSignature.keyFingerprint` is the bare base64 with no prefix; `isSigningKeyAllowed` adds it back.
  *   - GPG: hex only (optional `0x`, spaces/colons tolerated) of at least 16 digits — a long key id
  *     (16) or full fingerprint (40). Anything shorter or non-hex is rejected, never prefix-matched.
  */

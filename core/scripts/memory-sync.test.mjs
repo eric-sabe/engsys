@@ -476,6 +476,9 @@ describe('memory-sync (#131)', () => {
     assert.equal(isEventTrustedByConfig({ kind: 'commit', text: 'subject\rsmuggled' }, config), false);
     assert.equal(isEventTrustedByConfig({ kind: 'commit', text: 'subject\n\nbody' }, config), false);
     assert.equal(isEventTrustedByConfig({ kind: 'commit', text: 'subject\n' }, config), false);
+    for (const sep of ['\u0085', '\u2028', '\u2029']) {
+      assert.equal(isEventTrustedByConfig({ kind: 'commit', text: `subject${sep}smuggled` }, config), false, `U+${sep.codePointAt(0).toString(16)}`);
+    }
     // A genuine operator commit is trusted by ID, not by the fallback, so multi-line text is fine there.
     assert.equal(
       isEventTrustedByConfig({ kind: 'commit', author_kind: 'operator', author_id: 777, text: 's\n\nbody' }, { operator_user_ids: [777] }),
@@ -646,6 +649,23 @@ describe('memory-sync (#131)', () => {
       assert.ok(isSigningKeyAllowed(key, [`sha256:${SSH_FP.slice(7)}=`]));
       assert.ok(!isSigningKeyAllowed(key, [SSH_FP.toLowerCase()]), 'case change is a different fingerprint');
       assert.ok(!isSigningKeyAllowed(key, ['SHA256:AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfH']));
+    });
+
+    it('SSH key as GitHub returns it (bare base64, no SHA256: prefix) matches a listed SHA256: fingerprint; the same bare key under another case does not', () => {
+      const bare = SSH_FP.slice('SHA256:'.length);
+      const bareKey = { type: 'ssh', id: bare };
+      assert.ok(isSigningKeyAllowed(bareKey, [SSH_FP]), 'positive control');
+      assert.ok(isSigningKeyAllowed(bareKey, [`sha256:${bare}`]));
+      assert.ok(!isSigningKeyAllowed({ type: 'ssh', id: bare.toLowerCase() }, [SSH_FP]));
+      const cfg = { operator_user_ids: [777], operator_signing_key_fingerprints: [SSH_FP] };
+      assert.equal(kind({ signingKey: bareKey }, cfg), 'operator');
+      assert.equal(kind({ signingKey: { type: 'ssh', id: bare.toLowerCase() } }, cfg), null);
+      // fetchCommitTrustBatch with the bare form end to end
+      const exec = () => JSON.stringify({ data: { repository: { object: { history: { pageInfo: { hasNextPage: false }, nodes: [
+        { oid: 'c1', signature: { isValid: true, wasSignedByGitHub: false, keyFingerprint: bare }, committer: { user: { databaseId: 777 } } },
+      ] } } } } });
+      const m = fetchCommitTrustBatch('owner/repo', 'deadbeef', { exec });
+      assert.ok(isSigningKeyAllowed(m.get('c1').signingKey, [SSH_FP]));
     });
 
     it('fetchCommitTrustBatch requests the key and records it; a GitHub-signed commit yields no signing key', () => {
