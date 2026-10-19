@@ -756,6 +756,13 @@ has "…naming the instance plugin as what failed (not the engsys plugin)" "$OUT
 cp "$IR/plugins/acme/bin/acme-guard" "$ACME/bin/acme-guard"
 run fleet verify
 rc_is "restored: passes again" 0
+# a settings line that names the instance plugin is still a settings problem, not an instance plugin install failure
+echo '{"enabledPlugins":{"acme@acme-fleet":false}}' >"$HOME/.claude/settings.json"
+run fleet verify
+rc_is "a user settings file disabling the pinned instance plugin is a mismatch" 1
+has "…classified as settings, not as the instance plugin" "$OUT" "components: settings or user-scope config"
+hasnt "…" "$OUT" "components: instance plugin"
+rm -f "$HOME/.claude/settings.json"
 # an instance tag off the default branch (ff-engsys-fleet tags release: commits that way): a warning for now, never a mismatch
 echo diverged >"$FAKE/inst-compare"
 c0="$(comments)"
