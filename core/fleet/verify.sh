@@ -311,7 +311,9 @@ else
       if [ -n "$max_age" ]; then u_list=(node "$FLEET_KIT_DIR/lib/plugin-list-from-files.mjs" --config-dir "$HOME/.claude" --project-dir "$PIN_DIR")
       else u_list=(env -u CLAUDE_CONFIG_DIR claude plugin list --json); fi
       if ! (cd "$PIN_DIR" && "${u_list[@]}") >"$plist_u" 2>/dev/null; then
-        out="$out"$'\n'"fleet verify: not verified: claude plugin list failed in $PIN_DIR for ~/.claude (the interactive roles)"; rc=3
+        if [ -n "$max_age" ]; then out="$out"$'\n'"fleet verify: not verified: the plugin list could not be read from the files of ~/.claude (the interactive roles; their login is not touched)"
+        else out="$out"$'\n'"fleet verify: not verified: claude plugin list failed in $PIN_DIR for ~/.claude (the interactive roles)"; fi
+        rc=3
       else
         uargs=(--repo "$repo" --tag "$ref" --plugin-id "engsys@$ENGSYS_MARKETPLACE" --project-dir "$PIN_DIR" --plugins "$plist_u" --harness claude)
         uargs+=(${market_args[@]+"${market_args[@]}"})

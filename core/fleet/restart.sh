@@ -62,10 +62,7 @@ has_window() { # capture first: `grep -q` closing the pipe early would fail the 
   w="$(tmux list-windows -t "$TMUX_SESSION" -F '#{window_name}' 2>/dev/null)" || return 1
   grep -Fxq "$1" <<<"$w"
 }
-pane_cmd() { tmux list-panes -t "$(win "$1")" -F '#{pane_current_command}' 2>/dev/null | head -1; }
-is_alive() { # the launcher runs claude from the window's login shell; shell in the foreground = exited
-  case "$(pane_cmd "$1")" in '' | zsh | -zsh | bash | -bash | sh | -sh | fish | -fish) return 1 ;; esac
-}
+is_alive() { fleet_session_alive "$1"; } # one rule for restart and verify (lib/session-dirs.sh, engsys#223)
 started_at() { # epoch the session's claude process started ('' if none)
   local pp pid lstart
   pp="$(tmux list-panes -t "$(win "$1")" -F '#{pane_pid}' 2>/dev/null | head -1)"
@@ -152,6 +149,7 @@ login_expired() {
   if [ -f "$sup/auth.$n.expired" ]; then echo "its own login is on the supervisor's auth hold since $(head -n 1 "$sup/auth.$n.expired")"
   elif [ -f "$sup/auth.expired" ]; then echo "the fleet's login is on the supervisor's auth hold since $(head -n 1 "$sup/auth.expired")"
   else
+    [ "$force" != 1 ] || return 1   # an old auth error can stay in the pane after /login: --force cycles anyway
     last="$(tmux capture-pane -p -t "$(win "$n")" -S -200 2>/dev/null | grep -E '^(⏺|●) ' | tail -n 1 || true)"
     grep -Eq '^(⏺|●) (API Error: 401|Please run /login|OAuth session expired and could not be refreshed|OAuth token refresh failed|Signed out of Claude|Invalid API key|Failed to authenticate)' <<<"$last" || return 1
     echo "its pane shows a Claude auth error: ${last:0:120}"
