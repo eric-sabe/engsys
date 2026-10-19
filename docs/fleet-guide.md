@@ -469,9 +469,26 @@ other. Your other plugins, skills and MCP servers in `~/.claude` are not checked
 The tradeoff, plainly: under `supervised` the interactive roles still carry the fleet's GitHub identity (the
 App token, through the gh shim and the fleet git identity) while they load your personal, unverified
 plugins, skills and MCP servers. A `nyx-review` verdict posted from an interactive role is only as
-trustworthy as that role's unverified `~/.claude`, and merge-monster does not yet tell it apart from a
-security-lane verdict (eric-sabe/engsys#197). Choose `supervised` only if you accept that for the attended
-roles.
+trustworthy as that role's unverified `~/.claude`. Choose `supervised` only if you accept that for the attended
+roles, or turn on signed security verdicts below.
+
+**Signed security verdicts: `FLEET_SECURITY_VERDICT_KEY=on` (eric-sabe/engsys#197).** A *defence-in-depth* layer,
+**not a security boundary**. With it on, `fleet launch` creates an HMAC key at `<fleet state>/security-verdict.key`
+(mode 0600, never replaced) and tells only security-lane sessions where it is (`ENGSYS_SECURITY_VERDICT_KEY_FILE`,
+set by the session launcher for a security env file or an Opus 4.8 model, and unset for every other session). A
+security-lane session posts its verdict with `node <engsys-root>/lib/security-verdict.mjs post --repo O/N --pr N --sha
+<head> --verdict PASS|FINDINGS --body-file F`, which refuses outside a security-lane session and for any SHA that is
+not the PR's current head, and signs an HMAC-SHA256 over repo, PR, head SHA, verdict, timestamp, nonce and a hash of the
+review text. Merge-monster verifies it when its config sets `ready_requirements.signed_security_verdict: true`
+(**opt-in, default off**, so existing fleets are unchanged): once on, the latest validly signed verdict for the
+PR's current head decides (a signed FINDINGS verdict fails the READY preflight); unsigned, forged, tampered or
+wrong-head `nyx-review` comments are ignored when such a verdict exists and fail the preflight when none does; an
+unreadable or group-readable key always fails; and a verdict signed for an older head never counts for a new one. What it does not do: the key file is
+readable by every process running as the fleet's macOS user, so an attended session with a shell can read it and sign a
+verdict. It stops accidental and naive forgery, not a hostile session on the same account. A Nyx reviewer dispatched
+from an interactive role cannot post a valid verdict; the review has to run in the security lane. The real boundary is
+a separate GitHub identity for the security lane (eric-sabe/engsys#220); the keystone-side gate that reads these
+verdicts is wired separately.
 
 **The monster batons.** A session the fleet launched (`ENGSYS_SESSION` and `ENGSYS_SESSION_RUN` set) may
 take, renew or act on the merge or maintain baton only when the launcher armed it for that role

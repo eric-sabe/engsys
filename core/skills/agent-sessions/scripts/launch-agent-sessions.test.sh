@@ -30,6 +30,7 @@ exit 0
 SH
 chmod +x "$T/bin/"*
 : >"$T/w/security.env"
+: >"$T/w/ordinary.env"
 export PATH="$T/bin:$PATH" FAKE="$T" HOME="$T/home"
 unset HARNESS FLEET_HARNESS AGY_REMOTE_CONTROL AGY_REMOTE_CONTROL_AUTOSTART FLEET_ID 2>/dev/null || true
 
@@ -159,6 +160,25 @@ has "copilot: haiku → claude-haiku-5.5" "$acts" "--model claude-haiku-5.5"
 has "copilot: bypassPermissions → --yolo" "$acts" "--yolo"
 has "copilot: --dangerously-skip-permissions → --yolo --mode autopilot --no-ask-user" "$acts" "--yolo --mode autopilot --no-ask-user"
 
+SEC_ENV_OK="acme-sec|$W||--model claude-opus-4-8|$W/security.env"
+echo "engsys#197: the verdict key path goes only to security-lane lines (defence in depth, not a boundary)"
+KEYP="$T/fleet.key"
+run claude "$SEC_MODEL" ENGSYS_SECURITY_VERDICT_KEY_FILE="$KEYP"
+has "claude: a security-model line gets the key path (positive control)" "$acts" "export ENGSYS_SECURITY_VERDICT_KEY_FILE=$KEYP"
+run claude "$SEC_ENV_OK" ENGSYS_SECURITY_VERDICT_KEY_FILE="$KEYP"
+has "claude: a security env-file line gets the key path (positive control)" "$acts" "export ENGSYS_SECURITY_VERDICT_KEY_FILE=$KEYP"
+run claude "$BUILD" ENGSYS_SECURITY_VERDICT_KEY_FILE="$KEYP"
+lacks "claude: an interactive line is NOT given the key path" "$acts" "export ENGSYS_SECURITY_VERDICT_KEY_FILE"
+has "claude: an interactive line has it unset" "$acts" "unset ENGSYS_SECURITY_VERDICT_KEY_FILE"
+run claude "$MM" ENGSYS_SECURITY_VERDICT_KEY_FILE="$KEYP"
+lacks "claude: the merge monster is NOT given the key path by the launcher" "$acts" "export ENGSYS_SECURITY_VERDICT_KEY_FILE"
+run claude "$SEC_MODEL"
+lacks "claude: nothing is exported when the launcher has no key configured" "$acts" "export ENGSYS_SECURITY_VERDICT_KEY_FILE"
+echo "export-before-claude ordering: the key decision is repeated after the env file"
+run claude "$SEC_ENV_OK" ENGSYS_SECURITY_VERDICT_KEY_FILE="$KEYP"
+case "$acts" in *"set +a && export ENGSYS_SECURITY_VERDICT_KEY_FILE"*) ok "claude: the key decision is re-applied after the env file is sourced" ;; *) no "claude: re-applied after the env file" "$acts" ;; esac
+run claude "acme-build|$W||--model opus|$W/ordinary.env" ENGSYS_SECURITY_VERDICT_KEY_FILE="$KEYP"
+case "$acts" in *"set +a && unset ENGSYS_SECURITY_VERDICT_KEY_FILE"*) ok "claude: an env file cannot add the key path to an ordinary session (unset after sourcing)" ;; *) no "claude: unset after the env file" "$acts" ;; esac
 echo "antigravity flag translation and the remote-control daemon"
 run antigravity "$BUILD"
 [ "$rc" -eq 0 ] && ok "antigravity: interactive line launches" || no "antigravity: interactive line launches" "$err"

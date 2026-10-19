@@ -415,9 +415,29 @@ launch_one() {
   root="$(cd "$workdir" && pwd -P)" || { echo "error: cannot resolve workdir for '$name': $workdir" >&2; return 1; }
   cmd="export ENGSYS_SESSION=$(printf %q "$name") ENGSYS_SESSION_RUN=$(printf %q "$run") ENGSYS_SESSION_ROOT=$(printf %q "$root")"
   if [ -n "$role" ]; then cmd+=" ENGSYS_SINGLETON_ROLE=$role && "; else cmd+=" && unset ENGSYS_SINGLETON_ROLE && "; fi
+  # engsys#197 (option B): only a security-lane line (a security env file or an Opus 4.8 model) on Claude is
+  # handed the PATH of the fleet's verdict key (ENGSYS_SECURITY_VERDICT_KEY_FILE, set by core/fleet/launch.sh
+  # from FLEET_SECURITY_VERDICT_KEY=on); every other session has it unset. Decided here, before the env
+  # file, so a later assignment in an env file is overwritten below. Defence in depth, not a boundary: the
+  # key file is readable by the same OS user (core/lib/security-verdict.mjs).
+  local verdict_key_file="${ENGSYS_SECURITY_VERDICT_KEY_FILE:-}"
+  if [ -n "$verdict_key_file" ] && [ "$HARNESS" = claude ] && is_security_line "$flags" "${session_env:-}"; then
+    cmd+="export ENGSYS_SECURITY_VERDICT_KEY_FILE=$(printf %q "$verdict_key_file") && "
+  else
+    cmd+="unset ENGSYS_SECURITY_VERDICT_KEY_FILE && "
+  fi
   cmd+="cd $(printf %q "$workdir") && "
   if [ -n "$session_env" ]; then
     cmd+="set -a && . $(printf %q "$session_env") && set +a && "
+    # and again after it, when a key is configured: an env file can neither add the key path to a
+    # non-security session nor drop it from a security one
+    if [ -n "$verdict_key_file" ]; then
+      if [ "$HARNESS" = claude ] && is_security_line "$flags" "${session_env:-}"; then
+        cmd+="export ENGSYS_SECURITY_VERDICT_KEY_FILE=$(printf %q "$verdict_key_file") && "
+      else
+        cmd+="unset ENGSYS_SECURITY_VERDICT_KEY_FILE && "
+      fi
+    fi
   fi
   # The Claude Code config dir comes from the launcher's own environment (the fleet kit sets it from
   # FLEET_CLAUDE_CONFIG_DIR), never from the tmux server's, which may predate it, and it is decided after

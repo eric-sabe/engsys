@@ -142,6 +142,18 @@ else
   unset ENGSYS_CONFIG_DIR_SESSIONS
 fi
 
+# Signed security verdicts (engsys#197, option B). The launcher hands the PATH of the key to security-lane
+# sessions only (launch-agent-sessions.sh); the key is created here, once, mode 0600, and never replaced.
+unset ENGSYS_SECURITY_VERDICT_KEY_FILE
+if [ "${FLEET_SECURITY_VERDICT_KEY:-off}" = on ]; then
+  command -v node >/dev/null || fleet_die "FLEET_SECURITY_VERDICT_KEY=on needs node"
+  if [ ! -e "$FLEET_SECURITY_VERDICT_KEY_FILE" ]; then
+    (umask 077; node "$ENGSYS_DIR/core/lib/security-verdict.mjs" keygen --key-file "$FLEET_SECURITY_VERDICT_KEY_FILE") \
+      || fleet_die "can't create the security verdict key $FLEET_SECURITY_VERDICT_KEY_FILE"
+  fi
+  ENGSYS_SECURITY_VERDICT_KEY_FILE="$FLEET_SECURITY_VERDICT_KEY_FILE"; export ENGSYS_SECURITY_VERDICT_KEY_FILE
+fi
+
 mkdir -p "$ENV_DIR" && chmod 700 "$ENV_DIR"
 shopt -s nullglob
 for tmpl in "$FLEET_REPO"/fleet/env/*.env.tmpl; do
