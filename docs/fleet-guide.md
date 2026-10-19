@@ -490,10 +490,9 @@ an unreadable or group-readable key always fails. What it does not do: the key f
 readable by every process running as the fleet's macOS user, so an attended session with a shell can read it and sign a
 verdict. It stops accidental and naive forgery, not a hostile session on the same account. A Nyx reviewer dispatched
 from an interactive role cannot post a valid verdict; the review has to run in the security lane. The security lane is
-any Opus 4.8 line, which includes the maintenance monster, so it can sign verdicts on its own fix PRs; this PR does not
-change who gets the key, and a separate GitHub identity for the lane (#220) is the real fix. The key path reaches a
-session only on its own launch line, never the launcher's or the tmux server's environment. The real boundary is
-a separate GitHub identity for the security lane (eric-sabe/engsys#220); the keystone-side gate that reads these
+any Opus 4.8 line, which includes the maintenance monster, so it can sign verdicts on its own fix PRs. The key path
+reaches a session only on its own launch line, never the launcher's or the tmux server's environment. The real
+boundary is a separate GitHub identity for the security lane (eric-sabe/engsys#220); the keystone-side gate that reads these
 verdicts is wired separately.
 
 **The monster batons.** A session the fleet launched (`ENGSYS_SESSION` and `ENGSYS_SESSION_RUN` set) may
