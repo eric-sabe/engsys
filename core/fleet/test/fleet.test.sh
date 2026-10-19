@@ -1312,5 +1312,37 @@ run env -u SSH_CONNECTION -u SSH_TTY PATH="$T/darwin-bin:$PATH" bash "$ENGSYS_HO
 has "launch outside SSH still refuses a logged-out session" "$OUT" "is not logged in"
 rm -f "$LC"
 
+echo "== N. engsys#214: HEAD on a stale local copy of the pinned tag (a re-cut release) is caught"
+setconf "INSTANCE_MARKETPLACE=" "GH_APP_ENV=" "ENGSYS_REF=v1.4.0"
+git -C "$ENGSYS_HOST" tag -d v1.3.0 >/dev/null 2>&1 || true
+run fleet sync
+rc_is "baseline: the host sits on origin's v1.4.0" 0
+STALE_C="$(git -C "$ENGSYS_HOST" rev-parse HEAD)"
+run fleet sync
+has "in sync: no drift reported" "$OUT" "in sync"
+git -C "$E" commit -q --allow-empty -m "engsys 1.4.0 re-cut"; git -C "$E" tag -f v1.4.0 >/dev/null
+git -C "$E" push -q -f origin main v1.4.0
+RECUT_C="$(git -C "$E" rev-parse v1.4.0)"
+[ "$RECUT_C" != "$STALE_C" ] && ok "(the re-cut tag is a different commit)" || bad "(the re-cut tag is a different commit)"
+run fleet sync --check
+rc_is "--check: a stale local pinned tag is drift" 1
+has "…named as a re-cut release" "$OUT" "stale local copy of v1.4.0"
+eq "…and --check moved nothing" "$(git -C "$ENGSYS_HOST" rev-parse HEAD)" "$STALE_C"
+# offline: ls-remote fails, so warn and keep the local copy
+ORIGIN_URL="$(git -C "$ENGSYS_HOST" remote get-url origin)"
+git -C "$ENGSYS_HOST" remote set-url origin "$T/no-such-remote.git"
+run fleet sync
+rc_is "offline: sync still succeeds" 0
+has "…warns it could not ask origin" "$OUT" "could not ask origin whether the local tag v1.4.0 is current"
+eq "…and keeps the local copy" "$(git -C "$ENGSYS_HOST" rev-parse HEAD)" "$STALE_C"
+git -C "$ENGSYS_HOST" remote set-url origin "$ORIGIN_URL"
+run fleet sync
+rc_is "online again: sync re-fetches the re-cut tag" 0
+has "…says it was re-cut" "$OUT" "v1.4.0 was re-cut upstream"
+eq "…the checkout is at origin's commit" "$(git -C "$ENGSYS_HOST" rev-parse HEAD)" "$RECUT_C"
+run fleet sync
+has "…and the next sync is in sync" "$OUT" "in sync"
+rm -f "$LC"
+
 # =============================================================================================
 finish fleet.test

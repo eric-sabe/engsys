@@ -228,6 +228,21 @@ fleet_fetch_tags() {
   return 1
 }
 
+# fleet_pinned_tag_drift <dir> <tag> → 0 when the local <tag> points at a different commit than origin's (a re-cut
+# release; engsys#214), 1 when they agree, the tag is not local, or origin can't be asked. One cheap `git ls-remote`
+# (the peeled ^{} line wins for an annotated tag). Offline-tolerant: an ls-remote failure is a warning, never a stop.
+fleet_pinned_tag_drift() {
+  local dir="$1" tag="$2" local_c remote out
+  local_c="$(git -C "$dir" rev-parse -q --verify "refs/tags/$tag^{commit}" 2>/dev/null)" || return 1
+  if ! out="$(git -C "$dir" ls-remote --tags origin "refs/tags/$tag" "refs/tags/$tag^{}" 2>/dev/null)"; then
+    echo "fleet: warning: could not ask origin whether the local tag $tag is current in $dir (offline?); keeping the local copy" >&2
+    return 1
+  fi
+  remote="$(awk -v r="refs/tags/$tag^{}" '$2 == r {print $1}' <<<"$out")"
+  [ -n "$remote" ] || remote="$(awk -v r="refs/tags/$tag" '$2 == r {print $1}' <<<"$out")"
+  [ -n "$remote" ] && [ "$remote" != "$local_c" ]
+}
+
 # fleet_keychain_unreadable → 0 on macOS in an SSH shell, where `claude auth status` says "not logged in" because the
 # login Keychain can't be read, not because there is no login (engsys#210). Acting on that answer (a /login) would
 # replace a working login. Callers say "login state unknown" and neither hold nor skip work on it.
