@@ -369,6 +369,7 @@ export FLEET_CLAUDE_CONFIG_DIR_PER_SESSION
 # Only the conf files set it. Defence in depth, NOT a boundary: any process of this OS user can read the key
 # (core/lib/security-verdict.mjs, fleet-guide.md).
 : "${FLEET_SECURITY_VERDICT_KEY:=off}"
+# shellcheck disable=SC2034 # FLEET_SECURITY_VERDICT_KEY_FILE is read by launch.sh, which sources this file
 case "$FLEET_SECURITY_VERDICT_KEY" in
   # the PATH is deliberately NOT exported (it would reach the tmux server's global environment)
   on) FLEET_SECURITY_VERDICT_KEY_FILE="$FLEET_STATE/security-verdict.key" ;;
