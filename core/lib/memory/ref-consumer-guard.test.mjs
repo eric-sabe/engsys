@@ -5,6 +5,11 @@
 // security (docs/memory-spec.md §3.1, "Wiring a consumer") and (b) added to CONSUMERS below, and a
 // listed consumer additionally must call `verifyMemoryRefTip(` in code (not just a comment).
 //
+// BEST-EFFORT TRIPWIRE against honest mistakes (a contributor wiring the obvious reader API without
+// knowing the rule), NOT a defence against a determined author: a textual scan can be evaded by
+// obfuscation (string concatenation, dynamic import, a renamed re-export). The real control is the
+// security review this guard forces by failing; trust itself rests on verifyMemoryRefTip.
+//
 // The checker is a pure function over {path -> source text} so its own behavior has positive and
 // negative controls on synthetic inputs, then the real repo is scanned.
 
@@ -17,7 +22,12 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 
 // Anything that names the memory refs or their fetch/list/read helpers.
-const REF_TOKENS = /refs\/engsys\/(?!leases\b|batons\b)|engsys\/memory|memory-incoming|MEMORY_REF_PREFIX|MEMORY_FETCH_REFSPEC|fetchMemoryRefs|listMemoryRefShas|loadClassBEvents/;
+// Includes the ref store's own reader API (createMemoryRefStore().readEvents(), EVENTS_REF, tailRef): a reader
+// does not need to spell the ref path at all.
+const REF_TOKENS =
+	/refs\/engsys\/(?!leases\b|batons\b)|engsys\/memory|memory-incoming|MEMORY_REF_PREFIX|MEMORY_FETCH_REFSPEC|fetchMemoryRefs|listMemoryRefShas|loadClassBEvents|\bcreateMemoryRefStore\b|\breadEvents\b|\bEVENTS_REF\b|\btailRef\b/;
+// Reading a ref's content through the store API (a non-consumer may publish, never read back).
+const READ_TOKENS = /\breadEvents\b|listMemoryRefShas|loadClassBEvents/;
 // The subset that FETCHES (or stages a fetch of) the refs.
 const FETCH_TOKENS = /fetchMemoryRefs|MEMORY_FETCH_REFSPEC|memory-incoming/;
 
@@ -28,7 +38,7 @@ const NON_CONSUMER_RULES = {
 	'core/lib/memory/ref-store.mjs': { allowFetchTokens: true },
 	// Reads local ref tips only through stripRefEventTrustLabels, which discards every embedded
 	// trust label and stamps author_kind 'untrusted_ref' (rejected unconditionally by trust.mjs).
-	'core/lib/memory/index-db.mjs': { mustContain: ['stripRefEventTrustLabels(blobText)'] },
+	'core/lib/memory/index-db.mjs': { allowReadTokens: true, mustContain: ['stripRefEventTrustLabels(blobText)'] },
 	// Publish-only: writes via the ref store, never reads a ref back.
 	'core/scripts/memory-sync.mjs': {},
 	// Documents the rejection of unverified ref events; no read.
@@ -46,11 +56,14 @@ const CONSUMERS = new Set([]);
 const SKIP_DIRS = new Set(['node_modules', '.git', 'tmp', 'data', 'tests']);
 const SKIP_EXT = new Set(['.md', '.html', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico', '.sqlite', '.db', '.lock']);
 
-function stripComments(src) {
+// `#` starts a comment only in shell/YAML; in JS a line may legitimately start with `#` (a private field).
+const HASH_COMMENT_EXT = /\.(sh|bash|ya?ml)$/;
+function stripComments(src, rel = '') {
+	const hashComments = HASH_COMMENT_EXT.test(rel);
 	return String(src)
 		.replace(/^\s*\/\*[\s\S]*?\*\//gm, '') // line-leading block comments only: `refs/engsys/memory/*` in a string must not open one
 		.split('\n')
-		.filter((l) => !/^\s*(\/\/|#)/.test(l))
+		.filter((l) => !(/^\s*\/\//.test(l) || (hashComments && /^\s*#/.test(l))))
 		.join('\n');
 }
 
@@ -58,7 +71,7 @@ function stripComments(src) {
 export function findRefConsumerViolations(files, { consumers = CONSUMERS, rules = NON_CONSUMER_RULES } = {}) {
 	const violations = [];
 	for (const [rel, text] of Object.entries(files)) {
-		const code = stripComments(text);
+		const code = stripComments(text, rel);
 		if (!REF_TOKENS.test(code)) continue;
 		const callsVerify = /\bverifyMemoryRefTip\s*\(/.test(code);
 		if (consumers.has(rel)) {
@@ -72,6 +85,9 @@ export function findRefConsumerViolations(files, { consumers = CONSUMERS, rules 
 					'wiring the memory ref fetch/read requires a security review (docs/memory-spec.md §3.1)',
 			);
 			continue;
+		}
+		if (!rule.allowFetchTokens && !rule.allowReadTokens && READ_TOKENS.test(code)) {
+			violations.push(`${rel}: non-consumer file reads refs/engsys/memory/* content (readEvents/listMemoryRefShas/loadClassBEvents)`);
 		}
 		if (!rule.allowFetchTokens && FETCH_TOKENS.test(code)) {
 			violations.push(`${rel}: non-consumer file fetches/stages refs/engsys/memory/* (fetchMemoryRefs/MEMORY_FETCH_REFSPEC/memory-incoming)`);
@@ -131,6 +147,22 @@ describe('refs/engsys/memory/* consumer guard (engsys#188)', () => {
 	it('negative: index-db losing its label-stripping read path fails', () => {
 		const v = findRefConsumerViolations({ 'core/lib/memory/index-db.mjs': "const p = 'refs/engsys/memory';\napplyJsonlLinesToMap(blobText, byKey);" });
 		assert.equal(v.length, 1);
+	});
+
+	it('negative: the ref store reader API (createMemoryRefStore().readEvents(), an imported EVENTS_REF or tailRef) is caught without the ref path', () => {
+		const reader = "import { createMemoryRefStore } from './ref-store.mjs';\nconst tip = await createMemoryRefStore({ repo }).readEvents();\n";
+		assert.equal(findRefConsumerViolations({ 'core/new-reader.mjs': reader }).length, 1);
+		assert.equal(findRefConsumerViolations({ 'core/e.mjs': "import { EVENTS_REF } from './ref-store.mjs';\nuse(EVENTS_REF);" }).length, 1);
+		assert.equal(findRefConsumerViolations({ 'core/t.mjs': "import { tailRef } from './ref-store.mjs';\nuse(tailRef('a', 'b'));" }).length, 1);
+	});
+	it('negative: memory-sync (a publisher) that starts reading refs back fails; positive control: publish-only passes', () => {
+		assert.equal(findRefConsumerViolations({ 'core/scripts/memory-sync.mjs': 'const s = createMemoryRefStore(o); await s.readEvents({ ref });' }).length, 1);
+		assert.deepEqual(findRefConsumerViolations({ 'core/scripts/memory-sync.mjs': 'const s = createMemoryRefStore(o); await s.writeEvents({ ref: EVENTS_REF, events });' }), []);
+	});
+	it('a JS line starting with # (a private field) is code, not a comment; in a shell file it is a comment', () => {
+		const js = 'class A {\n  #store = createMemoryRefStore(o);\n}\n';
+		assert.equal(findRefConsumerViolations({ 'core/p.mjs': js }).length, 1);
+		assert.deepEqual(findRefConsumerViolations({ 'core/p.sh': '# createMemoryRefStore is not used here\necho hi\n' }), []);
 	});
 
 	it('positive control: a listed consumer that calls verifyMemoryRefTip( passes', () => {
