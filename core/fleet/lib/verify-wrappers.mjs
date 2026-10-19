@@ -335,10 +335,17 @@ const SAFE_PROGRAMS = ['true', 'false', 'echo', 'printf', 'sleep', 'date', 'cat'
 const WRAPPERS = ['nice', 'nohup', 'timeout', 'xargs', 'time'];
 /** Options of a wrapper that take a value, and whether it has a leading positional (timeout's duration). */
 const WRAPPER_VALUE_FLAGS = { nice: ['-n', '--adjustment'], nohup: [], timeout: ['-k', '--kill-after', '-s', '--signal'], xargs: ['-I', '-n', '-P', '-L', '-s', '-d', '-E', '-a'], time: ['-o', '-f'] };
-/** The words after a wrapper's own options (and timeout's duration): the command it runs. */
+/** The options of xargs that only shape how it batches its input: anything else (-a <file>, -J, ...) is refused. */
+const XARGS_FLAGS = /^(-0|-r|-t|-x|--null|--no-run-if-empty|--verbose|--max-args=.*|--max-procs=.*|-[nPIsLdE].*)$/;
+/**
+ * The words after a wrapper's own options (and timeout's duration): the command it runs. → array, or null when an
+ * option can't be allowed (xargs reading its words from a file). An empty array is a wrapper with no command of its
+ * own: refused by the caller, since xargs would then supply the command itself from its input.
+ */
 function wrapperRest(name, args) {
   let i = 0;
   for (; i < args.length && args[i].startsWith('-') && args[i] !== '--'; i++) {
+    if (name === 'xargs' && !XARGS_FLAGS.test(args[i])) return null;
     if (WRAPPER_VALUE_FLAGS[name].includes(args[i])) i++;
   }
   if (args[i] === '--') i++;
@@ -542,7 +549,12 @@ export function parseSettingsCommand(command, { home = os.homedir(), projectDir 
           programs.push(p);
           runInterpreter(prog, args);
         } else if (isInterp(base)) runInterpreter(base, args);
-        else if (WRAPPERS.includes(base)) simple(wrapperRest(base, args)); // the wrapped command passes the same rules
+        else if (WRAPPERS.includes(base)) { // the wrapped command passes the same rules
+          const rest = wrapperRest(base, args);
+          if (rest === null) problems.push(`${base} with an option that reads or builds its command from outside the hook (${args.find((a) => a.startsWith('-a') || a.startsWith('-J')) || 'see the allowed xargs options'})`);
+          else if (!rest.length) problems.push(`${base} without a command of its own: a wrapper may only run the command the hook names`);
+          else simple(rest);
+        }
         else if (SAFE_PROGRAMS.includes(base)) {
           for (const a of args) if (!a.startsWith('-') && a.includes('/')) fileArg(a, 'an argument');
         } else problems.push(`${prog} is not on the list of system programs that can't run code from their arguments (${SAFE_PROGRAMS.join(', ')}) or a wrapper`);

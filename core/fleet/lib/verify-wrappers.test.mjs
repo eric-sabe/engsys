@@ -1035,6 +1035,13 @@ test('hookTargets: a task runner is refused however it is spelled, a direct scri
   unlisted('/usr/bin/xargs mybin', /found on PATH that is not an interpreter: mybin/);
   unlisted('/usr/bin/xargs env mybin', /found on PATH that is not an interpreter: env/);
   unlisted('/usr/bin/find . -exec ./gradlew build', /\/usr\/bin\/find is not on the list/);
+  // a wrapper whose command comes from its input, or from a file (CodeRabbit round 3)
+  unlisted('/usr/bin/xargs -a /tmp/x /usr/bin/nice', /xargs with an option that reads or builds its command/);
+  unlisted('/usr/bin/xargs -a/tmp/x /usr/bin/nice', /xargs with an option that reads or builds its command/);
+  unlisted('/usr/bin/xargs /usr/bin/timeout 5', /timeout without a command of its own/);
+  unlisted('/usr/bin/xargs /usr/bin/nice', /nice without a command of its own/);
+  unlisted('/usr/bin/xargs -I{} {}', /found on PATH that is not an interpreter/);
+  unlisted('/usr/bin/xargs bash', /bash with no script file/);
   // positive controls: the allowlist and the wrappers still let the safe forms through
   assert.deepEqual(hookTargets('/usr/bin/nice true make-docs.sh cmake-build', dir).problems, [], 'true is a no-op, whatever it is given');
   assert.deepEqual(hookTargets('/bin/sleep 1', dir).problems, []);
