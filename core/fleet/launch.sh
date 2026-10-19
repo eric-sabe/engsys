@@ -243,6 +243,10 @@ session_dir_problem() { # session_dir_problem <name>
   if at="$(cat "$FLEET_STATE/auth-ok.$1" 2>/dev/null)" && [[ "$at" =~ ^[0-9]+$ ]] && [ $(( $(date +%s) - at )) -lt $(( VERIFY_MAX_AGE_MIN * 60 )) ]; then return 1; fi
   li="$( (cd "${TMPDIR:-/tmp}" && CLAUDE_CONFIG_DIR="$d" fleet_dir_lock "$d" claude auth status --json </dev/null) 2>/dev/null | jq -r 'if .loggedIn == true then "true" elif .loggedIn == false then "false" else "" end' 2>/dev/null || true)"
   if [ "$li" = true ]; then mkdir -p "$FLEET_STATE" && date +%s >"$FLEET_STATE/auth-ok.$1"; fi
+  if [ "$li" = false ] && fleet_keychain_unreadable; then
+    echo "fleet launch: $1: login state unknown (SSH, Keychain not readable); launching anyway. $(fleet_keychain_advice)" >&2
+    return 1
+  fi
   if [ "$li" = false ]; then echo "its own Claude login ($d) is not logged in: CLAUDE_CONFIG_DIR=$d claude (/login, then /exit)"; return 0; fi
   return 1
 }

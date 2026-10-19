@@ -135,6 +135,11 @@ dir_logged_out() {
   if [ "$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION" = on ]; then
     if [ "$li" = true ]; then date +%s >"$ok"; else rm -f "${ok:?}"; fi
   fi
+  if [ "$li" = false ] && fleet_keychain_unreadable; then
+    # engsys#210: an SSH shell can't read the login Keychain; that is no evidence of a logout, so don't hold
+    echo "fleet verify: login state unknown (SSH, Keychain not readable) for $FLEET_CLAUDE_CONFIG_DIR; not holding. $(fleet_keychain_advice)" >&2
+    return 1
+  fi
   [ "$li" = false ]
 }
 
