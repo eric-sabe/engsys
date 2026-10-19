@@ -559,8 +559,14 @@ export function claudeConfigDir(ctx) {
   return { dir: set ? expandHome(set, ctx.home) : path.join(ctx.home, '.claude'), fromConf: Boolean(set), scope };
 }
 
+/** True on macOS in an SSH shell (same heuristic as fleet_keychain_unreadable in lib/fleet-env.sh). */
+export function keychainUnreadable(ctx) {
+  const env = ctx.env || process.env;
+  return (ctx.platform || process.platform) === 'darwin' && Boolean(env.SSH_CONNECTION || env.SSH_TTY);
+}
+
 /** Which config dir is in use and whether it is logged in (`claude auth status`: loggedIn only, nothing else). */
-function claudeConfigItem(ctx, cfg) {
+export function claudeConfigItem(ctx, cfg) {
   const exists = fs.existsSync(cfg.dir);
   let login = 'unknown';
   if (exists) {
@@ -573,6 +579,8 @@ function claudeConfigItem(ctx, cfg) {
       if (j && j.loggedIn === true) login = 'logged in';
       else if (j && j.loggedIn === false) login = 'NOT logged in';
     } catch { /* unknown */ }
+    // engsys#210: in an SSH shell on macOS the login Keychain can't be read, so "not logged in" is no evidence
+    if (login === 'NOT logged in' && keychainUnreadable(ctx)) login = 'login state unknown (SSH, Keychain not readable; check from the Mac\'s GUI session, do not /login)';
   }
   const who = cfg.interactive ? 'interactive roles' : cfg.fromConf && cfg.scope === 'supervised' ? 'supervised sessions' : 'fleet sessions';
   return {

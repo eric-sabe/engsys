@@ -200,6 +200,10 @@ pane holds that session only, the test request runs with that session's `CLAUDE_
 running. `INTEGRITY_SESSION_CMD=<cmd>` replaces `INTEGRITY_CMD`: it is asked as `<cmd> <session>` for each singleton
 session once per tick, and its verdict holds only that session.
 
+Adopting per-session dirs on a running fleet: `fleet config-dir init --per-session`, then one `/login` and one workspace trust per
+session from the Mac's GUI session (not SSH, where the Keychain is unreadable), then set the flag, `fleet sync`,
+`fleet verify`, and restart each monster. The full steps are in the fleet guide § 6.1 (engsys#212).
+
 **Moved ledger targets.** The supervisor records, per session, the ledger target it
 last launched it against (`logs/fleet-supervisor/<name>.target`). When the
 configured target differs (for example the resource broker moving from a

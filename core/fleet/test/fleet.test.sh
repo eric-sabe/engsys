@@ -1312,5 +1312,91 @@ run env -u SSH_CONNECTION -u SSH_TTY PATH="$T/darwin-bin:$PATH" bash "$ENGSYS_HO
 has "launch outside SSH still refuses a logged-out session" "$OUT" "is not logged in"
 rm -f "$LC"
 
+echo "== N. engsys#214: HEAD on a stale local copy of the pinned tag (a re-cut release) is caught"
+setconf "INSTANCE_MARKETPLACE=" "GH_APP_ENV=" "ENGSYS_REF=v1.4.0"
+git -C "$ENGSYS_HOST" tag -d v1.3.0 >/dev/null 2>&1 || true
+run fleet sync
+rc_is "baseline: the host sits on origin's v1.4.0" 0
+STALE_C="$(git -C "$ENGSYS_HOST" rev-parse HEAD)"
+run fleet sync
+has "in sync: no drift reported" "$OUT" "in sync"
+git -C "$E" commit -q --allow-empty -m "engsys 1.4.0 re-cut"; git -C "$E" tag -f v1.4.0 >/dev/null
+git -C "$E" push -q -f origin main v1.4.0
+RECUT_C="$(git -C "$E" rev-parse v1.4.0)"
+[ "$RECUT_C" != "$STALE_C" ] && ok "(the re-cut tag is a different commit)" || bad "(the re-cut tag is a different commit)"
+run fleet sync --check
+rc_is "--check: a stale local pinned tag is drift" 1
+has "…named as a re-cut release" "$OUT" "stale local copy of v1.4.0"
+eq "…and --check moved nothing" "$(git -C "$ENGSYS_HOST" rev-parse HEAD)" "$STALE_C"
+# offline: ls-remote fails, so warn and keep the local copy
+ORIGIN_URL="$(git -C "$ENGSYS_HOST" remote get-url origin)"
+git -C "$ENGSYS_HOST" remote set-url origin "$T/no-such-remote.git"
+run fleet sync
+rc_is "offline: sync still succeeds" 0
+has "…warns it could not ask origin" "$OUT" "could not ask origin whether the local tag v1.4.0 is current"
+eq "…and keeps the local copy" "$(git -C "$ENGSYS_HOST" rev-parse HEAD)" "$STALE_C"
+git -C "$ENGSYS_HOST" remote set-url origin "$ORIGIN_URL"
+run fleet sync
+rc_is "online again: sync re-fetches the re-cut tag" 0
+has "…says it was re-cut" "$OUT" "v1.4.0 was re-cut upstream"
+eq "…the checkout is at origin's commit" "$(git -C "$ENGSYS_HOST" rev-parse HEAD)" "$RECUT_C"
+run fleet sync
+has "…and the next sync is in sync" "$OUT" "in sync"
+rm -f "$LC"
+
+echo "== O. engsys#212: per-session adoption: early warnings, and no /login advice over SSH"
+setconf "INSTANCE_MARKETPLACE=" "GH_APP_ENV=" "ENGSYS_REF=v1.4.0" "FLEET_CLAUDE_CONFIG_DIR=$FCFG" "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on"
+SESS="$FCFG.sessions"; rm -rf "$SESS" "$FAKE/claude-cfg"
+run fleet sync
+rc_is "flag on, no session dirs yet: sync still exits 0 (a warning)" 0
+has "sync warns once, naming the sessions" "$OUT" "these sessions have no config dir or no login yet: acme-mm acme-build acme-security acme-rel"
+has "…and the adoption steps" "$OUT" "fleet config-dir init, then log in once and accept workspace trust once per session"
+has "…from the GUI session, not SSH" "$OUT" "Mac's own GUI session, not SSH"
+run fleet status
+has "fleet status carries the same warning" "$OUT" "these sessions have no config dir or no login yet"
+# dirs exist but nobody logged in
+for n in acme-mm acme-build acme-security acme-rel; do rm -f "$FAKE/loggedin/$n"; touch "$FAKE/loggedout/$n"; done
+run fleet config-dir init
+run fleet sync
+has "dirs present but logged out: the warning names them too" "$OUT" "these sessions have no config dir or no login yet: acme-mm acme-build acme-security acme-rel"
+for n in acme-mm acme-build acme-security acme-rel; do rm -f "$FAKE/loggedout/$n"; touch "$FAKE/loggedin/$n"; done
+run fleet sync
+hasnt "all logged in: no adoption warning" "$OUT" "no config dir or no login yet"
+# config-dir init over SSH on macOS must not print /login commands
+for n in acme-mm acme-build acme-security acme-rel; do rm -f "$FAKE/loggedin/$n"; touch "$FAKE/loggedout/$n"; done
+run env SSH_CONNECTION="10.0.0.1 1 10.0.0.2 22" PATH="$T/darwin-bin:$PATH" bash "$ENGSYS_HOST/core/fleet/bin/fleet" --instance "$INST" config-dir init
+rc_is "config-dir init over SSH on macOS exits 0" 0
+has "…says the login state is unknown" "$OUT" "login state unknown (SSH, Keychain not readable) for: acme-mm acme-build acme-security acme-rel"
+hasnt "…and prints no /login command for any session" "$OUT" "CLAUDE_CONFIG_DIR=$SESS/acme-mm claude"
+hasnt "…nor claims they are all logged in" "$OUT" "every session dir is logged in"
+run env -u SSH_CONNECTION -u SSH_TTY PATH="$T/darwin-bin:$PATH" bash "$ENGSYS_HOST/core/fleet/bin/fleet" --instance "$INST" config-dir init
+has "outside SSH the login commands are printed as before" "$OUT" "acme-mm: CLAUDE_CONFIG_DIR=$SESS/acme-mm claude"
+# the single-dir form
+setconf "INSTANCE_MARKETPLACE=" "GH_APP_ENV=" "ENGSYS_REF=v1.4.0"
+touch "$FAKE/loggedout/$(basename "$T/one-dir")"
+run env SSH_TTY=/dev/ttys001 PATH="$T/darwin-bin:$PATH" bash "$ENGSYS_HOST/core/fleet/bin/fleet" --instance "$INST" config-dir init --dir "$T/one-dir"
+has "single dir over SSH on macOS: login state unknown" "$OUT" "login state unknown (SSH, Keychain not readable) for $T/one-dir"
+hasnt "…no /login step printed" "$OUT" "# /login with the fleet's seat"
+run env -u SSH_CONNECTION -u SSH_TTY PATH="$T/darwin-bin:$PATH" bash "$ENGSYS_HOST/core/fleet/bin/fleet" --instance "$INST" config-dir init --dir "$T/one-dir"
+has "single dir outside SSH: the steps are printed" "$OUT" "# /login with the fleet's seat"
+# adoption order: init --per-session works with the flag still off, so the dirs and logins come first
+setconf "INSTANCE_MARKETPLACE=" "GH_APP_ENV=" "ENGSYS_REF=v1.4.0" "FLEET_CLAUDE_CONFIG_DIR=$FCFG"
+rm -rf "$SESS"; for n in acme-mm acme-build acme-security acme-rel; do rm -f "$FAKE/loggedout/$n"; touch "$FAKE/loggedin/$n"; done
+run fleet config-dir init --per-session
+rc_is "init --per-session with the flag off exits 0" 0
+for n in acme-mm acme-build acme-security acme-rel; do [ -f "$SESS/$n/settings.json" ] && ok "…$n has its own dir" || bad "…$n has its own dir"; done
+has "…and says the flag is still off, and to turn it on once logged in" "$OUT" "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION is still off"
+run fleet config-dir init --per-session --session acme-mm
+hasnt "…--session narrows it" "$OUT" "session acme-build"
+setconf "INSTANCE_MARKETPLACE=" "GH_APP_ENV=" "ENGSYS_REF=v1.4.0"
+run fleet config-dir init --per-session
+rc_is "…without FLEET_CLAUDE_CONFIG_DIR it is refused" 1
+has "…saying why" "$OUT" "--per-session needs FLEET_CLAUDE_CONFIG_DIR"
+setconf "INSTANCE_MARKETPLACE=" "GH_APP_ENV=" "ENGSYS_REF=v1.4.0" "FLEET_CLAUDE_CONFIG_DIR=$FCFG"
+run fleet config-dir init --per-session --dir "$T/one-dir"
+rc_is "init --per-session --dir is refused, not silently narrowed" 1
+has "…saying why" "$OUT" "--per-session and --dir cannot be combined"
+rm -f "$LC"
+
 # =============================================================================================
 finish fleet.test

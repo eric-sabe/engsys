@@ -12,7 +12,7 @@ PIDS=()
 cleanup() {
   local p
   for p in ${PIDS[@]+"${PIDS[@]}"}; do pkill -P "$p" 2>/dev/null || true; kill "$p" 2>/dev/null || true; done
-  rm -rf "$T"
+  rm -rf "$T" 2>/dev/null || true   # a cleanup failure must not override the run's exit status under errexit
 }
 trap cleanup EXIT
 

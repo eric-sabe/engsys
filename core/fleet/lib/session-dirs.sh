@@ -91,3 +91,22 @@ fleet_session_dir_names() {
     printf '%s\n' "$n"
   done < <(roster_names)
 }
+
+# fleet_session_dirs_missing → the per-session-mode sessions whose own config dir does not exist yet, one per line
+# (engsys#212: the flag was turned on before `fleet config-dir init` ran).
+fleet_session_dirs_missing() {
+  local n
+  while IFS= read -r n; do
+    [ -z "$n" ] || [ -d "$(fleet_session_config_dir "$n")" ] || printf '%s\n' "$n"
+  done < <(fleet_session_dir_names)
+}
+# fleet_config_dir_fix [<session>] → the adoption steps in one line (engsys#212). A dir that is missing never
+# appears by itself; the login and the workspace trust are one-time and need the Mac's GUI session, not SSH (the
+# login Keychain is not readable there, engsys#210).
+fleet_config_dir_fix() {
+  if [ "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:-off}" = on ]; then
+    echo "fleet config-dir init${1:+ --session $1}, then log in once and accept workspace trust once per session (CLAUDE_CONFIG_DIR=<dir> claude: /login, /exit) from a terminal in the Mac's own GUI session, not SSH, then fleet sync, fleet verify, and restart each monster (fleet guide § 6.1)"
+  else
+    echo "fleet config-dir init, then log in once and accept workspace trust (CLAUDE_CONFIG_DIR=<dir> claude: /login, /exit) from a terminal in the Mac's own GUI session, not SSH, then fleet sync and fleet restart --all (fleet guide § 6.1)"
+  fi
+}

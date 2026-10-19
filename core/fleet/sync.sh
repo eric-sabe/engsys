@@ -137,15 +137,22 @@ main() {
     fi
   else
     have_engsys="$(fleet_git_at "$ENGSYS_DIR")"
-    if [ "$have_engsys" != "$want_engsys" ]; then
+    local recut=0
+    # engsys#214: HEAD can sit on a stale local copy of the pinned tag (a re-cut release); compare it with origin's
+    if [ "$have_engsys" = "$want_engsys" ] && fleet_pinned_tag_drift "$ENGSYS_DIR" "$want_engsys"; then recut=1; fi
+    if [ "$have_engsys" != "$want_engsys" ] || [ "$recut" = 1 ]; then
       if [ "$check" = 1 ]; then
-        say "engsys checkout is at $have_engsys (pin $want_engsys)"; drift=1
+        if [ "$recut" = 1 ]; then say "engsys checkout is at a stale local copy of $want_engsys (origin's tag moved: re-cut release)"
+        else say "engsys checkout is at $have_engsys (pin $want_engsys)"; fi
+        drift=1
       else
         [ -z "$prev_engsys" ] || fleet_die "engsys checkout still at $have_engsys after switching to $want_engsys"
         require_clean "$ENGSYS_DIR"
+        # after a re-cut the tag name no longer names the old commit, so the re-exec's job diff needs the sha
+        [ "$recut" = 0 ] || have_engsys="$(git -C "$ENGSYS_DIR" rev-parse HEAD)"
         fleet_fetch_tags "$ENGSYS_DIR" "$want_engsys" || fleet_die "could not fetch the engsys tags into $ENGSYS_DIR (see above)"
         git -C "$ENGSYS_DIR" checkout -q "$want_engsys"
-        say "engsys: $have_engsys → $want_engsys"
+        if [ "$recut" = 1 ]; then say "engsys: $want_engsys was re-cut upstream; moved the checkout to origin's commit"; else say "engsys: $have_engsys → $want_engsys"; fi
         [ -f "$ENGSYS_DIR/core/fleet/sync.sh" ] || fleet_die "engsys $want_engsys has no fleet kit (core/fleet/sync.sh) — the checkout is moved; pin a release that includes it"
         FLEET_SYNC_RESUMED=1 FLEET_SYNC_PREV_INSTANCE="$prev_instance" FLEET_SYNC_PREV_ENGSYS="$have_engsys" FLEET_SYNC_CHANGED=1 \
           exec bash "$ENGSYS_DIR/core/fleet/sync.sh" --instance "$FLEET_REPO"
@@ -190,18 +197,25 @@ main() {
       [ "${#cfg_dirs[@]}" -gt 0 ] || fleet_die "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on, but no session on this host uses the fleet's config dir"
     fi
     if [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] && [ "${FLEET_CLAUDE_CONFIG_DIR_SCOPE:-all}" = supervised ]; then cfg_dirs+=(""); fi
-    local cfg_dir
+    local cfg_dir ps_bad=""
     for cfg_dir in "${cfg_dirs[@]}"; do
       SYNC_CFG="$cfg_dir"
       # a session dir that does not exist yet must not stop the other sessions' sync: report it as drift
       if [ -n "$cfg_dir" ] && [ "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:-off}" = on ] && [ ! -d "$cfg_dir" ]; then
         say "claude config dir: $cfg_dir (session ${cfg_dir##*/}) does not exist"
         warn "session ${cfg_dir##*/} has no config dir yet: fleet config-dir init --session ${cfg_dir##*/}, then log in with CLAUDE_CONFIG_DIR=$cfg_dir claude (fleet guide § 6.1). Its plugins are not synced."
-        drift=1; continue
+        drift=1; ps_bad="$ps_bad ${cfg_dir##*/}"; continue
       fi
-      claude_config_report "$check" || drift=1
+      if ! claude_config_report "$check"; then
+        drift=1
+        [ "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:-off}" != on ] || ps_bad="$ps_bad ${cfg_dir##*/}"
+      fi
       sync_claude_plugins
     done
+    # engsys#212: turning the flag on before the dirs exist and are logged in is the common adoption slip; say so once
+    if [ -n "$ps_bad" ]; then
+      warn "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on, but these sessions have no config dir or no login yet:$ps_bad. $(fleet_config_dir_fix)"
+    fi
     SYNC_CFG="${FLEET_CLAUDE_CONFIG_DIR:-}"
     GUARDED=(); sync_cleanup; trap - EXIT
   fi

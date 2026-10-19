@@ -7,6 +7,8 @@ Arguments (optional): $ARGUMENTS
 
 Run the **resource-broker** skill (`<engsys-root>/skills/resource-broker/SKILL.md`) as a long-lived broker session.
 
+**Self-check, right after the Skill call returns.** Load the skill first (the `Skill` tool, then follow it). The harness can answer that call with "already loaded above; instructions unchanged" while only this short command text is in your context and the skill's body is not (engsys#211). When the call returns, look for one line of the body, right under its title, of the form `body-sentinel:resource-broker:` followed by four hex digits. If it is in your context, say nothing and go on. If it is not, do not take "already loaded" at face value: Read `<engsys-root>/skills/resource-broker/SKILL.md` by its literal path, follow it, and record the re-read in your session-start digest.
+
 Intended to run on an always-on machine, alongside (not instead of) Merge Monster and Maintenance Monster — three batons, producer/consumer, no baton fights. Pool primitives (leases, the slot table, queue, nudges) are the `durable-lease` skill's `pool-cli`; this session drives them.
 
 Before starting the loop:

@@ -5,6 +5,8 @@ description: Run the Merge Monster merge-orchestrator session — own the merge 
 
 # Merge Monster — Orchestrator Session
 
+body-sentinel:merge-monster:a41f
+
 You are the merge baton-holder (`refs/engsys/batons/merge`). While you hold it, nothing else merges, and you act only while you hold it. **Every rule you must obey is in this file.** [`references/runbook-details.md`](references/runbook-details.md) (the "runbook") holds the long-form tables, schemas and edge cases; where a step names one of its sections to read first, read that section before acting.
 
 ## Prerequisites
@@ -17,16 +19,17 @@ You are the merge baton-holder (`refs/engsys/batons/merge`). While you hold it, 
 ## Session startup
 
 > **Invoke each script as its own Bash call, by literal path.** No `cd`, no shell variables, no `&&`/`;` chaining, and no `mkdir`.
+> **Fenced-write bodies** (the guard refuses anything else): a literal body, or `--body-file -` with a heredoc whose delimiter is quoted (`<<'EOF'`). Never `$( )`, backticks, `&&`, `;` or a redirect around the command: compute the value first and paste it in.
 
 0. **Harness check, before anything else**: the monsters are Claude-only, and the launcher refuses a merge monster on a non-Claude harness (`HARNESS=copilot` or `HARNESS=antigravity`). If you find yourself running on one anyway, do not take the baton and make no GitHub write: journal it locally, post one `fleet notify --level alert` (it needs no baton), and stop. The same goes for a session the fleet launched as something else: a fleet-launched session (`ENGSYS_SESSION` and `ENGSYS_SESSION_RUN` set) may hold the merge baton only when `ENGSYS_SINGLETON_ROLE=merge`, and, under `FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised`, only on the fleet's Claude config dir; `mm-baton.sh startup` refuses otherwise (`not_armed`). Then stop: do not work around it. To run the merge monster by hand, start it in a session the fleet did not launch and pass `--session <name>` to every `mm-baton.sh` call.
-1. Read the config and load prior `<state_dir>/state.md` / journal if present.
+1. Read the config and load prior `<state_dir>/state.md` / journal if present. Resolve plugin and skill paths now from the running session (`<engsys-root>` / `<skill-dir>` from your context; its config dir is `$CLAUDE_CONFIG_DIR`, else `~/.claude`), never from a path recorded in `state.md`: that can still name the config dir from before a switch to per-session dirs. Overwrite a stale one.
 2. **Take the baton before touching GitHub**: `<skill-dir>/scripts/mm-baton.sh startup --repo <repo> --state-dir <state_dir>`.
    - `acquired` / `resumed` (exit 0): continue to step 3 (`tookOver` + `notBefore`: no mutation before `notBefore`).
    - `held_elsewhere` (`isHome: true`) or `wait_self`: **stand by**. No heartbeat, no ledger comment, no Monitor, nothing that writes. Schedule the fallback tick (step 6) and run `startup` again on each tick until it returns 0, then continue from step 3.
    - `not_home`: stop here and schedule no tick.
    - `registry_error`, `error`, `protocol_unsupported`: never act; retry on tick.
 3. **Reconcile reality**: run `<skill-dir>/scripts/mm-snapshot.sh --repo <repo>` and rebuild the queue from live labels — never trust a stale queue file over GitHub. Then read your cross-fleet inbox (multi-fleet, read-only): `node <engsys-root>/fleet/msg.mjs inbox <your session> --mark-read`. Read each pointer with `node <engsys-root>/fleet/msg.mjs read <url>` and re-read that PR or issue on GitHub.
-4. **Heartbeat**: `<skill-dir>/scripts/mm-heartbeat.sh --repo <repo> --issue <ledger_issue> --state-dir <state_dir> --status "session start"`. Always pass `--state-dir`: the script renews the baton first and writes the heartbeat only while you hold it (exit 1 + `BATON_LOST` = § Lost baton; exit 5 = no baton, no heartbeat to write). Post a session-start digest through `mm-act.sh guard` and advertise `session: <ns>-mm`.
+4. **Heartbeat**: `<skill-dir>/scripts/mm-heartbeat.sh --repo <repo> --issue <ledger_issue> --state-dir <state_dir> --status "session start"`. Always pass `--state-dir`: the script renews the baton first and writes the heartbeat only while you hold it (exit 1 + `BATON_LOST` = § Lost baton; exit 5 = no baton, no heartbeat to write). Post a session-start digest through `mm-act.sh guard` and advertise `session: <ns>-mm`. If you had to re-read this file because its `body-sentinel` line was missing from your context (the command's self-check), say so in that digest.
 5. **Arm the event bus** (one Monitor, `timeout_ms: 1800000`):
    ```bash
    bash <skill-dir>/scripts/mm-watch.sh --repo <repo> \
