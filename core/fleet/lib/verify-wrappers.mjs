@@ -1676,7 +1676,7 @@ export async function run(argv, {
     const c = readCache(a.cache);
     const ageMin = c ? (now() - Number(c.verifiedAt)) / 60_000 : Infinity;
     if (c && c.result === 'ok' && c.repo === a.repo && c.tag === a.tag && sameJson(c.local, local) && sameJson(c.market ?? {}, marketLocal) && sameJson(c.host ?? null, host)
-      && !(offMainEnforced && (c.warnings || []).some((w) => /^instance release /.test(w))) && sameJson(c.project ?? null, projectKey) && sameJson(c.info ?? [], info) && ageMin >= 0 && ageMin < a.maxAgeMin) {
+      && !(offMainEnforced && (!Array.isArray(c.warnings) || c.warnings.some((w) => /^instance release /.test(w)))) && sameJson(c.project ?? null, projectKey) && sameJson(c.info ?? [], info) && ageMin >= 0 && ageMin < a.maxAgeMin) {
       warnLines(Array.isArray(c.warnings) ? c.warnings : []);
       for (const mp of market) out(`verify: ok, ${countFiles(marketLocal[mp.id].local)} files of ${mp.id} in ${mp.roots.join(', ')} match ${mp.repo}@${mp.tag} (unchanged)`);
       out(`verify: ok, ${countFiles(local)} protected files in ${where} match ${target} (unchanged since the check ${Math.floor(ageMin)}m ago)`);
