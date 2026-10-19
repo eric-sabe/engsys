@@ -124,7 +124,7 @@ main() {
         say "engsys worktree is at $have_engsys (pin $want_engsys)"; drift=1
       else
         [ -z "$prev_engsys" ] || fleet_die "engsys worktree still at $have_engsys after switching to $want_engsys"
-        git -C "$ENGSYS_DIR" fetch -q --tags origin 2>/dev/null || true
+        fleet_fetch_tags "$ENGSYS_DIR" "$want_engsys" || fleet_die "could not fetch the engsys tags into $ENGSYS_DIR (see above)"
         mkdir -p "$FLEET_STATE"
         git -C "$ENGSYS_DIR" worktree remove --force "$engsys_target" >/dev/null 2>&1 || rm -rf "$engsys_target"
         git -C "$ENGSYS_DIR" worktree prune

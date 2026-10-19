@@ -1255,6 +1255,18 @@ eq "…and the stale tag was left alone" "$(git -C "$ENGSYS_HOST" rev-parse v1.3
 git -C "$ENGSYS_HOST" tag -d v1.3.0 >/dev/null
 run fleet sync
 rc_is "after the suggested fix, sync succeeds" 0
+# the same rejection with FLEET_ISOLATE_ENGSYS_WORKTREE=1 must not check out a stale pinned commit silently
+git -C "$ENGSYS_HOST" tag -f v1.3.0 v1.1.0 >/dev/null; STALE13="$(git -C "$ENGSYS_HOST" rev-parse v1.3.0)"
+setconf "INSTANCE_MARKETPLACE=" "GH_APP_ENV=" "ENGSYS_REF=v1.4.0" "FLEET_ISOLATE_ENGSYS_WORKTREE=1"
+run fleet sync
+rc_is "isolated worktree mode: a rejected tag fetch stops sync" 1
+has "…with the fix" "$OUT" "the local tag v1.3.0 differs from origin's (re-cut release?): git -C $ENGSYS_HOST tag -d v1.3.0, then fleet sync"
+[ ! -e "$STATE/engsys/.git" ] && ok "…and no worktree was created from a stale checkout" || bad "…and no worktree was created from a stale checkout"
+git -C "$ENGSYS_HOST" tag -d v1.3.0 >/dev/null
+run fleet sync
+rc_is "isolated worktree mode: after the fix, sync succeeds" 0
+eq "…the worktree is at origin's v1.4.0" "$(git -C "$STATE/engsys" rev-parse HEAD)" "$(git -C "$E" rev-parse v1.4.0)"
+git -C "$ENGSYS_HOST" worktree remove --force "$STATE/engsys" >/dev/null 2>&1 || true
 
 echo "== M. engsys#210: an SSH shell on macOS can't read the Keychain, so 'not logged in' is 'unknown'"
 REAL_UNAME="$(command -v uname)"; mkdir -p "$T/darwin-bin"
@@ -1270,6 +1282,14 @@ hasnt "…and never says NOT logged in" "$OUT" "NOT logged in"
 has "…advises the GUI session or unlocking the Keychain" "$OUT" "security unlock-keychain"
 has "…and not to /login" "$OUT" "do NOT /login"
 has "…the plugin installs still ran" "$(since "$m" | grep "CFG=$FCFG\$")" "plugin install"
+run env SSH_CONNECTION="10.0.0.1 1 10.0.0.2 22" PATH="$T/darwin-bin:$PATH" bash "$ENGSYS_HOST/core/fleet/bin/fleet" --instance "$INST" verify
+hasnt "verify over SSH does not hold on the login" "$OUT" "is not logged in"
+has "…and the plugin integrity check ran (the fixture's ~/.claude plugin is a version behind)" "$OUT" "MISMATCH against vendor/engsys@v1.2.0"
+echo '{"enabledPlugins":{"stray@market":true},"syncClaudeAiSkills":false,"syncClaudeAiPlugins":false}' >"$FCFG/settings.json"
+run env SSH_CONNECTION="10.0.0.1 1 10.0.0.2 22" PATH="$T/darwin-bin:$PATH" bash "$ENGSYS_HOST/core/fleet/bin/fleet" --instance "$INST" verify
+rc_is "verify over SSH with a tampered plugin set is still a mismatch" 1
+has "…naming the stray plugin" "$OUT" "stray@market"
+echo '{"syncClaudeAiSkills":false,"syncClaudeAiPlugins":false}' >"$FCFG/settings.json"
 rm -rf "$FAKE/claude-cfg"
 run env -u SSH_CONNECTION -u SSH_TTY PATH="$T/darwin-bin:$PATH" bash "$ENGSYS_HOST/core/fleet/bin/fleet" --instance "$INST" sync
 has "the same answer outside SSH is still NOT logged in" "$OUT" "NOT logged in"
@@ -1277,8 +1297,6 @@ rm -rf "$FAKE/claude-cfg"
 mkdir -p "$T/linux-bin"; printf '#!/usr/bin/env bash\n[ "${1:-}" = -s ] && { echo Linux; exit 0; }\nexec %s "$@"\n' "$REAL_UNAME" >"$T/linux-bin/uname"; chmod +x "$T/linux-bin/uname"
 run env SSH_TTY=/dev/ttys001 PATH="$T/linux-bin:$PATH" bash "$ENGSYS_HOST/core/fleet/bin/fleet" --instance "$INST" sync
 has "SSH on a non-macOS host is still NOT logged in (the Keychain is a macOS thing)" "$OUT" "NOT logged in"
-run env SSH_CONNECTION="10.0.0.1 1 10.0.0.2 22" PATH="$T/darwin-bin:$PATH" bash "$ENGSYS_HOST/core/fleet/bin/fleet" --instance "$INST" verify
-hasnt "verify over SSH does not hold on the login" "$OUT" "is not logged in"
 run env -u SSH_CONNECTION -u SSH_TTY PATH="$T/darwin-bin:$PATH" bash "$ENGSYS_HOST/core/fleet/bin/fleet" --instance "$INST" verify
 rc_is "verify outside SSH still holds a logged-out fleet dir" 3
 has "…saying so" "$OUT" "is not logged in"
@@ -1289,6 +1307,7 @@ rm -f "$FAKE/loggedin/acme-security" "$STATE"/auth-ok.*; touch "$FAKE/loggedout/
 run env SSH_CONNECTION="10.0.0.1 1 10.0.0.2 22" PATH="$T/darwin-bin:$PATH" bash "$ENGSYS_HOST/core/fleet/bin/fleet" --instance "$INST" launch acme-security
 hasnt "launch over SSH does not refuse on 'not logged in'" "$OUT" "is not logged in"
 has "…it says the login state is unknown" "$OUT" "login state unknown (SSH, Keychain not readable)"
+matches "…and the plugin integrity check still ran for that session" "$OUT" "does not match|could not run"
 run env -u SSH_CONNECTION -u SSH_TTY PATH="$T/darwin-bin:$PATH" bash "$ENGSYS_HOST/core/fleet/bin/fleet" --instance "$INST" launch acme-security
 has "launch outside SSH still refuses a logged-out session" "$OUT" "is not logged in"
 rm -f "$LC"

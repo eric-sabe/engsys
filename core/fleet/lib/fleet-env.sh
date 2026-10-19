@@ -187,19 +187,22 @@ fleet_git_at() { # fleet_git_at <dir> → exact tag at HEAD, else short sha
 # what the operator chose, and origin is the source of truth for it. Any other rejected tag is never moved: git's error
 # and the fix are printed and the return code is 1.
 fleet_fetch_tags() {
-  local dir="$1" pinned="${2:-}" out rc=0 line t bad="" rejected=0
+  local dir="$1" pinned="${2:-}" out rc=0 line t err bad=() rejected=0
   out="$(LC_ALL=C git -C "$dir" fetch --tags origin 2>&1)" || rc=$?
   [ "$rc" != 0 ] || return 0
   while IFS= read -r line; do
     case "$line" in
       *"[rejected]"*)
-        rejected=1
+        rejected=1; err=""
         t="$(sed -E 's/.*\[rejected\][[:space:]]+([^[:space:]]+)[[:space:]]+->.*/\1/' <<<"$line")"
-        case "$t" in *[[:space:]]*) t="(unparsed: ${line#"${line%%[![:space:]]*}"})"; bad="$bad ${t// /_}"; continue ;; esac
+        case "$t" in *[[:space:]]*) bad+=("unparsed rejection: ${line#"${line%%[![:space:]]*}"}"); continue ;; esac
         if [ -n "$pinned" ] && [ "$t" = "$pinned" ] && [ -n "$(git -C "$dir" ls-remote --tags origin "refs/tags/$t" 2>/dev/null)" ] \
-          && git -C "$dir" fetch -q --force origin "refs/tags/$t:refs/tags/$t" 2>/dev/null; then
+          && err="$(git -C "$dir" fetch -q --force origin "refs/tags/$t:refs/tags/$t" 2>&1)"; then
           echo "fleet: the local tag $t differed from origin's (re-cut release?): re-fetched it from origin, since it is the pinned one" >&2
-        else bad="$bad $t"; fi ;;
+        else
+          [ -z "${err:-}" ] || printf '%s\n' "$err" >&2
+          bad+=("$t")
+        fi ;;
     esac
   done <<<"$out"
   if [ "$rejected" = 0 ]; then
@@ -208,7 +211,7 @@ fleet_fetch_tags() {
     echo "fleet: git fetch --tags origin failed in $dir (rc=$rc)" >&2
     return "$rc"
   fi
-  if [ -z "$bad" ]; then
+  if [ "${#bad[@]}" = 0 ]; then
     # only the pinned tag was rejected, and it is settled; a separate failure in the same fetch still counts
     grep -Eq '^(error|fatal):' <<<"$out" || return 0
     printf '%s\n' "$out" >&2
@@ -216,8 +219,11 @@ fleet_fetch_tags() {
     return "$rc"
   fi
   printf '%s\n' "$out" >&2
-  for t in $bad; do
-    echo "fleet: the local tag $t differs from origin's (re-cut release?): git -C $dir tag -d $t, then fleet sync" >&2
+  for t in "${bad[@]}"; do
+    case "$t" in
+      "unparsed rejection: "*) echo "fleet: git rejected a tag fetch in $dir and the tag could not be named ($t); compare the local tags with origin's" >&2 ;;
+      *) echo "fleet: the local tag $t differs from origin's (re-cut release?): git -C $dir tag -d $t, then fleet sync" >&2 ;;
+    esac
   done
   return 1
 }
