@@ -870,7 +870,7 @@ run fleet verify --session acme-mm
 rc_is "…another session verifies clean on its own" 0
 run fleet launch acme-security
 rc_is "…and only the bad one is refused a launch" 1
-has "…saying its dir" "$OUT" "its engsys plugin (in $SESS/acme-security) does not match"
+has "…saying its dir, and that it is the settings (an enabled stray plugin), not the engsys plugin" "$OUT" "what it loads (in $SESS/acme-security) does not pass the integrity check (settings or user-scope config)"
 rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"; run fleet launch acme-mm
 rc_is "…while the good one launches" 0
 echo '{"syncClaudeAiSkills":false,"syncClaudeAiPlugins":false}' >"$SESS/acme-security/settings.json"

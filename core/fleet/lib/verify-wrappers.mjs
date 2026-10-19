@@ -1585,9 +1585,10 @@ export async function run(argv, {
     for (const mp of market) {
       if (l.includes(mp.id) || (mp.roots || []).some((r) => l.includes(r))) return /^release /.test(l) ? `instance release (${mp.id})` : `instance plugin ${mp.id}`;
     }
+    // the label comes first: settings, user-cfg and memory lines also carry an absolute path, which says nothing about the plugin
+    if (/^(settings|user-cfg|memory|sched) /.test(l)) return 'settings or user-scope config';
     if (a.engsysDir && l.includes(a.engsysDir)) return 'host kit';
     if (/^(release|version|no-path|two-paths|disabled|shadowed) /.test(l) || /^\S+\s+\//.test(l)) return 'engsys plugin';
-    if (/^(settings|user-cfg|memory|sched) /.test(l)) return 'settings or user-scope config';
     return 'pin checkout';
   };
   const infoLines = (lines) => { for (const l of lines) out(`verify: info ${l}`); };

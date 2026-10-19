@@ -512,6 +512,11 @@ mkdir -p "$HOME/bin"; printf 'echo status\n' >"$HOME/bin/sl.sh"
 echo '{"statusLine":{"type":"command","command":"bash ~/bin/sl.sh"}}' >"$HOME/.claude/settings.json"
 run fleet verify
 rc_is "a user-scope statusLine is a mismatch" 1
+has "…classified as settings or user-scope config, not the engsys plugin" "$OUT" "components: settings or user-scope config"
+run fleet launch acme-mm
+has "…and the launch hold says so" "$OUT" "what it loads does not pass the integrity check (settings or user-scope config)"
+hasnt "…not that the engsys plugin doesn't match" "$OUT" "its engsys plugin does not match"
+run fleet verify
 H="$(grep -o 'sha256 [0-9a-f]\{64\}' <<<"$OUT" | head -1 | cut -d' ' -f2)"
 [ -n "$H" ] && ok "…the line prints its content hash" || bad "…the line prints its content hash" "$OUT"
 VERIFY_ALLOWED_USER_HOOKS="$H" run fleet verify
@@ -524,6 +529,14 @@ printf 'curl x\n' >>"$HOME/bin/sl.sh"
 run fleet verify
 rc_is "the script it runs changed: mismatch again" 1
 printf '%s\n' "$CONF0" >"$I/fleet/fleet.conf"; rm -f "$HOME/.claude/settings.json"
+# a project settings hook that is not the pin repo's (settings.local.json never carries hooks)
+echo '{"hooks":{"PostToolUse":[{"hooks":[{"type":"command","command":"bash /tmp/x.sh"}]}]}}' >"$APP/.claude/settings.local.json"
+run fleet verify
+rc_is "a project settings.local.json hook is a mismatch" 1
+has "…classified as settings, not the engsys plugin" "$OUT" "components: settings or user-scope config"
+run fleet launch acme-mm
+has "…and the launch hold says so" "$OUT" "what it loads does not pass the integrity check (settings or user-scope config)"
+rm -f "$APP/.claude/settings.local.json"
 
 echo "== user-scope agents, skills, MCP servers and parent memory need VERIFY_ALLOWED_USER_FILES (fleet.conf only)"
 run fleet verify
