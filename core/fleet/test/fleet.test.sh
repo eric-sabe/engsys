@@ -122,7 +122,8 @@ cat >"$T/bin/gh" <<'SH'
 echo "gh $*" >>"$FAKE/gh.log"
 case "${1:-} ${2:-}" in
   "issue view") cat "$FAKE/ledger-$3.json" ;;
-  "issue comment") [ ! -f "$FAKE/comment-fail" ] || { echo "gh: HTTP 502" >&2; exit 1; } ;;   # an alert that can't be delivered
+  "issue comment") [ ! -f "$FAKE/record-head-dir" ] || git -C "$(cat "$FAKE/record-head-dir")" rev-parse HEAD >>"$FAKE/head-at-comment.log"   # where a checkout is when an alert goes out
+    [ ! -f "$FAKE/comment-fail" ] || { echo "gh: HTTP 502" >&2; exit 1; } ;;   # an alert that can't be delivered
 esac
 exit 0
 SH
@@ -1326,7 +1327,7 @@ has "in sync: no drift reported" "$OUT" "in sync"
 git -C "$E" commit -q --allow-empty -m "engsys 1.4.0 re-cut"; git -C "$E" tag -f v1.4.0 >/dev/null
 git -C "$E" push -q -f origin main v1.4.0
 RECUT_C="$(git -C "$E" rev-parse v1.4.0)"
-[ "$RECUT_C" != "$STALE_C" ] && ok "(the re-cut tag is a different commit)" || bad "(the re-cut tag is a different commit)"
+if [ "$RECUT_C" != "$STALE_C" ]; then ok "(the re-cut tag is a different commit)"; else bad "(the re-cut tag is a different commit)"; fi
 run fleet sync --check
 rc_is "--check: a stale local pinned tag is drift" 1
 has "…named as a re-cut release" "$OUT" "stale local copy of v1.4.0"
@@ -1358,7 +1359,7 @@ run fleet sync
 rc_is "isolated: baseline sync exits 0" 0
 OLDW="$(git -C "$STATE/engsys" rev-parse HEAD)"
 recut_engsys "isolated"; NEWW="$(git -C "$E" rev-parse v1.4.0)"
-[ "$NEWW" != "$OLDW" ] && ok "(the re-cut tag is a different commit)" || bad "(the re-cut tag is a different commit)"
+if [ "$NEWW" != "$OLDW" ]; then ok "(the re-cut tag is a different commit)"; else bad "(the re-cut tag is a different commit)"; fi
 run fleet sync --check
 rc_is "isolated --check: a stale local copy of the pinned tag in the worktree is drift" 1
 has "…named as a re-cut release" "$OUT" "engsys worktree is at a stale local copy of v1.4.0"
@@ -1383,7 +1384,7 @@ rc_is "instance: baseline sync exits 0" 0
 eq "…the instance checkout is at its pin" "$(git -C "$INST" describe --tags --exact-match)" v0.2.0
 OLDI="$(git -C "$INST" rev-parse HEAD)"
 recut_instance "first"; NEWI="$(git -C "$I" rev-parse v0.2.0)"
-[ "$NEWI" != "$OLDI" ] && ok "(the re-cut instance tag is a different commit)" || bad "(the re-cut instance tag is a different commit)"
+if [ "$NEWI" != "$OLDI" ]; then ok "(the re-cut instance tag is a different commit)"; else bad "(the re-cut instance tag is a different commit)"; fi
 run fleet sync --check
 rc_is "instance --check: a stale local pinned instance tag at HEAD is drift" 1
 has "…named as a re-cut release" "$OUT" "instance checkout is at a stale local copy of v0.2.0"
@@ -1448,6 +1449,18 @@ has "…with the new pair" "$(last_alert)" "$NEWW2"
 run fleet sync
 eq "…and then it is latched" "$(alerts)" "$((A1 + 1))"
 git -C "$ENGSYS_HOST" worktree remove --force "$STATE/engsys" >/dev/null 2>&1 || true
+# ordering: the alert goes out from the running kit while the checkout is still on the OLD commit
+setconf "INSTANCE_MARKETPLACE=" "GH_APP_ENV=" "ENGSYS_REF=v1.4.0" "$NOTIFY"
+run fleet sync
+rc_is "ordering: baseline sync of the plain checkout exits 0" 0
+OLDO="$(git -C "$ENGSYS_HOST" rev-parse HEAD)"
+recut_engsys "ordering"; NEWO="$(git -C "$E" rev-parse v1.4.0)"
+printf '%s\n' "$ENGSYS_HOST" >"$FAKE/record-head-dir"; : >"$FAKE/head-at-comment.log"
+run fleet sync
+rm -f "$FAKE/record-head-dir"
+rc_is "ordering: the re-cut tag is adopted" 0
+eq "…the checkout was still on the old commit when the alert went out" "$(tail -n 1 "$FAKE/head-at-comment.log")" "$OLDO"
+eq "…and is on origin's commit afterwards" "$(git -C "$ENGSYS_HOST" rev-parse HEAD)" "$NEWO"
 # the instance repo's tag too
 setconf "GH_APP_ENV=" "ENGSYS_REF=v1.4.0" "INSTANCE_REF=v0.2.0" "$NOTIFY"
 run fleet sync
@@ -1482,8 +1495,8 @@ has "…" "$SEG" "plugin marketplace add https://github.com/vendor/engsys.git#v1
 has "…and its plugin reinstalled" "$SEG" "plugin install core@engsys"
 has "…says so" "$OUT" "marketplace engsys: re-added at v1.4.0, whose tag was re-cut upstream"
 rm1="$(lineno "$SEG" "plugin marketplace remove engsys")"; ad1="$(lineno "$SEG" "plugin marketplace add https://github.com/vendor/engsys.git#v1.4.0")"; in1="$(lineno "$SEG" "plugin install core@engsys")"
-[ -n "$rm1" ] && [ "$rm1" -lt "$ad1" ] && [ "$ad1" -lt "$in1" ] && ok "…in that order" || bad "…in that order" "$SEG"
-[ ! -e "$STATE/pin-recut.reinstall" ] && ok "…and nothing is left pending" || bad "…and nothing is left pending" "$(cat "$STATE/pin-recut.reinstall")"
+if [ -n "$rm1" ] && [ "$rm1" -lt "$ad1" ] && [ "$ad1" -lt "$in1" ]; then ok "…in that order"; else bad "…in that order" "$SEG"; fi
+if [ ! -e "$STATE/pin-recut.reinstall" ]; then ok "…and nothing is left pending"; else bad "…and nothing is left pending" "$(cat "$STATE/pin-recut.reinstall")"; fi
 m="$(mark)"; run fleet sync
 hasnt "a sync after that refreshes nothing again" "$(since "$m")" "plugin marketplace remove engsys"
 # interrupted (the CLI fails the removal): the work stays pending on disk, --check says so, and the next sync finishes it
@@ -1499,14 +1512,14 @@ m="$(mark)"; run fleet sync
 rc_is "the next sync finishes it" 0
 has "…reinstalling the marketplace" "$(since "$m")" "plugin marketplace add https://github.com/vendor/engsys.git#v1.4.0"
 has "…and its plugin" "$(since "$m")" "plugin install core@engsys"
-[ ! -e "$STATE/pin-recut.reinstall" ] && ok "…and clears the pending file" || bad "…and clears the pending file"
+if [ ! -e "$STATE/pin-recut.reinstall" ]; then ok "…and clears the pending file"; else bad "…and clears the pending file"; fi
 run fleet sync --check
 rc_is "…after which --check is clean" 0
 # the cache copies (Copilot): the plugin files must be the new commit's
 setconf "INSTANCE_MARKETPLACE=" "GH_APP_ENV=" "ENGSYS_REF=v1.4.0" "HARNESS=copilot"
 run fleet sync
 CP="$STATE/copilot-home/installed-plugins/engsys/core"
-[ -d "$CP" ] && ok "copilot: the plugin cache is installed" || bad "copilot: the plugin cache is installed" "$OUT"
+if [ -d "$CP" ]; then ok "copilot: the plugin cache is installed"; else bad "copilot: the plugin cache is installed" "$OUT"; fi
 printf 'v2\n' >"$E/core/recut-mark"; git -C "$E" add -A; git -C "$E" commit -q -m "engsys re-cut with a changed plugin file"; git -C "$E" tag -f v1.4.0 >/dev/null; git -C "$E" push -q -f origin main v1.4.0
 run fleet sync
 rc_is "copilot: sync adopts the re-cut tag" 0

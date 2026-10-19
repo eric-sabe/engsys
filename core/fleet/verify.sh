@@ -113,6 +113,7 @@ fi
 LATCH="$FLEET_STATE/verify-wrappers.alerted$SFX"
 UNVERIFIED_LATCH="$FLEET_STATE/verify-wrappers.unverified$SFX"
 FORCED_LATCH="$FLEET_STATE/verify-ref-forced.alerted"
+OFFMAIN_LATCH="$FLEET_STATE/verify-instance-offmain.alerted$SFX"
 host="$(hostname -s 2>/dev/null || echo this host)"
 notify() { node "$FLEET_KIT_DIR/notify.mjs" --require-delivery "$@" >&2; } # undelivered: its latch stays as it was, retried next run
 now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
@@ -333,6 +334,16 @@ if [ "$alert" = 1 ]; then
       fi
       if [ -f "$UNVERIFIED_LATCH" ]; then
         notify --level info --incident "wrapper-integrity-unverified$INC" --resolve "Resolved: the engsys plugin check on $host runs again, and passes." && rm -f "$UNVERIFIED_LATCH"
+      fi
+      # An instance release tag that is off its repo's default branch passes for now, with a warning (INSTANCE_OFF_MAIN_ENFORCED
+      # in lib/verify-wrappers.mjs, eric-sabe/engsys#227): said once per distinct warning, at info level.
+      om="$(sed -n 's/^verify: WARNING \(instance release .*\)$/\1/p' <<<"$out" | head -n 1 | cut -c1-400)"
+      if [ -n "$om" ]; then
+        if [ "$(cat "$OFFMAIN_LATCH" 2>/dev/null)" != "$om" ]; then
+          notify --level info --incident "instance-release-off-main$INC" "Plugin check on $host${session:+ (session $session)}: $om. The merge and maintain sessions are not held for it yet." && printf '%s\n' "$om" >"$OFFMAIN_LATCH"
+        fi
+      elif [ -f "$OFFMAIN_LATCH" ]; then
+        notify --level info --incident "instance-release-off-main$INC" --resolve "Resolved: the instance release on $host is on its default branch again, or no longer pinned." && rm -f "$OFFMAIN_LATCH"
       fi ;;
     1)
       fp="$(sed -n 's/^fingerprint: //p' <<<"$out" | tail -1)"

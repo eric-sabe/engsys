@@ -445,7 +445,7 @@ pin_moved_flush() { # send every pending alert not yet latched; keep what could 
     ! grep -Fxq -- "$key" "$PIN_MOVED_LATCH" 2>/dev/null || continue
     IFS='|' read -r what tag old new <<<"$key"
     if [[ "$what" =~ ^(engsys|instance)$ ]] && [[ "$tag" =~ ^[A-Za-z0-9._-]+$ ]] && [[ "$old" =~ ^[0-9a-f]{40}$ ]] && [[ "$new" =~ ^[0-9a-f]{40}$ ]] \
-      && node "$FLEET_KIT_DIR/notify.mjs" --level alert --incident pin-tag-moved --require-delivery \
+      && node "$FLEET_KIT_DIR/notify.mjs" --level alert --incident "pin-tag-moved-$what-$tag-${new:0:12}" --require-delivery \
         "Fleet on $host: the pinned $what release tag $tag moved on origin. This host had $old, origin now has $new, and fleet sync adopted origin's commit (origin is the trust root for the pin). A re-cut can be deliberate. If nobody on the team moved $tag, treat it as a possible compromise: check who pushed it and what changed between the two commits. Nothing else on the host was changed." >&2; then
       printf '%s\n' "$key" >>"$PIN_MOVED_LATCH"
     else

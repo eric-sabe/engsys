@@ -304,8 +304,12 @@ export function settingsCommands(cfg) {
 
 // --- Command lines in settings (hooks and command keys) --------------------------------------------
 // A command is pinned only when everything it runs is known: each simple command (split on ; & | && ||)
-// is a shell no-op (echo, printf, true, false, :, exit), an interpreter, or an absolute path to a
-// regular file, and every file it names is an absolute path to a regular file. Only ~, $HOME and
+// is a shell no-op (echo, printf, true, false, :, exit), an interpreter with an absolute script, a root-owned
+// system program from the short SAFE_PROGRAMS list (they run nothing named in their arguments), a system wrapper
+// (nice, timeout, xargs, ...) whose wrapped command passes these same rules, or an absolute path to a regular file,
+// and every file it names is an absolute path to a regular file. Any other system program (git, perl -e, awk,
+// sed, osascript, ...) is refused: an allowlist, because a denylist of "dangerous" names can be split, aliased
+// or renamed around. Only ~, $HOME and
 // $CLAUDE_PROJECT_DIR are expanded. Rejected, never guessed at: other variables, command substitution,
 // globs, ~user, brace expansion, input redirects, output redirects other than to /dev/null or another
 // fd, subshells, env assignments, a program found on PATH that is not an interpreter in SYSTEM_BIN_DIRS,
@@ -318,7 +322,31 @@ export function settingsCommands(cfg) {
 /** Where an interpreter named without a path may come from; its resolved path is part of the pin. */
 export const SYSTEM_BIN_DIRS = ['/bin', '/usr/bin', '/opt/homebrew/bin', '/usr/local/bin'];
 const SHELLS = ['bash', 'sh', 'zsh'];
-const INTERPRETERS = [...SHELLS, 'node', 'python', 'python3'];
+const INTERPRETERS = [...SHELLS, 'node', 'python', 'python3', 'perl', 'ruby'];
+/** python3.12, python3.13, ... are the same interpreter under a version-suffixed name. */
+const isInterp = (n) => INTERPRETERS.includes(n) || /^python[0-9.]*$/.test(n);
+/**
+ * Root-owned system programs a pinned command may run by absolute path: none of them runs a command, a script or
+ * code named in its arguments. Everything else under /bin and /usr/bin (git, awk, sed, find, perl -e, osascript,
+ * ...) is refused.
+ */
+const SAFE_PROGRAMS = ['true', 'false', 'echo', 'printf', 'sleep', 'date', 'cat', 'head', 'tail', 'wc', 'uname', 'pwd', 'basename', 'dirname'];
+/** System wrappers: they run the command in their arguments, which then has to pass the same rules. */
+const WRAPPERS = ['nice', 'nohup', 'timeout', 'xargs', 'time'];
+/** Options of a wrapper that take a value, and whether it has a leading positional (timeout's duration). */
+const WRAPPER_VALUE_FLAGS = { nice: ['-n', '--adjustment'], nohup: [], timeout: ['-k', '--kill-after', '-s', '--signal'], xargs: ['-I', '-n', '-P', '-L', '-s', '-d', '-E', '-a'], time: ['-o', '-f'] };
+/** The words after a wrapper's own options (and timeout's duration): the command it runs. */
+function wrapperRest(name, args) {
+  let i = 0;
+  for (; i < args.length && args[i].startsWith('-') && args[i] !== '--'; i++) {
+    if (WRAPPER_VALUE_FLAGS[name].includes(args[i])) i++;
+  }
+  if (args[i] === '--') i++;
+  if (name === 'timeout') i++;
+  return args.slice(i);
+}
+/** The launcher scripts of package managers, run through node: yarn-4.1.0.cjs, npm-cli.js, pnpm.cjs, ... */
+const LAUNCHER_RE = /^(yarn|npm|npx|pnpm|corepack|bun)([-.][A-Za-z0-9.-]*)?\.(cjs|mjs|js)$/;
 const NOOPS = ['echo', 'printf', 'true', 'false', ':', 'exit'];
 /**
  * Interpreter flags a pinned command may use: they change no code that runs. Anything else (-c, -e, -m,
@@ -328,6 +356,7 @@ const SAFE_FLAGS = {
   shell: /^[-+][euxvf]+$|^-o$|^(errexit|nounset|pipefail|xtrace)$|^--norc$|^--noprofile$/,
   node: /^--(no-warnings|enable-source-maps|no-deprecation|trace-warnings)$/,
   python: /^-[uBEsI]+$/,
+  none: /(?!)/, // perl, ruby: no flag is safe
 };
 /** Directories whose programs are root-owned on a stock macOS/Linux host: pinned by path alone. */
 const ROOT_BIN_DIRS = ['/bin', '/usr/bin'];
@@ -350,12 +379,6 @@ const taskRunnerOf = (word) => {
   const base = path.basename(String(word)).toLowerCase().replace(/\.(cmd|bat|exe)$/, '');
   return TASK_RUNNERS.includes(base) ? base : '';
 };
-/**
- * A task runner named inside an argument of a system wrapper (xargs sh -c "npm run x", find -exec make): a runner name as
- * a whole word, so `make` in `make-docs.sh` or `cmake-build` does not count, `./gradlew` and `node_modules/.bin/npm` do.
- */
-const RUNNER_WORD_RE = new RegExp(`(^|[^A-Za-z0-9_.-])(${TASK_RUNNERS.map((r) => r.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&')).join('|')})($|[^A-Za-z0-9_.-])`);
-const runnerInText = (text) => { const m = RUNNER_WORD_RE.exec(String(text)); return m ? m[2] : ''; };
 const runnerProblem = (name) => `a task runner (${name}) runs manifest code that isn't pinned; use a direct committed script`;
 
 /**
@@ -483,11 +506,13 @@ export function parseSettingsCommand(command, { home = os.homedir(), projectDir 
         for (const a of args.slice(i + 2)) if (a.includes('/')) fileArg(a, 'an argument');
         return;
       }
-      const fam = SHELLS.includes(name) ? 'shell' : name === 'node' ? 'node' : 'python';
+      const fam = SHELLS.includes(name) ? 'shell' : name === 'node' ? 'node' : name.startsWith('python') ? 'python' : 'none';
       if (SHELLS.includes(name) && args[i] === '-o' && i + 1 < args.length) { i++; continue; }
       if (!SAFE_FLAGS[fam].test(args[i])) { problems.push(`${name} ${args[i]} can load code that can't be pinned`); return; }
     }
     if (i >= args.length) { problems.push(`${name} with no script file`); return; }
+    // a package manager's own launcher or a runner wrapper script is a task runner however it is reached
+    if (taskRunnerOf(args[i]) || LAUNCHER_RE.test(path.basename(args[i]))) { problems.push(runnerProblem(path.basename(args[i]))); return; }
     fileArg(args[i], `the ${name} script`);
     for (const a of args.slice(i + 1)) if (!a.startsWith('-') && a.includes('/')) fileArg(a, 'an argument');
   };
@@ -502,7 +527,7 @@ export function parseSettingsCommand(command, { home = os.homedir(), projectDir 
       let real = prog;
       try { real = fs.realpathSync(prog); } catch { /* keep */ }
       const base = path.basename(prog);
-      const pathOnly = (INTERPRETERS.includes(base) || base === 'env')
+      const pathOnly = (isInterp(base) || base === 'env')
         ? underSystem(prog) && underSystem(real)
         : ROOT_BIN_DIRS.some((d) => prog.startsWith(`${d}/`)) && ROOT_BIN_DIRS.some((d) => real.startsWith(`${d}/`));
       if (pathOnly && (k === 'file' || k === 'symlink')) {
@@ -511,22 +536,16 @@ export function parseSettingsCommand(command, { home = os.homedir(), projectDir 
           if (!args.length || args[0].startsWith('-') || args[0].includes('=')) { problems.push('env with options or assignments'); return; }
           [prog, ...args] = args;
           if (taskRunnerOf(prog)) { problems.push(runnerProblem(taskRunnerOf(prog))); return; }
-          if (!INTERPRETERS.includes(prog)) { problems.push(`env runs a program that is not an interpreter: ${prog}`); return; }
+          if (!isInterp(prog)) { problems.push(`env runs a program that is not an interpreter: ${prog}`); return; }
           const p = resolveBin(prog);
           if (!p) { problems.push(`interpreter ${prog} not found in ${SYSTEM_BIN_DIRS.join(', ')}`); return; }
           programs.push(p);
           runInterpreter(prog, args);
-        } else if (INTERPRETERS.includes(base)) runInterpreter(base, args);
-        else {
-          // a system wrapper (xargs, nice, timeout, find -exec, ...) can run another program: refuse a task runner named
-          // among its words or inside one of them (xargs sh -c "npm run x"), and any interpreter it would run, whose own
-          // command line is then not one this parser sees (xargs sh -c "...")
-          const wrapped = args.map((a) => taskRunnerOf(a) || runnerInText(a)).find(Boolean);
-          if (wrapped) { problems.push(runnerProblem(wrapped)); return; }
-          const interp = args.map((a) => path.basename(a)).find((a) => INTERPRETERS.includes(a));
-          if (interp) { problems.push(`a system wrapper runs an interpreter (${interp}) whose command can't be pinned; name the script directly`); return; }
+        } else if (isInterp(base)) runInterpreter(base, args);
+        else if (WRAPPERS.includes(base)) simple(wrapperRest(base, args)); // the wrapped command passes the same rules
+        else if (SAFE_PROGRAMS.includes(base)) {
           for (const a of args) if (!a.startsWith('-') && a.includes('/')) fileArg(a, 'an argument');
-        }
+        } else problems.push(`${prog} is not on the list of system programs that can't run code from their arguments (${SAFE_PROGRAMS.join(', ')}) or a wrapper`);
         return;
       }
       fileArg(prog, 'the program');
@@ -534,7 +553,7 @@ export function parseSettingsCommand(command, { home = os.homedir(), projectDir 
       return;
     }
     if (prog.includes('/')) { problems.push(`the program is not an absolute path: ${prog}`); return; }
-    if (!INTERPRETERS.includes(prog)) { problems.push(`a program found on PATH that is not an interpreter: ${prog}`); return; }
+    if (!isInterp(prog)) { problems.push(`a program found on PATH that is not an interpreter: ${prog}`); return; }
     const p = resolveBin(prog);
     if (!p) { problems.push(`interpreter ${prog} not found in ${SYSTEM_BIN_DIRS.join(', ')}`); return; }
     programs.push(p);
@@ -1244,6 +1263,16 @@ export function compare(tree, local, subdir = PLUGIN_SUBDIR) {
   return diffs;
 }
 
+/**
+ * Is an INSTANCE marketplace's release tag required to be on its repo's default branch (engsys#196)? The engsys
+ * release always is (fetchRelease's `compare`, a MISMATCH otherwise). Instance fleets tag `release:` commits that sit
+ * off the default branch (FeedFrwd/ff-engsys-fleet: v0.1.15 to v0.1.18 all diverge), so for now an off-main instance tag
+ * is a WARNING (printed, and alerted at info level by verify.sh) and every other instance check still enforces: the file
+ * hashes against the tag's tree, a non-tag pin, an unreadable source. Flip this to true, and nothing else, to make it a
+ * MISMATCH like engsys (follow-up: eric-sabe/engsys#227).
+ */
+export const INSTANCE_OFF_MAIN_ENFORCED = false;
+
 /** Where a marketplace lists its plugins, at the root of its repo. */
 export const MARKETPLACE_FILE = '.claude-plugin/marketplace.json';
 /** The placeholder directory a marketplace plugin's install is scanned under until its real source directory is known. */
@@ -1388,8 +1417,9 @@ function readCache(file) {
 
 function writeCache(file, data) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(data) + '\n', { mode: 0o600 });
+  // 'wx': never write through a file or symlink someone else put at the temp name; the cache dir is one a session can write
+  const tmp = `${file}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(data) + '\n', { mode: 0o600, flag: 'wx' });
   fs.renameSync(tmp, file);
 }
 
@@ -1503,6 +1533,9 @@ export function problemFingerprint(lines) {
   const parts = groupProblems(lines).map((g) => `${g.label}=${g.count}`);
   const integrity = new Set(PROBLEM_GROUPS.filter((g) => g.integrity).map((g) => g.key));
   for (const l of lines) if (integrity.has(problemGroup(l))) parts.push(l.replace(/\b[0-9a-f]{40,64}\b/g, '#'));
+  // a synced-skills bucket: its path and file count, so a file planted into an already reported bucket re-alerts while a
+  // content-only update (same files) does not (engsys#201)
+  for (const l of lines) if (/synced claude\.ai skill file/.test(l)) parts.push(l.replace(/\(synced skills are not trusted.*$/, ''));
   return crypto.createHash('sha1').update(parts.join('\n')).digest('hex');
 }
 
@@ -1510,6 +1543,7 @@ export function problemFingerprint(lines) {
 export async function run(argv, {
   fetch = fetchRelease,
   blob = fetchBlob,
+  instanceOffMainEnforced = INSTANCE_OFF_MAIN_ENFORCED,
   projectApi = (endpoint) => ghJson('gh', endpoint, 30_000),
   projectLocal = projectLocalState,
   now = Date.now,
@@ -1528,9 +1562,21 @@ export async function run(argv, {
     if (groups.some((g) => g.userScope)) out('hint: set up a separate fleet config dir: fleet config-dir init (see fleet guide § 6.1)');
     // last hint wins in the alert: leftover claude.ai-synced skills have a specific cleanup
     if (sorted.some((l) => /synced claude\.ai skill file/.test(l))) out('hint: claude.ai synced skills into the fleet config dir. Set syncClaudeAiSkills and syncClaudeAiPlugins to false in its settings.json (fleet config-dir init does it), delete its skills/synced/ directory, then fleet verify (fleet guide § 6.1)');
+    // which of the pinned things the problems are in, for the launch gate's hold reason
+    const comps = [...new Set(sorted.map(componentOf))];
+    out(`components: ${comps.join(', ')}`);
     out(`fingerprint: ${problemFingerprint(sorted)}`);
     if (a.cache) { try { fs.rmSync(a.cache, { force: true }); } catch { /* best effort */ } }
     return 1;
+  };
+  const componentOf = (l) => {
+    for (const mp of market) {
+      if (l.includes(mp.id) || (mp.roots || []).some((r) => l.includes(r))) return /^release /.test(l) ? `instance release (${mp.id})` : `instance plugin ${mp.id}`;
+    }
+    if (a.engsysDir && l.includes(a.engsysDir)) return 'host kit';
+    if (/^(release|version|no-path|two-paths|disabled|shadowed) /.test(l) || /^\S+\s+\//.test(l)) return 'engsys plugin';
+    if (/^(settings|user-cfg|memory|sched) /.test(l)) return 'settings or user-scope config';
+    return 'pin checkout';
   };
   const infoLines = (lines) => { for (const l of lines) out(`verify: info ${l}`); };
   const warnLines = (lines) => { for (const l of lines) out(`verify: WARNING ${l}`); };
@@ -1624,13 +1670,16 @@ export async function run(argv, {
   }
   for (const d of compare(rel.tree, local)) problems.push(`${d.kind.padEnd(10)} ${cachePath(d.root, d.path)} ${d.have}`);
   const released = new Map();
+  const marketWarnings = [];
   for (const mp of market) {
     try {
       const key = `${mp.repo}@${mp.tag}`;
       if (!released.has(key)) released.set(key, await fetch({ repo: mp.repo, tag: mp.tag }));
       const mrel = released.get(key);
       if (mrel.status !== 'ahead' && mrel.status !== 'identical') {
-        problems.push(`release    ${mp.id}: ${mp.tag} of ${mp.repo} is commit ${mrel.commit}, which is not on ${mrel.defaultBranch} (compare: ${mrel.status})`);
+        const line = `${mp.id}: ${mp.tag} of ${mp.repo} is commit ${mrel.commit}, which is not on ${mrel.defaultBranch} (compare: ${mrel.status})`;
+        if (instanceOffMainEnforced) problems.push(`release    ${line}`);
+        else marketWarnings.push(`instance release ${line}; allowed for now, a MISMATCH once INSTANCE_OFF_MAIN_ENFORCED is on (eric-sabe/engsys#227)`);
       }
       const mfSha = mrel.tree.get(MARKETPLACE_FILE);
       if (!mfSha) throw new Unverified(`${mp.repo}@${mp.tag} has no ${MARKETPLACE_FILE}`);
@@ -1665,6 +1714,7 @@ export async function run(argv, {
       else problems.push(`sched      ${st.rel} holds scheduled prompts, not on VERIFY_ALLOWED_USER_FILES (sha256 ${st.hash})`);
     }
   }
+  warnings = [...marketWarnings, ...warnings];
   warnLines(warnings);
   if (problems.length) return mismatch(problems);
 

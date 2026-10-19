@@ -920,8 +920,20 @@ test('instance marketplace plugin: fail closed when it cannot be checked (engsys
   r = await run3(pluginList([userEntry(eng), instEntry(acme)]), { fetch: async ({ repo }) => { if (repo === 'acme/fleet') throw new Unverified('gh api failed: 404'); return release; } });
   assert.equal(r.rc, 3); assert.match(r.text, /not verified against acme\/fleet@v3\.4\.5: gh api failed: 404/);
   // the instance tag is on an unmerged commit
-  r = await run3(pluginList([userEntry(eng), instEntry(acme)]), { fetch: async ({ repo }) => (repo === 'acme/fleet' ? instanceRelease({ status: 'diverged' }) : release) });
+  // the instance tag is off the default branch: a WARNING for now (eric-sabe/engsys#227), the files still enforce
+  const offMain = { fetch: async ({ repo }) => (repo === 'acme/fleet' ? instanceRelease({ status: 'diverged' }) : release) };
+  r = await run3(pluginList([userEntry(eng), instEntry(acme)]), offMain);
+  assert.equal(r.rc, 0, r.text); assert.match(r.text, /verify: WARNING instance release acme@acme-fleet: v3\.4\.5 of acme\/fleet is commit d+, which is not on main \(compare: diverged\).*engsys#227/);
+  fs.appendFileSync(path.join(acme, 'bin', 'acme-guard'), 'tampered\n');
+  r = await run3(pluginList([userEntry(eng), instEntry(acme)]), offMain);
+  assert.equal(r.rc, 1, 'an off-main instance tag does not excuse a modified file'); assert.match(r.text, /modified\s+\S+\/bin\/acme-guard/);
+  fs.writeFileSync(path.join(acme, 'bin', 'acme-guard'), INSTANCE_FILES['plugins/acme/bin/acme-guard']);
+  // the one switch: enforced, the same tag is a MISMATCH like engsys
+  r = await run3(pluginList([userEntry(eng), instEntry(acme)]), { ...offMain, instanceOffMainEnforced: true });
   assert.equal(r.rc, 1); assert.match(r.text, /release\s+acme@acme-fleet: v3\.4\.5 of acme\/fleet is commit d+, which is not on main/);
+  // the engsys tag off the default branch is still a MISMATCH, whatever the switch says
+  r = await run3(pluginList([userEntry(eng), instEntry(acme)]), { fetch: async ({ repo }) => (repo === 'acme/fleet' ? inst : { ...release, status: 'diverged' }) });
+  assert.equal(r.rc, 1); assert.match(r.text, /release\s+v9\.9\.9 is commit c+, which is not on main/);
   // the release's marketplace file can't say where the plugin comes from: not verified, no directory is guessed
   for (const market of ['not json', JSON.stringify({ plugins: [] }), JSON.stringify({ plugins: [{ name: 'acme', source: { source: 'github', repo: 'x/y' } }] }),
     JSON.stringify({ plugins: [{ name: 'acme', source: './' }] }), JSON.stringify({ plugins: [{ name: 'acme', source: './../etc' }] }),
@@ -997,12 +1009,47 @@ test('hookTargets: a task runner is refused however it is spelled, a direct scri
   // the wrapped command hidden inside a shell string or a script argument (CodeRabbit, engsys#185 review)
   refused('/usr/bin/xargs sh -c "npm run lint"', 'npm');
   refused('/usr/bin/timeout 5 bash -c "cd x && make lint"', 'make');
-  refused('/usr/bin/find . -exec ./gradlew build', 'gradlew');
   refused('/usr/bin/nice node_modules/.bin/npm run lint', 'npm');
-  const notRunner = (cmd, re) => assert.match(hookTargets(cmd, dir).problems.join('\n'), re, cmd);
-  notRunner('/usr/bin/xargs sh -c "echo hi"', /a system wrapper runs an interpreter \(sh\)/);
-  notRunner('/usr/bin/nice python3 -c "print(1)"', /a system wrapper runs an interpreter \(python3\)/);
-  assert.deepEqual(hookTargets('/usr/bin/nice true make-docs.sh cmake-build', dir).problems, [], 'positive control: make-docs.sh and cmake-build are not the runner make');
+  // allowlist, not denylist (Nyx and review on the first push): a root-owned program that can run what its arguments name
+  const unlisted = (cmd, re = /is not on the list of system programs|not an absolute path|found on PATH that is not an interpreter|can load code|task runner/) => {
+    const r = hookTargets(cmd, dir);
+    assert.ok(r.problems.length > 0, `${cmd}: must be refused`);
+    assert.match(r.problems.join('\n'), re, cmd);
+  };
+  fs.writeFileSync(path.join(dir, 'hook.pl'), 'print 1;\n');
+  unlisted('/usr/bin/git lint', /\/usr\/bin\/git is not on the list of system programs/); // a local alias runs anything
+  unlisted('/usr/bin/perl hook.pl', /the perl script is not an absolute path/);
+  unlisted('/usr/bin/ruby hook.rb', /the ruby script is not an absolute path/);
+  unlisted(`/usr/bin/perl -e 'exec "n"."pm", "run", "lint"'`, /perl -e can load code/);
+  unlisted(`/usr/bin/awk 'BEGIN{system("np" "m run lint")}'`, /\/usr\/bin\/awk is not on the list/);
+  unlisted('/usr/bin/sed -e s/a/b/ x', /\/usr\/bin\/sed is not on the list/);
+  unlisted('/usr/bin/osascript x', /\/usr\/bin\/osascript is not on the list/);
+  unlisted('/usr/bin/xargs perl hook.pl', /the perl script is not an absolute path/);
+  unlisted('/usr/bin/nice python3.12 hook.py', /the python3\.12 script is not an absolute path|interpreter python3\.12 not found/); // relative script, or not installed here
+  unlisted('/usr/bin/nice python3.12 -c "print(1)"', /python3\.12 -c can load code|interpreter python3\.12 not found/);
+  unlisted('bash "$CLAUDE_PROJECT_DIR/gradlew" build', /a task runner \(gradlew\)/);
+  unlisted('node "$CLAUDE_PROJECT_DIR/.yarn/releases/yarn-4.1.0.cjs" run lint', /a task runner \(yarn-4\.1\.0\.cjs\)/);
+  unlisted('node /usr/lib/node_modules/npm/bin/npm-cli.js run lint', /a task runner \(npm-cli\.js\)/);
+  // a wrapper running a bare-name PATH program (Homebrew PATH dirs are writable), directly or through env
+  unlisted('/usr/bin/nice somecli', /found on PATH that is not an interpreter: somecli/);
+  unlisted('/usr/bin/xargs mybin', /found on PATH that is not an interpreter: mybin/);
+  unlisted('/usr/bin/xargs env mybin', /found on PATH that is not an interpreter: env/);
+  unlisted('/usr/bin/find . -exec ./gradlew build', /\/usr\/bin\/find is not on the list/);
+  // positive controls: the allowlist and the wrappers still let the safe forms through
+  assert.deepEqual(hookTargets('/usr/bin/nice true make-docs.sh cmake-build', dir).problems, [], 'true is a no-op, whatever it is given');
+  assert.deepEqual(hookTargets('/bin/sleep 1', dir).problems, []);
+  assert.deepEqual(hookTargets('/usr/bin/timeout 5 bash "$CLAUDE_PROJECT_DIR/scripts/lint.sh"', dir).problems, [], 'a wrapper around an interpreter with a pinned script');
+  assert.deepEqual(hookTargets('/usr/bin/nice -n 5 bash "$CLAUDE_PROJECT_DIR/scripts/lint.sh"', dir).problems, []);
+  assert.deepEqual(hookTargets('/usr/bin/xargs -n 1 bash "$CLAUDE_PROJECT_DIR/scripts/lint.sh"', dir).problems, []);
+  assert.deepEqual(hookTargets('perl "$CLAUDE_PROJECT_DIR/hook.pl"', dir).problems, [], 'perl with an absolute pinned script is the interpreter form');
+  fs.mkdirSync(path.join(dir, '.claude', 'hooks'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.claude', 'hooks', 'post-edit-reminders.sh'), 'echo r\n');
+  assert.deepEqual(hookTargets('bash "$CLAUDE_PROJECT_DIR/.claude/hooks/post-edit-reminders.sh"', dir),
+    { targets: ['.claude/hooks/post-edit-reminders.sh'], problems: [] }, "keystone's real hook form");
+  // a path segment named like a runner is not the runner (CodeRabbit nit: the program/basename is what counts)
+  fs.mkdirSync(path.join(dir, 'scripts', 'task'));
+  fs.writeFileSync(path.join(dir, 'scripts', 'task', 'run.sh'), 'echo r\n');
+  assert.deepEqual(hookTargets('bash "$CLAUDE_PROJECT_DIR/scripts/task/run.sh"', dir).problems, [], '.../task/run.sh is not the runner task');
   // by absolute path, through env, through sh -c, and a repo-tracked wrapper script of a runner
   refused('/usr/local/bin/npm run lint', 'npm');
   refused('/usr/bin/env npm run lint', 'npm');
@@ -1227,6 +1274,10 @@ test('synced claude.ai skills: grouped per bucket, never trusted by source, and 
   const before = fpOf(check().problems);
   fs.writeFileSync(path.join(dir1, 'skill1', 'SKILL.md'), 'skill skill1 v2\n');
   assert.equal(fpOf(check().problems), before, 'content-only update: same fingerprint');
+  const dir1again = path.join(cfg, 'skills', 'synced', `${org}_${acct}`);
+  fs.mkdirSync(path.join(dir1again, 'planted'), { recursive: true });
+  fs.writeFileSync(path.join(dir1again, 'planted', 'SKILL.md'), 'new file\n');
+  assert.notEqual(fpOf(check().problems), before, 'a file planted into an already reported bucket re-alerts');
   assert.equal(groupProblems(check().problems).find((g) => g.label === 'user-scope skills/agents/files').count, 4);
 
 });

