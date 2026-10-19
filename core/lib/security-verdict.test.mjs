@@ -31,7 +31,8 @@ describe('signed nyx-review verdicts (engsys#197 option B)', () => {
   it('positive control: a verdict signed with the key verifies for the current head', () => {
     const body = sign();
     assert.equal(claimsNyxReview(body), true);
-    assert.deepEqual(checkVerdictBody({ key, repo: REPO, pr: PR, headSha: SHA, body, now }), { state: 'valid', verdict: 'PASS', ts: NOW / 1000, sha: SHA });
+    const c = checkVerdictBody({ key, repo: REPO, pr: PR, headSha: SHA, body, now });
+    assert.deepEqual({ state: c.state, verdict: c.verdict, ts: c.ts, sha: c.sha }, { state: 'valid', verdict: 'PASS', ts: NOW / 1000, sha: SHA });
     const r = evalOne(body);
     assert.equal(r.ok, true);
     assert.equal(r.state, 'verified');
@@ -106,13 +107,57 @@ describe('signed nyx-review verdicts (engsys#197 option B)', () => {
     assert.equal(r.state, 'none');
   });
 
-  it('a signed FINDINGS verdict for the head blocks (exit 4), and the latest valid verdict decides', () => {
-    const findings = { body: sign({ verdict: 'FINDINGS' }), createdAt: '2026-10-19T09:00:00Z' };
-    const pass = { body: sign({ verdict: 'PASS' }), createdAt: '2026-10-19T10:00:00Z' };
+  const at = (min) => () => NOW - min * 60 * 1000; // sign "min minutes ago"
+  const cm = (body, createdAt) => ({ body, createdAt });
+
+  it('a signed FINDINGS verdict for the head blocks (exit 4), and the LATEST SIGNED verdict decides', () => {
     const base = { key, repo: REPO, pr: PR, headSha: SHA, now };
+    const findings = cm(sign({ verdict: 'FINDINGS', now: at(120) }), '2026-10-19T09:00:00Z');
+    const pass = cm(sign({ verdict: 'PASS', now: at(60) }), '2026-10-19T10:00:00Z');
+    const findingsLater = cm(sign({ verdict: 'FINDINGS', now: at(30) }), '2026-10-19T11:00:00Z');
     assert.equal(evaluateSecurityVerdicts({ ...base, comments: [findings] }).exit, 4);
     assert.equal(evaluateSecurityVerdicts({ ...base, comments: [findings, pass] }).ok, true);
-    assert.equal(evaluateSecurityVerdicts({ ...base, comments: [pass, { ...findings, createdAt: '2026-10-19T11:00:00Z' }] }).exit, 4);
+    assert.equal(evaluateSecurityVerdicts({ ...base, comments: [findings, pass, findingsLater] }).exit, 4);
+  });
+
+  it('REGRESSION (replay): re-posting an earlier authentic PASS after a later signed FINDINGS does not flip the outcome', () => {
+    const base = { key, repo: REPO, pr: PR, headSha: SHA, now };
+    const pass = sign({ verdict: 'PASS', now: at(120) });
+    const findings = sign({ verdict: 'FINDINGS', now: at(60) });
+    const comments = [cm(pass, '2026-10-19T10:00:00Z'), cm(findings, '2026-10-19T11:00:00Z'), cm(pass, '2026-10-19T11:30:00Z')];
+    const r = evaluateSecurityVerdicts({ ...base, comments });
+    assert.equal(r.exit, 4, 'the replayed PASS (newer createdAt, older signed ts) must not outrank the FINDINGS');
+    assert.equal(r.counts.duplicate, 1);
+    // Positive control: a genuinely newer signed PASS does clear it.
+    const newer = sign({ verdict: 'PASS', now: at(10) });
+    assert.equal(evaluateSecurityVerdicts({ ...base, comments: [...comments, cm(newer, '2026-10-19T11:40:00Z')] }).ok, true);
+    // Equal signed timestamps: FINDINGS outranks PASS (fail closed), whatever the comment order.
+    const tiedP = sign({ verdict: 'PASS', now: at(5), nonce: '1'.repeat(16) });
+    const tiedF = sign({ verdict: 'FINDINGS', now: at(5), nonce: '2'.repeat(16) });
+    assert.equal(evaluateSecurityVerdicts({ ...base, comments: [cm(tiedF, 'a'), cm(tiedP, 'b')] }).exit, 4);
+    assert.equal(evaluateSecurityVerdicts({ ...base, comments: [cm(tiedP, 'a'), cm(tiedF, 'b')] }).exit, 4);
+  });
+
+  it('REGRESSION (sticky FINDINGS): FINDINGS@A is not cleared by a push to B, in either mode, until a fresh signed verdict exists for B', () => {
+    const findingsA = cm(sign({ sha: SHA2, verdict: 'FINDINGS', now: at(60) }), '2026-10-19T10:00:00Z');
+    const onB = { key, repo: REPO, pr: PR, headSha: SHA, now }; // head moved from SHA2 (A) to SHA (B)
+    for (const require of [false, true]) {
+      const r = evaluateSecurityVerdicts({ ...onB, comments: [findingsA], require });
+      assert.equal(r.ok, false, `require=${require}`);
+      assert.equal(r.exit, 4);
+      assert.equal(r.reason, 'signed_findings_on_earlier_head_unresolved');
+    }
+    // Still sticky when the FINDINGS has expired (age never clears it).
+    const old = cm(sign({ sha: SHA2, verdict: 'FINDINGS', now: at(60 * 24 * 30) }), '2026-09-19T10:00:00Z');
+    assert.equal(evaluateSecurityVerdicts({ ...onB, comments: [old] }).exit, 4);
+    // A signed PASS for B (later than the FINDINGS) clears it; so does a fresh FINDINGS@B (still blocks, for B).
+    const passB = cm(sign({ sha: SHA, verdict: 'PASS', now: at(5) }), '2026-10-19T11:50:00Z');
+    assert.equal(evaluateSecurityVerdicts({ ...onB, comments: [findingsA, passB] }).ok, true);
+    assert.equal(evaluateSecurityVerdicts({ ...onB, comments: [findingsA, passB], require: true }).ok, true);
+    // A PASS for the OLD head (after the FINDINGS) does not satisfy --require on the new head, and is no replay credit.
+    const passA = cm(sign({ sha: SHA2, verdict: 'PASS', now: at(30) }), '2026-10-19T11:00:00Z');
+    assert.equal(evaluateSecurityVerdicts({ ...onB, comments: [findingsA, passA], require: true }).ok, false);
+    assert.equal(evaluateSecurityVerdicts({ ...onB, comments: [findingsA, passA] }).state, 'none');
   });
 
   it('a forged unsigned PASS next to a genuine signed one does not poison a valid verdict, but alone it blocks', () => {
@@ -121,6 +166,14 @@ describe('signed nyx-review verdicts (engsys#197 option B)', () => {
     const base = { key, repo: REPO, pr: PR, headSha: SHA, now };
     assert.equal(evaluateSecurityVerdicts({ ...base, comments: [real, forged] }).ok, true);
     assert.equal(evaluateSecurityVerdicts({ ...base, comments: [forged] }).ok, false);
+  });
+
+  it('only the exact marker is a claim: `<!-- nyx-review-anything` is not', () => {
+    assert.equal(claimsNyxReview('<!-- nyx-review -->\nNYX-VERDICT: PASS'), true);
+    assert.equal(claimsNyxReview('<!-- nyx-review-extra -->\nNYX-VERDICT: PASS'), false);
+    assert.equal(claimsNyxReview('<!--nyx-review-->'), false);
+    assert.equal(claimsNyxReview('<!-- NYX-REVIEW -->'), false);
+    assert.equal(evalOne('<!-- nyx-review-extra -->\nNYX-VERDICT: PASS').state, 'none');
   });
 
   it('refuses to sign malformed claims', () => {
@@ -159,7 +212,7 @@ describe('key file handling', () => {
     generateKeyFile(good);
     const link = path.join(dir, 'link.key');
     fs.symlinkSync(good, link);
-    assert.throws(() => readKeyFile(link), /not a regular file/);
+    assert.throws(() => readKeyFile(link), /not a regular file \(symlink\)/);
     const short = path.join(dir, 'short.key');
     fs.writeFileSync(short, 'abcd\n', { mode: 0o600 });
     assert.throws(() => readKeyFile(short), /at least 32 bytes/);

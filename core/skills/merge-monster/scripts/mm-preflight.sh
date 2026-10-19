@@ -16,11 +16,13 @@
 # --full keeps the raw comments instead.
 #
 # Signed security verdicts (engsys#197, option B; OFF unless --security-verdict is passed): the model passes
-# it only when the config sets ready_requirements.signed_security_verdict: true. Then the LATEST `nyx-review`
-# verdict with a valid HMAC for the PR's CURRENT head SHA decides (core/lib/security-verdict.mjs): PASS passes,
-# FINDINGS fails. Comments that are unsigned, forged, tampered or signed for another head are ignored once a
-# valid verdict for the head exists; with none, an invalid claim fails the PR (a verdict that does not verify
-# never passes silently), as does an unreadable key (exit 1, reason on stderr). --require-security-verdict also fails a
+# it only when the config sets ready_requirements.signed_security_verdict: true. Then the authentic `nyx-review`
+# verdicts (valid HMAC) are ranked by SIGNED timestamp, never comment createdAt, and the latest decides
+# (core/lib/security-verdict.mjs): FINDINGS for ANY head fails and is sticky (a push does not clear it; only a
+# fresh signed verdict for the current head does), and a PASS counts only when signed for the current head.
+# Unsigned, forged or tampered `<!-- nyx-review -->` comments are ignored once an authentic verdict decides;
+# with none, such a claim fails the PR (it never passes silently), as does an unreadable key (exit 1, reason
+# on stderr). --require-security-verdict also fails a
 # PR that has no valid verdict (pass it for PRs that need a security review). Defence in depth, NOT a
 # boundary: the key is readable by every process of the fleet's OS user.
 #

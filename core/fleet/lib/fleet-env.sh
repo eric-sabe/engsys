@@ -370,7 +370,8 @@ export FLEET_CLAUDE_CONFIG_DIR_PER_SESSION
 # (core/lib/security-verdict.mjs, fleet-guide.md).
 : "${FLEET_SECURITY_VERDICT_KEY:=off}"
 case "$FLEET_SECURITY_VERDICT_KEY" in
-  on) FLEET_SECURITY_VERDICT_KEY_FILE="$FLEET_STATE/security-verdict.key"; export FLEET_SECURITY_VERDICT_KEY_FILE ;;
+  # the PATH is deliberately NOT exported (it would reach the tmux server's global environment)
+  on) FLEET_SECURITY_VERDICT_KEY_FILE="$FLEET_STATE/security-verdict.key" ;;
   off) unset FLEET_SECURITY_VERDICT_KEY_FILE ;;
   *) fleet_die "FLEET_SECURITY_VERDICT_KEY must be on or off (got '$FLEET_SECURITY_VERDICT_KEY')" ;;
 esac

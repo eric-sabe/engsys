@@ -34,13 +34,13 @@ chmod +x "$T/bin/gh"
 export FAKE="$T" FLEET_GH="$T/bin/gh"
 unset FLEET_STATE GH_APP_ENV_FILE
 
-# sign <key> <sha> <verdict> <text> → a comment body on stdout, signed by the real library
+# sign <key> <sha> <verdict> <text> [minutes-ago] → a comment body on stdout, signed by the real library
 sign() {
   node --input-type=module -e '
     import fs from "node:fs";
     import { readKeyFile, signVerdict } from "'"$SV"'";
-    process.stdout.write(signVerdict({ key: readKeyFile(process.argv[1]), repo: "acme/app", pr: 7, sha: process.argv[2], verdict: process.argv[3], reviewText: process.argv[4] }));
-  ' "$1" "$2" "$3" "$4"
+    process.stdout.write(signVerdict({ key: readKeyFile(process.argv[1]), repo: "acme/app", pr: 7, sha: process.argv[2], verdict: process.argv[3], reviewText: process.argv[4], now: () => Date.now() - Number(process.argv[5] || 0) * 60000 }));
+  ' "$1" "$2" "$3" "$4" "${5:-0}"
 }
 # view <comment body>... → writes $T/view.json with one comment per argument
 view() {
@@ -92,6 +92,22 @@ view "$(sign "$KEY" "$HEAD_SHA" FINDINGS 'Finding: F1.')"
 run --security-verdict --security-key-file "$KEY"
 rc_is "a signed FINDINGS verdict for the head blocks" 1
 has "  …as findings" signed_findings_for_head
+
+echo "a FINDINGS verdict is sticky across a push (engsys#197 review)"
+FIND_OLD="$(sign "$KEY" "$OLD_SHA" FINDINGS 'Finding: F1.' 60)"
+view "$FIND_OLD"
+run --security-verdict --security-key-file "$KEY"
+rc_is "FINDINGS signed for the OLD head still fails on the new head (a whitespace push does not clear it)" 1
+has "  …as unresolved on an earlier head" "signed_findings_on_earlier_head_unresolved"
+run --require-security-verdict --security-key-file "$KEY"
+rc_is "  …in require mode too" 1
+view "$FIND_OLD" "$(sign "$KEY" "$HEAD_SHA" PASS 'Fixed; no findings.' 5)"
+run --security-verdict --security-key-file "$KEY"
+rc_is "a later signed PASS for the new head clears it (positive control)" 0
+EARLY_PASS="$(sign "$KEY" "$HEAD_SHA" PASS 'ok' 120)"
+view "$EARLY_PASS" "$(sign "$KEY" "$HEAD_SHA" FINDINGS 'bad' 60)" "$EARLY_PASS"
+run --security-verdict --security-key-file "$KEY"
+rc_is "re-posting an earlier authentic PASS after a later FINDINGS does not flip it" 1
 
 view
 run --require-security-verdict --security-key-file "$KEY"

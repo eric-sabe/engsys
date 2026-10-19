@@ -480,13 +480,19 @@ security-lane session posts its verdict with `node <engsys-root>/lib/security-ve
 <head> --verdict PASS|FINDINGS --body-file F`, which refuses outside a security-lane session and for any SHA that is
 not the PR's current head, and signs an HMAC-SHA256 over repo, PR, head SHA, verdict, timestamp, nonce and a hash of the
 review text. Merge-monster verifies it when its config sets `ready_requirements.signed_security_verdict: true`
-(**opt-in, default off**, so existing fleets are unchanged): once on, the latest validly signed verdict for the
-PR's current head decides (a signed FINDINGS verdict fails the READY preflight); unsigned, forged, tampered or
-wrong-head `nyx-review` comments are ignored when such a verdict exists and fail the preflight when none does; an
-unreadable or group-readable key always fails; and a verdict signed for an older head never counts for a new one. What it does not do: the key file is
+(**opt-in, default off**, so existing fleets are unchanged): once on, verdicts are ranked by their signed timestamp
+(never the comment's `createdAt`, so re-posting an old verdict changes nothing) and the latest authentic one decides.
+A signed FINDINGS verdict for any head fails the READY preflight and is sticky: a new push does not clear it, only a
+fresh signed verdict for the current head does. A PASS counts only for the head it was signed for. Unsigned, forged or
+tampered comments with the exact marker `<!-- nyx-review -->` are ignored when an authentic verdict decides and fail
+the preflight when none does (fail closed by design: a claimed verdict that does not verify never passes silently);
+an unreadable or group-readable key always fails. What it does not do: the key file is
 readable by every process running as the fleet's macOS user, so an attended session with a shell can read it and sign a
 verdict. It stops accidental and naive forgery, not a hostile session on the same account. A Nyx reviewer dispatched
-from an interactive role cannot post a valid verdict; the review has to run in the security lane. The real boundary is
+from an interactive role cannot post a valid verdict; the review has to run in the security lane. The security lane is
+any Opus 4.8 line, which includes the maintenance monster, so it can sign verdicts on its own fix PRs; this PR does not
+change who gets the key, and a separate GitHub identity for the lane (#220) is the real fix. The key path reaches a
+session only on its own launch line, never the launcher's or the tmux server's environment. The real boundary is
 a separate GitHub identity for the security lane (eric-sabe/engsys#220); the keystone-side gate that reads these
 verdicts is wired separately.
 

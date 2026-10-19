@@ -30,11 +30,14 @@ ready_requirements:
   review_marker: ""          # evidence comment preflight requires on the PR,
                              # e.g. "<!-- review-findings -->" — empty to skip
   signed_security_verdict: false # opt-in (engsys#197, option B; default off, so existing fleets are unchanged).
-                             # true: the READY preflight runs with --security-verdict. The LATEST `nyx-review`
-                             # verdict carrying a valid HMAC for the PR's CURRENT head SHA decides (PASS
-                             # passes, FINDINGS fails); unsigned, forged, tampered or wrong-head comments
-                             # are ignored once such a verdict exists and FAIL the preflight when none does;
-                             # an unreadable key always fails (fail closed). Needs the fleet to run with
+                             # true: the READY preflight runs with --security-verdict. Verdicts are ranked by
+                             # their SIGNED timestamp (never the comment's createdAt, so a re-posted old
+                             # verdict changes nothing); the latest authentic one decides. FINDINGS (for ANY
+                             # head) fails and is STICKY: a new push does not clear it, only a fresh signed
+                             # verdict for the current head does. A PASS counts only when signed for the
+                             # current head. Unsigned, forged or tampered `<!-- nyx-review -->` comments are
+                             # ignored once an authentic verdict decides and FAIL the preflight when none
+                             # does; an unreadable key always fails (fail closed). Needs the fleet to run with
                              # FLEET_SECURITY_VERDICT_KEY=on. Defence in depth, NOT a boundary (the key is
                              # readable by any process of the fleet's OS user); the boundary is a separate
                              # GitHub identity for the security lane (eric-sabe/engsys#220).

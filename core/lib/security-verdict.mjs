@@ -65,11 +65,25 @@ export function generateKeyFile(file) {
  */
 export function readKeyFile(file) {
   if (typeof file !== 'string' || !file) throw new Error('no key file configured');
-  const st = fs.lstatSync(file);
-  if (!st.isFile()) throw new Error(`key file ${file} is not a regular file`);
-  if (typeof process.getuid === 'function' && st.uid !== process.getuid()) throw new Error(`key file ${file} is not owned by this user`);
-  if ((st.mode & 0o077) !== 0) throw new Error(`key file ${file} must not be readable by group or other (mode ${(st.mode & 0o777).toString(8)})`);
-  const hex = fs.readFileSync(file, 'utf8').trim();
+  // Opened with O_NOFOLLOW and checked with fstat on the descriptor we read from, so a symlink (or a swap
+  // between a check and a read) can't redirect the read to another file.
+  let fd;
+  try {
+    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  } catch (err) {
+    if (err.code === 'ELOOP') throw new Error(`key file ${file} is not a regular file (symlink)`);
+    throw err;
+  }
+  let hex;
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isFile()) throw new Error(`key file ${file} is not a regular file`);
+    if (typeof process.getuid === 'function' && st.uid !== process.getuid()) throw new Error(`key file ${file} is not owned by this user`);
+    if ((st.mode & 0o077) !== 0) throw new Error(`key file ${file} must not be readable by group or other (mode ${(st.mode & 0o777).toString(8)})`);
+    hex = fs.readFileSync(fd, 'utf8').trim();
+  } finally {
+    fs.closeSync(fd);
+  }
   if (!/^[0-9a-f]+$/i.test(hex) || hex.length < MIN_KEY_BYTES * 2 || hex.length % 2 !== 0) throw new Error(`key file ${file} does not hold a hex key of at least ${MIN_KEY_BYTES} bytes`);
   return Buffer.from(hex, 'hex');
 }
@@ -110,7 +124,8 @@ export function signVerdict({ key, repo, pr, sha, verdict, reviewText = '', now 
 
 /** True for a comment that claims to be a nyx-review verdict (starts with the marker). */
 export function claimsNyxReview(body) {
-  return /^\s*<!--\s*nyx-review\b/i.test(String(body ?? ''));
+  // The exact marker only (`<!-- nyx-review -->`), at the start: `<!-- nyx-review-anything` is not a claim.
+  return /^\s*<!-- nyx-review -->/.test(String(body ?? ''));
 }
 
 /**
@@ -121,7 +136,7 @@ export function claimsNyxReview(body) {
  */
 export function checkVerdictBody({ key, repo, pr, headSha, body, now = () => Date.now(), maxAgeSec = DEFAULT_MAX_AGE_SEC }) {
   const lines = normalizeBody(body).split('\n');
-  if (!/^<!--\s*nyx-review\s*-->$/i.test((lines[0] ?? '').trim())) return { state: 'invalid', reason: 'marker_not_first_line' };
+  if ((lines[0] ?? '').trim() !== MARKER) return { state: 'invalid', reason: 'marker_not_first_line' };
   const vm = /^NYX-VERDICT:\s*(PASS|FINDINGS)\s*$/.exec(lines[1] ?? '');
   if (!vm) return { state: 'invalid', reason: 'verdict_line_missing' };
   const sm = SIG_RE.exec((lines[2] ?? '').trim());
@@ -137,40 +152,55 @@ export function checkVerdictBody({ key, repo, pr, headSha, body, now = () => Dat
   const a = Buffer.from(want, 'hex');
   const b = Buffer.from(mac, 'hex');
   if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return { state: 'invalid', reason: 'bad_mac' };
-  if (sha !== String(headSha).toLowerCase()) return { state: 'stale', reason: 'signed_for_another_head', sha };
-  if (maxAgeSec > 0 && nowSec - ts > maxAgeSec) return { state: 'stale', reason: 'expired', sha };
-  return { state: 'valid', verdict: signedVerdict, ts, sha };
+  // From here the MAC verified: `verdict`, `ts`, `nonce` and `sha` are authentic whatever the state below.
+  const authentic = { verdict: signedVerdict, ts, nonce, sha };
+  if (sha !== String(headSha).toLowerCase()) return { state: 'stale', reason: 'signed_for_another_head', ...authentic };
+  if (maxAgeSec > 0 && nowSec - ts > maxAgeSec) return { state: 'stale', reason: 'expired', ...authentic };
+  return { state: 'valid', ...authentic };
 }
 
 /**
  * Decide the security gate for a PR from its comments (gh's `comments` array: {body, createdAt, author}).
- *   - the LATEST valid-for-head verdict decides: PASS -> ok; FINDINGS -> findings
- *   - no valid verdict and `require` -> not ok (no_valid_verdict)
- *   - no valid verdict, not `require`, but a nyx-review comment that is invalid (unsigned, forged,
- *     tampered) -> not ok (forged_or_unsigned); a fail-closed rule: a claimed verdict that does not
- *     verify never passes silently
- *   - otherwise (no nyx-review comment, or only stale ones) -> ok, state 'none'
- * Returns { ok, state, reason, exit, counts }. exit: 0 ok | 1 not ok | 4 findings.
+ * Only comments whose MAC verifies ("authentic") take part; they are ranked by their SIGNED timestamp, never
+ * by the comment's createdAt (anyone can re-post an old authentic body, which would otherwise outrank a
+ * later verdict), a repeated nonce counts once, and on equal timestamps FINDINGS outranks PASS. The latest
+ * authentic verdict L decides:
+ *   - L is FINDINGS, for ANY head -> not ok (exit 4), in both modes. It is sticky: pushing a new commit
+ *     does not clear it, only a fresh signed verdict for the current head (later than L) does.
+ *   - L is PASS signed for the current head -> ok (verified).
+ *   - otherwise (nothing authentic, or L is a PASS for an earlier head or expired):
+ *       `require` -> not ok (no_valid_verdict);
+ *       a nyx-review claim that is invalid (unsigned, forged, tampered) -> not ok (forged_or_unsigned): a
+ *       claimed verdict that does not verify never passes silently;
+ *       else ok, state 'none'.
+ * Invalid comments are ignored when an authentic verdict decides. Returns { ok, state, reason, exit, counts };
+ * exit: 0 ok | 1 not ok | 4 findings.
  */
 export function evaluateSecurityVerdicts({ key, repo, pr, headSha, comments, require = false, now = () => Date.now(), maxAgeSec = DEFAULT_MAX_AGE_SEC }) {
   if (!SHA_RE.test(String(headSha ?? '').toLowerCase())) return { ok: false, state: 'error', reason: 'head_sha_unknown', exit: 1, counts: {} };
-  const counts = { claimed: 0, valid: 0, stale: 0, invalid: 0 };
+  const counts = { claimed: 0, valid: 0, stale: 0, invalid: 0, duplicate: 0 };
+  const nonces = new Set();
   let latest = null;
   for (const c of Array.isArray(comments) ? comments : []) {
     if (!claimsNyxReview(c?.body)) continue;
     counts.claimed += 1;
     const r = checkVerdictBody({ key, repo, pr, headSha, body: c.body, now, maxAgeSec });
+    if (r.nonce === undefined) { counts.invalid += 1; continue; } // MAC did not verify
+    if (nonces.has(r.nonce)) { counts.duplicate += 1; continue; } // a re-post of an authentic body
+    nonces.add(r.nonce);
     counts[r.state] += 1;
-    if (r.state === 'valid') {
-      const at = Date.parse(c.createdAt ?? '') || 0;
-      if (!latest || at >= latest.at) latest = { at, verdict: r.verdict, ts: r.ts };
-    }
+    if (!latest || r.ts > latest.ts || (r.ts === latest.ts && r.verdict === 'FINDINGS')) latest = r;
   }
-  if (latest) {
-    return latest.verdict === 'PASS'
-      ? { ok: true, state: 'verified', reason: 'signed_pass_for_head', exit: 0, counts }
-      : { ok: false, state: 'findings', reason: 'signed_findings_for_head', exit: 4, counts };
+  if (latest?.verdict === 'FINDINGS') {
+    return {
+      ok: false,
+      state: 'findings',
+      reason: latest.sha === String(headSha).toLowerCase() ? 'signed_findings_for_head' : 'signed_findings_on_earlier_head_unresolved',
+      exit: 4,
+      counts,
+    };
   }
+  if (latest?.state === 'valid') return { ok: true, state: 'verified', reason: 'signed_pass_for_head', exit: 0, counts };
   if (require) return { ok: false, state: 'missing', reason: 'no_valid_verdict', exit: 1, counts };
   if (counts.invalid > 0) return { ok: false, state: 'invalid', reason: 'forged_or_unsigned', exit: 1, counts };
   return { ok: true, state: 'none', reason: counts.stale > 0 ? 'only_stale_verdicts' : 'no_verdict_claimed', exit: 0, counts };
@@ -217,8 +247,9 @@ export async function main(argv = process.argv.slice(2), { exec = execFileSync, 
     try {
       comment = signVerdict({ key, repo, pr, sha, verdict, reviewText: fs.readFileSync(values['body-file'], 'utf8'), now });
     } catch (e) { die(e.message, 2); }
-    const tmp = `${values['body-file']}.signed`;
-    fs.writeFileSync(tmp, comment, { mode: 0o600 });
+    const tmp = `${values['body-file']}.signed.${crypto.randomBytes(6).toString('hex')}`;
+    // Exclusive create (wx) with mode 0600: never follows or reuses an existing path.
+    fs.writeFileSync(tmp, comment, { mode: 0o600, flag: 'wx' });
     try {
       exec('gh', ['pr', 'comment', String(pr), '-R', repo, '--body-file', tmp], { stdio: ['ignore', 'inherit', 'inherit'], timeout: 60000 });
     } catch (e) { die(`gh pr comment failed: ${e.message}`, 3); } finally { fs.rmSync(tmp, { force: true }); }
@@ -240,8 +271,7 @@ export async function main(argv = process.argv.slice(2), { exec = execFileSync, 
     process.stdout.write(`${JSON.stringify(r)}\n`);
     return r.exit;
   }
-  die('usage: security-verdict.mjs keygen|post|verify ...', 2);
-  return 2;
+  return die('usage: security-verdict.mjs keygen|post|verify ...', 2);
 }
 
 if (isMainEntry(import.meta.url)) {
