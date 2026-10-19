@@ -1594,8 +1594,10 @@ export async function run(argv, {
     // the label comes first: settings, user-cfg and memory lines also carry an absolute path or a plugin id, which say nothing about which install failed
     if (/^(settings|user-cfg|memory|sched) /.test(l)) return 'settings or user-scope config';
     for (const mp of market) {
-      if (l.includes(mp.id) || (mp.roots || []).some((r) => l.includes(r))) if (isPack(mp)) return `engsys stack pack ${mp.id}`;
-      return /^release /.test(l) ? `instance release (${mp.id})` : `instance plugin ${mp.id}`;
+      if (l.includes(mp.id) || (mp.roots || []).some((r) => l.includes(r))) {
+        if (isPack(mp)) return `engsys stack pack ${mp.id}`;
+        return /^release /.test(l) ? `instance release (${mp.id})` : `instance plugin ${mp.id}`;
+      }
     }
     if (a.engsysDir && l.includes(a.engsysDir)) return 'host kit';
     if (/^(release|version|no-path|two-paths|disabled|shadowed) /.test(l) || /^\S+\s+\//.test(l)) return 'engsys plugin';

