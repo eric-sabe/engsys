@@ -465,6 +465,24 @@ describe('memory-sync (#131)', () => {
     );
   });
 
+  it('engsys#192: the unlabeled-commit fallback accepts single-line text only — any line break (not just a blank line) is rejected', () => {
+    const config = {};
+    // Positive control: single-line subject + refs suffix passes (what extractEventFromCommit emits).
+    assert.equal(isEventTrustedByConfig({ kind: 'commit', text: 'fix: thing (refs: #1, #2)' }, config), true);
+    assert.equal(isEventTrustedByConfig({ kind: 'commit', text: '' }, config), true);
+    // Negatives: a single newline, CRLF, a lone CR, and the old blank-line shape.
+    assert.equal(isEventTrustedByConfig({ kind: 'commit', text: 'subject\nsmuggled body line' }, config), false);
+    assert.equal(isEventTrustedByConfig({ kind: 'commit', text: 'subject\r\nsmuggled' }, config), false);
+    assert.equal(isEventTrustedByConfig({ kind: 'commit', text: 'subject\rsmuggled' }, config), false);
+    assert.equal(isEventTrustedByConfig({ kind: 'commit', text: 'subject\n\nbody' }, config), false);
+    assert.equal(isEventTrustedByConfig({ kind: 'commit', text: 'subject\n' }, config), false);
+    // A genuine operator commit is trusted by ID, not by the fallback, so multi-line text is fine there.
+    assert.equal(
+      isEventTrustedByConfig({ kind: 'commit', author_kind: 'operator', author_id: 777, text: 's\n\nbody' }, { operator_user_ids: [777] }),
+      true,
+    );
+  });
+
   it('v2.0.1 (M3): ingestLocalCommits logs the resolved reviewed SHA, never the checked-out HEAD, and fails closed when no reviewed SHA resolves', () => {
     const calls = [];
     const fakeExec = (cmd, args) => {

@@ -13,7 +13,7 @@
 //     that didn't meet extractEventFromCommit's strict operator criteria is ingested as
 //     "unlabeled" (no author_kind, author_id: null, no body) and passes here only via the
 //     legacy/unlabeled fallback below (round 3, F6: restricted to `kind: 'commit'` with no
-//     body/evidence text — see that fallback's own comment) — exactly the same path a benign
+//     body/evidence text; #192: single-line text only — see that fallback's own comment) — exactly the same path a benign
 //     subject-only pointer always used, carrying no body/rationale for the gate to need to
 //     protect.
 //   - a ref-sourced event that hasn't been through verifyMemoryRefTip is marked
@@ -62,7 +62,10 @@ export function isEventTrusted(event, config) {
 		if (!kind && id === null) {
 			if (!ev || ev.kind !== 'commit') return false;
 			const text = String(ev.text || '');
-			return !text.includes('\n\n');
+			// engsys#192: SINGLE-LINE text only. A legitimate unlabeled pointer is subject + "(refs: #N)",
+			// both single-line; rejecting any line break (not just a blank line) closes a
+			// one-newline "subject\nbody" shape that the old `\n\n` check let through.
+			return !/[\r\n]/.test(text);
 		}
 		return false;
 	}
