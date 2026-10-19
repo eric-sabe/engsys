@@ -1465,6 +1465,66 @@ run fleet sync
 eq "…and a repeat sync is silent" "$(alerts)" "$((A2 + 1))"
 rm -f "$LC"
 
+echo "== P3. engsys#219: a re-cut pinned tag refreshes the installed plugins, though the marketplace ref and the plugin version are unchanged"
+setconf "INSTANCE_MARKETPLACE=" "GH_APP_ENV=" "ENGSYS_REF=v1.4.0"
+run fleet sync
+rc_is "claude: baseline sync exits 0" 0
+run fleet sync
+hasnt "…a second sync reinstalls nothing" "$OUT" "re-added at"
+recut_engsys "plugins"; NEWP="$(git -C "$E" rev-parse v1.4.0)"
+m="$(mark)"
+run fleet sync
+rc_is "claude: sync adopts the re-cut tag" 0
+eq "…the checkout is at origin's commit" "$(git -C "$ENGSYS_HOST" rev-parse HEAD)" "$NEWP"
+SEG="$(since "$m")"
+has "…the engsys marketplace is removed and added again at the same ref" "$SEG" "plugin marketplace remove engsys"
+has "…" "$SEG" "plugin marketplace add https://github.com/vendor/engsys.git#v1.4.0"
+has "…and its plugin reinstalled" "$SEG" "plugin install core@engsys"
+has "…says so" "$OUT" "marketplace engsys: re-added at v1.4.0, whose tag was re-cut upstream"
+rm1="$(lineno "$SEG" "plugin marketplace remove engsys")"; ad1="$(lineno "$SEG" "plugin marketplace add https://github.com/vendor/engsys.git#v1.4.0")"; in1="$(lineno "$SEG" "plugin install core@engsys")"
+[ -n "$rm1" ] && [ "$rm1" -lt "$ad1" ] && [ "$ad1" -lt "$in1" ] && ok "…in that order" || bad "…in that order" "$SEG"
+[ ! -e "$STATE/pin-recut.reinstall" ] && ok "…and nothing is left pending" || bad "…and nothing is left pending" "$(cat "$STATE/pin-recut.reinstall")"
+m="$(mark)"; run fleet sync
+hasnt "a sync after that refreshes nothing again" "$(since "$m")" "plugin marketplace remove engsys"
+# interrupted (the CLI fails the removal): the work stays pending on disk, --check says so, and the next sync finishes it
+recut_engsys "interrupted"; NEWQ="$(git -C "$E" rev-parse v1.4.0)"
+run env FAKE_CLAUDE_REMOVE_FAIL=1 bash "$ENGSYS_HOST/core/fleet/bin/fleet" --instance "$INST" sync
+rc_is "an interrupted reinstall fails the sync" 1
+eq "…the checkout had moved to origin's commit" "$(git -C "$ENGSYS_HOST" rev-parse HEAD)" "$NEWQ"
+eq "…and the engsys reinstall stays pending on disk" "$(cat "$STATE/pin-recut.reinstall" 2>/dev/null || echo none)" engsys
+run fleet sync --check
+rc_is "--check reports the pending reinstall as drift" 1
+has "…named" "$OUT" "marketplace engsys is waiting for a plugin reinstall (its pinned tag was re-cut)"
+m="$(mark)"; run fleet sync
+rc_is "the next sync finishes it" 0
+has "…reinstalling the marketplace" "$(since "$m")" "plugin marketplace add https://github.com/vendor/engsys.git#v1.4.0"
+has "…and its plugin" "$(since "$m")" "plugin install core@engsys"
+[ ! -e "$STATE/pin-recut.reinstall" ] && ok "…and clears the pending file" || bad "…and clears the pending file"
+run fleet sync --check
+rc_is "…after which --check is clean" 0
+# the cache copies (Copilot): the plugin files must be the new commit's
+setconf "INSTANCE_MARKETPLACE=" "GH_APP_ENV=" "ENGSYS_REF=v1.4.0" "HARNESS=copilot"
+run fleet sync
+CP="$STATE/copilot-home/installed-plugins/engsys/core"
+[ -d "$CP" ] && ok "copilot: the plugin cache is installed" || bad "copilot: the plugin cache is installed" "$OUT"
+printf 'v2\n' >"$E/core/recut-mark"; git -C "$E" add -A; git -C "$E" commit -q -m "engsys re-cut with a changed plugin file"; git -C "$E" tag -f v1.4.0 >/dev/null; git -C "$E" push -q -f origin main v1.4.0
+run fleet sync
+rc_is "copilot: sync adopts the re-cut tag" 0
+eq "…the cached plugin files match the new commit" "$(cat "$CP/recut-mark" 2>/dev/null || echo missing)" v2
+# the instance marketplace, when the instance tag is re-cut
+setconf "GH_APP_ENV=" "ENGSYS_REF=v1.4.0" "INSTANCE_REF=v0.2.0"
+run fleet sync
+rc_is "instance: baseline sync exits 0" 0
+recut_instance "plugins"
+m="$(mark)"
+run fleet sync
+rc_is "instance: sync adopts the re-cut tag" 0
+SEG="$(since "$m")"
+has "the instance marketplace was re-added at the same ref" "$SEG" "plugin marketplace add https://github.com/acme/acme-fleet.git#v0.2.0"
+has "…and its plugin reinstalled" "$SEG" "plugin install ctx@acme"
+rm -f "$LC"
+git -C "$ENGSYS_HOST" checkout -q v1.4.0 2>/dev/null || true
+
 echo "== O. engsys#212: per-session adoption: early warnings, and no /login advice over SSH"
 setconf "INSTANCE_MARKETPLACE=" "GH_APP_ENV=" "ENGSYS_REF=v1.4.0" "FLEET_CLAUDE_CONFIG_DIR=$FCFG" "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on"
 SESS="$FCFG.sessions"; rm -rf "$SESS" "$FAKE/claude-cfg"

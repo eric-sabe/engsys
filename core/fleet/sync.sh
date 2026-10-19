@@ -55,6 +55,16 @@ main() {
   local resumed="${FLEET_SYNC_RESUMED:-}" prev_instance="${FLEET_SYNC_PREV_INSTANCE:-}" prev_engsys="${FLEET_SYNC_PREV_ENGSYS:-}"
   local changed="${FLEET_SYNC_CHANGED:-0}" drift=0
   unset FLEET_SYNC_RESUMED FLEET_SYNC_PREV_INSTANCE FLEET_SYNC_PREV_ENGSYS FLEET_SYNC_CHANGED
+  # recut_markets: the marketplaces whose pinned tag was re-cut and adopted (engsys#219). The ref and the plugin version are
+  # unchanged, so step 4 would see nothing to do: it reinstalls these anyway. The list lives on disk (pin-recut.reinstall)
+  # until every config dir and cache this sync covers has been reinstalled, so a sync that was interrupted, or that had to
+  # refuse a marketplace, is finished by the next one. recut_keep: what this run could not finish (' * ' = a whole dir).
+  local recut_markets="" recut_keep="" recut_file="$FLEET_STATE/pin-recut.reinstall" rm_line
+  if [ -f "$recut_file" ]; then
+    while IFS= read -r rm_line; do
+      [[ "$rm_line" =~ ^[A-Za-z0-9._-]+$ ]] && recut_markets+=" $rm_line"
+    done <"$recut_file"
+  fi
   # engsys#217: an alert that could not be delivered when a pinned tag moved is retried here
   [ "$check" = 1 ] || pin_moved_flush
 
@@ -114,6 +124,7 @@ main() {
         # the alert goes out from the code that is running now, before the checkout moves to the re-cut commit
         if [ "$irecut" = 1 ]; then
           pin_moved_alert instance "$want_instance" "$have_instance" "$(git -C "$FLEET_REPO" rev-parse -q --verify "refs/tags/$want_instance^{commit}" || true)"
+          recut_note "$INSTANCE_MARKETPLACE"
         fi
         git -C "$FLEET_REPO" checkout -q "$want_instance"
         if [ "$irecut" = 1 ]; then say "instance: $want_instance was re-cut upstream; moved the checkout to origin's commit"; else say "instance: $have_instance → $want_instance"; fi
@@ -147,6 +158,7 @@ main() {
         fleet_fetch_tags "$ENGSYS_DIR" "$want_engsys" || fleet_die "could not fetch the engsys tags into $ENGSYS_DIR (see above)"
         if [ "$wrecut" = 1 ]; then
           pin_moved_alert engsys "$want_engsys" "$have_engsys" "$(git -C "$ENGSYS_DIR" rev-parse -q --verify "refs/tags/$want_engsys^{commit}" || true)"
+          recut_note "$ENGSYS_MARKETPLACE"
         fi
         mkdir -p "$FLEET_STATE"
         git -C "$ENGSYS_DIR" worktree remove --force "$engsys_target" >/dev/null 2>&1 || rm -rf "$engsys_target"
@@ -177,6 +189,7 @@ main() {
         # engsys#217: the alert goes out from the code that is running now, before the checkout moves to the re-cut commit
         if [ "$recut" = 1 ]; then
           pin_moved_alert engsys "$want_engsys" "$have_engsys" "$(git -C "$ENGSYS_DIR" rev-parse -q --verify "refs/tags/$want_engsys^{commit}" || true)"
+          recut_note "$ENGSYS_MARKETPLACE"
         fi
         git -C "$ENGSYS_DIR" checkout -q "$want_engsys"
         if [ "$recut" = 1 ]; then say "engsys: $want_engsys was re-cut upstream; moved the checkout to origin's commit"; else say "engsys: $have_engsys → $want_engsys"; fi
@@ -231,7 +244,7 @@ main() {
       if [ -n "$cfg_dir" ] && [ "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:-off}" = on ] && [ ! -d "$cfg_dir" ]; then
         say "claude config dir: $cfg_dir (session ${cfg_dir##*/}) does not exist"
         warn "session ${cfg_dir##*/} has no config dir yet: fleet config-dir init --session ${cfg_dir##*/}, then log in with CLAUDE_CONFIG_DIR=$cfg_dir claude (fleet guide § 6.1). Its plugins are not synced."
-        drift=1; ps_bad="$ps_bad ${cfg_dir##*/}"; continue
+        drift=1; ps_bad="$ps_bad ${cfg_dir##*/}"; recut_keep=" * "; continue
       fi
       if ! claude_config_report "$check"; then
         drift=1
@@ -256,6 +269,8 @@ main() {
       esac
     done
   fi
+
+  [ "$check" = 1 ] || [ -z "$recut_markets" ] || recut_settle
 
   # --- report ------------------------------------------------------------------------------------
   if [ "$check" = 1 ]; then
@@ -304,7 +319,7 @@ main() {
 # One config dir's plugin step (SYNC_CFG: the dir, '' = ~/.claude). Runs inside main(): it reads and sets
 # main's locals (check, markets, m_refs, m_repos, m_plugins, changed, drift) through bash's dynamic scope.
 sync_claude_plugins() {
-  local i m ref repo cur installed p refused=" "
+  local i m ref repo cur installed p moved refused=" "
   # A fleet config dir (never ~/.claude) gets the claude.ai sync switches off, idempotently (engsys#200): without
   # them the first login syncs the account's claude.ai skills and plugins into the fleet dir.
   # An explicit FLEET_CLAUDE_CONFIG_DIR that resolves (realpath, so a symlink too) to ~/.claude is the operator's own
@@ -325,9 +340,14 @@ sync_claude_plugins() {
   for i in "${!markets[@]}"; do
     m="${markets[$i]}" ref="${m_refs[$i]}" repo="${m_repos[$i]}"
     cur="$(plugin_cli marketplace list --json | jq -r --arg m "$m" '.[] | select(.name == $m) | .ref // ""')"
-    if [ "$cur" != "$ref" ]; then
+    # engsys#219: a re-cut pinned tag moved the checkout to a new commit under the same ref, so the installed plugin files are
+    # behind it although the marketplace ref and the plugin version still match: reinstall this marketplace like a moved ref
+    moved=0; case " $recut_markets " in *" $m "*) moved=1 ;; esac
+    if [ "$cur" != "$ref" ] || [ "$moved" = 1 ]; then
       if [ "$check" = 1 ]; then
-        say "marketplace $m is at '${cur:-absent}' (pin $ref)"; drift=1; continue
+        if [ "$moved" = 1 ] && [ "$cur" = "$ref" ]; then say "marketplace $m is waiting for a plugin reinstall (its pinned tag was re-cut)"
+        else say "marketplace $m is at '${cur:-absent}' (pin $ref)"; fi
+        drift=1; continue
       fi
       # remove uninstalls every plugin from this marketplace; running sessions keep their cache dirs.
     # In ~/.claude under scope supervised (the operator's own dir) that is allowed only when it takes
@@ -347,14 +367,16 @@ sync_claude_plugins() {
         | "\(.id) (\(.scope // "user")\(if .projectPath then " " + .projectPath else "" end))"' | paste -sd, - | sed 's/,/, /g')"
       if [ -n "$keep" ]; then
         warn "marketplace $m in ~/.claude is at '$cur' (pin $ref), but moving it would uninstall plugins the fleet doesn't pin: $keep. Not moving it. Either uninstall those plugins (claude plugin uninstall <plugin> --scope <scope>), or move it yourself (claude plugin marketplace remove $m, then claude plugin marketplace add https://github.com/$repo.git#$ref and reinstall what you need), then fleet sync."
-        drift=1; refused+=" $m "; continue
+        drift=1; refused+=" $m "; recut_keep+=" $m "; continue
       fi
     fi
     if [ -n "$cur" ]; then marketplace_remove "$m"; settings_guard_check "marketplace remove $m"; fi
       plugin_cli marketplace add "https://github.com/$repo.git#$ref" --scope user >/dev/null \
         || fleet_die "marketplace add $m#$ref failed — $m plugins are UNINSTALLED on this host. Re-run: fleet sync (running sessions are unaffected)."
       settings_guard_check "marketplace add $m"
-      say "marketplace $m: ${cur:-absent} → $ref"; changed=1
+      if [ "$moved" = 1 ] && [ "$cur" = "$ref" ]; then say "marketplace $m: re-added at $ref, whose tag was re-cut upstream; its plugins are reinstalled"
+      else say "marketplace $m: ${cur:-absent} → $ref"; fi
+      changed=1
       installed="$(user_plugins)"
     fi
     case "$refused" in *" $m "*) continue ;; esac
@@ -432,6 +454,20 @@ pin_moved_flush() { # send every pending alert not yet latched; keep what could 
     fi
   done <"$PIN_MOVED_PENDING"
   if [ -n "$keep" ]; then printf '%s' "$keep" >"$PIN_MOVED_PENDING"; else rm -f "$PIN_MOVED_PENDING"; fi
+}
+
+# --- the pending plugin reinstall after a re-cut pinned tag (engsys#219) --------------------------------
+recut_note() { # recut_note <marketplace>: this run adopted a re-cut tag of it; its plugins are reinstalled until settled
+  local m="$1" f="$FLEET_STATE/pin-recut.reinstall"
+  mkdir -p "$FLEET_STATE"
+  case " $recut_markets " in *" $m "*) ;; *) recut_markets+=" $m"; printf '%s\n' "$m" >>"$f" ;; esac
+}
+recut_settle() { # drop from the pending file every marketplace this run reinstalled everywhere; keep the rest
+  local f="$FLEET_STATE/pin-recut.reinstall" m left=""
+  for m in $recut_markets; do
+    case "$recut_keep" in *" * "* | *" $m "*) left+="$m"$'\n' ;; esac
+  done
+  if [ -n "$left" ]; then printf '%s' "$left" >"$f"; else rm -f "$f"; fi
 }
 
 # --- the plugin CLI, kept away from project settings (engsys#112) -----------------------------------
@@ -548,7 +584,7 @@ require_clean() { # tracked changes would block (or be carried across) a checkou
 }
 
 sync_non_claude_plugins() { # sync_non_claude_plugins <check> <engsys_target> [target_harness] [is_fallback]
-  local check_mode="$1" engsys_checkout="$2" target_h="${3:-${HARNESS:-claude}}" is_fb="${4:-0}" i m ref want p src_repo sub cache_dir cfg_file cur_ver
+  local check_mode="$1" engsys_checkout="$2" target_h="${3:-${HARNESS:-claude}}" is_fb="${4:-0}" i m ref want p src_repo sub cache_dir cfg_file cur_ver moved
   local entries="[]"
   if [ "$target_h" = "copilot" ]; then
     cfg_file="${COPILOT_HOME:-$FLEET_STATE/copilot-home}/config.json"
@@ -581,9 +617,13 @@ sync_non_claude_plugins() { # sync_non_claude_plugins <check> <engsys_target> [t
           cur_ver="$(jq -r --arg id "$p@$m" '(.plugins // .)[]? | select(.id == $id) | .version // empty' "$cfg_file" 2>/dev/null || true)"
         fi
       fi
-      if [ "$cur_ver" != "$want" ] || [ ! -d "$cache_dir" ]; then
+      # engsys#219: a re-cut pinned tag leaves the version and the cache dir as they were: copy the plugin again from the moved checkout
+      moved=0; case " $recut_markets " in *" $m "*) moved=1 ;; esac
+      if [ "$cur_ver" != "$want" ] || [ ! -d "$cache_dir" ] || [ "$moved" = 1 ]; then
         if [ "$check_mode" = 1 ]; then
-          say "plugin $p@$m ($target_h) is at '${cur_ver:-absent}' (pin $want)"; drift=1
+          if [ "$moved" = 1 ] && [ "$cur_ver" = "$want" ]; then say "plugin $p@$m ($target_h) is waiting for a reinstall (its pinned tag was re-cut)"
+          else say "plugin $p@$m ($target_h) is at '${cur_ver:-absent}' (pin $want)"; fi
+          drift=1
           continue
         fi
         [ -d "$src_repo/$sub" ] && [ ! -L "$src_repo/$sub" ] || fleet_die "plugin source $src_repo/$sub not found for $p@$m"

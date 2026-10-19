@@ -1150,6 +1150,12 @@ old and new commit ids, nothing else (no paths, no probe output). It goes out fr
 before the checkout moves to the re-cut code, so the new code can't be what decides whether it is sent. It is
 latched once per tag and commit pair in `.fleet/pin-recut.alerted`, written only after delivery; an alert that
 could not be delivered stays in `.fleet/pin-recut.pending` and the next sync retries it. A failed alert never blocks the sync.
+A re-cut leaves the marketplace ref and the plugin version unchanged, so installed plugins would stay on the old
+commit: sync records the moved marketplace in `.fleet/pin-recut.reinstall` and reinstalls its plugins in every
+config dir (remove, add `#<ref>`, install), and copies the Copilot and Antigravity plugin caches again (engsys#219).
+The entry is removed only after every dir and cache the run covers has been done, so an interrupted sync, or a
+`~/.claude` marketplace that sync had to refuse, is finished by the next one; `fleet sync --check` reports it
+as drift (`waiting for a plugin reinstall`) until then.
 
 ### Recipes
 
