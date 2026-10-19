@@ -35,6 +35,7 @@
 //   verify-wrappers.mjs --repo <owner/repo> --tag vX.Y.Z --plugin-id engsys@<marketplace>
 //                       --project-dir <PIN_DIR> --plugins <`claude plugin list --json` output file>
 //                       [--engsys-dir <ENGSYS_DIR>] [--check-settings] [--user-settings-dir <claude config dir>]
+//                       [--fleet-config-dir]
 //                       [--allowed-user-plugins "<name@mkt> ..."] [--allowed-user-hooks "<sha256> ..."]
 //                       [--check-user-config --claude-json <file> --allowed-user-files "<sha256> ..."]
 //                       [--pin-repo <owner/repo>]
@@ -51,6 +52,8 @@
 // --pin-repo: PIN_DIR's .claude/ tree and every settings-hook target against that repo's default branch
 //   on GitHub (projectLocalState + verifyProjectTrust, below). A pin checkout behind the tip passes with a
 //   WARNING line only while every auto-loaded file is identical at the tip.
+// --fleet-config-dir (engsys#201): --user-settings-dir is a fleet config dir (not ~/.claude): warn when its settings.json
+//   doesn't switch the claude.ai skill/plugin sync off. Synced skills are never trusted by source (see userConfigItems).
 //
 // Exit: 0 everything matches | 1 MISMATCH (a definite difference) | 3 not verified (GitHub unreachable,
 //       API error, truncated tree, nothing installed) | 2 usage. Callers hold merge/maintain sessions on
@@ -559,6 +562,8 @@ export function userCommandHash(command, { home = os.homedir(), projectDir = '' 
   return { hash: h.digest('hex'), problems: p.problems };
 }
 
+/** What to do about claude.ai-synced skills in a fleet config dir (engsys#201). */
+const SYNCED_HINT = 'synced skills are not trusted by source or by manifest; set syncClaudeAiSkills and syncClaudeAiPlugins to false in the dir\'s settings.json and delete its skills/synced/';
 /** Top-level settings keys that pick, limit or redirect the session's model (Claude Code 2.1.292). */
 export const MODEL_SETTINGS_TOP_KEYS = ['model', 'availableModels', 'fallbackModel', 'advisorModel', 'modelOverrides', 'deniedModels', 'enforceAvailableModels'];
 
@@ -678,7 +683,7 @@ export function parentMemoryFiles(projectDir, home = os.homedir()) {
 export function checkSettingsDetailed({
   projectDir, userSettingsDir = '', pinSettingsSha = '', projectVerified = false,
   allowedUserPlugins = new Set(), allowedUserHooks = new Set(), home = os.homedir(),
-  claudeJson = '', allowedUserFiles = null,
+  claudeJson = '', allowedUserFiles = null, fleetConfigDir = false,
 }) {
   const problems = [];
   const info = [];
@@ -798,15 +803,40 @@ export function checkSettingsDetailed({
       }
     }
   }
+  // A fleet config dir must have Claude Code's claude.ai sync switched off (engsys#201; `fleet config-dir init` and
+  // `fleet sync` set it, engsys#200): synced skills and plugins change with no host-side action and their content has
+  // no root of trust here, so the dir should never receive them. Only `false` is honoured by Claude Code. A warning:
+  // what did sync in is judged below, the switch only says whether more will arrive.
+  if (userSettingsDir && fleetConfigDir) {
+    let us = null;
+    try { us = JSON.parse(fs.readFileSync(path.join(userSettingsDir, 'settings.json'), 'utf8')); } catch { us = null; }
+    const off = (k) => us && typeof us === 'object' && us[k] === false;
+    const on = ['syncClaudeAiSkills', 'syncClaudeAiPlugins'].filter((k) => !off(k));
+    if (on.length) {
+      warnings.push(`${path.join(userSettingsDir, 'settings.json')} does not set ${on.join(' and ')} to false, so Claude Code may sync claude.ai skills or plugins into this fleet config dir; run: fleet config-dir init (it retrofits an existing dir), or fleet sync`);
+    }
+  }
   // User-scope configuration loaded besides settings (agents, commands, skills, rules, memory, MCP
   // servers): each must be on VERIFY_ALLOWED_USER_FILES. Checked when allowedUserFiles is passed.
   if (userSettingsDir && allowedUserFiles) {
     const allowedF = allowedUserFiles instanceof Set ? allowedUserFiles : parseAllowedFiles(allowedUserFiles);
     const uc = userConfigItems({ configDir: userSettingsDir, claudeJson, projectDir });
     problems.push(...uc.problems);
+    // Files claude.ai synced into <dir>/skills/synced/<bucket>/ are reported once per bucket, not once per file. Nothing is
+    // trusted by being there: the bucket id, its marker and its manifest.json are files a session can write too, and the
+    // manifest has no content hashes. Each file is still a problem unless its own sha256 is on the allowlist.
+    const syncedRoot = path.join(userSettingsDir, 'skills', 'synced') + path.sep;
+    const buckets = new Map();
     for (const it of uc.items) {
-      if (allowedF.has(it.hash)) info.push(`allowed    ${it.what} ${it.hash} (VERIFY_ALLOWED_USER_FILES)`);
+      if (allowedF.has(it.hash)) { info.push(`allowed    ${it.what} ${it.hash} (VERIFY_ALLOWED_USER_FILES)`); continue; }
+      const rel = it.what.startsWith(syncedRoot) ? it.what.slice(syncedRoot.length) : null;
+      // <bucket>/..., or the .bucket-<bucket> marker beside it; any other loose file under synced/ keeps its own line
+      const b = rel === null ? null : rel.includes(path.sep) ? rel.split(path.sep)[0] : /^\.bucket-[^.].*$/.test(rel) ? rel.slice('.bucket-'.length) : null;
+      if (b !== null) buckets.set(b, (buckets.get(b) || 0) + 1);
       else problems.push(`user-cfg   ${it.what} is not on VERIFY_ALLOWED_USER_FILES (sha256 ${it.hash})`);
+    }
+    for (const [b, n] of [...buckets].sort()) {
+      problems.push(`user-cfg   ${path.join(syncedRoot, b)} holds ${n} synced claude.ai skill file(s) not on VERIFY_ALLOWED_USER_FILES (${SYNCED_HINT})`);
     }
   }
   if (allowedUserFiles) {
@@ -1379,6 +1409,7 @@ export function parseArgs(argv) {
     globalPluginsDir: process.env.AGY_GLOBAL_PLUGINS_DIR || '',
     engsysDir: '',
     checkSettings: false,
+    fleetConfigDir: false,
     userSettingsDir: '',
     pinSettingsSha: '',
     pinRepo: '',
@@ -1405,6 +1436,7 @@ export function parseArgs(argv) {
       case '--global-plugins-dir': a.globalPluginsDir = v(); break;
       case '--engsys-dir': a.engsysDir = v(); break;
       case '--check-settings': a.checkSettings = true; break;
+      case '--fleet-config-dir': a.fleetConfigDir = true; break;
       case '--user-settings-dir': a.userSettingsDir = v(); a.checkSettings = true; break;
       case '--pin-settings-sha': a.pinSettingsSha = v(); a.checkSettings = true; break;
       case '--pin-repo': a.pinRepo = v(); a.checkSettings = true; break;
@@ -1494,6 +1526,8 @@ export async function run(argv, {
     const groups = groupProblems(sorted);
     out(`summary: ${sorted.length} problems: ${groups.map((g) => `${g.label} (${g.count})`).join(', ')}`);
     if (groups.some((g) => g.userScope)) out('hint: set up a separate fleet config dir: fleet config-dir init (see fleet guide § 6.1)');
+    // last hint wins in the alert: leftover claude.ai-synced skills have a specific cleanup
+    if (sorted.some((l) => /synced claude\.ai skill file/.test(l))) out('hint: claude.ai synced skills into the fleet config dir. Set syncClaudeAiSkills and syncClaudeAiPlugins to false in its settings.json (fleet config-dir init does it), delete its skills/synced/ directory, then fleet verify (fleet guide § 6.1)');
     out(`fingerprint: ${problemFingerprint(sorted)}`);
     if (a.cache) { try { fs.rmSync(a.cache, { force: true }); } catch { /* best effort */ } }
     return 1;
@@ -1544,6 +1578,7 @@ export async function run(argv, {
       allowedUserHooks: parseAllowedHooks(a.allowedUserHooks),
       claudeJson: a.claudeJson,
       allowedUserFiles: a.checkUserConfig ? parseAllowedFiles(a.allowedUserFiles) : null,
+      fleetConfigDir: a.fleetConfigDir,
     });
     preProblems.push(...r.problems);
     info = r.info;

@@ -626,6 +626,38 @@ for k in '"hooks": {}' '"env": {"X": "1"}' '"model": "opus"' '"statusLine": {"ty
 done
 rm -f "$MS"
 
+echo "== engsys#201: claude.ai-synced skills in a fleet config dir: one problem per bucket, never trusted by source; the sync switch is checked"
+FCFGS="$T/fleet-claude-synced"; mkdir -p "$FCFGS"
+printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\n' "$CONF0" "$FCFGS" >"$I/fleet/fleet.conf"
+run fleet verify
+rc_is "a fleet config dir with no settings: passes" 0
+has "…but warns that the claude.ai sync is not switched off" "$OUT" "does not set syncClaudeAiSkills and syncClaudeAiPlugins to false"
+has "…and says how to fix it" "$OUT" "run: fleet config-dir init"
+printf '{"syncClaudeAiSkills": false, "syncClaudeAiPlugins": false}\n' >"$FCFGS/settings.json"
+run fleet verify
+rc_is "both switches off: passes" 0
+hasnt "…without the warning" "$OUT" "syncClaudeAi"
+B1="$FCFGS/skills/synced/003ee125-0000-0000-0000-000000000001_a50a1214-0000-0000-0000-000000000002"
+mkdir -p "$B1/docx" "$B1/docs"
+: >"$FCFGS/skills/synced/.bucket-003ee125-0000-0000-0000-000000000001_a50a1214-0000-0000-0000-000000000002"
+printf '{"skills":[{"skillId":"docx","name":"docx","source":"anthropic","creatorType":"anthropic"},{"skillId":"docs","name":"docs","source":"anthropic","creatorType":"anthropic"}]}\n' >"$B1/manifest.json"
+printf 'docx v1\n' >"$B1/docx/SKILL.md"; printf 'docs v1\n' >"$B1/docs/SKILL.md"
+run fleet verify
+rc_is "a leftover synced bucket is a mismatch (never trusted by source or by its manifest)" 1
+eq "…as ONE problem line for the bucket, not one per file" "$(grep -c 'synced claude.ai skill file' <<<"$OUT")" 1
+has "…naming the bucket and its file count (3 files + the marker)" "$OUT" "003ee125-0000-0000-0000-000000000001_a50a1214-0000-0000-0000-000000000002 holds 4 synced claude.ai skill file(s)"
+has "…with the cleanup hint" "$OUT" "hint: claude.ai synced skills into the fleet config dir. Set syncClaudeAiSkills and syncClaudeAiPlugins to false"
+FP1="$(sed -n 's/^fingerprint: //p' <<<"$OUT")"
+printf 'docx v2\n' >"$B1/docx/SKILL.md"
+run fleet verify
+eq "a content-only update keeps the same fingerprint (no re-alert)" "$(sed -n 's/^fingerprint: //p' <<<"$OUT")" "$FP1"
+run fleet launch acme-mm
+rc_is "…and the launch is still held" 1
+rm -rf "$FCFGS/skills"
+run fleet verify
+rc_is "cleaned up: passes" 0
+printf '%s\n' "$CONF0" >"$I/fleet/fleet.conf"
+
 echo "== engsys#212: a missing config dir is named, never called transient"
 NOCFG="$T/no-such-cfg"
 printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\n' "$CONF0" "$NOCFG" >"$I/fleet/fleet.conf"

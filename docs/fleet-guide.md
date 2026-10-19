@@ -1427,6 +1427,21 @@ override: `CLAUDE_CODE_SUBAGENT_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL_FORCE`, `ANT
 schema): each could move a pinned security agent off its model. The
 security lane's rendered env also unsets `CLAUDE_CODE_SUBAGENT_MODEL` and `CLAUDE_CODE_SUBAGENT_MODEL_FORCE`.
 
+**Skills claude.ai syncs into a fleet config dir** (engsys#201). With the account's sync on, Claude Code writes the
+account's claude.ai skills to `<config dir>/skills/synced/<orgUuid>_<accountUuid>/` (plus a `.bucket-<id>` marker and a
+`manifest.json`), on a personal login and on a Team login alike. The primary fix is to never let them in: `fleet
+config-dir init` and `fleet sync` set `syncClaudeAiSkills: false` and `syncClaudeAiPlugins: false` (§ 6.1), and
+`fleet verify` warns (`WARNING … does not set … to false`, with the fix command) when a fleet config dir's
+`settings.json` doesn't. What is already there is a mismatch, reported as **one line per bucket**
+(`… holds N synced claude.ai skill file(s) …`, with a cleanup hint) instead of one per file, and a content-only
+update to a bucket doesn't change the alert's fingerprint. To clear it: set the two switches, delete
+`<config dir>/skills/synced/`, and run `fleet verify`. A synced skill is deliberately **not** trusted by source:
+the bucket id, its marker, its `manifest.json` (`source`, `creatorType`) and the files it lists all sit in the
+config dir, where any session of this user can write them, and the manifest carries no content hashes, so a
+forged manifest plus a planted `SKILL.md` would look exactly like a real sync. There is no allowlist by bucket or
+author. The only exception is the existing one: an operator who reviews a file can list its sha256 in
+`VERIFY_ALLOWED_USER_FILES`, and it then has to be re-approved when upstream changes it.
+
 **The alert** names the total and the categories (engsys plugin or host kit, pin checkout, unpinned
 user-scope plugins, MCP servers, user-scope skills/agents/files, user-scope hooks and commands, settings,
 memory files above the pin checkout), lists the first few problems, and for user-scope items points at
