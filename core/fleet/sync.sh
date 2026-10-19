@@ -120,11 +120,12 @@ main() {
         require_clean "$FLEET_REPO"
         # after a re-cut the tag name no longer names the old commit, so the re-exec's job diff needs the sha
         [ "$irecut" = 0 ] || have_instance="$(git -C "$FLEET_REPO" rev-parse HEAD)"
+        # recorded before the fetch moves the local tag: a sync killed after it still reinstalls the plugins next time
+        [ "$irecut" = 0 ] || recut_note "$INSTANCE_MARKETPLACE"
         fleet_fetch_tags "$FLEET_REPO" "$want_instance" || fleet_die "could not fetch the instance tags into $FLEET_REPO (see above)"
         # the alert goes out from the code that is running now, before the checkout moves to the re-cut commit
         if [ "$irecut" = 1 ]; then
           pin_moved_alert instance "$want_instance" "$have_instance" "$(git -C "$FLEET_REPO" rev-parse -q --verify "refs/tags/$want_instance^{commit}" || true)"
-          recut_note "$INSTANCE_MARKETPLACE"
         fi
         git -C "$FLEET_REPO" checkout -q "$want_instance"
         if [ "$irecut" = 1 ]; then say "instance: $want_instance was re-cut upstream; moved the checkout to origin's commit"; else say "instance: $have_instance → $want_instance"; fi
@@ -155,10 +156,11 @@ main() {
       else
         [ -z "$prev_engsys" ] || fleet_die "engsys worktree still at $have_engsys after switching to $want_engsys"
         [ "$wrecut" = 0 ] || have_engsys="$(git -C "$engsys_target" rev-parse HEAD)"
+        # recorded before the fetch moves the local tag: a sync killed after it still reinstalls the plugins next time
+        [ "$wrecut" = 0 ] || recut_note "$ENGSYS_MARKETPLACE"
         fleet_fetch_tags "$ENGSYS_DIR" "$want_engsys" || fleet_die "could not fetch the engsys tags into $ENGSYS_DIR (see above)"
         if [ "$wrecut" = 1 ]; then
           pin_moved_alert engsys "$want_engsys" "$have_engsys" "$(git -C "$ENGSYS_DIR" rev-parse -q --verify "refs/tags/$want_engsys^{commit}" || true)"
-          recut_note "$ENGSYS_MARKETPLACE"
         fi
         mkdir -p "$FLEET_STATE"
         git -C "$ENGSYS_DIR" worktree remove --force "$engsys_target" >/dev/null 2>&1 || rm -rf "$engsys_target"
@@ -185,11 +187,12 @@ main() {
         require_clean "$ENGSYS_DIR"
         # after a re-cut the tag name no longer names the old commit, so the re-exec's job diff needs the sha
         [ "$recut" = 0 ] || have_engsys="$(git -C "$ENGSYS_DIR" rev-parse HEAD)"
+        # recorded before the fetch moves the local tag: a sync killed after it still reinstalls the plugins next time
+        [ "$recut" = 0 ] || recut_note "$ENGSYS_MARKETPLACE"
         fleet_fetch_tags "$ENGSYS_DIR" "$want_engsys" || fleet_die "could not fetch the engsys tags into $ENGSYS_DIR (see above)"
         # engsys#217: the alert goes out from the code that is running now, before the checkout moves to the re-cut commit
         if [ "$recut" = 1 ]; then
           pin_moved_alert engsys "$want_engsys" "$have_engsys" "$(git -C "$ENGSYS_DIR" rev-parse -q --verify "refs/tags/$want_engsys^{commit}" || true)"
-          recut_note "$ENGSYS_MARKETPLACE"
         fi
         git -C "$ENGSYS_DIR" checkout -q "$want_engsys"
         if [ "$recut" = 1 ]; then say "engsys: $want_engsys was re-cut upstream; moved the checkout to origin's commit"; else say "engsys: $have_engsys → $want_engsys"; fi
