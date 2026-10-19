@@ -334,9 +334,9 @@ const SAFE_PROGRAMS = ['true', 'false', 'echo', 'printf', 'sleep', 'date', 'cat'
 /** System wrappers: they run the command in their arguments, which then has to pass the same rules. */
 const WRAPPERS = ['nice', 'nohup', 'timeout', 'xargs', 'time'];
 /** Options of a wrapper that take a value, and whether it has a leading positional (timeout's duration). */
-const WRAPPER_VALUE_FLAGS = { nice: ['-n', '--adjustment'], nohup: [], timeout: ['-k', '--kill-after', '-s', '--signal'], xargs: ['-I', '-n', '-P', '-L', '-s', '-d', '-E', '-a'], time: ['-o', '-f'] };
-/** The options of xargs that only shape how it batches its input: anything else (-a <file>, -J, ...) is refused. */
-const XARGS_FLAGS = /^(-0|-r|-t|-x|--null|--no-run-if-empty|--verbose|--max-args=.*|--max-procs=.*|-[nPIsLdE].*)$/;
+const WRAPPER_VALUE_FLAGS = { nice: ['-n', '--adjustment'], nohup: [], timeout: ['-k', '--kill-after', '-s', '--signal'], xargs: ['-n', '-P', '-L', '-s', '-d', '-E'], time: ['-o', '-f'] };
+/** The options of xargs that only shape how it batches its input: anything else (-a <file>, -J, -I <replstr>, which lets its input rewrite the command, ...) is refused. */
+const XARGS_FLAGS = /^(-0|-r|-t|-x|--null|--no-run-if-empty|--verbose|--max-args=.*|--max-procs=.*|-[nPsLdE].*)$/;
 /**
  * The words after a wrapper's own options (and timeout's duration): the command it runs. → array, or null when an
  * option can't be allowed (xargs reading its words from a file). An empty array is a wrapper with no command of its

@@ -1040,7 +1040,9 @@ test('hookTargets: a task runner is refused however it is spelled, a direct scri
   unlisted('/usr/bin/xargs -a/tmp/x /usr/bin/nice', /xargs with an option that reads or builds its command/);
   unlisted('/usr/bin/xargs /usr/bin/timeout 5', /timeout without a command of its own/);
   unlisted('/usr/bin/xargs /usr/bin/nice', /nice without a command of its own/);
-  unlisted('/usr/bin/xargs -I{} {}', /found on PATH that is not an interpreter/);
+  unlisted('/usr/bin/xargs -I{} {}', /xargs with an option that reads or builds its command/);
+  unlisted('/usr/bin/xargs -I/usr/bin/true /usr/bin/true', /xargs with an option that reads or builds its command/);
+  unlisted('/usr/bin/xargs -I /abs/s.sh bash /abs/s.sh', /xargs with an option that reads or builds its command/);
   unlisted('/usr/bin/xargs bash', /bash with no script file/);
   // positive controls: the allowlist and the wrappers still let the safe forms through
   assert.deepEqual(hookTargets('/usr/bin/nice true make-docs.sh cmake-build', dir).problems, [], 'true is a no-op, whatever it is given');

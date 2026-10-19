@@ -246,7 +246,12 @@ else
     args+=(--check-user-config --claude-json "${FLEET_CLAUDE_CONFIG_DIR:+$FLEET_CLAUDE_CONFIG_DIR/.claude.json}")
     [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] || args[${#args[@]}-1]="$HOME/.claude.json"
     [ -z "${VERIFY_ALLOWED_USER_FILES:-}" ] || args+=(--allowed-user-files "$VERIFY_ALLOWED_USER_FILES")
-    [ -z "${FLEET_CLAUDE_CONFIG_DIR:-}" ] || args+=(--fleet-config-dir)   # a dir of the fleet's own: its claude.ai sync must be off (engsys#201)
+    # a dir of the fleet's own: its claude.ai sync must be off (engsys#201). Never ~/.claude itself, which sync and config-dir
+    # init leave alone (engsys#204): the warning's fix would not work there
+    if [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] \
+      && [ "$(cd "$FLEET_CLAUDE_CONFIG_DIR" 2>/dev/null && pwd -P || echo "$FLEET_CLAUDE_CONFIG_DIR")" != "$(cd "$HOME/.claude" 2>/dev/null && pwd -P || echo "$HOME/.claude")" ]; then
+      args+=(--fleet-config-dir)
+    fi
     # The launcher's messaging settings (--settings on every session, monsters included): only the keys it writes.
     ns="$(fleet_roster_header NAMESPACE)"
     [ -z "$ns" ] || args+=(--messaging-settings "$HOME/.claude/$ns-messaging-settings.json")

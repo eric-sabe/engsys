@@ -639,6 +639,10 @@ run fleet verify
 rc_is "a fleet config dir with no settings: passes" 0
 has "…but warns that the claude.ai sync is not switched off" "$OUT" "does not set syncClaudeAiSkills and syncClaudeAiPlugins to false"
 has "…and says how to fix it" "$OUT" "run: fleet config-dir init"
+printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\n' "$CONF0" "$HOME/.claude" >"$I/fleet/fleet.conf"
+run fleet verify
+hasnt "an explicit FLEET_CLAUDE_CONFIG_DIR that is ~/.claude is the operator's own dir: no sync-switch warning (its fix would not work there)" "$OUT" "syncClaudeAi"
+printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\n' "$CONF0" "$FCFGS" >"$I/fleet/fleet.conf"
 printf '{"syncClaudeAiSkills": false, "syncClaudeAiPlugins": false}\n' >"$FCFGS/settings.json"
 run fleet verify
 rc_is "both switches off: passes" 0
