@@ -64,6 +64,16 @@ refs/engsys/memory/<role>/<fleet-id>   a monster's journal tail (one writer per 
   fetch now fails closed instead), then `git show <ref>:events.jsonl`. Clones and worktrees never
   fetch these refs by default, and any event read back this way is untrusted (`author_kind`/
   `author_id` stripped) until `verifyMemoryRefTip` is wired into the reader.
+- **Wiring a consumer of these refs requires a security review.** The fetch (`fetchMemoryRefs`) is
+  deliberately unwired. Any code that fetches or reads `refs/engsys/memory/*` as trusted input must
+  go through `verifyMemoryRefTip` (`ref-store.mjs`) and must not re-implement tip trust. This is
+  enforced by `core/lib/memory/ref-consumer-guard.test.mjs`: a file that names the memory refs and
+  is not on its short non-consumer list fails the suite, and a listed consumer must call
+  `verifyMemoryRefTip(` in code. The only current reader of ref content (`loadClassBEvents`) strips
+  every embedded trust label (`author_kind: 'untrusted_ref'`). Adding a consumer means a Nyx
+  review, then updating that guard's `CONSUMERS` set and this section in the same PR. A non-forced
+  fetch also rejects every fetch after the first compaction (parentless commit); a consumer needs
+  the staged-fetch design noted in `ref-store.mjs`, not a forced refspec.
 - **Secret scan before every write.** Branch-filtered CI scanners don't cover custom refs. Any match
   rejects the record and logs it.
 - **Compaction:** when the blob passes `max_events` (default 20000), the writer keeps the latest
@@ -326,6 +336,8 @@ is just the fleet config (if any) over the defaults.
   - minimized and deleted sources produce tombstones;
   - Dependabot is dropped;
   - boundary spoofing is quarantined, and flag-only rules do not quarantine.
+- Ref consumer guard: no file outside a short reviewed list names `refs/engsys/memory/*`, and a
+  listed consumer calls `verifyMemoryRefTip(` (engsys#188).
 - Ref store:
   - a CAS conflict retries and merges;
   - a secret-scan hit rejects the record;

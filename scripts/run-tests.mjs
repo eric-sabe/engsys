@@ -57,6 +57,7 @@ const SUITES = [
   ["node --test core/scripts/plugin-mode-layout.test.mjs"],
   ["NODE_NO_WARNINGS=1 node --test core/lib/memory/index-db.test.mjs"],
   ["NODE_NO_WARNINGS=1 node --test core/lib/memory/ref-store.test.mjs"],
+  ["NODE_NO_WARNINGS=1 node --test core/lib/memory/ref-consumer-guard.test.mjs"],
   ["NODE_NO_WARNINGS=1 node --test core/scripts/memory-brief.test.mjs"],
   ["NODE_NO_WARNINGS=1 node --test core/scripts/memory-sync.test.mjs"],
   ["NODE_NO_WARNINGS=1 node --test core/.claude-plugin/subagent-memory-inject.test.mjs"],
