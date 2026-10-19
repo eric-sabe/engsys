@@ -5,6 +5,8 @@ description: Run the Resource Broker session, the third monster. It arbitrates a
 
 # Resource Broker: the host's resource arbiter
 
+body-sentinel:resource-broker:d09b
+
 > **Entry point:** `/engsys:resource-broker`. Runs as a long-lived session on the fleet host alongside Merge
 > Monster and Maintenance Monster. Before the loop: (1) read `resource-broker.yml` (see **Config location**);
 > if missing, copy `config.example.yml` and `acme-pool.json` from this skill, run
@@ -99,8 +101,9 @@ its holder resets it with `reset`. No pool-file change is needed.
 > **Invoke each script as its own Bash call, by literal path.** Substitute `<engsys-root>` / `<skill-dir>`
 > with the actual path from your context: no `cd`, no shell variables, no `&&`/`;` chaining, and no `mkdir`
 > (the scripts create their state dirs).
+> **Fenced-write bodies** (a singleton-write guard may refuse anything else): a literal body, or `--body-file -` with a heredoc whose delimiter is quoted (`<<'EOF'`). Never `$( )`, backticks, `&&`, `;` or a redirect around the command: compute the value first and paste it in.
 
-1. Read the config; load prior `state.md` / journal from `state_dir` if present (you may be resuming).
+1. Read the config; load prior `state.md` / journal from `state_dir` if present (you may be resuming). Resolve plugin and skill paths now from the running session (`<engsys-root>` / `<skill-dir>` from your context; its config dir is `$CLAUDE_CONFIG_DIR`, else `~/.claude`), never from a path recorded in `state.md`: that can still name the config dir from before a switch to per-session dirs. Overwrite a stale one.
    Then run `bash <skill-dir>/scripts/broker-config.sh --config <config>`: its `effective ledger`,
    `effective owner` and `effective owner_pattern` lines are what the scripts use. "The ledger issue"
    below means that effective ledger, which in multi-fleet mode is not the config's `ledger_issue`.
@@ -127,7 +130,7 @@ its holder resets it with `reset`. No pool-file change is needed.
    Comment a session-start digest on the ledger issue: the reconcile summary, current occupancy, and a
    nothing-to-do-until-an-event posture. **Advertise your addressable name** in that digest, a line like
    `session: <ns>-broker`, so the decider and every waiting agent read the target from your ledger rather
-   than guessing (see Cross-session messaging).
+   than guessing (see Cross-session messaging). If you had to re-read this file because its `body-sentinel` line was missing from your context (the command's self-check), say so in that digest.
 4. Arm the event bus, **one Monitor for the whole session**, with `timeout_ms: 1800000` (the maximum: every
    Monitor ends at its timeout, 30 minutes at most), running:
 

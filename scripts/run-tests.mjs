@@ -88,6 +88,7 @@ const SUITES = [
   ["node --test core/fleet/lib/xray.test.mjs"],
   ["node --test tests/personas-and-skills.test.mjs"],
   ["node --test tests/monster-skill-rules.test.mjs"],
+  ["node --test tests/monster-skill-sentinel.test.mjs"],
   ["node --test tests/model-policy.test.mjs"],
   ["bash core/skills/agent-sessions/scripts/launch-agent-sessions.test.sh"],
 ];
