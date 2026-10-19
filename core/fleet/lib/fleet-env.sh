@@ -243,6 +243,14 @@ fleet_pinned_tag_drift() {
   [ -n "$remote" ] && [ "$remote" != "$local_c" ]
 }
 
+# fleet_pin_recut <dir> <at> <tag> → 0 when the checkout in <dir> sits on its local copy of the pinned <tag> (<at> is
+# fleet_git_at's answer for it) and origin's <tag> is another commit: a re-cut release (engsys#214), whichever checkout it is
+# (the engsys host checkout, its isolated worktree through the repo they share, or the instance repo: engsys#216). The one
+# place that decides "stale pinned tag", so the three sync steps can't drift apart. 1 otherwise, offline included.
+fleet_pin_recut() {
+  [ "$2" = "$3" ] && fleet_pinned_tag_drift "$1" "$3"
+}
+
 # fleet_keychain_unreadable → 0 on macOS in an SSH shell, where `claude auth status` says "not logged in" because the
 # login Keychain can't be read, not because there is no login (engsys#210). Acting on that answer (a /login) would
 # replace a working login. Callers say "login state unknown" and neither hold nor skip work on it.

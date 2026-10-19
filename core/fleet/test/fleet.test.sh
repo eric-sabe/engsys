@@ -1346,6 +1346,61 @@ run fleet sync
 has "…and the next sync is in sync" "$OUT" "in sync"
 rm -f "$LC"
 
+echo "== P. engsys#216: a stale local copy of a re-cut pinned tag is caught in the isolated worktree and in the instance repo"
+recut_engsys() { git -C "$E" commit -q --allow-empty -m "engsys re-cut $1"; git -C "$E" tag -f v1.4.0 >/dev/null; git -C "$E" push -q -f origin main v1.4.0; }
+recut_instance() { git -C "$I" commit -q --allow-empty -m "instance re-cut $1"; git -C "$I" tag -f v0.2.0 >/dev/null; git -C "$I" push -q -f origin main v0.2.0; }
+ORIGIN_URL="$(git -C "$ENGSYS_HOST" remote get-url origin)"
+INST_ORIGIN="$(git -C "$INST" remote get-url origin)"
+git -C "$ENGSYS_HOST" worktree remove --force "$STATE/engsys" >/dev/null 2>&1 || true
+setconf "INSTANCE_MARKETPLACE=" "GH_APP_ENV=" "ENGSYS_REF=v1.4.0" "FLEET_ISOLATE_ENGSYS_WORKTREE=1"
+run fleet sync
+rc_is "isolated: baseline sync exits 0" 0
+OLDW="$(git -C "$STATE/engsys" rev-parse HEAD)"
+recut_engsys "isolated"; NEWW="$(git -C "$E" rev-parse v1.4.0)"
+[ "$NEWW" != "$OLDW" ] && ok "(the re-cut tag is a different commit)" || bad "(the re-cut tag is a different commit)"
+run fleet sync --check
+rc_is "isolated --check: a stale local copy of the pinned tag in the worktree is drift" 1
+has "…named as a re-cut release" "$OUT" "engsys worktree is at a stale local copy of v1.4.0"
+eq "…and --check moved nothing" "$(git -C "$STATE/engsys" rev-parse HEAD)" "$OLDW"
+git -C "$ENGSYS_HOST" remote set-url origin "$T/no-such-remote.git"
+run fleet sync
+rc_is "isolated, offline: sync still succeeds" 0
+has "…warns it could not ask origin" "$OUT" "could not ask origin whether the local tag v1.4.0 is current in $ENGSYS_HOST"
+eq "…keeps the local copy" "$(git -C "$STATE/engsys" rev-parse HEAD)" "$OLDW"
+git -C "$ENGSYS_HOST" remote set-url origin "$ORIGIN_URL"
+run fleet sync
+rc_is "isolated, online: sync re-fetches the re-cut tag" 0
+has "…says it was re-cut" "$OUT" "v1.4.0 was re-cut upstream; moved the worktree to origin's commit"
+eq "…the worktree is at origin's commit" "$(git -C "$STATE/engsys" rev-parse HEAD)" "$NEWW"
+run fleet sync
+has "…and the next sync is in sync" "$OUT" "in sync"
+git -C "$ENGSYS_HOST" worktree remove --force "$STATE/engsys" >/dev/null 2>&1 || true
+# the instance repo
+setconf "GH_APP_ENV=" "ENGSYS_REF=v1.4.0" "INSTANCE_REF=v0.2.0"
+run fleet sync
+rc_is "instance: baseline sync exits 0" 0
+eq "…the instance checkout is at its pin" "$(git -C "$INST" describe --tags --exact-match)" v0.2.0
+OLDI="$(git -C "$INST" rev-parse HEAD)"
+recut_instance "first"; NEWI="$(git -C "$I" rev-parse v0.2.0)"
+[ "$NEWI" != "$OLDI" ] && ok "(the re-cut instance tag is a different commit)" || bad "(the re-cut instance tag is a different commit)"
+run fleet sync --check
+rc_is "instance --check: a stale local pinned instance tag at HEAD is drift" 1
+has "…named as a re-cut release" "$OUT" "instance checkout is at a stale local copy of v0.2.0"
+eq "…and --check moved nothing" "$(git -C "$INST" rev-parse HEAD)" "$OLDI"
+git -C "$INST" remote set-url origin "$T/no-such-instance.git"
+run fleet sync
+rc_is "instance, offline: sync still succeeds" 0
+has "…warns it could not ask origin" "$OUT" "could not ask origin whether the local tag v0.2.0 is current in $INST"
+eq "…keeps the local copy" "$(git -C "$INST" rev-parse HEAD)" "$OLDI"
+git -C "$INST" remote set-url origin "$INST_ORIGIN"
+run fleet sync
+rc_is "instance, online: sync re-fetches the re-cut tag" 0
+has "…says it was re-cut" "$OUT" "instance: v0.2.0 was re-cut upstream; moved the checkout to origin's commit"
+eq "…the instance checkout is at origin's commit" "$(git -C "$INST" rev-parse HEAD)" "$NEWI"
+run fleet sync
+has "…and the next sync is in sync" "$OUT" "in sync"
+rm -f "$LC"
+
 echo "== O. engsys#212: per-session adoption: early warnings, and no /login advice over SSH"
 setconf "INSTANCE_MARKETPLACE=" "GH_APP_ENV=" "ENGSYS_REF=v1.4.0" "FLEET_CLAUDE_CONFIG_DIR=$FCFG" "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on"
 SESS="$FCFG.sessions"; rm -rf "$SESS" "$FAKE/claude-cfg"

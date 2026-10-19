@@ -1138,6 +1138,13 @@ The pins are in the pin repo's `.claude/settings.json` (section 3). `fleet sync`
 `fleet sync --check` reports drift only. Sync refuses to run over uncommitted changes to tracked files in
 either checkout (it names the checkout). It never restarts anything.
 
+**A re-cut pinned tag** (engsys#214, #216). A pinned release tag can be moved on origin (a re-cut). Sync asks
+origin (`git ls-remote`, the peeled tag) whether the checkout's local copy of the pinned tag is still origin's
+commit, for the engsys checkout, the engsys worktree under `FLEET_ISOLATE_ENGSYS_WORKTREE=1` and the instance
+repo alike (one shared check, `fleet_pin_recut`). On a difference it re-fetches the pinned tag, and only that
+tag, from origin, moves the checkout to the new commit and re-executes; `--check` reports it as drift
+(`stale local copy of <tag>`). Offline (`ls-remote` fails) it warns and keeps going on the local copy.
+
 ### Recipes
 
 **Ship an instance change** (anything merged to the instance repo's default branch: context, configs,

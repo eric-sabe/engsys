@@ -8,6 +8,8 @@
 #   2. checks out the INSTANCE repo at the instance pin, then re-execs (skipped when the instance has
 #      no INSTANCE_MARKETPLACE)
 #   3. checks out ENGSYS_DIR at the engsys pin, then re-execs — the kit's own code lives there
+#      (steps 2 and 3 treat a pinned release tag that was re-cut on origin as a move too: the local copy of the tag is
+#      compared with origin's, and the checkout, or the isolated worktree, follows origin's commit)
 #   4. reinstalls the user-level plugins when a marketplace ref moved (remove -> add #ref -> install
 #      each enabled plugin), installs any enabled plugin that's missing, and checks each one is at the
 #      pinned version. Every `claude plugin` call is user-scope and runs outside any project; if the
@@ -92,17 +94,23 @@ main() {
 
   # --- 2. the instance repo at its pin (then continue from the NEW checkout) ---------------------
   if [ -n "$INSTANCE_MARKETPLACE" ]; then
-    local have_instance
+    local have_instance irecut=0
     have_instance="$(fleet_git_at "$FLEET_REPO")"
-    if [ "$have_instance" != "$want_instance" ]; then
+    # engsys#216: HEAD can sit on a stale local copy of the pinned instance tag too (a re-cut release)
+    if fleet_pin_recut "$FLEET_REPO" "$have_instance" "$want_instance"; then irecut=1; fi
+    if [ "$have_instance" != "$want_instance" ] || [ "$irecut" = 1 ]; then
       if [ "$check" = 1 ]; then
-        say "instance checkout is at $have_instance (pin $want_instance)"; drift=1
+        if [ "$irecut" = 1 ]; then say "instance checkout is at a stale local copy of $want_instance (origin's tag moved: re-cut release)"
+        else say "instance checkout is at $have_instance (pin $want_instance)"; fi
+        drift=1
       else
         [ -z "$prev_instance" ] || fleet_die "instance checkout still at $have_instance after switching to $want_instance"
         require_clean "$FLEET_REPO"
+        # after a re-cut the tag name no longer names the old commit, so the re-exec's job diff needs the sha
+        [ "$irecut" = 0 ] || have_instance="$(git -C "$FLEET_REPO" rev-parse HEAD)"
         fleet_fetch_tags "$FLEET_REPO" "$want_instance" || fleet_die "could not fetch the instance tags into $FLEET_REPO (see above)"
         git -C "$FLEET_REPO" checkout -q "$want_instance"
-        say "instance: $have_instance → $want_instance"
+        if [ "$irecut" = 1 ]; then say "instance: $want_instance was re-cut upstream; moved the checkout to origin's commit"; else say "instance: $have_instance → $want_instance"; fi
         FLEET_SYNC_RESUMED=1 FLEET_SYNC_PREV_INSTANCE="$have_instance" FLEET_SYNC_CHANGED=1 \
           exec bash "$FLEET_KIT_DIR/sync.sh" --instance "$FLEET_REPO"
       fi
@@ -119,17 +127,23 @@ main() {
     else
       have_engsys="absent"
     fi
-    if [ "$have_engsys" != "$want_engsys" ]; then
+    # engsys#216: the worktree can sit on a stale copy of the pinned tag too; the tags live in the repo it shares with ENGSYS_DIR
+    local wrecut=0
+    if fleet_pin_recut "$ENGSYS_DIR" "$have_engsys" "$want_engsys"; then wrecut=1; fi
+    if [ "$have_engsys" != "$want_engsys" ] || [ "$wrecut" = 1 ]; then
       if [ "$check" = 1 ]; then
-        say "engsys worktree is at $have_engsys (pin $want_engsys)"; drift=1
+        if [ "$wrecut" = 1 ]; then say "engsys worktree is at a stale local copy of $want_engsys (origin's tag moved: re-cut release)"
+        else say "engsys worktree is at $have_engsys (pin $want_engsys)"; fi
+        drift=1
       else
         [ -z "$prev_engsys" ] || fleet_die "engsys worktree still at $have_engsys after switching to $want_engsys"
+        [ "$wrecut" = 0 ] || have_engsys="$(git -C "$engsys_target" rev-parse HEAD)"
         fleet_fetch_tags "$ENGSYS_DIR" "$want_engsys" || fleet_die "could not fetch the engsys tags into $ENGSYS_DIR (see above)"
         mkdir -p "$FLEET_STATE"
         git -C "$ENGSYS_DIR" worktree remove --force "$engsys_target" >/dev/null 2>&1 || rm -rf "$engsys_target"
         git -C "$ENGSYS_DIR" worktree prune
         git -C "$ENGSYS_DIR" worktree add -q --force --detach "$engsys_target" "$want_engsys"
-        say "engsys (isolated worktree): $have_engsys → $want_engsys"
+        if [ "$wrecut" = 1 ]; then say "engsys (isolated worktree): $want_engsys was re-cut upstream; moved the worktree to origin's commit"; else say "engsys (isolated worktree): $have_engsys → $want_engsys"; fi
         [ -f "$engsys_target/core/fleet/sync.sh" ] || fleet_die "engsys $want_engsys has no fleet kit (core/fleet/sync.sh)"
         FLEET_SYNC_RESUMED=1 FLEET_SYNC_PREV_INSTANCE="$prev_instance" FLEET_SYNC_PREV_ENGSYS="$have_engsys" FLEET_SYNC_CHANGED=1 \
           exec bash "$engsys_target/core/fleet/sync.sh" --instance "$FLEET_REPO"
@@ -139,7 +153,7 @@ main() {
     have_engsys="$(fleet_git_at "$ENGSYS_DIR")"
     local recut=0
     # engsys#214: HEAD can sit on a stale local copy of the pinned tag (a re-cut release); compare it with origin's
-    if [ "$have_engsys" = "$want_engsys" ] && fleet_pinned_tag_drift "$ENGSYS_DIR" "$want_engsys"; then recut=1; fi
+    if fleet_pin_recut "$ENGSYS_DIR" "$have_engsys" "$want_engsys"; then recut=1; fi
     if [ "$have_engsys" != "$want_engsys" ] || [ "$recut" = 1 ]; then
       if [ "$check" = 1 ]; then
         if [ "$recut" = 1 ]; then say "engsys checkout is at a stale local copy of $want_engsys (origin's tag moved: re-cut release)"
