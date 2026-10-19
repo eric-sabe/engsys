@@ -766,6 +766,51 @@ export function extractEventsFromIssueNode(
 }
 
 /**
+ * Normalize a signing-key identifier for comparison (engsys#187). Returns `{ type, id }` or `null`.
+ *   - SSH: `SHA256:<base64>` (what `ssh-keygen -l` prints, and how an operator lists a key) — base64 is
+ *     case-sensitive, so only the prefix is case-folded and trailing `=` padding is dropped. GitHub's
+ *     `SshSignature.keyFingerprint` is the bare base64 with no prefix; `isSigningKeyAllowed` adds it back.
+ *   - GPG: hex only (optional `0x`, spaces/colons tolerated) of at least 16 digits — a long key id
+ *     (16) or full fingerprint (40). Anything shorter or non-hex is rejected, never prefix-matched.
+ */
+export function normalizeSigningKeyId(raw) {
+  if (typeof raw !== 'string') return null;
+  const s = raw.trim();
+  const ssh = /^sha256:([A-Za-z0-9+/]{20,})={0,2}$/i.exec(s);
+  if (ssh) return { type: 'ssh', id: ssh[1] };
+  const hex = s.replace(/^0x/i, '').replace(/[\s:]/g, '').toLowerCase();
+  if (/^[0-9a-f]{16,}$/.test(hex)) return { type: 'gpg', id: hex };
+  return null;
+}
+
+/**
+ * True only when `signingKey` (`{ type: 'gpg'|'ssh', id }` from `fetchCommitTrustBatch`) is on
+ * `allowlist`. Fails closed on a missing key, an empty/non-array allowlist, or any malformed entry
+ * (which is skipped, never wildcard-matched). Types never cross-match. GitHub exposes only the
+ * 64-bit long key id for a GPG signature, so a listed 40-hex fingerprint matches when it ENDS
+ * WITH that key id; a listed 16-hex key id must match exactly.
+ */
+export function isSigningKeyAllowed(signingKey, allowlist) {
+  if (!signingKey || !Array.isArray(allowlist) || allowlist.length === 0) return false;
+  const got = normalizeSigningKeyId(
+    signingKey.type === 'ssh' ? `SHA256:${String(signingKey.id ?? '').replace(/^sha256:/i, '')}` : String(signingKey.id ?? ''),
+  );
+  if (!got || got.type !== signingKey.type) return false;
+  for (const entry of allowlist) {
+    const want = normalizeSigningKeyId(entry);
+    if (!want || want.type !== got.type) continue;
+    if (want.type === 'ssh') {
+      if (want.id === got.id) return true;
+    } else if (got.id.length === 16 && (want.id === got.id || (want.id.length === 40 && want.id.endsWith(got.id)))) {
+      return true;
+    } else if (got.id.length === 40 && want.id === got.id) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Extract a normalized memory event from a git commit record per §7.2 commit-ingest filter:
  *   - Skip commits authored or co-authored by Dependabot.
  *   - Always index commit subject + `#123` / `Closes #123` references + touched files.
@@ -805,11 +850,17 @@ export function extractEventFromCommit(
   // trust gate's member/owner path now requires a trusted_member_user_ids/operator_user_ids ID
   // match, and commits were never meant to carry that burden — they fall through the gate's
   // legacy/unlabeled allowance instead, same as before, carrying nothing sensitive to protect.
+  // engsys#187: a fourth, equally required criterion — the signature's KEY must be on the
+  // operator-controlled `operator_signing_key_fingerprints` allowlist (repo-at-reviewed-SHA or
+  // fleet config only). A verified signature by itself only proves SOME key registered to the
+  // committer's account signed; the allowlist pins which key(s) count as the operator's. An
+  // empty/missing allowlist trusts nothing.
   const operators = new Set((config.operator_user_ids ?? []).map(Number));
   const committerId = commit.committerId != null ? Number(commit.committerId) : null;
   const hasAgentCoAuthor = AGENT_TRAILER_RE.test(body);
   const isOperatorCommit =
     commit.verified === true &&
+    isSigningKeyAllowed(commit.signingKey, config.operator_signing_key_fingerprints) &&
     committerId != null &&
     operators.has(committerId) &&
     !hasAgentCoAuthor;
@@ -863,7 +914,7 @@ const COMMIT_TRUST_GQL = `query($owner:String!,$name:String!,$expr:String!,$firs
       ... on Commit{
         history(first:$first,after:$after,since:$since){
           pageInfo{hasNextPage endCursor}
-          nodes{oid signature{isValid} committer{user{databaseId}}}
+          nodes{oid signature{isValid wasSignedByGitHub ... on GpgSignature{keyId} ... on SshSignature{keyFingerprint}} committer{user{databaseId}}}
         }
       }
     }
@@ -875,7 +926,7 @@ const COMMIT_TRUST_GQL = `query($owner:String!,$name:String!,$expr:String!,$firs
  * from `sha`, via `history`, in batches of (at most) 100 — ONE or a handful of GraphQL calls
  * total, never one REST call per commit (cr review round 2, F2/F5: the per-commit REST lookup
  * this replaced made --init do up to 500 sequential network round-trips, and it ran inside the
- * maintenance heartbeat). Returns a `Map<sha, { verified: boolean, committerId: number|null }>`.
+ * maintenance heartbeat). Returns a `Map<sha, { verified: boolean, signingKey: {type,id}|null, committerId: number|null }>`.
  * Fails closed: any error/missing `repo` stops pagination and returns whatever was already
  * fetched (possibly empty) — never retries into a hang.
  *
@@ -918,8 +969,16 @@ export function fetchCommitTrustBatch(repo, sha, { maxCount = INIT_CAPS.commits,
     const nodes = Array.isArray(history?.nodes) ? history.nodes : [];
     for (const n of nodes) {
       if (!n || typeof n.oid !== 'string') continue;
+      // engsys#187: capture WHICH key signed. A GitHub-signed commit (web UI / web-flow) is never
+      // the operator's own key, so it yields no signingKey. Absent/odd shapes yield null.
+      let signingKey = null;
+      if (n.signature?.wasSignedByGitHub !== true) {
+        if (typeof n.signature?.keyId === 'string' && n.signature.keyId) signingKey = { type: 'gpg', id: n.signature.keyId };
+        else if (typeof n.signature?.keyFingerprint === 'string' && n.signature.keyFingerprint) signingKey = { type: 'ssh', id: n.signature.keyFingerprint };
+      }
       result.set(n.oid, {
         verified: n.signature?.isValid === true,
+        signingKey,
         committerId: n.committer?.user?.databaseId != null ? Number(n.committer.user.databaseId) : null,
       });
     }
@@ -987,7 +1046,12 @@ export function ingestLocalCommits(
   // one REST call per commit) resolves signature validity + the committer's numeric id for every
   // commit in this batch at once. Skipped entirely when no operator_user_ids are configured —
   // there's nothing for the result to be matched against either way.
-  const wantTrust = (config.operator_user_ids ?? []).length > 0 && normalizeOptionalRepo(repo);
+  // engsys#187: also skipped when no signing-key allowlist is configured — no commit could be
+  // trusted without one, so the lookup would be wasted.
+  const wantTrust =
+    (config.operator_user_ids ?? []).length > 0 &&
+    (config.operator_signing_key_fingerprints ?? []).length > 0 &&
+    normalizeOptionalRepo(repo);
   const trustBySha = wantTrust ? fetchTrustBatch(repo, effectiveRef, { maxCount, since, exec }) : new Map();
 
   const events = [];
@@ -1013,6 +1077,7 @@ export function ingestLocalCommits(
         files,
         committerId: trust?.committerId ?? null,
         verified: trust?.verified === true,
+        signingKey: trust?.signingKey ?? null,
       },
       { repo, config, cacheDir, now },
     );

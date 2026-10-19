@@ -87,6 +87,23 @@ describe('extractTargetAgentType (engsys v2.0.1 M5)', () => {
 			'engsys:isabelle',
 		);
 	});
+	test('engsys#192: strips \\p{Default_Ignorable_Code_Point} characters that are NOT \\p{Cf} (combining grapheme joiner, variation selector, Hangul filler)', () => {
+		// Guard the premise: each of these is default-ignorable but not a Cf format character.
+		for (const ch of ['\u034F', '\uFE0F', '\u3164']) {
+			assert.ok(/\p{Default_Ignorable_Code_Point}/u.test(ch), `U+${ch.codePointAt(0).toString(16)} is default-ignorable`);
+			assert.ok(!/\p{Cf}/u.test(ch), `U+${ch.codePointAt(0).toString(16)} is not Cf`);
+		}
+		// U+034F COMBINING GRAPHEME JOINER spliced into a name that would otherwise miss an exclusion.
+		assert.equal(extractTargetAgentType({ tool_input: { subagent_type: 'ny\u034Fx' } }), 'nyx');
+		assert.equal(extractTargetAgentType({ tool_input: { subagent_type: 'engsys:ny\uFE0Fx' } }), 'engsys:nyx');
+		// ... and in a subagent_type/agent_type pair it must not manufacture a false disagreement.
+		assert.equal(
+			extractTargetAgentType({ tool_input: { subagent_type: 'is\u034Fabelle', agent_type: 'isabelle' } }),
+			'isabelle',
+		);
+		// Positive control: an ordinary visible name is untouched.
+		assert.equal(extractTargetAgentType({ tool_input: { subagent_type: 'engsys:nyx' } }), 'engsys:nyx');
+	});
 	test('engsys v2.0.1 round 3 (F5): subagent_type vs agent_type disagreement compares BARE names — a namespace-prefix spelling difference is not a conflict', () => {
 		// Positive control: same bare name, one namespaced, one not -> no conflict, resolves.
 		assert.equal(

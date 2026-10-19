@@ -15,13 +15,25 @@
 # name is special-cased: the config's review_marker, a handoff block or any other marker reads the same.
 # --full keeps the raw comments instead.
 #
-# Usage: mm-preflight.sh --repo owner/name --pr N [--full]
+# Signed security verdicts (engsys#197, option B; OFF unless --security-verdict is passed): the model passes
+# it only when the config sets ready_requirements.signed_security_verdict: true. Then the authentic `nyx-review`
+# verdicts (valid HMAC) are ranked by SIGNED timestamp, never comment createdAt, and the latest decides
+# (core/lib/security-verdict.mjs): FINDINGS for ANY head fails and is sticky (a push does not clear it; only a
+# fresh signed verdict for the current head does), and a PASS counts only when signed for the current head.
+# Unsigned, forged or tampered `<!-- nyx-review -->` comments are ignored once an authentic verdict decides;
+# with none, such a claim fails the PR (it never passes silently), as does an unreadable key (exit 1, reason
+# on stderr). --require-security-verdict also fails a
+# PR that has no valid verdict (pass it for PRs that need a security review). Defence in depth, NOT a
+# boundary: the key is readable by every process of the fleet's OS user.
+#
+# Usage: mm-preflight.sh --repo owner/name --pr N [--full] [--security-verdict [--require-security-verdict]
+#                        [--security-key-file PATH]]
 set -euo pipefail
 # shellcheck source=../../../lib/fleet-gh.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/fleet-gh.sh"
 fleet_gh_resolve
 
-REPO="" PR="" FULL=0 ISSUE_FILE="" CHECK_CONTRACT=0
+REPO="" PR="" FULL=0 ISSUE_FILE="" CHECK_CONTRACT=0 SEC_VERDICT=0 SEC_REQUIRE=0 SEC_KEY_FILE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) REPO="$2"; shift 2 ;;
@@ -29,6 +41,9 @@ while [ $# -gt 0 ]; do
     --full) FULL=1; shift ;;
     --issue-file) ISSUE_FILE="$2"; shift 2 ;;
     --check-contract) CHECK_CONTRACT=1; shift ;;
+    --security-verdict) SEC_VERDICT=1; shift ;;
+    --require-security-verdict) SEC_VERDICT=1; SEC_REQUIRE=1; shift ;;
+    --security-key-file) SEC_KEY_FILE="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -38,7 +53,7 @@ OWNER="${REPO%%/*}"
 NAME="${REPO##*/}"
 
 VIEW=$("$FLEET_GH" pr view "$PR" -R "$REPO" \
-  --json isDraft,mergeable,mergeStateStatus,baseRefName,body,comments,files,commits)
+  --json isDraft,mergeable,mergeStateStatus,baseRefName,headRefOid,body,comments,files,commits)
 
 THREADS=$("$FLEET_GH" api graphql -f owner="$OWNER" -f name="$NAME" -F number="$PR" -f query='
   query($owner: String!, $name: String!, $number: Int!) {
@@ -70,7 +85,28 @@ if [ "$CHECK_CONTRACT" -eq 1 ] || [ -n "$ISSUE_FILE" ]; then
   rm -f "$PR_BODY_TMP"
 fi
 
-jq -n --argjson view "$VIEW" --argjson threads "$THREADS" --argjson full "$FULL" --argjson contract "$CONTRACT_JSON" '
+SECURITY_JSON="null"
+if [ "$SEC_VERDICT" -eq 1 ]; then
+  # Fail closed on every path below: no key, no head SHA, no node, or any non-zero verdict exit.
+  [ -n "$SEC_KEY_FILE" ] || SEC_KEY_FILE="${FLEET_STATE:+$FLEET_STATE/security-verdict.key}"
+  SV_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/security-verdict.mjs"
+  HEAD_SHA=$(jq -r '.headRefOid // ""' <<<"$VIEW")
+  if [ -z "$SEC_KEY_FILE" ] || [ -z "$HEAD_SHA" ] || ! command -v node >/dev/null || [ ! -f "$SV_SCRIPT" ]; then
+    echo '{"ok":false,"state":"error","reason":"security_verdict_unconfigured: need a key file (--security-key-file or FLEET_STATE), the PR head SHA, node and security-verdict.mjs"}' >&2
+    exit 1
+  fi
+  SV_ARGS=(verify --repo "$REPO" --pr "$PR" --sha "$HEAD_SHA" --key-file "$SEC_KEY_FILE")
+  [ "$SEC_REQUIRE" -eq 1 ] && SV_ARGS+=(--require)
+  SV_RC=0
+  SECURITY_JSON=$(jq -c '.comments // []' <<<"$VIEW" | node "$SV_SCRIPT" "${SV_ARGS[@]}") || SV_RC=$?
+  if [ "$SV_RC" -ne 0 ]; then
+    if [ -n "$SECURITY_JSON" ]; then echo "$SECURITY_JSON" >&2
+    else echo '{"ok":false,"state":"error","reason":"security_verdict_check_failed"}' >&2; fi
+    exit 1
+  fi
+fi
+
+jq -n --argjson view "$VIEW" --argjson security "$SECURITY_JSON" --argjson threads "$THREADS" --argjson full "$FULL" --argjson contract "$CONTRACT_JSON" '
   def leading_markers: (capture("^(?<lead>(\\s*<!--[\\s\\S]*?-->)+)")? // {lead: ""}).lead
     | [scan("<!--[\\s\\S]*?-->") | gsub("\\s+"; " ") | .[0:200]];
   def project:
@@ -85,5 +121,6 @@ jq -n --argjson view "$VIEW" --argjson threads "$THREADS" --argjson full "$FULL"
         items: [ $all[] | select((.markers | length) > 0 or (.findingAcks | length) > 0) ] };
   $view + {reviewThreads: $threads}
   | if $contract != null then . + {contractCheck: $contract} else . end
+  | if $security != null then . + {securityVerdict: $security} else . end
   | if $full == 1 then . else .comments |= ((. // []) | project) end'
 

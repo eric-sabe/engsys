@@ -20,6 +20,8 @@ case "$1" in
   has-session) exit 1 ;;                        # no session yet
   send-keys) [ -n "${TMUX_FAIL:-}" ] && exit 1; shift; echo "send-keys $*" >>"$FAKE/actions" ;;
 esac
+# engsys#197: no tmux call may see the verdict key path in its environment (the server would keep it)
+if [ -n "${ENGSYS_SECURITY_VERDICT_KEY_FILE+x}" ]; then echo "tmux $1 saw the key path" >>"$FAKE/leak"; fi
 exit 0
 SH
 for b in claude copilot; do printf '#!/usr/bin/env bash\nexit 0\n' >"$T/bin/$b"; done
@@ -30,6 +32,7 @@ exit 0
 SH
 chmod +x "$T/bin/"*
 : >"$T/w/security.env"
+: >"$T/w/ordinary.env"
 export PATH="$T/bin:$PATH" FAKE="$T" HOME="$T/home"
 unset HARNESS FLEET_HARNESS AGY_REMOTE_CONTROL AGY_REMOTE_CONTROL_AUTOSTART FLEET_ID 2>/dev/null || true
 
@@ -41,7 +44,8 @@ run() {
   printf 'NAMESPACE=acme\n%s\n' "$body" >"$T/w/roster"
   : >"$T/actions"
   set +e
-  err="$(cd "$T/w" && env HARNESS="$harness" "$@" bash "$LAUNCH" --roster "$T/w/roster" 2>&1 >/dev/null)"
+  # shellcheck disable=SC2086
+  err="$(cd "$T/w" && env HARNESS="$harness" "$@" bash "$LAUNCH" --roster "$T/w/roster" ${LAUNCH_EXTRA:-} 2>&1 >/dev/null)"
   rc=$?
   set -e
   acts="$(cat "$T/actions")"
@@ -159,6 +163,33 @@ has "copilot: haiku → claude-haiku-5.5" "$acts" "--model claude-haiku-5.5"
 has "copilot: bypassPermissions → --yolo" "$acts" "--yolo"
 has "copilot: --dangerously-skip-permissions → --yolo --mode autopilot --no-ask-user" "$acts" "--yolo --mode autopilot --no-ask-user"
 
+SEC_ENV_OK="acme-sec|$W||--model claude-opus-4-8|$W/security.env"
+echo "engsys#197: the verdict key path goes only to security-lane lines (defence in depth, not a boundary)"
+KEYP="$T/fleet.key"
+LAUNCH_EXTRA="--verdict-key-file $KEYP"
+rm -f "$T/leak"
+run claude "$SEC_MODEL" 
+has "claude: a security-model line gets the key path (positive control)" "$acts" "export ENGSYS_SECURITY_VERDICT_KEY_FILE=$KEYP"
+run claude "$SEC_ENV_OK" 
+has "claude: a security env-file line gets the key path (positive control)" "$acts" "export ENGSYS_SECURITY_VERDICT_KEY_FILE=$KEYP"
+run claude "$BUILD" 
+lacks "claude: an interactive line is NOT given the key path" "$acts" "export ENGSYS_SECURITY_VERDICT_KEY_FILE"
+has "claude: an interactive line has it unset" "$acts" "unset ENGSYS_SECURITY_VERDICT_KEY_FILE"
+run claude "$MM" 
+lacks "claude: the merge monster is NOT given the key path by the launcher" "$acts" "export ENGSYS_SECURITY_VERDICT_KEY_FILE"
+LAUNCH_EXTRA="" run claude "$SEC_MODEL"
+lacks "claude: nothing is exported when the launcher has no key configured" "$acts" "export ENGSYS_SECURITY_VERDICT_KEY_FILE"
+# an inherited key path in the launcher's own environment is scrubbed, never forwarded and never seen by tmux
+LAUNCH_EXTRA="" run claude "$SEC_MODEL" ENGSYS_SECURITY_VERDICT_KEY_FILE=/inherited/key
+lacks "claude: an inherited key path is not forwarded to a launch line" "$acts" "/inherited/key"
+LAUNCH_EXTRA="--verdict-key-file $KEYP" run claude "$SEC_ENV_OK" ENGSYS_SECURITY_VERDICT_KEY_FILE=/inherited/key
+lacks "claude: …nor does the launcher's own env leak into the line when a key flag is also given" "$acts" "/inherited/key"
+if [ ! -s "$T/leak" ]; then ok "no tmux call ever saw the key path in its environment (the server's global env stays clean)"; else no "tmux saw the key path" "$(cat "$T/leak")"; fi
+echo "export-before-claude ordering: the key decision is repeated after the env file"
+run claude "$SEC_ENV_OK" 
+case "$acts" in *"set +a && export ENGSYS_SECURITY_VERDICT_KEY_FILE"*) ok "claude: the key decision is re-applied after the env file is sourced" ;; *) no "claude: re-applied after the env file" "$acts" ;; esac
+run claude "acme-build|$W||--model opus|$W/ordinary.env" 
+case "$acts" in *"set +a && unset ENGSYS_SECURITY_VERDICT_KEY_FILE"*) ok "claude: an env file cannot add the key path to an ordinary session (unset after sourcing)" ;; *) no "claude: unset after the env file" "$acts" ;; esac
 echo "antigravity flag translation and the remote-control daemon"
 run antigravity "$BUILD"
 [ "$rc" -eq 0 ] && ok "antigravity: interactive line launches" || no "antigravity: interactive line launches" "$err"

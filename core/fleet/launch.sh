@@ -142,6 +142,21 @@ else
   unset ENGSYS_CONFIG_DIR_SESSIONS
 fi
 
+# Signed security verdicts (engsys#197, option B). The launcher hands the PATH of the key to security-lane
+# sessions only (launch-agent-sessions.sh); the key is created here, once, mode 0600, and never replaced.
+# The key PATH is handed to the launcher as a flag, never exported: an exported variable would reach the tmux
+# server's global environment, and so every window opened by hand.
+unset ENGSYS_SECURITY_VERDICT_KEY_FILE
+VERDICT_KEY_ARGS=()
+if [ "${FLEET_SECURITY_VERDICT_KEY:-off}" = on ]; then
+  command -v node >/dev/null || fleet_die "FLEET_SECURITY_VERDICT_KEY=on needs node"
+  if [ ! -e "$FLEET_SECURITY_VERDICT_KEY_FILE" ]; then
+    (umask 077; node "$ENGSYS_DIR/core/lib/security-verdict.mjs" keygen --key-file "$FLEET_SECURITY_VERDICT_KEY_FILE") \
+      || fleet_die "can't create the security verdict key $FLEET_SECURITY_VERDICT_KEY_FILE"
+  fi
+  VERDICT_KEY_ARGS=(--verdict-key-file "$FLEET_SECURITY_VERDICT_KEY_FILE")
+fi
+
 mkdir -p "$ENV_DIR" && chmod 700 "$ENV_DIR"
 shopt -s nullglob
 for tmpl in "$FLEET_REPO"/fleet/env/*.env.tmpl; do
@@ -285,7 +300,7 @@ if [ -n "$name" ]; then
   elif is_singleton "$name" && ! singleton_integrity_ok "$name"; then
     fleet_die "not launching $name: $why_held (above). Check the running sessions, fix or reinstall the plugin, then: fleet verify"
   fi
-  lrc=0; bash "$LAUNCHER" --roster "$FLEET_STATE/roster" "$name" || lrc=$?
+  lrc=0; bash "$LAUNCHER" --roster "$FLEET_STATE/roster" "${VERDICT_KEY_ARGS[@]+"${VERDICT_KEY_ARGS[@]}"}" "$name" || lrc=$?
   [ "$lrc" != 0 ] || record_panes "$name"
   exit "$lrc"
 fi
@@ -333,7 +348,7 @@ if [ "$kept" = 0 ]; then
   [ "$refused" = 0 ] || fleet_die "$refused session(s) refused (SKIPPED above: a Claude-only session on HARNESS=$launch_harness, or a session without its own Claude login); nothing else to launch"
   echo "fleet: no roster session runs on this host; nothing to launch"; exit 0
 fi
-lrc=0; bash "$LAUNCHER" --roster "$host_roster" || lrc=$?
+lrc=0; bash "$LAUNCHER" --roster "$host_roster" "${VERDICT_KEY_ARGS[@]+"${VERDICT_KEY_ARGS[@]}"}" || lrc=$?
 # shellcheck disable=SC2046 # names are [a-z0-9-] only
 record_panes $(awk -F'|' '/^[A-Za-z0-9][A-Za-z0-9._-]*\|/ { print $1 }' "$host_roster")
 [ "$refused" != 0 ] || exit "$lrc"

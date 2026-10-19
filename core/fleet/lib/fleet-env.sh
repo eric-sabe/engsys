@@ -44,7 +44,7 @@ unset TMUX_SESSION LOG_DIR
 unset FLEET_ID FEDERATION_FILE FLEET_INSTANCE_REPO ROLES ROSTER_EXCLUDE OPERATOR_TIMEZONE OPERATOR_CLOCK
 # So do the fleet's Claude config dir and the integrity check's user-plugin allowlist: what `fleet verify`
 # accepts must come from the operator's config files, never from whoever ran the command.
-unset FLEET_CLAUDE_CONFIG_DIR FLEET_CLAUDE_CONFIG_DIR_SCOPE FLEET_CLAUDE_CONFIG_DIR_PER_SESSION VERIFY_ALLOWED_USER_PLUGINS VERIFY_ALLOWED_USER_HOOKS VERIFY_ALLOWED_USER_FILES
+unset FLEET_CLAUDE_CONFIG_DIR FLEET_CLAUDE_CONFIG_DIR_SCOPE FLEET_CLAUDE_CONFIG_DIR_PER_SESSION FLEET_SECURITY_VERDICT_KEY FLEET_SECURITY_VERDICT_KEY_FILE ENGSYS_SECURITY_VERDICT_KEY_FILE VERIFY_ALLOWED_USER_PLUGINS VERIFY_ALLOWED_USER_HOOKS VERIFY_ALLOWED_USER_FILES
 # PIN_SETTINGS (where the pins are read) too: only a conf file, or sync's own pins copy in .fleet/
 # (FLEET_SYNC_PINS, set by sync.sh across its re-execs), may point it somewhere else.
 _pin_settings_sync="${FLEET_SYNC_RESUMED:+${PIN_SETTINGS:-}}"
@@ -362,6 +362,21 @@ if [ "$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION" = on ] && [ -z "${FLEET_CLAUDE_CONFI
   fleet_die "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on needs FLEET_CLAUDE_CONFIG_DIR (the base the per-session dirs hang off)"
 fi
 export FLEET_CLAUDE_CONFIG_DIR_PER_SESSION
+
+# FLEET_SECURITY_VERDICT_KEY=on (engsys#197, option B): a security-lane session signs its nyx-review verdict
+# with an HMAC key kept at $FLEET_STATE/security-verdict.key (mode 0600, created by `fleet launch` when absent);
+# merge-monster can then verify the verdict (mm-preflight.sh --security-verdict). Off or unset = as before.
+# Only the conf files set it. Defence in depth, NOT a boundary: any process of this OS user can read the key
+# (core/lib/security-verdict.mjs, fleet-guide.md).
+: "${FLEET_SECURITY_VERDICT_KEY:=off}"
+# shellcheck disable=SC2034 # FLEET_SECURITY_VERDICT_KEY_FILE is read by launch.sh, which sources this file
+case "$FLEET_SECURITY_VERDICT_KEY" in
+  # the PATH is deliberately NOT exported (it would reach the tmux server's global environment)
+  on) FLEET_SECURITY_VERDICT_KEY_FILE="$FLEET_STATE/security-verdict.key" ;;
+  off) unset FLEET_SECURITY_VERDICT_KEY_FILE ;;
+  *) fleet_die "FLEET_SECURITY_VERDICT_KEY must be on or off (got '$FLEET_SECURITY_VERDICT_KEY')" ;;
+esac
+export FLEET_SECURITY_VERDICT_KEY
 
 # fleet_dir_lock <dir> <command...> → runs the command holding a per-config-dir lock, in per-session mode; plain
 # otherwise. Fleet commands that run `claude` against a session's dir (verify's auth status and plugin list) are

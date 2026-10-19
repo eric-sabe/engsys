@@ -1398,5 +1398,30 @@ rc_is "init --per-session --dir is refused, not silently narrowed" 1
 has "…saying why" "$OUT" "--per-session and --dir cannot be combined"
 rm -f "$LC"
 
+echo "== P. engsys#197: FLEET_SECURITY_VERDICT_KEY=on gives only the security lane the verdict key PATH"
+STATE_KEY="$STATE/security-verdict.key"
+rm -f "$STATE_KEY"
+setconf "FLEET_SECURITY_VERDICT_KEY=on"
+rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"; run fleet launch
+rc_is "launch with the verdict key on exits 0" 0
+if [ -f "$STATE_KEY" ]; then ok "the key is created in the fleet state dir"; else bad "the key is created in the fleet state dir"; fi
+eq "…mode 600" "$(mode_of "$STATE_KEY")" 600
+has "the security lane is handed the key PATH" "$(tl acme-security)" "export ENGSYS_SECURITY_VERDICT_KEY_FILE=$STATE_KEY"
+hasnt "the key itself is on no launch line" "$(cat "$FAKE/tmux.log")" "$(tr -d '\n' <"$STATE_KEY")"
+for n in acme-mm acme-build acme-rel; do
+  hasnt "$n (not the security lane) is not handed the key path" "$(tl "$n")" "export ENGSYS_SECURITY_VERDICT_KEY_FILE"
+done
+KEY_BEFORE="$(cat "$STATE_KEY")"
+rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"; run fleet launch
+eq "a second launch never replaces the key" "$(cat "$STATE_KEY")" "$KEY_BEFORE"
+setconf "FLEET_SECURITY_VERDICT_KEY=off"
+rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"; run fleet launch
+hasnt "off (the default): nobody is handed a key path" "$(cat "$FAKE/tmux.log")" "export ENGSYS_SECURITY_VERDICT_KEY_FILE"
+setconf "FLEET_SECURITY_VERDICT_KEY=maybe"
+run fleet launch
+rc_is "a bad value is refused" 1
+has "…saying why" "$OUT" "FLEET_SECURITY_VERDICT_KEY must be on or off"
+rm -f "$LC"
+
 # =============================================================================================
 finish fleet.test
