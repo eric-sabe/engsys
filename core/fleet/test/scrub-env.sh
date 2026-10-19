@@ -7,4 +7,5 @@ _scrub_vars="$(compgen -v | grep -E '^(ENGSYS_|FLEET_|PIN_|INSTANCE_|GH_APP|GH_B
 for _v in $_scrub_vars; do unset "$_v"; done
 # A git hook exports these; a child `git init` would rewrite the enclosing repo.
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY
+unset SSH_CONNECTION SSH_TTY   # a test run over SSH must not look like one (engsys#210)
 unset _scrub_vars _v

@@ -100,7 +100,7 @@ main() {
       else
         [ -z "$prev_instance" ] || fleet_die "instance checkout still at $have_instance after switching to $want_instance"
         require_clean "$FLEET_REPO"
-        git -C "$FLEET_REPO" fetch -q --tags origin
+        fleet_fetch_tags "$FLEET_REPO" "$want_instance" || fleet_die "could not fetch the instance tags into $FLEET_REPO (see above)"
         git -C "$FLEET_REPO" checkout -q "$want_instance"
         say "instance: $have_instance → $want_instance"
         FLEET_SYNC_RESUMED=1 FLEET_SYNC_PREV_INSTANCE="$have_instance" FLEET_SYNC_CHANGED=1 \
@@ -124,7 +124,7 @@ main() {
         say "engsys worktree is at $have_engsys (pin $want_engsys)"; drift=1
       else
         [ -z "$prev_engsys" ] || fleet_die "engsys worktree still at $have_engsys after switching to $want_engsys"
-        git -C "$ENGSYS_DIR" fetch -q --tags origin 2>/dev/null || true
+        fleet_fetch_tags "$ENGSYS_DIR" "$want_engsys" || fleet_die "could not fetch the engsys tags into $ENGSYS_DIR (see above)"
         mkdir -p "$FLEET_STATE"
         git -C "$ENGSYS_DIR" worktree remove --force "$engsys_target" >/dev/null 2>&1 || rm -rf "$engsys_target"
         git -C "$ENGSYS_DIR" worktree prune
@@ -143,7 +143,7 @@ main() {
       else
         [ -z "$prev_engsys" ] || fleet_die "engsys checkout still at $have_engsys after switching to $want_engsys"
         require_clean "$ENGSYS_DIR"
-        git -C "$ENGSYS_DIR" fetch -q --tags origin
+        fleet_fetch_tags "$ENGSYS_DIR" "$want_engsys" || fleet_die "could not fetch the engsys tags into $ENGSYS_DIR (see above)"
         git -C "$ENGSYS_DIR" checkout -q "$want_engsys"
         say "engsys: $have_engsys → $want_engsys"
         [ -f "$ENGSYS_DIR/core/fleet/sync.sh" ] || fleet_die "engsys $want_engsys has no fleet kit (core/fleet/sync.sh) — the checkout is moved; pin a release that includes it"
@@ -410,6 +410,12 @@ claude_config_report() {
     say "claude config dir: $dir$what does not exist"; return 1
   fi
   li="$( (cd "$SYNC_TMP/cwd" && fleet_claude auth status --json) 2>/dev/null | jq -r 'if .loggedIn == true then "logged in" elif .loggedIn == false then "NOT logged in" else "login unknown" end' 2>/dev/null || true)"
+  if [ "$li" = "NOT logged in" ] && fleet_keychain_unreadable; then
+    # engsys#210: not a login problem; don't hold, don't skip the plugin work
+    say "claude config dir: $dir$what, login state unknown (SSH, Keychain not readable)"
+    warn "this SSH shell can't read the login Keychain, so claude can't say whether $dir is logged in; do NOT /login. $(fleet_keychain_advice)"
+    return 0
+  fi
   say "claude config dir: $dir$what, ${li:-login unknown}"
   if [ "$li" = "NOT logged in" ]; then
     if [ -n "$SYNC_CFG" ]; then

@@ -181,6 +181,67 @@ fleet_git_at() { # fleet_git_at <dir> → exact tag at HEAD, else short sha
   git -C "$1" describe --tags --exact-match 2>/dev/null || git -C "$1" rev-parse --short HEAD
 }
 
+# fleet_fetch_tags <dir> <pinned tag> → `git fetch --tags origin` that never fails silently (engsys#210). A local tag
+# that differs from origin's (a re-cut release) is rejected by git ("would clobber existing tag"); that used to exit
+# 1 with no message. The pinned tag alone is re-fetched with --force once ls-remote confirms origin has it: the pin is
+# what the operator chose, and origin is the source of truth for it. Any other rejected tag is never moved: git's error
+# and the fix are printed and the return code is 1.
+fleet_fetch_tags() {
+  local dir="$1" pinned="${2:-}" out rc=0 line t err bad=() rejected=0
+  out="$(LC_ALL=C git -C "$dir" fetch --tags origin 2>&1)" || rc=$?
+  [ "$rc" != 0 ] || return 0
+  while IFS= read -r line; do
+    case "$line" in
+      *"[rejected]"*)
+        rejected=1; err=""
+        t="$(sed -E 's/.*\[rejected\][[:space:]]+([^[:space:]]+)[[:space:]]+->.*/\1/' <<<"$line")"
+        case "$t" in *[[:space:]]*) bad+=("unparsed rejection: ${line#"${line%%[![:space:]]*}"}"); continue ;; esac
+        if [ -n "$pinned" ] && [ "$t" = "$pinned" ] && [ -n "$(git -C "$dir" ls-remote --tags origin "refs/tags/$t" 2>/dev/null)" ] \
+          && err="$(git -C "$dir" fetch -q --force origin "refs/tags/$t:refs/tags/$t" 2>&1)"; then
+          echo "fleet: the local tag $t differed from origin's (re-cut release?): re-fetched it from origin, since it is the pinned one" >&2
+        else
+          [ -z "${err:-}" ] || printf '%s\n' "$err" >&2
+          bad+=("$t")
+        fi ;;
+    esac
+  done <<<"$out"
+  if [ "$rejected" = 0 ]; then
+    # not a tag rejection (network, auth, a bad remote): show git's own words
+    printf '%s\n' "$out" >&2
+    echo "fleet: git fetch --tags origin failed in $dir (rc=$rc)" >&2
+    return "$rc"
+  fi
+  if [ "${#bad[@]}" = 0 ]; then
+    # only the pinned tag was rejected, and it is settled; a separate failure in the same fetch still counts
+    grep -Eq '^(error|fatal):' <<<"$out" || return 0
+    printf '%s\n' "$out" >&2
+    echo "fleet: git fetch --tags origin failed in $dir (rc=$rc)" >&2
+    return "$rc"
+  fi
+  printf '%s\n' "$out" >&2
+  for t in "${bad[@]}"; do
+    case "$t" in
+      "unparsed rejection: "*) echo "fleet: git rejected a tag fetch in $dir and the tag could not be named ($t); compare the local tags with origin's" >&2 ;;
+      *) echo "fleet: the local tag $t differs from origin's (re-cut release?): git -C $dir tag -d $t, then fleet sync" >&2 ;;
+    esac
+  done
+  return 1
+}
+
+# fleet_keychain_unreadable → 0 on macOS in an SSH shell, where `claude auth status` says "not logged in" because the
+# login Keychain can't be read, not because there is no login (engsys#210). Acting on that answer (a /login) would
+# replace a working login. Callers say "login state unknown" and neither hold nor skip work on it.
+# This is a heuristic on purpose (the issue's contract): there is no reliable probe, since the login Keychain can be
+# unlocked yet unreachable from an SSH session's security context. The cost of a wrong guess is bounded: a real logout
+# is reported as "unknown" with the advice to check from the GUI session, never as "logged in", and the fleet's own
+# launchd jobs (which run in the GUI session) still hold on an explicit logout.
+fleet_keychain_unreadable() {
+  [ "$(uname -s)" = Darwin ] && { [ -n "${SSH_CONNECTION:-}" ] || [ -n "${SSH_TTY:-}" ]; }
+}
+fleet_keychain_advice() {
+  echo "run this from a terminal in the Mac's own GUI session, or unlock the Keychain first (security unlock-keychain)"
+}
+
 FLEET_ENGSYS_REF_FORCED=0 FLEET_INSTANCE_REF_FORCED=0
 [ -z "${ENGSYS_REF:-}" ] || FLEET_ENGSYS_REF_FORCED=1
 [ -z "${INSTANCE_REF:-}" ] || FLEET_INSTANCE_REF_FORCED=1
