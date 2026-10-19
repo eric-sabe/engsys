@@ -55,6 +55,8 @@ main() {
   local resumed="${FLEET_SYNC_RESUMED:-}" prev_instance="${FLEET_SYNC_PREV_INSTANCE:-}" prev_engsys="${FLEET_SYNC_PREV_ENGSYS:-}"
   local changed="${FLEET_SYNC_CHANGED:-0}" drift=0
   unset FLEET_SYNC_RESUMED FLEET_SYNC_PREV_INSTANCE FLEET_SYNC_PREV_ENGSYS FLEET_SYNC_CHANGED
+  # engsys#217: an alert that could not be delivered when a pinned tag moved is retried here
+  [ "$check" = 1 ] || pin_moved_flush
 
   # --- 1. pin repo checkout (pin source) ---------------------------------------------------------
   if [ -z "$resumed" ]; then
@@ -109,6 +111,10 @@ main() {
         # after a re-cut the tag name no longer names the old commit, so the re-exec's job diff needs the sha
         [ "$irecut" = 0 ] || have_instance="$(git -C "$FLEET_REPO" rev-parse HEAD)"
         fleet_fetch_tags "$FLEET_REPO" "$want_instance" || fleet_die "could not fetch the instance tags into $FLEET_REPO (see above)"
+        # the alert goes out from the code that is running now, before the checkout moves to the re-cut commit
+        if [ "$irecut" = 1 ]; then
+          pin_moved_alert instance "$want_instance" "$have_instance" "$(git -C "$FLEET_REPO" rev-parse -q --verify "refs/tags/$want_instance^{commit}" || true)"
+        fi
         git -C "$FLEET_REPO" checkout -q "$want_instance"
         if [ "$irecut" = 1 ]; then say "instance: $want_instance was re-cut upstream; moved the checkout to origin's commit"; else say "instance: $have_instance → $want_instance"; fi
         FLEET_SYNC_RESUMED=1 FLEET_SYNC_PREV_INSTANCE="$have_instance" FLEET_SYNC_CHANGED=1 \
@@ -139,6 +145,9 @@ main() {
         [ -z "$prev_engsys" ] || fleet_die "engsys worktree still at $have_engsys after switching to $want_engsys"
         [ "$wrecut" = 0 ] || have_engsys="$(git -C "$engsys_target" rev-parse HEAD)"
         fleet_fetch_tags "$ENGSYS_DIR" "$want_engsys" || fleet_die "could not fetch the engsys tags into $ENGSYS_DIR (see above)"
+        if [ "$wrecut" = 1 ]; then
+          pin_moved_alert engsys "$want_engsys" "$have_engsys" "$(git -C "$ENGSYS_DIR" rev-parse -q --verify "refs/tags/$want_engsys^{commit}" || true)"
+        fi
         mkdir -p "$FLEET_STATE"
         git -C "$ENGSYS_DIR" worktree remove --force "$engsys_target" >/dev/null 2>&1 || rm -rf "$engsys_target"
         git -C "$ENGSYS_DIR" worktree prune
@@ -165,6 +174,10 @@ main() {
         # after a re-cut the tag name no longer names the old commit, so the re-exec's job diff needs the sha
         [ "$recut" = 0 ] || have_engsys="$(git -C "$ENGSYS_DIR" rev-parse HEAD)"
         fleet_fetch_tags "$ENGSYS_DIR" "$want_engsys" || fleet_die "could not fetch the engsys tags into $ENGSYS_DIR (see above)"
+        # engsys#217: the alert goes out from the code that is running now, before the checkout moves to the re-cut commit
+        if [ "$recut" = 1 ]; then
+          pin_moved_alert engsys "$want_engsys" "$have_engsys" "$(git -C "$ENGSYS_DIR" rev-parse -q --verify "refs/tags/$want_engsys^{commit}" || true)"
+        fi
         git -C "$ENGSYS_DIR" checkout -q "$want_engsys"
         if [ "$recut" = 1 ]; then say "engsys: $want_engsys was re-cut upstream; moved the checkout to origin's commit"; else say "engsys: $have_engsys → $want_engsys"; fi
         [ -f "$ENGSYS_DIR/core/fleet/sync.sh" ] || fleet_die "engsys $want_engsys has no fleet kit (core/fleet/sync.sh) — the checkout is moved; pin a release that includes it"
@@ -379,6 +392,47 @@ sync_claude_plugins() {
 
 say() { echo "fleet-sync: $*"; }
 warn() { echo "fleet-sync: WARNING $*" >&2; }
+
+# --- the alert for a pinned release tag that moved (engsys#217) -------------------------------------
+# Origin is the trust root for the pin and adopting a re-cut is intended, but a release tag moving under a pinned fleet is
+# security-relevant (a re-cut, a mistake, or a compromised push), so the operator hears about it. One alert per
+# <tag, old commit, new commit>: $FLEET_STATE/pin-recut.alerted latches a pair once it was DELIVERED (like
+# verify-ref-forced.alerted: an undelivered alert stays pending and is retried by the next sync, whatever it adopts).
+# It is sent by the kit that is running, before the checkout moves to the re-cut commit: the new code must not be what decides
+# whether the alert goes out. The text carries the tag and two commit ids and nothing else: no paths, no probe output, no tokens;
+# anything that is not a plain tag name and two full commit ids is not sent at all.
+PIN_MOVED_LATCH="" PIN_MOVED_PENDING=""
+pin_moved_alert() { # pin_moved_alert <engsys|instance> <tag> <old sha> <new sha>
+  local what="$1" tag="$2" old="$3" new="$4"
+  PIN_MOVED_LATCH="$FLEET_STATE/pin-recut.alerted" PIN_MOVED_PENDING="$FLEET_STATE/pin-recut.pending"
+  if [[ "$tag" =~ ^[A-Za-z0-9._-]+$ ]] && [[ "$old" =~ ^[0-9a-f]{40}$ ]] && [[ "$new" =~ ^[0-9a-f]{40}$ ]] && [ "$old" != "$new" ]; then
+    mkdir -p "$FLEET_STATE"
+    printf '%s|%s|%s|%s\n' "$what" "$tag" "$old" "$new" >>"$PIN_MOVED_PENDING"
+  else
+    warn "the pinned tag '$tag' moved, but its old and new commits could not be read, so no alert was sent; check who pushed it"
+  fi
+  pin_moved_flush
+}
+pin_moved_flush() { # send every pending alert not yet latched; keep what could not be delivered for the next run
+  PIN_MOVED_LATCH="$FLEET_STATE/pin-recut.alerted" PIN_MOVED_PENDING="$FLEET_STATE/pin-recut.pending"
+  [ -s "$PIN_MOVED_PENDING" ] || return 0
+  local keep="" key what tag old new host
+  host="$(hostname -s 2>/dev/null || echo this host)"
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    ! grep -Fxq -- "$key" "$PIN_MOVED_LATCH" 2>/dev/null || continue
+    IFS='|' read -r what tag old new <<<"$key"
+    if [[ "$what" =~ ^(engsys|instance)$ ]] && [[ "$tag" =~ ^[A-Za-z0-9._-]+$ ]] && [[ "$old" =~ ^[0-9a-f]{40}$ ]] && [[ "$new" =~ ^[0-9a-f]{40}$ ]] \
+      && node "$FLEET_KIT_DIR/notify.mjs" --level alert --incident pin-tag-moved --require-delivery \
+        "Fleet on $host: the pinned $what release tag $tag moved on origin. This host had $old, origin now has $new, and fleet sync adopted origin's commit (origin is the trust root for the pin). A re-cut can be deliberate. If nobody on the team moved $tag, treat it as a possible compromise: check who pushed it and what changed between the two commits. Nothing else on the host was changed." >&2; then
+      printf '%s\n' "$key" >>"$PIN_MOVED_LATCH"
+    else
+      keep+="$key"$'\n'
+      warn "the alert for the moved pinned tag $tag was not delivered; the next fleet sync retries it"
+    fi
+  done <"$PIN_MOVED_PENDING"
+  if [ -n "$keep" ]; then printf '%s' "$keep" >"$PIN_MOVED_PENDING"; else rm -f "$PIN_MOVED_PENDING"; fi
+}
 
 # --- the plugin CLI, kept away from project settings (engsys#112) -----------------------------------
 # Claude Code applies `claude plugin` changes to the project settings of its cwd too: a `marketplace

@@ -122,6 +122,7 @@ cat >"$T/bin/gh" <<'SH'
 echo "gh $*" >>"$FAKE/gh.log"
 case "${1:-} ${2:-}" in
   "issue view") cat "$FAKE/ledger-$3.json" ;;
+  "issue comment") [ ! -f "$FAKE/comment-fail" ] || { echo "gh: HTTP 502" >&2; exit 1; } ;;   # an alert that can't be delivered
 esac
 exit 0
 SH
@@ -1399,6 +1400,69 @@ has "…says it was re-cut" "$OUT" "instance: v0.2.0 was re-cut upstream; moved 
 eq "…the instance checkout is at origin's commit" "$(git -C "$INST" rev-parse HEAD)" "$NEWI"
 run fleet sync
 has "…and the next sync is in sync" "$OUT" "in sync"
+rm -f "$LC"
+
+echo "== P2. engsys#217: adopting a moved pinned tag alerts the operator once per tag and commit pair"
+NOTIFY="NOTIFY_FALLBACK_ISSUE=acme/acme-fleet#5"
+alerts() { grep -c '^gh issue comment 5 -R acme/acme-fleet' "$FAKE/gh.log" || true; }
+last_alert() { grep '^gh issue comment 5 -R acme/acme-fleet' "$FAKE/gh.log" | tail -n 1; }
+rm -f "$FAKE/comment-fail"
+git -C "$ENGSYS_HOST" worktree remove --force "$STATE/engsys" >/dev/null 2>&1 || true
+setconf "INSTANCE_MARKETPLACE=" "GH_APP_ENV=" "ENGSYS_REF=v1.4.0" "FLEET_ISOLATE_ENGSYS_WORKTREE=1" "$NOTIFY"
+run fleet sync
+rc_is "baseline sync exits 0" 0
+OLDW="$(git -C "$STATE/engsys" rev-parse HEAD)"
+recut_engsys "alert"; NEWW="$(git -C "$E" rev-parse v1.4.0)"
+git -C "$ENGSYS_HOST" remote set-url origin "$T/no-such-remote.git"
+A0="$(alerts)"
+run fleet sync
+rc_is "offline: the tag can't be compared, sync succeeds" 0
+eq "…and no alert is sent" "$(alerts)" "$A0"
+git -C "$ENGSYS_HOST" remote set-url origin "$ORIGIN_URL"
+run fleet sync
+rc_is "online: the moved tag is adopted" 0
+eq "…one alert (the fleet notify fallback comment)" "$(alerts)" "$((A0 + 1))"
+AL="$(last_alert)"
+has "…naming the tag" "$AL" "pinned engsys release tag v1.4.0 moved on origin"
+has "…the old commit" "$AL" "$OLDW"
+has "…and the new commit" "$AL" "$NEWW"
+hasnt "…and no host path or probe output" "$AL" "$HOME"
+run fleet sync
+eq "a repeat sync with the same pair stays silent" "$(alerts)" "$((A0 + 1))"
+# the same pair again (the local tag and the worktree put back on the old commit): still latched
+git -C "$ENGSYS_HOST" tag -f v1.4.0 "$OLDW" >/dev/null; git -C "$STATE/engsys" checkout -q --detach "$OLDW"
+run fleet sync
+has "the same old/new pair is adopted again..." "$OUT" "v1.4.0 was re-cut upstream"
+eq "…without a second alert" "$(alerts)" "$((A0 + 1))"
+# a different pair alerts again; an alert that can't be delivered never blocks the adoption and is retried by the next sync
+recut_engsys "alert 2"; NEWW2="$(git -C "$E" rev-parse v1.4.0)"
+touch "$FAKE/comment-fail"
+run fleet sync
+rc_is "an undeliverable alert never blocks the adoption" 0
+has "…it warns" "$OUT" "the alert for the moved pinned tag v1.4.0 was not delivered; the next fleet sync retries it"
+eq "…the worktree is at origin's commit" "$(git -C "$STATE/engsys" rev-parse HEAD)" "$NEWW2"
+rm -f "$FAKE/comment-fail"; A1="$(alerts)"
+run fleet sync
+eq "the next sync delivers it" "$(alerts)" "$((A1 + 1))"
+has "…with the new pair" "$(last_alert)" "$NEWW2"
+run fleet sync
+eq "…and then it is latched" "$(alerts)" "$((A1 + 1))"
+git -C "$ENGSYS_HOST" worktree remove --force "$STATE/engsys" >/dev/null 2>&1 || true
+# the instance repo's tag too
+setconf "GH_APP_ENV=" "ENGSYS_REF=v1.4.0" "INSTANCE_REF=v0.2.0" "$NOTIFY"
+run fleet sync
+rc_is "instance: baseline sync exits 0" 0
+OLDI="$(git -C "$INST" rev-parse HEAD)"
+recut_instance "alert"; NEWI="$(git -C "$I" rev-parse v0.2.0)"
+A2="$(alerts)"
+run fleet sync
+rc_is "instance: the moved tag is adopted" 0
+eq "…one alert" "$(alerts)" "$((A2 + 1))"
+has "…for the instance tag" "$(last_alert)" "pinned instance release tag v0.2.0 moved on origin"
+has "…with the old commit" "$(last_alert)" "$OLDI"
+has "…and the new commit" "$(last_alert)" "$NEWI"
+run fleet sync
+eq "…and a repeat sync is silent" "$(alerts)" "$((A2 + 1))"
 rm -f "$LC"
 
 echo "== O. engsys#212: per-session adoption: early warnings, and no /login advice over SSH"

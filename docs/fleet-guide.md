@@ -1144,6 +1144,12 @@ commit, for the engsys checkout, the engsys worktree under `FLEET_ISOLATE_ENGSYS
 repo alike (one shared check, `fleet_pin_recut`). On a difference it re-fetches the pinned tag, and only that
 tag, from origin, moves the checkout to the new commit and re-executes; `--check` reports it as drift
 (`stale local copy of <tag>`). Offline (`ls-remote` fails) it warns and keeps going on the local copy.
+Origin is the trust root and adopting a re-cut is intended, but a release tag moving under a pinned fleet could
+also be a mistake or a compromised push, so adopting it sends a `fleet notify` alert (engsys#217): the tag and the
+old and new commit ids, nothing else (no paths, no probe output). It goes out from the kit that is running,
+before the checkout moves to the re-cut code, so the new code can't be what decides whether it is sent. It is
+latched once per tag and commit pair in `.fleet/pin-recut.alerted`, written only after delivery; an alert that
+could not be delivered stays in `.fleet/pin-recut.pending` and the next sync retries it. A failed alert never blocks the sync.
 
 ### Recipes
 
