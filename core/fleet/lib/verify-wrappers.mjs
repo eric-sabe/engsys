@@ -35,18 +35,25 @@
 //   verify-wrappers.mjs --repo <owner/repo> --tag vX.Y.Z --plugin-id engsys@<marketplace>
 //                       --project-dir <PIN_DIR> --plugins <`claude plugin list --json` output file>
 //                       [--engsys-dir <ENGSYS_DIR>] [--check-settings] [--user-settings-dir <claude config dir>]
+//                       [--fleet-config-dir]
 //                       [--allowed-user-plugins "<name@mkt> ..."] [--allowed-user-hooks "<sha256> ..."]
 //                       [--check-user-config --claude-json <file> --allowed-user-files "<sha256> ..."]
 //                       [--pin-repo <owner/repo>]
+//                       [--market-plugin "<plugin>@<marketplace>|<owner/repo>|<ref>" ...]
 //                       [--cache <file> --max-age-min <n>]
 //
 // --engsys-dir: the host kit (ENGSYS_HOST_TREES, ENGSYS_HOST_FILES) against the same release tree.
 // --user-settings-dir: the Claude config dir the sessions use (FLEET_CLAUDE_CONFIG_DIR, else ~/.claude);
 //   a user-scope plugin the project doesn't enable is a mismatch unless --allowed-user-plugins lists it,
 //   and a user-scope hook or settings command unless --allowed-user-hooks lists its userCommandHash.
+// --market-plugin (repeatable, engsys#196): a plugin of another marketplace (the instance's), checked the same
+//   way against that repo's release <ref> (a vX.Y.Z tag). The directory its install is a copy of is the
+//   `source` of its entry in the release's .claude-plugin/marketplace.json, read from GitHub (pluginSubdir).
 // --pin-repo: PIN_DIR's .claude/ tree and every settings-hook target against that repo's default branch
 //   on GitHub (projectLocalState + verifyProjectTrust, below). A pin checkout behind the tip passes with a
 //   WARNING line only while every auto-loaded file is identical at the tip.
+// --fleet-config-dir (engsys#201): --user-settings-dir is a fleet config dir (not ~/.claude): warn when its settings.json
+//   doesn't switch the claude.ai skill/plugin sync off. Synced skills are never trusted by source (see userConfigItems).
 //
 // Exit: 0 everything matches | 1 MISMATCH (a definite difference) | 3 not verified (GitHub unreachable,
 //       API error, truncated tree, nothing installed) | 2 usage. Callers hold merge/maintain sessions on
@@ -148,9 +155,9 @@ export function blobSha(buf) {
   return crypto.createHash('sha1').update(`blob ${b.length}\0`).update(b).digest('hex');
 }
 
-/** The file under an install root that holds a protected repo path. */
-export function cachePath(root, repoPath) {
-  return path.join(root, repoPath.slice(PLUGIN_SUBDIR.length + 1));
+/** The file under an install root that holds a protected repo path (subdir: the plugin's source directory in its repo). */
+export function cachePath(root, repoPath, subdir = PLUGIN_SUBDIR) {
+  return path.join(root, repoPath.slice(subdir.length + 1));
 }
 
 /**
@@ -158,7 +165,7 @@ export function cachePath(root, repoPath) {
  * directory) or anything else that isn't a regular file or a real directory is 'not-a-file' and is not
  * followed: a symlink could be repointed after the check. Only <root>/.in_use/ (and macOS .DS_Store) is skipped.
  */
-export function scanRoot(root) {
+export function scanRoot(root, subdir = PLUGIN_SUBDIR) {
   const out = {};
   const visit = (absDir, relDir) => {
     for (const e of fs.readdirSync(absDir, { withFileTypes: true })) {
@@ -167,17 +174,17 @@ export function scanRoot(root) {
       const abs = path.join(absDir, e.name);
       const rel = `${relDir}${e.name}`;
       if (e.isDirectory()) visit(abs, `${rel}/`);
-      else if (e.isFile()) out[`${PLUGIN_SUBDIR}/${rel}`] = blobSha(fs.readFileSync(abs));
-      else out[`${PLUGIN_SUBDIR}/${rel}`] = 'not-a-file';
+      else if (e.isFile()) out[`${subdir}/${rel}`] = blobSha(fs.readFileSync(abs));
+      else out[`${subdir}/${rel}`] = 'not-a-file';
     }
   };
   visit(root, '');
   return out;
 }
 
-/** Scan every root. → { [root]: scanRoot(root) } */
-export function localState(roots) {
-  return Object.fromEntries(roots.map((r) => [r, scanRoot(r)]));
+/** Scan every root. → { [root]: scanRoot(root, subdir) } */
+export function localState(roots, subdir = PLUGIN_SUBDIR) {
+  return Object.fromEntries(roots.map((r) => [r, scanRoot(r, subdir)]));
 }
 
 /**
@@ -297,8 +304,12 @@ export function settingsCommands(cfg) {
 
 // --- Command lines in settings (hooks and command keys) --------------------------------------------
 // A command is pinned only when everything it runs is known: each simple command (split on ; & | && ||)
-// is a shell no-op (echo, printf, true, false, :, exit), an interpreter, or an absolute path to a
-// regular file, and every file it names is an absolute path to a regular file. Only ~, $HOME and
+// is a shell no-op (echo, printf, true, false, :, exit), an interpreter with an absolute script, a root-owned
+// system program from the short SAFE_PROGRAMS list (they run nothing named in their arguments), a system wrapper
+// (nice, timeout, xargs, ...) whose wrapped command passes these same rules, or an absolute path to a regular file,
+// and every file it names is an absolute path to a regular file. Any other system program (git, perl -e, awk,
+// sed, osascript, ...) is refused: an allowlist, because a denylist of "dangerous" names can be split, aliased
+// or renamed around. Only ~, $HOME and
 // $CLAUDE_PROJECT_DIR are expanded. Rejected, never guessed at: other variables, command substitution,
 // globs, ~user, brace expansion, input redirects, output redirects other than to /dev/null or another
 // fd, subshells, env assignments, a program found on PATH that is not an interpreter in SYSTEM_BIN_DIRS,
@@ -311,7 +322,38 @@ export function settingsCommands(cfg) {
 /** Where an interpreter named without a path may come from; its resolved path is part of the pin. */
 export const SYSTEM_BIN_DIRS = ['/bin', '/usr/bin', '/opt/homebrew/bin', '/usr/local/bin'];
 const SHELLS = ['bash', 'sh', 'zsh'];
-const INTERPRETERS = [...SHELLS, 'node', 'python', 'python3'];
+const INTERPRETERS = [...SHELLS, 'node', 'python', 'python3', 'perl', 'ruby'];
+/** python3.12, python3.13, ... are the same interpreter under a version-suffixed name. */
+const isInterp = (n) => INTERPRETERS.includes(n) || /^python[0-9.]*$/.test(n);
+/**
+ * Root-owned system programs a pinned command may run by absolute path: none of them runs a command, a script or
+ * code named in its arguments. Everything else under /bin and /usr/bin (git, awk, sed, find, perl -e, osascript,
+ * ...) is refused.
+ */
+const SAFE_PROGRAMS = ['true', 'false', 'echo', 'printf', 'sleep', 'date', 'cat', 'head', 'tail', 'wc', 'uname', 'pwd', 'basename', 'dirname'];
+/** System wrappers: they run the command in their arguments, which then has to pass the same rules. */
+const WRAPPERS = ['nice', 'nohup', 'timeout', 'xargs', 'time'];
+/** Options of a wrapper that take a value, and whether it has a leading positional (timeout's duration). */
+const WRAPPER_VALUE_FLAGS = { nice: ['-n', '--adjustment'], nohup: [], timeout: ['-k', '--kill-after', '-s', '--signal'], xargs: ['-n', '-P', '-L', '-s', '-d', '-E'], time: ['-o', '-f'] };
+/** The options of xargs that only shape how it batches its input: anything else (-a <file>, -J, -I <replstr>, which lets its input rewrite the command, ...) is refused. */
+const XARGS_FLAGS = /^(-0|-r|-t|-x|--null|--no-run-if-empty|--verbose|--max-args=.*|--max-procs=.*|-[nPsLdE].*)$/;
+/**
+ * The words after a wrapper's own options (and timeout's duration): the command it runs. → array, or null when an
+ * option can't be allowed (xargs reading its words from a file). An empty array is a wrapper with no command of its
+ * own: refused by the caller, since xargs would then supply the command itself from its input.
+ */
+function wrapperRest(name, args) {
+  let i = 0;
+  for (; i < args.length && args[i].startsWith('-') && args[i] !== '--'; i++) {
+    if (name === 'xargs' && !XARGS_FLAGS.test(args[i])) return null;
+    if (WRAPPER_VALUE_FLAGS[name].includes(args[i])) i++;
+  }
+  if (args[i] === '--') i++;
+  if (name === 'timeout') i++;
+  return args.slice(i);
+}
+/** The launcher scripts of package managers, run through node: yarn-4.1.0.cjs, npm-cli.js, pnpm.cjs, ... */
+const LAUNCHER_RE = /^(yarn|npm|npx|pnpm|corepack|bun)([-.][A-Za-z0-9.-]*)?\.(cjs|mjs|js)$/;
 const NOOPS = ['echo', 'printf', 'true', 'false', ':', 'exit'];
 /**
  * Interpreter flags a pinned command may use: they change no code that runs. Anything else (-c, -e, -m,
@@ -321,9 +363,30 @@ const SAFE_FLAGS = {
   shell: /^[-+][euxvf]+$|^-o$|^(errexit|nounset|pipefail|xtrace)$|^--norc$|^--noprofile$/,
   node: /^--(no-warnings|enable-source-maps|no-deprecation|trace-warnings)$/,
   python: /^-[uBEsI]+$/,
+  none: /(?!)/, // perl, ruby: no flag is safe
 };
 /** Directories whose programs are root-owned on a stock macOS/Linux host: pinned by path alone. */
 const ROOT_BIN_DIRS = ['/bin', '/usr/bin'];
+/**
+ * Task runners and package managers (engsys#185). Each runs whatever a manifest in the working directory
+ * says (package.json scripts, a Makefile, a justfile, build.gradle, ...), and those manifests, and the
+ * files they name, are not among the files verify compares with GitHub: a local writer could change them
+ * and have the hook run the change. So a command that invokes one can't be pinned, whichever way it is
+ * spelled (bare, by absolute path, through env, sh -c, or as an argument of a wrapper such as xargs).
+ * Fail closed; the escape is a direct committed script (fleet guide, "the pin checkout's .claude/").
+ */
+export const TASK_RUNNERS = [
+  'npm', 'npx', 'pnpm', 'pnpx', 'yarn', 'yarnpkg', 'bun', 'bunx', 'deno', 'corepack', 'lerna', 'nx', 'turbo',
+  'make', 'gmake', 'cmake', 'ninja', 'just', 'task', 'mage', 'rake', 'bundle', 'bundler', 'gradle', 'gradlew',
+  'mvn', 'mvnw', 'ant', 'sbt', 'mix', 'tox', 'nox', 'invoke', 'fab', 'poetry', 'pipenv', 'pdm', 'hatch', 'uv', 'uvx',
+  'cargo', 'composer', 'pre-commit', 'lefthook', 'husky',
+];
+/** The task runner a command word names (by its file name, whatever its directory), or ''. */
+const taskRunnerOf = (word) => {
+  const base = path.basename(String(word)).toLowerCase().replace(/\.(cmd|bat|exe)$/, '');
+  return TASK_RUNNERS.includes(base) ? base : '';
+};
+const runnerProblem = (name) => `a task runner (${name}) runs manifest code that isn't pinned; use a direct committed script`;
 
 /**
  * Tokenize a command line. → { tokens: [{t:'word', v} | {t:'op', v}], problems }. Expands ~, $HOME and
@@ -450,11 +513,13 @@ export function parseSettingsCommand(command, { home = os.homedir(), projectDir 
         for (const a of args.slice(i + 2)) if (a.includes('/')) fileArg(a, 'an argument');
         return;
       }
-      const fam = SHELLS.includes(name) ? 'shell' : name === 'node' ? 'node' : 'python';
+      const fam = SHELLS.includes(name) ? 'shell' : name === 'node' ? 'node' : name.startsWith('python') ? 'python' : 'none';
       if (SHELLS.includes(name) && args[i] === '-o' && i + 1 < args.length) { i++; continue; }
       if (!SAFE_FLAGS[fam].test(args[i])) { problems.push(`${name} ${args[i]} can load code that can't be pinned`); return; }
     }
     if (i >= args.length) { problems.push(`${name} with no script file`); return; }
+    // a package manager's own launcher or a runner wrapper script is a task runner however it is reached
+    if (taskRunnerOf(args[i]) || LAUNCHER_RE.test(path.basename(args[i]))) { problems.push(runnerProblem(path.basename(args[i]))); return; }
     fileArg(args[i], `the ${name} script`);
     for (const a of args.slice(i + 1)) if (!a.startsWith('-') && a.includes('/')) fileArg(a, 'an argument');
   };
@@ -463,12 +528,13 @@ export function parseSettingsCommand(command, { home = os.homedir(), projectDir 
     let [prog, ...args] = words;
     if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(prog)) { problems.push(`an environment assignment (${prog.split('=')[0]}=)`); return; }
     if (NOOPS.includes(prog)) return;
+    if (taskRunnerOf(prog)) { problems.push(runnerProblem(taskRunnerOf(prog))); return; }
     if (path.isAbsolute(prog)) {
       const k = kindOf(prog);
       let real = prog;
       try { real = fs.realpathSync(prog); } catch { /* keep */ }
       const base = path.basename(prog);
-      const pathOnly = (INTERPRETERS.includes(base) || base === 'env')
+      const pathOnly = (isInterp(base) || base === 'env')
         ? underSystem(prog) && underSystem(real)
         : ROOT_BIN_DIRS.some((d) => prog.startsWith(`${d}/`)) && ROOT_BIN_DIRS.some((d) => real.startsWith(`${d}/`));
       if (pathOnly && (k === 'file' || k === 'symlink')) {
@@ -476,13 +542,22 @@ export function parseSettingsCommand(command, { home = os.homedir(), projectDir 
         if (base === 'env') {
           if (!args.length || args[0].startsWith('-') || args[0].includes('=')) { problems.push('env with options or assignments'); return; }
           [prog, ...args] = args;
-          if (!INTERPRETERS.includes(prog)) { problems.push(`env runs a program that is not an interpreter: ${prog}`); return; }
+          if (taskRunnerOf(prog)) { problems.push(runnerProblem(taskRunnerOf(prog))); return; }
+          if (!isInterp(prog)) { problems.push(`env runs a program that is not an interpreter: ${prog}`); return; }
           const p = resolveBin(prog);
           if (!p) { problems.push(`interpreter ${prog} not found in ${SYSTEM_BIN_DIRS.join(', ')}`); return; }
           programs.push(p);
           runInterpreter(prog, args);
-        } else if (INTERPRETERS.includes(base)) runInterpreter(base, args);
-        else for (const a of args) if (!a.startsWith('-') && a.includes('/')) fileArg(a, 'an argument');
+        } else if (isInterp(base)) runInterpreter(base, args);
+        else if (WRAPPERS.includes(base)) { // the wrapped command passes the same rules
+          const rest = wrapperRest(base, args);
+          if (rest === null) problems.push(`${base} with an option that reads or builds its command from outside the hook (${args.find((a) => a.startsWith('-a') || a.startsWith('-J')) || 'see the allowed xargs options'})`);
+          else if (!rest.length) problems.push(`${base} without a command of its own: a wrapper may only run the command the hook names`);
+          else simple(rest);
+        }
+        else if (SAFE_PROGRAMS.includes(base)) {
+          for (const a of args) if (!a.startsWith('-') && a.includes('/')) fileArg(a, 'an argument');
+        } else problems.push(`${prog} is not on the list of system programs that can't run code from their arguments (${SAFE_PROGRAMS.join(', ')}) or a wrapper`);
         return;
       }
       fileArg(prog, 'the program');
@@ -490,7 +565,7 @@ export function parseSettingsCommand(command, { home = os.homedir(), projectDir 
       return;
     }
     if (prog.includes('/')) { problems.push(`the program is not an absolute path: ${prog}`); return; }
-    if (!INTERPRETERS.includes(prog)) { problems.push(`a program found on PATH that is not an interpreter: ${prog}`); return; }
+    if (!isInterp(prog)) { problems.push(`a program found on PATH that is not an interpreter: ${prog}`); return; }
     const p = resolveBin(prog);
     if (!p) { problems.push(`interpreter ${prog} not found in ${SYSTEM_BIN_DIRS.join(', ')}`); return; }
     programs.push(p);
@@ -518,6 +593,8 @@ export function userCommandHash(command, { home = os.homedir(), projectDir = '' 
   return { hash: h.digest('hex'), problems: p.problems };
 }
 
+/** What to do about claude.ai-synced skills in a fleet config dir (engsys#201). */
+const SYNCED_HINT = 'synced skills are not trusted by source or by manifest; set syncClaudeAiSkills and syncClaudeAiPlugins to false in the dir\'s settings.json and delete its skills/synced/';
 /** Top-level settings keys that pick, limit or redirect the session's model (Claude Code 2.1.292). */
 export const MODEL_SETTINGS_TOP_KEYS = ['model', 'availableModels', 'fallbackModel', 'advisorModel', 'modelOverrides', 'deniedModels', 'enforceAvailableModels'];
 
@@ -637,10 +714,11 @@ export function parentMemoryFiles(projectDir, home = os.homedir()) {
 export function checkSettingsDetailed({
   projectDir, userSettingsDir = '', pinSettingsSha = '', projectVerified = false,
   allowedUserPlugins = new Set(), allowedUserHooks = new Set(), home = os.homedir(),
-  claudeJson = '', allowedUserFiles = null,
+  claudeJson = '', allowedUserFiles = null, fleetConfigDir = false,
 }) {
   const problems = [];
   const info = [];
+  const warnings = [];
   const allowed = allowedUserPlugins instanceof Set ? allowedUserPlugins : parseAllowedPlugins(allowedUserPlugins);
   const allowedHooks = allowedUserHooks instanceof Set ? allowedUserHooks : parseAllowedHooks(allowedUserHooks);
   const common = (f, cfg) => {
@@ -756,21 +834,46 @@ export function checkSettingsDetailed({
       }
     }
   }
+  // A fleet config dir must have Claude Code's claude.ai sync switched off (engsys#201; `fleet config-dir init` and
+  // `fleet sync` set it, engsys#200): synced skills and plugins change with no host-side action and their content has
+  // no root of trust here, so the dir should never receive them. Only `false` is honoured by Claude Code. A warning:
+  // what did sync in is judged below, the switch only says whether more will arrive.
+  if (userSettingsDir && fleetConfigDir) {
+    let us = null;
+    try { us = JSON.parse(fs.readFileSync(path.join(userSettingsDir, 'settings.json'), 'utf8')); } catch { us = null; }
+    const off = (k) => us && typeof us === 'object' && us[k] === false;
+    const on = ['syncClaudeAiSkills', 'syncClaudeAiPlugins'].filter((k) => !off(k));
+    if (on.length) {
+      warnings.push(`${path.join(userSettingsDir, 'settings.json')} does not set ${on.join(' and ')} to false, so Claude Code may sync claude.ai skills or plugins into this fleet config dir; run: fleet config-dir init (it retrofits an existing dir), or fleet sync`);
+    }
+  }
   // User-scope configuration loaded besides settings (agents, commands, skills, rules, memory, MCP
   // servers): each must be on VERIFY_ALLOWED_USER_FILES. Checked when allowedUserFiles is passed.
   if (userSettingsDir && allowedUserFiles) {
     const allowedF = allowedUserFiles instanceof Set ? allowedUserFiles : parseAllowedFiles(allowedUserFiles);
     const uc = userConfigItems({ configDir: userSettingsDir, claudeJson, projectDir });
     problems.push(...uc.problems);
+    // Files claude.ai synced into <dir>/skills/synced/<bucket>/ are reported once per bucket, not once per file. Nothing is
+    // trusted by being there: the bucket id, its marker and its manifest.json are files a session can write too, and the
+    // manifest has no content hashes. Each file is still a problem unless its own sha256 is on the allowlist.
+    const syncedRoot = path.join(userSettingsDir, 'skills', 'synced') + path.sep;
+    const buckets = new Map();
     for (const it of uc.items) {
-      if (allowedF.has(it.hash)) info.push(`allowed    ${it.what} ${it.hash} (VERIFY_ALLOWED_USER_FILES)`);
+      if (allowedF.has(it.hash)) { info.push(`allowed    ${it.what} ${it.hash} (VERIFY_ALLOWED_USER_FILES)`); continue; }
+      const rel = it.what.startsWith(syncedRoot) ? it.what.slice(syncedRoot.length) : null;
+      // <bucket>/..., or the .bucket-<bucket> marker beside it; any other loose file under synced/ keeps its own line
+      const b = rel === null ? null : rel.includes(path.sep) ? rel.split(path.sep)[0] : /^\.bucket-[^.].*$/.test(rel) ? rel.slice('.bucket-'.length) : null;
+      if (b !== null) buckets.set(b, (buckets.get(b) || 0) + 1);
       else problems.push(`user-cfg   ${it.what} is not on VERIFY_ALLOWED_USER_FILES (sha256 ${it.hash})`);
+    }
+    for (const [b, n] of [...buckets].sort()) {
+      problems.push(`user-cfg   ${path.join(syncedRoot, b)} holds ${n} synced claude.ai skill file(s) not on VERIFY_ALLOWED_USER_FILES (${SYNCED_HINT})`);
     }
   }
   if (allowedUserFiles) {
     for (const f of parentMemoryFiles(projectDir, home)) problems.push(`memory     ${f} is loaded into every session above the pin checkout; remove it`);
   }
-  return { problems: [...new Set(problems)], info: [...new Set(info)] };
+  return { problems: [...new Set(problems)], info: [...new Set(info)], warnings: [...new Set(warnings)] };
 }
 
 /** The keys the session launcher writes into its messaging settings file (launch-agent-sessions.sh). */
@@ -1156,11 +1259,11 @@ export function parseTree(json) {
  * difference: modified (different bytes) | missing (in the release, not on disk) | unexpected (on disk,
  * not in the release) | not-a-file (a symlink or other non-regular entry).
  */
-export function compare(tree, local) {
+export function compare(tree, local, subdir = PLUGIN_SUBDIR) {
   const diffs = [];
   for (const [root, m] of Object.entries(local)) {
     for (const p of tree.keys()) {
-      if (p.startsWith(`${PLUGIN_SUBDIR}/`) && !(p in m)) diffs.push({ root, path: p, kind: 'missing', have: '-' });
+      if (p.startsWith(`${subdir}/`) && !(p in m)) diffs.push({ root, path: p, kind: 'missing', have: '-' });
     }
     for (const [p, have] of Object.entries(m)) {
       const want = tree.get(p) ?? null;
@@ -1170,6 +1273,51 @@ export function compare(tree, local) {
     }
   }
   return diffs;
+}
+
+/**
+ * Is an INSTANCE marketplace's release tag required to be on its repo's default branch (engsys#196)? The engsys
+ * release always is (fetchRelease's `compare`, a MISMATCH otherwise). Instance fleets tag `release:` commits that sit
+ * off the default branch (FeedFrwd/ff-engsys-fleet: v0.1.15 to v0.1.18 all diverge), so for now an off-main instance tag
+ * is a WARNING (printed, and alerted at info level by verify.sh) and every other instance check still enforces: the file
+ * hashes against the tag's tree, a non-tag pin, an unreadable source. Flip this to true, and nothing else, to make it a
+ * MISMATCH like engsys (follow-up: eric-sabe/engsys#227).
+ */
+export const INSTANCE_OFF_MAIN_ENFORCED = false;
+
+/** Where a marketplace lists its plugins, at the root of its repo. */
+export const MARKETPLACE_FILE = '.claude-plugin/marketplace.json';
+/** The placeholder directory a marketplace plugin's install is scanned under until its real source directory is known. */
+const MARKET_SCAN = '@plugin';
+
+/**
+ * The repo directory a marketplace plugin is installed from (engsys#196): the `source` of its entry in the
+ * marketplace file, read from the verified release (never from a local file), which must be a path inside
+ * the repo. A plugin's install is a copy of that directory, so a repo path <subdir>/<p> lives at
+ * <install path>/<p>. Anything else (an unlisted or duplicated plugin, a source that is not a `./` path, the
+ * repo root, a path that climbs out) throws an Unverified: fail closed, never guess a directory.
+ */
+export function pluginSubdir(marketplaceJson, pluginName) {
+  let m;
+  try { m = JSON.parse(String(marketplaceJson)); } catch { throw new Unverified(`${MARKETPLACE_FILE} of the release is not JSON`); }
+  const entries = Array.isArray(m?.plugins) ? m.plugins.filter((e) => e && e.name === pluginName) : [];
+  if (entries.length !== 1) throw new Unverified(`${MARKETPLACE_FILE} of the release lists ${entries.length} plugins named ${pluginName}, not one`);
+  const src = entries[0].source;
+  if (typeof src !== 'string' || !src.startsWith('./')) throw new Unverified(`the release's source for ${pluginName} is not a ./ path inside its repo`);
+  const dir = path.posix.normalize(src.slice(2)).replace(/\/+$/, '');
+  if (!dir || dir === '.' || dir === '..' || dir.startsWith('../') || dir.startsWith('/')) {
+    throw new Unverified(`the release's source for ${pluginName} (${src}) is the repo root or leaves the repo`);
+  }
+  return dir;
+}
+
+/** A blob's bytes through gh, checked against the sha the verified tree names. */
+export async function fetchBlob({ repo, sha, gh = 'gh', timeoutMs = 30_000 }) {
+  const b = await ghJson(gh, `repos/${repo}/git/blobs/${sha}`, timeoutMs);
+  if (!b || b.encoding !== 'base64' || typeof b.content !== 'string') throw new Unverified(`GitHub returned an unreadable blob ${sha}`);
+  const buf = Buffer.from(b.content, 'base64');
+  if (blobSha(buf) !== sha) throw new Unverified(`the blob GitHub returned for ${sha} does not hash to it`);
+  return buf;
 }
 
 function findShadowingPlugins(pluginId, verifiedRoots, candidateDirs, real) {
@@ -1281,8 +1429,9 @@ function readCache(file) {
 
 function writeCache(file, data) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(data) + '\n', { mode: 0o600 });
+  // 'wx': never write through a file or symlink someone else put at the temp name; the cache dir is one a session can write
+  const tmp = `${file}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(data) + '\n', { mode: 0o600, flag: 'wx' });
   fs.renameSync(tmp, file);
 }
 
@@ -1302,6 +1451,7 @@ export function parseArgs(argv) {
     globalPluginsDir: process.env.AGY_GLOBAL_PLUGINS_DIR || '',
     engsysDir: '',
     checkSettings: false,
+    fleetConfigDir: false,
     userSettingsDir: '',
     pinSettingsSha: '',
     pinRepo: '',
@@ -1311,6 +1461,7 @@ export function parseArgs(argv) {
     messagingSettings: '',
     claudeJson: '',
     checkUserConfig: false,
+    marketPlugins: [],
   };
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
@@ -1327,6 +1478,7 @@ export function parseArgs(argv) {
       case '--global-plugins-dir': a.globalPluginsDir = v(); break;
       case '--engsys-dir': a.engsysDir = v(); break;
       case '--check-settings': a.checkSettings = true; break;
+      case '--fleet-config-dir': a.fleetConfigDir = true; break;
       case '--user-settings-dir': a.userSettingsDir = v(); a.checkSettings = true; break;
       case '--pin-settings-sha': a.pinSettingsSha = v(); a.checkSettings = true; break;
       case '--pin-repo': a.pinRepo = v(); a.checkSettings = true; break;
@@ -1336,6 +1488,12 @@ export function parseArgs(argv) {
       case '--claude-json': a.claudeJson = v(); break;
       case '--messaging-settings': a.messagingSettings = v(); break;
       case '--check-user-config': a.checkUserConfig = true; break;
+      case '--market-plugin': {
+        const [id, repo, tag, ...extra] = v().split('|');
+        if (extra.length || !ID_RE.test(id || '') || !REPO_RE.test(repo || '') || !tag || /\s/.test(tag)) throw new Error('--market-plugin must be <plugin>@<marketplace>|<owner/repo>|<ref>');
+        a.marketPlugins.push({ id, repo, tag });
+        break;
+      }
       default: throw new Error(`unknown argument: ${k}`);
     }
   }
@@ -1387,12 +1545,17 @@ export function problemFingerprint(lines) {
   const parts = groupProblems(lines).map((g) => `${g.label}=${g.count}`);
   const integrity = new Set(PROBLEM_GROUPS.filter((g) => g.integrity).map((g) => g.key));
   for (const l of lines) if (integrity.has(problemGroup(l))) parts.push(l.replace(/\b[0-9a-f]{40,64}\b/g, '#'));
+  // a synced-skills bucket: its path and file count, so a file planted into an already reported bucket re-alerts while a
+  // content-only update (same files) does not (engsys#201)
+  for (const l of lines) if (/synced claude\.ai skill file/.test(l)) parts.push(l.replace(/\(synced skills are not trusted.*$/, ''));
   return crypto.createHash('sha1').update(parts.join('\n')).digest('hex');
 }
 
 /** The CLI, with its effects injectable for tests. → exit code. */
 export async function run(argv, {
   fetch = fetchRelease,
+  blob = fetchBlob,
+  instanceOffMainEnforced = INSTANCE_OFF_MAIN_ENFORCED,
   projectApi = (endpoint) => ghJson('gh', endpoint, 30_000),
   projectLocal = projectLocalState,
   now = Date.now,
@@ -1409,9 +1572,24 @@ export async function run(argv, {
     const groups = groupProblems(sorted);
     out(`summary: ${sorted.length} problems: ${groups.map((g) => `${g.label} (${g.count})`).join(', ')}`);
     if (groups.some((g) => g.userScope)) out('hint: set up a separate fleet config dir: fleet config-dir init (see fleet guide § 6.1)');
+    // last hint wins in the alert: leftover claude.ai-synced skills have a specific cleanup
+    if (sorted.some((l) => /synced claude\.ai skill file/.test(l))) out('hint: claude.ai synced skills into the fleet config dir. Set syncClaudeAiSkills and syncClaudeAiPlugins to false in its settings.json (fleet config-dir init does it), delete its skills/synced/ directory, then fleet verify (fleet guide § 6.1)');
+    // which of the pinned things the problems are in, for the launch gate's hold reason
+    const comps = [...new Set(sorted.map(componentOf))];
+    out(`components: ${comps.join(', ')}`);
     out(`fingerprint: ${problemFingerprint(sorted)}`);
     if (a.cache) { try { fs.rmSync(a.cache, { force: true }); } catch { /* best effort */ } }
     return 1;
+  };
+  const componentOf = (l) => {
+    // the label comes first: settings, user-cfg and memory lines also carry an absolute path or a plugin id, which say nothing about which install failed
+    if (/^(settings|user-cfg|memory|sched) /.test(l)) return 'settings or user-scope config';
+    for (const mp of market) {
+      if (l.includes(mp.id) || (mp.roots || []).some((r) => l.includes(r))) return /^release /.test(l) ? `instance release (${mp.id})` : `instance plugin ${mp.id}`;
+    }
+    if (a.engsysDir && l.includes(a.engsysDir)) return 'host kit';
+    if (/^(release|version|no-path|two-paths|disabled|shadowed) /.test(l) || /^\S+\s+\//.test(l)) return 'engsys plugin';
+    return 'pin checkout';
   };
   const infoLines = (lines) => { for (const l of lines) out(`verify: info ${l}`); };
   const warnLines = (lines) => { for (const l of lines) out(`verify: WARNING ${l}`); };
@@ -1427,6 +1605,20 @@ export async function run(argv, {
   });
   if (sel.notInstalled) { out(`verify: not verified: ${a.pluginId} is not installed for ${a.projectDir} (run: fleet sync)`); return 3; }
   const preProblems = [...sel.problems];
+  // Plugins of other marketplaces (the instance marketplace, engsys#196): each is held to its own marketplace's
+  // pinned release the same way. Same fail-closed rules: an install that is missing, or a pin that is not a
+  // release tag, is "not verified", never silently skipped.
+  const market = [];
+  for (const mp of a.marketPlugins) {
+    if (!TAG_RE.test(mp.tag)) {
+      out(`verify: not verified: ${mp.id} is pinned at '${mp.tag}', which is not a release tag (vX.Y.Z), so its install can't be checked against ${mp.repo}`);
+      return 3;
+    }
+    const ms = selectInstalls(list, { pluginId: mp.id, projectDir: a.projectDir, version: mp.tag.slice(1), harness: a.harness, globalPluginsDir: a.globalPluginsDir });
+    if (ms.notInstalled) { out(`verify: not verified: ${mp.id} is not installed for ${a.projectDir} (run: fleet sync)`); return 3; }
+    preProblems.push(...ms.problems);
+    market.push({ ...mp, roots: ms.roots });
+  }
   let info = [];
   let project = null;
   if (a.pinRepo) {
@@ -1445,9 +1637,11 @@ export async function run(argv, {
       allowedUserHooks: parseAllowedHooks(a.allowedUserHooks),
       claudeJson: a.claudeJson,
       allowedUserFiles: a.checkUserConfig ? parseAllowedFiles(a.allowedUserFiles) : null,
+      fleetConfigDir: a.fleetConfigDir,
     });
     preProblems.push(...r.problems);
     info = r.info;
+    warnLines(r.warnings);
     if (a.messagingSettings) preProblems.push(...checkMessagingSettings(a.messagingSettings));
   }
   infoLines(info);
@@ -1455,6 +1649,10 @@ export async function run(argv, {
 
   let local;
   try { local = localState(sel.roots); } catch (e) { out(`verify: not verified: can't read the plugin files (${e.message})`); return 3; }
+  const marketLocal = {};
+  try { for (const mp of market) marketLocal[mp.id] = { repo: mp.repo, tag: mp.tag, local: localState(mp.roots, MARKET_SCAN) }; } catch (e) {
+    out(`verify: not verified: can't read the plugin files (${e.message})`); return 3;
+  }
   let host = null;
   if (a.engsysDir) {
     try { host = scanHost(a.engsysDir); } catch (e) { out(`verify: not verified: can't read the host kit files (${e.message})`); return 3; }
@@ -1465,9 +1663,10 @@ export async function run(argv, {
   if (a.cache) {
     const c = readCache(a.cache);
     const ageMin = c ? (now() - Number(c.verifiedAt)) / 60_000 : Infinity;
-    if (c && c.result === 'ok' && c.repo === a.repo && c.tag === a.tag && sameJson(c.local, local) && sameJson(c.host ?? null, host)
+    if (c && c.result === 'ok' && c.repo === a.repo && c.tag === a.tag && sameJson(c.local, local) && sameJson(c.market ?? {}, marketLocal) && sameJson(c.host ?? null, host)
       && sameJson(c.project ?? null, projectKey) && sameJson(c.info ?? [], info) && ageMin >= 0 && ageMin < a.maxAgeMin) {
       warnLines(Array.isArray(c.warnings) ? c.warnings : []);
+      for (const mp of market) out(`verify: ok, ${countFiles(marketLocal[mp.id].local)} files of ${mp.id} in ${mp.roots.join(', ')} match ${mp.repo}@${mp.tag} (unchanged)`);
       out(`verify: ok, ${countFiles(local)} protected files in ${where} match ${target} (unchanged since the check ${Math.floor(ageMin)}m ago)`);
       return 0;
     }
@@ -1483,6 +1682,32 @@ export async function run(argv, {
     problems.push(`release    ${a.tag} is commit ${rel.commit}, which is not on ${rel.defaultBranch} (compare: ${rel.status})`);
   }
   for (const d of compare(rel.tree, local)) problems.push(`${d.kind.padEnd(10)} ${cachePath(d.root, d.path)} ${d.have}`);
+  const released = new Map();
+  const marketWarnings = [];
+  for (const mp of market) {
+    try {
+      const key = `${mp.repo}@${mp.tag}`;
+      if (!released.has(key)) released.set(key, await fetch({ repo: mp.repo, tag: mp.tag }));
+      const mrel = released.get(key);
+      if (mrel.status !== 'ahead' && mrel.status !== 'identical') {
+        const line = `${mp.id}: ${mp.tag} of ${mp.repo} is commit ${mrel.commit}, which is not on ${mrel.defaultBranch} (compare: ${mrel.status})`;
+        if (instanceOffMainEnforced) problems.push(`release    ${line}`);
+        else marketWarnings.push(`instance release ${line}; allowed for now, a MISMATCH once INSTANCE_OFF_MAIN_ENFORCED is on (eric-sabe/engsys#227)`);
+      }
+      const mfSha = mrel.tree.get(MARKETPLACE_FILE);
+      if (!mfSha) throw new Unverified(`${mp.repo}@${mp.tag} has no ${MARKETPLACE_FILE}`);
+      const subdir = pluginSubdir(await blob({ repo: mp.repo, sha: mfSha }), mp.id.split('@')[0]);
+      const rekeyed = Object.fromEntries(Object.entries(marketLocal[mp.id].local).map(([root, m]) => [root,
+        Object.fromEntries(Object.entries(m).map(([k, v]) => [`${subdir}/${k.slice(MARKET_SCAN.length + 1)}`, v]))]));
+      // an install of nothing, or of a directory the release doesn't have, is a mismatch, not a pass
+      if (![...mrel.tree.keys()].some((p) => p.startsWith(`${subdir}/`))) throw new Unverified(`${mp.repo}@${mp.tag} has no files under ${subdir}/`);
+      for (const d of compare(mrel.tree, rekeyed, subdir)) problems.push(`${d.kind.padEnd(10)} ${cachePath(d.root, d.path, subdir)} ${d.have}`);
+      mp.subdir = subdir;
+    } catch (e) {
+      out(`verify: not verified against ${mp.repo}@${mp.tag}: ${e instanceof Unverified ? e.message : String(e && e.message || e)}`);
+      return 3;
+    }
+  }
   if (host) {
     for (const d of compareHost(rel.tree, host, a.engsysDir)) problems.push(`${d.kind.padEnd(10)} ${d.absPath} ${d.have}`);
   }
@@ -1502,14 +1727,16 @@ export async function run(argv, {
       else problems.push(`sched      ${st.rel} holds scheduled prompts, not on VERIFY_ALLOWED_USER_FILES (sha256 ${st.hash})`);
     }
   }
+  warnings = [...marketWarnings, ...warnings];
   warnLines(warnings);
   if (problems.length) return mismatch(problems);
 
   if (a.cache) {
-    try { writeCache(a.cache, { repo: a.repo, tag: a.tag, local, host, project: projectKey, info, warnings, result: 'ok', verifiedAt: now() }); } catch (e) {
+    try { writeCache(a.cache, { repo: a.repo, tag: a.tag, local, market: marketLocal, host, project: projectKey, info, warnings, result: 'ok', verifiedAt: now() }); } catch (e) {
       out(`verify: WARNING can't write ${a.cache} (${e.message}); the next run asks GitHub again`);
     }
   }
+  for (const mp of market) out(`verify: ok, ${countFiles(marketLocal[mp.id].local)} files of ${mp.id} in ${mp.roots.join(', ')} match ${mp.repo}@${mp.tag} (${mp.subdir}/)`);
   out(`verify: ok, ${countFiles(local)} protected files in ${where} match ${target} (commit ${rel.commit.slice(0, 12)}, on ${rel.defaultBranch})${project ? `; ${a.pinRepo} checkout ${project.head.slice(0, 12)} and its auto-loaded files (.claude/, CLAUDE.md, .mcp.json, command targets) match GitHub` : ''}`);
   return 0;
 }

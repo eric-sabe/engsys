@@ -74,6 +74,23 @@ n="$(next_bin claude)" || exit 127
 G="$(cat "$D/gitdir")" M="$(cat "$D/marketplace")"
 base="$("$n" "$@" 2>/dev/null || true)"
 printf '%s' "$base" | jq -e 'type == "array"' >/dev/null 2>&1 || base='[]'
+# Other marketplaces' plugins (the instance's, engsys#196): like engsys below, each plugin the pin enables from another
+# marketplace, at a release tag, is materialized from the sandbox remote of the repo the pin names (the directory the tag's
+# marketplace file gives for it, so what the release holds and it verifies) and listed as installed.
+while IFS=$'\t' read -r id m ref repo; do
+  [ -n "$id" ] && [[ "$ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+  p="${id%@*}"; R="$(cat "$D/troot")/remotes/$repo.git"
+  [ -d "$R" ] && git -C "$R" rev-parse -q --verify "refs/tags/$ref" >/dev/null || continue
+  sub="$(git -C "$R" show "$ref:.claude-plugin/marketplace.json" 2>/dev/null | jq -r --arg p "$p" '.plugins[]? | select(.name == $p) | .source // empty')"; sub="${sub#./}"
+  [ -n "$sub" ] || continue
+  root="$HOME/.claude/plugins/cache/$m/$p/${ref#v}"
+  if [ ! -d "$root" ]; then
+    tmp="$(mktemp -d)"; git -C "$R" archive "$ref" "$sub" | tar -x -C "$tmp"
+    mkdir -p "$(dirname "$root")"; mv "$tmp/$sub" "$root"; rm -rf "$tmp"
+  fi
+  base="$(printf '%s' "$base" | jq -c --arg id "$id" --arg v "${ref#v}" --arg p "$root" 'map(select(.id != $id)) + [{id: $id, version: $v, scope: "user", enabled: true, installPath: $p}]')"
+done < <(jq -r --arg e "$M" '. as $s | (.enabledPlugins // {}) | to_entries[] | select(.value == true) | (.key | split("@")) as $k | select($k[1] != $e)
+  | [.key, $k[1], ($s.extraKnownMarketplaces[$k[1]].source.ref // ""), ($s.extraKnownMarketplaces[$k[1]].source.repo // "")] | @tsv' .claude/settings.json 2>/dev/null || true)
 ref="$(jq -r --arg m "$M" '.extraKnownMarketplaces[$m].source.ref // empty' .claude/settings.json 2>/dev/null || true)"
 if [[ "$ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] && git -C "$G" rev-parse -q --verify "refs/tags/$ref" >/dev/null; then
   root="$HOME/.claude/plugins/cache/$M/engsys/${ref#v}"

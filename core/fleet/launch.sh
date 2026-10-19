@@ -213,24 +213,35 @@ fi
 # Plugin integrity (engsys#70), asked once per launch and only when a merge or maintain session is in it.
 # Fails closed: only a pass lets them start (engsys#86 review H1).
 integrity="" why_held="" # integrity: '' = not asked yet | ok | held
+# held_reason <verify output> <where> → why a mismatch holds the launch, naming what actually failed (the verifier's
+# `components:` line): the engsys plugin keeps its old wording, anything else says which thing it is
+held_reason() {
+  local comps
+  comps="$(sed -n 's/^components: //p' <<<"$1" | tail -n 1)"
+  if [ -z "$comps" ] || [ "$comps" = "engsys plugin" ]; then printf 'its engsys plugin%s does not match %s' "$2" "$ENGSYS_REF"
+  else printf 'what it loads%s does not pass the integrity check (%s); see fleet verify' "$2" "$comps"; fi
+}
 singleton_integrity_ok() { # singleton_integrity_ok [<name>] → 0 when merge/maintain sessions may start
   # one login per session (engsys#205): each session's own dir is verified on its own, so one bad dir holds one session
   if [ "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:-off}" = on ] && [ -n "${1:-}" ] && fleet_session_config_dir "$1" >/dev/null; then
-    local prc=0
-    bash "$FLEET_KIT_DIR/verify.sh" --instance "$FLEET_REPO" --alert --session "$1" </dev/null >&2 || prc=$?
+    local prc=0 vout
+    vout="$(bash "$FLEET_KIT_DIR/verify.sh" --instance "$FLEET_REPO" --alert --session "$1" </dev/null 2>&1)" || prc=$?
+    printf '%s\n' "$vout" >&2
     case "$prc" in
       0) return 0 ;;
-      1) why_held="its engsys plugin (in $(fleet_session_config_dir "$1")) does not match $ENGSYS_REF" ;;
+      1) why_held="$(held_reason "$vout" " (in $(fleet_session_config_dir "$1"))")" ;;
       *) why_held="the engsys plugin check for $(fleet_session_config_dir "$1") could not run (exit $prc), so the plugin is unverified" ;;
     esac
     return 1
   fi
   if [ -z "$integrity" ]; then
     local rc=0
-    bash "$FLEET_KIT_DIR/verify.sh" --instance "$FLEET_REPO" --alert </dev/null >&2 || rc=$?
+    local vout
+    vout="$(bash "$FLEET_KIT_DIR/verify.sh" --instance "$FLEET_REPO" --alert </dev/null 2>&1)" || rc=$?
+    printf '%s\n' "$vout" >&2
     case "$rc" in
       0) integrity=ok ;;
-      1) integrity=held why_held="its engsys plugin does not match $ENGSYS_REF" ;;
+      1) integrity=held why_held="$(held_reason "$vout" "")" ;;
       *) integrity=held why_held="the engsys plugin check could not run (exit $rc), so the plugin is unverified" ;;
     esac
   fi

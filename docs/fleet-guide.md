@@ -1138,6 +1138,28 @@ The pins are in the pin repo's `.claude/settings.json` (section 3). `fleet sync`
 `fleet sync --check` reports drift only. Sync refuses to run over uncommitted changes to tracked files in
 either checkout (it names the checkout). It never restarts anything.
 
+**A re-cut pinned tag** (engsys#214, #216). A pinned release tag can be moved on origin (a re-cut). Sync asks
+origin (`git ls-remote`, the peeled tag) whether the checkout's local copy of the pinned tag is still origin's
+commit, for the engsys checkout, the engsys worktree under `FLEET_ISOLATE_ENGSYS_WORKTREE=1` and the instance
+repo alike (one shared check, `fleet_pin_recut`). On a difference it re-fetches the pinned tag, and only that
+tag, from origin, moves the checkout to the new commit and re-executes; `--check` reports it as drift
+(`stale local copy of <tag>`). Offline (`ls-remote` fails) it warns and keeps going on the local copy.
+Origin is the trust root and adopting a re-cut is intended, but a release tag moving under a pinned fleet could
+also be a mistake or a compromised push, so adopting it sends a `fleet notify` alert (engsys#217): the tag and the
+old and new commit ids, nothing else (no paths, no probe output). It goes out from the kit that is running,
+before the checkout moves to the re-cut code, so the new code can't be what decides whether it is sent. It is
+latched once per tag and commit pair in `.fleet/pin-recut.alerted`, written only after delivery; an alert that
+could not be delivered stays in `.fleet/pin-recut.pending` and the next sync retries it. A failed alert never blocks the sync.
+The latch is a file in `.fleet/`, so it is host state: a process running as the same user could pre-seed it and
+silence the alert for a pair it has chosen. That is an accepted residual (it already could edit `fleet.conf` or the
+kit's state); the alert is detection of a moved tag, not isolation.
+A re-cut leaves the marketplace ref and the plugin version unchanged, so installed plugins would stay on the old
+commit: sync records the moved marketplace in `.fleet/pin-recut.reinstall` and reinstalls its plugins in every
+config dir (remove, add `#<ref>`, install), and copies the Copilot and Antigravity plugin caches again (engsys#219).
+The entry is removed only after every dir and cache the run covers has been done, so an interrupted sync, or a
+`~/.claude` marketplace that sync had to refuse, is finished by the next one; `fleet sync --check` reports it
+as drift (`waiting for a plugin reinstall`) until then.
+
 ### Recipes
 
 **Ship an instance change** (anything merged to the instance repo's default branch: context, configs,
@@ -1316,6 +1338,31 @@ cache. `fleet verify` compares the whole `core/fleet/` and `core/lib/` trees the
 the lease and baton code, the verifier itself) plus the supervisor and launcher scripts with the same
 release tree: a modified, missing or extra file there is a mismatch too.
 
+**The instance marketplace's plugins** (engsys#196). Every plugin that `PIN_SETTINGS` enables from
+`INSTANCE_MARKETPLACE` (a fleet's own plugin pinned beside engsys) loads hooks into the monsters and the
+attended roles, so its install is held to its own marketplace's release: `INSTANCE_REF` on that
+marketplace's repo, which must be a release tag (`vX.Y.Z`), in each dir `fleet verify`
+covers (the fleet's config dir and, under `FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised`, `~/.claude`). The
+directory the plugin is built from is the `source` of its entry in `.claude-plugin/marketplace.json` **at
+that release, read from GitHub** (a local file never says where to look); it must be one `./` path inside
+the repo. The check is the same as for engsys: every file under the install is a blob of that directory at
+the tag, a missing, extra or modified file is a mismatch, and a symlink is `not-a-file`. Fail closed: an
+enabled instance plugin that is not installed, a pin that is not a release tag, or a release whose marketplace
+file doesn't name exactly one `./` source for the plugin is "not verified" (exit 3), which holds the merge and
+maintain sessions like any other check that can't run. The other plugins of the engsys marketplace (the stack
+packs) are not hash-checked yet.
+
+*Migration note: an instance tag off the default branch is a warning for now.* The engsys release must be on the
+default branch (anything else is a mismatch). Fleets that tag `release:` commits off their default branch (for
+example `FeedFrwd/ff-engsys-fleet`, whose v0.1.15 to v0.1.18 all diverge) would otherwise hold their merge and
+maintain sessions, so for the **instance** marketplace only, a tag that is not on the default branch prints
+`WARNING instance release ...` and sends one info-level alert (latched per distinct warning, resolved when it
+clears), and the exit code is unchanged. Everything else about the instance check still enforces: the file hashes
+against the tag's tree, a pin that is not a tag, an unreadable `source`. The switch is the single constant
+`INSTANCE_OFF_MAIN_ENFORCED` in `lib/verify-wrappers.mjs`; flipping it makes this a mismatch like engsys
+(tracked in eric-sabe/engsys#227). A mismatch's launch-hold message now names what failed (the engsys plugin,
+an instance plugin, an instance release, the host kit, ...).
+
 **The pin checkout's `.claude/` and its hooks.** Claude Code loads `PIN_DIR/.claude/` (settings, hooks,
 agents, commands, skills) into every session, and a settings hook runs whatever script it names. Its trust
 root is `PIN_REPO`'s default branch as the GitHub API reports it, never a local ref (`origin/HEAD` and
@@ -1335,8 +1382,23 @@ root is `PIN_REPO`'s default branch as the GitHub API reports it, never a local 
 - Every script a `settings.json` hook or command key (`statusLine`, `apiKeyHelper`, any `*Helper` /
   `*Command`, …) names must be an absolute path (write it as `"$CLAUDE_PROJECT_DIR/…"`; `bash hook.sh` or
   `./hook.sh` is a mismatch) to a regular file inside the repo, tracked at HEAD and unchanged. A hook that runs a path outside the repo, or has any other variable or command substitution
-  in it, is a mismatch. Code a hook reaches indirectly (`npm run …`, `make …`) is not followed: keep hook
-  commands to a direct script.
+  in it, is a mismatch. A command is accepted only from an allowlist (engsys#185): an
+  interpreter (`bash`, `sh`, `zsh`, `node`, `python*` including `python3.12`, `perl`, `ruby`) with an absolute
+  script that is tracked at HEAD; a root-owned system program from the short `SAFE_PROGRAMS` list (`true`, `echo`,
+  `sleep`, `date`, `cat`, ...), which runs nothing named in its arguments; or a system wrapper (`nice`, `nohup`,
+  `timeout`, `xargs`, `time`) whose wrapped command passes the same rules, so a bare-name program after a
+  wrapper (`nice somecli`, `xargs env mybin`) is refused like one at the top; `env` is stricter still and may only
+  start one of the listed interpreters, without options or assignments. A wrapper must name its own command, and
+  `xargs` accepts only its batching options (no `-a`, `-I`, `-J`). Any other system program (`git`,
+  `awk`, `sed`, `find`, `perl -e`, `osascript`, ...) is a mismatch. A task runner or package manager
+  (`npm run …`, `pnpm`, `yarn`, `npx`, `make`, `just`, `gradle`, `cargo`, …; `TASK_RUNNERS` in
+  `lib/verify-wrappers.mjs`) is refused however it is reached, by its file name: bare, by absolute path, through a
+  wrapper, `env` or `sh -c`, as `gradlew`, or as a package manager's launcher script run by node (`yarn-4.1.0.cjs`,
+  `npm-cli.js`). Such a runner executes whatever `package.json` or a `Makefile` says, and verify doesn't compare those
+  files with GitHub. There is deliberately no allowlist for it. The way out is a direct script that the hook names
+  (`bash "$CLAUDE_PROJECT_DIR/scripts/lint.sh"`): the script is tracked at HEAD and compared byte for byte. What that
+  script itself calls or imports is not followed, so keep it self-contained and review it as hook code. (A plugin's
+  own `hooks.json`, written with `${CLAUDE_PLUGIN_ROOT}`, is not parsed here: the plugin's files are hash-checked.)
 
 Claude Code's own runtime state under `.claude/` is skipped by an explicit list, matched
 case-insensitively: `settings.local.json` (checked separately), `scheduled_tasks.lock`, `worktrees/`,
@@ -1406,6 +1468,21 @@ override: `CLAUDE_CODE_SUBAGENT_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL_FORCE`, `ANT
 `enforceAvailableModels` or `switchModelsOnFlag: true` (the model keys of Claude Code 2.1.292's settings
 schema): each could move a pinned security agent off its model. The
 security lane's rendered env also unsets `CLAUDE_CODE_SUBAGENT_MODEL` and `CLAUDE_CODE_SUBAGENT_MODEL_FORCE`.
+
+**Skills claude.ai syncs into a fleet config dir** (engsys#201). With the account's sync on, Claude Code writes the
+account's claude.ai skills to `<config dir>/skills/synced/<orgUuid>_<accountUuid>/` (plus a `.bucket-<id>` marker and a
+`manifest.json`), on a personal login and on a Team login alike. The primary fix is to never let them in: `fleet
+config-dir init` and `fleet sync` set `syncClaudeAiSkills: false` and `syncClaudeAiPlugins: false` (§ 6.1), and
+`fleet verify` warns (`WARNING … does not set … to false`, with the fix command) when a fleet config dir's
+`settings.json` doesn't. What is already there is a mismatch, reported as **one line per bucket**
+(`… holds N synced claude.ai skill file(s) …`, with a cleanup hint) instead of one per file, and a content-only
+update to a bucket doesn't change the alert's fingerprint. To clear it: set the two switches, delete
+`<config dir>/skills/synced/`, and run `fleet verify`. A synced skill is deliberately **not** trusted by source:
+the bucket id, its marker, its `manifest.json` (`source`, `creatorType`) and the files it lists all sit in the
+config dir, where any session of this user can write them, and the manifest carries no content hashes, so a
+forged manifest plus a planted `SKILL.md` would look exactly like a real sync. There is no allowlist by bucket or
+author. The only exception is the existing one: an operator who reviews a file can list its sha256 in
+`VERIFY_ALLOWED_USER_FILES`, and it then has to be re-approved when upstream changes it.
 
 **The alert** names the total and the categories (engsys plugin or host kit, pin checkout, unpinned
 user-scope plugins, MCP servers, user-scope skills/agents/files, user-scope hooks and commands, settings,

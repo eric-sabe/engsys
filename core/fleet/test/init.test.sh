@@ -390,6 +390,12 @@ git -C "$E" init -q && git -C "$E" add -A && git -C "$E" commit -q -m "engsys" &
 # shellcheck source=fake-release.sh
 . "$HERE/fake-release.sh"
 fake_release "$E"
+# The instance marketplace's release (`fleet verify` checks its plugin's install against it, engsys#196): the scaffold of
+# section A, tagged v0.1.0 in a sandbox remote the fake GitHub serves as acme/acme-fleet.
+IWORK="$T/inst-release"; mkdir -p "$IWORK" "$T/remotes/acme"
+cp -R "$FULL/." "$IWORK/"; rm -rf "$IWORK/.git"
+git init -q "$IWORK" && git -C "$IWORK" add -A && git -C "$IWORK" commit -q -m "acme-fleet 0.1.0" && git -C "$IWORK" tag v0.1.0
+git clone -q --bare "$IWORK" "$T/remotes/acme/acme-fleet.git"
 # The pin repo: a local checkout whose .claude/settings.json pins engsys (and the instance marketplace).
 P="$HOME/git/app"
 mkdir -p "$P/.claude"
