@@ -111,16 +111,25 @@ fleet_config_dir_fix() {
   fi
 }
 
-# fleet_session_alive <name> → 0 when a claude process is running in the session's tmux window: the window exists in
-# $TMUX_SESSION and its pane's foreground command is not a login shell (the launcher runs claude from the window's
-# shell, so a shell in the foreground means it exited; the same rule as `fleet restart`). Anything unreadable (no
-# tmux server, no window) is "not running": the caller then asks the CLI, which is safe only because nothing else
-# holds that credential. Used by verify.sh to keep its periodic check off a live session's credential (engsys#223).
+# fleet_session_alive <name> → 0 when a claude process is running in the session's tmux window: a window of that name
+# exists (any tmux session, like launch.sh's own check: `-a`) and its pane's foreground command is not a login shell
+# (the launcher runs claude from the window's shell, so a shell in the foreground means it exited). Anything
+# unreadable (no tmux server, no window) is "not running": the caller then asks the CLI, which is safe only because
+# nothing else holds that credential. Used by verify.sh and restart.sh to keep periodic work off a live session's
+# credential (engsys#223).
 fleet_session_alive() {
-  local w cmd
-  w="$(tmux list-windows -t "$TMUX_SESSION" -F '#{window_name}' 2>/dev/null)" || return 1
-  grep -Fxq -- "$1" <<<"$w" || return 1
-  cmd="$(tmux list-panes -t "${TMUX_SESSION}:$1" -F '#{pane_current_command}' 2>/dev/null | head -n 1)"
+  local cmd
+  # NOTE: the shell-name list below now decides whether a LIVE credential gets a claude process started on it (verify's
+  # CLI fallback). A name missing from it makes a running claude look exited, and the short-lived process can then
+  # rotate the refresh token out from under it (anthropics/claude-code#88583). Keep it complete.
+  cmd="$(tmux list-panes -a -F '#{window_name} #{pane_current_command}' 2>/dev/null | awk -v n="$1" '$1 == n { print $2; exit }')" || return 1
   case "$cmd" in '' | zsh | -zsh | bash | -bash | sh | -sh | fish | -fish) return 1 ;; esac
   return 0
+}
+# fleet_live_sessions → the roster sessions (this host's roster) that are running, one per line.
+fleet_live_sessions() {
+  local n
+  while IFS= read -r n; do
+    [ -z "$n" ] || ! fleet_session_alive "$n" || printf '%s\n' "$n"
+  done < <(roster_names)
 }

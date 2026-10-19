@@ -387,12 +387,14 @@ esac
 export FLEET_SECURITY_VERDICT_KEY
 
 # fleet_log_claude_call <dir> <command...> → one line "<UTC time> <dir> <command>" in $FLEET_STATE/claude-invocations.log,
-# so a login that dies can be matched against the claude processes the fleet itself ran on its dir (engsys#223). Best
-# effort, never fails the caller; the file is cut to its last 500 lines once it passes 200 KB.
+# so a login that dies can be matched against the claude processes the fleet itself ran on its dir (engsys#223). Called
+# by fleet_dir_lock and by the callers that run claude on ~/.claude (verify.sh, sync.sh); the supervisor's auth probe
+# keeps its own log in its state dir. Best effort, never fails the caller; created 0600; refuses to write through a
+# symlink (the log or its .tmp: .fleet/ is writable by a session); cut to its last 500 lines once past 200 KB.
 fleet_log_claude_call() {
   local f="$FLEET_STATE/claude-invocations.log" d="$1"; shift
-  { mkdir -p "$FLEET_STATE" && printf '%s %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$d" "$*" >>"$f"; } 2>/dev/null || return 0
-  if [ "$(wc -c <"$f" 2>/dev/null || echo 0)" -gt 204800 ]; then tail -n 500 "$f" >"$f.tmp" 2>/dev/null && mv "$f.tmp" "$f" 2>/dev/null; fi
+  { mkdir -p "$FLEET_STATE" && [ ! -L "$f" ] && [ ! -L "$f.tmp" ] && (umask 077; printf '%s %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$d" "$*" >>"$f"); } 2>/dev/null || return 0
+  if [ "$(wc -c <"$f" 2>/dev/null || echo 0)" -gt 204800 ]; then (umask 077; tail -n 500 "$f" >"$f.tmp" && mv "$f.tmp" "$f") 2>/dev/null || true; fi
   return 0
 }
 

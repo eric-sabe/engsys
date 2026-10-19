@@ -446,6 +446,10 @@ auth_probe() {
   esac
   command -v "$probe_bin" >/dev/null 2>&1 || { AUTH_PROBE_WHY="no test request ($probe_bin is not on PATH)"; return 1; }
   local dir pid rc=0 waited=0 last
+  # every test request is a claude process on a credential: record it (engsys#223), refusing to write through a symlink
+  if [ "$h" = claude ] && [ ! -L "$STATE_DIR/claude-invocations.log" ]; then
+    (umask 077; printf '%s %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${AUTH_PROBE_CFG:-${CLAUDE_CONFIG_DIR:-default}}" "claude -p (auth probe)" >>"$STATE_DIR/claude-invocations.log") 2>/dev/null || true
+  fi
   dir="$(mktemp -d "${TMPDIR:-/tmp}/fleet-supervisor-auth.XXXXXX")"
   if [ "$h" = "copilot" ]; then
     (cd "$dir" && exec copilot -p 'Reply with the single word OK' -s --no-custom-instructions --disable-builtin-mcps --model claude-haiku-5.5) </dev/null >"$dir/probe.out" 2>&1 &

@@ -158,7 +158,10 @@ live_session() {
 # the call is serialized per dir, and a logged-in answer is kept for --max-age minutes (a logged-out one never is).
 dir_logged_out() {
   local ok="$FLEET_STATE/auth-ok$SFX" li at
-  if live_session; then return 1; fi   # engsys#223: the running session owns the credential; the supervisor's pane watch sees its expiry
+  if live_session; then   # engsys#223: the running session owns the credential; the supervisor's pane watch sees its expiry
+    echo "fleet verify: login not checked: session $session is running (the supervisor's pane watch covers it)"
+    return 1
+  fi
   if [ "$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION" = on ] && [ -n "$max_age" ] && at="$(cat "$ok" 2>/dev/null)" && [[ "$at" =~ ^[0-9]+$ ]] \
     && [ $(( $(date +%s) - at )) -lt $(( max_age * 60 )) ]; then return 1; fi
   li="$( (cd "${TMPDIR:-/tmp}" && CLAUDE_CONFIG_DIR="$FLEET_CLAUDE_CONFIG_DIR" fleet_dir_lock "$FLEET_CLAUDE_CONFIG_DIR" claude auth status --json </dev/null) 2>/dev/null | jq -r 'if .loggedIn == true then "true" elif .loggedIn == false then "false" else "" end' 2>/dev/null || true)"
@@ -308,10 +311,14 @@ else
       && [ "${HARNESS:-claude}" = claude ]; then
       plist_u="$(mktemp "$FLEET_STATE/plugin-list-user.XXXXXX")"
       # ~/.claude belongs to the live interactive roles: a periodic check (--max-age) reads its files, never starts a claude on it (engsys#223)
-      if [ -n "$max_age" ]; then u_list=(node "$FLEET_KIT_DIR/lib/plugin-list-from-files.mjs" --config-dir "$HOME/.claude" --project-dir "$PIN_DIR")
-      else u_list=(env -u CLAUDE_CONFIG_DIR claude plugin list --json); fi
+      # (a launch has no --max-age, but an interactive role may be live on ~/.claude too: then its files, the same way)
+      u_files=0
+      if [ -n "$max_age" ]; then u_files=1
+      else fleet_roster_prepare; while IFS= read -r un; do if [ -n "$un" ] && is_interactive "$un"; then u_files=1; break; fi; done < <(fleet_live_sessions); fi
+      if [ "$u_files" = 1 ]; then u_list=(node "$FLEET_KIT_DIR/lib/plugin-list-from-files.mjs" --config-dir "$HOME/.claude" --project-dir "$PIN_DIR")
+      else fleet_log_claude_call "$HOME/.claude" claude plugin list --json; u_list=(env -u CLAUDE_CONFIG_DIR claude plugin list --json); fi
       if ! (cd "$PIN_DIR" && "${u_list[@]}") >"$plist_u" 2>/dev/null; then
-        if [ -n "$max_age" ]; then out="$out"$'\n'"fleet verify: not verified: the plugin list could not be read from the files of ~/.claude (the interactive roles; their login is not touched)"
+        if [ "$u_files" = 1 ]; then out="$out"$'\n'"fleet verify: not verified: the plugin list could not be read from the files of ~/.claude (the interactive roles; their login is not touched)"
         else out="$out"$'\n'"fleet verify: not verified: claude plugin list failed in $PIN_DIR for ~/.claude (the interactive roles)"; fi
         rc=3
       else
@@ -335,15 +342,22 @@ if [ "$rc" = 1 ]; then
   probs="$(sed -n 's/^  \(.*\)$/\1/p' <<<"$out")"
   if [ -n "$probs" ] && ! grep -qv '^stale ' <<<"$probs"; then only_stale=1; fi
 fi
-sync_why=""
+sync_why="" sync_deferred=0
 if [ "$only_stale" = 1 ] && [ "$auto_sync" = 1 ]; then
+  # engsys#223: fleet sync runs `claude auth status` and `claude plugin ...` on every session dir, running ones included.
+  # A periodic check must not, so while any session is running the sync is deferred (the stale mismatch stands: relaunches
+  # stay held, alerted as deferred) and happens on a later tick once none is, or when the operator runs fleet sync.
+  live_now=""
+  if [ "$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION" = on ] && [ -n "$max_age" ]; then live_now="$(fleet_live_sessions | paste -sd' ' -)"; fi
   # Full ref names, never --short: a local branch or tag named origin/<x> makes --short ambiguous.
   pin_branch="$(git -C "$PIN_DIR" symbolic-ref -q HEAD 2>/dev/null || true)"
   case "$pin_branch" in refs/heads/*) pin_branch="${pin_branch#refs/heads/}" ;; *) pin_branch="" ;; esac
   def_branch="$(git -C "$PIN_DIR" symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null || true)"
   case "$def_branch" in refs/remotes/origin/?*) def_branch="${def_branch#refs/remotes/origin/}" ;; *) def_branch="" ;; esac
   : "${def_branch:=main}"
-  if [ "$pin_branch" != "$def_branch" ]; then sync_why="the pin checkout is on '${pin_branch:-a detached HEAD}', not $def_branch"
+  if [ -n "$live_now" ]; then
+    sync_deferred=1 sync_why="sync deferred: $(wc -w <<<"$live_now" | tr -d ' ') session(s) running ($live_now). A periodic check never starts claude on a running session's login, and fleet sync does. It runs on a later tick once none is running, or run fleet sync yourself"
+  elif [ "$pin_branch" != "$def_branch" ]; then sync_why="the pin checkout is on '${pin_branch:-a detached HEAD}', not $def_branch"
   elif [ -n "$(git -C "$PIN_DIR" status --porcelain --untracked-files=no 2>/dev/null || echo dirty)" ]; then sync_why="the pin checkout has uncommitted changes to tracked files"
   elif [ -n "$(git -C "$PIN_DIR" status --porcelain -- .claude ':(exclude,icase).claude/settings.local.json' \
       ':(exclude,icase).claude/scheduled_tasks.lock' ':(exclude,icase).claude/worktrees' ':(exclude,icase).claude/checkpoints' \
@@ -360,7 +374,8 @@ if [ "$only_stale" = 1 ] && [ "$auto_sync" = 1 ]; then
     fi
     sync_why="fleet sync failed (above)"
   fi
-  out="$out"$'\n'"fleet verify: could not auto-sync: $sync_why"
+  if [ "$sync_deferred" = 1 ]; then out="$out"$'\n'"fleet verify: $sync_why"
+  else out="$out"$'\n'"fleet verify: could not auto-sync: $sync_why"; fi
 fi
 printf '%s\n' "$out"
 
@@ -387,7 +402,7 @@ if [ "$alert" = 1 ]; then
       fp="$(sed -n 's/^fingerprint: //p' <<<"$out" | tail -1)"
       if [ "$only_stale" = 1 ] && [ "$(cat "$LATCH" 2>/dev/null)" != "$fp|$auto_sync|$sync_why" ]; then
         lines="$(sed -n 's/^  \(.*\)$/\1/p' <<<"$out" | awk 'NR <= 8')"
-        notify --level alert --incident "wrapper-integrity$INC" "Plugin check on $host${session:+ (session $session)}: the pin checkout ($PIN_DIR) is behind main, and files the sessions load changed there. $(if [ -n "$sync_why" ]; then printf 'Auto-sync could not fast-forward it: %s. Please bring the checkout back to main and run fleet sync.' "$sync_why"; elif [ "$auto_sync" = 1 ]; then printf 'Auto-syncing: fleet sync is running for it now.'; else printf 'Run fleet sync (a supervised host also does it on its own, through fleet verify --auto-sync).'; fi) Merge and maintain sessions are held until it matches; running sessions are left as they are. This is not a sign of tampering. Behind on:
+        notify --level alert --incident "wrapper-integrity$INC" "Plugin check on $host${session:+ (session $session)}: the pin checkout ($PIN_DIR) is behind main, and files the sessions load changed there. $(if [ "$sync_deferred" = 1 ]; then printf 'Auto-sync is deferred (%s).' "$sync_why"; elif [ -n "$sync_why" ]; then printf 'Auto-sync could not fast-forward it: %s. Please bring the checkout back to main and run fleet sync.' "$sync_why"; elif [ "$auto_sync" = 1 ]; then printf 'Auto-syncing: fleet sync is running for it now.'; else printf 'Run fleet sync (a supervised host also does it on its own, through fleet verify --auto-sync).'; fi) Merge and maintain sessions are held until it matches; running sessions are left as they are. This is not a sign of tampering. Behind on:
 $lines
 Details: fleet verify" && printf '%s\n' "$fp|$auto_sync|$sync_why" >"$LATCH"
       elif [ "$only_stale" = 0 ] && [ "$(cat "$LATCH" 2>/dev/null)" != "$fp" ]; then

@@ -66,7 +66,7 @@ cat >"$T/bin/tmux" <<'SH'
 # stub tmux: $FAKE/tmux-windows lists the windows, $FAKE/tmux-cmd is every pane's foreground command
 case "${1:-}" in
   list-windows) cat "$FAKE/tmux-windows" 2>/dev/null || exit 1 ;;
-  list-panes) cat "$FAKE/tmux-cmd" 2>/dev/null || exit 1 ;;
+  list-panes) while IFS= read -r wn; do [ -z "$wn" ] || echo "$wn $(cat "$FAKE/tmux-cmd" 2>/dev/null)"; done <"$FAKE/tmux-windows" ;;
 esac
 exit 0
 SH
@@ -632,6 +632,17 @@ printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\nFLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised
 run fleet verify
 rc_is "scope supervised, ~/.claude's engsys intact: passes" 0
 has "…it checked ~/.claude" "$OUT" "~/.claude (interactive roles, FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised): the engsys plugin"
+# engsys#223: an interactive role live on ~/.claude: even a launch-style check reads ~/.claude's files, no claude on it
+mkdir -p "$HOME/.claude/plugins"
+jq '{version: 2, plugins: (group_by(.id) | map({key: .[0].id, value: map({scope, version, installPath})}) | from_entries)}' "$FAKE/plugins-user.json" >"$HOME/.claude/plugins/installed_plugins.json"
+echo acme-build >"$FAKE/tmux-windows"; echo node >"$FAKE/tmux-cmd"; : >"$FAKE/claude.calls"
+run fleet verify
+rc_is "scope supervised with an interactive role running: passes" 0
+hasnt "…no claude plugin list on ~/.claude (no CLAUDE_CONFIG_DIR)" "$(cat "$FAKE/claude.calls")" "unset|plugin list"
+rm -f "$FAKE/tmux-windows" "$FAKE/tmux-cmd" "$HOME/.claude/plugins/installed_plugins.json"; : >"$FAKE/claude.calls"
+run fleet verify
+has "nothing running: the launch gate asks the CLI on ~/.claude" "$(cat "$FAKE/claude.calls")" "unset|plugin list --json"
+has "…and logs it" "$(cat "$I/.fleet/claude-invocations.log")" "$HOME/.claude claude plugin list --json"
 printf '\n# tampered\n' >>"$UCACHE/skills/merge-monster/scripts/mm-act.sh"
 run fleet verify
 rc_is "a tampered engsys file in ~/.claude holds the monsters" 1
@@ -927,5 +938,37 @@ rc_is "no installed_plugins.json: nothing installed, not verified" 3
 cp "$T/ip.good" "$PS/plugins/installed_plugins.json"
 rm -f "$I/.fleet"/verify-wrappers*.json
 printf '%s\n' "$CONF0" >"$I/fleet/fleet.conf"; rm -f "$FAKE/auth.json" "$FAKE/tmux-windows" "$FAKE/tmux-cmd"
+
+echo "== engsys#223: --auto-sync never starts claude on a running session; the sync is deferred, loudly"
+printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\nFLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on\n' "$CONF0" "$PCFG" >"$I/fleet/fleet.conf"
+echo '{"loggedIn": true}' >"$FAKE/auth.json"
+W2="$T/app-work2"; git clone -q "$FAKE/app-origin.git" "$W2"
+printf 'echo v3\n' >>"$W2/.claude/hooks/remind.sh"; commit_all "$W2" "hook v3"; git -C "$W2" push -q origin HEAD:main
+git -C "$APP" fetch -q origin
+rm -f "$I/.fleet"/verify-wrappers*.json
+echo acme-mm >"$FAKE/tmux-windows"; echo node >"$FAKE/tmux-cmd"; : >"$FAKE/claude.calls"; g0="$(said 'is deferred')"
+run fleet verify --alert --auto-sync --max-age 15 --session acme-mm
+rc_is "a stale pin checkout with a session running: still a mismatch (not a pass)" 1
+has "…says the sync is deferred and why" "$OUT" "sync deferred: 1 session(s) running (acme-mm)"
+hasnt "…did not auto-sync" "$OUT" "auto-syncing"
+eq "…and started no claude at all (call log)" "$(calls)" 0
+eq "…the alert says it is deferred, once" "$(said 'Auto-sync is deferred')" "$((g0 + 1))"
+has "…and the login check was skipped, said so" "$OUT" "login not checked: session acme-mm is running"
+: >"$FAKE/tmux-windows"; : >"$FAKE/claude.calls"
+run fleet verify --alert --auto-sync --max-age 15 --session acme-mm
+hasnt "with nothing running the sync is not deferred" "$OUT" "sync deferred"
+has "…it runs (the sync happens once the sessions are gone)" "$OUT" "auto-syncing (fleet sync, no restarts)"
+git -C "$APP" reset -q --hard origin/main 2>/dev/null || true
+rm -f "$FAKE/tmux-windows" "$FAKE/tmux-cmd" "$FAKE/auth.json"; printf '%s\n' "$CONF0" >"$I/fleet/fleet.conf"
+
+echo "== engsys#223: the invocation log is 0600 and never written through a symlink"
+LOGF="$I/.fleet/claude-invocations.log"; rm -f "$LOGF" "$LOGF.tmp"
+ln -s "$T/victim" "$LOGF"
+( FLEET_INSTANCE="$I"; . "$E/core/fleet/lib/fleet-env.sh"; fleet_log_claude_call /d claude x ) >/dev/null 2>&1 || true
+if [ ! -e "$T/victim" ]; then ok "a symlinked log is not followed"; else bad "a symlinked log is not followed"; fi
+rm -f "$LOGF"
+( FLEET_INSTANCE="$I"; . "$E/core/fleet/lib/fleet-env.sh"; fleet_log_claude_call /d claude x ) >/dev/null 2>&1 || true
+eq "a fresh log is created 0600" "$(stat -f %Lp "$LOGF" 2>/dev/null || stat -c %a "$LOGF")" 600
+rm -f "$LOGF"
 
 finish verify.test.sh
