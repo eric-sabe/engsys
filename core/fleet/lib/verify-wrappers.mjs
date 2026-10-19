@@ -38,12 +38,16 @@
 //                       [--allowed-user-plugins "<name@mkt> ..."] [--allowed-user-hooks "<sha256> ..."]
 //                       [--check-user-config --claude-json <file> --allowed-user-files "<sha256> ..."]
 //                       [--pin-repo <owner/repo>]
+//                       [--market-plugin "<plugin>@<marketplace>|<owner/repo>|<ref>" ...]
 //                       [--cache <file> --max-age-min <n>]
 //
 // --engsys-dir: the host kit (ENGSYS_HOST_TREES, ENGSYS_HOST_FILES) against the same release tree.
 // --user-settings-dir: the Claude config dir the sessions use (FLEET_CLAUDE_CONFIG_DIR, else ~/.claude);
 //   a user-scope plugin the project doesn't enable is a mismatch unless --allowed-user-plugins lists it,
 //   and a user-scope hook or settings command unless --allowed-user-hooks lists its userCommandHash.
+// --market-plugin (repeatable, engsys#196): a plugin of another marketplace (the instance's), checked the same
+//   way against that repo's release <ref> (a vX.Y.Z tag). The directory its install is a copy of is the
+//   `source` of its entry in the release's .claude-plugin/marketplace.json, read from GitHub (pluginSubdir).
 // --pin-repo: PIN_DIR's .claude/ tree and every settings-hook target against that repo's default branch
 //   on GitHub (projectLocalState + verifyProjectTrust, below). A pin checkout behind the tip passes with a
 //   WARNING line only while every auto-loaded file is identical at the tip.
@@ -148,9 +152,9 @@ export function blobSha(buf) {
   return crypto.createHash('sha1').update(`blob ${b.length}\0`).update(b).digest('hex');
 }
 
-/** The file under an install root that holds a protected repo path. */
-export function cachePath(root, repoPath) {
-  return path.join(root, repoPath.slice(PLUGIN_SUBDIR.length + 1));
+/** The file under an install root that holds a protected repo path (subdir: the plugin's source directory in its repo). */
+export function cachePath(root, repoPath, subdir = PLUGIN_SUBDIR) {
+  return path.join(root, repoPath.slice(subdir.length + 1));
 }
 
 /**
@@ -158,7 +162,7 @@ export function cachePath(root, repoPath) {
  * directory) or anything else that isn't a regular file or a real directory is 'not-a-file' and is not
  * followed: a symlink could be repointed after the check. Only <root>/.in_use/ (and macOS .DS_Store) is skipped.
  */
-export function scanRoot(root) {
+export function scanRoot(root, subdir = PLUGIN_SUBDIR) {
   const out = {};
   const visit = (absDir, relDir) => {
     for (const e of fs.readdirSync(absDir, { withFileTypes: true })) {
@@ -167,17 +171,17 @@ export function scanRoot(root) {
       const abs = path.join(absDir, e.name);
       const rel = `${relDir}${e.name}`;
       if (e.isDirectory()) visit(abs, `${rel}/`);
-      else if (e.isFile()) out[`${PLUGIN_SUBDIR}/${rel}`] = blobSha(fs.readFileSync(abs));
-      else out[`${PLUGIN_SUBDIR}/${rel}`] = 'not-a-file';
+      else if (e.isFile()) out[`${subdir}/${rel}`] = blobSha(fs.readFileSync(abs));
+      else out[`${subdir}/${rel}`] = 'not-a-file';
     }
   };
   visit(root, '');
   return out;
 }
 
-/** Scan every root. → { [root]: scanRoot(root) } */
-export function localState(roots) {
-  return Object.fromEntries(roots.map((r) => [r, scanRoot(r)]));
+/** Scan every root. → { [root]: scanRoot(root, subdir) } */
+export function localState(roots, subdir = PLUGIN_SUBDIR) {
+  return Object.fromEntries(roots.map((r) => [r, scanRoot(r, subdir)]));
 }
 
 /**
@@ -678,6 +682,7 @@ export function checkSettingsDetailed({
 }) {
   const problems = [];
   const info = [];
+  const warnings = [];
   const allowed = allowedUserPlugins instanceof Set ? allowedUserPlugins : parseAllowedPlugins(allowedUserPlugins);
   const allowedHooks = allowedUserHooks instanceof Set ? allowedUserHooks : parseAllowedHooks(allowedUserHooks);
   const common = (f, cfg) => {
@@ -807,7 +812,7 @@ export function checkSettingsDetailed({
   if (allowedUserFiles) {
     for (const f of parentMemoryFiles(projectDir, home)) problems.push(`memory     ${f} is loaded into every session above the pin checkout; remove it`);
   }
-  return { problems: [...new Set(problems)], info: [...new Set(info)] };
+  return { problems: [...new Set(problems)], info: [...new Set(info)], warnings: [...new Set(warnings)] };
 }
 
 /** The keys the session launcher writes into its messaging settings file (launch-agent-sessions.sh). */
@@ -1193,11 +1198,11 @@ export function parseTree(json) {
  * difference: modified (different bytes) | missing (in the release, not on disk) | unexpected (on disk,
  * not in the release) | not-a-file (a symlink or other non-regular entry).
  */
-export function compare(tree, local) {
+export function compare(tree, local, subdir = PLUGIN_SUBDIR) {
   const diffs = [];
   for (const [root, m] of Object.entries(local)) {
     for (const p of tree.keys()) {
-      if (p.startsWith(`${PLUGIN_SUBDIR}/`) && !(p in m)) diffs.push({ root, path: p, kind: 'missing', have: '-' });
+      if (p.startsWith(`${subdir}/`) && !(p in m)) diffs.push({ root, path: p, kind: 'missing', have: '-' });
     }
     for (const [p, have] of Object.entries(m)) {
       const want = tree.get(p) ?? null;
@@ -1207,6 +1212,41 @@ export function compare(tree, local) {
     }
   }
   return diffs;
+}
+
+/** Where a marketplace lists its plugins, at the root of its repo. */
+export const MARKETPLACE_FILE = '.claude-plugin/marketplace.json';
+/** The placeholder directory a marketplace plugin's install is scanned under until its real source directory is known. */
+const MARKET_SCAN = '@plugin';
+
+/**
+ * The repo directory a marketplace plugin is installed from (engsys#196): the `source` of its entry in the
+ * marketplace file, read from the verified release (never from a local file), which must be a path inside
+ * the repo. A plugin's install is a copy of that directory, so a repo path <subdir>/<p> lives at
+ * <install path>/<p>. Anything else (an unlisted or duplicated plugin, a source that is not a `./` path, the
+ * repo root, a path that climbs out) throws an Unverified: fail closed, never guess a directory.
+ */
+export function pluginSubdir(marketplaceJson, pluginName) {
+  let m;
+  try { m = JSON.parse(String(marketplaceJson)); } catch { throw new Unverified(`${MARKETPLACE_FILE} of the release is not JSON`); }
+  const entries = Array.isArray(m?.plugins) ? m.plugins.filter((e) => e && e.name === pluginName) : [];
+  if (entries.length !== 1) throw new Unverified(`${MARKETPLACE_FILE} of the release lists ${entries.length} plugins named ${pluginName}, not one`);
+  const src = entries[0].source;
+  if (typeof src !== 'string' || !src.startsWith('./')) throw new Unverified(`the release's source for ${pluginName} is not a ./ path inside its repo`);
+  const dir = path.posix.normalize(src.slice(2)).replace(/\/+$/, '');
+  if (!dir || dir === '.' || dir === '..' || dir.startsWith('../') || dir.startsWith('/')) {
+    throw new Unverified(`the release's source for ${pluginName} (${src}) is the repo root or leaves the repo`);
+  }
+  return dir;
+}
+
+/** A blob's bytes through gh, checked against the sha the verified tree names. */
+export async function fetchBlob({ repo, sha, gh = 'gh', timeoutMs = 30_000 }) {
+  const b = await ghJson(gh, `repos/${repo}/git/blobs/${sha}`, timeoutMs);
+  if (!b || b.encoding !== 'base64' || typeof b.content !== 'string') throw new Unverified(`GitHub returned an unreadable blob ${sha}`);
+  const buf = Buffer.from(b.content, 'base64');
+  if (blobSha(buf) !== sha) throw new Unverified(`the blob GitHub returned for ${sha} does not hash to it`);
+  return buf;
 }
 
 function findShadowingPlugins(pluginId, verifiedRoots, candidateDirs, real) {
@@ -1348,6 +1388,7 @@ export function parseArgs(argv) {
     messagingSettings: '',
     claudeJson: '',
     checkUserConfig: false,
+    marketPlugins: [],
   };
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
@@ -1373,6 +1414,12 @@ export function parseArgs(argv) {
       case '--claude-json': a.claudeJson = v(); break;
       case '--messaging-settings': a.messagingSettings = v(); break;
       case '--check-user-config': a.checkUserConfig = true; break;
+      case '--market-plugin': {
+        const [id, repo, tag, ...extra] = v().split('|');
+        if (extra.length || !ID_RE.test(id || '') || !REPO_RE.test(repo || '') || !tag || /\s/.test(tag)) throw new Error('--market-plugin must be <plugin>@<marketplace>|<owner/repo>|<ref>');
+        a.marketPlugins.push({ id, repo, tag });
+        break;
+      }
       default: throw new Error(`unknown argument: ${k}`);
     }
   }
@@ -1430,6 +1477,7 @@ export function problemFingerprint(lines) {
 /** The CLI, with its effects injectable for tests. → exit code. */
 export async function run(argv, {
   fetch = fetchRelease,
+  blob = fetchBlob,
   projectApi = (endpoint) => ghJson('gh', endpoint, 30_000),
   projectLocal = projectLocalState,
   now = Date.now,
@@ -1464,6 +1512,20 @@ export async function run(argv, {
   });
   if (sel.notInstalled) { out(`verify: not verified: ${a.pluginId} is not installed for ${a.projectDir} (run: fleet sync)`); return 3; }
   const preProblems = [...sel.problems];
+  // Plugins of other marketplaces (the instance marketplace, engsys#196): each is held to its own marketplace's
+  // pinned release the same way. Same fail-closed rules: an install that is missing, or a pin that is not a
+  // release tag, is "not verified", never silently skipped.
+  const market = [];
+  for (const mp of a.marketPlugins) {
+    if (!TAG_RE.test(mp.tag)) {
+      out(`verify: not verified: ${mp.id} is pinned at '${mp.tag}', which is not a release tag (vX.Y.Z), so its install can't be checked against ${mp.repo}`);
+      return 3;
+    }
+    const ms = selectInstalls(list, { pluginId: mp.id, projectDir: a.projectDir, version: mp.tag.slice(1), harness: a.harness, globalPluginsDir: a.globalPluginsDir });
+    if (ms.notInstalled) { out(`verify: not verified: ${mp.id} is not installed for ${a.projectDir} (run: fleet sync)`); return 3; }
+    preProblems.push(...ms.problems);
+    market.push({ ...mp, roots: ms.roots });
+  }
   let info = [];
   let project = null;
   if (a.pinRepo) {
@@ -1485,6 +1547,7 @@ export async function run(argv, {
     });
     preProblems.push(...r.problems);
     info = r.info;
+    warnLines(r.warnings);
     if (a.messagingSettings) preProblems.push(...checkMessagingSettings(a.messagingSettings));
   }
   infoLines(info);
@@ -1492,6 +1555,10 @@ export async function run(argv, {
 
   let local;
   try { local = localState(sel.roots); } catch (e) { out(`verify: not verified: can't read the plugin files (${e.message})`); return 3; }
+  const marketLocal = {};
+  try { for (const mp of market) marketLocal[mp.id] = { repo: mp.repo, tag: mp.tag, local: localState(mp.roots, MARKET_SCAN) }; } catch (e) {
+    out(`verify: not verified: can't read the plugin files (${e.message})`); return 3;
+  }
   let host = null;
   if (a.engsysDir) {
     try { host = scanHost(a.engsysDir); } catch (e) { out(`verify: not verified: can't read the host kit files (${e.message})`); return 3; }
@@ -1502,9 +1569,10 @@ export async function run(argv, {
   if (a.cache) {
     const c = readCache(a.cache);
     const ageMin = c ? (now() - Number(c.verifiedAt)) / 60_000 : Infinity;
-    if (c && c.result === 'ok' && c.repo === a.repo && c.tag === a.tag && sameJson(c.local, local) && sameJson(c.host ?? null, host)
+    if (c && c.result === 'ok' && c.repo === a.repo && c.tag === a.tag && sameJson(c.local, local) && sameJson(c.market ?? {}, marketLocal) && sameJson(c.host ?? null, host)
       && sameJson(c.project ?? null, projectKey) && sameJson(c.info ?? [], info) && ageMin >= 0 && ageMin < a.maxAgeMin) {
       warnLines(Array.isArray(c.warnings) ? c.warnings : []);
+      for (const mp of market) out(`verify: ok, ${countFiles(marketLocal[mp.id].local)} files of ${mp.id} in ${mp.roots.join(', ')} match ${mp.repo}@${mp.tag} (unchanged)`);
       out(`verify: ok, ${countFiles(local)} protected files in ${where} match ${target} (unchanged since the check ${Math.floor(ageMin)}m ago)`);
       return 0;
     }
@@ -1520,6 +1588,29 @@ export async function run(argv, {
     problems.push(`release    ${a.tag} is commit ${rel.commit}, which is not on ${rel.defaultBranch} (compare: ${rel.status})`);
   }
   for (const d of compare(rel.tree, local)) problems.push(`${d.kind.padEnd(10)} ${cachePath(d.root, d.path)} ${d.have}`);
+  const released = new Map();
+  for (const mp of market) {
+    try {
+      const key = `${mp.repo}@${mp.tag}`;
+      if (!released.has(key)) released.set(key, await fetch({ repo: mp.repo, tag: mp.tag }));
+      const mrel = released.get(key);
+      if (mrel.status !== 'ahead' && mrel.status !== 'identical') {
+        problems.push(`release    ${mp.id}: ${mp.tag} of ${mp.repo} is commit ${mrel.commit}, which is not on ${mrel.defaultBranch} (compare: ${mrel.status})`);
+      }
+      const mfSha = mrel.tree.get(MARKETPLACE_FILE);
+      if (!mfSha) throw new Unverified(`${mp.repo}@${mp.tag} has no ${MARKETPLACE_FILE}`);
+      const subdir = pluginSubdir(await blob({ repo: mp.repo, sha: mfSha }), mp.id.split('@')[0]);
+      const rekeyed = Object.fromEntries(Object.entries(marketLocal[mp.id].local).map(([root, m]) => [root,
+        Object.fromEntries(Object.entries(m).map(([k, v]) => [`${subdir}/${k.slice(MARKET_SCAN.length + 1)}`, v]))]));
+      // an install of nothing, or of a directory the release doesn't have, is a mismatch, not a pass
+      if (![...mrel.tree.keys()].some((p) => p.startsWith(`${subdir}/`))) throw new Unverified(`${mp.repo}@${mp.tag} has no files under ${subdir}/`);
+      for (const d of compare(mrel.tree, rekeyed, subdir)) problems.push(`${d.kind.padEnd(10)} ${cachePath(d.root, d.path, subdir)} ${d.have}`);
+      mp.subdir = subdir;
+    } catch (e) {
+      out(`verify: not verified against ${mp.repo}@${mp.tag}: ${e instanceof Unverified ? e.message : String(e && e.message || e)}`);
+      return 3;
+    }
+  }
   if (host) {
     for (const d of compareHost(rel.tree, host, a.engsysDir)) problems.push(`${d.kind.padEnd(10)} ${d.absPath} ${d.have}`);
   }
@@ -1543,10 +1634,11 @@ export async function run(argv, {
   if (problems.length) return mismatch(problems);
 
   if (a.cache) {
-    try { writeCache(a.cache, { repo: a.repo, tag: a.tag, local, host, project: projectKey, info, warnings, result: 'ok', verifiedAt: now() }); } catch (e) {
+    try { writeCache(a.cache, { repo: a.repo, tag: a.tag, local, market: marketLocal, host, project: projectKey, info, warnings, result: 'ok', verifiedAt: now() }); } catch (e) {
       out(`verify: WARNING can't write ${a.cache} (${e.message}); the next run asks GitHub again`);
     }
   }
+  for (const mp of market) out(`verify: ok, ${countFiles(marketLocal[mp.id].local)} files of ${mp.id} in ${mp.roots.join(', ')} match ${mp.repo}@${mp.tag} (${mp.subdir}/)`);
   out(`verify: ok, ${countFiles(local)} protected files in ${where} match ${target} (commit ${rel.commit.slice(0, 12)}, on ${rel.defaultBranch})${project ? `; ${a.pinRepo} checkout ${project.head.slice(0, 12)} and its auto-loaded files (.claude/, CLAUDE.md, .mcp.json, command targets) match GitHub` : ''}`);
   return 0;
 }

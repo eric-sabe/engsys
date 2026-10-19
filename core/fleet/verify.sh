@@ -10,6 +10,9 @@
 # When ENGSYS_REF is forced (fleet.local.conf or the environment) to something other than the pin in
 # PIN_SETTINGS, it says so: a forced older tag is a way back to a weaker guard.
 #
+# The enabled plugins of INSTANCE_MARKETPLACE (the fleet's own plugin) are checked the same way against that
+# marketplace's own pinned release (INSTANCE_REF, a vX.Y.Z tag), in every dir covered here (engsys#196).
+#
 # Also checked (lib/verify-wrappers.mjs): the pin checkout's .claude/ tree and every script its settings
 # hooks run, against PIN_REPO's default branch on GitHub (PIN_DIR's HEAD must be that tip or behind it;
 # behind is a warning to run fleet sync), and the user-scope settings of the Claude config dir the
@@ -170,6 +173,19 @@ list_plugins() {
   if [ -n "${key:-}" ]; then cp "$plist" "$cache" && printf '%s' "$key" >"$keyf"; fi
 }
 
+# The instance marketplace's enabled plugins (a fleet's own plugin pinned beside engsys, engsys#196): each one's install is
+# held to that marketplace's own pinned release, in every dir this run covers. The directory a plugin is built from comes from
+# the release's marketplace file, read by the verifier from GitHub. A plugin the pin enables but no pin repo/ref can name is
+# "not verified" below, never skipped.
+market_args=() inst_plugins="" inst_repo=""
+if [ -n "${INSTANCE_MARKETPLACE:-}" ]; then
+  inst_plugins="$(fleet_enabled_plugins "$INSTANCE_MARKETPLACE")"
+  inst_repo="$(fleet_pin_repo "$INSTANCE_MARKETPLACE")"
+  while IFS= read -r ip; do
+    [ -z "$ip" ] || market_args+=(--market-plugin "$ip@$INSTANCE_MARKETPLACE|$inst_repo|${INSTANCE_REF:-}")
+  done <<<"$inst_plugins"
+fi
+
 rc=0 out="" plist="" cfg_missing=0
 # The Claude Code config dir the fleet's sessions run with: FLEET_CLAUDE_CONFIG_DIR (fleet-env.sh exports
 # it as CLAUDE_CONFIG_DIR for every fleet command and session, so `claude plugin list` below reads it
@@ -187,6 +203,8 @@ elif [ "${HARNESS:-claude}" = "claude" ] && ! command -v claude >/dev/null; then
   out="fleet verify: not verified: claude not found, so the installed plugin can't be located"; rc=3
 elif ! [ -d "$PIN_DIR" ]; then
   out="fleet verify: not verified: PIN_DIR not found: $PIN_DIR"; rc=3
+elif [ -n "$inst_plugins" ] && { [ -z "$inst_repo" ] || [ -z "${INSTANCE_REF:-}" ]; }; then
+  out="fleet verify: not verified: no '$INSTANCE_MARKETPLACE' marketplace with a repo and ref in $PIN_SETTINGS, so its plugins can't be checked"; rc=3
 elif [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] && ! [ -d "$FLEET_CLAUDE_CONFIG_DIR" ]; then
   cfg_missing=1
   out="fleet verify: not verified: FLEET_CLAUDE_CONFIG_DIR not found: $FLEET_CLAUDE_CONFIG_DIR ($(fleet_config_dir_fix "$session"))"; rc=3
@@ -218,6 +236,7 @@ else
   fi
   if [ "$rc" = 0 ]; then
     args=(--repo "$repo" --tag "$ref" --plugin-id "engsys@$ENGSYS_MARKETPLACE" --project-dir "$PIN_DIR" --plugins "$plist" --harness "${HARNESS:-claude}" --check-settings --user-settings-dir "$claude_cfg")
+    args+=(${market_args[@]+"${market_args[@]}"})
     [ -z "${VERIFY_ALLOWED_USER_PLUGINS:-}" ] || args+=(--allowed-user-plugins "$VERIFY_ALLOWED_USER_PLUGINS")
     [ -z "${VERIFY_ALLOWED_USER_HOOKS:-}" ] || args+=(--allowed-user-hooks "$VERIFY_ALLOWED_USER_HOOKS")
     # User-scope config besides settings (agents, commands, skills, rules, memory, MCP servers) and memory
@@ -257,11 +276,12 @@ else
         out="$out"$'\n'"fleet verify: not verified: claude plugin list failed in $PIN_DIR for ~/.claude (the interactive roles)"; rc=3
       else
         uargs=(--repo "$repo" --tag "$ref" --plugin-id "engsys@$ENGSYS_MARKETPLACE" --project-dir "$PIN_DIR" --plugins "$plist_u" --harness claude)
+        uargs+=(${market_args[@]+"${market_args[@]}"})
         [ -z "$max_age" ] || uargs+=(--cache "$FLEET_STATE/verify-wrappers-user.json" --max-age-min "$max_age")
         urc=0; uout="$(node "$FLEET_KIT_DIR/lib/verify-wrappers.mjs" "${uargs[@]}" 2>&1)" || urc=$?
         if [ "$urc" = 1 ] && ! grep -q '^verify: MISMATCH' <<<"$uout"; then urc=3; fi
         case "$urc" in 0 | 1 | 3) ;; *) urc=3 ;; esac
-        out="$out"$'\n'"fleet verify: ~/.claude (interactive roles, FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised): the engsys plugin"$'\n'"$uout"
+        out="$out"$'\n'"fleet verify: ~/.claude (interactive roles, FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised): the engsys plugin${inst_plugins:+ and the $INSTANCE_MARKETPLACE plugin(s)}"$'\n'"$uout"
         rc="$urc"
       fi
       rm -f "$plist_u"

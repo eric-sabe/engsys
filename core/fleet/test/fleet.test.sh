@@ -235,7 +235,9 @@ cat >"$I/jobs/launchd/fleet-supervisor.plist.tmpl" <<'EOF'
 </plist>
 EOF
 printf '.fleet/\nlogs/\n' >"$I/.gitignore"
-echo '{"name":"acme","plugins":[]}' >"$I/.claude-plugin/marketplace.json"
+# the instance's plugins have real directories: `fleet verify` checks their installs against the release (engsys#196)
+for pl in ctx extra; do mkdir -p "$I/plugins/$pl/.claude-plugin"; printf '{"name":"%s"}\n' "$pl" >"$I/plugins/$pl/.claude-plugin/plugin.json"; done
+echo '{"name":"acme","plugins":[{"name":"ctx","source":"./plugins/ctx"},{"name":"extra","source":"./plugins/extra"}]}' >"$I/.claude-plugin/marketplace.json"
 commit_all "$I" "instance 0.1.0"; git -C "$I" tag v0.1.0
 echo "later work" >"$I/notes.txt"; commit_all "$I" "post-release work on main"
 push_all "$I"

