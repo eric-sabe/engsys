@@ -197,18 +197,25 @@ main() {
       [ "${#cfg_dirs[@]}" -gt 0 ] || fleet_die "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on, but no session on this host uses the fleet's config dir"
     fi
     if [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] && [ "${FLEET_CLAUDE_CONFIG_DIR_SCOPE:-all}" = supervised ]; then cfg_dirs+=(""); fi
-    local cfg_dir
+    local cfg_dir ps_bad=""
     for cfg_dir in "${cfg_dirs[@]}"; do
       SYNC_CFG="$cfg_dir"
       # a session dir that does not exist yet must not stop the other sessions' sync: report it as drift
       if [ -n "$cfg_dir" ] && [ "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:-off}" = on ] && [ ! -d "$cfg_dir" ]; then
         say "claude config dir: $cfg_dir (session ${cfg_dir##*/}) does not exist"
         warn "session ${cfg_dir##*/} has no config dir yet: fleet config-dir init --session ${cfg_dir##*/}, then log in with CLAUDE_CONFIG_DIR=$cfg_dir claude (fleet guide § 6.1). Its plugins are not synced."
-        drift=1; continue
+        drift=1; ps_bad="$ps_bad ${cfg_dir##*/}"; continue
       fi
-      claude_config_report "$check" || drift=1
+      if ! claude_config_report "$check"; then
+        drift=1
+        [ "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:-off}" != on ] || ps_bad="$ps_bad ${cfg_dir##*/}"
+      fi
       sync_claude_plugins
     done
+    # engsys#212: turning the flag on before the dirs exist and are logged in is the common adoption slip; say so once
+    if [ -n "$ps_bad" ]; then
+      warn "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on, but these sessions have no config dir or no login yet:$ps_bad. $(fleet_config_dir_fix)"
+    fi
     SYNC_CFG="${FLEET_CLAUDE_CONFIG_DIR:-}"
     GUARDED=(); sync_cleanup; trap - EXIT
   fi

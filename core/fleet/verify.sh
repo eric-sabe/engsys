@@ -84,6 +84,10 @@ if [ "$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION" = on ]; then
     names="$(fleet_session_dir_names)"
     if [ -z "$names" ]; then echo "fleet verify: not verified: FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on, but no session on this host uses the fleet's config dir"; exit 3; fi
     worst=0
+    missing="$(fleet_session_dirs_missing | paste -sd' ' -)"
+    if [ -n "$missing" ]; then
+      echo "fleet verify: WARNING FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on, but these sessions have no config dir yet: $missing. $(fleet_config_dir_fix)"
+    fi
     reargs=(--instance "$FLEET_REPO"); [ "$alert" = 0 ] || reargs+=(--alert); [ "$auto_sync" = 0 ] || reargs+=(--auto-sync); [ -z "$max_age" ] || reargs+=(--max-age "$max_age")
     while IFS= read -r n; do
       echo "== session $n ($(fleet_session_config_dir "$n")) =="
@@ -166,7 +170,7 @@ list_plugins() {
   if [ -n "${key:-}" ]; then cp "$plist" "$cache" && printf '%s' "$key" >"$keyf"; fi
 }
 
-rc=0 out="" plist=""
+rc=0 out="" plist="" cfg_missing=0
 # The Claude Code config dir the fleet's sessions run with: FLEET_CLAUDE_CONFIG_DIR (fleet-env.sh exports
 # it as CLAUDE_CONFIG_DIR for every fleet command and session, so `claude plugin list` below reads it
 # too), else the account's ~/.claude. It is what the monsters load. (With FLEET_CLAUDE_CONFIG_DIR_SCOPE=
@@ -184,7 +188,8 @@ elif [ "${HARNESS:-claude}" = "claude" ] && ! command -v claude >/dev/null; then
 elif ! [ -d "$PIN_DIR" ]; then
   out="fleet verify: not verified: PIN_DIR not found: $PIN_DIR"; rc=3
 elif [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] && ! [ -d "$FLEET_CLAUDE_CONFIG_DIR" ]; then
-  out="fleet verify: not verified: FLEET_CLAUDE_CONFIG_DIR not found: $FLEET_CLAUDE_CONFIG_DIR (see the fleet guide: a separate Claude config dir)"; rc=3
+  cfg_missing=1
+  out="fleet verify: not verified: FLEET_CLAUDE_CONFIG_DIR not found: $FLEET_CLAUDE_CONFIG_DIR ($(fleet_config_dir_fix "$session"))"; rc=3
 elif [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] && [ "${HARNESS:-claude}" = claude ] && dir_logged_out; then
   # A rotation must not relaunch a monster into a login prompt: hold until the fleet seat is logged in.
   out="fleet verify: not verified: the fleet's Claude config dir $FLEET_CLAUDE_CONFIG_DIR is not logged in (CLAUDE_CONFIG_DIR=$FLEET_CLAUDE_CONFIG_DIR claude, then /login)"; rc=3
@@ -324,9 +329,17 @@ $lines
 Details: fleet verify" && printf '%s\n' "$fp" >"$LATCH"
       fi ;;
     3)
-      if [ ! -f "$UNVERIFIED_LATCH" ]; then
+      # The latch holds "<time> <reason>". A change of reason alerts again: a missing config dir that turns up while a
+      # generic "could not run" alert is latched must not keep the "may resolve on its own" text (engsys#212).
+      reason=other; [ "$cfg_missing" != 1 ] || reason=missing
+      prev_reason="$(awk '{print $2}' "$UNVERIFIED_LATCH" 2>/dev/null || true)"; [ "$prev_reason" = missing ] || prev_reason=other
+      if [ -f "$UNVERIFIED_LATCH" ] && [ "$prev_reason" = "$reason" ]; then :
+      elif [ "$reason" = missing ]; then
+        notify --level alert --incident "wrapper-integrity-unverified$INC" "Plugin check on $host${session:+ (session $session)} could not run: its Claude config dir $FLEET_CLAUDE_CONFIG_DIR does not exist. This does not clear by itself. Fix: $(fleet_config_dir_fix "$session"). Merge and maintain sessions are held until it can confirm the plugin matches $repo@${ref:-the pin}." \
+          && echo "$(now) $reason" >"$UNVERIFIED_LATCH"
+      else
         notify --level alert --incident "wrapper-integrity-unverified$INC" "Plugin check on $host${session:+ (session $session)} could not run: $(tail -n 1 <<<"$out" | sed 's/^.*not verified[^:]*: //' | cut -c1-300). Merge and maintain sessions are held until it can confirm the plugin matches $repo@${ref:-the pin}. If GitHub is having trouble this resolves on its own; otherwise see fleet verify." \
-          && now >"$UNVERIFIED_LATCH"
+          && echo "$(now) $reason" >"$UNVERIFIED_LATCH"
       fi ;;
   esac
 fi

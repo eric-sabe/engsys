@@ -10,6 +10,7 @@ import {
   formatXrayReport,
   parseTranscriptSummary,
   parseAgentsTsv,
+  claudeConfigItem,
 } from './xray.mjs';
 import { hookTelemetryPath, recordHookTelemetry } from '../../lib/harness-io.mjs';
 
@@ -405,6 +406,28 @@ test('xray reports both Claude config dirs under FLEET_CLAUDE_CONFIG_DIR_SCOPE=s
     assert.equal(sup.meta.dir, path.join(tmpDir, 'fleet-claude'));
     assert.ok(ia, 'and ~/.claude, for the interactive roles');
     assert.equal(ia.meta.dir, path.join(tmpDir, 'home', '.claude'));
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('#212: xray says "login state unknown" (never "NOT logged in") for a logged-out answer in an SSH shell on macOS', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'engsys-xray-ssh-'));
+  try {
+    const bin = path.join(tmpDir, 'bin');
+    fs.mkdirSync(bin);
+    fs.mkdirSync(path.join(tmpDir, 'cfg'));
+    fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\necho \'{"loggedIn": false}\'\nexit 1\n', { mode: 0o755 });
+    const cfg = { dir: path.join(tmpDir, 'cfg'), fromConf: true, scope: 'all' };
+    const base = { PATH: `${bin}:${process.env.PATH}` };
+    const ssh = claudeConfigItem({ env: { ...base, SSH_CONNECTION: '10.0.0.1 1 10.0.0.2 22' }, platform: 'darwin' }, cfg);
+    assert.match(ssh.detail, /login state unknown \(SSH, Keychain not readable/);
+    assert.doesNotMatch(ssh.detail, /NOT logged in/);
+    assert.equal(ssh.status, 'warn');
+    const gui = claudeConfigItem({ env: base, platform: 'darwin' }, cfg);
+    assert.match(gui.detail, /NOT logged in/);
+    const linux = claudeConfigItem({ env: { ...base, SSH_TTY: '/dev/ttys001' }, platform: 'linux' }, cfg);
+    assert.match(linux.detail, /NOT logged in/);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

@@ -618,4 +618,46 @@ for k in '"hooks": {}' '"env": {"X": "1"}' '"model": "opus"' '"statusLine": {"ty
 done
 rm -f "$MS"
 
+echo "== engsys#212: a missing config dir is named, never called transient"
+NOCFG="$T/no-such-cfg"
+printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\n' "$CONF0" "$NOCFG" >"$I/fleet/fleet.conf"
+rm -f "$I/.fleet"/verify-wrappers.unverified*
+g0="$(said 'could not run')"
+run fleet verify --alert
+rc_is "a missing fleet config dir is 'not verified'" 3
+has "…the verdict names the fix" "$OUT" "fleet config-dir init"
+eq "…one alert" "$(said 'could not run')" "$((g0 + 1))"
+has "…saying the dir does not exist" "$(grep -- 'could not run' "$FAKE/gh.log" | tail -n 1)" "does not exist"
+has "…and the fix" "$(grep -- 'could not run' "$FAKE/gh.log" | tail -n 1)" "Fix: fleet config-dir init"
+hasnt "…without the 'resolves on its own' line" "$(grep -- 'could not run' "$FAKE/gh.log" | tail -n 1)" "resolves on its own"
+printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\nFLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on\n' "$CONF0" "$NOCFG" >"$I/fleet/fleet.conf"
+rm -f "$I/.fleet"/verify-wrappers.unverified*
+run fleet verify --alert --session acme-mm
+rc_is "per-session: one session's missing dir is 'not verified'" 3
+last="$(grep -- 'could not run' "$FAKE/gh.log" | tail -n 1)"
+has "…the alert names that session's fix" "$last" "fleet config-dir init --session acme-mm"
+has "…and the per-session login steps (GUI session, not SSH)" "$last" "Mac's own GUI session, not SSH"
+hasnt "…without 'resolves on its own'" "$last" "resolves on its own"
+run fleet verify
+rc_is "per-session: a plain verify with no dirs is 'not verified'" 3
+has "…warns up front that the flag is on without the dirs" "$OUT" "WARNING FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on, but these sessions have no config dir yet: acme-mm acme-security"
+has "…pointing at config-dir init" "$OUT" "fleet config-dir init"
+# a generic "could not run" latch must not swallow the missing-dir alert that follows it
+rm -f "$I/.fleet"/verify-wrappers.unverified*
+printf '%s\n' "$CONF0" >"$I/fleet/fleet.conf"; touch "$FAKE/gh-fail"
+g0="$(said 'could not run')"
+run fleet verify --alert
+rc_is "GitHub down: a generic 'could not run' alert, latched" 3
+has "…it is the transient wording" "$(grep -- 'could not run' "$FAKE/gh.log" | tail -n 1)" "resolves on its own"
+run fleet verify --alert
+eq "…not repeated while the reason is the same" "$(said 'could not run')" "$((g0 + 1))"
+rm -f "$FAKE/gh-fail"
+printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\n' "$CONF0" "$NOCFG" >"$I/fleet/fleet.conf"
+run fleet verify --alert
+eq "the dir goes missing: a new alert despite the latch" "$(said 'could not run')" "$((g0 + 2))"
+has "…naming the fix" "$(grep -- 'could not run' "$FAKE/gh.log" | tail -n 1)" "Fix: fleet config-dir init"
+run fleet verify --alert
+eq "…and once only" "$(said 'could not run')" "$((g0 + 2))"
+printf '%s\n' "$CONF0" >"$I/fleet/fleet.conf"; rm -f "$I/.fleet"/verify-wrappers.unverified*
+
 finish verify.test.sh

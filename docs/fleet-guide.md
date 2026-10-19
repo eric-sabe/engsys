@@ -504,6 +504,22 @@ So no two long-lived sessions may share a login:
   is not logged in, the commands to run: `CLAUDE_CONFIG_DIR=<its dir> claude`, `/login` with the fleet's seat, `/exit`,
   and the workspace-trust step from section 6.1 step 3 for that dir. Then `fleet sync` (installs the pinned plugins
   into every session dir), `fleet verify`, `fleet restart --all`. `fleet config-dir init --session <name>` does one.
+- **Adopting it on a running fleet (engsys#212): the flag goes in last.** The order matters, because with the flag on
+  and a session's dir missing, `fleet verify` cannot run for that session and its monster is held:
+  1. `fleet config-dir init --per-session` (add `--session <name>` for one) creates every session's dir while the flag is
+     still off. (Without `--per-session` and without the flag, `init` seeds the one shared dir instead.)
+  2. Log each session in once and accept workspace trust once, **from a terminal in the Mac's own GUI session, not
+     over SSH**: `CLAUDE_CONFIG_DIR=<its dir> claude`, `/login`, `/exit`, then
+     `cd <PIN_DIR> && CLAUDE_CONFIG_DIR=<its dir> claude --dangerously-skip-permissions`, trust, `/exit`. Over SSH the
+     login Keychain can't be read (engsys#210), so `claude auth status` reports "not logged in" for a login that
+     works, and `/login` there would replace it; `fleet config-dir init` over SSH says "login state unknown" and
+     prints no login commands.
+  3. Set `FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on`.
+  4. `fleet sync`, then `fleet verify`, then restart each monster (`fleet restart --all`, or one at a time).
+  Turned on early anyway? `fleet sync` and `fleet status` warn at once with "these sessions have no
+  config dir or no login yet" and the steps above; `fleet verify` warns up front about sessions with no dir and
+  reports a logged-out dir in that session's block. The integrity alert for a missing dir names
+  `fleet config-dir init --session <name>` instead of waiting for it to clear: a missing dir never does.
 - **Re-login after a wipe is one session, not all:** `CLAUDE_CONFIG_DIR=<that dir> claude`, `/login`, `/exit`. The
   supervisor holds only that session and the alert (`claude-auth-expired-<session>`) names the dir and the command.
 - **Add a session:** add it to the roster, then `fleet config-dir init --session <name>`, log it in, `fleet sync`.

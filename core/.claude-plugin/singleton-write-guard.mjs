@@ -845,7 +845,10 @@ function denyMessage(role, found) {
     + `Writes go through ONE plain command: <engsys-root>/skills/${wrapper} guard --repo <repo> --state-dir <state_dir> -- gh <args…>`
     + `${role === 'merge' ? '; merges as mm-act.sh merge --pr N --sha <validated head> --method merge|squash' : ''}`
     + '; a push as … guard --pr N -- git -C <worktree> push --force-with-lease origin HEAD:refs/heads/<PR head branch>. '
-    + 'No ;, &&, redirects, $( ) or backticks around it (2>&1, | jq, | cat and ; echo $? may follow); a heredoc body needs a quoted delimiter (<<\'EOF\'), since an unquoted one expands $VAR into the post. If the fence refuses, do not act (SKILL.md § The baton). '
+    + 'What passes: a literal body (--body "text"), or --body-file - with a heredoc whose delimiter is quoted (<<\'EOF\'), since an unquoted one expands $VAR into the post. '
+    + 'What is refused: $( ) or backticks in the body (compute the value first and paste it in), ;, && and redirects around the command (2>&1, | jq, | cat and ; echo $? may follow). '
+    + `Example (EOF alone on its closing line):\n${wrapper} guard --repo <repo> --state-dir <state_dir> -- gh pr comment 12 --body-file - <<'EOF'\n<the body lines>\nEOF\n`
+    + 'If the fence refuses, do not act (SKILL.md § The baton). '
     + 'Dispatched agents never write to GitHub themselves: they hand the act back to the monster. Settings, git config and plugin files are read-only here.';
 }
 

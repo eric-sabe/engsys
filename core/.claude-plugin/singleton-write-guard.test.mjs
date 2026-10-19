@@ -1363,3 +1363,14 @@ test('engsys v2.0.1 round 2 (F8) positive control: two DIFFERENT commands of the
   assert.equal(recs.length, 2);
   assert.notEqual(recs[0].detail, recs[1].detail);
 });
+
+test('#212: the refusal names the accepted body forms and gives a one-line example', () => {
+  for (const [role, env] of [['merge', MERGE], ['maintain', { ENGSYS_SINGLETON_ROLE: 'maintain' }]]) {
+    const d = decide({ command: 'gh pr comment 1 --body "$(date -u)"', env, pluginRoot: ROOT });
+    assert.ok(d, `${role}: a $( ) body is refused`);
+    assert.match(d.deny, /What passes: a literal body/, role);
+    assert.match(d.deny, /heredoc whose delimiter is quoted \(<<'EOF'\)/, role);
+    assert.match(d.deny, /What is refused: \$\( \) or backticks/, role);
+    assert.match(d.deny, /Example \(EOF alone on its closing line\):\n\S+ guard --repo <repo> --state-dir <state_dir> -- gh pr comment 12 --body-file - <<'EOF'\n<the body lines>\nEOF\n/, role);
+  }
+});
