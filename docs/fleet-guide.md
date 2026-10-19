@@ -1349,8 +1349,17 @@ the repo. The check is the same as for engsys: every file under the install is a
 the tag, a missing, extra or modified file is a mismatch, and a symlink is `not-a-file`. Fail closed: an
 enabled instance plugin that is not installed, a pin that is not a release tag, or a release whose marketplace
 file doesn't name exactly one `./` source for the plugin is "not verified" (exit 3), which holds the merge and
-maintain sessions like any other check that can't run. The other plugins of the engsys marketplace (the stack
-packs) are not hash-checked yet.
+maintain sessions like any other check that can't run.
+
+**The engsys marketplace's stack packs** (engsys#224). Every other plugin that `PIN_SETTINGS` enables from the engsys
+marketplace (`engsys-azure`, `engsys-typescript`, `engsys-web`, ...) loads skills, agents and hooks too, so it gets the
+same check against the **engsys release itself** (`ENGSYS_REF` on the engsys repo; the pack's directory is the
+`source` of its entry in that release's `.claude-plugin/marketplace.json`, for example `./stacks/lang/typescript`),
+in every dir covered above. A tampered, missing or extra file is a mismatch (named as an `engsys stack pack` in the
+launch-hold message); a pack the pin enables but that is not installed, or that the release's marketplace file does
+not list, is "not verified". The engsys release's on-default-branch check is the strict one, so a pack never gets the
+instance warning below. A real install is byte-identical to its release directory (Claude Code adds only `.in_use/`,
+which the scan skips), so enabling a pack in the pin needs no allowlist.
 
 *Migration note: an instance tag off the default branch is a warning for now.* The engsys release must be on the
 default branch (anything else is a mismatch). Fleets that tag `release:` commits off their default branch (for

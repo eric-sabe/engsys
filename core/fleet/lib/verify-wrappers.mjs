@@ -46,7 +46,7 @@
 // --user-settings-dir: the Claude config dir the sessions use (FLEET_CLAUDE_CONFIG_DIR, else ~/.claude);
 //   a user-scope plugin the project doesn't enable is a mismatch unless --allowed-user-plugins lists it,
 //   and a user-scope hook or settings command unless --allowed-user-hooks lists its userCommandHash.
-// --market-plugin (repeatable, engsys#196): a plugin of another marketplace (the instance's), checked the same
+// --market-plugin (repeatable, engsys#196): a plugin of another marketplace (the instance's, or an engsys stack pack, engsys#224), checked the same
 //   way against that repo's release <ref> (a vX.Y.Z tag). The directory its install is a copy of is the
 //   `source` of its entry in the release's .claude-plugin/marketplace.json, read from GitHub (pluginSubdir).
 // --pin-repo: PIN_DIR's .claude/ tree and every settings-hook target against that repo's default branch
@@ -1581,11 +1581,14 @@ export async function run(argv, {
     if (a.cache) { try { fs.rmSync(a.cache, { force: true }); } catch { /* best effort */ } }
     return 1;
   };
+  // a plugin of the engsys marketplace itself (a stack pack, engsys#224), as opposed to the instance's
+  const isPack = (mp) => mp.id.split('@')[1] === a.pluginId.split('@')[1];
   const componentOf = (l) => {
     // the label comes first: settings, user-cfg and memory lines also carry an absolute path or a plugin id, which say nothing about which install failed
     if (/^(settings|user-cfg|memory|sched) /.test(l)) return 'settings or user-scope config';
     for (const mp of market) {
-      if (l.includes(mp.id) || (mp.roots || []).some((r) => l.includes(r))) return /^release /.test(l) ? `instance release (${mp.id})` : `instance plugin ${mp.id}`;
+      if (l.includes(mp.id) || (mp.roots || []).some((r) => l.includes(r))) if (isPack(mp)) return `engsys stack pack ${mp.id}`;
+      return /^release /.test(l) ? `instance release (${mp.id})` : `instance plugin ${mp.id}`;
     }
     if (a.engsysDir && l.includes(a.engsysDir)) return 'host kit';
     if (/^(release|version|no-path|two-paths|disabled|shadowed) /.test(l) || /^\S+\s+\//.test(l)) return 'engsys plugin';
@@ -1682,14 +1685,15 @@ export async function run(argv, {
     problems.push(`release    ${a.tag} is commit ${rel.commit}, which is not on ${rel.defaultBranch} (compare: ${rel.status})`);
   }
   for (const d of compare(rel.tree, local)) problems.push(`${d.kind.padEnd(10)} ${cachePath(d.root, d.path)} ${d.have}`);
-  const released = new Map();
+  // the engsys marketplace's own plugins (the stack packs, engsys#224) share the engsys release, whose on-main check above is strict
+  const released = new Map([[`${a.repo}@${a.tag}`, rel]]);
   const marketWarnings = [];
   for (const mp of market) {
     try {
       const key = `${mp.repo}@${mp.tag}`;
       if (!released.has(key)) released.set(key, await fetch({ repo: mp.repo, tag: mp.tag }));
       const mrel = released.get(key);
-      if (mrel.status !== 'ahead' && mrel.status !== 'identical') {
+      if (mrel !== rel && mrel.status !== 'ahead' && mrel.status !== 'identical') {
         const line = `${mp.id}: ${mp.tag} of ${mp.repo} is commit ${mrel.commit}, which is not on ${mrel.defaultBranch} (compare: ${mrel.status})`;
         if (instanceOffMainEnforced) problems.push(`release    ${line}`);
         else marketWarnings.push(`instance release ${line}; allowed for now, a MISMATCH once INSTANCE_OFF_MAIN_ENFORCED is on (eric-sabe/engsys#227)`);
