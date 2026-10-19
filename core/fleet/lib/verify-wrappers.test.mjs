@@ -919,7 +919,6 @@ test('instance marketplace plugin: fail closed when it cannot be checked (engsys
   // GitHub can't be reached for the instance repo
   r = await run3(pluginList([userEntry(eng), instEntry(acme)]), { fetch: async ({ repo }) => { if (repo === 'acme/fleet') throw new Unverified('gh api failed: 404'); return release; } });
   assert.equal(r.rc, 3); assert.match(r.text, /not verified against acme\/fleet@v3\.4\.5: gh api failed: 404/);
-  // the instance tag is on an unmerged commit
   // the instance tag is off the default branch: a WARNING for now (eric-sabe/engsys#227), the files still enforce
   const offMain = { fetch: async ({ repo }) => (repo === 'acme/fleet' ? instanceRelease({ status: 'diverged' }) : release) };
   r = await run3(pluginList([userEntry(eng), instEntry(acme)]), offMain);

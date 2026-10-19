@@ -1386,8 +1386,10 @@ root is `PIN_REPO`'s default branch as the GitHub API reports it, never a local 
   interpreter (`bash`, `sh`, `zsh`, `node`, `python*` including `python3.12`, `perl`, `ruby`) with an absolute
   script that is tracked at HEAD; a root-owned system program from the short `SAFE_PROGRAMS` list (`true`, `echo`,
   `sleep`, `date`, `cat`, ...), which runs nothing named in its arguments; or a system wrapper (`nice`, `nohup`,
-  `timeout`, `xargs`, `time`, `env`) whose wrapped command passes the same rules, so a bare-name program after a
-  wrapper (`nice somecli`, `xargs env mybin`) is refused like one at the top. Any other system program (`git`,
+  `timeout`, `xargs`, `time`) whose wrapped command passes the same rules, so a bare-name program after a
+  wrapper (`nice somecli`, `xargs env mybin`) is refused like one at the top; `env` is stricter still and may only
+  start one of the listed interpreters, without options or assignments. A wrapper must name its own command, and
+  `xargs` accepts only its batching options (no `-a`, `-I`, `-J`). Any other system program (`git`,
   `awk`, `sed`, `find`, `perl -e`, `osascript`, ...) is a mismatch. A task runner or package manager
   (`npm run …`, `pnpm`, `yarn`, `npx`, `make`, `just`, `gradle`, `cargo`, …; `TASK_RUNNERS` in
   `lib/verify-wrappers.mjs`) is refused however it is reached, by its file name: bare, by absolute path, through a

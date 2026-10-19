@@ -219,7 +219,7 @@ held_reason() {
   local comps
   comps="$(sed -n 's/^components: //p' <<<"$1" | tail -n 1)"
   if [ -z "$comps" ] || [ "$comps" = "engsys plugin" ]; then printf 'its engsys plugin%s does not match %s' "$2" "$ENGSYS_REF"
-  else printf 'what it loads%s does not match its pinned release: %s' "$2" "$comps"; fi
+  else printf 'what it loads%s does not pass the integrity check (%s); see fleet verify' "$2" "$comps"; fi
 }
 singleton_integrity_ok() { # singleton_integrity_ok [<name>] → 0 when merge/maintain sessions may start
   # one login per session (engsys#205): each session's own dir is verified on its own, so one bad dir holds one session

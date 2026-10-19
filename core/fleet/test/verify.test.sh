@@ -739,7 +739,7 @@ rc_is "a tampered instance-plugin file is a mismatch" 1
 has "…named" "$OUT" "modified   $ACME/bin/acme-guard"
 run fleet launch acme-mm
 rc_is "…and holds the launch" 1
-has "…naming the instance plugin as what failed (not the engsys plugin)" "$OUT" "what it loads does not match its pinned release: instance plugin acme@acme-fleet"
+has "…naming the instance plugin as what failed (not the engsys plugin)" "$OUT" "what it loads does not pass the integrity check (instance plugin acme@acme-fleet)"
 cp "$IR/plugins/acme/bin/acme-guard" "$ACME/bin/acme-guard"
 run fleet verify
 rc_is "restored: passes again" 0
