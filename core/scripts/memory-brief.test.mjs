@@ -265,6 +265,75 @@ describe('loadConfig', () => {
 		}
 	});
 
+	describe('operator_signing_key_fingerprints sources (engsys#187)', () => {
+		const KEY = '0123456789abcdef';
+		test('positive control: unioned from the reviewed-SHA repo config and the fleet config dir', () => {
+			const dir = makeRepo({});
+			const fleetConfigDir = mktmp();
+			const prev = process.env.CLAUDE_CONFIG_DIR;
+			try {
+				mkdirSync(join(dir, '.claude'), { recursive: true });
+				writeFileSync(join(dir, '.claude', 'memory.yml'), `operator_signing_key_fingerprints: ["${KEY}"]\n`);
+				commitAndPush(dir, 'add fingerprints');
+				writeFileSync(join(fleetConfigDir, 'memory.yml'), 'operator_signing_key_fingerprints: ["SHA256:AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfG"]\n');
+				process.env.CLAUDE_CONFIG_DIR = fleetConfigDir;
+				const cfg = loadConfig(dir);
+				assert.deepEqual(new Set(cfg.operator_signing_key_fingerprints), new Set([KEY, 'SHA256:AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfG']));
+			} finally {
+				if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prev;
+				rmSync(dir, { recursive: true, force: true });
+				rmSync(fleetConfigDir, { recursive: true, force: true });
+			}
+		});
+
+		test('negative: a working-tree-only (uncommitted) memory.yml contributes nothing', () => {
+			const dir = makeRepo({});
+			try {
+				mkdirSync(join(dir, '.claude'), { recursive: true });
+				writeFileSync(join(dir, '.claude', 'memory.yml'), `operator_signing_key_fingerprints: ["${KEY}"]\n`);
+				assert.deepEqual(loadConfig(dir).operator_signing_key_fingerprints, []);
+			} finally {
+				rmSync(dir, { recursive: true, force: true });
+			}
+		});
+
+		test('negative: a repo not in the fleet/plugin repos allowlist cannot supply fingerprints', () => {
+			const unlisted = makeRepo({ remoteUrl: 'https://github.com/third-party/evil.git' });
+			const fleetConfigDir = mktmp();
+			const prev = process.env.CLAUDE_CONFIG_DIR;
+			const prevRepos = process.env.ENGSYS_MEMORY_REPOS;
+			try {
+				delete process.env.ENGSYS_MEMORY_REPOS;
+				process.env.CLAUDE_CONFIG_DIR = fleetConfigDir;
+				writeFileSync(join(fleetConfigDir, 'memory.yml'), 'repos: [acme/trusted]\n');
+				mkdirSync(join(unlisted, '.claude'), { recursive: true });
+				writeFileSync(join(unlisted, '.claude', 'memory.yml'), `operator_signing_key_fingerprints: ["${KEY}"]\n`);
+				commitAndPush(unlisted, 'self-supplied key');
+				assert.deepEqual(loadConfig(unlisted).operator_signing_key_fingerprints, []);
+			} finally {
+				if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prev;
+				if (prevRepos === undefined) delete process.env.ENGSYS_MEMORY_REPOS; else process.env.ENGSYS_MEMORY_REPOS = prevRepos;
+				rmSync(unlisted, { recursive: true, force: true });
+				rmSync(fleetConfigDir, { recursive: true, force: true });
+			}
+		});
+
+		test('negative: the plugin config dir is not a source; non-string (numeric) entries are dropped', () => {
+			const dir = makeRepo({});
+			const pluginDir = mktmp();
+			try {
+				writeFileSync(join(pluginDir, 'memory.yml'), `operator_signing_key_fingerprints: ["${KEY}"]\n`);
+				mkdirSync(join(dir, '.claude'), { recursive: true });
+				writeFileSync(join(dir, '.claude', 'memory.yml'), 'operator_signing_key_fingerprints: [1234567890123456]\n');
+				commitAndPush(dir, 'numeric fingerprint');
+				assert.deepEqual(loadConfig(dir, { pluginRoot: pluginDir }).operator_signing_key_fingerprints, []);
+			} finally {
+				rmSync(dir, { recursive: true, force: true });
+				rmSync(pluginDir, { recursive: true, force: true });
+			}
+		});
+	});
+
 	test('coerces a scalar list field (e.g. exclude_class_b_agents: isabelle) to a one-item list and logs a warning (#155)', () => {
 		const dir = makeRepo({});
 		const logs = [];

@@ -17,11 +17,16 @@ import {
   extractEventFromCommit,
   ingestLocalCommits,
   fetchCommitTrustBatch,
+  isSigningKeyAllowed,
+  normalizeSigningKeyId,
   computeOverlapSince,
   runMemorySync,
   readCursors,
   cappedWarning,
 } from './memory-sync.mjs';
+
+const OP_KEY_ID = '0123456789ABCDEF';
+const OP_KEY = { type: 'gpg', id: OP_KEY_ID.toLowerCase() };
 
 describe('memory-sync (#131)', () => {
   it('filters authors by association and numeric bot user databaseId (§7.2)', async () => {
@@ -215,7 +220,7 @@ describe('memory-sync (#131)', () => {
   });
 
   it('enforces commit-ingest filter: skips Dependabot, indexes subject + #refs only by default, requires signature+committer-id+no-agent-coauthor for operator body indexing (round 2 F2)', () => {
-    const config = { operator_user_ids: [777] };
+    const config = { operator_user_ids: [777], operator_signing_key_fingerprints: [OP_KEY_ID] };
 
     // Dependabot author or co-author -> skipped
     assert.equal(
@@ -280,6 +285,7 @@ describe('memory-sync (#131)', () => {
         authorEmail: 'operator@example.com',
         committerId: 777,
         verified: false,
+        signingKey: OP_KEY,
         date: '2026-05-02T10:00:00Z',
         subject: 'feat(memory): add ref-store (#130)',
         body: 'Unverified rationale that must NOT be indexed.',
@@ -299,6 +305,7 @@ describe('memory-sync (#131)', () => {
         authorEmail: 'operator@example.com',
         committerId: 777,
         verified: true,
+        signingKey: OP_KEY,
         date: '2026-05-02T10:00:00Z',
         subject: 'feat(memory): add ref-store (#130)',
         body: 'Agent rationale.\nCo-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>',
@@ -318,6 +325,7 @@ describe('memory-sync (#131)', () => {
         authorEmail: 'operator@example.com',
         committerId: 1,
         verified: true,
+        signingKey: OP_KEY,
         date: '2026-05-02T10:00:00Z',
         subject: 'feat(memory): add ref-store (#130)',
         body: 'Wrong-committer rationale that must NOT be indexed.',
@@ -337,6 +345,7 @@ describe('memory-sync (#131)', () => {
         authorEmail: 'operator@example.com',
         committerId: 777,
         verified: true,
+        signingKey: OP_KEY,
         date: '2026-05-02T10:00:00Z',
         subject: 'feat(memory): add ref-store (#130)',
         body: 'Operator rationale preserved in commit body.',
@@ -351,8 +360,9 @@ describe('memory-sync (#131)', () => {
   });
 
   it('v2.0.1 round 3 (F4): the agent co-author trailer match covers every named agent/provider, is case-insensitive and whitespace-tolerant, and recognizes Assisted-by:/Generated-by: too', () => {
-    const config = { operator_user_ids: [777] };
+    const config = { operator_user_ids: [777], operator_signing_key_fingerprints: [OP_KEY_ID] };
     const baseCommit = {
+      signingKey: OP_KEY,
       sha: '8888888888888888',
       authorName: 'eric',
       authorEmail: 'operator@example.com',
@@ -510,14 +520,14 @@ describe('memory-sync (#131)', () => {
     // commit by sha.
     let calls2 = 0;
     const trustMap = new Map([
-      ['3333333333333333', { verified: true, committerId: 777 }],
-      ['4444444444444444', { verified: false, committerId: 777 }],
+      ['3333333333333333', { verified: true, committerId: 777, signingKey: OP_KEY }],
+      ['4444444444444444', { verified: false, committerId: 777, signingKey: OP_KEY }],
     ]);
     const events = ingestLocalCommits('/repo', {
       exec: () => makeRaw(['3333333333333333', '4444444444444444']),
       resolveSha: () => 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
       fetchTrustBatch: () => { calls2 += 1; return trustMap; },
-      config: { operator_user_ids: [777] },
+      config: { operator_user_ids: [777], operator_signing_key_fingerprints: [OP_KEY_ID] },
       repo: 'owner/repo',
     });
     assert.equal(calls2, 1, 'exactly one batched call for the whole batch of commits');
@@ -543,6 +553,112 @@ describe('memory-sync (#131)', () => {
     };
     fetchCommitTrustBatch('owner/repo', 'deadbeef', { exec: exec2 });
     assert.ok(!calls2[0].some((a) => typeof a === 'string' && a.startsWith('since=')));
+  });
+
+  describe('signing-key allowlist for commit operator trust (engsys#187)', () => {
+    const SSH_FP = 'SHA256:AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfG';
+    const base = {
+      sha: 'abababababababab',
+      authorName: 'eric',
+      authorEmail: 'operator@example.com',
+      committerId: 777,
+      verified: true,
+      signingKey: OP_KEY,
+      date: '2026-05-02T10:00:00Z',
+      subject: 'feat: x (#1)',
+      body: 'Operator rationale.',
+      files: [],
+    };
+    const config = { operator_user_ids: [777], operator_signing_key_fingerprints: [OP_KEY_ID] };
+    const kind = (over, cfg = config) => extractEventFromCommit({ ...base, ...over }, { repo: 'owner/repo', config: cfg }).author_kind;
+
+    it('positive control: verified + listed fingerprint + operator committer id -> operator, body indexed', () => {
+      const ev = extractEventFromCommit(base, { repo: 'owner/repo', config });
+      assert.equal(ev.author_kind, 'operator');
+      assert.equal(ev.author_id, 777);
+      assert.ok(ev.text.includes('Operator rationale.'));
+    });
+
+    it('negative: unsigned (no signature, no key) is never operator', () => {
+      assert.equal(kind({ verified: false, signingKey: null }), null);
+    });
+    it('negative: signature not verified is never operator even with a listed key', () => {
+      assert.equal(kind({ verified: false }), null);
+    });
+    it('negative: verified but fingerprint not listed', () => {
+      assert.equal(kind({ signingKey: { type: 'gpg', id: 'ffffffffffffffff' } }), null);
+    });
+    it('negative: verified + listed fingerprint but committer id mismatch', () => {
+      assert.equal(kind({ committerId: 1 }), null);
+      assert.equal(kind({ committerId: null }), null);
+    });
+    it('negative: verified + operator id but no signing key reported', () => {
+      assert.equal(kind({ signingKey: null }), null);
+    });
+    it('negative: empty / missing allowlist trusts nothing (fail closed)', () => {
+      assert.equal(kind({}, { operator_user_ids: [777], operator_signing_key_fingerprints: [] }), null);
+      assert.equal(kind({}, { operator_user_ids: [777] }), null);
+      assert.equal(kind({}, { operator_user_ids: [777], operator_signing_key_fingerprints: 'not-a-list' }), null);
+    });
+    it('negative: a malformed allowlist entry never wildcard-matches', () => {
+      for (const bad of ['', '*', 'abc', '0x', 12345678901234567890, null, {}, 'ffff']) {
+        assert.equal(kind({}, { operator_user_ids: [777], operator_signing_key_fingerprints: [bad] }), null, String(bad));
+      }
+    });
+    it('the allowlist the commit itself carries is never consulted (only config is)', () => {
+      assert.equal(
+        extractEventFromCommit({ ...base, signingKey: { type: 'gpg', id: 'ffffffffffffffff' }, operator_signing_key_fingerprints: ['ffffffffffffffff'] }, { repo: 'owner/repo', config }).author_kind,
+        null,
+      );
+    });
+
+    it('normalization and matching: case/space/colon/0x tolerant for GPG, a listed 40-hex fingerprint matches its long key id, types never cross-match', () => {
+      assert.deepEqual(normalizeSigningKeyId('0x0123 4567:89ab CDEF'), { type: 'gpg', id: '0123456789abcdef' });
+      assert.equal(normalizeSigningKeyId('abc'), null);
+      assert.equal(normalizeSigningKeyId(42), null);
+      assert.ok(isSigningKeyAllowed(OP_KEY, ['AAAA1111BBBB2222CCCC3333' + '0123456789ABCDEF']));
+      assert.ok(isSigningKeyAllowed(OP_KEY, ['0123 4567 89ab cdef']));
+      assert.ok(!isSigningKeyAllowed(OP_KEY, ['0123456789ABCDEE']));
+      assert.ok(!isSigningKeyAllowed({ type: 'gpg', id: 'cdef' }, ['cdef']), 'a short reported key id is rejected');
+      assert.ok(!isSigningKeyAllowed({ type: 'ssh', id: OP_KEY_ID }, [OP_KEY_ID]), 'ssh vs gpg never cross-match');
+    });
+    it('SSH fingerprints compare exactly (base64 is case-sensitive; SHA256: prefix and padding tolerant)', () => {
+      const key = { type: 'ssh', id: SSH_FP };
+      assert.ok(isSigningKeyAllowed(key, [SSH_FP]), 'positive control');
+      assert.ok(isSigningKeyAllowed(key, [`sha256:${SSH_FP.slice(7)}=`]));
+      assert.ok(!isSigningKeyAllowed(key, [SSH_FP.toLowerCase()]), 'case change is a different fingerprint');
+      assert.ok(!isSigningKeyAllowed(key, ['SHA256:AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfH']));
+    });
+
+    it('fetchCommitTrustBatch requests the key and records it; a GitHub-signed commit yields no signing key', () => {
+      const exec = (cmd, args) => {
+        assert.ok(args.some((a) => String(a).includes('GpgSignature{keyId}') && String(a).includes('SshSignature{keyFingerprint}')));
+        return JSON.stringify({ data: { repository: { object: { history: { pageInfo: { hasNextPage: false }, nodes: [
+          { oid: 'a1', signature: { isValid: true, wasSignedByGitHub: false, keyId: OP_KEY_ID }, committer: { user: { databaseId: 777 } } },
+          { oid: 'a2', signature: { isValid: true, wasSignedByGitHub: false, keyFingerprint: SSH_FP }, committer: { user: { databaseId: 777 } } },
+          { oid: 'a3', signature: { isValid: true, wasSignedByGitHub: true, keyId: OP_KEY_ID }, committer: { user: { databaseId: 777 } } },
+          { oid: 'a4', signature: null, committer: { user: { databaseId: 777 } } },
+        ] } } } } });
+      };
+      const m = fetchCommitTrustBatch('owner/repo', 'deadbeef', { exec });
+      assert.deepEqual(m.get('a1').signingKey, { type: 'gpg', id: OP_KEY_ID });
+      assert.deepEqual(m.get('a2').signingKey, { type: 'ssh', id: SSH_FP });
+      assert.equal(m.get('a3').signingKey, null);
+      assert.equal(m.get('a4').signingKey, null);
+      assert.equal(m.get('a4').verified, false);
+    });
+
+    it('ingestLocalCommits skips the GraphQL lookup when no signing-key allowlist is configured', () => {
+      let calls = 0;
+      ingestLocalCommits('/repo', {
+        exec: () => 'x',
+        resolveSha: () => 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
+        fetchTrustBatch: () => { calls += 1; return new Map(); },
+        config: { operator_user_ids: [777] },
+        repo: 'owner/repo',
+      });
+      assert.equal(calls, 0);
+    });
   });
 
   it('extracts structured findings only from leading marker comments, emits tombstones for isMinimized, and sets truncated flag on paginated connections', () => {

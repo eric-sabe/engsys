@@ -68,6 +68,11 @@ export const DEFAULTS = {
 	review_markers: [],
 	trusted_bot_user_ids: [],
 	operator_user_ids: [],
+	// engsys#187: signing-key allowlist for commit-level operator trust. GPG key ids / full
+	// fingerprints (hex) and SSH `SHA256:` fingerprints. Loaded ONLY from the reviewed-SHA repo
+	// config and the fleet config dir — never the plugin config, never the working tree — and
+	// empty means NO commit is ever operator-trusted (fail closed). See docs/memory-spec.md §10.
+	operator_signing_key_fingerprints: [],
 	// engsys v2.0.1 round 2 (F1): operator_emails/operator_logins are gone — trust is numeric-ID
 	// only, everywhere. trusted_member_user_ids (F4) is the allowlist owner/member Class B events
 	// are gated on at brief time (union'd with operator_user_ids).
@@ -90,6 +95,10 @@ export const DEFAULTS = {
  * fleet config dir (`CLAUDE_CONFIG_DIR`) and plugin config dir (`CLAUDE_PLUGIN_ROOT`), then
  * defaults. Scalar list fields are coerced to one-item lists (#155).
  */
+// engsys#187: unioned like UNION_FIELDS, but ONLY from the reviewed-SHA repo config and the fleet
+// config dir (the two sources the operator controls) — the plugin config is not a source for it.
+const SIGNING_KEY_FIELD = 'operator_signing_key_fingerprints';
+
 const UNION_FIELDS = ['exclude_class_b_agents', 'trusted_bot_user_ids', 'operator_user_ids', 'trusted_member_user_ids', 'review_markers', 'high_fanout_globs'];
 
 function isPlainObject(v) {
@@ -140,6 +149,13 @@ export function loadConfig(repoRoot, { sha, pluginRoot, allowedRepos, log = null
 		const fleetArr = coerceListField(fleetConfig?.[field], { field, log });
 		merged[field] = [...new Set([...pluginArr, ...repoArr, ...fleetArr])];
 	}
+	// Signing-key allowlist (#187): repo-at-reviewed-SHA + fleet config only. String entries only —
+	// a YAML scalar like an all-digit fingerprint parses as a (precision-losing) number, which is
+	// dropped rather than guessed at.
+	merged[SIGNING_KEY_FIELD] = [...new Set([
+		...coerceListField(repoConfig?.[SIGNING_KEY_FIELD], { field: SIGNING_KEY_FIELD, log }),
+		...coerceListField(fleetConfig?.[SIGNING_KEY_FIELD], { field: SIGNING_KEY_FIELD, log }),
+	].filter((v) => typeof v === 'string' && v.trim()))];
 	// `repos` comes ONLY from fleet/plugin config (never repoConfig, so an unlisted repo cannot allowlist itself, #145).
 	merged.repos = [...new Set([
 		...coerceListField(pluginConfig?.repos, { field: 'repos', log }),

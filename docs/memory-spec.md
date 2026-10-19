@@ -237,6 +237,7 @@ repos: [owner/repo]                     # indexed repos; events are read from ea
 review_markers: ["<!-- local-review-findings -->"]   # extra markers to parse; default regex also applies
 trusted_bot_user_ids: []                # numeric bot USER ids (not App ids)
 operator_user_ids: []                   # numeric user ids; commit/MEMBER/OWNER operator trust
+operator_signing_key_fingerprints: []   # GPG long key ids / 40-hex fingerprints, SSH "SHA256:..." fingerprints; commit operator trust (repo@reviewed-SHA + fleet config only)
 trusted_member_user_ids: []             # numeric user ids; MEMBER/OWNER trust (union'd with operator_user_ids)
 exclude_class_b_agents: []              # agent types that get Class A only (security agents are always excluded)
 high_fanout_globs: []                   # files keyed by symbol instead of path
@@ -249,7 +250,9 @@ publish_role: maintain                  # which singleton publishes refs/engsys/
 
 A commit is `author_kind: 'operator'` only when ALL of: the commit carries a cryptographically
 verified signature (`commit.verification.verified`, resolved via one batched GraphQL `history`
-query, never per-commit); the **committer's** (never the author's — GitHub derives `.author.id`/
+query, never per-commit); the signing **key** (GraphQL `GpgSignature.keyId` / `SshSignature.keyFingerprint`)
+is listed in `operator_signing_key_fingerprints` (engsys#187; an empty list trusts no commit, and a
+GitHub-signed `wasSignedByGitHub` commit never carries a key); the **committer's** (never the author's — GitHub derives `.author.id`/
 the author identity from the commit's author EMAIL, which anyone can set locally) numeric id is
 in `operator_user_ids`; and the commit message carries no agent co-author trailer
 (`Co-Authored-By:`/`Assisted-by:`/`Generated-by:`, matching Claude, Copilot, Gemini, Antigravity,
@@ -264,6 +267,15 @@ session an agent can drive, and GitHub Codespaces' automatic commit signing must
 every operator account — a Codespace that auto-signs commits as the operator would hand an agent
 session running inside it a path to a genuinely "verified" signature with no human behind it. If
 either of those holds, this trailer regex is unnecessary; if neither holds, it's not sufficient.
+
+`operator_signing_key_fingerprints` is the one allowlist with a narrower source set than the others:
+it is read ONLY from the repo's `.claude/memory.yml` at the reviewed SHA (and only for a repo in the
+fleet/plugin `repos` allowlist) and the fleet config dir's `memory.yml` — never the plugin config,
+never the working tree, never a value carried by a commit or event. Entries are strings (quote
+them: an unquoted all-digit fingerprint parses as a lossy YAML number and is dropped). GPG entries
+are hex (16-digit long key id, or a 40-hex fingerprint, which matches a signature whose long key id
+is its suffix — GitHub reports only the long id, of the signing (sub)key); SSH entries are
+`SHA256:<base64>` and compare exactly. Malformed entries are skipped, never wildcard-matched.
 
 `loadConfig()` reads BOTH the repo's own `.claude/memory.yml` (from the reviewed SHA, never the
 working tree — §2 rule 4) and the fleet config dir's `memory.yml` (`CLAUDE_CONFIG_DIR`), and
