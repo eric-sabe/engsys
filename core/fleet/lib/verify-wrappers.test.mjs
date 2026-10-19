@@ -841,6 +841,49 @@ test('hookTargets: only absolute regular files inside the repo, run by system in
   assert.deepEqual(hookTargets('python3 -u "$CLAUDE_PROJECT_DIR/hook.sh"', dir).problems, [], 'positive control: python -u');
 });
 
+test('hookTargets: a task runner is refused however it is spelled, a direct script still passes (engsys#185)', () => {
+  const dir = tmp('verify-runner-');
+  fs.mkdirSync(path.join(dir, 'scripts'));
+  fs.writeFileSync(path.join(dir, 'scripts', 'lint.sh'), 'echo lint\n');
+  fs.writeFileSync(path.join(dir, 'package.json'), '{"scripts":{"lint":"echo hi"}}\n');
+  fs.writeFileSync(path.join(dir, 'gradlew'), '#!/bin/sh\n');
+  // positive control: the same hook as a direct script, with the runner only named in an argument of a no-op
+  assert.deepEqual(hookTargets('bash "$CLAUDE_PROJECT_DIR/scripts/lint.sh"', dir), { targets: ['scripts/lint.sh'], problems: [] });
+  assert.deepEqual(hookTargets('echo make; bash "$CLAUDE_PROJECT_DIR/scripts/lint.sh" npm', dir).problems, [], 'a runner name as a script argument is just data');
+  const refused = (cmd, name) => {
+    const r = hookTargets(cmd, dir);
+    assert.match(r.problems.join('\n'), new RegExp(`a task runner \\(${name}\\) runs manifest code that isn't pinned; use a direct committed script`), cmd);
+  };
+  refused('npm run lint', 'npm');
+  refused('pnpm lint', 'pnpm');
+  refused('yarn lint', 'yarn');
+  refused('npx eslint .', 'npx');
+  refused('make lint', 'make');
+  refused('just lint', 'just');
+  // the cases the old "not an interpreter" rule let through: a root-owned system binary names no file in its arguments
+  refused('/usr/bin/make lint', 'make');
+  refused('/usr/bin/xargs make lint', 'make');
+  refused('/usr/bin/nice npm run lint', 'npm');
+  // the wrapped command hidden inside a shell string or a script argument (CodeRabbit, engsys#185 review)
+  refused('/usr/bin/xargs sh -c "npm run lint"', 'npm');
+  refused('/usr/bin/timeout 5 bash -c "cd x && make lint"', 'make');
+  refused('/usr/bin/find . -exec ./gradlew build', 'gradlew');
+  refused('/usr/bin/nice node_modules/.bin/npm run lint', 'npm');
+  const notRunner = (cmd, re) => assert.match(hookTargets(cmd, dir).problems.join('\n'), re, cmd);
+  notRunner('/usr/bin/xargs sh -c "echo hi"', /a system wrapper runs an interpreter \(sh\)/);
+  notRunner('/usr/bin/nice python3 -c "print(1)"', /a system wrapper runs an interpreter \(python3\)/);
+  assert.deepEqual(hookTargets('/usr/bin/nice true make-docs.sh cmake-build', dir).problems, [], 'positive control: make-docs.sh and cmake-build are not the runner make');
+  // by absolute path, through env, through sh -c, and a repo-tracked wrapper script of a runner
+  refused('/usr/local/bin/npm run lint', 'npm');
+  refused('/usr/bin/env npm run lint', 'npm');
+  refused('bash -c "echo start; npm run lint"', 'npm');
+  refused('"$CLAUDE_PROJECT_DIR/gradlew" build', 'gradlew');
+  // a runner after a separator is found too
+  refused('bash "$CLAUDE_PROJECT_DIR/scripts/lint.sh" && make lint', 'make');
+  // and the user-scope hash refuses to pin one, so an allowlist can't cover it
+  assert.match(userCommandHash('/usr/bin/make lint', { home: dir }).problems.join('\n'), /task runner \(make\)/);
+});
+
 test('userCommandHash: interpreter path and every file are pinned; anything unresolvable is a problem', () => {
   const home = tmp('verify-uch-');
   fs.mkdirSync(path.join(home, 'bin'));

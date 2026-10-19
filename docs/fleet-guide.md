@@ -1335,8 +1335,14 @@ root is `PIN_REPO`'s default branch as the GitHub API reports it, never a local 
 - Every script a `settings.json` hook or command key (`statusLine`, `apiKeyHelper`, any `*Helper` /
   `*Command`, …) names must be an absolute path (write it as `"$CLAUDE_PROJECT_DIR/…"`; `bash hook.sh` or
   `./hook.sh` is a mismatch) to a regular file inside the repo, tracked at HEAD and unchanged. A hook that runs a path outside the repo, or has any other variable or command substitution
-  in it, is a mismatch. Code a hook reaches indirectly (`npm run …`, `make …`) is not followed: keep hook
-  commands to a direct script.
+  in it, is a mismatch. A hook command that invokes a task runner or package manager (`npm run …`, `pnpm`,
+  `yarn`, `npx`, `make`, `just`, `gradle`, `cargo`, …; the list is `TASK_RUNNERS` in `lib/verify-wrappers.mjs`)
+  is a mismatch, however it is spelled (bare, by absolute path, through `env` or `sh -c`, or as the argument of
+  a wrapper such as `xargs`): such a runner executes whatever `package.json` or a `Makefile` says, and verify
+  doesn't compare those files with GitHub (engsys#185). There is deliberately no allowlist for it. The way out
+  is a direct script that the hook names (`bash "$CLAUDE_PROJECT_DIR/scripts/lint.sh"`): the script is tracked
+  at HEAD and compared byte for byte. What that script itself calls or imports is not followed, so keep it
+  self-contained and review it as hook code.
 
 Claude Code's own runtime state under `.claude/` is skipped by an explicit list, matched
 case-insensitively: `settings.local.json` (checked separately), `scheduled_tasks.lock`, `worktrees/`,

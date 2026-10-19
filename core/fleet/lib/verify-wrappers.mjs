@@ -324,6 +324,32 @@ const SAFE_FLAGS = {
 };
 /** Directories whose programs are root-owned on a stock macOS/Linux host: pinned by path alone. */
 const ROOT_BIN_DIRS = ['/bin', '/usr/bin'];
+/**
+ * Task runners and package managers (engsys#185). Each runs whatever a manifest in the working directory
+ * says (package.json scripts, a Makefile, a justfile, build.gradle, ...), and those manifests, and the
+ * files they name, are not among the files verify compares with GitHub: a local writer could change them
+ * and have the hook run the change. So a command that invokes one can't be pinned, whichever way it is
+ * spelled (bare, by absolute path, through env, sh -c, or as an argument of a wrapper such as xargs).
+ * Fail closed; the escape is a direct committed script (fleet guide, "the pin checkout's .claude/").
+ */
+export const TASK_RUNNERS = [
+  'npm', 'npx', 'pnpm', 'pnpx', 'yarn', 'yarnpkg', 'bun', 'bunx', 'deno', 'corepack', 'lerna', 'nx', 'turbo',
+  'make', 'gmake', 'cmake', 'ninja', 'just', 'task', 'mage', 'rake', 'bundle', 'bundler', 'gradle', 'gradlew',
+  'mvn', 'mvnw', 'ant', 'sbt', 'mix', 'tox', 'nox', 'invoke', 'fab', 'poetry', 'pipenv', 'pdm', 'hatch', 'uv', 'uvx',
+  'cargo', 'composer', 'pre-commit', 'lefthook', 'husky',
+];
+/** The task runner a command word names (by its file name, whatever its directory), or ''. */
+const taskRunnerOf = (word) => {
+  const base = path.basename(String(word)).toLowerCase().replace(/\.(cmd|bat|exe)$/, '');
+  return TASK_RUNNERS.includes(base) ? base : '';
+};
+/**
+ * A task runner named inside an argument of a system wrapper (xargs sh -c "npm run x", find -exec make): a runner name as
+ * a whole word, so `make` in `make-docs.sh` or `cmake-build` does not count, `./gradlew` and `node_modules/.bin/npm` do.
+ */
+const RUNNER_WORD_RE = new RegExp(`(^|[^A-Za-z0-9_.-])(${TASK_RUNNERS.map((r) => r.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&')).join('|')})($|[^A-Za-z0-9_.-])`);
+const runnerInText = (text) => { const m = RUNNER_WORD_RE.exec(String(text)); return m ? m[2] : ''; };
+const runnerProblem = (name) => `a task runner (${name}) runs manifest code that isn't pinned; use a direct committed script`;
 
 /**
  * Tokenize a command line. → { tokens: [{t:'word', v} | {t:'op', v}], problems }. Expands ~, $HOME and
@@ -463,6 +489,7 @@ export function parseSettingsCommand(command, { home = os.homedir(), projectDir 
     let [prog, ...args] = words;
     if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(prog)) { problems.push(`an environment assignment (${prog.split('=')[0]}=)`); return; }
     if (NOOPS.includes(prog)) return;
+    if (taskRunnerOf(prog)) { problems.push(runnerProblem(taskRunnerOf(prog))); return; }
     if (path.isAbsolute(prog)) {
       const k = kindOf(prog);
       let real = prog;
@@ -476,13 +503,23 @@ export function parseSettingsCommand(command, { home = os.homedir(), projectDir 
         if (base === 'env') {
           if (!args.length || args[0].startsWith('-') || args[0].includes('=')) { problems.push('env with options or assignments'); return; }
           [prog, ...args] = args;
+          if (taskRunnerOf(prog)) { problems.push(runnerProblem(taskRunnerOf(prog))); return; }
           if (!INTERPRETERS.includes(prog)) { problems.push(`env runs a program that is not an interpreter: ${prog}`); return; }
           const p = resolveBin(prog);
           if (!p) { problems.push(`interpreter ${prog} not found in ${SYSTEM_BIN_DIRS.join(', ')}`); return; }
           programs.push(p);
           runInterpreter(prog, args);
         } else if (INTERPRETERS.includes(base)) runInterpreter(base, args);
-        else for (const a of args) if (!a.startsWith('-') && a.includes('/')) fileArg(a, 'an argument');
+        else {
+          // a system wrapper (xargs, nice, timeout, find -exec, ...) can run another program: refuse a task runner named
+          // among its words or inside one of them (xargs sh -c "npm run x"), and any interpreter it would run, whose own
+          // command line is then not one this parser sees (xargs sh -c "...")
+          const wrapped = args.map((a) => taskRunnerOf(a) || runnerInText(a)).find(Boolean);
+          if (wrapped) { problems.push(runnerProblem(wrapped)); return; }
+          const interp = args.map((a) => path.basename(a)).find((a) => INTERPRETERS.includes(a));
+          if (interp) { problems.push(`a system wrapper runs an interpreter (${interp}) whose command can't be pinned; name the script directly`); return; }
+          for (const a of args) if (!a.startsWith('-') && a.includes('/')) fileArg(a, 'an argument');
+        }
         return;
       }
       fileArg(prog, 'the program');
