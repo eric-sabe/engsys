@@ -954,6 +954,10 @@ hasnt "…did not auto-sync" "$OUT" "auto-syncing"
 eq "…and started no claude at all (call log)" "$(calls)" 0
 eq "…the alert says it is deferred, once" "$(said 'Auto-sync is deferred')" "$((g0 + 1))"
 has "…and the login check was skipped, said so" "$OUT" "login not checked: session acme-mm is running"
+printf 'acme-mm\nacme-security\n' >"$FAKE/tmux-windows"
+run fleet verify --alert --auto-sync --max-age 15 --session acme-mm
+eq "…a different set of running sessions does not alert again" "$(said 'Auto-sync is deferred')" "$((g0 + 1))"
+echo acme-mm >"$FAKE/tmux-windows"
 : >"$FAKE/tmux-windows"; : >"$FAKE/claude.calls"
 run fleet verify --alert --auto-sync --max-age 15 --session acme-mm
 hasnt "with nothing running the sync is not deferred" "$OUT" "sync deferred"

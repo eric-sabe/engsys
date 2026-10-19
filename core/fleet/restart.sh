@@ -141,7 +141,7 @@ pins_text="engsys ${ENGSYS_REF:-?}"
 ROTATE_MSG="Operator: the fleet host was upgraded (pins: $pins_text). Rotate at your next safe point — finish the current step, never mid-merge: post your digest and a final ledger heartbeat with status \`rotation requested\`, then exit. The supervisor relaunches you on the new versions."
 
 # login_expired <name> → 0 (and prints why) when the session's own login is expired: the supervisor holds it, or its
-# pane's last Claude message is an auth error. The pane patterns are a subset of CLAUDE_AUTH_ERRORS in
+# pane's last Claude message is an auth error. The pane patterns are the start of each CLAUDE_AUTH_ERRORS entry (keep them in step) in
 # skills/agent-sessions/scripts/fleet-supervisor.sh, which does the real detection; this only keeps restart from
 # typing into a pane that can't answer.
 login_expired() {
@@ -151,7 +151,7 @@ login_expired() {
   else
     [ "$force" != 1 ] || return 1   # an old auth error can stay in the pane after /login: --force cycles anyway
     last="$(tmux capture-pane -p -t "$(win "$n")" -S -200 2>/dev/null | grep -E '^(⏺|●) ' | tail -n 1 || true)"
-    grep -Eq '^(⏺|●) (API Error: 401|Please run /login|OAuth session expired and could not be refreshed|OAuth token refresh failed|Signed out of Claude|Invalid API key|Failed to authenticate)' <<<"$last" || return 1
+    grep -Eq '^(⏺|●) (Login expired|OAuth token revoked|Not logged in|API Error: 401|Invalid API key|Please run /login|Failed to authenticate|Remote Control disconnected|OAuth token refresh failed|Signed out of Claude|Failed to refresh OAuth token|OAuth session expired and could not be refreshed|No Copilot subscription found)' <<<"$last" || return 1
     echo "its pane shows a Claude auth error: ${last:0:120}"
   fi
   return 0
