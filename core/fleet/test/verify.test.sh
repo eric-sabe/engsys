@@ -1051,6 +1051,11 @@ rm -f "$LOGF"
 eq "a fresh log is created 0600" "$(stat -c %a "$LOGF" 2>/dev/null || stat -f %Lp "$LOGF")" 600
 rm -f "$LOGF"
 echo "== engsys#224: the engsys marketplace's stack packs are checked against the engsys release, in every dir verify covers"
+# the section above (engsys#223) leaves a stale-pin test plugin enabled in the pin; a stack pack is any other enabled engsys plugin now
+git -C "$APP" fetch -q origin; git -C "$APP" reset -q --hard origin/main
+jq 'del(.enabledPlugins["zz@engsys"])' "$APP/.claude/settings.json" >"$T/p.json" && cp "$T/p.json" "$APP/.claude/settings.json"
+pinpush "drop the engsys#223 test plugin"
+printf '%s\n' "$CONF0" >"$I/fleet/fleet.conf"; rm -f "$FAKE/tmux-windows" "$FAKE/auth.json"
 PACK="$HOME/.claude/plugins/cache/engsys/engsys-pack/1.0.0"; mkdir -p "$(dirname "$PACK")"; cp -R "$E/stacks/lang/pack" "$PACK"
 mkdir -p "$PACK/.in_use"; echo '{"pid":4242}' >"$PACK/.in_use/4242"   # Claude Code's PID markers: skipped, like the engsys plugin's
 PACK_U="$T/user-cache/engsys/engsys-pack/1.0.0"; mkdir -p "$(dirname "$PACK_U")"; cp -R "$E/stacks/lang/pack" "$PACK_U"
