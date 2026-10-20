@@ -122,7 +122,7 @@ fleet_session_alive() {
   # NOTE: the shell-name list below now decides whether a LIVE credential gets a claude process started on it (verify's
   # CLI fallback). A name missing from it makes a running claude look exited, and the short-lived process can then
   # rotate the refresh token out from under it (anthropics/claude-code#88583). Keep it complete.
-  cmd="$(tmux list-panes -a -F '#{window_name} #{pane_current_command}' 2>/dev/null | awk -v n="$1" '$1 == n { print $2; exit }')" || return 1
+  cmd="$(tmux list-panes -a -F '#{window_name} #{pane_current_command}' 2>/dev/null | awk -v n="$1" '$1 == n && !d { print $2; d = 1 }')" || return 1   # no early `exit`: it would SIGPIPE tmux and fail the pipeline under pipefail
   case "$cmd" in '' | zsh | -zsh | bash | -bash | sh | -sh | fish | -fish) return 1 ;; esac
   return 0
 }

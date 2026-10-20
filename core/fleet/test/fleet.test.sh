@@ -753,7 +753,7 @@ has "security.env (security lane only): the fleet dir" "$(cat "$STATE/env/securi
 # a security env that also sources session.env (which unsets it) still ends on the fleet dir
 has "…after it sources session.env" "$(sed -n '/session.env/,$p' "$STATE/env/security.env")" "CLAUDE_CONFIG_DIR=$FCFG"
 # named relaunch (the supervisor's path) of a supervised session: the fleet dir too
-grep -Fxv acme-mm "$FAKE/tmux/windows" >"$FAKE/w.new" || true; mv "$FAKE/w.new" "$FAKE/tmux/windows"; : >"$FAKE/tmux.log"
+: >"$FAKE/tmux/windows"; : >"$FAKE/tmux.log"   # no session live at all (an interactive role would make the ~/.claude check read files, which this stub never writes): it asks the (stub) CLI, not its files
 run fleet launch acme-mm
 has "named relaunch of a supervised session: the fleet dir" "$(tl acme-mm)" "export CLAUDE_CONFIG_DIR=$FCFG && "
 # Lines the launcher arms as monsters or security tier, whatever spelling: they must get the fleet dir.
