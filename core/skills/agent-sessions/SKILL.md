@@ -77,6 +77,18 @@ server does NOT inherit launcher exports); refuses duplicate window names
 a tmux window named for its role (`new-window -t <session>:` — the trailing
 colon means "next free index"; without it the second launch fails).
 
+Each window is typed only `. <launch file>` (engsys#236): the full command line
+goes into a one-shot 0600 file in the launch dir (`--launch-dir`, else
+`$ENGSYS_LAUNCH_DIR`, else `~/.local/state/engsys/launch`; the fleet kit uses
+`<instance>/.fleet/launch`), which removes itself just before the harness starts.
+A fresh window's shell is still starting when the keys arrive, so its tty is in
+canonical mode, where macOS keeps at most 1024 bytes (MAX_CANON) of an unread
+line and drops the rest, Enter included; a long command typed whole never runs.
+A launch then counts only once it has started (the file is gone and the pane is
+no longer at its shell) within `LAUNCH_START_TIMEOUT_SEC` (default 30); otherwise
+the launcher says `launch did not start`, closes the window and exits non-zero,
+and the supervisor treats it as a failed relaunch.
+
 A session line may carry an optional 5th field, `name|workdir|prompt|extra|env`:
 a per-session env file (absolute, or relative to the roster's directory) that
 **replaces** the roster-level `ENV_FILE` for that session only. Use it to run
@@ -164,7 +176,7 @@ runs under launchd/cron every ~5 minutes with **no LLM in the restart path**
 | any (`HOST_CHECK_CMD` says this host doesn't run the session) | any | never touch: no ledger read, no comment, no relaunch. Asked first, every tick; a check that errors skips the session too |
 | (per tick, not per session) `HOST_HEALTH_CMD` fails | | one alert through `NOTIFY_CMD` per incident, resolved once the check passes again; a failed post is retried next tick |
 | stale | **alive** | never kill; escalate once on the ledger |
-| any relaunch **fails** | | escalate once on the ledger with the launcher's error, retry each tick without commenting, comment once on recovery |
+| any relaunch **fails** (including a launch that never started) | | escalate once on the ledger with the launcher's error and alert once via `NOTIFY_CMD`, retry each tick without commenting, comment and resolve the alert once on recovery |
 | a supervisor-launched pane's last message is the usage-limit line (`You've hit your [weekly ]limit · resets …`) | any | hold the session (`<name>.limit-hold`, reset time parsed from the line): no stale or relaunch escalation; after the reset plus `LIMIT_RESUME_MARGIN_SEC` re-prompt an idle pane, or relaunch an exited one, once; re-hit within 30 min backs off; an unreadable reset time is alert-only |
 | (per tick, not per session) a pane shows Claude Code's login error | any | hold **every** relaunch and kill nothing; one `NOTIFY_CMD --level action --incident claude-auth-expired`; resume, and resolve the alert, once the login works |
 

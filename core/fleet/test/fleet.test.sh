@@ -100,6 +100,9 @@ done
 w="${t#*:}"
 # a launched session shows its first reply; the supervisor reads it for a login error (engsys#103)
 add_window() { grep -Fxq "$1" "$F/windows" || echo "$1" >>"$F/windows"; echo node >"$F/cmd-$1"; echo "⏺ Reading the ledger." >"$F/cap-$1"; }
+# engsys#236: a launch types `. <launch file>`; play the shell: log the file's line ("[script] [<target>] <line>",
+# what the launch-line assertions read) and remove it, as its own last step before the harness does
+run_launch_line() { local f; case "$1" in ". "*) eval "f=${1#. }"; [ -f "$f" ] || return 0; { printf 'tmux [script] [%s] ' "$t"; cat "$f"; } >>"$FAKE/tmux.log"; rm -f "$f" ;; esac; }
 case "$sub" in
   list-windows) cat "$F/windows" ;;
   list-panes)
@@ -114,7 +117,7 @@ case "$sub" in
   new-session) touch "$F/session"; add_window "$nm" ;;
   new-window) add_window "$nm" ;;
   kill-window) grep -Fxv "$w" "$F/windows" >"$F/windows.new" || true; mv "$F/windows.new" "$F/windows"; rm -f "$F/cmd-$w" "$F/pid-$w" "$F/cap-$w" ;;
-  send-keys) if [ "$last" = "/exit" ]; then echo zsh >"$F/cmd-$w"; fi ;;
+  send-keys) run_launch_line "${3:-}"; if [ "$last" = "/exit" ]; then echo zsh >"$F/cmd-$w"; fi ;;
 esac
 exit 0
 SH
@@ -659,7 +662,8 @@ has "roster: tmux session rendered" "$ROSTER_OUT" "TMUX_SESSION=acme"
 has "roster: ENV_FILE points at the rendered lane env" "$ROSTER_OUT" "ENV_FILE=$STATE/env/session.env"
 has "roster: 5th field rendered" "$ROSTER_OUT" "acme-security|$HOME/git/app|/maintenance-monster|--model claude-opus-4-8|$STATE/env/security.env"
 has "roster: monster line" "$ROSTER_OUT" "acme-mm|$HOME/git/app|/merge-monster|--model model-m --dangerously-skip-permissions"
-tl() { grep -F "[send-keys] [-t] [acme:$1]" "$FAKE/tmux.log" | head -1; } # the launch command line for a window
+# the launch command line for a window: the launch file's line (engsys#236), minus its own removal step before the harness
+tl() { grep -F "tmux [script] [acme:$1] " "$FAKE/tmux.log" | head -1 | sed -E 's/command rm -f -- [^ ]+ && //'; }
 has "mm: default env (roster ENV_FILE)" "$(tl acme-mm)" "cd $HOME/git/app && set -a && . $STATE/env/session.env && set +a && unset -f claude 2>/dev/null; unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && unset CLAUDE_CONFIG_DIR && command claude --name acme-mm"
 has "mm: prompt before the extra flags" "$(tl acme-mm)" "/merge-monster --model model-m --dangerously-skip-permissions"
 has "security: the 5th field replaces ENV_FILE" "$(tl acme-security)" "set -a && . $STATE/env/security.env && set +a && unset -f claude 2>/dev/null; unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && unset CLAUDE_CONFIG_DIR && command claude --name acme-security"
@@ -669,6 +673,12 @@ has "rel: a relative 5th field resolves against the roster's directory" "$(tl ac
 has "build: empty workdir runs from PIN_DIR" "$(tl acme-build)" "cd $HOME/git/app && set -a && . $STATE/env/session.env"
 has "build: --add-dir from WORKTREES_DIR" "$(tl acme-build)" "--add-dir $HOME/git/worktrees --model model-b"
 eq "four windows started" "$(grep -c . "$FAKE/tmux/windows")" 4
+# engsys#236: only `. <launch file>` is typed (far under MAX_CANON), the file in .fleet/launch; started launches leave none
+TYPED="$(grep -F "tmux [send-keys] [-t] [acme:acme-mm] " "$FAKE/tmux.log" | head -1)"
+has "236: the launcher types only '. <launch file>', in .fleet/launch" "$TYPED" "/.fleet/launch/acme-mm."
+if [ "$(printf '%s' "$TYPED" | LC_ALL=C wc -c | tr -d ' ')" -lt 300 ]; then ok "236: …a short line"; else bad "236: …a short line ($TYPED)"; fi
+eq "236: …the launch dir is 0700" "$(mode_of "$STATE/launch")" 700
+eq "236: …and started launches leave no launch file" "$(ls -A "$STATE/launch")" ""
 run fleet launch
 has "a second launch skips live windows" "$OUT" "skip: a tmux window named 'acme-mm' already exists"
 grep -Fxv acme-build "$FAKE/tmux/windows" >"$FAKE/w.new" || true; mv "$FAKE/w.new" "$FAKE/tmux/windows"

@@ -42,9 +42,22 @@
 #                     environment never silently falls back.
 #
 # USAGE
-#   launch-agent-sessions.sh [--roster FILE] [--verdict-key-file PATH] [session-name]
+#   launch-agent-sessions.sh [--roster FILE] [--verdict-key-file PATH] [--launch-dir DIR] [session-name]
 #     no args          start every session in the roster
 #     session-name     start just that one
+#
+# HOW A SESSION STARTS (engsys#236)
+#   Each session's full command line (env, cd, env file, harness) is written to a one-shot launch file
+#   in DIR (--launch-dir, else $ENGSYS_LAUNCH_DIR, else ~/.local/state/engsys/launch; 0700, owned by
+#   this user), and the window's shell is typed only `. <file>`. The window's shell is still starting
+#   when the keys arrive, so its tty is in canonical mode, where macOS keeps at most MAX_CANON (1024)
+#   bytes of an unread line and drops the rest, Enter included: a long line typed whole never runs.
+#   Sourcing keeps the old semantics: the same interactive shell runs the command, so the harness is
+#   the pane's foreground command, and the pane returns to the shell when it exits (what the
+#   supervisor reads). The file removes itself just before the harness starts.
+#   A launch counts only once it has started: the file is gone and the pane's foreground command is
+#   no longer the shell, within LAUNCH_START_TIMEOUT_SEC (default 30; 0 = don't wait). Otherwise it
+#   fails with "launch did not start", its window is closed, and the launcher exits non-zero.
 #
 # PREREQS
 #   * tmux; claude >= 2.1.232; run as the machine's normal login user
@@ -59,13 +72,15 @@ ONLY=""
 # process nor the tmux server it may start (whose global environment every later window inherits, hand-opened
 # ones included) ever carries it; it reaches a session only on that session's own launch line, below.
 VERDICT_KEY_FILE=""
+LAUNCH_DIR="${ENGSYS_LAUNCH_DIR:-}"
 unset ENGSYS_SECURITY_VERDICT_KEY_FILE
 unset ENGSYS_MM_CONFIG   # engsys#229: set per merge-role line below, never inherited (nor seen by the tmux server)
 while [ $# -gt 0 ]; do
   case "$1" in
     --roster) ROSTER="$2"; shift 2 ;;
     --verdict-key-file) VERDICT_KEY_FILE="$2"; shift 2 ;;
-    -h | --help) sed -n '2,53p' "$0"; exit 0 ;;
+    --launch-dir) LAUNCH_DIR="$2"; shift 2 ;;
+    -h | --help) sed -n '2,66p' "$0"; exit 0 ;;
     *) ONLY="$1"; shift ;;
   esac
 done
@@ -74,6 +89,12 @@ REPO="$(pwd)"
 ROSTER_DIR="$(cd "$(dirname "$ROSTER")" 2>/dev/null && pwd)" || ROSTER_DIR="$REPO"
 [ -f "$ROSTER" ] || { echo "error: roster not found: $ROSTER (see the agent-sessions skill's roster.example)" >&2; exit 1; }
 command -v tmux >/dev/null 2>&1 || { echo "error: tmux not found on PATH" >&2; exit 1; }
+LAUNCH_DIR="${LAUNCH_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/engsys/launch}"
+LAUNCH_START_TIMEOUT_SEC="${LAUNCH_START_TIMEOUT_SEC:-30}"
+case "$LAUNCH_START_TIMEOUT_SEC" in '' | *[!0-9]*) echo "error: LAUNCH_START_TIMEOUT_SEC must be a whole number of seconds" >&2; exit 1 ;; esac
+# The one line typed into a window, `. <launch file>`, stays far below MAX_CANON (1024 bytes); a launch dir whose
+# path would push it past this is refused rather than truncated.
+LAUNCH_LINE_MAX=512
 # launchd jobs (the fleet supervisor) run with a fixed PATH that may not include where Claude Code was
 # installed: the native installer uses ~/.local/bin. Look in the standard install locations before failing.
 HARNESS="${HARNESS:-${FLEET_HARNESS:-claude}}"
@@ -365,6 +386,58 @@ is_supervised_session() {
   return 1
 }
 
+# engsys#236: the launch dir (header). Checked once per run: owned by this user, open to nobody else, never a
+# symlink, and absolute, because the window's shell reads the file from its own cwd. A missing one is created 0700;
+# an existing one open to others is refused, never chmod'ed (it may be a directory with another purpose).
+# Leftovers of a launcher killed mid-wait (a launch file normally removes itself, and a failed launch removes it)
+# are pruned after an hour: only files named as launch files (<name>.<run id>.XXXXXX), nothing else in the dir.
+LAUNCH_DIR_READY=0
+prepare_launch_dir() {
+  [ "$LAUNCH_DIR_READY" = 0 ] || return 0
+  local mode
+  if [ -L "$LAUNCH_DIR" ]; then echo "error: launch dir $LAUNCH_DIR is a symlink; refusing to write launch files through it" >&2; return 1; fi
+  (umask 077 && mkdir -p "$LAUNCH_DIR") || { echo "error: can't create launch dir $LAUNCH_DIR" >&2; return 1; }
+  if [ -L "$LAUNCH_DIR" ] || [ ! -d "$LAUNCH_DIR" ] || [ ! -O "$LAUNCH_DIR" ]; then
+    echo "error: launch dir $LAUNCH_DIR is not a directory owned by $(id -un)" >&2; return 1
+  fi
+  # GNU first: GNU `stat -f` is filesystem status and would print before failing; BSD `stat -c` fails silently
+  mode="$(stat -c %a "$LAUNCH_DIR" 2>/dev/null || stat -f %Lp "$LAUNCH_DIR" 2>/dev/null || true)"
+  case "$mode" in
+    *[0-7]00) ;;
+    *) echo "error: launch dir $LAUNCH_DIR is open to other users (mode ${mode:-unknown}); it must be private: chmod 700 it, or use another --launch-dir" >&2; return 1 ;;
+  esac
+  LAUNCH_DIR="$(cd -P "$LAUNCH_DIR" && pwd)" || { echo "error: can't resolve launch dir $LAUNCH_DIR" >&2; return 1; }
+  find "$LAUNCH_DIR" -maxdepth 1 -type f -mmin +60 \
+    -name '*.[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z-*-*.??????' \
+    -exec rm -f {} + 2>/dev/null || true
+  LAUNCH_DIR_READY=1
+}
+# The login shells a fresh window runs (the same list as the supervisor's pane_cmd checks).
+is_shell_cmd() {
+  case "$1" in zsh | -zsh | bash | -bash | sh | -sh | fish | -fish) return 0 ;; esac
+  return 1
+}
+# wait_started <name> <launch file> → 0 once the session has started: the launch file is gone (the shell ran the
+# line up to the harness, which removes it just before starting) and the pane's foreground command is no longer
+# the shell. Otherwise, after LAUNCH_START_TIMEOUT_SEC, says why (with the pane's last lines) and returns 1.
+wait_started() {
+  local name="$1" file="$2" target="${TMUX_SESSION}:$1" waited=0 cur why
+  while :; do
+    cur="$(tmux list-panes -t "$target" -F '#{pane_current_command}' 2>/dev/null | head -1 || true)"
+    if [ -z "$cur" ]; then why="its window closed"; break; fi
+    if [ ! -e "$file" ] && ! is_shell_cmd "$cur"; then return 0; fi
+    if [ "$waited" -ge "$LAUNCH_START_TIMEOUT_SEC" ]; then
+      if [ -e "$file" ]; then why="the shell never ran the launch line (the pane is still at $cur)"
+      else why="the launch line ran, but $HARNESS_BIN is not running (the pane is back at $cur)"; fi
+      break
+    fi
+    sleep 1; waited=$((waited + 1))
+  done
+  echo "error: launch did not start for '$name' within ${LAUNCH_START_TIMEOUT_SEC}s: $why" >&2
+  { tmux capture-pane -p -t "$target" -S -20 2>/dev/null || true; } | grep -v '^[[:space:]]*$' | tail -n 3 | cut -c1-200 | sed 's/^/  pane: /' >&2 || true
+  return 1
+}
+
 # ---------------------------------------------------------------------------
 # Launch
 # ---------------------------------------------------------------------------
@@ -388,7 +461,7 @@ launch_one() {
     session_env="$env_file"
   fi
 
-  local cmd run role=""
+  local cmd run_cmd="" run role=""
   # The session's own name and a per-launch id, for the monsters' baton (engsys#62): the holder is
   # <fleet>:<ENGSYS_SESSION>, and a fencing token on disk is honored only by the launch that took it.
   # A merge or maintenance monster (by its prompt, as lib/host-roles.sh reads it) also gets
@@ -504,26 +577,27 @@ launch_one() {
   local mm_cfg=""
   [ "$role" != merge ] || [ "$HARNESS" != claude ] || mm_cfg="$(resolve_mm_config "$workdir" "$cfg_dir")"
   if [ -n "$mm_cfg" ]; then cmd+="export ENGSYS_MM_CONFIG=$(printf %q "$mm_cfg") && "; fi
+  # The harness itself (run_cmd) follows the launch file's self-removal (below).
   if [ "$HARNESS" = "copilot" ]; then
-    cmd+="copilot --name $(printf %q "$name")"
-    [ -n "$prompt" ] && cmd+=" -i $(printf %q "$prompt")"
+    run_cmd+="copilot --name $(printf %q "$name")"
+    [ -n "$prompt" ] && run_cmd+=" -i $(printf %q "$prompt")"
     local copilot_flags
     copilot_flags="$(translate_copilot_flags "${MODEL:+$MODEL }${extra:-}")"
-    [ -n "$copilot_flags" ] && cmd+=" $copilot_flags"
+    [ -n "$copilot_flags" ] && run_cmd+=" $copilot_flags"
   elif [ "$HARNESS" = "antigravity" ]; then
-    cmd+="agy $(printf %q "$workdir")"
-    [ -n "$prompt" ] && cmd+=" -i $(printf %q "$prompt")"
+    run_cmd+="agy $(printf %q "$workdir")"
+    [ -n "$prompt" ] && run_cmd+=" -i $(printf %q "$prompt")"
     local agy_flags
     agy_flags="$(translate_antigravity_flags "${MODEL:+$MODEL }${extra:-}")" || { echo "error: refusing to launch '$name' on HARNESS=antigravity" >&2; return 1; }
-    [ -n "$agy_flags" ] && cmd+=" $agy_flags"
+    [ -n "$agy_flags" ] && run_cmd+=" $agy_flags"
   else
-    cmd+="command claude --name $(printf %q "$name") --settings $(printf %q "$SETTINGS_FILE")"
+    run_cmd+="command claude --name $(printf %q "$name") --settings $(printf %q "$SETTINGS_FILE")"
     # The prompt goes BEFORE the model/extra flags: several claude flags take a
     # list (--add-dir, --allowedTools, …) and would swallow a trailing prompt as
     # one more value — the session would start with no instruction.
-    [ -n "$prompt" ] && cmd+=" $(printf %q "$prompt")"
-    [ -n "$MODEL" ] && cmd+=" $MODEL"
-    [ -n "$extra" ] && cmd+=" $extra"
+    [ -n "$prompt" ] && run_cmd+=" $(printf %q "$prompt")"
+    [ -n "$MODEL" ] && run_cmd+=" $MODEL"
+    [ -n "$extra" ] && run_cmd+=" $extra"
   fi
 
   # A duplicate logical name ANYWHERE the same user runs claude makes Claude
@@ -535,15 +609,45 @@ launch_one() {
     return 0
   fi
 
+  # engsys#236: the command goes into a one-shot launch file and only `. <file>` is typed (header). mktemp creates
+  # it new (O_EXCL, so never through an existing path or symlink), mode 0600, with a unique name per session and
+  # launch, in a 0700 dir only this user can touch. It holds the key file's PATH for a security line, never key
+  # material. The export/unset order is the line's own: the env file is sourced, then the verdict key, the config
+  # dir and ENGSYS_MM_CONFIG are decided after it. Its last step before the harness removes it, so its absence
+  # tells the start check that the shell got that far.
+  prepare_launch_dir || return 1
+  local launch_file line nbytes
+  launch_file="$(umask 077 && mktemp "$LAUNCH_DIR/${name//[^A-Za-z0-9._-]/_}.$run.XXXXXX")" \
+    || { echo "error: can't create a launch file for '$name' in $LAUNCH_DIR" >&2; return 1; }
+  if [ -L "$launch_file" ] || [ ! -f "$launch_file" ] || [ ! -O "$launch_file" ]; then
+    echo "error: launch file for '$name' is not a regular file owned by $(id -un): $launch_file" >&2; return 1
+  fi
+  printf '%s\n' "${cmd}command rm -f -- $(printf %q "$launch_file") && ${run_cmd}" >"$launch_file" \
+    || { rm -f "$launch_file"; echo "error: can't write the launch file for '$name': $launch_file" >&2; return 1; }
+  line=". $(printf %q "$launch_file")"
+  nbytes="$(printf '%s' "$line" | LC_ALL=C wc -c | tr -d ' ')"
+  if [ "$nbytes" -gt "$LAUNCH_LINE_MAX" ]; then
+    rm -f "$launch_file"
+    echo "error: the launch line for '$name' would be $nbytes bytes (limit $LAUNCH_LINE_MAX, MAX_CANON 1024): use a shorter --launch-dir" >&2
+    return 1
+  fi
+
   if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
     # Trailing colon matters: `-t session` (no colon) is a WINDOW target — the
     # session's current window — and the second launch dies with "index 0 in
     # use". `-t session:` means "next free index in this session".
-    tmux new-window -t "${TMUX_SESSION}:" -n "$name" || { echo "error: tmux new-window failed for '$name'" >&2; return 1; }
+    tmux new-window -t "${TMUX_SESSION}:" -n "$name" || { rm -f "$launch_file"; echo "error: tmux new-window failed for '$name'" >&2; return 1; }
   else
-    tmux new-session -d -s "$TMUX_SESSION" -n "$name" || { echo "error: tmux new-session failed for '$name'" >&2; return 1; }
+    tmux new-session -d -s "$TMUX_SESSION" -n "$name" || { rm -f "$launch_file"; echo "error: tmux new-session failed for '$name'" >&2; return 1; }
   fi
-  tmux send-keys -t "${TMUX_SESSION}:${name}" "$cmd" Enter || { echo "error: tmux send-keys failed for '$name'" >&2; return 1; }
+  tmux send-keys -t "${TMUX_SESSION}:${name}" "$line" Enter || { rm -f "$launch_file"; echo "error: tmux send-keys failed for '$name'" >&2; return 1; }
+  # Sent is not started (engsys#236): a launch that never starts closes its window, so nothing half-started is left
+  # for a later tick to mistake for an exited session, and its launch file can't run late.
+  if [ "$LAUNCH_START_TIMEOUT_SEC" -gt 0 ] && ! wait_started "$name" "$launch_file"; then
+    rm -f "$launch_file"
+    tmux kill-window -t "${TMUX_SESSION}:${name}" 2>/dev/null || true
+    return 1
+  fi
   echo "launched: $name  ($workdir)"
 }
 

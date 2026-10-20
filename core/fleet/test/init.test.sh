@@ -77,6 +77,9 @@ done
 w="${t#*:}"
 # a launched session shows its first reply; the supervisor reads it for a login error (engsys#103)
 add_window() { grep -Fxq "$1" "$F/windows" || echo "$1" >>"$F/windows"; echo node >"$F/cmd-$1"; echo "⏺ Reading the ledger." >"$F/cap-$1"; }
+# engsys#236: a launch types `. <launch file>`; play the shell: log the file's line ("[script] [<target>] <line>",
+# what the launch-line assertions read) and remove it, as its own last step before the harness does
+run_launch_line() { local f; case "$1" in ". "*) eval "f=${1#. }"; [ -f "$f" ] || return 0; { printf 'tmux [script] [%s] ' "$t"; cat "$f"; } >>"$FAKE/tmux.log"; rm -f "$f" ;; esac; }
 case "$sub" in
   list-windows) cat "$F/windows" ;;
   list-panes) cat "$F/cmd-$w" 2>/dev/null || exit 1 ;;
@@ -84,6 +87,7 @@ case "$sub" in
   has-session) [ -f "$F/session" ] || exit 1 ;;
   new-session) touch "$F/session"; add_window "$nm" ;;
   new-window) add_window "$nm" ;;
+  send-keys) run_launch_line "${3:-}" ;;
 esac
 exit 0
 SH
@@ -409,7 +413,8 @@ seed_repo acme/app "$P" && commit_all "$P" "pins" && push_all "$P"
 printf 'GH_APP_ID=1\nGH_APP_INSTALLATION_ID=2\nGH_APP_PEM=%s/none.pem\nGH_BOT_AUTHOR_NAME=acme-fleet[bot]\nGH_BOT_AUTHOR_EMAIL=1+acme-fleet[bot]@users.noreply.github.com\n' "$HOME" >"$HOME/.config/acme/gh-app.env"
 printf 'AZURE_CLIENT_ID=00000000-0000-0000-0000-000000000000\n' >"$HOME/.config/acme/azure-sp.env"
 
-launched() { grep -F "[send-keys] [-t] [acme:$1]" "$FAKE/tmux.log" | head -1 || true; }
+# the launch command line for a window: the launch file's line (engsys#236), minus its own removal step before the harness
+launched() { grep -F "tmux [script] [acme:$1] " "$FAKE/tmux.log" | head -1 | sed -E 's/command rm -f -- [^ ]+ && //' || true; }
 unrendered() { grep -REn '__[A-Z][A-Z0-9_]*__' "$@" 2>/dev/null || true; }
 
 echo "-- full scaffold: launch through the shim"
