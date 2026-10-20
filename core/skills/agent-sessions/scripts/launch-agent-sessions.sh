@@ -447,6 +447,7 @@ launch_one() {
   else
     cmd+="unset ENGSYS_SECURITY_VERDICT_KEY_FILE && "
   fi
+  cmd+="unset ENGSYS_MM_CONFIG && "   # engsys#229: cleared here, set again below for a merge-role line once its config dir is known
   cmd+="cd $(printf %q "$workdir") && "
   if [ -n "$session_env" ]; then
     cmd+="set -a && . $(printf %q "$session_env") && set +a && "
@@ -498,10 +499,11 @@ launch_one() {
   fi
   if [ -n "$cfg_dir" ]; then cmd+="export CLAUDE_CONFIG_DIR=$(printf %q "$cfg_dir") && "; else cmd+="unset CLAUDE_CONFIG_DIR && "; fi
   # engsys#229, belt and braces beside mm-preflight's own discovery: a merge-role line is told where its repo's fleet merge
-  # config is; every other line has it unset. Decided after the env file, so an env file cannot move it.
+  # config is; every other line has it unset (above, before the env file). Decided after the env file, so an env file
+  # cannot move it.
   local mm_cfg=""
   [ "$role" != merge ] || [ "$HARNESS" != claude ] || mm_cfg="$(resolve_mm_config "$workdir" "$cfg_dir")"
-  if [ -n "$mm_cfg" ]; then cmd+="export ENGSYS_MM_CONFIG=$(printf %q "$mm_cfg") && "; else cmd+="unset ENGSYS_MM_CONFIG && "; fi
+  if [ -n "$mm_cfg" ]; then cmd+="export ENGSYS_MM_CONFIG=$(printf %q "$mm_cfg") && "; fi
   if [ "$HARNESS" = "copilot" ]; then
     cmd+="copilot --name $(printf %q "$name")"
     [ -n "$prompt" ] && cmd+=" -i $(printf %q "$prompt")"
