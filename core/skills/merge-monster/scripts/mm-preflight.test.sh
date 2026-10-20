@@ -27,6 +27,8 @@ cat >"$T/bin/gh" <<'SH'
 case "$1 $2" in
   "pr view") cat "$FAKE/view.json" ;;
   "api graphql") echo '{"nodes":[]}' ;;
+  "api repos/acme/app/pulls/7/files"*) [ ! -f "$FAKE/files-fail" ] || { echo "gh: HTTP 502" >&2; exit 1; }; cat "$FAKE/files.json" ;;
+  "api repos/acme/app/pulls/7") [ ! -f "$FAKE/files-fail" ] || { echo "gh: HTTP 502" >&2; exit 1; }; cat "$FAKE/changed" ;;
   *) echo "fake gh: unexpected $*" >&2; exit 2 ;;
 esac
 SH
@@ -46,7 +48,7 @@ sign() {
 view() {
   local arr="[]" b
   for b in "$@"; do arr="$(jq -c --arg b "$b" '. + [{body:$b, createdAt:"2026-10-19T10:00:00Z", author:{login:"app[bot]"}}]' <<<"$arr")"; done
-  jq -n --argjson c "$arr" --arg h "$HEAD_SHA" '{isDraft:false,mergeable:"MERGEABLE",mergeStateStatus:"CLEAN",baseRefName:"main",headRefOid:$h,body:"Closes #1",comments:$c,files:[],commits:[]}' >"$T/view.json"
+  jq -n --argjson c "$arr" --arg h "$HEAD_SHA" --argjson LBL "${LABELS:-[]}" '{isDraft:false,mergeable:"MERGEABLE",mergeStateStatus:"CLEAN",baseRefName:"main",headRefOid:$h,body:"Closes #1",comments:$c,files:[],commits:[],labels:$LBL}' >"$T/view.json"
 }
 run() { RC=0; OUT="$(bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 "$@" 2>&1)" || RC=$?; }
 
@@ -127,6 +129,125 @@ rc_is "a group/other-readable key is refused" 1
 chmod 600 "$KEY"
 run --security-verdict --security-key-file "$KEY"
 rc_is "…and accepted again once fixed (positive control)" 0
+
+echo "engsys#229: preflight decides --require-security-verdict itself, from the repo's config"
+CFG="$T/merge-monster.yml"
+cat >"$CFG" <<'YML'
+repo: acme/app
+ready_requirements:
+  signed_security_verdict: true
+security_sensitive_label: security
+security_sensitive_globs:
+  - services/dashboard/app/(auth)/**
+  - services/dashboard/app/api/auth/[...nextauth]/**
+  - "**/*.bicep"
+  - .github/workflows/**
+YML
+files() { # files <name>... → $T/files.json (one array) and the changed_files count
+  local arr="[]" f
+  for f in "$@"; do arr="$(jq -c --arg f "$f" '. + [{filename:$f, status:"modified"}]' <<<"$arr")"; done
+  printf '%s\n' "$arr" >"$T/files.json"; printf '%s\n' "$#" >"$T/changed"
+}
+view
+files README.md services/api/src/x.ts
+run --config "$CFG" --security-key-file "$KEY"
+rc_is "config on, no sensitive file: passes without a verdict, and the flag was omitted" 0
+has "  …the gate ran (turned on by the config)" "\"state\": \"none\""
+files "services/dashboard/app/(auth)/login/page.tsx"
+view
+run --config "$CFG" --security-key-file "$KEY"
+rc_is "a route-group path with no signed PASS is blocked although the session omitted the flag" 1
+has "  …reason" "no_valid_verdict"
+view "$UNSIGNED"
+run --config "$CFG" --security-key-file "$KEY"
+rc_is "…an unsigned PASS comment does not satisfy it" 1
+view "$GOOD"
+run --config "$CFG" --security-key-file "$KEY"
+rc_is "…a signed PASS for the head does (positive control)" 0
+has "  …recorded why it was required" "glob:services/dashboard/app/(auth)/**"
+view
+files "services/dashboard/app/api/auth/[...nextauth]/route.ts"
+run --config "$CFG" --security-key-file "$KEY"
+rc_is "a [...nextauth] path matches literally and needs the verdict" 1
+files "services/dashboard/app/api/auth/n/route.ts" "services/dashboard/app/auth/page.tsx" "services/dashboard/app/authx/page.tsx"
+run --config "$CFG" --security-key-file "$KEY"
+rc_is "brackets and parentheses are not regex: n/ and auth/ do not match" 0
+files infrastructure/main.bicep
+run --config "$CFG" --security-key-file "$KEY"
+rc_is "**/x.bicep matches a nested file" 1
+files main.bicep
+run --config "$CFG" --security-key-file "$KEY"
+rc_is "…and a root-level one" 1
+# renames: both the new and the old path count
+jq -n '[{filename:"docs/moved.md", previous_filename:"services/dashboard/app/(auth)/old.tsx", status:"renamed"}]' >"$T/files.json"; echo 1 >"$T/changed"
+run --config "$CFG" --security-key-file "$KEY"
+rc_is "a rename OUT of a sensitive path is sensitive (old path)" 1
+jq -n '[{filename:"services/dashboard/app/(auth)/new.tsx", previous_filename:"docs/old.md", status:"renamed"}]' >"$T/files.json"
+run --config "$CFG" --security-key-file "$KEY"
+rc_is "a rename INTO a sensitive path is sensitive (new path)" 1
+# the label alone
+files README.md
+LABELS='[{"name":"Security"}]' view
+run --config "$CFG" --security-key-file "$KEY"
+rc_is "the security label alone requires the verdict (case-insensitive)" 1
+LABELS='[{"name":"docs"}]' view
+run --config "$CFG" --security-key-file "$KEY"
+rc_is "…another label does not (positive control)" 0
+# pagination: pages come back as concatenated arrays
+printf '[{"filename":"a.md"}]\n[{"filename":".github/workflows/ci.yml"}]\n' >"$T/files.json"; echo 2 >"$T/changed"
+run --config "$CFG" --security-key-file "$KEY"
+rc_is "a sensitive file on page 2 is found" 1
+# fail closed
+printf '[{"filename":"a.md"}]\n' >"$T/files.json"; echo 5 >"$T/changed"
+run --config "$CFG" --security-key-file "$KEY"
+rc_is "a file list shorter than changed_files fails closed" 1
+has "  …naming it" "security_file_list_unreadable"
+printf '[{"filename":"a.md"}]\n' >"$T/files.json"; echo 3001 >"$T/changed"
+run --config "$CFG" --security-key-file "$KEY"
+rc_is "more than 3000 changed files cannot be listed in full: the verdict is required" 1
+has "  …naming the reason" "no_valid_verdict"
+view "$GOOD"
+run --config "$CFG" --security-key-file "$KEY"
+rc_is "…and a signed PASS satisfies it" 0
+view; touch "$T/files-fail"
+run --config "$CFG" --security-key-file "$KEY"
+rc_is "an unreadable file list (API error) fails closed" 1
+has "  …naming it" "security_file_list_unreadable"
+rm -f "$T/files-fail"
+run --config "$T/nope.yml" --security-key-file "$KEY"
+rc_is "an unreadable config fails closed" 1
+has "  …naming it" "security_config_unreadable"
+printf 'security_sensitive_globs: oops\n' >"$T/bad.yml"
+run --config "$T/bad.yml" --security-verdict --security-key-file "$KEY"
+rc_is "a malformed glob list fails closed" 1
+# the key
+files "services/dashboard/app/(auth)/x.tsx"; view "$GOOD"
+run --config "$CFG" --security-key-file "$T/missing.key"
+rc_is "an unreadable key fails closed" 1
+has "  …as key_unavailable" "key_unavailable"
+# the config does not opt in: unchanged behaviour; discovery
+printf 'repo: acme/app\nsecurity_sensitive_globs:\n  - services/**\n' >"$T/off.yml"
+run --config "$T/off.yml" --security-key-file "$KEY"
+rc_is "config without signed_security_verdict: the gate stays off (opt-in unchanged)" 0
+view
+RC=0; OUT="$(ENGSYS_MM_CONFIG="$CFG" bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --security-key-file "$KEY" 2>&1)" || RC=$?
+rc_is "ENGSYS_MM_CONFIG supplies the config when --config is omitted" 1
+mkdir -p "$T/wd/.claude"; cp "$CFG" "$T/wd/.claude/merge-monster.yml"
+RC=0; OUT="$(cd "$T/wd" && bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --security-key-file "$KEY" 2>&1)" || RC=$?
+rc_is "…and so does .claude/merge-monster.yml in the cwd" 1
+# --require-security-verdict can still ask for more, never for less
+files README.md
+run --config "$CFG" --require-security-verdict --security-key-file "$KEY"
+rc_is "the flag still requires a verdict when nothing sensitive changed" 1
+# the capability the fleet probes for, and the signing grant
+if grep -q 'security_sensitive_globs' "$HERE/mm-preflight.sh" && grep -q -- '--security-verdict' "$HERE/mm-preflight.sh"; then ok "mm-preflight.sh carries the capability literals the fleet probes"; else bad "capability literals"; fi
+printf 'review\n' >"$T/body.md"
+RC=0; OUT="$(env -u ENGSYS_SECURITY_VERDICT_KEY_FILE node "$SV" post --repo acme/app --pr 7 --sha "$HEAD_SHA" --verdict PASS --body-file "$T/body.md" 2>&1)" || RC=$?
+rc_is "security-verdict post refuses without ENGSYS_SECURITY_VERDICT_KEY_FILE" 1
+has "  …saying why" "not a security-lane session"
+view "$GOOD"; files README.md
+run --config "$CFG" --security-key-file "$KEY"
+rc_is "…while verification by key-file path keeps working (positive control)" 0
 
 echo "$pass passed, $fail failed."
 [ "$fail" = 0 ]

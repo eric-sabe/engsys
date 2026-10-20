@@ -26,14 +26,27 @@
 # PR that has no valid verdict (pass it for PRs that need a security review). Defence in depth, NOT a
 # boundary: the key is readable by every process of the fleet's OS user.
 #
-# Usage: mm-preflight.sh --repo owner/name --pr N [--full] [--security-verdict [--require-security-verdict]
-#                        [--security-key-file PATH]]
+# The requirement itself is decided HERE, not by the merge session (engsys#229): with the repo's merge-monster config
+# (--config FILE; else $ENGSYS_MM_CONFIG; else .claude/merge-monster.yml in the cwd) the script reads
+# ready_requirements.signed_security_verdict (true turns --security-verdict on even when the flag is omitted),
+# security_sensitive_globs and security_sensitive_label (default `security`), lists the PR's files over REST
+# (pulls/N/files: filename and previous_filename, so both sides of a rename are matched, paginated) and requires a
+# signed PASS whenever the PR carries the label or any changed file matches a glob (core/lib/security-sensitive.mjs).
+# --require-security-verdict can still ask for more, never for less. Fail closed (exit 1, reason on stderr): an
+# unreadable config (security_config_unreadable), a file list shorter than the PR's changed_files
+# (security_file_list_unreadable), an unreadable key (key_unavailable). A PR with more than 3000 files, which GitHub
+# cannot list in full, requires the verdict. Residual: a session that supplies no config and has none discoverable
+# keeps the old opt-in behaviour, so the fleet's launch context must pass --config (the capability to probe for is
+# the literal security_sensitive_globs in this file).
+#
+# Usage: mm-preflight.sh --repo owner/name --pr N [--full] [--config FILE]
+#                        [--security-verdict [--require-security-verdict] [--security-key-file PATH]]
 set -euo pipefail
 # shellcheck source=../../../lib/fleet-gh.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/fleet-gh.sh"
 fleet_gh_resolve
 
-REPO="" PR="" FULL=0 ISSUE_FILE="" CHECK_CONTRACT=0 SEC_VERDICT=0 SEC_REQUIRE=0 SEC_KEY_FILE=""
+REPO="" PR="" FULL=0 ISSUE_FILE="" CHECK_CONTRACT=0 SEC_VERDICT=0 SEC_REQUIRE=0 SEC_KEY_FILE="" MM_CONFIG_FILE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) REPO="$2"; shift 2 ;;
@@ -44,6 +57,7 @@ while [ $# -gt 0 ]; do
     --security-verdict) SEC_VERDICT=1; shift ;;
     --require-security-verdict) SEC_VERDICT=1; SEC_REQUIRE=1; shift ;;
     --security-key-file) SEC_KEY_FILE="$2"; shift 2 ;;
+    --config) MM_CONFIG_FILE="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -53,7 +67,7 @@ OWNER="${REPO%%/*}"
 NAME="${REPO##*/}"
 
 VIEW=$("$FLEET_GH" pr view "$PR" -R "$REPO" \
-  --json isDraft,mergeable,mergeStateStatus,baseRefName,headRefOid,body,comments,files,commits)
+  --json isDraft,mergeable,mergeStateStatus,baseRefName,headRefOid,body,comments,files,commits,labels)
 
 THREADS=$("$FLEET_GH" api graphql -f owner="$OWNER" -f name="$NAME" -F number="$PR" -f query='
   query($owner: String!, $name: String!, $number: Int!) {
@@ -85,6 +99,30 @@ if [ "$CHECK_CONTRACT" -eq 1 ] || [ -n "$ISSUE_FILE" ]; then
   rm -f "$PR_BODY_TMP"
 fi
 
+# Whether this PR needs a signed security verdict, decided from the config (engsys#229), never from the session's flags.
+SS_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/security-sensitive.mjs"
+sec_fail() { printf '{"ok":false,"state":"error","reason":%s}\n' "$(jq -Rn --arg r "$1" '$r')" >&2; exit 1; }
+[ -n "$MM_CONFIG_FILE" ] || MM_CONFIG_FILE="${ENGSYS_MM_CONFIG:-}"
+[ -n "$MM_CONFIG_FILE" ] || { [ ! -f .claude/merge-monster.yml ] || MM_CONFIG_FILE=".claude/merge-monster.yml"; }
+SEC_REASONS="[]"
+if [ -n "$MM_CONFIG_FILE" ] || [ "$SEC_VERDICT" -eq 1 ]; then
+  command -v node >/dev/null && [ -f "$SS_SCRIPT" ] || sec_fail "security_config_unreadable: node or security-sensitive.mjs not found"
+  SS_CFG=(); [ -z "$MM_CONFIG_FILE" ] || SS_CFG=(--config "$MM_CONFIG_FILE")
+  SS_POLICY=$(node "$SS_SCRIPT" policy ${SS_CFG[@]+"${SS_CFG[@]}"}) || sec_fail "$(jq -r '.reason // "security_config_unreadable"' <<<"$SS_POLICY" 2>/dev/null || echo security_config_unreadable)"
+  if [ "$(jq -r '.signedVerdict' <<<"$SS_POLICY")" = true ]; then SEC_VERDICT=1; fi
+  if [ "$SEC_VERDICT" -eq 1 ]; then
+    SS_FILES="[]" SS_COUNT="null"
+    if [ "$(jq -r '.globs' <<<"$SS_POLICY")" -gt 0 ]; then
+      SS_FILES=$("$FLEET_GH" api "repos/$REPO/pulls/$PR/files?per_page=100" --paginate | jq -s -c 'add // []') || sec_fail "security_file_list_unreadable: listing the PR files failed"
+      SS_COUNT=$("$FLEET_GH" api "repos/$REPO/pulls/$PR" --jq '.changed_files') || sec_fail "security_file_list_unreadable: reading changed_files failed"
+      [[ "$SS_COUNT" =~ ^[0-9]+$ ]] || sec_fail "security_file_list_unreadable: changed_files is not a number"
+    fi
+    SS_OUT=$(jq -n -c --argjson f "$SS_FILES" --argjson n "$SS_COUNT" --argjson l "$(jq -c '.labels // []' <<<"$VIEW")" '{files:$f, changedFiles:$n, labels:$l}' \
+      | node "$SS_SCRIPT" decide ${SS_CFG[@]+"${SS_CFG[@]}"}) || sec_fail "$(jq -r '.reason // "security_file_list_unreadable"' <<<"$SS_OUT" 2>/dev/null || echo security_file_list_unreadable)"
+    if [ "$(jq -r '.required' <<<"$SS_OUT")" = true ]; then SEC_REQUIRE=1; SEC_REASONS="$(jq -c '.reasons' <<<"$SS_OUT")"; fi
+  fi
+fi
+
 SECURITY_JSON="null"
 if [ "$SEC_VERDICT" -eq 1 ]; then
   # Fail closed on every path below: no key, no head SHA, no node, or any non-zero verdict exit.
@@ -99,6 +137,7 @@ if [ "$SEC_VERDICT" -eq 1 ]; then
   [ "$SEC_REQUIRE" -eq 1 ] && SV_ARGS+=(--require)
   SV_RC=0
   SECURITY_JSON=$(jq -c '.comments // []' <<<"$VIEW" | node "$SV_SCRIPT" "${SV_ARGS[@]}") || SV_RC=$?
+  [ "$SV_RC" -ne 0 ] || [ -z "$SECURITY_JSON" ] || SECURITY_JSON=$(jq -c --argjson r "$SEC_REQUIRE" --argjson why "$SEC_REASONS" '. + {requiredBy: (if $r == 1 then $why else [] end)}' <<<"$SECURITY_JSON" 2>/dev/null || printf '%s' "$SECURITY_JSON")
   if [ "$SV_RC" -ne 0 ]; then
     if [ -n "$SECURITY_JSON" ]; then echo "$SECURITY_JSON" >&2
     else echo '{"ok":false,"state":"error","reason":"security_verdict_check_failed"}' >&2; fi

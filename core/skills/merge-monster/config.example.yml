@@ -42,6 +42,15 @@ ready_requirements:
                              # readable by any process of the fleet's OS user); the boundary is a separate
                              # GitHub identity for the security lane (eric-sabe/engsys#220).
   security_verdict_key_file: ""  # absolute path to the verdict key; empty = $FLEET_STATE/security-verdict.key
+
+# Paths whose PRs need a signed security verdict (engsys#229), decided by mm-preflight.sh itself when it runs with
+# --config: `*` and `?` stay inside one path segment, `**` crosses segments, `**/x` also matches a root-level `x`;
+# everything else is literal, so `app/(auth)/**` and `app/api/auth/[...nextauth]/**` match themselves. Both the old and
+# the new path of a rename are matched. Only used when ready_requirements.signed_security_verdict is true.
+security_sensitive_globs: []
+  # - services/dashboard/app/(auth)/**
+  # - "**/*.bicep"
+security_sensitive_label: security   # a PR carrying this label always needs the verdict
   sdd_contract: false        # opt-in: true only when this repo's PRs carry SDD
                              # `<!-- engsys:issue-meta -->` contracts; preflight then
                              # runs with --check-contract. Off by default: on a repo

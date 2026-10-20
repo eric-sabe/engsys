@@ -475,7 +475,7 @@ roles, or turn on signed security verdicts below.
 **Signed security verdicts: `FLEET_SECURITY_VERDICT_KEY=on` (eric-sabe/engsys#197).** A *defence-in-depth* layer,
 **not a security boundary**. With it on, `fleet launch` creates an HMAC key at `<fleet state>/security-verdict.key`
 (mode 0600, never replaced) and tells only security-lane sessions where it is (`ENGSYS_SECURITY_VERDICT_KEY_FILE`,
-set by the session launcher for a security env file or an Opus 4.8 model, and unset for every other session). A
+set by the session launcher for a session whose env file is `security.env` or `nyx.env` only, and unset for every other session whatever its model, engsys#229). A
 security-lane session posts its verdict with `node <engsys-root>/lib/security-verdict.mjs post --repo O/N --pr N --sha
 <head> --verdict PASS|FINDINGS --body-file F`, which refuses outside a security-lane session and for any SHA that is
 not the PR's current head, and signs an HMAC-SHA256 over repo, PR, head SHA, verdict, timestamp, nonce and a hash of the
@@ -489,11 +489,26 @@ the preflight when none does (fail closed by design: a claimed verdict that does
 an unreadable or group-readable key always fails. What it does not do: the key file is
 readable by every process running as the fleet's macOS user, so an attended session with a shell can read it and sign a
 verdict. It stops accidental and naive forgery, not a hostile session on the same account. A Nyx reviewer dispatched
-from an interactive role cannot post a valid verdict; the review has to run in the security lane. The security lane is
-any Opus 4.8 line, which includes the maintenance monster, so it can sign verdicts on its own fix PRs. The key path
+from an interactive role cannot post a valid verdict; the review has to run in the security lane. The signing grant is
+narrower than the security model: the merge monster runs Opus 4.8 and reads attacker-authored PR content, so it is not given the
+key path and cannot mint a PASS (`post` refuses), but it still verifies, because `mm-preflight.sh` reads the key file by path.
+The maintenance monster runs on the security env file, so it can sign verdicts on its own fix PRs. The key path
 reaches a session only on its own launch line, never the launcher's or the tmux server's environment. The real
 boundary is a separate GitHub identity for the security lane (eric-sabe/engsys#220); the keystone-side gate that reads these
 verdicts is wired separately.
+
+**Which PRs need a verdict is decided by `mm-preflight.sh`, not by the merge session** (engsys#229). Run with `--config
+<merge-monster.yml>` (or `ENGSYS_MM_CONFIG`, or `.claude/merge-monster.yml` in the cwd), it reads `security_sensitive_globs`
+and `security_sensitive_label` (default `security`), lists the PR's files over REST (paginated; `filename` and
+`previous_filename`, so both sides of a rename match) and requires a signed PASS whenever the label is on the PR or any
+file matches a glob. Omitting `--require-security-verdict` cannot lower that; a config that sets
+`ready_requirements.signed_security_verdict: true` also turns the gate on without `--security-verdict`. The glob dialect:
+`*` and `?` stay in one segment, `**` crosses segments, `**/x` matches a root-level `x`, everything else (parentheses,
+brackets, dots) is literal, no braces. It fails closed: an unreadable config (`security_config_unreadable`), a file list
+shorter than the PR's `changed_files` (`security_file_list_unreadable`), an unreadable key (`key_unavailable`); a PR with
+more than 3000 files, which GitHub does not list in full, requires the verdict. Residual: a session that passes no config
+and has none discoverable keeps the old opt-in behaviour, so the launch context must give the merge session its `--config`.
+The capability to probe for is the literal `security_sensitive_globs` in `mm-preflight.sh`.
 
 **The monster batons.** A session the fleet launched (`ENGSYS_SESSION` and `ENGSYS_SESSION_RUN` set) may
 take, renew or act on the merge or maintain baton only when the launcher armed it for that role
