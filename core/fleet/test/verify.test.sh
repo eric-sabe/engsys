@@ -973,6 +973,13 @@ run fleet verify --alert --auto-sync --max-age 15 --session acme-mm
 eq "…a different set of running sessions does not alert again" "$(said 'Auto-sync is deferred')" "$((g0 + 1))"
 VERIFY_DEFER_REALERT_MIN=0 run fleet verify --alert --auto-sync --max-age 15 --session acme-mm
 eq "…but the re-alert interval elapsing does" "$(said 'Auto-sync is deferred')" "$((g0 + 2))"
+ORIGIN_URL="$(git -C "$APP" remote get-url origin)"; git -C "$APP" remote set-url origin "$T/no-such-origin.git"
+: >"$FAKE/tmux-windows"; : >"$FAKE/claude.calls"
+run fleet verify --alert --auto-sync --max-age 15 --session acme-mm
+rc_is "a failed git fetch leaves the mismatch standing" 1
+has "…reported as a fetch failure, not as a pins change" "$OUT" "git fetch of origin failed in the pin checkout"
+hasnt "…and nothing was synced" "$OUT" "auto-syncing"
+git -C "$APP" remote set-url origin "$ORIGIN_URL"
 : >"$FAKE/tmux-windows"; : >"$FAKE/claude.calls"
 run fleet verify --alert --auto-sync --max-age 15 --session acme-mm
 hasnt "with nothing running the sync is not deferred" "$OUT" "sync deferred"

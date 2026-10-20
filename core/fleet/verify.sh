@@ -366,12 +366,16 @@ if [ "$only_stale" = 1 ] && [ "$auto_sync" = 1 ]; then
       ':(exclude,icase).claude/assistant-daemon-state.json' 2>/dev/null || echo dirty)" ]; then sync_why="the pin checkout's .claude/ has untracked files"
   else
     # a fetch and a fast-forward are git only; compare the pins (marketplaces and enabled plugins) of HEAD and the tip
+    fetched=0
     if git -C "$PIN_DIR" fetch -q origin 2>/dev/null; then
+      fetched=1
       pins_head="$(git -C "$PIN_DIR" show HEAD:.claude/settings.json 2>/dev/null | jq -cS '{extraKnownMarketplaces, enabledPlugins}' 2>/dev/null || echo head)"
       pins_tip="$(git -C "$PIN_DIR" show "refs/remotes/origin/$def_branch:.claude/settings.json" 2>/dev/null | jq -cS '{extraKnownMarketplaces, enabledPlugins}' 2>/dev/null || echo tip)"
       [ "$pins_head" != "$pins_tip" ] || pins_same=1
     fi
-    if [ "$pins_same" = 1 ]; then
+    if [ "$fetched" = 0 ]; then
+      sync_why="git fetch of origin failed in the pin checkout (offline?); nothing was changed, the next tick tries again"
+    elif [ "$pins_same" = 1 ]; then
       echo "fleet verify: the pin checkout is behind $def_branch and the pins are unchanged: fast-forwarding it (git only, no claude)"
       if git -C "$PIN_DIR" merge -q --ff-only "refs/remotes/origin/$def_branch" 2>/dev/null; then
         [ -z "${plist:-}" ] || rm -f "$plist"
