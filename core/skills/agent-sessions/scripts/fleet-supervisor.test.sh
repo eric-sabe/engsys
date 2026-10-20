@@ -963,7 +963,7 @@ printf '#!/usr/bin/env bash\nexport PATH="$FAKE/lbin:$PATH" HOME="$FAKE/home" LA
 printf 'TMUX_SESSION=acme\nLAUNCH_CMD=bash %s/real-launch.sh\nNOTIFY_CMD=bash %s/notify.sh\nAUTH_CHECK_WAIT_SEC=0\nREPO=o/r\nacme-mm|1|60\n' "$T" "$T" >"$T/w/sup.conf"
 reset; rm -f "$T/notify-fail"; ledger 90 "ok — merging #12"; pane exited; run
 expect "236 e2e: the real launcher types only a short line" "^lsend \. /.*/home/.local/state/engsys/launch/acme-mm\.[^ ]*$"
-expect "  …the launch never starts → the supervisor alerts" "^notify --level alert --incident launch-failed-acme-mm .*error: launch did not start for 'acme-mm' within 1s: the shell never ran the launch line"
+expect "  …the launch never starts → the supervisor alerts" "^notify --level alert --incident launch-failed-acme-mm .*error: launch did not start for 'acme-mm' within 1s: the launch line has not reached the harness yet"
 expect "  …the launcher closed the window it opened" "^lkill acme:acme-mm"
 expect "  …and the ledger says FAILED" "comment 1: .*relaunch of .acme-mm. FAILED"
 expect "  …never a relaunched comment" "!fleet-supervisor: relaunched"

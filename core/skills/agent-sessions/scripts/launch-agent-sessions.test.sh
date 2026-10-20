@@ -19,7 +19,8 @@ cat >"$T/bin/tmux" <<'SH'
 # send-keys -t <target> <line> Enter: the line is `. <launch file>` (engsys#236). The fake logs the line, then the
 # file's content ("script: …"), and plays the shell: it removes the file (the line's own last step before the
 # harness) and the pane runs claude. FAKE_NO_START = the shell never reads the line (the pane stays at zsh);
-# FAKE_EXIT_AT_ONCE = the line runs but the harness exits at once (back at zsh).
+# FAKE_EXIT_AT_ONCE = the line runs but the harness exits at once (back at zsh). FAKE_SHELL=bash|zsh = really
+# source the file in that shell (the fake claude logs to $FAKE/ran); the pane runs claude only if it ran.
 case "$1" in
   list-windows) exit 0 ;;                       # no windows: every name is free
   has-session) exit 1 ;;                        # no session yet
@@ -27,18 +28,23 @@ case "$1" in
     echo "send-keys $2 $3 $4 $5" >>"$FAKE/actions"; printf '%s' "$4" >"$FAKE/typed"
     f="${4#. }"; eval "f=$f"; echo "$f" >"$FAKE/launch-file"
     if [ -f "$f" ]; then echo "script: $(cat "$f")" >>"$FAKE/actions"; ls -ln "$f" >"$FAKE/launch-file.ls"; cp "$f" "$FAKE/launch-file.copy"; fi
-    if [ -n "${FAKE_NO_START:-}" ]; then echo zsh >"$FAKE/pane"
+    if [ -n "${FAKE_SHELL:-}" ]; then
+      ( cd "$FAKE" && "$FAKE_SHELL" -c '. "$1"' _ "$f" ) >"$FAKE/shell.out" 2>&1 </dev/null || true
+      if [ -s "$FAKE/ran" ]; then echo claude >"$FAKE/pane"; else echo zsh >"$FAKE/pane"; fi
+    elif [ -n "${FAKE_NO_START:-}" ]; then echo zsh >"$FAKE/pane"
     elif [ -n "${FAKE_EXIT_AT_ONCE:-}" ]; then rm -f "$f"; echo zsh >"$FAKE/pane"
     else rm -f "$f"; echo claude >"$FAKE/pane"; fi ;;
   list-panes) cat "$FAKE/pane" 2>/dev/null || exit 1 ;;
   capture-pane) echo "zsh: command not found: --remote-contr" ;;
   kill-window) echo "kill-window $3" >>"$FAKE/actions"; rm -f "$FAKE/pane" ;;
+  set-option) [ -n "${FAKE_SETOPT_FAIL:-}" ] && exit 1; echo "set-option $*" >>"$FAKE/actions" ;;
 esac
 # engsys#197: no tmux call may see the verdict key path in its environment (the server would keep it)
 if [ -n "${ENGSYS_SECURITY_VERDICT_KEY_FILE+x}" ]; then echo "tmux $1 saw the key path" >>"$FAKE/leak"; fi
 exit 0
 SH
-for b in claude copilot; do printf '#!/usr/bin/env bash\nexit 0\n' >"$T/bin/$b"; done
+printf '#!/usr/bin/env bash\necho "ran $*" >>"$FAKE/ran"\nexit 0\n' >"$T/bin/claude"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$T/bin/copilot"
 cat >"$T/bin/agy" <<'SH'
 #!/usr/bin/env bash
 [ "${1:-}" = remote-control ] && echo "agy-rc $*" >>"$FAKE/actions"
@@ -56,7 +62,7 @@ no() { fail=$((fail + 1)); echo "  FAIL  $1"; [ -n "${2:-}" ] && printf '       
 run() {
   local harness="$1" body="$2"; shift 2
   printf 'NAMESPACE=acme\n%s\n' "$body" >"$T/w/roster"
-  : >"$T/actions"; rm -f "$T/pane" "$T/typed" "$T/launch-file" "$T/launch-file.ls" "$T/launch-file.copy"
+  : >"$T/actions"; rm -f "$T/pane" "$T/typed" "$T/launch-file" "$T/launch-file.ls" "$T/launch-file.copy" "$T/ran"
   set +e
   # shellcheck disable=SC2086
   err="$(cd "$T/w" && env HARNESS="$harness" "$@" bash "$LAUNCH" --roster "$T/w/roster" ${LAUNCH_EXTRA:-} 2>&1 >/dev/null)"
@@ -313,7 +319,7 @@ lacks "…nothing reaches tmux" "$acts" "send-keys"
 echo "engsys#236: sent is not started — a launch that never starts fails loudly"
 run claude "$BUILD" FAKE_NO_START=1
 if [ "$rc" -ne 0 ]; then ok "pane never leaves the shell: exits non-zero"; else no "never started: exits non-zero" "rc=$rc"; fi
-has "…launch did not start, naming the session and the wait" "$err" "error: launch did not start for 'acme-build' within 2s: the shell never ran the launch line (the pane is still at zsh)"
+has "…launch did not start, naming the session and the wait" "$err" "error: launch did not start for 'acme-build' within 2s: the launch line has not reached the harness yet (the pane is still at zsh)"
 has "…shows the pane's last lines" "$err" "  pane: zsh: command not found: --remote-contr"
 has "…the line is reported skipped" "$err" "SKIPPED: acme-build"
 has "…its window is closed" "$acts" "kill-window acme:acme-build"
@@ -328,6 +334,36 @@ if [ "$rc" -ne 0 ]; then ok "LAUNCH_START_TIMEOUT_SEC must be a number"; else no
 run claude "$BUILD
 acme-mm|$W|/engsys:merge-monster|--model opus" FAKE_NO_START=1
 has "a whole roster: every session that never starts is counted" "$err" "error: 2 roster session(s) not launched; 0 launched"
+
+echo "engsys#236 review: the window keeps its name (allow-rename and automatic-rename off, before the line is typed)"
+run claude "$BUILD"
+has "allow-rename off on the new window" "$acts" "set-option -w -t acme:acme-build allow-rename off"
+has "automatic-rename off on the new window" "$acts" "set-option -w -t acme:acme-build automatic-rename off"
+case "$acts" in *"automatic-rename off"*"send-keys"*) ok "…both before the launch line is typed" ;; *) no "rename options before send-keys" "$acts" ;; esac
+run claude "$BUILD" FAKE_SETOPT_FAIL=1
+if [ "$rc" -ne 0 ]; then ok "set-option fails: the launch fails"; else no "set-option failure fails the launch"; fi
+has "…says why" "$err" "tmux set-option (allow-rename/automatic-rename off) failed for 'acme-build'"
+lacks "…nothing is typed" "$acts" "send-keys"
+has "…its window is closed" "$acts" "kill-window acme:acme-build"
+
+echo "engsys#236 review: the launch line is one fail-closed chain (sourced for real, in bash and zsh)"
+printf 'export FROM_ENV=1\n' >"$W/good.env"; printf 'export FROM_ENV=1\nfalse\n' >"$W/bad.env"
+for sh in bash zsh; do
+  command -v "$sh" >/dev/null 2>&1 || { echo "  skip  $sh not installed"; continue; }
+  run claude "acme-build|$W||--model opus|$W/good.env" FAKE_SHELL="$sh"
+  [ "$rc" -eq 0 ] && ok "$sh: an ordinary env file: the line runs claude (positive control; unset -f on a missing function is fine)" || no "$sh: good env launches" "$err | $(cat "$T/shell.out" 2>/dev/null)"
+  has "$sh: …claude ran with its name" "$(cat "$T/ran" 2>/dev/null)" "ran --name acme-build"
+  run claude "acme-build|$W||--model opus|$W/bad.env" FAKE_SHELL="$sh"
+  if [ "$rc" -ne 0 ]; then ok "$sh: an env file whose last command fails: the launch fails"; else no "$sh: failing env file fails the launch"; fi
+  [ ! -s "$T/ran" ] && ok "$sh: …no harness runs" || no "$sh: no harness after a failing env file" "$(cat "$T/ran")"
+  has "$sh: …loudly" "$err" "error: launch did not start for 'acme-build' within 2s: the launch line has not reached the harness yet"
+  LAUNCH_EXTRA="--verdict-key-file $T/fleet.key" run claude "acme-sec|$W||--model claude-opus-4-8|$W/security.env" FAKE_SHELL="$sh"
+  [ "$rc" -eq 0 ] && has "$sh: a security line runs claude through the whole chain" "$(cat "$T/ran" 2>/dev/null)" "ran --name acme-sec" || no "$sh: security line launches" "$err | $(cat "$T/shell.out" 2>/dev/null)"
+done
+LAUNCH_EXTRA=""
+has "the chain is not restarted after the claude-function guard" "$(cat "$T/launch-file.copy")" "{ unset -f claude 2>/dev/null || true; } && "
+chain="$(cat "$T/launch-file.copy")"
+lacks "…no other ';' in the line (the only one closes the guard's group)" "${chain/|| true; \}/|| true \}}" ";"
 
 echo "$pass passed, $fail failed."
 [ "$fail" = 0 ]

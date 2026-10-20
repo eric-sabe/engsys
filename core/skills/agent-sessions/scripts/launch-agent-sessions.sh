@@ -420,14 +420,17 @@ is_shell_cmd() {
 # wait_started <name> <launch file> → 0 once the session has started: the launch file is gone (the shell ran the
 # line up to the harness, which removes it just before starting) and the pane's foreground command is no longer
 # the shell. Otherwise, after LAUNCH_START_TIMEOUT_SEC, says why (with the pane's last lines) and returns 1.
+# The file is checked BEFORE the pane is read: a pane sampled first could show the `rm` itself and then count as
+# started once the file is gone, though the harness never ran.
 wait_started() {
-  local name="$1" file="$2" target="${TMUX_SESSION}:$1" waited=0 cur why
+  local name="$1" file="$2" target="${TMUX_SESSION}:$1" waited=0 cur why gone
   while :; do
+    gone=0; [ -e "$file" ] || gone=1
     cur="$(tmux list-panes -t "$target" -F '#{pane_current_command}' 2>/dev/null | head -1 || true)"
     if [ -z "$cur" ]; then why="its window closed"; break; fi
-    if [ ! -e "$file" ] && ! is_shell_cmd "$cur"; then return 0; fi
+    if [ "$gone" = 1 ] && ! is_shell_cmd "$cur"; then return 0; fi
     if [ "$waited" -ge "$LAUNCH_START_TIMEOUT_SEC" ]; then
-      if [ -e "$file" ]; then why="the shell never ran the launch line (the pane is still at $cur)"
+      if [ -e "$file" ]; then why="the launch line has not reached the harness yet (the pane is still at $cur)"
       else why="the launch line ran, but $HARNESS_BIN is not running (the pane is back at $cur)"; fi
       break
     fi
@@ -561,8 +564,11 @@ launch_one() {
     cfg_dir="${ENGSYS_CONFIG_DIR_SESSIONS%/}/$name"
   fi
   [ -z "$cfg_dir" ] || gate_dir="$cfg_dir"
-  # A function named claude in an env file must not stand in for the binary either.
-  cmd+="unset -f claude 2>/dev/null; "
+  # A function named claude in an env file must not stand in for the binary either. The whole line is one
+  # fail-closed && chain (engsys#236 review): a `;` here restarted it, so an env file whose last command failed
+  # skipped `set +a` and the key path's re-decision above, and claude still ran. zsh's `unset -f` fails for a
+  # function that doesn't exist, hence the `|| true`.
+  cmd+="{ unset -f claude 2>/dev/null || true; } && "
   # Under scope supervised the session knows the fleet dir and the scope, so the baton can refuse a
   # session that isn't on it (lib/lease/baton.mjs launchedSessionGate).
   if [ -n "${FLEET_CLAUDE_CONFIG_DIR_INTERACTIVE+x}" ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
@@ -639,6 +645,14 @@ launch_one() {
     tmux new-window -t "${TMUX_SESSION}:" -n "$name" || { rm -f "$launch_file"; echo "error: tmux new-window failed for '$name'" >&2; return 1; }
   else
     tmux new-session -d -s "$TMUX_SESSION" -n "$name" || { rm -f "$launch_file"; echo "error: tmux new-session failed for '$name'" >&2; return 1; }
+  fi
+  # The window keeps its name (engsys#236 review): the harness renames it with an escape sequence (ESC k … ESC \)
+  # when allow-rename is on, and a renamed window is lost to every name-addressed call here and in the supervisor
+  # (the start check reads "window closed", kill-window misses it, the live session is orphaned and the next tick
+  # launches a duplicate). -n already turns automatic-rename off; it is set again explicitly.
+  if ! tmux set-option -w -t "${TMUX_SESSION}:${name}" allow-rename off || ! tmux set-option -w -t "${TMUX_SESSION}:${name}" automatic-rename off; then
+    rm -f "$launch_file"; tmux kill-window -t "${TMUX_SESSION}:${name}" 2>/dev/null || true
+    echo "error: tmux set-option (allow-rename/automatic-rename off) failed for '$name'" >&2; return 1
   fi
   tmux send-keys -t "${TMUX_SESSION}:${name}" "$line" Enter || { rm -f "$launch_file"; echo "error: tmux send-keys failed for '$name'" >&2; return 1; }
   # Sent is not started (engsys#236): a launch that never starts closes its window, so nothing half-started is left
