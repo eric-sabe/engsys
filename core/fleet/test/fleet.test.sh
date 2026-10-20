@@ -104,6 +104,7 @@ case "$sub" in
   list-windows) cat "$F/windows" ;;
   list-panes)
     case "$fmt" in
+      *window_name*) while IFS= read -r wn; do [ -z "$wn" ] || [ ! -f "$F/cmd-$wn" ] || printf '%s\t%s\n' "$wn" "$(cat "$F/cmd-$wn")"; done <"$F/windows" ;;
       *pane_pid*) cat "$F/pid-$w" 2>/dev/null || exit 1 ;;
       *pane_id*) [ -f "$F/cmd-$w" ] || exit 1; echo "%pane-$w" ;;
       *) cat "$F/cmd-$w" 2>/dev/null || exit 1 ;;
@@ -752,7 +753,7 @@ has "security.env (security lane only): the fleet dir" "$(cat "$STATE/env/securi
 # a security env that also sources session.env (which unsets it) still ends on the fleet dir
 has "…after it sources session.env" "$(sed -n '/session.env/,$p' "$STATE/env/security.env")" "CLAUDE_CONFIG_DIR=$FCFG"
 # named relaunch (the supervisor's path) of a supervised session: the fleet dir too
-grep -Fxv acme-mm "$FAKE/tmux/windows" >"$FAKE/w.new" || true; mv "$FAKE/w.new" "$FAKE/tmux/windows"; : >"$FAKE/tmux.log"
+: >"$FAKE/tmux/windows"; : >"$FAKE/tmux.log"   # no session live at all (an interactive role would make the ~/.claude check read files, which this stub never writes): it asks the (stub) CLI, not its files
 run fleet launch acme-mm
 has "named relaunch of a supervised session: the fleet dir" "$(tl acme-mm)" "export CLAUDE_CONFIG_DIR=$FCFG && "
 # Lines the launcher arms as monsters or security tier, whatever spelling: they must get the fleet dir.
@@ -881,7 +882,9 @@ has "…naming its dir and the login command" "$(sed -n '/== session acme-mm/,/=
 run fleet verify --session acme-security
 rc_is "…the others still pass" 0
 login_all acme-mm
-# a login that works is not asked about again within --max-age (and a logged-out one never is cached)
+# a login that works is not asked about again within --max-age (and a logged-out one never is cached). No window is
+# running here: a running session's dir gets no claude at all from a periodic check (engsys#223, verify.test.sh)
+rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"
 : >"$FAKE/claude.log"; run fleet verify --session acme-mm --max-age 15; run fleet verify --session acme-mm --max-age 15
 eq "verify --max-age: one auth status per dir" "$(grep -c '^auth status' "$FAKE/claude.log" || true)" 1
 # launch reuses verify's logged-in answer, and leaves a running session's credential alone
@@ -893,6 +896,7 @@ run fleet launch
 eq "launch: sessions already running are not asked about" "$(grep -c '^auth status.*CFG='"$SESS" "$FAKE/claude.log" || true)" 0
 # plugin list is not asked on every tick: reused within --max-age while nothing it depends on changed
 pl_calls() { grep -c "^plugin list --json.*CFG=$SESS/acme-mm" "$FAKE/claude.log" || true; }
+rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"   # the launches above started windows: acme-mm is not running for this check
 rm -f "$STATE"/plugin-list.acme-mm.*; : >"$FAKE/claude.log"
 run fleet verify --session acme-mm --max-age 15; run fleet verify --session acme-mm --max-age 15
 eq "verify --max-age: one plugin list per dir while nothing changed" "$(pl_calls)" 1
@@ -1017,7 +1021,7 @@ rm -f "$STATE/verify-wrappers.alerted"
 run fleet verify --auto-sync
 rc_is "--auto-sync on a clean checkout of main: syncs and passes" 0
 eq "…without touching launchd (it runs inside the supervisor's job)" "$(cat "$FAKE/launchctl.log")" ""
-has "…saying it auto-syncs" "$OUT" "auto-syncing (fleet sync, no restarts)"
+has "…saying it fast-forwards with git alone (pins unchanged: no fleet sync, no claude)" "$OUT" "fast-forwarding it (git only, no claude)"
 eq "…the checkout is at main now" "$(git -C "$APPD" rev-parse HEAD)" "$(git -C "$P" rev-parse HEAD)"
 behind notes.txt; git -C "$APPD" pull -q --ff-only origin main   # a tracked, ordinary file to dirty
 behind CLAUDE.md
@@ -1168,6 +1172,33 @@ run fleet restart acme-rel
 has "an exited window is relaunched directly" "$OUT" "acme-rel: relaunched"
 run fleet restart acme-nope
 has "unknown names are skipped" "$OUT" "acme-nope: not in the roster"
+# restart's pane check is a copy of the supervisor's CLAUDE_AUTH_ERRORS: every entry must appear verbatim in it
+SUPSH="$CORE_SRC/skills/agent-sessions/scripts/fleet-supervisor.sh"; drift=""
+while IFS= read -r ent; do
+  ent="${ent#  \'}"; ent="${ent%\'}"
+  grep -Fq -- "$ent" "$KIT_SRC/restart.sh" || drift="$drift [$ent]"
+done < <(sed -n '/^CLAUDE_AUTH_ERRORS=(/,/^)/p' "$SUPSH" | grep "^  '")
+eq "restart.sh's pane patterns carry every supervisor auth-error entry" "$drift" ""
+# engsys#223: a live session whose login expired can't act on a rotation request: say so, type nothing, kill nothing
+SUP="$INST/logs/fleet-supervisor"; mkdir -p "$SUP"
+printf '2026-10-19T17:30:00Z\nthe `acme-mm` window\n' >"$SUP/auth.acme-mm.expired"; : >"$FAKE/tmux.log"
+run fleet restart acme-mm
+rc_is "restart of a session on an auth hold exits 0" 0
+has "…says its login expired and names the dir to re-login" "$OUT" "acme-mm: login expired, not cycled (its own login is on the supervisor's auth hold since 2026-10-19T17:30:00Z). Re-login: CLAUDE_CONFIG_DIR="
+has "…and that the supervisor relaunches it" "$OUT" "The supervisor relaunches it on its next tick"
+hasnt "…no rotation request typed" "$(cat "$FAKE/tmux.log")" "[send-keys]"
+hasnt "…nothing killed" "$(cat "$FAKE/tmux.log")" "[kill-window]"
+rm -f "$SUP/auth.acme-mm.expired"
+echo "⏺ OAuth session expired and could not be refreshed · Please run /login" >"$FT/cap-acme-mm"; : >"$FAKE/tmux.log"
+run fleet restart acme-mm
+has "a pane showing the auth error is treated the same" "$OUT" "acme-mm: login expired, not cycled (its pane shows a Claude auth error"
+hasnt "…no rotation request typed" "$(cat "$FAKE/tmux.log")" "[send-keys]"
+echo "⏺ Failed to authenticate the build agent; retrying" >"$FT/cap-acme-mm"; : >"$FAKE/tmux.log"
+run fleet restart acme-mm
+has "a message only starting like an auth error (not the supervisor's entries) is not one" "$OUT" "acme-mm: rotation requested"
+echo "⏺ Reading the ledger." >"$FT/cap-acme-mm"; : >"$FAKE/tmux.log"
+run fleet restart acme-mm
+has "a healthy monster is still asked to rotate" "$OUT" "acme-mm: rotation requested"
 run fleet restart --all
 has "--all relaunches a missing monster window" "$OUT" "acme-security: relaunched"
 

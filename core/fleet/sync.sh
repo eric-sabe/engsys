@@ -490,7 +490,7 @@ sync_tmp() { # call in the main shell (not in $(…)) so later calls share it; r
 SYNC_CFG="${FLEET_CLAUDE_CONFIG_DIR:-}"   # the config dir the plugin step works on ('' = ~/.claude)
 fleet_claude() {
   if [ -n "$SYNC_CFG" ]; then CLAUDE_CONFIG_DIR="$SYNC_CFG" fleet_dir_lock "$SYNC_CFG" claude "$@"
-  else env -u CLAUDE_CONFIG_DIR claude "$@"; fi
+  else fleet_log_claude_call "$HOME/.claude" claude "$@"; env -u CLAUDE_CONFIG_DIR claude "$@"; fi
 }
 plugin_cli() { (cd "$SYNC_TMP/cwd" && fleet_claude plugin "$@"); }
 # A marketplace that only a project's settings declare (extraKnownMarketplaces) is not "declared in user

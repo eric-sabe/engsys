@@ -110,3 +110,33 @@ fleet_config_dir_fix() {
     echo "fleet config-dir init, then log in once and accept workspace trust (CLAUDE_CONFIG_DIR=<dir> claude: /login, /exit) from a terminal in the Mac's own GUI session, not SSH, then fleet sync and fleet restart --all (fleet guide § 6.1)"
   fi
 }
+
+# fleet_session_alive <name> [<tmux session>] → 0 when a claude process is running in the session's tmux window: a window of that name
+# exists (any tmux session, like launch.sh's own check: `-a`) and its pane's foreground command is not a login shell
+# (the launcher runs claude from the window's shell, so a shell in the foreground means it exited). Anything
+# unreadable (no tmux server, no window) is "not running": the caller then asks the CLI, which is safe only because
+# nothing else holds that credential. Used by verify.sh and restart.sh to keep periodic work off a live session's
+# credential (engsys#223).
+fleet_session_alive() {
+  local out
+  # NOTE: the shell-name pattern below now decides whether a LIVE credential gets a claude process started on it (verify's
+  # CLI fallback): a pane whose foreground command matches it reads as "exited". Only login shells belong here; a name that
+  # a running claude can show (a wrapper script's bash or sh) would make verify start a short-lived claude on its login,
+  # which can rotate the refresh token out from under it (anthropics/claude-code#88583).
+  # The window name is matched exactly (tab-separated fields), and the session is live if ANY pane of ANY window of that
+  # name has a non-shell foreground command: an unrelated same-named window sitting at a shell must not hide a live one.
+  # (No early `exit` in the awk: it would SIGPIPE tmux and fail the pipeline under pipefail.)
+  if [ -n "${2:-}" ]; then   # scoped to one tmux session: what `fleet restart` acts on
+    out="$(tmux list-panes -t "$2:$1" -F '#{pane_current_command}' 2>/dev/null | awk '$0 != "" && $0 !~ /^-?(zsh|bash|sh|fish)$/ { l = 1 } END { if (l) print "live" }')" || return 1
+  else
+    out="$(tmux list-panes -a -F "#{window_name}$(printf '\t')#{pane_current_command}" 2>/dev/null | awk -F'\t' -v n="$1" '$1 == n && $2 != "" && $2 !~ /^-?(zsh|bash|sh|fish)$/ { l = 1 } END { if (l) print "live" }')" || return 1
+  fi
+  [ -n "$out" ]
+}
+# fleet_live_sessions → the roster sessions (this host's roster) that are running, one per line.
+fleet_live_sessions() {
+  local n
+  while IFS= read -r n; do
+    [ -z "$n" ] || ! fleet_session_alive "$n" || printf '%s\n' "$n"
+  done < <(roster_names)
+}

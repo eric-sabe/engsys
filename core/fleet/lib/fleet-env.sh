@@ -386,6 +386,18 @@ case "$FLEET_SECURITY_VERDICT_KEY" in
 esac
 export FLEET_SECURITY_VERDICT_KEY
 
+# fleet_log_claude_call <dir> <command...> → one line "<UTC time> <dir> <command>" in $FLEET_STATE/claude-invocations.log,
+# so a login that dies can be matched against the claude processes the fleet itself ran on its dir (engsys#223). Called
+# by fleet_dir_lock and by the callers that run claude on ~/.claude (verify.sh, sync.sh); the supervisor's auth probe
+# keeps its own log in its state dir. Best effort, never fails the caller; created 0600; refuses to write through a
+# symlink (the log or its .tmp: .fleet/ is writable by a session); cut to its last 500 lines once past 200 KB.
+fleet_log_claude_call() {
+  local f="$FLEET_STATE/claude-invocations.log" d="$1"; shift
+  { mkdir -p "$FLEET_STATE" && [ ! -L "$f" ] && [ ! -L "$f.tmp" ] && (umask 077; printf '%s %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$d" "$*" >>"$f"); } 2>/dev/null || return 0
+  if [ "$(wc -c <"$f" 2>/dev/null || echo 0)" -gt 204800 ]; then (umask 077; tail -n 500 "$f" >"$f.tmp" && mv "$f.tmp" "$f") 2>/dev/null || true; fi
+  return 0
+}
+
 # fleet_dir_lock <dir> <command...> → runs the command holding a per-config-dir lock, in per-session mode; plain
 # otherwise. Fleet commands that run `claude` against a session's dir (verify's auth status and plugin list) are
 # extra processes on that credential, and the CLI contacts api.anthropic.com for them even when logged out, so
@@ -393,7 +405,7 @@ export FLEET_SECURITY_VERDICT_KEY
 # the lock stays busy for two minutes.
 fleet_dir_lock() {
   local dir="$1"; shift
-  if [ "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:-off}" != on ]; then "$@"; return; fi
+  if [ "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:-off}" != on ]; then fleet_log_claude_call "$dir" "$@"; "$@"; return; fi
   local lock guard waited=0 rc=0 lm owner ostart me mystart
   lock="$FLEET_STATE/locks/claude-$(printf '%s' "$dir" | cksum | cut -d' ' -f1).lock"
   guard="$lock.reclaim"
@@ -421,6 +433,7 @@ fleet_dir_lock() {
     sleep 0.5
   done
   printf '%s|%s\n' "$me" "$mystart" >"$lock/holder" 2>/dev/null || true
+  fleet_log_claude_call "$dir" "$@"   # logged once the lock is held: the time is when the process starts, not when it queued
   "$@" || rc=$?
   rm -f "${lock:?}/holder"; rmdir "$lock" 2>/dev/null || true
   return "$rc"

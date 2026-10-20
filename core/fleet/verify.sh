@@ -52,6 +52,16 @@
 # a logged-in answer is reused for --max-age minutes: the CLI contacts the API even for those, so they are
 # extra processes on a credential that the session's own process already refreshes.
 #
+# A running session's credential is never touched by a periodic check (engsys#223). With --max-age (the supervisor's
+# tick) and --session, when the session is running (a claude process in its tmux window, fleet_session_alive), verify
+# spawns NO claude process on its dir: the plugin list is built from the dir's files (lib/plugin-list-from-files.mjs:
+# plugins/installed_plugins.json plus enabledPlugins in the user, project and local settings; unreadable or malformed
+# is "not verified", exit 3), and `claude auth status` is skipped (the supervisor's pane watch catches an expired
+# login of a running session). A short-lived claude refreshing the access token near expiry rotates the refresh token
+# out from under the live process (anthropics/claude-code#88583). Without --max-age (a launch), or when the session
+# is not running, nothing shares the token, so the CLI is used and the check fails closed as before. Residual: a
+# claude started by hand on that dir outside tmux is not seen.
+#
 # Exit: 0 match | 1 MISMATCH | 3 not verified (GitHub unreachable, no pin or not a tag, nothing installed)
 #       | 2 usage. Merge and maintain sessions start only on 0 (engsys#86 review H1).
 #
@@ -133,10 +143,25 @@ elif [ "$alert" = 1 ] && [ -f "$FORCED_LATCH" ]; then
   notify --level info --incident engsys-ref-forced --resolve "Resolved: ENGSYS_REF on $host follows the pin ($pinned) again." && rm -f "$FORCED_LATCH"
 fi
 
+# live_session → 0 when this is a periodic check (--max-age) of a session that is running: its credential belongs to that
+# process, so verify must not start a claude on it. Evaluated once.
+LIVE=""
+live_session() {
+  if [ -z "$LIVE" ]; then
+    LIVE=0
+    if [ "$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION" = on ] && [ -n "$max_age" ] && [ -n "$session" ] && fleet_session_alive "$session"; then LIVE=1; fi
+  fi
+  [ "$LIVE" = 1 ]
+}
+
 # dir_logged_out → 0 only when claude says explicitly that the fleet's config dir is not logged in. In per-session mode
 # the call is serialized per dir, and a logged-in answer is kept for --max-age minutes (a logged-out one never is).
 dir_logged_out() {
   local ok="$FLEET_STATE/auth-ok$SFX" li at
+  if live_session; then   # engsys#223: the running session owns the credential; the supervisor's pane watch sees its expiry
+    echo "fleet verify: login not checked: session $session is running (the supervisor's pane watch covers it)"
+    return 1
+  fi
   if [ "$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION" = on ] && [ -n "$max_age" ] && at="$(cat "$ok" 2>/dev/null)" && [[ "$at" =~ ^[0-9]+$ ]] \
     && [ $(( $(date +%s) - at )) -lt $(( max_age * 60 )) ]; then return 1; fi
   li="$( (cd "${TMPDIR:-/tmp}" && CLAUDE_CONFIG_DIR="$FLEET_CLAUDE_CONFIG_DIR" fleet_dir_lock "$FLEET_CLAUDE_CONFIG_DIR" claude auth status --json </dev/null) 2>/dev/null | jq -r 'if .loggedIn == true then "true" elif .loggedIn == false then "false" else "" end' 2>/dev/null || true)"
@@ -160,6 +185,10 @@ dir_logged_out() {
 # (no --max-age) never uses it: the gate that decides whether a monster starts re-checks every time.
 list_plugins() {
   local d="${FLEET_CLAUDE_CONFIG_DIR:-}" cache="$FLEET_STATE/plugin-list$SFX.json" keyf="$FLEET_STATE/plugin-list$SFX.key" key f m
+  if live_session; then   # engsys#223: from the dir's files, no claude process; a failure is "not verified" (the caller's rc 3)
+    node "$FLEET_KIT_DIR/lib/plugin-list-from-files.mjs" --config-dir "$d" --project-dir "$PIN_DIR" >"$plist" 2>"$plist.err" || { tail -n 1 "$plist.err" >&2; rm -f "$plist.err"; return 1; }
+    rm -f "$plist.err"; return 0
+  fi
   if [ "$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION" = on ] && [ -n "$max_age" ]; then
     key="${ENGSYS_REF:-}|${INSTANCE_REF:-}|$d"
     for f in "$d/plugins" "$d/plugins/installed_plugins.json" "$d/plugins/known_marketplaces.json" "$d/settings.json" "$d/.claude.json" "$PIN_DIR/.claude/settings.json" "${PIN_SETTINGS:-}"; do
@@ -232,7 +261,9 @@ else
   else
     # The cwd decides which project-scope installs apply: the sessions start in PIN_DIR (engsys#86 review H2).
     if ! list_plugins; then
-      out="fleet verify: not verified: claude plugin list failed in $PIN_DIR"; rc=3
+      if live_session; then out="fleet verify: not verified: the plugin list could not be read from the files of $FLEET_CLAUDE_CONFIG_DIR (a running session's login is not touched)"
+      else out="fleet verify: not verified: claude plugin list failed in $PIN_DIR"; fi
+      rc=3
     fi
   fi
   if [ "$rc" = 0 ]; then
@@ -279,8 +310,17 @@ else
     if [ "$rc" = 0 ] && [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] && [ "${FLEET_CLAUDE_CONFIG_DIR_SCOPE:-all}" = supervised ] \
       && [ "${HARNESS:-claude}" = claude ]; then
       plist_u="$(mktemp "$FLEET_STATE/plugin-list-user.XXXXXX")"
-      if ! (cd "$PIN_DIR" && env -u CLAUDE_CONFIG_DIR claude plugin list --json) >"$plist_u" 2>/dev/null; then
-        out="$out"$'\n'"fleet verify: not verified: claude plugin list failed in $PIN_DIR for ~/.claude (the interactive roles)"; rc=3
+      # ~/.claude belongs to the live interactive roles: a periodic check (--max-age) reads its files, never starts a claude on it (engsys#223)
+      # (a launch has no --max-age, but an interactive role may be live on ~/.claude too: then its files, the same way)
+      u_files=0
+      if [ -n "$max_age" ]; then u_files=1
+      else fleet_roster_prepare; while IFS= read -r un; do if [ -n "$un" ] && is_interactive "$un"; then u_files=1; break; fi; done < <(fleet_live_sessions); fi
+      if [ "$u_files" = 1 ]; then u_list=(node "$FLEET_KIT_DIR/lib/plugin-list-from-files.mjs" --config-dir "$HOME/.claude" --project-dir "$PIN_DIR")
+      else fleet_log_claude_call "$HOME/.claude" claude plugin list --json; u_list=(env -u CLAUDE_CONFIG_DIR claude plugin list --json); fi
+      if ! (cd "$PIN_DIR" && "${u_list[@]}") >"$plist_u" 2>/dev/null; then
+        if [ "$u_files" = 1 ]; then out="$out"$'\n'"fleet verify: not verified: the plugin list could not be read from the files of ~/.claude (the interactive roles; their login is not touched)"
+        else out="$out"$'\n'"fleet verify: not verified: claude plugin list failed in $PIN_DIR for ~/.claude (the interactive roles)"; fi
+        rc=3
       else
         uargs=(--repo "$repo" --tag "$ref" --plugin-id "engsys@$ENGSYS_MARKETPLACE" --project-dir "$PIN_DIR" --plugins "$plist_u" --harness claude)
         uargs+=(${market_args[@]+"${market_args[@]}"})
@@ -302,8 +342,15 @@ if [ "$rc" = 1 ]; then
   probs="$(sed -n 's/^  \(.*\)$/\1/p' <<<"$out")"
   if [ -n "$probs" ] && ! grep -qv '^stale ' <<<"$probs"; then only_stale=1; fi
 fi
-sync_why=""
+sync_why="" sync_deferred=0
 if [ "$only_stale" = 1 ] && [ "$auto_sync" = 1 ]; then
+  # engsys#223: the common case, a pin checkout that is merely behind with the pins unchanged, is fixed by a git
+  # fast-forward alone, with no claude, so it is done even while sessions run. Only a change of the pins needs the parts
+  # of fleet sync that run `claude plugin ...` / `claude auth status` on every session dir, running ones included: a
+  # periodic check defers those while any session is running (the stale mismatch stands, relaunches stay held, alerted
+  # as deferred and re-alerted every VERIFY_DEFER_REALERT_MIN minutes), and they happen on a later tick once none is
+  # running, or when the operator runs fleet sync.
+  live_now="" pins_same=0 sync_ff_only=0
   # Full ref names, never --short: a local branch or tag named origin/<x> makes --short ambiguous.
   pin_branch="$(git -C "$PIN_DIR" symbolic-ref -q HEAD 2>/dev/null || true)"
   case "$pin_branch" in refs/heads/*) pin_branch="${pin_branch#refs/heads/}" ;; *) pin_branch="" ;; esac
@@ -318,7 +365,28 @@ if [ "$only_stale" = 1 ] && [ "$auto_sync" = 1 ]; then
       ':(exclude,icase).claude/agent-memory-local' ':(exclude,icase).claude/first-run' \
       ':(exclude,icase).claude/assistant-daemon-state.json' 2>/dev/null || echo dirty)" ]; then sync_why="the pin checkout's .claude/ has untracked files"
   else
-    echo "fleet verify: the pin checkout is behind $def_branch and files the sessions load changed there: auto-syncing (fleet sync, no restarts)"
+    # a fetch and a fast-forward are git only; compare the pins (marketplaces and enabled plugins) of HEAD and the tip
+    fetched=0
+    if git -C "$PIN_DIR" fetch -q origin 2>/dev/null; then
+      fetched=1
+      pins_head="$(git -C "$PIN_DIR" show HEAD:.claude/settings.json 2>/dev/null | jq -cS '{extraKnownMarketplaces, enabledPlugins}' 2>/dev/null || echo head)"
+      pins_tip="$(git -C "$PIN_DIR" show "refs/remotes/origin/$def_branch:.claude/settings.json" 2>/dev/null | jq -cS '{extraKnownMarketplaces, enabledPlugins}' 2>/dev/null || echo tip)"
+      [ "$pins_head" != "$pins_tip" ] || pins_same=1
+    fi
+    if [ "$fetched" = 0 ]; then
+      sync_why="git fetch of origin failed in the pin checkout (offline?); nothing was changed, the next tick tries again"
+    elif [ "$pins_same" = 1 ]; then
+      echo "fleet verify: the pin checkout is behind $def_branch and the pins are unchanged: fast-forwarding it (git only, no claude)"
+      if git -C "$PIN_DIR" merge -q --ff-only "refs/remotes/origin/$def_branch" 2>/dev/null; then
+        [ -z "${plist:-}" ] || rm -f "$plist"
+        reargs=(--instance "$FLEET_REPO"); [ "$alert" = 0 ] || reargs+=(--alert); [ -z "$max_age" ] || reargs+=(--max-age "$max_age"); [ -z "$session" ] || reargs+=(--session "$session")
+        exec bash "$FLEET_KIT_DIR/verify.sh" "${reargs[@]}"   # once: the re-run has no --auto-sync
+      fi
+      sync_why="the pin checkout could not fast-forward to origin/$def_branch"
+    elif [ "$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION" = on ] && [ -n "$max_age" ] && live_now="$(fleet_live_sessions | paste -sd' ' -)" && [ -n "$live_now" ]; then
+      sync_deferred=1 sync_why="the pins changed, and moving the plugins needs claude on every session dir, which a periodic check never starts on a running session's login: sync deferred while $(wc -w <<<"$live_now" | tr -d ' ') session(s) run ($live_now). This does not clear by itself while they run: stop or restart them (it then runs on its own), or run fleet sync by hand, which does start claude on the live logins (a small risk of logging a session out)"
+    else
+    echo "fleet verify: the pin checkout is behind $def_branch and the pins changed: auto-syncing (fleet sync, no restarts)"
     # --no-jobs: this runs inside the supervisor's own launchd job, which a job reload would kill.
     if bash "$FLEET_KIT_DIR/sync.sh" --instance "$FLEET_REPO" --no-jobs </dev/null >&2; then
       [ -z "${plist:-}" ] || rm -f "$plist"
@@ -326,8 +394,10 @@ if [ "$only_stale" = 1 ] && [ "$auto_sync" = 1 ]; then
       exec bash "$FLEET_KIT_DIR/verify.sh" "${reargs[@]}"   # once: the re-run has no --auto-sync
     fi
     sync_why="fleet sync failed (above)"
+    fi
   fi
-  out="$out"$'\n'"fleet verify: could not auto-sync: $sync_why"
+  if [ "$sync_deferred" = 1 ]; then out="$out"$'\n'"fleet verify: $sync_why"
+  else out="$out"$'\n'"fleet verify: could not auto-sync: $sync_why"; fi
 fi
 printf '%s\n' "$out"
 
@@ -335,7 +405,7 @@ if [ "$alert" = 1 ]; then
   case "$rc" in
     0)
       if [ -f "$LATCH" ]; then
-        notify --level info --incident "wrapper-integrity$INC" --resolve "Resolved: the engsys plugin files on $host match $repo@$ref again." && rm -f "$LATCH"
+        notify --level info --incident "wrapper-integrity$INC" --resolve "Resolved: the engsys plugin files on $host match $repo@$ref again." && rm -f "$LATCH" "$LATCH.at"
       fi
       if [ -f "$UNVERIFIED_LATCH" ]; then
         notify --level info --incident "wrapper-integrity-unverified$INC" --resolve "Resolved: the engsys plugin check on $host runs again, and passes." && rm -f "$UNVERIFIED_LATCH"
@@ -352,11 +422,17 @@ if [ "$alert" = 1 ]; then
       fi ;;
     1)
       fp="$(sed -n 's/^fingerprint: //p' <<<"$out" | tail -1)"
-      if [ "$only_stale" = 1 ] && [ "$(cat "$LATCH" 2>/dev/null)" != "$fp|$auto_sync|$sync_why" ]; then
+      # latch on a fixed reason for a deferral: the list of running sessions changes with every start and stop
+      latch_why="$sync_why"; [ "$sync_deferred" != 1 ] || latch_why="deferred: sessions running"
+      # a deferral that persists is alerted again every VERIFY_DEFER_REALERT_MIN minutes (default 360): it never clears by itself
+      defer_due=0
+      if [ "$sync_deferred" = 1 ] && [ -f "$LATCH" ] && at="$(cat "$LATCH.at" 2>/dev/null)" && [[ "$at" =~ ^[0-9]+$ ]] \
+        && [ $(( $(date +%s) - at )) -ge $(( ${VERIFY_DEFER_REALERT_MIN:-360} * 60 )) ]; then defer_due=1; fi
+      if [ "$only_stale" = 1 ] && { [ "$(cat "$LATCH" 2>/dev/null)" != "$fp|$auto_sync|$latch_why" ] || [ "$defer_due" = 1 ]; }; then
         lines="$(sed -n 's/^  \(.*\)$/\1/p' <<<"$out" | awk 'NR <= 8')"
-        notify --level alert --incident "wrapper-integrity$INC" "Plugin check on $host${session:+ (session $session)}: the pin checkout ($PIN_DIR) is behind main, and files the sessions load changed there. $(if [ -n "$sync_why" ]; then printf 'Auto-sync could not fast-forward it: %s. Please bring the checkout back to main and run fleet sync.' "$sync_why"; elif [ "$auto_sync" = 1 ]; then printf 'Auto-syncing: fleet sync is running for it now.'; else printf 'Run fleet sync (a supervised host also does it on its own, through fleet verify --auto-sync).'; fi) Merge and maintain sessions are held until it matches; running sessions are left as they are. This is not a sign of tampering. Behind on:
+        notify --level alert --incident "wrapper-integrity$INC" "Plugin check on $host${session:+ (session $session)}: the pin checkout ($PIN_DIR) is behind main, and files the sessions load changed there. $(if [ "$sync_deferred" = 1 ]; then printf 'Auto-sync is deferred: %s.' "$sync_why"; elif [ -n "$sync_why" ]; then printf 'Auto-sync could not fast-forward it: %s. Please bring the checkout back to main and run fleet sync.' "$sync_why"; elif [ "$auto_sync" = 1 ]; then printf 'Auto-syncing: fleet sync is running for it now.'; else printf 'Run fleet sync (a supervised host also does it on its own, through fleet verify --auto-sync).'; fi) Merge and maintain sessions are held until it matches; running sessions are left as they are. This is not a sign of tampering. Behind on:
 $lines
-Details: fleet verify" && printf '%s\n' "$fp|$auto_sync|$sync_why" >"$LATCH"
+Details: fleet verify" && printf '%s\n' "$fp|$auto_sync|$latch_why" >"$LATCH" && date +%s >"$LATCH.at"
       elif [ "$only_stale" = 0 ] && [ "$(cat "$LATCH" 2>/dev/null)" != "$fp" ]; then
         summary="$(sed -n 's/^summary: //p' <<<"$out" | tail -1)"
         hint="$(sed -n 's/^hint: //p' <<<"$out" | tail -1)"
