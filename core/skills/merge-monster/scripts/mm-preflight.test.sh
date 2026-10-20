@@ -28,12 +28,13 @@ case "$1 $2" in
   "pr view") cat "$FAKE/view.json" ;;
   "api graphql") echo '{"nodes":[]}' ;;
   "api repos/acme/app/pulls/7/files"*) [ ! -f "$FAKE/files-fail" ] || { echo "gh: HTTP 502" >&2; exit 1; }; cat "$FAKE/files.json" ;;
-  "api repos/acme/app/pulls/7") [ ! -f "$FAKE/files-fail" ] || { echo "gh: HTTP 502" >&2; exit 1; }; cat "$FAKE/changed" ;;
+  "api repos/acme/app/pulls/7") [ ! -f "$FAKE/files-fail" ] || { echo "gh: HTTP 502" >&2; exit 1; }; echo "$(cat "$FAKE/changed") $(cat "$FAKE/headsha")" ;;
   *) echo "fake gh: unexpected $*" >&2; exit 2 ;;
 esac
 SH
 chmod +x "$T/bin/gh"
 export FAKE="$T" FLEET_GH="$T/bin/gh"
+printf '%s\n' "$HEAD_SHA" >"$T/headsha"
 mkdir -p "$T/cfg0" "$T/home"; export CLAUDE_CONFIG_DIR="$T/cfg0" HOME="$T/home"; unset FLEET_CLAUDE_CONFIG_DIR ENGSYS_CONFIG_DIR_SESSIONS ENGSYS_MM_CONFIG   # hermetic: no real plugin install is looked at for a fleet config
 unset FLEET_STATE GH_APP_ENV_FILE
 
@@ -240,6 +241,12 @@ rc_is "ENGSYS_MM_CONFIG supplies the config when --config is omitted" 1
 mkdir -p "$T/wd/.claude"; cp "$CFG" "$T/wd/.claude/merge-monster.yml"
 RC=0; OUT="$(cd "$T/wd" && bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --security-key-file "$KEY" 2>&1)" || RC=$?
 rc_is "…and so does .claude/merge-monster.yml in the cwd" 1
+# the head moves between `pr view` and the file list: fail closed rather than judge two different commits
+files "services/api/x.ts"; view; printf '%s\n' "$OLD_SHA" >"$T/headsha"
+run --config "$CFG" --security-key-file "$KEY"
+rc_is "a PR head that moved while the files were read fails closed" 1
+has "  …naming it" "the PR head moved"
+printf '%s\n' "$HEAD_SHA" >"$T/headsha"
 # a session-supplied --config can add requirements, never replace the discoverable ones (CodeRabbit, major)
 printf 'repo: x\n' >"$T/weak.yml"
 files "services/dashboard/app/(auth)/x.tsx"; view

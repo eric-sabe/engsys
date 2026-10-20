@@ -159,7 +159,11 @@ if [ "${#SS_CONFIGS[@]}" -gt 0 ] || [ "$SEC_VERDICT" -eq 1 ]; then
     if [ "$SS_GLOBS" -gt 0 ]; then
       "$FLEET_GH" api "repos/$REPO/pulls/$PR/files?per_page=100" --paginate | jq -s -c 'add // [] | map({filename, previous_filename})' >"$SS_FILES_TMP" || sec_fail "security_file_list_unreadable: listing the PR files failed"
       [ -s "$SS_FILES_TMP" ] || sec_fail "security_file_list_unreadable: the file list is empty"
-      SS_COUNT=$("$FLEET_GH" api "repos/$REPO/pulls/$PR" --jq '.changed_files') || sec_fail "security_file_list_unreadable: reading changed_files failed"
+      # read after the file list, with the head it describes: if the head moved since `pr view`, the verdict check below
+      # would be judging another commit than the file list, so fail closed (the next tick sees the new head)
+      SS_META=$("$FLEET_GH" api "repos/$REPO/pulls/$PR" --jq '"\(.changed_files) \(.head.sha)"') || sec_fail "security_file_list_unreadable: reading changed_files failed"
+      SS_COUNT="${SS_META%% *}"
+      [ "${SS_META#* }" = "$(jq -r '.headRefOid // ""' <<<"$VIEW")" ] || sec_fail "security_file_list_unreadable: the PR head moved while it was read"
       [[ "$SS_COUNT" =~ ^[0-9]+$ ]] || sec_fail "security_file_list_unreadable: changed_files is not a number"
     fi
     for c in "${SS_LIST[@]}"; do
