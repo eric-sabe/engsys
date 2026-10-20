@@ -1,6 +1,6 @@
 {
   "name": "engsys",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "description": "The meta-harness for AI software engineering — 15 specialist personas, 24 stack packs, Adaptive SDD, compounding memory, and an optional autonomous fleet for Claude Code, GitHub Copilot CLI, and Google Antigravity.",
   "bin": {
     "engsys": "./install"
