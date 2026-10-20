@@ -32,6 +32,7 @@ case "$1" in
       ( cd "$FAKE" && "$FAKE_SHELL" -c '. "$1"' _ "$f" ) >"$FAKE/shell.out" 2>&1 </dev/null || true
       if [ -s "$FAKE/ran" ]; then echo claude >"$FAKE/pane"; else echo zsh >"$FAKE/pane"; fi
     elif [ -n "${FAKE_NO_START:-}" ]; then echo zsh >"$FAKE/pane"
+    elif [ -n "${FAKE_AT_RM:-}" ]; then rm -f "$f"; echo rm >"$FAKE/pane"
     elif [ -n "${FAKE_EXIT_AT_ONCE:-}" ]; then rm -f "$f"; echo zsh >"$FAKE/pane"
     else rm -f "$f"; echo claude >"$FAKE/pane"; fi ;;
   list-panes) cat "$FAKE/pane" 2>/dev/null || exit 1 ;;
@@ -327,6 +328,9 @@ has "…its window is closed" "$acts" "kill-window acme:acme-build"
 run claude "$BUILD" FAKE_EXIT_AT_ONCE=1
 if [ "$rc" -ne 0 ]; then ok "harness exits at once: exits non-zero"; else no "exits at once: non-zero" "rc=$rc"; fi
 has "…says the line ran but claude is not running" "$err" "the launch line ran, but claude is not running (the pane is back at zsh)"
+run claude "$BUILD" FAKE_AT_RM=1
+if [ "$rc" -ne 0 ]; then ok "file gone but the pane still at rm (the line's own rm): not counted as started"; else no "pane at rm is not started" "rc=$rc"; fi
+has "…says the harness is not running" "$err" "the launch line ran, but claude is not running (the pane is back at rm)"
 run claude "$BUILD" FAKE_NO_START=1 LAUNCH_START_TIMEOUT_SEC=0
 [ "$rc" -eq 0 ] && ok "LAUNCH_START_TIMEOUT_SEC=0: no start check (sent = launched)" || no "timeout 0 skips the check" "$err"
 run claude "$BUILD" LAUNCH_START_TIMEOUT_SEC=soon

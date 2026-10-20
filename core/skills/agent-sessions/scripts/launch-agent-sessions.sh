@@ -420,15 +420,16 @@ is_shell_cmd() {
 # wait_started <name> <launch file> → 0 once the session has started: the launch file is gone (the shell ran the
 # line up to the harness, which removes it just before starting) and the pane's foreground command is no longer
 # the shell. Otherwise, after LAUNCH_START_TIMEOUT_SEC, says why (with the pane's last lines) and returns 1.
-# The file is checked BEFORE the pane is read: a pane sampled first could show the `rm` itself and then count as
-# started once the file is gone, though the harness never ran.
+# The file is checked BEFORE the pane is read, and a pane at `rm` is not started: the line's `command rm` unlinks
+# the file before it exits, so a sample can see the file gone with `rm` still in the foreground, and the harness
+# may yet fail to exec.
 wait_started() {
   local name="$1" file="$2" target="${TMUX_SESSION}:$1" waited=0 cur why gone
   while :; do
     gone=0; [ -e "$file" ] || gone=1
     cur="$(tmux list-panes -t "$target" -F '#{pane_current_command}' 2>/dev/null | head -1 || true)"
     if [ -z "$cur" ]; then why="its window closed"; break; fi
-    if [ "$gone" = 1 ] && ! is_shell_cmd "$cur"; then return 0; fi
+    if [ "$gone" = 1 ] && ! is_shell_cmd "$cur" && [ "$cur" != rm ]; then return 0; fi
     if [ "$waited" -ge "$LAUNCH_START_TIMEOUT_SEC" ]; then
       if [ -e "$file" ]; then why="the launch line has not reached the harness yet (the pane is still at $cur)"
       else why="the launch line ran, but $HARNESS_BIN is not running (the pane is back at $cur)"; fi
