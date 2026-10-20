@@ -1,4 +1,6 @@
 import { describe, it } from 'node:test';
+import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import assert from 'node:assert/strict';
 import { compileGlob, loadPolicy, decide, GITHUB_FILE_LIMIT } from './security-sensitive.mjs';
 
@@ -77,5 +79,23 @@ describe('decide', () => {
     const none = { signedVerdict: true, globs: [], label: 'security' };
     assert.equal(decide(none, { labels: [] }).required, false);
     assert.equal(decide(none, { labels: [{ name: 'security' }] }).required, true);
+  });
+});
+
+describe('config.example.yml', () => {
+  const { parseYaml } = createRequire(import.meta.url)('./yaml.js');
+  const text = fs.readFileSync(new URL('../skills/merge-monster/config.example.yml', import.meta.url), 'utf8');
+  it('keeps every ready_requirements key under it, and the security keys at the top level', () => {
+    const cfg = parseYaml(text);
+    assert.deepEqual(Object.keys(cfg.ready_requirements), ['review_marker', 'signed_security_verdict', 'security_verdict_key_file', 'sdd_contract']);
+    assert.equal(cfg.ready_requirements.sdd_contract, false);
+    assert.equal(cfg.ready_requirements.signed_security_verdict, false);
+    assert.ok('security_sensitive_label' in cfg && !('security_sensitive_label' in cfg.ready_requirements));
+    assert.equal(cfg.security_sensitive_label, 'security');
+  });
+  it('uncommenting the globs example gives the list', () => {
+    const on = text.replace('  # - services/dashboard/app/(auth)/**', '  - services/dashboard/app/(auth)/**');
+    assert.deepEqual(parseYaml(on).security_sensitive_globs, ['services/dashboard/app/(auth)/**']);
+    assert.equal(parseYaml(on).ready_requirements.sdd_contract, false);
   });
 });

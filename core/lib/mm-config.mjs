@@ -8,10 +8,12 @@
 // A fleet's instance plugin carries per-repo config at <plugin root>/repos/<owner>/<repo>/ (the same directory the
 // plugin's SessionStart hook injects as `fleet config dir: ...`, core/fleet/scaffold/plugin/hooks/fleet-context.sh).
 // A plugin root is found, in each Claude config dir, from plugins/installed_plugins.json (every installPath); only
-// when that gives none is plugins/cache/<marketplace>/<plugin>/<version>/ walked (old versions stay on disk there). The directory name is tried as the slug and lowercased.
+// when that gives none is plugins/cache/<marketplace>/<plugin>/<version>/ walked (old versions stay on disk there).
 // `fleetManaged` is true when any plugin has a repos/<owner>/<repo>/ directory; `missing` when it is fleet-managed but
 // no merge-monster.yml in it is a readable file, so callers can fail closed instead of silently staying opt-in.
-// Config dirs default to $CLAUDE_CONFIG_DIR, else ~/.claude.
+// Config dirs default to defaultConfigDirs(): $CLAUDE_CONFIG_DIR plus the fleet's known dirs ($FLEET_CLAUDE_CONFIG_DIR, the
+// per-session dirs beside it, ~/.claude), all searched, so a session cannot hide the config by repointing one variable.
+// Directory names match case-insensitively, by listing.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -48,23 +50,47 @@ export function pluginRoots(configDir) {
   return [...roots];
 }
 
+/** Entries of `parent` whose name equals `name` ignoring case (a listing, so it also works on a case-sensitive filesystem). */
+function ciChildren(parent, name) {
+  const want = name.toLowerCase();
+  try { return fs.readdirSync(parent).filter((e) => e.toLowerCase() === want).map((e) => path.join(parent, e)); } catch { return []; }
+}
+
+/**
+ * The Claude config dirs a fleet session's plugins can be found in: the inherited $CLAUDE_CONFIG_DIR, and the fleet's
+ * known dirs, so a session that points CLAUDE_CONFIG_DIR somewhere empty does not escape: $FLEET_CLAUDE_CONFIG_DIR, every
+ * dir under its `.sessions` sibling (per-session dirs) and under $ENGSYS_CONFIG_DIR_SESSIONS, and ~/.claude.
+ */
+export function defaultConfigDirs(env = process.env) {
+  const dirs = [];
+  const add = (d) => { if (d && !dirs.includes(d)) dirs.push(d); };
+  const sessionsOf = (d) => { try { for (const e of fs.readdirSync(d)) if (isDir(path.join(d, e))) add(path.join(d, e)); } catch { /* none */ } };
+  add(env.CLAUDE_CONFIG_DIR);
+  if (env.FLEET_CLAUDE_CONFIG_DIR) { add(env.FLEET_CLAUDE_CONFIG_DIR); sessionsOf(`${env.FLEET_CLAUDE_CONFIG_DIR.replace(/\/+$/, '')}.sessions`); }
+  if (env.ENGSYS_CONFIG_DIR_SESSIONS) sessionsOf(env.ENGSYS_CONFIG_DIR_SESSIONS);
+  add(path.join(env.HOME || os.homedir(), '.claude'));
+  return dirs;
+}
+
 export function resolve({ slug, configDirs }) {
   const fleetDirs = [];
   const configs = [];
-  const seen = new Set(); // by inode: a case-insensitive filesystem answers both spellings of the slug with one directory
+  const seen = new Set(); // by inode: a case-insensitive filesystem answers every spelling of the slug with one directory
+  const [owner, name] = slug.split('/');
   for (const d of configDirs) {
     for (const root of pluginRoots(d)) {
-      for (const cand of [slug, slug.toLowerCase()]) {
-        const dir = path.join(root, 'repos', cand);
-        if (!isDir(dir)) continue;
-        const st = fs.statSync(dir);
-        const key = `${st.dev}:${st.ino}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        const real = fs.realpathSync(dir);
-        fleetDirs.push(real);
-        const cfg = path.join(real, 'merge-monster.yml');
-        if (isFile(cfg) && readable(cfg)) configs.push(cfg);
+      for (const ownerDir of ciChildren(path.join(root, 'repos'), owner)) {
+        for (const dir of ciChildren(ownerDir, name)) {
+          if (!isDir(dir)) continue;
+          const st = fs.statSync(dir);
+          const key = `${st.dev}:${st.ino}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const real = fs.realpathSync(dir);
+          fleetDirs.push(real);
+          const cfg = path.join(real, 'merge-monster.yml');
+          if (isFile(cfg) && readable(cfg)) configs.push(cfg);
+        }
       }
     }
   }
@@ -87,7 +113,7 @@ function main(argv) {
   }
   if (!SLUG_RE.test(slug)) { process.stdout.write(`${JSON.stringify({ slug: '', configs: [], fleetDirs: [], fleetManaged: false, missing: false })}\n`); return; }
   const configDirs = dirs.filter(Boolean);
-  if (!configDirs.length) configDirs.push(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'));
+  if (!configDirs.length) configDirs.push(...defaultConfigDirs());
   process.stdout.write(`${JSON.stringify(resolve({ slug, configDirs }))}\n`);
 }
 

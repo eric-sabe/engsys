@@ -34,7 +34,7 @@ esac
 SH
 chmod +x "$T/bin/gh"
 export FAKE="$T" FLEET_GH="$T/bin/gh"
-mkdir -p "$T/cfg0"; export CLAUDE_CONFIG_DIR="$T/cfg0"   # hermetic: no real plugin install is looked at for a fleet config
+mkdir -p "$T/cfg0" "$T/home"; export CLAUDE_CONFIG_DIR="$T/cfg0" HOME="$T/home"; unset FLEET_CLAUDE_CONFIG_DIR ENGSYS_CONFIG_DIR_SESSIONS ENGSYS_MM_CONFIG   # hermetic: no real plugin install is looked at for a fleet config
 unset FLEET_STATE GH_APP_ENV_FILE
 
 # sign <key> <sha> <verdict> <text> [minutes-ago] → a comment body on stdout, signed by the real library
@@ -302,6 +302,47 @@ RC=0; OUT="$(cd "$T/wd" && CLAUDE_CONFIG_DIR="$FLEETCFG2" bash "$HERE/mm-preflig
 rc_is "…unless the repo carries its own .claude/merge-monster.yml (in-repo wins; positive control)" 0
 RC=0; OUT="$(cd "$T/cfg0" && CLAUDE_CONFIG_DIR="$FLEETCFG2" bash "$HERE/mm-preflight.sh" --repo other/repo --pr 7 --security-key-file "$KEY" 2>&1)" || RC=$?
 rc_is "a repo with no fleet directory is not fleet-managed: unchanged opt-in (positive control)" 0
+
+echo "engsys#229 review round: capabilities, pruned env config, repointed config dir, case-insensitive match"
+RC=0; OUT="$(bash "$HERE/mm-preflight.sh" --capabilities 2>&1)" || RC=$?
+rc_is "--capabilities exits 0 without touching GitHub (no gh, no repo)" 0
+eq_out() { if [ "$OUT" = "$2" ]; then ok "$1"; else bad "$1" "$OUT"; fi; }
+eq_out "…and prints exactly the two tokens, one per line" "$(printf 'security-verdict\nsecurity-sensitive-globs')"
+RC=0; OUT="$(bash "$HERE/mm-preflight.sh" --capabilities --repo a/b 2>&1)" || RC=$?
+rc_is "…and only as the sole argument (anything else is the normal usage path)" 2
+# a pruned ENGSYS_MM_CONFIG falls back to the discovered copy, with a warning
+files "services/dashboard/app/(auth)/x.tsx"; view
+RC=0; OUT="$(cd "$T/cfg0" && CLAUDE_CONFIG_DIR="$FLEETCFG" ENGSYS_MM_CONFIG="$T/pruned/merge-monster.yml" bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --security-key-file "$KEY" 2>&1)" || RC=$?
+rc_is "a pruned ENGSYS_MM_CONFIG with a discovered copy: the copy is enforced (blocked without a verdict)" 1
+has "  …it was the gate, not a config failure" "no_valid_verdict"
+has "  …with a warning" "ENGSYS_MM_CONFIG"
+files README.md
+RC=0; OUT="$(cd "$T/cfg0" && CLAUDE_CONFIG_DIR="$FLEETCFG" ENGSYS_MM_CONFIG="$T/pruned/merge-monster.yml" bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --security-key-file "$KEY" 2>&1)" || RC=$?
+rc_is "…and a non-sensitive PR passes on the copy" 0
+RC=0; OUT="$(cd "$T/cfg0" && CLAUDE_CONFIG_DIR="$T/cfg0" ENGSYS_MM_CONFIG="$T/pruned/merge-monster.yml" bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --security-key-file "$KEY" 2>&1)" || RC=$?
+rc_is "a pruned ENGSYS_MM_CONFIG with no readable strict source still fails closed" 1
+has "  …naming it" "security_config_unreadable"
+# CLAUDE_CONFIG_DIR repointed at an empty dir does not hide the fleet's own dirs
+files "services/dashboard/app/(auth)/x.tsx"
+mkdir -p "$T/empty"
+RC=0; OUT="$(cd "$T/cfg0" && CLAUDE_CONFIG_DIR="$T/empty" FLEET_CLAUDE_CONFIG_DIR="$FLEETCFG" bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --security-key-file "$KEY" 2>&1)" || RC=$?
+rc_is "CLAUDE_CONFIG_DIR=<empty> does not escape: \$FLEET_CLAUDE_CONFIG_DIR is searched" 1
+has "  …by the gate" "no_valid_verdict"
+mkdir -p "$T/fleetdir.sessions/acme-mm/plugins/cache/acme-fleet/acme/1.0.0/repos/acme"
+cp -R "$PLUG/repos/acme/app" "$T/fleetdir.sessions/acme-mm/plugins/cache/acme-fleet/acme/1.0.0/repos/acme/app"
+mkdir -p "$T/fleetdir"
+RC=0; OUT="$(cd "$T/cfg0" && CLAUDE_CONFIG_DIR="$T/empty" FLEET_CLAUDE_CONFIG_DIR="$T/fleetdir" bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --security-key-file "$KEY" 2>&1)" || RC=$?
+rc_is "…and so are the per-session dirs beside it (<dir>.sessions/*)" 1
+mkdir -p "$T/home/.claude/plugins/cache/acme-fleet/acme/1.0.0/repos/acme"
+cp -R "$PLUG/repos/acme/app" "$T/home/.claude/plugins/cache/acme-fleet/acme/1.0.0/repos/acme/app"
+RC=0; OUT="$(cd "$T/cfg0" && CLAUDE_CONFIG_DIR="$T/empty" bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --security-key-file "$KEY" 2>&1)" || RC=$?
+rc_is "…and ~/.claude" 1
+rm -rf "$T/home/.claude"
+# a differently cased directory name
+mkdir -p "$T/cfg5/plugins/cache/acme-fleet/acme/1.0.0/repos/ACME"
+cp -R "$PLUG/repos/acme/app" "$T/cfg5/plugins/cache/acme-fleet/acme/1.0.0/repos/ACME/App"
+RC=0; OUT="$(cd "$T/cfg0" && CLAUDE_CONFIG_DIR="$T/cfg5" bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --security-key-file "$KEY" 2>&1)" || RC=$?
+rc_is "directories named ACME/App are found for acme/app (case-insensitive listing)" 1
 
 echo "$pass passed, $fail failed."
 [ "$fail" = 0 ]

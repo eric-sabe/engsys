@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { slugFromUrl, pluginRoots, resolve } from './mm-config.mjs';
+import { slugFromUrl, pluginRoots, resolve, defaultConfigDirs } from './mm-config.mjs';
 
 let T;
 before(() => { T = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-config-')); });
@@ -55,5 +55,23 @@ describe('resolve', () => {
     mk(path.join(cfg, 'plugins/cache/mk/fleet/1.0.0/repos/o/n/merge-monster.yml'));
     const r = resolve({ slug: 'o/n', configDirs: [cfg] });
     assert.equal(r.missing, true);
+  });
+});
+
+describe('case-insensitive match and the known config dirs', () => {
+  it('matches owner and repo directories ignoring case, by listing', () => {
+    const cfg = path.join(T, 'e');
+    mk(path.join(cfg, 'plugins/cache/mk/fleet/1.0.0'), { 'repos/FEEDFRWD/KeyStone/merge-monster.yml': 'repo: x\n' });
+    assert.equal(resolve({ slug: 'feedfrwd/keystone', configDirs: [cfg] }).configs.length, 1);
+    assert.equal(resolve({ slug: 'FeedFrwd/Keystone', configDirs: [cfg] }).configs.length, 1);
+    assert.equal(resolve({ slug: 'feedfrwd/keystone2', configDirs: [cfg] }).fleetManaged, false);
+  });
+  it('defaultConfigDirs: the inherited dir, the fleet dir, its per-session dirs, the sessions env, and ~/.claude', () => {
+    const fleet = mk(path.join(T, 'f/fleet'));
+    mk(path.join(T, 'f/fleet.sessions/s1')); mk(path.join(T, 'f/fleet.sessions/s2'), { 'plain-file': 'x' });
+    const other = mk(path.join(T, 'f/other.sessions/s3'));
+    const dirs = defaultConfigDirs({ CLAUDE_CONFIG_DIR: '/tmp/empty', FLEET_CLAUDE_CONFIG_DIR: fleet, ENGSYS_CONFIG_DIR_SESSIONS: path.dirname(other), HOME: '/h' });
+    assert.deepEqual(dirs, ['/tmp/empty', fleet, path.join(T, 'f/fleet.sessions/s1'), path.join(T, 'f/fleet.sessions/s2'), other, '/h/.claude']);
+    assert.deepEqual(defaultConfigDirs({ HOME: '/h' }), ['/h/.claude']);
   });
 });

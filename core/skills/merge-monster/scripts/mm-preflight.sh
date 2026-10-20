@@ -41,9 +41,17 @@
 # keeps the old opt-in behaviour, so the fleet's launch context must pass --config (the capability to probe for is
 # the literal security_sensitive_globs in this file).
 #
-# Usage: mm-preflight.sh --repo owner/name --pr N [--full] [--config FILE]
+# What this defends: a forgotten flag, a wrong --config, a model mistake, fully (every discoverable source counts and the
+# strictest wins). A prompt injection only partially: a session runs as the same OS user, so it can still run this script with
+# a different environment or reach the key file; the boundary is a separate GitHub identity for the security lane (#220).
+#
+# Usage: mm-preflight.sh --capabilities     (prints security-verdict and security-sensitive-globs, exit 0; unknown flag = old kit)
+#        mm-preflight.sh --repo owner/name --pr N [--full] [--config FILE]
 #                        [--security-verdict [--require-security-verdict] [--security-key-file PATH]]
 set -euo pipefail
+# --capabilities (engsys#229): one token per line, no GitHub, no config. An older kit has no such flag and exits 2
+# ("unknown arg"), which is how a caller tells the two apart without grepping source text.
+if [ "${1:-}" = --capabilities ] && [ $# -eq 1 ]; then printf 'security-verdict\nsecurity-sensitive-globs\n'; exit 0; fi
 # shellcheck source=../../../lib/fleet-gh.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/fleet-gh.sh"
 fleet_gh_resolve
@@ -119,8 +127,16 @@ if command -v node >/dev/null && [ -f "$MC_SCRIPT" ]; then
     sec_fail "security_config_unreadable: $REPO is fleet-managed ($(jq -r '.fleetDirs[0]' <<<"$MC_JSON")) but no readable merge-monster.yml was found there or in the repo"
   fi
 fi
+# ENGSYS_MM_CONFIG is a versioned cache path the launcher resolved at session start; if that version directory was
+# pruned since, a readable discovered copy stands in for it (with a warning) instead of failing every PR. With no
+# readable strict source left it is still kept, so the unreadable path fails closed below.
+MM_ENV_CONFIG="${ENGSYS_MM_CONFIG:-}"
+if [ -n "$MM_ENV_CONFIG" ] && [ ! -r "$MM_ENV_CONFIG" ] && { [ "${#FLEET_MM_CONFIGS[@]}" -gt 0 ] || [ -f .claude/merge-monster.yml ]; }; then
+  echo "mm-preflight: warning: ENGSYS_MM_CONFIG ($MM_ENV_CONFIG) is not readable; using the discovered merge config instead" >&2
+  MM_ENV_CONFIG=""
+fi
 SS_CONFIGS=()
-for c in "${ENGSYS_MM_CONFIG:-}" "$([ ! -f .claude/merge-monster.yml ] || echo .claude/merge-monster.yml)" ${FLEET_MM_CONFIGS[@]+"${FLEET_MM_CONFIGS[@]}"} "$MM_CONFIG_FILE"; do
+for c in "$MM_ENV_CONFIG" "$([ ! -f .claude/merge-monster.yml ] || echo .claude/merge-monster.yml)" ${FLEET_MM_CONFIGS[@]+"${FLEET_MM_CONFIGS[@]}"} "$MM_CONFIG_FILE"; do
   [ -n "$c" ] || continue
   SS_CONFIGS+=("$c")   # no de-duplication: a repeat is harmless, and a substring match could drop a config
 done
