@@ -104,7 +104,7 @@ case "$sub" in
   list-windows) cat "$F/windows" ;;
   list-panes)
     case "$fmt" in
-      *window_name*) while IFS= read -r wn; do [ -z "$wn" ] || [ ! -f "$F/cmd-$wn" ] || echo "$wn $(cat "$F/cmd-$wn")"; done <"$F/windows" ;;
+      *window_name*) while IFS= read -r wn; do [ -z "$wn" ] || [ ! -f "$F/cmd-$wn" ] || printf '%s\t%s\n' "$wn" "$(cat "$F/cmd-$wn")"; done <"$F/windows" ;;
       *pane_pid*) cat "$F/pid-$w" 2>/dev/null || exit 1 ;;
       *pane_id*) [ -f "$F/cmd-$w" ] || exit 1; echo "%pane-$w" ;;
       *) cat "$F/cmd-$w" 2>/dev/null || exit 1 ;;
@@ -1021,7 +1021,7 @@ rm -f "$STATE/verify-wrappers.alerted"
 run fleet verify --auto-sync
 rc_is "--auto-sync on a clean checkout of main: syncs and passes" 0
 eq "…without touching launchd (it runs inside the supervisor's job)" "$(cat "$FAKE/launchctl.log")" ""
-has "…saying it auto-syncs" "$OUT" "auto-syncing (fleet sync, no restarts)"
+has "…saying it fast-forwards with git alone (pins unchanged: no fleet sync, no claude)" "$OUT" "fast-forwarding it (git only, no claude)"
 eq "…the checkout is at main now" "$(git -C "$APPD" rev-parse HEAD)" "$(git -C "$P" rev-parse HEAD)"
 behind notes.txt; git -C "$APPD" pull -q --ff-only origin main   # a tracked, ordinary file to dirty
 behind CLAUDE.md
@@ -1186,6 +1186,9 @@ echo "⏺ OAuth session expired and could not be refreshed · Please run /login"
 run fleet restart acme-mm
 has "a pane showing the auth error is treated the same" "$OUT" "acme-mm: login expired, not cycled (its pane shows a Claude auth error"
 hasnt "…no rotation request typed" "$(cat "$FAKE/tmux.log")" "[send-keys]"
+echo "⏺ Failed to authenticate the build agent; retrying" >"$FT/cap-acme-mm"; : >"$FAKE/tmux.log"
+run fleet restart acme-mm
+has "a message only starting like an auth error (not the supervisor's entries) is not one" "$OUT" "acme-mm: rotation requested"
 echo "⏺ Reading the ledger." >"$FT/cap-acme-mm"; : >"$FAKE/tmux.log"
 run fleet restart acme-mm
 has "a healthy monster is still asked to rotate" "$OUT" "acme-mm: rotation requested"

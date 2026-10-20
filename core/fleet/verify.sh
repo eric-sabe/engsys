@@ -344,20 +344,20 @@ if [ "$rc" = 1 ]; then
 fi
 sync_why="" sync_deferred=0
 if [ "$only_stale" = 1 ] && [ "$auto_sync" = 1 ]; then
-  # engsys#223: fleet sync runs `claude auth status` and `claude plugin ...` on every session dir, running ones included.
-  # A periodic check must not, so while any session is running the sync is deferred (the stale mismatch stands: relaunches
-  # stay held, alerted as deferred) and happens on a later tick once none is, or when the operator runs fleet sync.
-  live_now=""
-  if [ "$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION" = on ] && [ -n "$max_age" ]; then live_now="$(fleet_live_sessions | paste -sd' ' -)"; fi
+  # engsys#223: the common case, a pin checkout that is merely behind with the pins unchanged, is fixed by a git
+  # fast-forward alone, with no claude, so it is done even while sessions run. Only a change of the pins needs the parts
+  # of fleet sync that run `claude plugin ...` / `claude auth status` on every session dir, running ones included: a
+  # periodic check defers those while any session is running (the stale mismatch stands, relaunches stay held, alerted
+  # as deferred and re-alerted every VERIFY_DEFER_REALERT_MIN minutes), and they happen on a later tick once none is
+  # running, or when the operator runs fleet sync.
+  live_now="" pins_same=0 sync_ff_only=0
   # Full ref names, never --short: a local branch or tag named origin/<x> makes --short ambiguous.
   pin_branch="$(git -C "$PIN_DIR" symbolic-ref -q HEAD 2>/dev/null || true)"
   case "$pin_branch" in refs/heads/*) pin_branch="${pin_branch#refs/heads/}" ;; *) pin_branch="" ;; esac
   def_branch="$(git -C "$PIN_DIR" symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null || true)"
   case "$def_branch" in refs/remotes/origin/?*) def_branch="${def_branch#refs/remotes/origin/}" ;; *) def_branch="" ;; esac
   : "${def_branch:=main}"
-  if [ -n "$live_now" ]; then
-    sync_deferred=1 sync_why="sync deferred: $(wc -w <<<"$live_now" | tr -d ' ') session(s) running ($live_now). A periodic check never starts claude on a running session's login, and fleet sync does. It runs on a later tick once none is running, or run fleet sync yourself"
-  elif [ "$pin_branch" != "$def_branch" ]; then sync_why="the pin checkout is on '${pin_branch:-a detached HEAD}', not $def_branch"
+  if [ "$pin_branch" != "$def_branch" ]; then sync_why="the pin checkout is on '${pin_branch:-a detached HEAD}', not $def_branch"
   elif [ -n "$(git -C "$PIN_DIR" status --porcelain --untracked-files=no 2>/dev/null || echo dirty)" ]; then sync_why="the pin checkout has uncommitted changes to tracked files"
   elif [ -n "$(git -C "$PIN_DIR" status --porcelain -- .claude ':(exclude,icase).claude/settings.local.json' \
       ':(exclude,icase).claude/scheduled_tasks.lock' ':(exclude,icase).claude/worktrees' ':(exclude,icase).claude/checkpoints' \
@@ -365,7 +365,24 @@ if [ "$only_stale" = 1 ] && [ "$auto_sync" = 1 ]; then
       ':(exclude,icase).claude/agent-memory-local' ':(exclude,icase).claude/first-run' \
       ':(exclude,icase).claude/assistant-daemon-state.json' 2>/dev/null || echo dirty)" ]; then sync_why="the pin checkout's .claude/ has untracked files"
   else
-    echo "fleet verify: the pin checkout is behind $def_branch and files the sessions load changed there: auto-syncing (fleet sync, no restarts)"
+    # a fetch and a fast-forward are git only; compare the pins (marketplaces and enabled plugins) of HEAD and the tip
+    if git -C "$PIN_DIR" fetch -q origin 2>/dev/null; then
+      pins_head="$(git -C "$PIN_DIR" show HEAD:.claude/settings.json 2>/dev/null | jq -cS '{extraKnownMarketplaces, enabledPlugins}' 2>/dev/null || echo head)"
+      pins_tip="$(git -C "$PIN_DIR" show "refs/remotes/origin/$def_branch:.claude/settings.json" 2>/dev/null | jq -cS '{extraKnownMarketplaces, enabledPlugins}' 2>/dev/null || echo tip)"
+      [ "$pins_head" != "$pins_tip" ] || pins_same=1
+    fi
+    if [ "$pins_same" = 1 ]; then
+      echo "fleet verify: the pin checkout is behind $def_branch and the pins are unchanged: fast-forwarding it (git only, no claude)"
+      if git -C "$PIN_DIR" merge -q --ff-only "refs/remotes/origin/$def_branch" 2>/dev/null; then
+        [ -z "${plist:-}" ] || rm -f "$plist"
+        reargs=(--instance "$FLEET_REPO"); [ "$alert" = 0 ] || reargs+=(--alert); [ -z "$max_age" ] || reargs+=(--max-age "$max_age"); [ -z "$session" ] || reargs+=(--session "$session")
+        exec bash "$FLEET_KIT_DIR/verify.sh" "${reargs[@]}"   # once: the re-run has no --auto-sync
+      fi
+      sync_why="the pin checkout could not fast-forward to origin/$def_branch"
+    elif [ "$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION" = on ] && [ -n "$max_age" ] && live_now="$(fleet_live_sessions | paste -sd' ' -)" && [ -n "$live_now" ]; then
+      sync_deferred=1 sync_why="the pins changed, and moving the plugins needs claude on every session dir, which a periodic check never starts on a running session's login: sync deferred while $(wc -w <<<"$live_now" | tr -d ' ') session(s) run ($live_now). This does not clear by itself while they run: stop or restart them (it then runs on its own), or run fleet sync by hand, which does start claude on the live logins (a small risk of logging a session out)"
+    else
+    echo "fleet verify: the pin checkout is behind $def_branch and the pins changed: auto-syncing (fleet sync, no restarts)"
     # --no-jobs: this runs inside the supervisor's own launchd job, which a job reload would kill.
     if bash "$FLEET_KIT_DIR/sync.sh" --instance "$FLEET_REPO" --no-jobs </dev/null >&2; then
       [ -z "${plist:-}" ] || rm -f "$plist"
@@ -373,6 +390,7 @@ if [ "$only_stale" = 1 ] && [ "$auto_sync" = 1 ]; then
       exec bash "$FLEET_KIT_DIR/verify.sh" "${reargs[@]}"   # once: the re-run has no --auto-sync
     fi
     sync_why="fleet sync failed (above)"
+    fi
   fi
   if [ "$sync_deferred" = 1 ]; then out="$out"$'\n'"fleet verify: $sync_why"
   else out="$out"$'\n'"fleet verify: could not auto-sync: $sync_why"; fi
@@ -383,7 +401,7 @@ if [ "$alert" = 1 ]; then
   case "$rc" in
     0)
       if [ -f "$LATCH" ]; then
-        notify --level info --incident "wrapper-integrity$INC" --resolve "Resolved: the engsys plugin files on $host match $repo@$ref again." && rm -f "$LATCH"
+        notify --level info --incident "wrapper-integrity$INC" --resolve "Resolved: the engsys plugin files on $host match $repo@$ref again." && rm -f "$LATCH" "$LATCH.at"
       fi
       if [ -f "$UNVERIFIED_LATCH" ]; then
         notify --level info --incident "wrapper-integrity-unverified$INC" --resolve "Resolved: the engsys plugin check on $host runs again, and passes." && rm -f "$UNVERIFIED_LATCH"
@@ -402,11 +420,15 @@ if [ "$alert" = 1 ]; then
       fp="$(sed -n 's/^fingerprint: //p' <<<"$out" | tail -1)"
       # latch on a fixed reason for a deferral: the list of running sessions changes with every start and stop
       latch_why="$sync_why"; [ "$sync_deferred" != 1 ] || latch_why="deferred: sessions running"
-      if [ "$only_stale" = 1 ] && [ "$(cat "$LATCH" 2>/dev/null)" != "$fp|$auto_sync|$latch_why" ]; then
+      # a deferral that persists is alerted again every VERIFY_DEFER_REALERT_MIN minutes (default 360): it never clears by itself
+      defer_due=0
+      if [ "$sync_deferred" = 1 ] && [ -f "$LATCH" ] && at="$(cat "$LATCH.at" 2>/dev/null)" && [[ "$at" =~ ^[0-9]+$ ]] \
+        && [ $(( $(date +%s) - at )) -ge $(( ${VERIFY_DEFER_REALERT_MIN:-360} * 60 )) ]; then defer_due=1; fi
+      if [ "$only_stale" = 1 ] && { [ "$(cat "$LATCH" 2>/dev/null)" != "$fp|$auto_sync|$latch_why" ] || [ "$defer_due" = 1 ]; }; then
         lines="$(sed -n 's/^  \(.*\)$/\1/p' <<<"$out" | awk 'NR <= 8')"
-        notify --level alert --incident "wrapper-integrity$INC" "Plugin check on $host${session:+ (session $session)}: the pin checkout ($PIN_DIR) is behind main, and files the sessions load changed there. $(if [ "$sync_deferred" = 1 ]; then printf 'Auto-sync is deferred (%s).' "$sync_why"; elif [ -n "$sync_why" ]; then printf 'Auto-sync could not fast-forward it: %s. Please bring the checkout back to main and run fleet sync.' "$sync_why"; elif [ "$auto_sync" = 1 ]; then printf 'Auto-syncing: fleet sync is running for it now.'; else printf 'Run fleet sync (a supervised host also does it on its own, through fleet verify --auto-sync).'; fi) Merge and maintain sessions are held until it matches; running sessions are left as they are. This is not a sign of tampering. Behind on:
+        notify --level alert --incident "wrapper-integrity$INC" "Plugin check on $host${session:+ (session $session)}: the pin checkout ($PIN_DIR) is behind main, and files the sessions load changed there. $(if [ "$sync_deferred" = 1 ]; then printf 'Auto-sync is deferred: %s.' "$sync_why"; elif [ -n "$sync_why" ]; then printf 'Auto-sync could not fast-forward it: %s. Please bring the checkout back to main and run fleet sync.' "$sync_why"; elif [ "$auto_sync" = 1 ]; then printf 'Auto-syncing: fleet sync is running for it now.'; else printf 'Run fleet sync (a supervised host also does it on its own, through fleet verify --auto-sync).'; fi) Merge and maintain sessions are held until it matches; running sessions are left as they are. This is not a sign of tampering. Behind on:
 $lines
-Details: fleet verify" && printf '%s\n' "$fp|$auto_sync|$latch_why" >"$LATCH"
+Details: fleet verify" && printf '%s\n' "$fp|$auto_sync|$latch_why" >"$LATCH" && date +%s >"$LATCH.at"
       elif [ "$only_stale" = 0 ] && [ "$(cat "$LATCH" 2>/dev/null)" != "$fp" ]; then
         summary="$(sed -n 's/^summary: //p' <<<"$out" | tail -1)"
         hint="$(sed -n 's/^hint: //p' <<<"$out" | tail -1)"

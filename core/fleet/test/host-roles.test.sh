@@ -36,7 +36,7 @@ w="${t#*:}"
 add_window() { grep -Fxq "$1" "$F/windows" || echo "$1" >>"$F/windows"; echo node >"$F/cmd-$1"; echo "⏺ Reading the ledger." >"$F/cap-$1"; }
 case "$sub" in
   list-windows) cat "$F/windows" ;;
-  list-panes) case "$fmt" in *pane_pid*) exit 1 ;; *window_name*) while IFS= read -r wn; do [ -z "$wn" ] || [ ! -f "$F/cmd-$wn" ] || echo "$wn $(cat "$F/cmd-$wn")"; done <"$F/windows" ;; *) cat "$F/cmd-$w" 2>/dev/null || exit 1 ;; esac ;;
+  list-panes) case "$fmt" in *pane_pid*) exit 1 ;; *window_name*) while IFS= read -r wn; do [ -z "$wn" ] || [ ! -f "$F/cmd-$wn" ] || printf '%s\t%s\n' "$wn" "$(cat "$F/cmd-$wn")"; done <"$F/windows" ;; *) cat "$F/cmd-$w" 2>/dev/null || exit 1 ;; esac ;;
   capture-pane) cat "$F/cap-$w" 2>/dev/null || true ;;
   has-session) [ -f "$F/session" ] || exit 1 ;;
   new-session) touch "$F/session"; add_window "$nm" ;;

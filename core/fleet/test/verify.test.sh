@@ -66,7 +66,9 @@ cat >"$T/bin/tmux" <<'SH'
 # stub tmux: $FAKE/tmux-windows lists the windows, $FAKE/tmux-cmd is every pane's foreground command
 case "${1:-}" in
   list-windows) cat "$FAKE/tmux-windows" 2>/dev/null || exit 1 ;;
-  list-panes) while IFS= read -r wn; do [ -z "$wn" ] || echo "$wn $(cat "$FAKE/tmux-cmd" 2>/dev/null)"; done <"$FAKE/tmux-windows" ;;
+  list-panes) while IFS= read -r wn; do   # a line is "<window>" (its pane runs $FAKE/tmux-cmd) or "<window><TAB><command>"
+      [ -z "$wn" ] || case "$wn" in *"$(printf '\t')"*) printf '%s\n' "$wn" ;; *) printf '%s\t%s\n' "$wn" "$(cat "$FAKE/tmux-cmd" 2>/dev/null)" ;; esac
+    done <"$FAKE/tmux-windows" ;;
 esac
 exit 0
 SH
@@ -939,30 +941,56 @@ cp "$T/ip.good" "$PS/plugins/installed_plugins.json"
 rm -f "$I/.fleet"/verify-wrappers*.json
 printf '%s\n' "$CONF0" >"$I/fleet/fleet.conf"; rm -f "$FAKE/auth.json" "$FAKE/tmux-windows" "$FAKE/tmux-cmd"
 
-echo "== engsys#223: --auto-sync never starts claude on a running session; the sync is deferred, loudly"
+echo "== engsys#223: --auto-sync: a behind pin checkout with unchanged pins fast-forwards with git alone, even while sessions run"
 printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\nFLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on\n' "$CONF0" "$PCFG" >"$I/fleet/fleet.conf"
 echo '{"loggedIn": true}' >"$FAKE/auth.json"
-W2="$T/app-work2"; git clone -q "$FAKE/app-origin.git" "$W2"
+git -C "$APP" fetch -q origin; git -C "$APP" reset -q --hard origin/main
+W2="$T/app-work2"; rm -rf "$W2"; git clone -q "$FAKE/app-origin.git" "$W2"
 printf 'echo v3\n' >>"$W2/.claude/hooks/remind.sh"; commit_all "$W2" "hook v3"; git -C "$W2" push -q origin HEAD:main
-git -C "$APP" fetch -q origin
 rm -f "$I/.fleet"/verify-wrappers*.json
-echo acme-mm >"$FAKE/tmux-windows"; echo node >"$FAKE/tmux-cmd"; : >"$FAKE/claude.calls"; g0="$(said 'is deferred')"
+echo acme-mm >"$FAKE/tmux-windows"; echo node >"$FAKE/tmux-cmd"; : >"$FAKE/claude.calls"
 run fleet verify --alert --auto-sync --max-age 15 --session acme-mm
-rc_is "a stale pin checkout with a session running: still a mismatch (not a pass)" 1
-has "…says the sync is deferred and why" "$OUT" "sync deferred: 1 session(s) running (acme-mm)"
+rc_is "stale-only, pins unchanged, a session running: fast-forwarded, then passes" 0
+has "…by git alone" "$OUT" "fast-forwarding it (git only, no claude)"
+eq "…with no claude call at all (call log)" "$(calls)" 0
+eq "…and the pin checkout is at the tip" "$(git -C "$APP" rev-parse HEAD)" "$(git -C "$APP" rev-parse origin/main)"
+
+echo "…a change of the pins with sessions running is deferred, alerted, and re-alerted"
+git -C "$W2" pull -q origin main
+jq '.enabledPlugins["zz@engsys"] = true' "$W2/.claude/settings.json" >"$W2/.claude/s.tmp" && mv "$W2/.claude/s.tmp" "$W2/.claude/settings.json"
+commit_all "$W2" "pins change"; git -C "$W2" push -q origin HEAD:main
+rm -f "$I/.fleet"/verify-wrappers*.json; : >"$FAKE/claude.calls"; g0="$(said 'Auto-sync is deferred')"
+run fleet verify --alert --auto-sync --max-age 15 --session acme-mm
+rc_is "a pins change with a session running: still a mismatch (hold stands)" 1
+has "…says the sync is deferred, and that it does not clear by itself" "$OUT" "does not clear by itself while they run"
 hasnt "…did not auto-sync" "$OUT" "auto-syncing"
 eq "…and started no claude at all (call log)" "$(calls)" 0
-eq "…the alert says it is deferred, once" "$(said 'Auto-sync is deferred')" "$((g0 + 1))"
+eq "…one alert" "$(said 'Auto-sync is deferred')" "$((g0 + 1))"
+has "…warning that fleet sync by hand starts claude on live logins" "$(grep 'Auto-sync is deferred' "$FAKE/gh.log" | tail -n 1)" "does start claude on the live logins"
 has "…and the login check was skipped, said so" "$OUT" "login not checked: session acme-mm is running"
 printf 'acme-mm\nacme-security\n' >"$FAKE/tmux-windows"
 run fleet verify --alert --auto-sync --max-age 15 --session acme-mm
 eq "…a different set of running sessions does not alert again" "$(said 'Auto-sync is deferred')" "$((g0 + 1))"
+VERIFY_DEFER_REALERT_MIN=0 run fleet verify --alert --auto-sync --max-age 15 --session acme-mm
+eq "…but the re-alert interval elapsing does" "$(said 'Auto-sync is deferred')" "$((g0 + 2))"
 : >"$FAKE/tmux-windows"; : >"$FAKE/claude.calls"
 run fleet verify --alert --auto-sync --max-age 15 --session acme-mm
 hasnt "with nothing running the sync is not deferred" "$OUT" "sync deferred"
-has "…it runs (the sync happens once the sessions are gone)" "$OUT" "auto-syncing (fleet sync, no restarts)"
-git -C "$APP" reset -q --hard origin/main 2>/dev/null || true
+has "…it runs (fleet sync, which may use claude)" "$OUT" "the pins changed: auto-syncing (fleet sync, no restarts)"
+git -C "$APP" fetch -q origin; git -C "$APP" reset -q --hard origin/main 2>/dev/null || true
 rm -f "$FAKE/tmux-windows" "$FAKE/tmux-cmd" "$FAKE/auth.json"; printf '%s\n' "$CONF0" >"$I/fleet/fleet.conf"
+
+echo "== engsys#223: liveness matches the window name exactly, and any matching pane at a non-shell counts"
+printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\nFLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on\n' "$CONF0" "$PCFG" >"$I/fleet/fleet.conf"
+echo '{"loggedIn": true}' >"$FAKE/auth.json"; rm -f "$I/.fleet"/verify-wrappers*.json
+TAB="$(printf '\t')"
+printf 'acme-mm%szsh\nacme-mm%snode\n' "$TAB" "$TAB" >"$FAKE/tmux-windows"; : >"$FAKE/claude.calls"
+run fleet verify --max-age 0 --session acme-mm
+eq "an earlier same-named window at a shell does not hide the live one: no claude" "$(calls)" 0
+printf 'acme-mm foo%snode\n' "$TAB" >"$FAKE/tmux-windows"; : >"$FAKE/claude.calls"
+run fleet verify --max-age 0 --session acme-mm
+has "a window named 'acme-mm foo' is not acme-mm: the CLI is used" "$(cat "$FAKE/claude.calls")" "plugin list --json"
+rm -f "$FAKE/tmux-windows" "$FAKE/auth.json"; printf '%s\n' "$CONF0" >"$I/fleet/fleet.conf"
 
 echo "== engsys#223: the invocation log is 0600 and never written through a symlink"
 LOGF="$I/.fleet/claude-invocations.log"; rm -f "$LOGF" "$LOGF.tmp"
