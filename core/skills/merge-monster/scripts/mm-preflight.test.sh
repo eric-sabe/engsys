@@ -179,6 +179,10 @@ rc_is "**/x.bicep matches a nested file" 1
 files main.bicep
 run --config "$CFG" --security-key-file "$KEY"
 rc_is "…and a root-level one" 1
+# a large PR: patch bodies of several MB per page must not reach an argument list (E2BIG)
+node -e 'const big="x".repeat(400000);const a=[];for(let i=0;i<30;i++)a.push({filename:"f"+i+".md",patch:big});process.stdout.write(JSON.stringify(a))' >"$T/files.json"; echo 30 >"$T/changed"
+run --config "$CFG" --security-key-file "$KEY"
+rc_is "30 files with 400 KB patches each: listed and judged, not an argument-size failure" 0
 # renames: both the new and the old path count
 jq -n '[{filename:"docs/moved.md", previous_filename:"services/dashboard/app/(auth)/old.tsx", status:"renamed"}]' >"$T/files.json"; echo 1 >"$T/changed"
 run --config "$CFG" --security-key-file "$KEY"

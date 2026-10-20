@@ -136,15 +136,19 @@ if [ "${#SS_CONFIGS[@]}" -gt 0 ] || [ "$SEC_VERDICT" -eq 1 ]; then
     SS_GLOBS=$((SS_GLOBS + $(jq -r '.globs' <<<"$SS_POLICY")))
   done
   if [ "$SEC_VERDICT" -eq 1 ]; then
-    SS_FILES="[]" SS_COUNT="null"
+    # the list is projected to the two path fields (the API also returns each file's patch text) and handed to jq as a
+    # file, never as an argument: a large PR would otherwise exceed the argument size limit (E2BIG)
+    SS_FILES_TMP="$(mktemp)"; trap 'rm -f "$SS_FILES_TMP"' EXIT
+    echo "[]" >"$SS_FILES_TMP"; SS_COUNT="null"
     if [ "$SS_GLOBS" -gt 0 ]; then
-      SS_FILES=$("$FLEET_GH" api "repos/$REPO/pulls/$PR/files?per_page=100" --paginate | jq -s -c 'add // []') || sec_fail "security_file_list_unreadable: listing the PR files failed"
+      "$FLEET_GH" api "repos/$REPO/pulls/$PR/files?per_page=100" --paginate | jq -s -c 'add // [] | map({filename, previous_filename})' >"$SS_FILES_TMP" || sec_fail "security_file_list_unreadable: listing the PR files failed"
+      [ -s "$SS_FILES_TMP" ] || sec_fail "security_file_list_unreadable: the file list is empty"
       SS_COUNT=$("$FLEET_GH" api "repos/$REPO/pulls/$PR" --jq '.changed_files') || sec_fail "security_file_list_unreadable: reading changed_files failed"
       [[ "$SS_COUNT" =~ ^[0-9]+$ ]] || sec_fail "security_file_list_unreadable: changed_files is not a number"
     fi
     for c in "${SS_LIST[@]}"; do
       SS_CFG=(); [ -z "$c" ] || SS_CFG=(--config "$c")
-      SS_OUT=$(jq -n -c --argjson f "$SS_FILES" --argjson n "$SS_COUNT" --argjson l "$(jq -c '.labels // []' <<<"$VIEW")" '{files:$f, changedFiles:$n, labels:$l}' \
+      SS_OUT=$(jq -n -c --slurpfile f "$SS_FILES_TMP" --argjson n "$SS_COUNT" --argjson l "$(jq -c '.labels // []' <<<"$VIEW")" '{files:$f[0], changedFiles:$n, labels:$l}' \
         | node "$SS_SCRIPT" decide ${SS_CFG[@]+"${SS_CFG[@]}"}) || sec_fail "$(jq -r '.reason // "security_file_list_unreadable"' <<<"$SS_OUT" 2>/dev/null || echo security_file_list_unreadable)"
       if [ "$(jq -r '.required' <<<"$SS_OUT")" = true ]; then SEC_REQUIRE=1; SEC_REASONS="$(jq -c -n --argjson a "$SEC_REASONS" --argjson b "$(jq -c '.reasons' <<<"$SS_OUT")" '$a + $b | unique')"; fi
     done
