@@ -37,9 +37,9 @@
 # --require-security-verdict can still ask for more, never for less. Fail closed (exit 1, reason on stderr): an
 # unreadable config (security_config_unreadable), a file list shorter than the PR's changed_files
 # (security_file_list_unreadable), an unreadable key (key_unavailable). A PR with more than 3000 files, which GitHub
-# cannot list in full, requires the verdict. Residual: a session that supplies no config and has none discoverable
-# keeps the old opt-in behaviour, so the fleet's launch context must pass --config (the capability to probe for is
-# the literal security_sensitive_globs in this file).
+# cannot list in full, requires the verdict. Residual: a repo that is not fleet-managed, has no
+# in-repo config and no exported ENGSYS_MM_CONFIG keeps the old opt-in behaviour (the launcher exports ENGSYS_MM_CONFIG
+# for merge-role lines; --config is optional and only adds). The capability probe is --capabilities, not this text.
 #
 # What this defends: a forgotten flag, a wrong --config, a model mistake, fully (every discoverable source counts and the
 # strictest wins). A prompt injection only partially: a session runs as the same OS user, so it can still run this script with
