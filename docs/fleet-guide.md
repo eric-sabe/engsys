@@ -507,8 +507,8 @@ file matches a glob. Omitting `--require-security-verdict` cannot lower that; a 
 `*` and `?` stay in one segment, `**` crosses segments, `**/x` matches a root-level `x`, everything else (parentheses,
 brackets, dots) is literal, no braces. It fails closed: an unreadable config (`security_config_unreadable`), a file list
 shorter than the PR's `changed_files` (`security_file_list_unreadable`), an unreadable key (`key_unavailable`); a PR with
-more than 3000 files, which GitHub does not list in full, requires the verdict. Residual: a session that passes no config
-and has none discoverable keeps the old opt-in behaviour, so the launch context must give the merge session its `--config`.
+more than 3000 files, which GitHub does not list in full, requires the verdict. Residual: a repo that is not fleet-managed,
+has no in-repo config and gets no exported `ENGSYS_MM_CONFIG` keeps the old opt-in behaviour.
 The capability to probe for is `mm-preflight.sh --capabilities`.
 
 **The monster batons.** A session the fleet launched (`ENGSYS_SESSION` and `ENGSYS_SESSION_RUN` set) may

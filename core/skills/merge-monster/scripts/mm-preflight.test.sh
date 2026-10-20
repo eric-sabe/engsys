@@ -261,7 +261,8 @@ files README.md
 run --config "$CFG" --require-security-verdict --security-key-file "$KEY"
 rc_is "the flag still requires a verdict when nothing sensitive changed" 1
 # the capability the fleet probes for, and the signing grant
-if grep -q 'security_sensitive_globs' "$HERE/mm-preflight.sh" && grep -q -- '--security-verdict' "$HERE/mm-preflight.sh"; then ok "mm-preflight.sh carries the capability literals the fleet probes"; else bad "capability literals"; fi
+RC=0; OUT="$(bash "$HERE/mm-preflight.sh" --capabilities 2>&1)" || RC=$?
+if [ "$RC" = 0 ] && [ "$OUT" = "$(printf 'security-verdict\nsecurity-sensitive-globs')" ]; then ok "--capabilities reports the two tokens the fleet probes for"; else bad "capabilities tokens" "$OUT"; fi
 printf 'review\n' >"$T/body.md"
 RC=0; OUT="$(env -u ENGSYS_SECURITY_VERDICT_KEY_FILE node "$SV" post --repo acme/app --pr 7 --sha "$HEAD_SHA" --verdict PASS --body-file "$T/body.md" 2>&1)" || RC=$?
 rc_is "security-verdict post refuses without ENGSYS_SECURITY_VERDICT_KEY_FILE" 1
