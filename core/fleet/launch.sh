@@ -11,7 +11,8 @@
 # set, and FLEET_INBOX_DIR, the relay's per-session inbox) when fleet.conf sets FLEET_ID, and
 # OPERATOR_TIMEZONE / OPERATOR_CLOCK when the fleet sets a time format.
 # then runs the launcher from PIN_DIR (the sessions' default workdir). Identity preflights belong in
-# the roster (PREFLIGHT= lines); they warn, never block.
+# the roster (PREFLIGHT= lines); they warn, never block. The launcher writes each session's one-shot launch
+# file in .fleet/launch (engsys#236), and exits non-zero for a session that was sent but never started.
 #
 # Sessions that are not on this host (ROLES / ROSTER_EXCLUDE in fleet.local.conf, or a singleton monster
 # whose registry home is another fleet: lib/host-roles.sh) are left out of a launch with no name, and
@@ -311,7 +312,7 @@ if [ -n "$name" ]; then
   elif is_singleton "$name" && ! singleton_integrity_ok "$name"; then
     fleet_die "not launching $name: $why_held (above). Check the running sessions, fix or reinstall the plugin, then: fleet verify"
   fi
-  lrc=0; bash "$LAUNCHER" --roster "$FLEET_STATE/roster" "${VERDICT_KEY_ARGS[@]+"${VERDICT_KEY_ARGS[@]}"}" "$name" || lrc=$?
+  lrc=0; bash "$LAUNCHER" --roster "$FLEET_STATE/roster" --launch-dir "$FLEET_STATE/launch" "${VERDICT_KEY_ARGS[@]+"${VERDICT_KEY_ARGS[@]}"}" "$name" || lrc=$?
   [ "$lrc" != 0 ] || record_panes "$name"
   exit "$lrc"
 fi
@@ -359,7 +360,7 @@ if [ "$kept" = 0 ]; then
   [ "$refused" = 0 ] || fleet_die "$refused session(s) refused (SKIPPED above: a Claude-only session on HARNESS=$launch_harness, or a session without its own Claude login); nothing else to launch"
   echo "fleet: no roster session runs on this host; nothing to launch"; exit 0
 fi
-lrc=0; bash "$LAUNCHER" --roster "$host_roster" "${VERDICT_KEY_ARGS[@]+"${VERDICT_KEY_ARGS[@]}"}" || lrc=$?
+lrc=0; bash "$LAUNCHER" --roster "$host_roster" --launch-dir "$FLEET_STATE/launch" "${VERDICT_KEY_ARGS[@]+"${VERDICT_KEY_ARGS[@]}"}" || lrc=$?
 # shellcheck disable=SC2046 # names are [a-z0-9-] only
 record_panes $(awk -F'|' '/^[A-Za-z0-9][A-Za-z0-9._-]*\|/ { print $1 }' "$host_roster")
 [ "$refused" != 0 ] || exit "$lrc"

@@ -9,22 +9,43 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 LAUNCH="$HERE/launch-agent-sessions.sh"
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
+T="$(cd "$T" && pwd -P)"   # physical: the launch dir and ENGSYS_MM_CONFIG are resolved paths
 mkdir -p "$T/bin" "$T/w" "$T/home"
 pass=0 fail=0
 
 # --- fakes -------------------------------------------------------------------------------------
 cat >"$T/bin/tmux" <<'SH'
 #!/usr/bin/env bash
+# send-keys -t <target> <line> Enter: the line is `. <launch file>` (engsys#236). The fake logs the line, then the
+# file's content ("script: …"), and plays the shell: it removes the file (the line's own last step before the
+# harness) and the pane runs claude. FAKE_NO_START = the shell never reads the line (the pane stays at zsh);
+# FAKE_EXIT_AT_ONCE = the line runs but the harness exits at once (back at zsh). FAKE_SHELL=bash|zsh = really
+# source the file in that shell (the fake claude logs to $FAKE/ran); the pane runs claude only if it ran.
 case "$1" in
   list-windows) exit 0 ;;                       # no windows: every name is free
   has-session) exit 1 ;;                        # no session yet
-  send-keys) [ -n "${TMUX_FAIL:-}" ] && exit 1; shift; echo "send-keys $*" >>"$FAKE/actions" ;;
+  send-keys) [ -n "${TMUX_FAIL:-}" ] && exit 1
+    echo "send-keys $2 $3 $4 $5" >>"$FAKE/actions"; printf '%s' "$4" >"$FAKE/typed"
+    f="${4#. }"; eval "f=$f"; echo "$f" >"$FAKE/launch-file"
+    if [ -f "$f" ]; then echo "script: $(cat "$f")" >>"$FAKE/actions"; ls -ln "$f" >"$FAKE/launch-file.ls"; cp "$f" "$FAKE/launch-file.copy"; fi
+    if [ -n "${FAKE_SHELL:-}" ]; then
+      ( cd "$FAKE" && "$FAKE_SHELL" -c '. "$1"' _ "$f" ) >"$FAKE/shell.out" 2>&1 </dev/null || true
+      if [ -s "$FAKE/ran" ]; then echo claude >"$FAKE/pane"; else echo zsh >"$FAKE/pane"; fi
+    elif [ -n "${FAKE_NO_START:-}" ]; then echo zsh >"$FAKE/pane"
+    elif [ -n "${FAKE_AT_RM:-}" ]; then rm -f "$f"; echo rm >"$FAKE/pane"
+    elif [ -n "${FAKE_EXIT_AT_ONCE:-}" ]; then rm -f "$f"; echo zsh >"$FAKE/pane"
+    else rm -f "$f"; echo claude >"$FAKE/pane"; fi ;;
+  list-panes) cat "$FAKE/pane" 2>/dev/null || exit 1 ;;
+  capture-pane) echo "zsh: command not found: --remote-contr" ;;
+  kill-window) echo "kill-window $3" >>"$FAKE/actions"; rm -f "$FAKE/pane" ;;
+  set-option) [ -n "${FAKE_SETOPT_FAIL:-}" ] && exit 1; echo "set-option $*" >>"$FAKE/actions" ;;
 esac
 # engsys#197: no tmux call may see the verdict key path in its environment (the server would keep it)
 if [ -n "${ENGSYS_SECURITY_VERDICT_KEY_FILE+x}" ]; then echo "tmux $1 saw the key path" >>"$FAKE/leak"; fi
 exit 0
 SH
-for b in claude copilot; do printf '#!/usr/bin/env bash\nexit 0\n' >"$T/bin/$b"; done
+printf '#!/usr/bin/env bash\necho "ran $*" >>"$FAKE/ran"\nexit 0\n' >"$T/bin/claude"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$T/bin/copilot"
 cat >"$T/bin/agy" <<'SH'
 #!/usr/bin/env bash
 [ "${1:-}" = remote-control ] && echo "agy-rc $*" >>"$FAKE/actions"
@@ -33,8 +54,8 @@ SH
 chmod +x "$T/bin/"*
 : >"$T/w/security.env"
 : >"$T/w/ordinary.env"
-export PATH="$T/bin:$PATH" FAKE="$T" HOME="$T/home"
-unset HARNESS FLEET_HARNESS AGY_REMOTE_CONTROL AGY_REMOTE_CONTROL_AUTOSTART FLEET_ID 2>/dev/null || true
+export PATH="$T/bin:$PATH" FAKE="$T" HOME="$T/home" LAUNCH_START_TIMEOUT_SEC=2
+unset HARNESS FLEET_HARNESS AGY_REMOTE_CONTROL AGY_REMOTE_CONTROL_AUTOSTART FLEET_ID ENGSYS_LAUNCH_DIR XDG_STATE_HOME 2>/dev/null || true
 
 ok() { pass=$((pass + 1)); echo "  ok    $1"; }
 no() { fail=$((fail + 1)); echo "  FAIL  $1"; [ -n "${2:-}" ] && printf '        %s\n' "$2"; }
@@ -42,7 +63,7 @@ no() { fail=$((fail + 1)); echo "  FAIL  $1"; [ -n "${2:-}" ] && printf '       
 run() {
   local harness="$1" body="$2"; shift 2
   printf 'NAMESPACE=acme\n%s\n' "$body" >"$T/w/roster"
-  : >"$T/actions"
+  : >"$T/actions"; rm -f "$T/pane" "$T/typed" "$T/launch-file" "$T/launch-file.ls" "$T/launch-file.copy" "$T/ran"
   set +e
   # shellcheck disable=SC2086
   err="$(cd "$T/w" && env HARNESS="$harness" "$@" bash "$LAUNCH" --roster "$T/w/roster" ${LAUNCH_EXTRA:-} 2>&1 >/dev/null)"
@@ -225,6 +246,128 @@ has "antigravity: AGY_REMOTE_CONTROL_AUTOSTART=1 starts the daemon (opt-in)" "$a
 run antigravity "acme-build|$W||--model haiku" AGY_REMOTE_CONTROL_AUTOSTART=1
 lacks "antigravity: opt-in alone, with no --remote-control session, starts nothing" "$acts" "agy-rc remote-control start"
 has "antigravity: haiku → gemini-3.8-flash" "$acts" "--model gemini-3.8-flash"
+
+echo "engsys#236: only a short '. <launch file>' line is typed; the full command lives in the file"
+LAUNCH_EXTRA=""
+bytes() { printf '%s' "$1" | LC_ALL=C wc -c | tr -d ' '; }
+# a long roster line: long --add-dir flags, a long config dir path (so a long ENGSYS_MM_CONFIG), a merge role
+LONG="$T/$(printf 'very-long-directory-name-%.0s' 1 2 3 4 5 6 7 8)"
+LONGFLAGS="--model claude-opus-4-8 --effort high --remote-control --dangerously-skip-permissions"
+for i in 1 2 3 4 5 6 7 8 9 10; do LONGFLAGS+=" --add-dir $LONG/worktree-$i"; done
+LMMCFG="$LONG/claude-config"; mkdir -p "$LMMCFG/plugins/cache/acme-fleet/acme/1.0.0/repos/acme/app"
+printf 'repo: acme/app\n' >"$LMMCFG/plugins/cache/acme-fleet/acme/1.0.0/repos/acme/app/merge-monster.yml"
+run claude "acme-mm|$W|/engsys:merge-monster|$LONGFLAGS" CLAUDE_CONFIG_DIR="$LMMCFG"
+[ "$rc" -eq 0 ] && ok "long merge line: launches" || no "long merge line: launches" "$err"
+typed="$(cat "$T/typed")"; script="$(cat "$T/launch-file.copy")"
+[ "$(bytes "$script")" -gt 1024 ] && ok "long merge line: the full command is over 1024 bytes ($(bytes "$script"))" || no "long merge line: over 1024 bytes" "$(bytes "$script")"
+[ "$(bytes "$typed")" -lt 1024 ] && ok "long merge line: the typed line is under 1024 bytes ($(bytes "$typed"): $typed)" || no "typed under 1024" "$typed"
+case "$typed" in ". $T/home/.local/state/engsys/launch/acme-mm."*) ok "long merge line: it sources a launch file in the default launch dir" ;; *) no "typed sources the launch file" "$typed" ;; esac
+has "long merge line: the file has ENGSYS_MM_CONFIG" "$script" "export ENGSYS_MM_CONFIG=$LMMCFG/plugins/cache/acme-fleet/acme/1.0.0/repos/acme/app/merge-monster.yml && "
+has "long merge line: …and every flag, to the last" "$script" "--add-dir $LONG/worktree-10"
+lf="$(cat "$T/launch-file")"
+case "$script" in *"&& command rm -f -- $lf && command claude --name acme-mm "*) ok "the file removes itself as its last step before the harness" ;; *) no "self-removal right before claude" "$script" ;; esac
+case "$(cat "$T/launch-file.ls")" in -rw-------*) ok "the launch file is mode 0600" ;; *) no "launch file 0600" "$(cat "$T/launch-file.ls")" ;; esac
+[ "$(stat -c %a "$T/home/.local/state/engsys/launch" 2>/dev/null || stat -f %Lp "$T/home/.local/state/engsys/launch")" = 700 ] && ok "the launch dir is mode 0700" || no "launch dir 0700"
+[ ! -e "$lf" ] && ok "a started launch leaves no launch file behind" || no "launch file removed" "$lf"
+# a security line: long key path, the verdict key export, the env file sourced before it
+LONGKEY="$LONG/fleet-security-verdict.key"
+LAUNCH_EXTRA="--verdict-key-file $LONGKEY" run claude "acme-sec|$W||$LONGFLAGS|$W/security.env" CLAUDE_CONFIG_DIR="$LMMCFG"
+LAUNCH_EXTRA=""
+typed="$(cat "$T/typed")"; script="$(cat "$T/launch-file.copy")"
+[ "$rc" -eq 0 ] && ok "long security line: launches" || no "long security line: launches" "$err"
+[ "$(bytes "$typed")" -lt 1024 ] && ok "long security line: the typed line is under 1024 bytes ($(bytes "$typed"))" || no "security typed under 1024" "$typed"
+lacks "long security line: the key path is not typed" "$typed" "$LONGKEY"
+case "$script" in *"&& unset ENGSYS_MM_CONFIG && cd "*" && set -a && . $W/security.env && set +a && export ENGSYS_SECURITY_VERDICT_KEY_FILE=$LONGKEY && "*"export CLAUDE_CONFIG_DIR=$LMMCFG && command rm -f -- "*" && command claude --name acme-sec "*)
+  ok "long security line: the file sources the env file, then sets the key path and the config dir, then claude" ;;
+  *) no "security ordering in the launch file" "$script" ;; esac
+case "$script" in *"export ENGSYS_SECURITY_VERDICT_KEY_FILE=$LONGKEY && unset ENGSYS_MM_CONFIG"*) ok "long security line: the key path is also set before the env file (overwritten after it either way)" ;; *) no "key before env file" "$script" ;; esac
+for h in copilot antigravity; do
+  run "$h" "$BUILD"
+  case "$(cat "$T/typed")" in ". $T/home/.local/state/engsys/launch/acme-build."*) ok "$h: goes through a launch file too" ;; *) no "$h launch file" "$(cat "$T/typed")" ;; esac
+done
+
+echo "engsys#236: the launch dir is private and never a symlink"
+mkdir -p "$T/real-launch"; ln -sfn "$T/real-launch" "$T/link-launch"
+run claude "$BUILD" ENGSYS_LAUNCH_DIR="$T/link-launch"
+if [ "$rc" -ne 0 ]; then ok "a symlinked launch dir: exits non-zero"; else no "symlinked launch dir: exits non-zero"; fi
+has "…says why" "$err" "is a symlink; refusing to write launch files through it"
+lacks "…nothing reaches tmux" "$acts" "send-keys"
+[ -z "$(ls -A "$T/real-launch")" ] && ok "…and nothing is written where it points" || no "nothing written through the symlink" "$(ls -A "$T/real-launch")"
+LAUNCH_EXTRA="--launch-dir $T/link-launch" run claude "$BUILD"
+has "--launch-dir: a symlink is refused the same way" "$err" "is a symlink"
+mkdir -p "$T/own-launch"; chmod 700 "$T/own-launch"
+run claude "$BUILD" ENGSYS_LAUNCH_DIR="$T/own-launch"
+[ "$rc" -eq 0 ] && ok "ENGSYS_LAUNCH_DIR: launches from that dir" || no "ENGSYS_LAUNCH_DIR launches" "$err"
+case "$(cat "$T/typed")" in ". $T/own-launch/acme-build."*) ok "…the file is in it" ;; *) no "file in ENGSYS_LAUNCH_DIR" "$(cat "$T/typed")" ;; esac
+mkdir -p "$T/open-launch"; chmod 755 "$T/open-launch"
+run claude "$BUILD" ENGSYS_LAUNCH_DIR="$T/open-launch"
+if [ "$rc" -ne 0 ]; then ok "an existing launch dir open to others: refused"; else no "open launch dir refused"; fi
+has "…says so" "$err" "is open to other users (mode 755)"
+[ "$(stat -c %a "$T/open-launch" 2>/dev/null || stat -f %Lp "$T/open-launch")" = 755 ] && ok "…and its mode is left alone (never chmod'ed)" || no "open launch dir mode untouched"
+lacks "…nothing reaches tmux" "$acts" "send-keys"
+# the prune: an hour-old launch file goes, anything else in the dir stays
+touch "$T/own-launch/acme-old.20261001T000000Z-1-2.AbCdEf" "$T/own-launch/roster" "$T/own-launch/notes.txt"
+touch -t 202610010000 "$T/own-launch/acme-old.20261001T000000Z-1-2.AbCdEf" "$T/own-launch/roster" "$T/own-launch/notes.txt"
+run claude "$BUILD" ENGSYS_LAUNCH_DIR="$T/own-launch"
+[ ! -e "$T/own-launch/acme-old.20261001T000000Z-1-2.AbCdEf" ] && ok "prune: an hour-old launch file is removed" || no "prune removes old launch file"
+[ -e "$T/own-launch/roster" ] && [ -e "$T/own-launch/notes.txt" ] && ok "prune: other old files in the dir are left alone" || no "prune keeps other files"
+DEEP="$T/$(printf 'd%.0s' $(seq 1 200))/$(printf 'e%.0s' $(seq 1 200))/$(printf 'f%.0s' $(seq 1 200))"
+run claude "$BUILD" ENGSYS_LAUNCH_DIR="$DEEP"
+if [ "$rc" -ne 0 ]; then ok "a launch dir too long for a short line: refused"; else no "too-long launch dir refused"; fi
+has "…says to use a shorter one" "$err" "use a shorter --launch-dir"
+lacks "…nothing reaches tmux" "$acts" "send-keys"
+
+echo "engsys#236: sent is not started — a launch that never starts fails loudly"
+run claude "$BUILD" FAKE_NO_START=1
+if [ "$rc" -ne 0 ]; then ok "pane never leaves the shell: exits non-zero"; else no "never started: exits non-zero" "rc=$rc"; fi
+has "…launch did not start, naming the session and the wait" "$err" "error: launch did not start for 'acme-build' within 2s: the launch line has not reached the harness yet (the pane is still at zsh)"
+has "…shows the pane's last lines" "$err" "  pane: zsh: command not found: --remote-contr"
+has "…the line is reported skipped" "$err" "SKIPPED: acme-build"
+has "…its window is closed" "$acts" "kill-window acme:acme-build"
+[ ! -e "$(cat "$T/launch-file")" ] && ok "…its launch file is removed (it can't run late)" || no "never-started launch file removed"
+run claude "$BUILD" FAKE_EXIT_AT_ONCE=1
+if [ "$rc" -ne 0 ]; then ok "harness exits at once: exits non-zero"; else no "exits at once: non-zero" "rc=$rc"; fi
+has "…says the line ran but claude is not running" "$err" "the launch line ran, but claude is not running (the pane is back at zsh)"
+run claude "$BUILD" FAKE_AT_RM=1
+if [ "$rc" -ne 0 ]; then ok "file gone but the pane still at rm (the line's own rm): not counted as started"; else no "pane at rm is not started" "rc=$rc"; fi
+has "…says the harness is not running" "$err" "the launch line ran, but claude is not running (the pane is back at rm)"
+run claude "$BUILD" FAKE_NO_START=1 LAUNCH_START_TIMEOUT_SEC=0
+[ "$rc" -eq 0 ] && ok "LAUNCH_START_TIMEOUT_SEC=0: no start check (sent = launched)" || no "timeout 0 skips the check" "$err"
+run claude "$BUILD" LAUNCH_START_TIMEOUT_SEC=soon
+if [ "$rc" -ne 0 ]; then ok "LAUNCH_START_TIMEOUT_SEC must be a number"; else no "bad timeout rejected"; fi
+run claude "$BUILD
+acme-mm|$W|/engsys:merge-monster|--model opus" FAKE_NO_START=1
+has "a whole roster: every session that never starts is counted" "$err" "error: 2 roster session(s) not launched; 0 launched"
+
+echo "engsys#236 review: the window keeps its name (allow-rename and automatic-rename off, before the line is typed)"
+run claude "$BUILD"
+has "allow-rename off on the new window" "$acts" "set-option -w -t acme:acme-build allow-rename off"
+has "automatic-rename off on the new window" "$acts" "set-option -w -t acme:acme-build automatic-rename off"
+case "$acts" in *"automatic-rename off"*"send-keys"*) ok "…both before the launch line is typed" ;; *) no "rename options before send-keys" "$acts" ;; esac
+run claude "$BUILD" FAKE_SETOPT_FAIL=1
+if [ "$rc" -ne 0 ]; then ok "set-option fails: the launch fails"; else no "set-option failure fails the launch"; fi
+has "…says why" "$err" "tmux set-option (allow-rename/automatic-rename off) failed for 'acme-build'"
+lacks "…nothing is typed" "$acts" "send-keys"
+has "…its window is closed" "$acts" "kill-window acme:acme-build"
+
+echo "engsys#236 review: the launch line is one fail-closed chain (sourced for real, in bash and zsh)"
+printf 'export FROM_ENV=1\n' >"$W/good.env"; printf 'export FROM_ENV=1\nfalse\n' >"$W/bad.env"
+for sh in bash zsh; do
+  command -v "$sh" >/dev/null 2>&1 || { echo "  skip  $sh not installed"; continue; }
+  run claude "acme-build|$W||--model opus|$W/good.env" FAKE_SHELL="$sh"
+  [ "$rc" -eq 0 ] && ok "$sh: an ordinary env file: the line runs claude (positive control; unset -f on a missing function is fine)" || no "$sh: good env launches" "$err | $(cat "$T/shell.out" 2>/dev/null)"
+  has "$sh: …claude ran with its name" "$(cat "$T/ran" 2>/dev/null)" "ran --name acme-build"
+  run claude "acme-build|$W||--model opus|$W/bad.env" FAKE_SHELL="$sh"
+  if [ "$rc" -ne 0 ]; then ok "$sh: an env file whose last command fails: the launch fails"; else no "$sh: failing env file fails the launch"; fi
+  [ ! -s "$T/ran" ] && ok "$sh: …no harness runs" || no "$sh: no harness after a failing env file" "$(cat "$T/ran")"
+  has "$sh: …loudly" "$err" "error: launch did not start for 'acme-build' within 2s: the launch line has not reached the harness yet"
+  LAUNCH_EXTRA="--verdict-key-file $T/fleet.key" run claude "acme-sec|$W||--model claude-opus-4-8|$W/security.env" FAKE_SHELL="$sh"
+  [ "$rc" -eq 0 ] && has "$sh: a security line runs claude through the whole chain" "$(cat "$T/ran" 2>/dev/null)" "ran --name acme-sec" || no "$sh: security line launches" "$err | $(cat "$T/shell.out" 2>/dev/null)"
+done
+LAUNCH_EXTRA=""
+has "the chain is not restarted after the claude-function guard" "$(cat "$T/launch-file.copy")" "{ unset -f claude 2>/dev/null || true; } && "
+chain="$(cat "$T/launch-file.copy")"
+lacks "…no other ';' in the line (the only one closes the guard's group)" "${chain/|| true; \}/|| true \}}" ";"
 
 echo "$pass passed, $fail failed."
 [ "$fail" = 0 ]

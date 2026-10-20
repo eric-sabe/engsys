@@ -34,6 +34,9 @@ done
 w="${t#*:}"
 # a launched session shows its first reply; the supervisor reads it for a login error (engsys#103)
 add_window() { grep -Fxq "$1" "$F/windows" || echo "$1" >>"$F/windows"; echo node >"$F/cmd-$1"; echo "⏺ Reading the ledger." >"$F/cap-$1"; }
+# engsys#236: a launch types `. <launch file>`; play the shell: log the file's line ("[script] [<target>] <line>",
+# what the launch-line assertions read) and remove it, as its own last step before the harness does
+run_launch_line() { local f; case "$1" in ". "*) eval "f=${1#. }"; [ -f "$f" ] || return 0; { printf 'tmux [script] [%s] ' "$t"; cat "$f"; } >>"$FAKE/tmux.log"; rm -f "$f" ;; esac; }
 case "$sub" in
   list-windows) cat "$F/windows" ;;
   list-panes) case "$fmt" in *pane_pid*) exit 1 ;; *window_name*) while IFS= read -r wn; do [ -z "$wn" ] || [ ! -f "$F/cmd-$wn" ] || printf '%s\t%s\n' "$wn" "$(cat "$F/cmd-$wn")"; done <"$F/windows" ;; *) cat "$F/cmd-$w" 2>/dev/null || exit 1 ;; esac ;;
@@ -42,6 +45,7 @@ case "$sub" in
   new-session) touch "$F/session"; add_window "$nm" ;;
   new-window) add_window "$nm" ;;
   kill-window) grep -Fxv "$w" "$F/windows" >"$F/windows.new" || true; mv "$F/windows.new" "$F/windows"; rm -f "$F/cmd-$w" ;;
+  send-keys) run_launch_line "${3:-}" ;;
 esac
 exit 0
 SH

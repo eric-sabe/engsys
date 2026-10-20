@@ -220,6 +220,16 @@ session (or `claude /login` in a terminal), the status issue's heartbeat and `fl
 relaunches each held session once. Details: the agent-sessions skill and the header of
 `fleet-supervisor.sh` (engsys#103).
 
+A relaunch that fails is escalated once on the session's ledger and alerted once with `fleet notify --level
+alert --incident launch-failed-<name>`, carrying the launcher's error line. That includes a launch whose keys
+were sent but whose session never started (engsys#236): the launcher types only `. <launch file>` into the new
+window (the full command is in a one-shot 0600 file in `<instance>/.fleet/launch/`), then waits up to
+`LAUNCH_START_TIMEOUT_SEC` seconds (default 30; 0 = don't wait) for the file to be gone and the pane to leave its
+shell. If it doesn't, the launcher says `launch did not start`, closes the window and exits non-zero, and the
+supervisor logs `RELAUNCH FAILED (…)` instead of `relaunched`. The alert is resolved by the first successful
+relaunch, or as soon as the session is seen running however it was started. Set `LAUNCH_START_TIMEOUT_SEC` in the
+environment of `fleet launch` (and of the supervisor's job, which launches through it).
+
 When a seat hits its usage or rate limit (`You've hit your limit · resets …`, `Usage limit reached`), the
 supervisor does not move any supervised session to another harness: the fleet is Claude-only, whatever
 `HARNESS_FALLBACK` says. It posts one `fleet notify --level alert --incident seat-limit`, resolved once no
@@ -1788,6 +1798,7 @@ plugins to install is `enabledPlugins` entries that are `true` and end in `@<mar
 | `<instance>/.fleet/roster` | the rendered roster |
 | `<instance>/.fleet/roster.host` | the rendered roster minus the sessions that are not on this host (§ 6.11); what `fleet launch` with no name starts |
 | `<instance>/.fleet/supervisor.conf` | the rendered supervisor conf |
+| `<instance>/.fleet/launch/` | one-shot launch files (mode 0600, dir 0700): each session's full command, sourced by its window's shell and removed just before the harness starts; a launch that never starts removes its own, and hour-old leftovers are pruned (engsys#236) |
 | `<instance>/.fleet/last-change`, `sync.log` | what `fleet restart` uses to decide BEHIND, and the history |
 | `<instance>/logs/fleet-supervisor/` | supervisor state and log |
 | `~/Library/Logs/<org>-fleet/` | launchd job logs |

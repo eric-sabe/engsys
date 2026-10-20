@@ -30,9 +30,13 @@
 #                                                  the BATON to allow it (below),
 #                                                  and INTEGRITY_CMD to pass
 #   any relaunch that FAILS                      → escalate once on the ledger
-#                                                  (with the launcher's error),
+#                                                  (with the launcher's error)
+#                                                  and alert once via NOTIFY_CMD,
 #                                                  retry each tick quietly,
-#                                                  comment again on recovery
+#                                                  comment again and resolve the
+#                                                  alert on recovery. A launch that
+#                                                  was sent but never started fails
+#                                                  too (the launcher checks, engsys#236)
 #   Claude Code's login expired (below)          → hold EVERY relaunch, of every
 #                                                  session; kill nothing; one
 #                                                  action-level alert; resume once
@@ -711,9 +715,12 @@ auth_after_launch() { # auth_after_launch <name> → watch the fresh pane for it
 # A failed launch is escalated ONCE per incident (latch: <name>.launch-failed) with the launcher's own
 # error lines, then retried quietly every tick; the first successful launch after that clears the latch
 # and says so. Without the latch a persistent cause (e.g. claude not on the job's PATH) posts a comment
-# every tick and buries the alert.
+# every tick and buries the alert. It is also alerted ONCE via NOTIFY_CMD (incident launch-failed-<name>,
+# latch: <name>.launch-alerted), resolved by the first successful launch. "Failed" includes a launch whose
+# keys were sent but whose session never started: the launcher waits for it and exits non-zero with
+# "launch did not start" (engsys#236), where it used to report success while nothing ran.
 relaunch() { # relaunch <name> <ledger> <repo> <reason>
-  local name="$1" ledger="$2" repo="$3" reason="$4" out failed="$STATE_DIR/$1.launch-failed"
+  local name="$1" ledger="$2" repo="$3" reason="$4" out failed="$STATE_DIR/$1.launch-failed" alerted="$STATE_DIR/$1.launch-alerted"
   RELAUNCH_OK=0 # set to 1 below when the launcher succeeded; the seat limit resume reads it
   # the last line of defence for the login hold: whatever path got here, nothing is killed or relaunched
   if auth_is_held "$name"; then auth_hold "$name" "relaunch due ($reason)"; return 0; fi
@@ -743,16 +750,24 @@ relaunch() { # relaunch <name> <ledger> <repo> <reason>
     else
       gh issue comment "$ledger" -R "$repo" --body "🔁 fleet-supervisor: relaunched \`$name\` ($reason_h, $(human_text "$(date -u +%Y-%m-%dT%H:%M:%SZ)")). Startup reconcile recovers state from this ledger + state.md." >/dev/null || true
     fi
+    if [ -f "$alerted" ] && notify --level info --incident "launch-failed-$name" --resolve "Resolved: \`$name\` relaunched on $HOST_NAME (its launch had failed since $(cat "$alerted"))."; then
+      rm -f "$alerted"
+    fi
     # the launch command exits 0 even when the new session can't log in: read its first reply
     [ "$AUTH_CHECK_WAIT_SEC" = 0 ] || auth_after_launch "$name"
   else
-    local tail_lines
+    local tail_lines first_err
     tail_lines="$(tail -n 5 "$out" | cut -c1-200)"
+    # the launcher's first error line is the specific one (e.g. "launch did not start for …"); the rest is its summary
+    first_err="$(grep -m 1 '^error: ' "$out" | cut -c1-300 || true)"
     cat "$out" >>"$LOG"; rm -f "$out"
+    if [ ! -f "$alerted" ] && notify --level alert --incident "launch-failed-$name" "fleet-supervisor: relaunch of \`$name\` on $HOST_NAME FAILED ($reason_h): ${first_err:-the launcher printed no error line; see logs/fleet-supervisor/supervisor.log}. The supervisor retries every tick and resolves this once a relaunch starts."; then
+      date -u +%Y-%m-%dT%H:%M:%SZ >"$alerted"
+    fi
     if [ -f "$failed" ]; then
-      log "$name: RELAUNCH FAILED — already escalated (failing since $(cat "$failed")), retrying next tick"
+      log "$name: RELAUNCH FAILED${first_err:+ ($first_err)} — already escalated (failing since $(cat "$failed")), retrying next tick"
     else
-      log "$name: RELAUNCH FAILED — escalating on ledger $repo#$ledger"
+      log "$name: RELAUNCH FAILED${first_err:+ ($first_err)} — escalating on ledger $repo#$ledger"
       gh issue comment "$ledger" -R "$repo" --body "🚨 fleet-supervisor: relaunch of \`$name\` FAILED ($reason_h). Operator needed. The supervisor retries every tick without commenting again, and comments once more when a relaunch succeeds. Launcher output:
 \`\`\`
 ${tail_lines:-(no output)}
@@ -1092,6 +1107,13 @@ for spec in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
   case "$CMD" in
     '' | zsh | -zsh | bash | -bash | sh | -sh | fish | -fish) ALIVE=0 ;;
   esac
+  # A session seen running ends its launch-failed alert (engsys#236), however it got started (an operator's
+  # `fleet launch` after a fix, say): a stale latch would hold back the alert for its next failure. A resolve that
+  # can't be posted is retried next tick.
+  if [ "$ALIVE" = 1 ] && [ -f "$STATE_DIR/$name.launch-alerted" ] \
+    && notify --level info --incident "launch-failed-$name" --resolve "Resolved: \`$name\` is running on $HOST_NAME again (its launch had failed since $(cat "$STATE_DIR/$name.launch-alerted"))."; then
+    rm -f "$STATE_DIR/$name.launch-alerted"
+  fi
 
   # --- classify ---------------------------------------------------------------
   STALE=0

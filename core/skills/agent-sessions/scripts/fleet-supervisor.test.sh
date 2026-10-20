@@ -920,6 +920,60 @@ mkhold_due acme-rel; wpane acme-w "⏺ Login expired · Please run /login"; run
 expect "resume due while the login is expired → held, not re-prompted" "!^sendkeys"
 rm -f "$T"/pane-* "$T"/capture-*
 
+# engsys#236: a failed relaunch is alerted once via NOTIFY_CMD (not only on the ledger), and resolved on recovery
+printf 'TMUX_SESSION=acme\nLAUNCH_CMD=bash %s/launch.sh\nNOTIFY_CMD=bash %s/notify.sh\nAUTH_CHECK_WAIT_SEC=0\nREPO=o/r\nacme-mm|1|60\n' "$T" "$T" >"$T/w/sup.conf"
+reset; rm -f "$T/notify-fail"; ledger 90 "ok — merging #12"; pane exited; touch "$T/launch-fail"; run
+expect "236: launcher fails → one alert via NOTIFY_CMD, with its error" "^notify --level alert --incident launch-failed-acme-mm fleet-supervisor: relaunch of .acme-mm. on .* FAILED (.*): error: claude not found on PATH"
+expect "  …and the ledger escalation as before" "comment 1: .*relaunch of .acme-mm. FAILED"
+run
+expect "236: still failing next tick → no second alert" "!^notify"
+rm -f "$T/launch-fail"; run
+expect "236: launcher works again → the alert is resolved" "^notify --level info --incident launch-failed-acme-mm --resolve Resolved: .acme-mm. relaunched on"
+ledger 90 "ok — merging #12"; pane exited; run
+expect "  …once" "!^notify"
+reset; touch "$T/launch-fail"; ledger 90 "ok — merging #12"; pane exited; run
+rm -f "$T/launch-fail"; pane idle; ledger 2 "ok — merging #12"; run   # an operator started it by hand
+expect "236: a session seen running resolves its launch-failed alert, however it started" "^notify --level info --incident launch-failed-acme-mm --resolve Resolved: .acme-mm. is running on"
+run
+expect "  …once" "!^notify"
+reset; touch "$T/notify-fail" "$T/launch-fail"; ledger 90 "ok — merging #12"; pane exited; run
+rm -f "$T/notify-fail"; run
+expect "236: an alert that could not be delivered is retried next tick" "^notify --level alert --incident launch-failed-acme-mm"
+rm -f "$T/launch-fail"
+
+# engsys#236 end to end: the real launcher, whose new window's shell never runs the launch line (a fake tmux whose
+# pane stays at zsh): the supervisor alerts and logs RELAUNCH FAILED, never "relaunched"
+LAUNCHER="$HERE/launch-agent-sessions.sh"
+mkdir -p "$T/lbin" "$T/home"
+cat >"$T/lbin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+  list-windows) exit 0 ;;
+  has-session) exit 1 ;;
+  send-keys) echo "lsend $4" >>"$FAKE/actions" ;;
+  list-panes) echo zsh ;;
+  capture-pane) echo "% " ;;
+  kill-window) echo "lkill $3" >>"$FAKE/actions" ;;
+esac
+exit 0
+SH
+chmod +x "$T/lbin/tmux"
+printf 'NAMESPACE=acme\nacme-mm|%s|/merge-monster|--model opus --remote-control\n' "$T/w" >"$T/w/real.roster"
+printf '#!/usr/bin/env bash\nexport PATH="$FAKE/lbin:$PATH" HOME="$FAKE/home" LAUNCH_START_TIMEOUT_SEC=1\nunset ENGSYS_LAUNCH_DIR XDG_STATE_HOME\ncd "$FAKE/w" && exec bash %q --roster "$FAKE/w/real.roster" "$@"\n' "$LAUNCHER" >"$T/real-launch.sh"
+printf 'TMUX_SESSION=acme\nLAUNCH_CMD=bash %s/real-launch.sh\nNOTIFY_CMD=bash %s/notify.sh\nAUTH_CHECK_WAIT_SEC=0\nREPO=o/r\nacme-mm|1|60\n' "$T" "$T" >"$T/w/sup.conf"
+reset; rm -f "$T/notify-fail"; ledger 90 "ok — merging #12"; pane exited; run
+expect "236 e2e: the real launcher types only a short line" "^lsend \. /.*/home/.local/state/engsys/launch/acme-mm\.[^ ]*$"
+expect "  …the launch never starts → the supervisor alerts" "^notify --level alert --incident launch-failed-acme-mm .*error: launch did not start for 'acme-mm' within 1s: the launch line has not reached the harness yet"
+expect "  …the launcher closed the window it opened" "^lkill acme:acme-mm"
+expect "  …and the ledger says FAILED" "comment 1: .*relaunch of .acme-mm. FAILED"
+expect "  …never a relaunched comment" "!fleet-supervisor: relaunched"
+grep -q "acme-mm: RELAUNCH FAILED (error: launch did not start for 'acme-mm'" "$T/w/logs/fleet-supervisor/supervisor.log" && echo "log-failed" >>"$T/actions"
+grep -q "acme-mm: relaunched" "$T/w/logs/fleet-supervisor/supervisor.log" && echo "log-relaunched" >>"$T/actions"
+expect "  …the log says RELAUNCH FAILED with the reason" "^log-failed"
+expect "  …and never 'relaunched'" "!^log-relaunched"
+[ -z "$(ls -A "$T/home/.local/state/engsys/launch" 2>/dev/null)" ] && echo "no-launch-file" >>"$T/actions"
+expect "  …and no launch file is left behind" "^no-launch-file"
+
 # launch-agent-sessions.sh harness policy and flag translation: launch-agent-sessions.test.sh.
 
 echo "$pass passed, $fail failed."
