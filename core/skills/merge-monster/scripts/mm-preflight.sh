@@ -122,7 +122,7 @@ fi
 SS_CONFIGS=()
 for c in "${ENGSYS_MM_CONFIG:-}" "$([ ! -f .claude/merge-monster.yml ] || echo .claude/merge-monster.yml)" ${FLEET_MM_CONFIGS[@]+"${FLEET_MM_CONFIGS[@]}"} "$MM_CONFIG_FILE"; do
   [ -n "$c" ] || continue
-  case " ${SS_CONFIGS[*]-} " in *" $c "*) ;; *) SS_CONFIGS+=("$c") ;; esac
+  SS_CONFIGS+=("$c")   # no de-duplication: a repeat is harmless, and a substring match could drop a config
 done
 SEC_REASONS="[]"
 if [ "${#SS_CONFIGS[@]}" -gt 0 ] || [ "$SEC_VERDICT" -eq 1 ]; then

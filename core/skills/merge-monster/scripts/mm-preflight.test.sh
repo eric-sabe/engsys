@@ -251,6 +251,11 @@ run --config "$T/weak.yml" --security-key-file "$KEY"
 rc_is "…and on its own a weak config (no globs, gate not on) is what it says, unchanged (positive control)" 0
 RC=0; OUT="$(ENGSYS_MM_CONFIG="$T/nope.yml" bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --config "$CFG" --security-key-file "$KEY" 2>&1)" || RC=$?
 rc_is "an unreadable discoverable config fails closed even when --config is fine" 1
+# a config path with a space (or one that is a substring of another) never hides a stricter one
+mkdir -p "$T/my dir"; cp "$T/weak.yml" "$T/my dir/.claude"
+files "services/dashboard/app/(auth)/x.tsx"; view
+RC=0; OUT="$(cd "$T/wd" && ENGSYS_MM_CONFIG="$T/my dir/.claude" bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --security-key-file "$KEY" 2>&1)" || RC=$?
+rc_is "a weak config whose path contains a space does not drop the repo's stricter config" 1
 # --require-security-verdict can still ask for more, never for less
 files README.md
 run --config "$CFG" --require-security-verdict --security-key-file "$KEY"
