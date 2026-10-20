@@ -31,7 +31,7 @@ describe('resolve', () => {
     assert.equal(r.fleetManaged, true); assert.equal(r.missing, false);
     assert.equal(r.configs.length, 1, 'only the installed version');
     assert.ok(r.configs[0].includes('/1.0.0/'));
-    assert.equal(r.configs.length, 1); assert.match(r.configs[0], /repos\/FeedFrwd\/keystone\/merge-monster\.yml$/);
+    assert.match(r.configs[0], /repos\/FeedFrwd\/keystone\/merge-monster\.yml$/);
   });
   it('falls back to walking plugins/cache, and tries the lowercased slug', () => {
     const cfg = path.join(T, 'b');
