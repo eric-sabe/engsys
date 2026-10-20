@@ -1172,6 +1172,13 @@ run fleet restart acme-rel
 has "an exited window is relaunched directly" "$OUT" "acme-rel: relaunched"
 run fleet restart acme-nope
 has "unknown names are skipped" "$OUT" "acme-nope: not in the roster"
+# restart's pane check is a copy of the supervisor's CLAUDE_AUTH_ERRORS: every entry must appear verbatim in it
+SUPSH="$CORE_SRC/skills/agent-sessions/scripts/fleet-supervisor.sh"; drift=""
+while IFS= read -r ent; do
+  ent="${ent#  \'}"; ent="${ent%\'}"
+  grep -Fq -- "$ent" "$KIT_SRC/restart.sh" || drift="$drift [$ent]"
+done < <(sed -n '/^CLAUDE_AUTH_ERRORS=(/,/^)/p' "$SUPSH" | grep "^  '")
+eq "restart.sh's pane patterns carry every supervisor auth-error entry" "$drift" ""
 # engsys#223: a live session whose login expired can't act on a rotation request: say so, type nothing, kill nothing
 SUP="$INST/logs/fleet-supervisor"; mkdir -p "$SUP"
 printf '2026-10-19T17:30:00Z\nthe `acme-mm` window\n' >"$SUP/auth.acme-mm.expired"; : >"$FAKE/tmux.log"

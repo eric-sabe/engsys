@@ -999,7 +999,7 @@ ln -s "$T/victim" "$LOGF"
 if [ ! -e "$T/victim" ]; then ok "a symlinked log is not followed"; else bad "a symlinked log is not followed"; fi
 rm -f "$LOGF"
 ( FLEET_INSTANCE="$I"; . "$E/core/fleet/lib/fleet-env.sh"; fleet_log_claude_call /d claude x ) >/dev/null 2>&1 || true
-eq "a fresh log is created 0600" "$(stat -f %Lp "$LOGF" 2>/dev/null || stat -c %a "$LOGF")" 600
+eq "a fresh log is created 0600" "$(stat -c %a "$LOGF" 2>/dev/null || stat -f %Lp "$LOGF")" 600
 rm -f "$LOGF"
 
 finish verify.test.sh
