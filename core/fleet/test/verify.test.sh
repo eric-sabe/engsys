@@ -957,7 +957,6 @@ has "…and the login check was skipped, said so" "$OUT" "login not checked: ses
 printf 'acme-mm\nacme-security\n' >"$FAKE/tmux-windows"
 run fleet verify --alert --auto-sync --max-age 15 --session acme-mm
 eq "…a different set of running sessions does not alert again" "$(said 'Auto-sync is deferred')" "$((g0 + 1))"
-echo acme-mm >"$FAKE/tmux-windows"
 : >"$FAKE/tmux-windows"; : >"$FAKE/claude.calls"
 run fleet verify --alert --auto-sync --max-age 15 --session acme-mm
 hasnt "with nothing running the sync is not deferred" "$OUT" "sync deferred"

@@ -405,8 +405,7 @@ fleet_log_claude_call() {
 # the lock stays busy for two minutes.
 fleet_dir_lock() {
   local dir="$1"; shift
-  fleet_log_claude_call "$dir" "$@"
-  if [ "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:-off}" != on ]; then "$@"; return; fi
+  if [ "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:-off}" != on ]; then fleet_log_claude_call "$dir" "$@"; "$@"; return; fi
   local lock guard waited=0 rc=0 lm owner ostart me mystart
   lock="$FLEET_STATE/locks/claude-$(printf '%s' "$dir" | cksum | cut -d' ' -f1).lock"
   guard="$lock.reclaim"
@@ -434,6 +433,7 @@ fleet_dir_lock() {
     sleep 0.5
   done
   printf '%s|%s\n' "$me" "$mystart" >"$lock/holder" 2>/dev/null || true
+  fleet_log_claude_call "$dir" "$@"   # logged once the lock is held: the time is when the process starts, not when it queued
   "$@" || rc=$?
   rm -f "${lock:?}/holder"; rmdir "$lock" 2>/dev/null || true
   return "$rc"

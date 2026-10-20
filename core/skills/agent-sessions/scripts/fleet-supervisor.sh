@@ -448,7 +448,8 @@ auth_probe() {
   local dir pid rc=0 waited=0 last
   # every test request is a claude process on a credential: record it (engsys#223), refusing to write through a symlink
   if [ "$h" = claude ] && [ ! -L "$STATE_DIR/claude-invocations.log" ]; then
-    (umask 077; printf '%s %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${AUTH_PROBE_CFG:-${CLAUDE_CONFIG_DIR:-default}}" "claude -p (auth probe)" >>"$STATE_DIR/claude-invocations.log") 2>/dev/null || true
+    (umask 077; printf '%s %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${AUTH_PROBE_CFG:-${CLAUDE_CONFIG_DIR:-default}}" "claude -p (auth probe)" >>"$STATE_DIR/claude-invocations.log"
+      if [ "$(wc -c <"$STATE_DIR/claude-invocations.log")" -gt 204800 ] && [ ! -L "$STATE_DIR/claude-invocations.log.tmp" ]; then tail -n 500 "$STATE_DIR/claude-invocations.log" >"$STATE_DIR/claude-invocations.log.tmp" && mv "$STATE_DIR/claude-invocations.log.tmp" "$STATE_DIR/claude-invocations.log"; fi) 2>/dev/null || true
   fi
   dir="$(mktemp -d "${TMPDIR:-/tmp}/fleet-supervisor-auth.XXXXXX")"
   if [ "$h" = "copilot" ]; then

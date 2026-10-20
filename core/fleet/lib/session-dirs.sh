@@ -120,8 +120,9 @@ fleet_config_dir_fix() {
 fleet_session_alive() {
   local cmd
   # NOTE: the shell-name list below now decides whether a LIVE credential gets a claude process started on it (verify's
-  # CLI fallback). A name missing from it makes a running claude look exited, and the short-lived process can then
-  # rotate the refresh token out from under it (anthropics/claude-code#88583). Keep it complete.
+  # CLI fallback): a pane whose foreground command is on it reads as "exited". Only login shells belong here; a name that
+  # a running claude can show (a wrapper script's bash or sh) would make verify start a short-lived claude on its login,
+  # which can rotate the refresh token out from under it (anthropics/claude-code#88583).
   # (No early `exit` in the awk: it would SIGPIPE tmux and fail the pipeline under pipefail.)
   if [ -n "${2:-}" ]; then   # scoped to one tmux session: what `fleet restart` acts on
     cmd="$(tmux list-panes -t "$2:$1" -F '#{pane_current_command}' 2>/dev/null | awk '!d { print; d = 1 }')" || return 1
