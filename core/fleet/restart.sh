@@ -62,7 +62,7 @@ has_window() { # capture first: `grep -q` closing the pipe early would fail the 
   w="$(tmux list-windows -t "$TMUX_SESSION" -F '#{window_name}' 2>/dev/null)" || return 1
   grep -Fxq "$1" <<<"$w"
 }
-is_alive() { fleet_session_alive "$1"; } # one rule for restart and verify (lib/session-dirs.sh, engsys#223)
+is_alive() { fleet_session_alive "$1" "$TMUX_SESSION"; } # one rule for restart and verify (lib/session-dirs.sh, engsys#223)
 started_at() { # epoch the session's claude process started ('' if none)
   local pp pid lstart
   pp="$(tmux list-panes -t "$(win "$1")" -F '#{pane_pid}' 2>/dev/null | head -1)"

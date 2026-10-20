@@ -111,7 +111,7 @@ fleet_config_dir_fix() {
   fi
 }
 
-# fleet_session_alive <name> → 0 when a claude process is running in the session's tmux window: a window of that name
+# fleet_session_alive <name> [<tmux session>] → 0 when a claude process is running in the session's tmux window: a window of that name
 # exists (any tmux session, like launch.sh's own check: `-a`) and its pane's foreground command is not a login shell
 # (the launcher runs claude from the window's shell, so a shell in the foreground means it exited). Anything
 # unreadable (no tmux server, no window) is "not running": the caller then asks the CLI, which is safe only because
@@ -122,7 +122,12 @@ fleet_session_alive() {
   # NOTE: the shell-name list below now decides whether a LIVE credential gets a claude process started on it (verify's
   # CLI fallback). A name missing from it makes a running claude look exited, and the short-lived process can then
   # rotate the refresh token out from under it (anthropics/claude-code#88583). Keep it complete.
-  cmd="$(tmux list-panes -a -F '#{window_name} #{pane_current_command}' 2>/dev/null | awk -v n="$1" '$1 == n && !d { print $2; d = 1 }')" || return 1   # no early `exit`: it would SIGPIPE tmux and fail the pipeline under pipefail
+  # (No early `exit` in the awk: it would SIGPIPE tmux and fail the pipeline under pipefail.)
+  if [ -n "${2:-}" ]; then   # scoped to one tmux session: what `fleet restart` acts on
+    cmd="$(tmux list-panes -t "$2:$1" -F '#{pane_current_command}' 2>/dev/null | awk '!d { print; d = 1 }')" || return 1
+  else
+    cmd="$(tmux list-panes -a -F '#{window_name} #{pane_current_command}' 2>/dev/null | awk -v n="$1" '$1 == n && !d { print $2; d = 1 }')" || return 1
+  fi
   case "$cmd" in '' | zsh | -zsh | bash | -bash | sh | -sh | fish | -fish) return 1 ;; esac
   return 0
 }
