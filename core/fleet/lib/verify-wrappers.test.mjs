@@ -959,7 +959,10 @@ test('instance marketplace plugin: fail closed when it cannot be checked (engsys
     // a malformed cache record (writable by a session) is a miss when enforcing, never a crash
     assert.equal((await run3(plugins, offMain, [...MARKET, ...withCache])).rc, 0); // a mismatch removed the cache: write it again
     fs.writeFileSync(cacheFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(cacheFile, 'utf8')), result: 'ok', warnings: 'not an array' }));
-    assert.equal((await run3(plugins, {}, ['--enforce-instance-on-main', ...MARKET, ...withCache])).rc, 0, 'enforcing, malformed cached warnings: re-checked, and an ahead tag passes');
+    let rechecked = 0;
+    const counting = async (a) => { rechecked++; return fetch(a); };
+    assert.equal((await run3(plugins, { fetch: counting }, ['--enforce-instance-on-main', ...MARKET, ...withCache])).rc, 0, 'enforcing, malformed cached warnings: an ahead tag passes');
+    assert.ok(rechecked > 0, 'the release was fetched again: a miss, not a cache hit');
   }
   // the engsys tag off the default branch is still a MISMATCH, whatever the switch says
   r = await run3(pluginList([userEntry(eng), instEntry(acme)]), { fetch: async ({ repo }) => (repo === 'acme/fleet' ? inst : { ...release, status: 'diverged' }) });
