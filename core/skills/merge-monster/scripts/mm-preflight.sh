@@ -27,8 +27,9 @@
 # boundary: the key is readable by every process of the fleet's OS user.
 #
 # The requirement itself is decided HERE, not by the merge session (engsys#229): with the repo's merge-monster config
-# (--config FILE, $ENGSYS_MM_CONFIG and .claude/merge-monster.yml in the cwd: every one that exists counts, the strictest
-# wins, so --config can add requirements but never replace the discoverable ones) the script reads
+# (--config FILE, $ENGSYS_MM_CONFIG, .claude/merge-monster.yml in the cwd and the fleet-config-dir copy found by
+# core/lib/mm-config.mjs: every one that exists counts, the strictest wins, so --config can add requirements but never
+# replace the discoverable ones; a fleet-managed repo with no merge config anywhere fails closed) the script reads
 # ready_requirements.signed_security_verdict (true turns --security-verdict on even when the flag is omitted),
 # security_sensitive_globs and security_sensitive_label (default `security`), lists the PR's files over REST
 # (pulls/N/files: filename and previous_filename, so both sides of a rename are matched, paginated) and requires a
@@ -106,8 +107,20 @@ sec_fail() { printf '{"ok":false,"state":"error","reason":%s}\n' "$(jq -Rn --arg
 # Every config source that exists counts and the strictest wins, so a session-supplied --config can add requirements
 # but never replace the discoverable ones (a file with only `repo: x` cannot lower them): $ENGSYS_MM_CONFIG (for the
 # fleet's launch context to export), .claude/merge-monster.yml in the cwd, and --config. Each must be readable.
+# The fleet-config-dir copy (the instance plugin's repos/<owner>/<repo>/merge-monster.yml, found through the session's
+# Claude config dir by core/lib/mm-config.mjs) counts too. A fleet-managed repo (that directory exists) with no readable
+# merge config anywhere, in-repo or fleet, fails closed rather than silently staying opt-in.
+MC_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/mm-config.mjs"
+FLEET_MM_CONFIGS=()
+if command -v node >/dev/null && [ -f "$MC_SCRIPT" ]; then
+  MC_JSON=$(node "$MC_SCRIPT" resolve --repo "$REPO" 2>/dev/null) || sec_fail "security_config_unreadable: could not look for the fleet config of $REPO"
+  while IFS= read -r c; do [ -z "$c" ] || FLEET_MM_CONFIGS+=("$c"); done < <(jq -r '.configs[]?' <<<"$MC_JSON")
+  if [ "$(jq -r '.missing' <<<"$MC_JSON")" = true ] && [ ! -f .claude/merge-monster.yml ]; then
+    sec_fail "security_config_unreadable: $REPO is fleet-managed ($(jq -r '.fleetDirs[0]' <<<"$MC_JSON")) but no readable merge-monster.yml was found there or in the repo"
+  fi
+fi
 SS_CONFIGS=()
-for c in "${ENGSYS_MM_CONFIG:-}" "$([ ! -f .claude/merge-monster.yml ] || echo .claude/merge-monster.yml)" "$MM_CONFIG_FILE"; do
+for c in "${ENGSYS_MM_CONFIG:-}" "$([ ! -f .claude/merge-monster.yml ] || echo .claude/merge-monster.yml)" ${FLEET_MM_CONFIGS[@]+"${FLEET_MM_CONFIGS[@]}"} "$MM_CONFIG_FILE"; do
   [ -n "$c" ] || continue
   case " ${SS_CONFIGS[*]-} " in *" $c "*) ;; *) SS_CONFIGS+=("$c") ;; esac
 done

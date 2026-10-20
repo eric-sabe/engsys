@@ -34,6 +34,7 @@ esac
 SH
 chmod +x "$T/bin/gh"
 export FAKE="$T" FLEET_GH="$T/bin/gh"
+mkdir -p "$T/cfg0"; export CLAUDE_CONFIG_DIR="$T/cfg0"   # hermetic: no real plugin install is looked at for a fleet config
 unset FLEET_STATE GH_APP_ENV_FILE
 
 # sign <key> <sha> <verdict> <text> [minutes-ago] → a comment body on stdout, signed by the real library
@@ -259,6 +260,39 @@ has "  …saying why" "not a security-lane session"
 view "$GOOD"; files README.md
 run --config "$CFG" --security-key-file "$KEY"
 rc_is "…while verification by key-file path keeps working (positive control)" 0
+
+echo "engsys#229: the fleet-config-dir copy of the merge config is discovered (keystone has no .claude/merge-monster.yml)"
+FLEETCFG="$T/cfg1"; PLUG="$FLEETCFG/plugins/cache/acme-fleet/acme/1.0.0"
+mkdir -p "$PLUG/repos/acme/app" "$FLEETCFG/plugins"
+cp "$CFG" "$PLUG/repos/acme/app/merge-monster.yml"
+jq -n --arg p "$PLUG" '{version:2, plugins:{"acme@acme-fleet":[{scope:"user", installPath:$p, version:"1.0.0"}]}}' >"$FLEETCFG/plugins/installed_plugins.json"
+files "services/dashboard/app/(auth)/x.tsx"; view
+RC=0; OUT="$(cd "$T/cfg0" && CLAUDE_CONFIG_DIR="$FLEETCFG" bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --security-key-file "$KEY" 2>&1)" || RC=$?
+rc_is "no flag, no --config, no env, no repo config: the fleet copy still blocks a sensitive PR without a verdict" 1
+has "  …through the gate" "no_valid_verdict"
+files README.md
+RC=0; OUT="$(cd "$T/cfg0" && CLAUDE_CONFIG_DIR="$FLEETCFG" bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --security-key-file "$KEY" 2>&1)" || RC=$?
+rc_is "…and passes a non-sensitive one (the fleet copy turned the gate on)" 0
+has "  …gate ran" '"state": "none"'
+# the cache walk finds it without installed_plugins.json, and a lowercased directory name works
+rm -f "$FLEETCFG/plugins/installed_plugins.json"
+files "services/dashboard/app/(auth)/x.tsx"
+RC=0; OUT="$(cd "$T/cfg0" && CLAUDE_CONFIG_DIR="$FLEETCFG" bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --security-key-file "$KEY" 2>&1)" || RC=$?
+rc_is "found through plugins/cache without installed_plugins.json" 1
+has "  …and it was the sensitive-path gate that blocked it" "no_valid_verdict"
+# fleet-managed but no merge config: fail closed, a session --config cannot paper over it
+FLEETCFG2="$T/cfg2"; mkdir -p "$FLEETCFG2/plugins/cache/acme-fleet/acme/1.0.0/repos/acme/app"
+: >"$FLEETCFG2/plugins/cache/acme-fleet/acme/1.0.0/repos/acme/app/context.md"
+files README.md
+RC=0; OUT="$(cd "$T/cfg0" && CLAUDE_CONFIG_DIR="$FLEETCFG2" bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --security-key-file "$KEY" 2>&1)" || RC=$?
+rc_is "a fleet-managed repo with no readable merge-monster.yml fails closed" 1
+has "  …naming it" "security_config_unreadable"
+RC=0; OUT="$(cd "$T/cfg0" && CLAUDE_CONFIG_DIR="$FLEETCFG2" bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --config "$T/weak.yml" --security-key-file "$KEY" 2>&1)" || RC=$?
+rc_is "…even with a weak --config" 1
+RC=0; OUT="$(cd "$T/wd" && CLAUDE_CONFIG_DIR="$FLEETCFG2" bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --security-key-file "$KEY" 2>&1)" || RC=$?
+rc_is "…unless the repo carries its own .claude/merge-monster.yml (in-repo wins; positive control)" 0
+RC=0; OUT="$(cd "$T/cfg0" && CLAUDE_CONFIG_DIR="$FLEETCFG2" bash "$HERE/mm-preflight.sh" --repo other/repo --pr 7 --security-key-file "$KEY" 2>&1)" || RC=$?
+rc_is "a repo with no fleet directory is not fleet-managed: unchanged opt-in (positive control)" 0
 
 echo "$pass passed, $fail failed."
 [ "$fail" = 0 ]

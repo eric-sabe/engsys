@@ -499,7 +499,7 @@ verdicts is wired separately.
 
 **Which PRs need a verdict is decided by `mm-preflight.sh`, not by the merge session** (engsys#229). Run with any of `ENGSYS_MM_CONFIG` (the
 fleet's launch context should export it), `.claude/merge-monster.yml` in the cwd and `--config <merge-monster.yml>`
-(every one that exists counts and the strictest wins, so `--config` can add requirements but never replace the others), it reads `security_sensitive_globs`
+(every one that exists counts and the strictest wins, so `--config` can add requirements but never replace the others) plus the **fleet-config-dir copy**: the instance plugin's `repos/<owner>/<repo>/merge-monster.yml`, which `core/lib/mm-config.mjs` finds through the session's Claude config dir (`$CLAUDE_CONFIG_DIR`, else `~/.claude`: every `installPath` in `plugins/installed_plugins.json`, else the `plugins/cache/*/*/*/` roots; the slug as given, then lowercased). A repo with such a `repos/<owner>/<repo>/` directory is fleet-managed: with no readable `merge-monster.yml` there and none in the repo it fails closed (`security_config_unreadable`), even when `--config` is passed. For a `merge`-role line the launcher also exports `ENGSYS_MM_CONFIG` pointing at that copy (looked up in the session's own config dir, then the launcher's) and unsets it on every other line. It reads `security_sensitive_globs`
 and `security_sensitive_label` (default `security`), lists the PR's files over REST (paginated; `filename` and
 `previous_filename`, so both sides of a rename match) and requires a signed PASS whenever the label is on the PR or any
 file matches a glob. Omitting `--require-security-verdict` cannot lower that; a config that sets

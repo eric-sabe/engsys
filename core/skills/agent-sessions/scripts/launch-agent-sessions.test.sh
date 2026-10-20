@@ -198,6 +198,21 @@ run claude "$SEC_ENV_OK"
 case "$acts" in *"set +a && export ENGSYS_SECURITY_VERDICT_KEY_FILE"*) ok "claude: the key decision is re-applied after the env file is sourced" ;; *) no "claude: re-applied after the env file" "$acts" ;; esac
 run claude "acme-build|$W||--model opus|$W/ordinary.env" 
 case "$acts" in *"set +a && unset ENGSYS_SECURITY_VERDICT_KEY_FILE"*) ok "claude: an env file cannot add the key path to an ordinary session (unset after sourcing)" ;; *) no "claude: unset after the env file" "$acts" ;; esac
+echo "engsys#229: a merge-role line is told where its repo's fleet merge config is (ENGSYS_MM_CONFIG), nothing else is"
+git -C "$T/w" init -q 2>/dev/null; git -C "$T/w" remote add origin https://github.com/acme/app.git 2>/dev/null || true
+MMCFG="$T/mmcfg"; MMPLUG="$MMCFG/plugins/cache/acme-fleet/acme/1.0.0"
+mkdir -p "$MMPLUG/repos/acme/app"; printf 'repo: acme/app\n' >"$MMPLUG/repos/acme/app/merge-monster.yml"
+MMLINE="acme-mm|$W|/merge-monster|--model claude-opus-4-8 --dangerously-skip-permissions"
+run claude "$MMLINE" CLAUDE_CONFIG_DIR="$MMCFG"
+has "claude: a merge-role line gets ENGSYS_MM_CONFIG pointing at the fleet copy" "$acts" "export ENGSYS_MM_CONFIG="
+has "claude: …the instance plugin's merge-monster.yml for its repo" "$acts" "repos/acme/app/merge-monster.yml"
+run claude "$BUILD" CLAUDE_CONFIG_DIR="$MMCFG"
+lacks "claude: an interactive line is not given it" "$acts" "export ENGSYS_MM_CONFIG"
+has "claude: …it has it unset" "$acts" "unset ENGSYS_MM_CONFIG"
+run claude "$MMLINE" CLAUDE_CONFIG_DIR="$T/nocfg"
+lacks "claude: a merge-role line whose repo has no fleet copy gets none" "$acts" "export ENGSYS_MM_CONFIG"
+run claude "$MMLINE" CLAUDE_CONFIG_DIR="$MMCFG" ENGSYS_MM_CONFIG=/inherited/mm.yml
+lacks "claude: an inherited ENGSYS_MM_CONFIG is never forwarded" "$acts" "/inherited/mm.yml"
 echo "antigravity flag translation and the remote-control daemon"
 run antigravity "$BUILD"
 [ "$rc" -eq 0 ] && ok "antigravity: interactive line launches" || no "antigravity: interactive line launches" "$err"
