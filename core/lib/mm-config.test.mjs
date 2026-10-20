@@ -25,8 +25,12 @@ describe('resolve', () => {
     const cfg = path.join(T, 'a');
     const plug = mk(path.join(cfg, 'plugins/cache/mk/fleet/1.0.0'), { 'repos/FeedFrwd/keystone/merge-monster.yml': 'repo: x\n', 'repos/FeedFrwd/keystone/context.md': 'c' });
     mk(path.join(cfg, 'plugins'), { 'installed_plugins.json': JSON.stringify({ version: 2, plugins: { 'fleet@mk': [{ scope: 'user', installPath: plug }, { scope: 'project', installPath: '/nonexistent' }] } }) });
+    // an old cached version with a weaker config is not what is installed: the list decides, the cache is not walked
+    mk(path.join(cfg, 'plugins/cache/mk/fleet/0.9.0'), { 'repos/FeedFrwd/keystone/merge-monster.yml': 'repo: old\n' });
     const r = resolve({ slug: 'FeedFrwd/keystone', configDirs: [cfg] });
     assert.equal(r.fleetManaged, true); assert.equal(r.missing, false);
+    assert.equal(r.configs.length, 1, 'only the installed version');
+    assert.ok(r.configs[0].includes('/1.0.0/'));
     assert.equal(r.configs.length, 1); assert.match(r.configs[0], /repos\/FeedFrwd\/keystone\/merge-monster\.yml$/);
   });
   it('falls back to walking plugins/cache, and tries the lowercased slug', () => {

@@ -7,8 +7,8 @@
 //
 // A fleet's instance plugin carries per-repo config at <plugin root>/repos/<owner>/<repo>/ (the same directory the
 // plugin's SessionStart hook injects as `fleet config dir: ...`, core/fleet/scaffold/plugin/hooks/fleet-context.sh).
-// A plugin root is found, in each Claude config dir, from plugins/installed_plugins.json (every installPath), and from
-// plugins/cache/<marketplace>/<plugin>/<version>/ as a fallback. The directory name is tried as the slug and lowercased.
+// A plugin root is found, in each Claude config dir, from plugins/installed_plugins.json (every installPath); only
+// when that gives none is plugins/cache/<marketplace>/<plugin>/<version>/ walked (old versions stay on disk there). The directory name is tried as the slug and lowercased.
 // `fleetManaged` is true when any plugin has a repos/<owner>/<repo>/ directory; `missing` when it is fleet-managed but
 // no merge-monster.yml in it is a readable file, so callers can fail closed instead of silently staying opt-in.
 // Config dirs default to $CLAUDE_CONFIG_DIR, else ~/.claude.
@@ -37,7 +37,8 @@ export function pluginRoots(configDir) {
     const entries = j && typeof j.plugins === 'object' && j.plugins ? Object.values(j.plugins) : Object.values(j || {});
     for (const list of entries) for (const e of Array.isArray(list) ? list : []) if (e && typeof e.installPath === 'string' && isDir(e.installPath)) roots.add(fs.realpathSync(e.installPath));
   } catch { /* no list: the cache walk below */ }
-  // each read failure stays local to its own entry: a stray file (.DS_Store, a lock) must not hide the other roots
+  if (roots.size) return [...roots]; // the list decides; the cache holds stale versions of every plugin too
+  // fallback, with no usable list: each read failure stays local to its own entry: a stray file (.DS_Store, a lock) must not hide the other roots
   const ls = (d) => { try { return fs.readdirSync(d); } catch { return []; } };
   const cache = path.join(configDir, 'plugins', 'cache');
   for (const m of ls(cache)) for (const p of ls(path.join(cache, m))) for (const v of ls(path.join(cache, m, p))) {
