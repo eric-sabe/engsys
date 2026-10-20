@@ -424,12 +424,12 @@ launch_one() {
   # engsys#197 (option B), narrowed by engsys#229: only a security-ENV session (security.env / nyx.env, the
   # security lane) on Claude is handed the PATH of the fleet's verdict key (ENGSYS_SECURITY_VERDICT_KEY_FILE, passed
   # by core/fleet/launch.sh as --verdict-key-file from FLEET_SECURITY_VERDICT_KEY=on); every other session has it
-  # unset, whatever its model. A merge session on Opus 4.8 reads attacker-authored PR content, so it must not be
+  # unset, whatever its model or env file (a merge-role line never gets it). A merge session on Opus 4.8 reads attacker-authored PR content, so it must not be
   # able to mint a PASS; it still verifies, because mm-preflight.sh reads the key file by path. Decided here, before the env
   # file, so a later assignment in an env file is overwritten below. Defence in depth, not a boundary: the
   # key file is readable by the same OS user (core/lib/security-verdict.mjs).
   local verdict_key_file="$VERDICT_KEY_FILE"
-  if [ -n "$verdict_key_file" ] && [ "$HARNESS" = claude ] && is_security_env "${session_env:-}"; then
+  if [ -n "$verdict_key_file" ] && [ "$HARNESS" = claude ] && [ "$role" != merge ] && is_security_env "${session_env:-}"; then
     cmd+="export ENGSYS_SECURITY_VERDICT_KEY_FILE=$(printf %q "$verdict_key_file") && "
   else
     cmd+="unset ENGSYS_SECURITY_VERDICT_KEY_FILE && "
@@ -440,7 +440,7 @@ launch_one() {
     # and again after it, when a key is configured: an env file can neither add the key path to a
     # non-security session nor drop it from a security one
     if [ -n "$verdict_key_file" ]; then
-      if [ "$HARNESS" = claude ] && is_security_env "${session_env:-}"; then
+      if [ "$HARNESS" = claude ] && [ "$role" != merge ] && is_security_env "${session_env:-}"; then
         cmd+="export ENGSYS_SECURITY_VERDICT_KEY_FILE=$(printf %q "$verdict_key_file") && "
       else
         cmd+="unset ENGSYS_SECURITY_VERDICT_KEY_FILE && "
