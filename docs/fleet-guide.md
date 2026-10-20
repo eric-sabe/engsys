@@ -492,7 +492,7 @@ verdict. It stops accidental and naive forgery, not a hostile session on the sam
 from an interactive role cannot post a valid verdict; the review has to run in the security lane. The signing grant is
 narrower than the security model: the merge monster runs Opus 4.8 and reads attacker-authored PR content, so it is not given the
 key path and cannot mint a PASS (`post` refuses), but it still verifies, because `mm-preflight.sh` reads the key file by path.
-The maintenance monster runs on the security env file, so it can sign verdicts on its own fix PRs. The key path
+The maintenance monster runs on the security env file, so it holds the signing grant, but it signs verdicts only on PRs it did not author: a PR the maintenance monster wrote itself waits for an operator (the fleet's context enforces this; the launcher does not tell authors apart). The key path
 reaches a session only on its own launch line, never the launcher's or the tmux server's environment. The real
 boundary is a separate GitHub identity for the security lane (eric-sabe/engsys#220); the keystone-side gate that reads these
 verdicts is wired separately.
