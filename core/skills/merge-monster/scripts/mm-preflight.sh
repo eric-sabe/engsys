@@ -26,14 +26,37 @@
 # PR that has no valid verdict (pass it for PRs that need a security review). Defence in depth, NOT a
 # boundary: the key is readable by every process of the fleet's OS user.
 #
-# Usage: mm-preflight.sh --repo owner/name --pr N [--full] [--security-verdict [--require-security-verdict]
-#                        [--security-key-file PATH]]
+# The requirement itself is decided HERE, not by the merge session (engsys#229): with the repo's merge-monster config
+# (--config FILE, $ENGSYS_MM_CONFIG, .claude/merge-monster.yml in the cwd and the fleet-config-dir copy found by
+# core/lib/mm-config.mjs: every one that exists counts, the strictest wins, so --config can add requirements but never
+# replace the discoverable ones; a fleet-managed repo with no merge config anywhere fails closed) the script reads
+# ready_requirements.signed_security_verdict (true turns --security-verdict on even when the flag is omitted),
+# security_sensitive_globs and security_sensitive_label (default `security`), lists the PR's files over REST
+# (pulls/N/files: filename and previous_filename, so both sides of a rename are matched, paginated) and requires a
+# signed PASS whenever the PR carries the label or any changed file matches a glob (core/lib/security-sensitive.mjs).
+# --require-security-verdict can still ask for more, never for less. Fail closed (exit 1, reason on stderr): an
+# unreadable config (security_config_unreadable), a file list shorter than the PR's changed_files
+# (security_file_list_unreadable), an unreadable key (key_unavailable). A PR with more than 3000 files, which GitHub
+# cannot list in full, requires the verdict. Residual: a repo that is not fleet-managed, has no
+# in-repo config and no exported ENGSYS_MM_CONFIG keeps the old opt-in behaviour (the launcher exports ENGSYS_MM_CONFIG
+# for merge-role lines; --config is optional and only adds). The capability probe is --capabilities, not this text.
+#
+# What this defends: a forgotten flag, a wrong --config, a model mistake, fully (every discoverable source counts and the
+# strictest wins). A prompt injection only partially: a session runs as the same OS user, so it can still run this script with
+# a different environment or reach the key file; the boundary is a separate GitHub identity for the security lane (#220).
+#
+# Usage: mm-preflight.sh --capabilities     (prints security-verdict and security-sensitive-globs, exit 0; unknown flag = old kit)
+#        mm-preflight.sh --repo owner/name --pr N [--full] [--config FILE]
+#                        [--security-verdict [--require-security-verdict] [--security-key-file PATH]]
 set -euo pipefail
+# --capabilities (engsys#229): one token per line, no GitHub, no config. An older kit has no such flag and exits 2
+# ("unknown arg"), which is how a caller tells the two apart without grepping source text.
+if [ "${1:-}" = --capabilities ] && [ $# -eq 1 ]; then printf 'security-verdict\nsecurity-sensitive-globs\n'; exit 0; fi
 # shellcheck source=../../../lib/fleet-gh.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/fleet-gh.sh"
 fleet_gh_resolve
 
-REPO="" PR="" FULL=0 ISSUE_FILE="" CHECK_CONTRACT=0 SEC_VERDICT=0 SEC_REQUIRE=0 SEC_KEY_FILE=""
+REPO="" PR="" FULL=0 ISSUE_FILE="" CHECK_CONTRACT=0 SEC_VERDICT=0 SEC_REQUIRE=0 SEC_KEY_FILE="" MM_CONFIG_FILE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) REPO="$2"; shift 2 ;;
@@ -44,6 +67,7 @@ while [ $# -gt 0 ]; do
     --security-verdict) SEC_VERDICT=1; shift ;;
     --require-security-verdict) SEC_VERDICT=1; SEC_REQUIRE=1; shift ;;
     --security-key-file) SEC_KEY_FILE="$2"; shift 2 ;;
+    --config) MM_CONFIG_FILE="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -53,7 +77,7 @@ OWNER="${REPO%%/*}"
 NAME="${REPO##*/}"
 
 VIEW=$("$FLEET_GH" pr view "$PR" -R "$REPO" \
-  --json isDraft,mergeable,mergeStateStatus,baseRefName,headRefOid,body,comments,files,commits)
+  --json isDraft,mergeable,mergeStateStatus,baseRefName,headRefOid,body,comments,files,commits,labels)
 
 THREADS=$("$FLEET_GH" api graphql -f owner="$OWNER" -f name="$NAME" -F number="$PR" -f query='
   query($owner: String!, $name: String!, $number: Int!) {
@@ -85,6 +109,72 @@ if [ "$CHECK_CONTRACT" -eq 1 ] || [ -n "$ISSUE_FILE" ]; then
   rm -f "$PR_BODY_TMP"
 fi
 
+# Whether this PR needs a signed security verdict, decided from the config (engsys#229), never from the session's flags.
+SS_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/security-sensitive.mjs"
+sec_fail() { printf '{"ok":false,"state":"error","reason":%s}\n' "$(jq -Rn --arg r "$1" '$r')" >&2; exit 1; }
+# Every config source that exists counts and the strictest wins, so a session-supplied --config can add requirements
+# but never replace the discoverable ones (a file with only `repo: x` cannot lower them): $ENGSYS_MM_CONFIG (for the
+# fleet's launch context to export), .claude/merge-monster.yml in the cwd, and --config. Each must be readable.
+# The fleet-config-dir copy (the instance plugin's repos/<owner>/<repo>/merge-monster.yml, found through the session's
+# Claude config dir by core/lib/mm-config.mjs) counts too. A fleet-managed repo (that directory exists) with no readable
+# merge config anywhere, in-repo or fleet, fails closed rather than silently staying opt-in.
+MC_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/mm-config.mjs"
+FLEET_MM_CONFIGS=()
+if command -v node >/dev/null && [ -f "$MC_SCRIPT" ]; then
+  MC_JSON=$(node "$MC_SCRIPT" resolve --repo "$REPO" 2>/dev/null) || sec_fail "security_config_unreadable: could not look for the fleet config of $REPO"
+  while IFS= read -r c; do [ -z "$c" ] || FLEET_MM_CONFIGS+=("$c"); done < <(jq -r '.configs[]?' <<<"$MC_JSON")
+  if [ "$(jq -r '.missing' <<<"$MC_JSON")" = true ] && [ ! -f .claude/merge-monster.yml ]; then
+    sec_fail "security_config_unreadable: $REPO is fleet-managed ($(jq -r '.fleetDirs[0]' <<<"$MC_JSON")) but no readable merge-monster.yml was found there or in the repo"
+  fi
+fi
+# ENGSYS_MM_CONFIG is a versioned cache path the launcher resolved at session start; if that version directory was
+# pruned since, a readable discovered copy stands in for it (with a warning) instead of failing every PR. With no
+# readable strict source left it is still kept, so the unreadable path fails closed below.
+MM_ENV_CONFIG="${ENGSYS_MM_CONFIG:-}"
+if [ -n "$MM_ENV_CONFIG" ] && [ ! -r "$MM_ENV_CONFIG" ] && { [ "${#FLEET_MM_CONFIGS[@]}" -gt 0 ] || [ -f .claude/merge-monster.yml ]; }; then
+  echo "mm-preflight: warning: ENGSYS_MM_CONFIG ($MM_ENV_CONFIG) is not readable; using the discovered merge config instead" >&2
+  MM_ENV_CONFIG=""
+fi
+SS_CONFIGS=()
+for c in "$MM_ENV_CONFIG" "$([ ! -f .claude/merge-monster.yml ] || echo .claude/merge-monster.yml)" ${FLEET_MM_CONFIGS[@]+"${FLEET_MM_CONFIGS[@]}"} "$MM_CONFIG_FILE"; do
+  [ -n "$c" ] || continue
+  SS_CONFIGS+=("$c")   # no de-duplication: a repeat is harmless, and a substring match could drop a config
+done
+SEC_REASONS="[]"
+if [ "${#SS_CONFIGS[@]}" -gt 0 ] || [ "$SEC_VERDICT" -eq 1 ]; then
+  command -v node >/dev/null && [ -f "$SS_SCRIPT" ] || sec_fail "security_config_unreadable: node or security-sensitive.mjs not found"
+  SS_LIST=("${SS_CONFIGS[@]+"${SS_CONFIGS[@]}"}"); [ "${#SS_LIST[@]}" -gt 0 ] || SS_LIST=("")
+  SS_GLOBS=0
+  for c in "${SS_LIST[@]}"; do
+    SS_CFG=(); [ -z "$c" ] || SS_CFG=(--config "$c")
+    SS_POLICY=$(node "$SS_SCRIPT" policy ${SS_CFG[@]+"${SS_CFG[@]}"}) || sec_fail "$(jq -r '.reason // "security_config_unreadable"' <<<"$SS_POLICY" 2>/dev/null || echo security_config_unreadable)"
+    if [ "$(jq -r '.signedVerdict' <<<"$SS_POLICY")" = true ]; then SEC_VERDICT=1; fi
+    SS_GLOBS=$((SS_GLOBS + $(jq -r '.globs' <<<"$SS_POLICY")))
+  done
+  if [ "$SEC_VERDICT" -eq 1 ]; then
+    # the list is projected to the two path fields (the API also returns each file's patch text) and handed to jq as a
+    # file, never as an argument: a large PR would otherwise exceed the argument size limit (E2BIG)
+    SS_FILES_TMP="$(mktemp)"; trap 'rm -f "$SS_FILES_TMP"' EXIT
+    echo "[]" >"$SS_FILES_TMP"; SS_COUNT="null"
+    if [ "$SS_GLOBS" -gt 0 ]; then
+      "$FLEET_GH" api "repos/$REPO/pulls/$PR/files?per_page=100" --paginate | jq -s -c 'add // [] | map({filename, previous_filename})' >"$SS_FILES_TMP" || sec_fail "security_file_list_unreadable: listing the PR files failed"
+      [ -s "$SS_FILES_TMP" ] || sec_fail "security_file_list_unreadable: the file list is empty"
+      # read after the file list, with the head it describes: if the head moved since `pr view`, the verdict check below
+      # would be judging another commit than the file list, so fail closed (the next tick sees the new head)
+      SS_META=$("$FLEET_GH" api "repos/$REPO/pulls/$PR" --jq '"\(.changed_files) \(.head.sha)"') || sec_fail "security_file_list_unreadable: reading changed_files failed"
+      SS_COUNT="${SS_META%% *}"
+      [ "${SS_META#* }" = "$(jq -r '.headRefOid // ""' <<<"$VIEW")" ] || sec_fail "security_file_list_unreadable: the PR head moved while it was read"
+      [[ "$SS_COUNT" =~ ^[0-9]+$ ]] || sec_fail "security_file_list_unreadable: changed_files is not a number"
+    fi
+    for c in "${SS_LIST[@]}"; do
+      SS_CFG=(); [ -z "$c" ] || SS_CFG=(--config "$c")
+      SS_OUT=$(jq -n -c --slurpfile f "$SS_FILES_TMP" --argjson n "$SS_COUNT" --argjson l "$(jq -c '.labels // []' <<<"$VIEW")" '{files:$f[0], changedFiles:$n, labels:$l}' \
+        | node "$SS_SCRIPT" decide ${SS_CFG[@]+"${SS_CFG[@]}"}) || sec_fail "$(jq -r '.reason // "security_file_list_unreadable"' <<<"$SS_OUT" 2>/dev/null || echo security_file_list_unreadable)"
+      if [ "$(jq -r '.required' <<<"$SS_OUT")" = true ]; then SEC_REQUIRE=1; SEC_REASONS="$(jq -c -n --argjson a "$SEC_REASONS" --argjson b "$(jq -c '.reasons' <<<"$SS_OUT")" '$a + $b | unique')"; fi
+    done
+  fi
+fi
+
 SECURITY_JSON="null"
 if [ "$SEC_VERDICT" -eq 1 ]; then
   # Fail closed on every path below: no key, no head SHA, no node, or any non-zero verdict exit.
@@ -99,6 +189,7 @@ if [ "$SEC_VERDICT" -eq 1 ]; then
   [ "$SEC_REQUIRE" -eq 1 ] && SV_ARGS+=(--require)
   SV_RC=0
   SECURITY_JSON=$(jq -c '.comments // []' <<<"$VIEW" | node "$SV_SCRIPT" "${SV_ARGS[@]}") || SV_RC=$?
+  [ "$SV_RC" -ne 0 ] || [ -z "$SECURITY_JSON" ] || SECURITY_JSON=$(jq -c --argjson r "$SEC_REQUIRE" --argjson why "$SEC_REASONS" '. + {requiredBy: (if $r == 1 then $why else [] end)}' <<<"$SECURITY_JSON" 2>/dev/null || printf '%s' "$SECURITY_JSON")
   if [ "$SV_RC" -ne 0 ]; then
     if [ -n "$SECURITY_JSON" ]; then echo "$SECURITY_JSON" >&2
     else echo '{"ok":false,"state":"error","reason":"security_verdict_check_failed"}' >&2; fi

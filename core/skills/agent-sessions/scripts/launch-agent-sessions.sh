@@ -60,6 +60,7 @@ ONLY=""
 # ones included) ever carries it; it reaches a session only on that session's own launch line, below.
 VERDICT_KEY_FILE=""
 unset ENGSYS_SECURITY_VERDICT_KEY_FILE
+unset ENGSYS_MM_CONFIG   # engsys#229: set per merge-role line below, never inherited (nor seen by the tmux server)
 while [ $# -gt 0 ]; do
   case "$1" in
     --roster) ROSTER="$2"; shift 2 ;;
@@ -297,6 +298,18 @@ is_security_model() {
   case "$m" in claude-opus-4-8* | claude-opus-4.8* | security) return 0 ;; esac
   return 1
 }
+# engsys#229: the repo's merge-monster config inside the fleet config dir (the instance plugin's
+# repos/<owner>/<repo>/merge-monster.yml, core/lib/mm-config.mjs), for a merge-role line's ENGSYS_MM_CONFIG. Prints the
+# first readable one, or nothing. Looked up in the session's own Claude config dir, then the launcher's.
+resolve_mm_config() { # resolve_mm_config <workdir> <session config dir>
+  local script args=() d out
+  script="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../lib" 2>/dev/null && pwd)/mm-config.mjs"
+  [ -f "$script" ] && command -v node >/dev/null && command -v jq >/dev/null || return 0
+  for d in "$2" "${CLAUDE_CONFIG_DIR:-}"; do [ -z "$d" ] || args+=(--config-dir "$d"); done
+  [ "${#args[@]}" -gt 0 ] || args+=(--config-dir "$HOME/.claude")
+  out="$(node "$script" resolve --cwd "$1" "${args[@]}" 2>/dev/null)" || return 0
+  jq -r '.configs[0] // empty' <<<"$out" 2>/dev/null || true
+}
 # 0 when an env file is the security lane: its name, without directory and extension, normalizes to
 # `security` or `nyx`.
 is_security_env() {
@@ -421,24 +434,27 @@ launch_one() {
   root="$(cd "$workdir" && pwd -P)" || { echo "error: cannot resolve workdir for '$name': $workdir" >&2; return 1; }
   cmd="export ENGSYS_SESSION=$(printf %q "$name") ENGSYS_SESSION_RUN=$(printf %q "$run") ENGSYS_SESSION_ROOT=$(printf %q "$root")"
   if [ -n "$role" ]; then cmd+=" ENGSYS_SINGLETON_ROLE=$role && "; else cmd+=" && unset ENGSYS_SINGLETON_ROLE && "; fi
-  # engsys#197 (option B): only a security-lane line (a security env file or an Opus 4.8 model) on Claude is
-  # handed the PATH of the fleet's verdict key (ENGSYS_SECURITY_VERDICT_KEY_FILE, passed by core/fleet/launch.sh
-  # as --verdict-key-file from FLEET_SECURITY_VERDICT_KEY=on); every other session has it unset. Decided here, before the env
+  # engsys#197 (option B), narrowed by engsys#229: only a security-ENV session (security.env / nyx.env, the
+  # security lane) on Claude is handed the PATH of the fleet's verdict key (ENGSYS_SECURITY_VERDICT_KEY_FILE, passed
+  # by core/fleet/launch.sh as --verdict-key-file from FLEET_SECURITY_VERDICT_KEY=on); every other session has it
+  # unset, whatever its model or env file (a merge-role line never gets it). A merge session on Opus 4.8 reads attacker-authored PR content, so it must not be
+  # able to mint a PASS; it still verifies, because mm-preflight.sh reads the key file by path. Decided here, before the env
   # file, so a later assignment in an env file is overwritten below. Defence in depth, not a boundary: the
   # key file is readable by the same OS user (core/lib/security-verdict.mjs).
   local verdict_key_file="$VERDICT_KEY_FILE"
-  if [ -n "$verdict_key_file" ] && [ "$HARNESS" = claude ] && is_security_line "$flags" "${session_env:-}"; then
+  if [ -n "$verdict_key_file" ] && [ "$HARNESS" = claude ] && [ "$role" != merge ] && is_security_env "${session_env:-}"; then
     cmd+="export ENGSYS_SECURITY_VERDICT_KEY_FILE=$(printf %q "$verdict_key_file") && "
   else
     cmd+="unset ENGSYS_SECURITY_VERDICT_KEY_FILE && "
   fi
+  cmd+="unset ENGSYS_MM_CONFIG && "   # engsys#229: cleared here, set again below for a merge-role line once its config dir is known
   cmd+="cd $(printf %q "$workdir") && "
   if [ -n "$session_env" ]; then
     cmd+="set -a && . $(printf %q "$session_env") && set +a && "
     # and again after it, when a key is configured: an env file can neither add the key path to a
     # non-security session nor drop it from a security one
     if [ -n "$verdict_key_file" ]; then
-      if [ "$HARNESS" = claude ] && is_security_line "$flags" "${session_env:-}"; then
+      if [ "$HARNESS" = claude ] && [ "$role" != merge ] && is_security_env "${session_env:-}"; then
         cmd+="export ENGSYS_SECURITY_VERDICT_KEY_FILE=$(printf %q "$verdict_key_file") && "
       else
         cmd+="unset ENGSYS_SECURITY_VERDICT_KEY_FILE && "
@@ -482,6 +498,12 @@ launch_one() {
     cmd+="unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && "
   fi
   if [ -n "$cfg_dir" ]; then cmd+="export CLAUDE_CONFIG_DIR=$(printf %q "$cfg_dir") && "; else cmd+="unset CLAUDE_CONFIG_DIR && "; fi
+  # engsys#229, belt and braces beside mm-preflight's own discovery: a merge-role line is told where its repo's fleet merge
+  # config is; every other line has it unset (above, before the env file). Decided after the env file, so an env file
+  # cannot move it.
+  local mm_cfg=""
+  [ "$role" != merge ] || [ "$HARNESS" != claude ] || mm_cfg="$(resolve_mm_config "$workdir" "$cfg_dir")"
+  if [ -n "$mm_cfg" ]; then cmd+="export ENGSYS_MM_CONFIG=$(printf %q "$mm_cfg") && "; fi
   if [ "$HARNESS" = "copilot" ]; then
     cmd+="copilot --name $(printf %q "$name")"
     [ -n "$prompt" ] && cmd+=" -i $(printf %q "$prompt")"

@@ -208,12 +208,28 @@ list_plugins() {
 # the release's marketplace file, read by the verifier from GitHub. A plugin the pin enables but no pin repo/ref can name is
 # "not verified" below, never skipped.
 market_args=() inst_plugins="" inst_repo=""
+case "${INSTANCE_OFF_MAIN:-warn}" in
+  warn) ;;
+  enforce) market_args+=(--enforce-instance-on-main) ;;
+  *) echo "fleet verify: INSTANCE_OFF_MAIN must be 'warn' or 'enforce' (got '${INSTANCE_OFF_MAIN}')" >&2; exit 2 ;;
+esac
 if [ -n "${INSTANCE_MARKETPLACE:-}" ]; then
   inst_plugins="$(fleet_enabled_plugins "$INSTANCE_MARKETPLACE")"
   inst_repo="$(fleet_pin_repo "$INSTANCE_MARKETPLACE")"
   while IFS= read -r ip; do
     [ -z "$ip" ] || market_args+=(--market-plugin "$ip@$INSTANCE_MARKETPLACE|$inst_repo|${INSTANCE_REF:-}")
   done <<<"$inst_plugins"
+fi
+
+# The engsys marketplace's other enabled plugins (the stack packs, engsys#224): same check, against the engsys release itself
+# (same repo and tag as the engsys plugin; the pack's directory comes from that release's marketplace file). A pack the pin
+# enables but that isn't installed is "not verified" in the verifier, never skipped.
+pack_plugins=""
+if [ -n "$repo" ] && [ -n "$ref" ]; then
+  pack_plugins="$(fleet_enabled_plugins "$ENGSYS_MARKETPLACE" | grep -vFx -e engsys || true)"
+  while IFS= read -r pp; do
+    [ -z "$pp" ] || market_args+=(--market-plugin "$pp@$ENGSYS_MARKETPLACE|$repo|$ref")
+  done <<<"$pack_plugins"
 fi
 
 rc=0 out="" plist="" cfg_missing=0
@@ -328,7 +344,7 @@ else
         urc=0; uout="$(node "$FLEET_KIT_DIR/lib/verify-wrappers.mjs" "${uargs[@]}" 2>&1)" || urc=$?
         if [ "$urc" = 1 ] && ! grep -q '^verify: MISMATCH' <<<"$uout"; then urc=3; fi
         case "$urc" in 0 | 1 | 3) ;; *) urc=3 ;; esac
-        out="$out"$'\n'"fleet verify: ~/.claude (interactive roles, FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised): the engsys plugin${inst_plugins:+ and the $INSTANCE_MARKETPLACE plugin(s)}"$'\n'"$uout"
+        out="$out"$'\n'"fleet verify: ~/.claude (interactive roles, FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised): the engsys plugin${pack_plugins:+, its stack packs}${inst_plugins:+ and the $INSTANCE_MARKETPLACE plugin(s)}"$'\n'"$uout"
         rc="$urc"
       fi
       rm -f "$plist_u"

@@ -475,7 +475,7 @@ roles, or turn on signed security verdicts below.
 **Signed security verdicts: `FLEET_SECURITY_VERDICT_KEY=on` (eric-sabe/engsys#197).** A *defence-in-depth* layer,
 **not a security boundary**. With it on, `fleet launch` creates an HMAC key at `<fleet state>/security-verdict.key`
 (mode 0600, never replaced) and tells only security-lane sessions where it is (`ENGSYS_SECURITY_VERDICT_KEY_FILE`,
-set by the session launcher for a security env file or an Opus 4.8 model, and unset for every other session). A
+set by the session launcher for a session whose env file is `security.env` or `nyx.env` only, and unset for every other session whatever its model, engsys#229). A
 security-lane session posts its verdict with `node <engsys-root>/lib/security-verdict.mjs post --repo O/N --pr N --sha
 <head> --verdict PASS|FINDINGS --body-file F`, which refuses outside a security-lane session and for any SHA that is
 not the PR's current head, and signs an HMAC-SHA256 over repo, PR, head SHA, verdict, timestamp, nonce and a hash of the
@@ -489,11 +489,27 @@ the preflight when none does (fail closed by design: a claimed verdict that does
 an unreadable or group-readable key always fails. What it does not do: the key file is
 readable by every process running as the fleet's macOS user, so an attended session with a shell can read it and sign a
 verdict. It stops accidental and naive forgery, not a hostile session on the same account. A Nyx reviewer dispatched
-from an interactive role cannot post a valid verdict; the review has to run in the security lane. The security lane is
-any Opus 4.8 line, which includes the maintenance monster, so it can sign verdicts on its own fix PRs. The key path
+from an interactive role cannot post a valid verdict; the review has to run in the security lane. The signing grant is
+narrower than the security model: the merge monster runs Opus 4.8 and reads attacker-authored PR content, so it is not given the
+key path and cannot mint a PASS (`post` refuses), but it still verifies, because `mm-preflight.sh` reads the key file by path.
+The maintenance monster runs on the security env file, so it holds the signing grant, but it signs verdicts only on PRs it did not author: a PR the maintenance monster wrote itself waits for an operator (the fleet's context enforces this; the launcher does not tell authors apart). The key path
 reaches a session only on its own launch line, never the launcher's or the tmux server's environment. The real
 boundary is a separate GitHub identity for the security lane (eric-sabe/engsys#220); the keystone-side gate that reads these
 verdicts is wired separately.
+
+**Which PRs need a verdict is decided by `mm-preflight.sh`, not by the merge session** (engsys#229). Run with any of `ENGSYS_MM_CONFIG` (the
+fleet's launch context should export it), `.claude/merge-monster.yml` in the cwd and `--config <merge-monster.yml>`
+(every one that exists counts and the strictest wins, so `--config` can add requirements but never replace the others) plus the **fleet-config-dir copy**: the instance plugin's `repos/<owner>/<repo>/merge-monster.yml`, which `core/lib/mm-config.mjs` finds through the Claude config dirs it can see (`$CLAUDE_CONFIG_DIR`, `$FLEET_CLAUDE_CONFIG_DIR`, the per-session dirs beside it, `$ENGSYS_CONFIG_DIR_SESSIONS/*` and `~/.claude`, all searched, so repointing one variable hides nothing): every `installPath` in `plugins/installed_plugins.json`, else the `plugins/cache/*/*/*/` roots; directory names match case-insensitively. If `ENGSYS_MM_CONFIG` is unreadable (its version directory was pruned) but a readable copy is discovered, the copy is used with a warning. `mm-preflight.sh --capabilities` prints `security-verdict` and `security-sensitive-globs` and exits 0 without touching GitHub (an older kit exits 2 on the unknown flag): that is the probe. A repo with such a `repos/<owner>/<repo>/` directory is fleet-managed: with no readable `merge-monster.yml` there and none in the repo it fails closed (`security_config_unreadable`), even when `--config` is passed. For a `merge`-role line the launcher also exports `ENGSYS_MM_CONFIG` pointing at that copy (looked up in the session's own config dir, then the launcher's) and unsets it on every other line. It reads `security_sensitive_globs`
+and `security_sensitive_label` (default `security`), lists the PR's files over REST (paginated; `filename` and
+`previous_filename`, so both sides of a rename match) and requires a signed PASS whenever the label is on the PR or any
+file matches a glob. Omitting `--require-security-verdict` cannot lower that; a config that sets
+`ready_requirements.signed_security_verdict: true` also turns the gate on without `--security-verdict`. The glob dialect:
+`*` and `?` stay in one segment, `**` crosses segments, `**/x` matches a root-level `x`, everything else (parentheses,
+brackets, dots) is literal, no braces. It fails closed: an unreadable config (`security_config_unreadable`), a file list
+shorter than the PR's `changed_files` (`security_file_list_unreadable`), an unreadable key (`key_unavailable`); a PR with
+more than 3000 files, which GitHub does not list in full, requires the verdict. Residual: a repo that is not fleet-managed,
+has no in-repo config and gets no exported `ENGSYS_MM_CONFIG` keeps the old opt-in behaviour.
+The capability to probe for is `mm-preflight.sh --capabilities`.
 
 **The monster batons.** A session the fleet launched (`ENGSYS_SESSION` and `ENGSYS_SESSION_RUN` set) may
 take, renew or act on the merge or maintain baton only when the launcher armed it for that role
@@ -1349,19 +1365,35 @@ the repo. The check is the same as for engsys: every file under the install is a
 the tag, a missing, extra or modified file is a mismatch, and a symlink is `not-a-file`. Fail closed: an
 enabled instance plugin that is not installed, a pin that is not a release tag, or a release whose marketplace
 file doesn't name exactly one `./` source for the plugin is "not verified" (exit 3), which holds the merge and
-maintain sessions like any other check that can't run. The other plugins of the engsys marketplace (the stack
-packs) are not hash-checked yet.
+maintain sessions like any other check that can't run.
 
-*Migration note: an instance tag off the default branch is a warning for now.* The engsys release must be on the
-default branch (anything else is a mismatch). Fleets that tag `release:` commits off their default branch (for
-example `FeedFrwd/ff-engsys-fleet`, whose v0.1.15 to v0.1.18 all diverge) would otherwise hold their merge and
-maintain sessions, so for the **instance** marketplace only, a tag that is not on the default branch prints
-`WARNING instance release ...` and sends one info-level alert (latched per distinct warning, resolved when it
-clears), and the exit code is unchanged. Everything else about the instance check still enforces: the file hashes
-against the tag's tree, a pin that is not a tag, an unreadable `source`. The switch is the single constant
-`INSTANCE_OFF_MAIN_ENFORCED` in `lib/verify-wrappers.mjs`; flipping it makes this a mismatch like engsys
-(tracked in eric-sabe/engsys#227). A mismatch's launch-hold message now names what failed (the engsys plugin,
-an instance plugin, an instance release, the host kit, ...).
+**The engsys marketplace's stack packs** (engsys#224). Every other plugin that `PIN_SETTINGS` enables from the engsys
+marketplace (`engsys-azure`, `engsys-typescript`, `engsys-web`, ...) loads skills, agents and hooks too, so it gets the
+same check against the **engsys release itself** (`ENGSYS_REF` on the engsys repo; the pack's directory is the
+`source` of its entry in that release's `.claude-plugin/marketplace.json`, for example `./stacks/lang/typescript`),
+in every dir covered above. A tampered, missing or extra file is a mismatch (named as an `engsys stack pack` in the
+launch-hold message); a pack the pin enables but that is not installed, or that the release's marketplace file does
+not list, is "not verified". The engsys release's on-default-branch check is the strict one, so a pack never gets the
+instance warning below. A real install is byte-identical to its release directory (Claude Code adds only `.in_use/`,
+which the scan skips), so enabling a pack in the pin needs no allowlist.
+
+*Migration note: an instance tag off the default branch is a warning for now* (eric-sabe/engsys#227, staged).
+The engsys release must be on the default branch (anything else is a mismatch). Fleets that tag `release:` commits
+off their default branch (`fleet pin --release next` stamps the version on a commit on top of origin/main and tags
+that commit without merging it, so `FeedFrwd/ff-engsys-fleet`'s v0.1.15 to v0.1.18 all diverge) would otherwise
+hold their merge and maintain sessions, so for the **instance** marketplace only, a tag that is not on the default
+branch prints `WARNING instance release ...` and sends one info-level alert (latched per distinct warning, resolved
+when it clears), and the exit code is unchanged. Everything else about the instance check still enforces: the file
+hashes against the tag's tree, a pin that is not a tag, an unreadable `source`.
+
+To enforce it: cut an instance release whose tag is on the default branch (identical to it or an ancestor of it,
+GitHub's `compare` says `ahead` or `identical`), pin it (`fleet pin`), then set `INSTANCE_OFF_MAIN=enforce` in
+`fleet.conf` and check `fleet verify` is clean (exit 0, no `WARNING instance release`). From then on an off-main
+instance tag is a mismatch like engsys, and holds the launch (`components: instance release (...)`). The setting can
+only tighten: it never relaxes the engsys release, and the built-in default
+(`INSTANCE_OFF_MAIN_ENFORCED` in `lib/verify-wrappers.mjs`) becomes `true` in a later engsys release, once every
+fleet that has an instance plugin tags on its default branch. A mismatch's launch-hold message names what failed
+(the engsys plugin, a stack pack, an instance plugin, an instance release, the host kit, ...).
 
 **The pin checkout's `.claude/` and its hooks.** Claude Code loads `PIN_DIR/.claude/` (settings, hooks,
 agents, commands, skills) into every session, and a settings hook runs whatever script it names. Its trust
@@ -1705,6 +1737,7 @@ format) overrides it per machine. Environment values for `ENGSYS_REF` / `INSTANC
 | `QUOTA_COOLDOWN_MIN` | no | Ignored (accepted from older configs): the supervisor never fails over, so there is nothing to fail back from |
 | `ENGSYS_MARKETPLACE` | no | Default `engsys` |
 | `INSTANCE_MARKETPLACE` | no | The instance's own marketplace name (for example `acme`). Empty means no instance plugin: no instance release, and the instance checkout is not pinned |
+| `INSTANCE_OFF_MAIN` | no | `warn` (default) or `enforce`: whether an instance release tag that is not on its repo's default branch is a warning or a verify mismatch that holds merge and maintain launches. It can only tighten the built-in default (section 6, instance marketplace) |
 | `WORKTREES_DIR` | no | Agent worktrees directory; created by `launch`; available to templates for `--add-dir` |
 | `GH_APP_ENV` | no | Path to the GitHub App env file. Set means identity kit on |
 | `FLEET_CLAUDE_CONFIG_DIR` | no | A separate Claude Code config dir for the fleet, with its own login (§ 6.1). Every fleet command and every launched session runs with `CLAUDE_CONFIG_DIR` set to it; `fleet sync` installs the plugins there and `fleet verify` checks it. An absolute path (or `~/…`). Never inherited from the caller's environment. Unset means `~/.claude` |

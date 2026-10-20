@@ -69,7 +69,7 @@ cat >"$T/bin/claude" <<'SH'
 # stub claude: just enough of `plugin` for fleet sync (one marketplace, its ref in $FAKE/mk-ref)
 echo "claude $*" >>"$FAKE/claude.log"
 case "$*" in
-  "plugin list --json") r="$(cat "$FAKE/mk-ref" 2>/dev/null || true)"; echo "[{\"id\":\"core@engsys\",\"version\":\"${r#v}\",\"scope\":\"user\"}]" ;;
+  "plugin list --json") r="$(cat "$FAKE/mk-ref" 2>/dev/null || true)"; echo "[{\"id\":\"engsys@engsys\",\"version\":\"${r#v}\",\"scope\":\"user\"}]" ;;
   "plugin marketplace list --json") r="$(cat "$FAKE/mk-ref" 2>/dev/null || true)"; [ -z "$r" ] && echo '[]' || echo "[{\"name\":\"engsys\",\"ref\":\"$r\"}]" ;;
   "plugin marketplace remove engsys"*) rm -f "$FAKE/mk-ref" ;;
   "plugin marketplace add "*) echo "${4#*#}" >"$FAKE/mk-ref" ;;
@@ -104,7 +104,7 @@ seed_repo acme/app "$P"
 mkdir -p "$P/.claude"
 pins() { # pins <engsys-ref>
   jq -n --arg e "$1" '{extraKnownMarketplaces: {engsys: {source: {source: "github", repo: "vendor/engsys", ref: $e}}},
-    enabledPlugins: {"core@engsys": true}}' >"$P/.claude/settings.json"
+    enabledPlugins: {"engsys@engsys": true}}' >"$P/.claude/settings.json"
 }
 pins v1.1.0; commit_all "$P" "pins"; push_all "$P"
 git clone -q https://github.com/acme/app.git "$HOME/git/app"

@@ -39,16 +39,19 @@
 //                       [--allowed-user-plugins "<name@mkt> ..."] [--allowed-user-hooks "<sha256> ..."]
 //                       [--check-user-config --claude-json <file> --allowed-user-files "<sha256> ..."]
 //                       [--pin-repo <owner/repo>]
-//                       [--market-plugin "<plugin>@<marketplace>|<owner/repo>|<ref>" ...]
+//                       [--enforce-instance-on-main] [--market-plugin "<plugin>@<marketplace>|<owner/repo>|<ref>" ...]
 //                       [--cache <file> --max-age-min <n>]
 //
 // --engsys-dir: the host kit (ENGSYS_HOST_TREES, ENGSYS_HOST_FILES) against the same release tree.
 // --user-settings-dir: the Claude config dir the sessions use (FLEET_CLAUDE_CONFIG_DIR, else ~/.claude);
 //   a user-scope plugin the project doesn't enable is a mismatch unless --allowed-user-plugins lists it,
 //   and a user-scope hook or settings command unless --allowed-user-hooks lists its userCommandHash.
-// --market-plugin (repeatable, engsys#196): a plugin of another marketplace (the instance's), checked the same
+// --market-plugin (repeatable, engsys#196): a plugin of another marketplace (the instance's, or an engsys stack pack, engsys#224), checked the same
 //   way against that repo's release <ref> (a vX.Y.Z tag). The directory its install is a copy of is the
 //   `source` of its entry in the release's .claude-plugin/marketplace.json, read from GitHub (pluginSubdir).
+// --enforce-instance-on-main (engsys#227): an instance marketplace tag that is not on its repo's default branch is a MISMATCH
+//   instead of a WARNING (INSTANCE_OFF_MAIN_ENFORCED is the same switch, compiled in). It only tightens; the engsys
+//   release is always strict.
 // --pin-repo: PIN_DIR's .claude/ tree and every settings-hook target against that repo's default branch
 //   on GitHub (projectLocalState + verifyProjectTrust, below). A pin checkout behind the tip passes with a
 //   WARNING line only while every auto-loaded file is identical at the tip.
@@ -1462,6 +1465,7 @@ export function parseArgs(argv) {
     claudeJson: '',
     checkUserConfig: false,
     marketPlugins: [],
+    enforceInstanceOnMain: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
@@ -1488,6 +1492,7 @@ export function parseArgs(argv) {
       case '--claude-json': a.claudeJson = v(); break;
       case '--messaging-settings': a.messagingSettings = v(); break;
       case '--check-user-config': a.checkUserConfig = true; break;
+      case '--enforce-instance-on-main': a.enforceInstanceOnMain = true; break;
       case '--market-plugin': {
         const [id, repo, tag, ...extra] = v().split('|');
         if (extra.length || !ID_RE.test(id || '') || !REPO_RE.test(repo || '') || !tag || /\s/.test(tag)) throw new Error('--market-plugin must be <plugin>@<marketplace>|<owner/repo>|<ref>');
@@ -1564,6 +1569,8 @@ export async function run(argv, {
   let a;
   try { a = parseArgs(argv); } catch (e) { out(`verify: ${e.message}`); return 2; }
   const target = `${a.repo}@${a.tag}`;
+  // --enforce-instance-on-main (fleet.conf INSTANCE_OFF_MAIN=enforce) can only tighten the constant, never loosen it
+  const offMainEnforced = instanceOffMainEnforced || a.enforceInstanceOnMain;
   const version = a.tag.slice(1);
   const mismatch = (lines) => {
     const sorted = [...new Set(lines)].sort();
@@ -1581,11 +1588,16 @@ export async function run(argv, {
     if (a.cache) { try { fs.rmSync(a.cache, { force: true }); } catch { /* best effort */ } }
     return 1;
   };
+  // a plugin of the engsys marketplace itself (a stack pack, engsys#224), as opposed to the instance's
+  const isPack = (mp) => mp.id.split('@')[1] === a.pluginId.split('@')[1];
   const componentOf = (l) => {
     // the label comes first: settings, user-cfg and memory lines also carry an absolute path or a plugin id, which say nothing about which install failed
     if (/^(settings|user-cfg|memory|sched) /.test(l)) return 'settings or user-scope config';
     for (const mp of market) {
-      if (l.includes(mp.id) || (mp.roots || []).some((r) => l.includes(r))) return /^release /.test(l) ? `instance release (${mp.id})` : `instance plugin ${mp.id}`;
+      if (l.includes(mp.id) || (mp.roots || []).some((r) => l.includes(r))) {
+        if (isPack(mp)) return `engsys stack pack ${mp.id}`;
+        return /^release /.test(l) ? `instance release (${mp.id})` : `instance plugin ${mp.id}`;
+      }
     }
     if (a.engsysDir && l.includes(a.engsysDir)) return 'host kit';
     if (/^(release|version|no-path|two-paths|disabled|shadowed) /.test(l) || /^\S+\s+\//.test(l)) return 'engsys plugin';
@@ -1664,7 +1676,7 @@ export async function run(argv, {
     const c = readCache(a.cache);
     const ageMin = c ? (now() - Number(c.verifiedAt)) / 60_000 : Infinity;
     if (c && c.result === 'ok' && c.repo === a.repo && c.tag === a.tag && sameJson(c.local, local) && sameJson(c.market ?? {}, marketLocal) && sameJson(c.host ?? null, host)
-      && sameJson(c.project ?? null, projectKey) && sameJson(c.info ?? [], info) && ageMin >= 0 && ageMin < a.maxAgeMin) {
+      && !(offMainEnforced && (!Array.isArray(c.warnings) || c.warnings.some((w) => /^instance release /.test(w)))) && sameJson(c.project ?? null, projectKey) && sameJson(c.info ?? [], info) && ageMin >= 0 && ageMin < a.maxAgeMin) {
       warnLines(Array.isArray(c.warnings) ? c.warnings : []);
       for (const mp of market) out(`verify: ok, ${countFiles(marketLocal[mp.id].local)} files of ${mp.id} in ${mp.roots.join(', ')} match ${mp.repo}@${mp.tag} (unchanged)`);
       out(`verify: ok, ${countFiles(local)} protected files in ${where} match ${target} (unchanged since the check ${Math.floor(ageMin)}m ago)`);
@@ -1682,17 +1694,18 @@ export async function run(argv, {
     problems.push(`release    ${a.tag} is commit ${rel.commit}, which is not on ${rel.defaultBranch} (compare: ${rel.status})`);
   }
   for (const d of compare(rel.tree, local)) problems.push(`${d.kind.padEnd(10)} ${cachePath(d.root, d.path)} ${d.have}`);
-  const released = new Map();
+  // the engsys marketplace's own plugins (the stack packs, engsys#224) share the engsys release, whose on-main check above is strict
+  const released = new Map([[`${a.repo}@${a.tag}`, rel]]);
   const marketWarnings = [];
   for (const mp of market) {
     try {
       const key = `${mp.repo}@${mp.tag}`;
       if (!released.has(key)) released.set(key, await fetch({ repo: mp.repo, tag: mp.tag }));
       const mrel = released.get(key);
-      if (mrel.status !== 'ahead' && mrel.status !== 'identical') {
+      if (mrel !== rel && mrel.status !== 'ahead' && mrel.status !== 'identical') {
         const line = `${mp.id}: ${mp.tag} of ${mp.repo} is commit ${mrel.commit}, which is not on ${mrel.defaultBranch} (compare: ${mrel.status})`;
-        if (instanceOffMainEnforced) problems.push(`release    ${line}`);
-        else marketWarnings.push(`instance release ${line}; allowed for now, a MISMATCH once INSTANCE_OFF_MAIN_ENFORCED is on (eric-sabe/engsys#227)`);
+        if (offMainEnforced) problems.push(`release    ${line}`);
+        else marketWarnings.push(`instance release ${line}; allowed for now, a MISMATCH once enforced: INSTANCE_OFF_MAIN=enforce in fleet.conf, or the default (eric-sabe/engsys#227)`);
       }
       const mfSha = mrel.tree.get(MARKETPLACE_FILE);
       if (!mfSha) throw new Unverified(`${mp.repo}@${mp.tag} has no ${MARKETPLACE_FILE}`);

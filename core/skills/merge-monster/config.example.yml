@@ -47,6 +47,16 @@ ready_requirements:
                              # runs with --check-contract. Off by default: on a repo
                              # without SDD contracts every PR would fail missing_issue_meta.
 
+# Paths whose PRs need a signed security verdict (engsys#229), decided by mm-preflight.sh itself, which finds this
+# file (in-repo, the fleet config dir, $ENGSYS_MM_CONFIG or --config): `*` and `?` stay inside one path segment, `**` crosses segments, `**/x` also matches a root-level `x`;
+# everything else is literal, so `app/(auth)/**` and `app/api/auth/[...nextauth]/**` match themselves. Both the old and
+# the new path of a rename are matched. Used when ready_requirements.signed_security_verdict is true (or
+# the session passes --security-verdict); the label below is checked then too.
+security_sensitive_globs:   # a block list; uncomment the examples below
+  # - services/dashboard/app/(auth)/**
+  # - "**/*.bicep"
+security_sensitive_label: security   # a PR carrying this label always needs the verdict
+
 # Globs (against changed files) whose PRs merge early to minimize queue-wide
 # rebase churn — lockfiles, CI workflow files, schemas, shared-package APIs.
 conflict_magnets: []

@@ -254,7 +254,7 @@ write_settings() { # write_settings <engsys-ref> <acme-ref> <extra plugin enable
     extraKnownMarketplaces: {
       engsys: {source: {source: "github", repo: "vendor/engsys", ref: $e}},
       acme: {source: {source: "github", repo: "acme/acme-fleet", ref: $a}}},
-    enabledPlugins: {"core@engsys": true, "off@engsys": false, "ctx@acme": true, "extra@acme": $x}}' >"$P/.claude/settings.json"
+    enabledPlugins: {"engsys@engsys": true, "off@engsys": false, "ctx@acme": true, "extra@acme": $x}}' >"$P/.claude/settings.json"
 }
 write_settings v1.0.0 v0.1.0 false
 commit_all "$P" "pins 1"
@@ -311,7 +311,7 @@ rc_is "FLEET_INSTANCE is honoured" 0
   eq "pins: ENGSYS_REF from settings.json" "$ENGSYS_REF" v1.0.0
   eq "pins: INSTANCE_REF from settings.json" "$INSTANCE_REF" v0.1.0
   eq "pins: fleet_pin_repo" "$(fleet_pin_repo acme)" acme/acme-fleet
-  eq "pins: fleet_enabled_plugins only the enabled ones" "$(fleet_enabled_plugins engsys)" core
+  eq "pins: fleet_enabled_plugins only the enabled ones" "$(fleet_enabled_plugins engsys)" engsys
   eq "sessions: roster" "$(fleet_roster_sessions | paste -sd' ' -)" "acme-mm acme-build acme-security acme-rel"
   eq "sessions: monsters come from the supervisor conf" "$(fleet_ledger_sessions | paste -sd' ' -)" "acme-mm acme-security"
   eq "render: substitutes conf keys" "$(fleet_render_text 'm=__MERGE_MODEL__' t)" "m=model-m"
@@ -336,11 +336,11 @@ eq "instance checkout is at its pin" "$(git -C "$INST" describe --tags --exact-m
 eq "instance step ran once (one re-exec)" "$(grep -c '^fleet-sync: instance: ' <<<"$OUT")" 1
 has "engsys marketplace added at its ref" "$OUT" "marketplace engsys: absent → v1.0.0"
 has "instance marketplace added at its ref" "$OUT" "marketplace acme: absent → v0.1.0"
-has "enabled engsys plugin installed" "$OUT" "installed core@engsys"
+has "enabled engsys plugin installed" "$OUT" "installed engsys@engsys"
 has "enabled instance plugin installed" "$OUT" "installed ctx@acme"
 hasnt "disabled plugin skipped" "$OUT" "off@engsys"
 eq "marketplaces at the pinned refs" "$(json_names marketplaces '.[] | .name + "#" + .ref')" "acme#v0.1.0 engsys#v1.0.0"
-eq "plugins installed" "$(json_names plugins '.[].id')" "core@engsys ctx@acme"
+eq "plugins installed" "$(json_names plugins '.[].id')" "ctx@acme engsys@engsys"
 has "marketplace add uses the pin repo url + #ref" "$(cat "$FAKE/claude.log")" "plugin marketplace add https://github.com/vendor/engsys.git#v1.0.0"
 eq "fleet processes had the gh shim first on PATH" "$(grep -v -e "PATH0=$SHIM" -e '^MARK' "$FAKE/claude.log" || true)" ""
 [ -s "$STATE/last-change" ] && ok "last-change stamped" || bad "last-change stamped"
@@ -401,7 +401,7 @@ if [ -n "$rm2" ] && [ -n "$ad2" ] && [ "$rm2" -lt "$ad2" ]; then ok "remove prec
 eq "engsys checkout at its pin" "$(git -C "$ENGSYS_HOST" describe --tags --exact-match)" v1.1.0
 eq "instance checkout at its pin" "$(git -C "$INST" describe --tags --exact-match)" v0.2.0
 eq "marketplaces" "$(json_names marketplaces '.[] | .name + "#" + .ref')" "acme#v0.2.0 engsys#v1.1.0"
-eq "plugins" "$(json_names plugins '.[].id')" "core@engsys ctx@acme extra@acme"
+eq "plugins" "$(json_names plugins '.[].id')" "ctx@acme engsys@engsys extra@acme"
 has "sync.log records the new pins" "$(cat "$STATE/sync.log")" "engsys=v1.1.0 acme=v0.2.0"
 has "jobs reinstalled through launchctl" "$(cat "$FAKE/launchctl.log")" "com.acme.fleet.acme-extra.plist"
 run fleet sync --check
@@ -424,7 +424,7 @@ rc_is "sync heals it (running the v1.0.0 kit, re-exec'd into v1.1.0)" 0
 has "engsys moved forward" "$OUT" "engsys: v1.0.0 → v1.1.0"
 has "engsys-side job template change reinstalls jobs" "$OUT" "launchd templates changed — reinstalling jobs"
 has "marketplace repaired" "$OUT" "marketplace acme: v0.1.0 → v0.2.0"
-eq "plugins back" "$(json_names plugins '.[].id')" "core@engsys ctx@acme extra@acme"
+eq "plugins back" "$(json_names plugins '.[].id')" "ctx@acme engsys@engsys extra@acme"
 run fleet sync --check; rc_is "in sync again" 0
 # The same heal from inside a fleet job (what verify --auto-sync runs): never touches launchd.
 git -C "$ENGSYS_HOST" checkout -q v1.0.0
@@ -496,13 +496,13 @@ has "…~/.claude's drift" "$OUT" "marketplace engsys is at 'v1.0.0'"
 # plugin of it and another project's project-scope install, so the step is refused (drift, no damage).
 cp "$FAKE/claude/plugins.json" "$T/user-plugins.bak"
 jq '. + [{id: "engsys-swift@engsys", version: "1.0.0", scope: "user", enabled: true},
-         {id: "core@engsys", version: "1.0.0", scope: "project", projectPath: "/other/proj", enabled: true}]' "$T/user-plugins.bak" >"$FAKE/claude/plugins.json"
+         {id: "engsys@engsys", version: "1.0.0", scope: "project", projectPath: "/other/proj", enabled: true}]' "$T/user-plugins.bak" >"$FAKE/claude/plugins.json"
 m="$(mark)"; run fleet sync
 rc_is "sync with unpinned plugins in ~/.claude still exits 0 (the fleet dir is synced)" 0
 has "…warns that moving it would uninstall unpinned plugins" "$OUT" "would uninstall plugins the fleet doesn't pin:"
 has "…with advice that works for a ref-pinned marketplace" "$OUT" "claude plugin marketplace remove engsys, then claude plugin marketplace add https://github.com/vendor/engsys.git#v1.1.0"
 has "…naming the operator's plugin" "$OUT" "engsys-swift@engsys (user)"
-has "…and the project-scope install" "$OUT" "core@engsys (project /other/proj)"
+has "…and the project-scope install" "$OUT" "engsys@engsys (project /other/proj)"
 has "…while the fleet dir is synced all the same" "$(since "$m" | grep "CFG=$FCFG\$")" "plugin install ctx@acme"
 eq "…never ran marketplace remove in ~/.claude" "$(since "$m" | grep 'CFG=unset$' | grep -c 'marketplace remove' || true)" 0
 has "…the operator's own plugin survives" "$(jq -r '.[].id' "$FAKE/claude/plugins.json")" "engsys-swift@engsys"
@@ -529,8 +529,8 @@ m="$(mark)"; run fleet sync
 rc_is "sync with scope supervised exits 0" 0
 has "…and reconciled ~/.claude (user scope)" "$(since "$m" | grep 'CFG=unset$')" "plugin marketplace add https://github.com/vendor/engsys.git"
 eq "…~/.claude: only user-scope plugin calls" "$(since "$m" | grep 'CFG=unset$' | grep -E 'marketplace (add|remove)|install ' | grep -vc -- '--scope user' || true)" 0
-eq "fleet dir plugins" "$(jq -r '.[].id' "$FS/plugins.json" | sort | paste -sd' ' -)" "core@engsys ctx@acme extra@acme"
-eq "~/.claude plugins" "$(json_names plugins '.[].id')" "core@engsys ctx@acme extra@acme"
+eq "fleet dir plugins" "$(jq -r '.[].id' "$FS/plugins.json" | sort | paste -sd' ' -)" "ctx@acme engsys@engsys extra@acme"
+eq "~/.claude plugins" "$(json_names plugins '.[].id')" "ctx@acme engsys@engsys extra@acme"
 run fleet sync --check; rc_is "both dirs in sync" 0
 run fleet status
 has "fleet status: the fleet dir's login" "$OUT" "claude config dir: $FCFG (FLEET_CLAUDE_CONFIG_DIR, scope supervised), login unknown"
@@ -562,8 +562,8 @@ if cmp -s "$T/app-settings.orig" "$APP_SETTINGS"; then ok "pin checkout settings
 seg="$(since "$b")"
 has "remove is user-scoped" "$seg" "plugin marketplace remove engsys --scope user"
 has "add is user-scoped" "$seg" "plugin marketplace add https://github.com/vendor/engsys.git#v1.1.0 --scope user"
-has "every enabled plugin of the swapped marketplace gets an install call" "$seg" "plugin install core@engsys --scope user"
-eq "plugins all back" "$(json_names plugins '.[].id')" "core@engsys ctx@acme extra@acme"
+has "every enabled plugin of the swapped marketplace gets an install call" "$seg" "plugin install engsys@engsys --scope user"
+eq "plugins all back" "$(json_names plugins '.[].id')" "ctx@acme engsys@engsys extra@acme"
 cwds="$(cwd_since "$c" | cut -f1 | sort -u)"
 [ -n "$cwds" ] && ok "plugin calls were recorded" || bad "plugin calls were recorded"
 eq "no plugin call ran inside a project (the pin checkout, the instance, the engsys checkout)" \
@@ -582,7 +582,7 @@ hasnt "…never claims synced" "$OUT" "fleet-sync: synced."
 if cmp -s "$T/app-settings.orig" "$APP_SETTINGS"; then ok "the rewritten settings were restored byte-identical"; else bad "the rewritten settings were restored byte-identical" "$(diff "$T/app-settings.orig" "$APP_SETTINGS" || true)"; fi
 run fleet sync
 rc_is "a plain re-run heals the host" 0
-eq "plugins back after the re-run" "$(json_names plugins '.[].id')" "core@engsys ctx@acme extra@acme"
+eq "plugins back after the re-run" "$(json_names plugins '.[].id')" "ctx@acme engsys@engsys extra@acme"
 
 # A marketplace declared only by project settings: the scoped remove is refused, sync retries without --scope
 # (from the same empty cwd) and still finishes at the pin (engsys#200).
@@ -593,7 +593,7 @@ has "…the marketplace moved" "$OUT" "marketplace engsys: v1.0.0 → v1.1.0"
 seg="$(since "$b")"
 has "…the scoped remove was tried first" "$seg" "plugin marketplace remove engsys --scope user"
 eq "…exactly one unscoped remove" "$(grep -E 'plugin marketplace remove engsys' <<<"$seg" | grep -vc -- '--scope' || true)" 1
-eq "…plugins all back" "$(json_names plugins '.[].id')" "core@engsys ctx@acme extra@acme"
+eq "…plugins all back" "$(json_names plugins '.[].id')" "ctx@acme engsys@engsys extra@acme"
 eq "…no plugin call ran inside a project" "$(cwd_since "$c" | cut -f1 | sort -u | grep -cE "^($HOME/git|$INST)(/|\$)" || true)" 0
 if cmp -s "$T/app-settings.orig" "$APP_SETTINGS"; then ok "…pin checkout settings byte-identical"; else bad "…pin checkout settings byte-identical" "$(diff "$T/app-settings.orig" "$APP_SETTINGS" || true)"; fi
 # Any other remove failure stays fatal (no blind retry).
@@ -604,7 +604,7 @@ run fleet sync
 rc_is "…and a plain re-run heals the host" 0
 # The unscoped fallback removes from EVERY scope: refused while another project has a project-scope install.
 stale_engsys
-jq '. + [{id: "core@engsys", version: "1.0.0", scope: "project", projectPath: "/somewhere/else/project"}]' "$FAKE/claude/plugins.json" >"$FAKE/p.json" && mv "$FAKE/p.json" "$FAKE/claude/plugins.json"
+jq '. + [{id: "engsys@engsys", version: "1.0.0", scope: "project", projectPath: "/somewhere/else/project"}]' "$FAKE/claude/plugins.json" >"$FAKE/p.json" && mv "$FAKE/p.json" "$FAKE/claude/plugins.json"
 m="$(mark)"
 run env FAKE_CLAUDE_PROJECT_DECLARED=engsys bash -c "cd '$HOME/git/app' && bash '$ENGSYS_HOST/core/fleet/bin/fleet' --instance '$INST' sync"
 rc_is "an unscoped fallback is refused while another project has an install" 1
@@ -615,15 +615,15 @@ run fleet sync
 rc_is "…and once that install is gone a plain sync heals the host" 0
 
 # An enabled plugin installed at the wrong version: --check names it, sync refuses to say synced.
-jq 'map(if .id == "core@engsys" then .version = "0.9.0" else . end)' "$FAKE/claude/plugins.json" >"$FAKE/p.json" && mv "$FAKE/p.json" "$FAKE/claude/plugins.json"
+jq 'map(if .id == "engsys@engsys" then .version = "0.9.0" else . end)' "$FAKE/claude/plugins.json" >"$FAKE/p.json" && mv "$FAKE/p.json" "$FAKE/claude/plugins.json"
 run fleet sync --check
-rc_is "a plugin off its pinned version is drift" 1; has "…named" "$OUT" "plugin core@engsys is at 0.9.0 (pin 1.1.0)"
+rc_is "a plugin off its pinned version is drift" 1; has "…named" "$OUT" "plugin engsys@engsys is at 0.9.0 (pin 1.1.0)"
 run fleet sync
 rc_is "sync fails on a plugin off its pinned version" 1
-has "…naming it" "$OUT" "core@engsys (at 0.9.0, pin 1.1.0)"
+has "…naming it" "$OUT" "engsys@engsys (at 0.9.0, pin 1.1.0)"
 has "…with the re-run instruction" "$OUT" "claude plugin uninstall --scope user <plugin@marketplace>"
 hasnt "…never claims synced" "$OUT" "fleet-sync: synced."
-jq 'map(if .id == "core@engsys" then .version = "1.1.0" else . end)' "$FAKE/claude/plugins.json" >"$FAKE/p.json" && mv "$FAKE/p.json" "$FAKE/claude/plugins.json"
+jq 'map(if .id == "engsys@engsys" then .version = "1.1.0" else . end)' "$FAKE/claude/plugins.json" >"$FAKE/p.json" && mv "$FAKE/p.json" "$FAKE/claude/plugins.json"
 # A project-scope install (`claude plugin list` shows those too) doesn't count as installed.
 jq 'map(if .id == "ctx@acme" then .scope = "project" else . end)' "$FAKE/claude/plugins.json" >"$FAKE/p.json" && mv "$FAKE/p.json" "$FAKE/claude/plugins.json"
 run fleet sync --check
@@ -1213,7 +1213,7 @@ has "engsys checkout follows it" "$OUT" "engsys: v1.1.0 → v1.2.0"
 hasnt "no instance step" "$OUT" "instance:"
 hasnt "no instance marketplace calls" "$seg" "acme"
 eq "only the engsys marketplace" "$(json_names marketplaces '.[] | .name + "#" + .ref')" "engsys#v1.2.0"
-eq "only its plugins" "$(json_names plugins '.[].id')" "core@engsys"
+eq "only its plugins" "$(json_names plugins '.[].id')" "engsys@engsys"
 eq "instance checkout untouched" "$(git -C "$INST" describe --tags --exact-match)" v0.2.0
 eq "without GH_APP_ENV no shim is put on PATH" "$(since "$b" | grep -v -e "PATH0=$T/bin" -e "PATH0=$T/fake-release" -e '^MARK' || true)" ""
 reset_tmux
@@ -1523,9 +1523,9 @@ eq "…the checkout is at origin's commit" "$(git -C "$ENGSYS_HOST" rev-parse HE
 SEG="$(since "$m")"
 has "…the engsys marketplace is removed and added again at the same ref" "$SEG" "plugin marketplace remove engsys"
 has "…" "$SEG" "plugin marketplace add https://github.com/vendor/engsys.git#v1.4.0"
-has "…and its plugin reinstalled" "$SEG" "plugin install core@engsys"
+has "…and its plugin reinstalled" "$SEG" "plugin install engsys@engsys"
 has "…says so" "$OUT" "marketplace engsys: re-added at v1.4.0, whose tag was re-cut upstream"
-rm1="$(lineno "$SEG" "plugin marketplace remove engsys")"; ad1="$(lineno "$SEG" "plugin marketplace add https://github.com/vendor/engsys.git#v1.4.0")"; in1="$(lineno "$SEG" "plugin install core@engsys")"
+rm1="$(lineno "$SEG" "plugin marketplace remove engsys")"; ad1="$(lineno "$SEG" "plugin marketplace add https://github.com/vendor/engsys.git#v1.4.0")"; in1="$(lineno "$SEG" "plugin install engsys@engsys")"
 if [ -n "$rm1" ] && [ "$rm1" -lt "$ad1" ] && [ "$ad1" -lt "$in1" ]; then ok "…in that order"; else bad "…in that order" "$SEG"; fi
 if [ ! -e "$STATE/pin-recut.reinstall" ]; then ok "…and nothing is left pending"; else bad "…and nothing is left pending" "$(cat "$STATE/pin-recut.reinstall")"; fi
 m="$(mark)"; run fleet sync
@@ -1542,14 +1542,14 @@ has "…named" "$OUT" "marketplace engsys is waiting for a plugin reinstall (its
 m="$(mark)"; run fleet sync
 rc_is "the next sync finishes it" 0
 has "…reinstalling the marketplace" "$(since "$m")" "plugin marketplace add https://github.com/vendor/engsys.git#v1.4.0"
-has "…and its plugin" "$(since "$m")" "plugin install core@engsys"
+has "…and its plugin" "$(since "$m")" "plugin install engsys@engsys"
 if [ ! -e "$STATE/pin-recut.reinstall" ]; then ok "…and clears the pending file"; else bad "…and clears the pending file"; fi
 run fleet sync --check
 rc_is "…after which --check is clean" 0
 # the cache copies (Copilot): the plugin files must be the new commit's
 setconf "INSTANCE_MARKETPLACE=" "GH_APP_ENV=" "ENGSYS_REF=v1.4.0" "HARNESS=copilot"
 run fleet sync
-CP="$STATE/copilot-home/installed-plugins/engsys/core"
+CP="$STATE/copilot-home/installed-plugins/engsys/engsys"
 if [ -d "$CP" ]; then ok "copilot: the plugin cache is installed"; else bad "copilot: the plugin cache is installed" "$OUT"; fi
 printf 'v2\n' >"$E/core/recut-mark"; git -C "$E" add -A; git -C "$E" commit -q -m "engsys re-cut with a changed plugin file"; git -C "$E" tag -f v1.4.0 >/dev/null; git -C "$E" push -q -f origin main v1.4.0
 run fleet sync
