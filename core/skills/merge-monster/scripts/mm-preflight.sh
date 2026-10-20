@@ -27,7 +27,8 @@
 # boundary: the key is readable by every process of the fleet's OS user.
 #
 # The requirement itself is decided HERE, not by the merge session (engsys#229): with the repo's merge-monster config
-# (--config FILE; else $ENGSYS_MM_CONFIG; else .claude/merge-monster.yml in the cwd) the script reads
+# (--config FILE, $ENGSYS_MM_CONFIG and .claude/merge-monster.yml in the cwd: every one that exists counts, the strictest
+# wins, so --config can add requirements but never replace the discoverable ones) the script reads
 # ready_requirements.signed_security_verdict (true turns --security-verdict on even when the flag is omitted),
 # security_sensitive_globs and security_sensitive_label (default `security`), lists the PR's files over REST
 # (pulls/N/files: filename and previous_filename, so both sides of a rename are matched, paginated) and requires a
@@ -102,24 +103,38 @@ fi
 # Whether this PR needs a signed security verdict, decided from the config (engsys#229), never from the session's flags.
 SS_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/security-sensitive.mjs"
 sec_fail() { printf '{"ok":false,"state":"error","reason":%s}\n' "$(jq -Rn --arg r "$1" '$r')" >&2; exit 1; }
-[ -n "$MM_CONFIG_FILE" ] || MM_CONFIG_FILE="${ENGSYS_MM_CONFIG:-}"
-[ -n "$MM_CONFIG_FILE" ] || { [ ! -f .claude/merge-monster.yml ] || MM_CONFIG_FILE=".claude/merge-monster.yml"; }
+# Every config source that exists counts and the strictest wins, so a session-supplied --config can add requirements
+# but never replace the discoverable ones (a file with only `repo: x` cannot lower them): $ENGSYS_MM_CONFIG (for the
+# fleet's launch context to export), .claude/merge-monster.yml in the cwd, and --config. Each must be readable.
+SS_CONFIGS=()
+for c in "${ENGSYS_MM_CONFIG:-}" "$([ ! -f .claude/merge-monster.yml ] || echo .claude/merge-monster.yml)" "$MM_CONFIG_FILE"; do
+  [ -n "$c" ] || continue
+  case " ${SS_CONFIGS[*]-} " in *" $c "*) ;; *) SS_CONFIGS+=("$c") ;; esac
+done
 SEC_REASONS="[]"
-if [ -n "$MM_CONFIG_FILE" ] || [ "$SEC_VERDICT" -eq 1 ]; then
+if [ "${#SS_CONFIGS[@]}" -gt 0 ] || [ "$SEC_VERDICT" -eq 1 ]; then
   command -v node >/dev/null && [ -f "$SS_SCRIPT" ] || sec_fail "security_config_unreadable: node or security-sensitive.mjs not found"
-  SS_CFG=(); [ -z "$MM_CONFIG_FILE" ] || SS_CFG=(--config "$MM_CONFIG_FILE")
-  SS_POLICY=$(node "$SS_SCRIPT" policy ${SS_CFG[@]+"${SS_CFG[@]}"}) || sec_fail "$(jq -r '.reason // "security_config_unreadable"' <<<"$SS_POLICY" 2>/dev/null || echo security_config_unreadable)"
-  if [ "$(jq -r '.signedVerdict' <<<"$SS_POLICY")" = true ]; then SEC_VERDICT=1; fi
+  SS_LIST=("${SS_CONFIGS[@]+"${SS_CONFIGS[@]}"}"); [ "${#SS_LIST[@]}" -gt 0 ] || SS_LIST=("")
+  SS_GLOBS=0
+  for c in "${SS_LIST[@]}"; do
+    SS_CFG=(); [ -z "$c" ] || SS_CFG=(--config "$c")
+    SS_POLICY=$(node "$SS_SCRIPT" policy ${SS_CFG[@]+"${SS_CFG[@]}"}) || sec_fail "$(jq -r '.reason // "security_config_unreadable"' <<<"$SS_POLICY" 2>/dev/null || echo security_config_unreadable)"
+    if [ "$(jq -r '.signedVerdict' <<<"$SS_POLICY")" = true ]; then SEC_VERDICT=1; fi
+    SS_GLOBS=$((SS_GLOBS + $(jq -r '.globs' <<<"$SS_POLICY")))
+  done
   if [ "$SEC_VERDICT" -eq 1 ]; then
     SS_FILES="[]" SS_COUNT="null"
-    if [ "$(jq -r '.globs' <<<"$SS_POLICY")" -gt 0 ]; then
+    if [ "$SS_GLOBS" -gt 0 ]; then
       SS_FILES=$("$FLEET_GH" api "repos/$REPO/pulls/$PR/files?per_page=100" --paginate | jq -s -c 'add // []') || sec_fail "security_file_list_unreadable: listing the PR files failed"
       SS_COUNT=$("$FLEET_GH" api "repos/$REPO/pulls/$PR" --jq '.changed_files') || sec_fail "security_file_list_unreadable: reading changed_files failed"
       [[ "$SS_COUNT" =~ ^[0-9]+$ ]] || sec_fail "security_file_list_unreadable: changed_files is not a number"
     fi
-    SS_OUT=$(jq -n -c --argjson f "$SS_FILES" --argjson n "$SS_COUNT" --argjson l "$(jq -c '.labels // []' <<<"$VIEW")" '{files:$f, changedFiles:$n, labels:$l}' \
-      | node "$SS_SCRIPT" decide ${SS_CFG[@]+"${SS_CFG[@]}"}) || sec_fail "$(jq -r '.reason // "security_file_list_unreadable"' <<<"$SS_OUT" 2>/dev/null || echo security_file_list_unreadable)"
-    if [ "$(jq -r '.required' <<<"$SS_OUT")" = true ]; then SEC_REQUIRE=1; SEC_REASONS="$(jq -c '.reasons' <<<"$SS_OUT")"; fi
+    for c in "${SS_LIST[@]}"; do
+      SS_CFG=(); [ -z "$c" ] || SS_CFG=(--config "$c")
+      SS_OUT=$(jq -n -c --argjson f "$SS_FILES" --argjson n "$SS_COUNT" --argjson l "$(jq -c '.labels // []' <<<"$VIEW")" '{files:$f, changedFiles:$n, labels:$l}' \
+        | node "$SS_SCRIPT" decide ${SS_CFG[@]+"${SS_CFG[@]}"}) || sec_fail "$(jq -r '.reason // "security_file_list_unreadable"' <<<"$SS_OUT" 2>/dev/null || echo security_file_list_unreadable)"
+      if [ "$(jq -r '.required' <<<"$SS_OUT")" = true ]; then SEC_REQUIRE=1; SEC_REASONS="$(jq -c -n --argjson a "$SEC_REASONS" --argjson b "$(jq -c '.reasons' <<<"$SS_OUT")" '$a + $b | unique')"; fi
+    done
   fi
 fi
 

@@ -497,8 +497,9 @@ reaches a session only on its own launch line, never the launcher's or the tmux 
 boundary is a separate GitHub identity for the security lane (eric-sabe/engsys#220); the keystone-side gate that reads these
 verdicts is wired separately.
 
-**Which PRs need a verdict is decided by `mm-preflight.sh`, not by the merge session** (engsys#229). Run with `--config
-<merge-monster.yml>` (or `ENGSYS_MM_CONFIG`, or `.claude/merge-monster.yml` in the cwd), it reads `security_sensitive_globs`
+**Which PRs need a verdict is decided by `mm-preflight.sh`, not by the merge session** (engsys#229). Run with any of `ENGSYS_MM_CONFIG` (the
+fleet's launch context should export it), `.claude/merge-monster.yml` in the cwd and `--config <merge-monster.yml>`
+(every one that exists counts and the strictest wins, so `--config` can add requirements but never replace the others), it reads `security_sensitive_globs`
 and `security_sensitive_label` (default `security`), lists the PR's files over REST (paginated; `filename` and
 `previous_filename`, so both sides of a rename match) and requires a signed PASS whenever the label is on the PR or any
 file matches a glob. Omitting `--require-security-verdict` cannot lower that; a config that sets

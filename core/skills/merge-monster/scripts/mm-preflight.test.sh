@@ -235,6 +235,17 @@ rc_is "ENGSYS_MM_CONFIG supplies the config when --config is omitted" 1
 mkdir -p "$T/wd/.claude"; cp "$CFG" "$T/wd/.claude/merge-monster.yml"
 RC=0; OUT="$(cd "$T/wd" && bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --security-key-file "$KEY" 2>&1)" || RC=$?
 rc_is "…and so does .claude/merge-monster.yml in the cwd" 1
+# a session-supplied --config can add requirements, never replace the discoverable ones (CodeRabbit, major)
+printf 'repo: x\n' >"$T/weak.yml"
+files "services/dashboard/app/(auth)/x.tsx"; view
+RC=0; OUT="$(ENGSYS_MM_CONFIG="$CFG" bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --config "$T/weak.yml" --security-key-file "$KEY" 2>&1)" || RC=$?
+rc_is "a weak --config does not replace ENGSYS_MM_CONFIG" 1
+RC=0; OUT="$(cd "$T/wd" && bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --config "$T/weak.yml" --security-key-file "$KEY" 2>&1)" || RC=$?
+rc_is "…nor the repo's .claude/merge-monster.yml" 1
+run --config "$T/weak.yml" --security-key-file "$KEY"
+rc_is "…and on its own a weak config (no globs, gate not on) is what it says, unchanged (positive control)" 0
+RC=0; OUT="$(ENGSYS_MM_CONFIG="$T/nope.yml" bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --config "$CFG" --security-key-file "$KEY" 2>&1)" || RC=$?
+rc_is "an unreadable discoverable config fails closed even when --config is fine" 1
 # --require-security-verdict can still ask for more, never for less
 files README.md
 run --config "$CFG" --require-security-verdict --security-key-file "$KEY"
