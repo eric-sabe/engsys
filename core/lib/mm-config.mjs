@@ -37,13 +37,13 @@ export function pluginRoots(configDir) {
     const entries = j && typeof j.plugins === 'object' && j.plugins ? Object.values(j.plugins) : Object.values(j || {});
     for (const list of entries) for (const e of Array.isArray(list) ? list : []) if (e && typeof e.installPath === 'string' && isDir(e.installPath)) roots.add(fs.realpathSync(e.installPath));
   } catch { /* no list: the cache walk below */ }
+  // each read failure stays local to its own entry: a stray file (.DS_Store, a lock) must not hide the other roots
+  const ls = (d) => { try { return fs.readdirSync(d); } catch { return []; } };
   const cache = path.join(configDir, 'plugins', 'cache');
-  try {
-    for (const m of fs.readdirSync(cache)) for (const p of fs.readdirSync(path.join(cache, m))) for (const v of fs.readdirSync(path.join(cache, m, p))) {
-      const r = path.join(cache, m, p, v);
-      if (isDir(r)) roots.add(fs.realpathSync(r));
-    }
-  } catch { /* no cache */ }
+  for (const m of ls(cache)) for (const p of ls(path.join(cache, m))) for (const v of ls(path.join(cache, m, p))) {
+    const r = path.join(cache, m, p, v);
+    if (isDir(r)) roots.add(fs.realpathSync(r));
+  }
   return [...roots];
 }
 

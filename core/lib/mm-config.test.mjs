@@ -32,6 +32,7 @@ describe('resolve', () => {
   it('falls back to walking plugins/cache, and tries the lowercased slug', () => {
     const cfg = path.join(T, 'b');
     mk(path.join(cfg, 'plugins/cache/mk/fleet/1.0.0'), { 'repos/feedfrwd/keystone/merge-monster.yml': 'repo: x\n' });
+    mk(path.join(cfg, 'plugins/cache'), { '.DS_Store': 'x' }); mk(path.join(cfg, 'plugins/cache/mk'), { 'stray.lock': 'x' }); mk(path.join(cfg, 'plugins/cache/aaa'), { 'f': 'x' });
     assert.deepEqual(pluginRoots(cfg).length, 1);
     const r = resolve({ slug: 'FeedFrwd/Keystone', configDirs: [cfg] });
     assert.equal(r.configs.length, 1);
