@@ -39,8 +39,11 @@ function ps(pid) {
 export function ownsPane(session, env = process.env) {
   const pane = env.TMUX_PANE;
   if (!/^%[0-9]{1,9}$/.test(pane ?? '')) return false;
-  const out = execFileSync('tmux', ['display-message', '-p', '-t', pane, '#{pane_pid}\t#{window_name}'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }).trim();
-  const [panePid, name] = out.split('\t');
+  // `|`, not a TAB: without a UTF-8 locale tmux prints a TAB in format output as `_` (engsys#250). A pid has no `|`, so
+  // everything after the first one is the window name.
+  const out = execFileSync('tmux', ['display-message', '-p', '-t', pane, '#{pane_pid}|#{window_name}'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }).trim();
+  const cut = out.indexOf('|');
+  const [panePid, name] = cut < 0 ? [out, undefined] : [out.slice(0, cut), out.slice(cut + 1)];
   if (name !== session || !/^[0-9]+$/.test(panePid ?? '')) return false;
   // Walk up past the shells the hook runs in to the first other process: the harness CLI process.
   let pid = process.ppid;

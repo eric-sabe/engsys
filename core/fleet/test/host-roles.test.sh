@@ -39,7 +39,7 @@ add_window() { grep -Fxq "$1" "$F/windows" || echo "$1" >>"$F/windows"; echo nod
 run_launch_line() { local f; case "$1" in ". "*) eval "f=${1#. }"; [ -f "$f" ] || return 0; { printf 'tmux [script] [%s] ' "$t"; cat "$f"; } >>"$FAKE/tmux.log"; rm -f "$f" ;; esac; }
 case "$sub" in
   list-windows) cat "$F/windows" ;;
-  list-panes) case "$fmt" in *pane_pid*) exit 1 ;; *window_name*) while IFS= read -r wn; do [ -z "$wn" ] || [ ! -f "$F/cmd-$wn" ] || printf '%s\t%s\n' "$wn" "$(cat "$F/cmd-$wn")"; done <"$F/windows" ;; *) cat "$F/cmd-$w" 2>/dev/null || exit 1 ;; esac ;;
+  list-panes) case "$fmt" in *pane_pid*) exit 1 ;; *window_name*) while IFS= read -r wn; do [ -z "$wn" ] || [ ! -f "$F/cmd-$wn" ] || { l="${fmt//"#{window_name}"/$wn}"; l="${l//"#{pane_current_command}"/$(cat "$F/cmd-$wn")}"; printf '%s\n' "$l" | tr '\t' _; }; done <"$F/windows" ;; *) cat "$F/cmd-$w" 2>/dev/null || exit 1 ;; esac ;;
   capture-pane) cat "$F/cap-$w" 2>/dev/null || true ;;
   has-session) [ -f "$F/session" ] || exit 1 ;;
   new-session) touch "$F/session"; add_window "$nm" ;;

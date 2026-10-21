@@ -105,7 +105,7 @@ SH
 chmod +x "$T/bin/gh"
 
 # --- fake tmux (records every call; answers display-message for the hook) ------------------------
-# $FAKE/tmux/pane-<%id>   "<pane_pid>\t<window_name>" for that pane
+# $FAKE/tmux/pane-<%id>   "<pane_pid>|<window_name>" for that pane (what tmux prints for the hook's -F)
 mkdir -p "$FAKE/tmux"
 : >"$FAKE/tmux.log"
 cat >"$T/bin/tmux" <<'SH'
@@ -353,7 +353,7 @@ node -e '
   }
   fs.writeFileSync(d + "/relay/state.json", JSON.stringify(st));
 ' "$STATE"
-printf '4000\tacme-build\n' >"$FAKE/tmux/pane-%7"
+printf '4000|acme-build\n' >"$FAKE/tmux/pane-%7"
 printf '4242 zsh\n' >"$FAKE/ps/default"   # the shell the hook runs in
 printf '4000 claude\n' >"$FAKE/ps/4242"     # …under a claude whose parent is the pane's shell (4000)
 hook() { env -u CLAUDE_PLUGIN_ROOT PATH="$T/hookbin:$PATH" FLEET_INBOX_DIR="$STATE/inbox" FLEET_ID=bob FEDERATION_FILE="$I/federation.yml" FLEET_INSTANCE_REPO=acme/acme-fleet "$@" node "$HOOK" "${HOOK_EVENT:-session-start}"; }

@@ -107,7 +107,7 @@ case "$sub" in
   list-windows) cat "$F/windows" ;;
   list-panes)
     case "$fmt" in
-      *window_name*) while IFS= read -r wn; do [ -z "$wn" ] || [ ! -f "$F/cmd-$wn" ] || printf '%s\t%s\n' "$wn" "$(cat "$F/cmd-$wn")"; done <"$F/windows" ;;
+      *window_name*) while IFS= read -r wn; do [ -z "$wn" ] || [ ! -f "$F/cmd-$wn" ] || { l="${fmt//"#{window_name}"/$wn}"; l="${l//"#{pane_current_command}"/$(cat "$F/cmd-$wn")}"; printf '%s\n' "$l" | tr '\t' _; }; done <"$F/windows" ;;
       *pane_pid*) cat "$F/pid-$w" 2>/dev/null || exit 1 ;;
       *pane_id*) [ -f "$F/cmd-$w" ] || exit 1; echo "%pane-$w" ;;
       *) cat "$F/cmd-$w" 2>/dev/null || exit 1 ;;
