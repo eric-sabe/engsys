@@ -151,13 +151,24 @@ fleet_live_sessions() {
 fleet_sync_deferred() { # fleet_sync_deferred <name> → 0 when <name>'s dir is waiting for a sync
   grep -Fxq -- "$1" "$FLEET_STATE/sync-deferred" 2>/dev/null
 }
+# A full sync, a launch's `sync.sh --session` and the supervisor's can each edit the list, so the read-modify-write runs
+# under a mkdir lock (atomic). The edit takes milliseconds: a lock held for 10 s belongs to a holder that died, and is taken over.
 fleet_sync_deferred_set() { # fleet_sync_deferred_set add|drop <name>
-  local f="$FLEET_STATE/sync-deferred" t
+  local f="$FLEET_STATE/sync-deferred" l="$FLEET_STATE/locks/sync-deferred.lock" t i=0 rc=0
   [ "$1" = add ] || [ -f "$f" ] || return 0
   [ "$1" != add ] || ! fleet_sync_deferred "$2" || return 0
-  mkdir -p "$FLEET_STATE"; t="$(mktemp "$f.XXXXXX")"
-  { grep -Fxv -- "$2" "$f" 2>/dev/null || true; [ "$1" != add ] || printf '%s\n' "$2"; } >"$t"
-  if [ -s "$t" ]; then mv "$t" "$f"; else rm -f "$t" "$f"; fi
+  mkdir -p "$FLEET_STATE/locks"
+  until mkdir "$l" 2>/dev/null; do
+    i=$((i + 1)); [ "$i" -lt 100 ] || { rm -rf "$l"; i=0; continue; }
+    sleep 0.1
+  done
+  t="$(mktemp "$f.XXXXXX")" || rc=1
+  if [ "$rc" = 0 ]; then
+    { grep -Fxv -- "$2" "$f" 2>/dev/null || true; [ "$1" != add ] || printf '%s\n' "$2"; } >"$t"
+    if [ -s "$t" ]; then mv "$t" "$f"; else rm -f "$t" "$f"; fi
+  fi
+  rmdir "$l" 2>/dev/null || true
+  return "$rc"
 }
 # fleet_sync_deferred_run <name> → syncs <name>'s own dir when fleet sync deferred it and the session is not running now
 # (rc 0 when there was nothing to do too). --no-jobs: the callers can run inside the supervisor's launchd job.

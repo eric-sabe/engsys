@@ -65,11 +65,12 @@
 # A dir `fleet sync` left behind while its session ran (engsys#253, .fleet/sync-deferred) is behind the pins on purpose
 # until the session restarts. With --auto-sync and --session, once that session is down, verify first syncs its dir
 # (`sync.sh --session`), so the supervisor's relaunch is not held by a dir that was only waiting. While it still runs, a
-# periodic check (--max-age) that finds a mismatch in it prints it and passes (exit 0, no alert): the session is on
-# what it loaded at start, and holding the gate would stop the supervisor from cycling a monster that sits idle after
-# its rotation request. That is no gap at the gate: `fleet launch` syncs the dir and verifies it again, without
+# periodic check (--max-age) whose every problem in it is an install at another version than the pin prints it and
+# passes (exit 0, no alert): the session is on what it loaded at start, and holding the gate would stop the supervisor
+# from cycling a monster that sits idle after its rotation request. Any other problem (a hook, settings, user-scope
+# config, memory, ...) is alerted and held as always. That is no gap at the gate: `fleet launch` syncs the dir and verifies it again, without
 # --max-age, before it starts the session. Residual: the list is a file in .fleet/, so a process running as the fleet's
-# user could add a live session's name to it and quiet that session's mismatch alert until it restarts (it could
+# user could add a live session's name to it and quiet that session's version-mismatch alert until it restarts (it could
 # already edit fleet.conf or the verify cache, verify-wrappers.mjs).
 #
 # Exit: 0 match | 1 MISMATCH | 3 not verified (GitHub unreachable, no pin or not a tag, nothing installed)
@@ -370,15 +371,12 @@ if [ "$rc" = 1 ]; then
   probs="$(sed -n 's/^  \(.*\)$/\1/p' <<<"$out")"
   if [ -n "$probs" ] && ! grep -qv '^stale ' <<<"$probs"; then only_stale=1; fi
 fi
-sync_why="" sync_deferred=0
+sync_why=""
 if [ "$only_stale" = 1 ] && [ "$auto_sync" = 1 ]; then
   # engsys#223: the common case, a pin checkout that is merely behind with the pins unchanged, is fixed by a git
-  # fast-forward alone, with no claude, so it is done even while sessions run. Only a change of the pins needs the parts
-  # of fleet sync that run `claude plugin ...` / `claude auth status` on every session dir, running ones included: a
-  # periodic check defers those while any session is running (the stale mismatch stands, relaunches stay held, alerted
-  # as deferred and re-alerted every VERIFY_DEFER_REALERT_MIN minutes), and they happen on a later tick once none is
-  # running, or when the operator runs fleet sync.
-  live_now="" pins_same=0 sync_ff_only=0
+  # fast-forward alone, with no claude. A change of the pins runs fleet sync, also while sessions run: since engsys#253
+  # sync itself starts no claude on a running session's own dir (it leaves that dir to the session's restart).
+  pins_same=0
   # Full ref names, never --short: a local branch or tag named origin/<x> makes --short ambiguous.
   pin_branch="$(git -C "$PIN_DIR" symbolic-ref -q HEAD 2>/dev/null || true)"
   case "$pin_branch" in refs/heads/*) pin_branch="${pin_branch#refs/heads/}" ;; *) pin_branch="" ;; esac
@@ -411,10 +409,8 @@ if [ "$only_stale" = 1 ] && [ "$auto_sync" = 1 ]; then
         exec bash "$FLEET_KIT_DIR/verify.sh" "${reargs[@]}"   # once: the re-run has no --auto-sync
       fi
       sync_why="the pin checkout could not fast-forward to origin/$def_branch"
-    elif [ "$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION" = on ] && [ -n "$max_age" ] && live_now="$(fleet_live_sessions | paste -sd' ' -)" && [ -n "$live_now" ]; then
-      sync_deferred=1 sync_why="the pins changed, and moving the plugins needs claude on every session dir, which a periodic check never starts on a running session's login: sync deferred while $(wc -w <<<"$live_now" | tr -d ' ') session(s) run ($live_now). This does not clear by itself while they run: stop or restart them (it then runs on its own), or run fleet sync by hand, which syncs the host and every stopped session's dir and leaves each running one's dir to its restart (engsys#253)"
     else
-    echo "fleet verify: the pin checkout is behind $def_branch and the pins changed: auto-syncing (fleet sync, no restarts)"
+    echo "fleet verify: the pin checkout is behind $def_branch and the pins changed: auto-syncing (fleet sync, no restarts; a running session's own dir is left to its restart)"
     # --no-jobs: this runs inside the supervisor's own launchd job, which a job reload would kill.
     if bash "$FLEET_KIT_DIR/sync.sh" --instance "$FLEET_REPO" --no-jobs </dev/null >&2; then
       [ -z "${plist:-}" ] || rm -f "$plist"
@@ -424,13 +420,15 @@ if [ "$only_stale" = 1 ] && [ "$auto_sync" = 1 ]; then
     sync_why="fleet sync failed (above)"
     fi
   fi
-  if [ "$sync_deferred" = 1 ]; then out="$out"$'\n'"fleet verify: $sync_why"
-  else out="$out"$'\n'"fleet verify: could not auto-sync: $sync_why"; fi
+  out="$out"$'\n'"fleet verify: could not auto-sync: $sync_why"
 fi
-# engsys#253: a running session whose dir fleet sync deferred is behind the pins until it restarts; the launch re-verifies
-# (a pin checkout behind main is still reported and alerted as such: that one is fleet sync's to fix)
+# engsys#253: a running session whose dir fleet sync deferred is behind the pins until it restarts; the launch re-verifies.
+# Only a dir whose EVERY problem is an install at another version than the pin (`version` lines) passes: that is what a
+# deferred pin change looks like. Anything else (a hook, settings, user-scope config, memory, a stale pin checkout, a
+# release problem, a disabled or doubled install) is alerted and held as always.
 deferred_pass=0
-if [ "$rc" = 1 ] && [ "$only_stale" = 0 ] && live_session && fleet_sync_deferred "$session"; then
+if [ "$rc" = 1 ] && live_session && fleet_sync_deferred "$session" \
+  && probs="$(sed -n 's/^  \(.*\)$/\1/p' <<<"$out")" && [ -n "$probs" ] && ! grep -qv '^version ' <<<"$probs"; then
   out="$out"$'\n'"fleet verify: session $session is running on what it loaded before fleet sync, which left its dir alone while it runs; the dir is synced and verified again before it relaunches (fleet restart $session). Not held, not alerted."
   rc=0 deferred_pass=1
 fi
@@ -454,16 +452,11 @@ if [ "$alert" = 1 ] && [ "$deferred_pass" = 0 ]; then
     1)
       fp="$(sed -n 's/^fingerprint: //p' <<<"$out" | tail -1)"
       # latch on a fixed reason for a deferral: the list of running sessions changes with every start and stop
-      latch_why="$sync_why"; [ "$sync_deferred" != 1 ] || latch_why="deferred: sessions running"
-      # a deferral that persists is alerted again every VERIFY_DEFER_REALERT_MIN minutes (default 360): it never clears by itself
-      defer_due=0
-      if [ "$sync_deferred" = 1 ] && [ -f "$LATCH" ] && at="$(cat "$LATCH.at" 2>/dev/null)" && [[ "$at" =~ ^[0-9]+$ ]] \
-        && [ $(( $(date +%s) - at )) -ge $(( ${VERIFY_DEFER_REALERT_MIN:-360} * 60 )) ]; then defer_due=1; fi
-      if [ "$only_stale" = 1 ] && { [ "$(cat "$LATCH" 2>/dev/null)" != "$fp|$auto_sync|$latch_why" ] || [ "$defer_due" = 1 ]; }; then
+      if [ "$only_stale" = 1 ] && [ "$(cat "$LATCH" 2>/dev/null)" != "$fp|$auto_sync|$sync_why" ]; then
         lines="$(sed -n 's/^  \(.*\)$/\1/p' <<<"$out" | awk 'NR <= 8')"
-        notify --level alert --incident "wrapper-integrity$INC" "Plugin check on $host${session:+ (session $session)}: the pin checkout ($PIN_DIR) is behind main, and files the sessions load changed there. $(if [ "$sync_deferred" = 1 ]; then printf 'Auto-sync is deferred: %s.' "$sync_why"; elif [ -n "$sync_why" ]; then printf 'Auto-sync could not fast-forward it: %s. Please bring the checkout back to main and run fleet sync.' "$sync_why"; elif [ "$auto_sync" = 1 ]; then printf 'Auto-syncing: fleet sync is running for it now.'; else printf 'Run fleet sync (a supervised host also does it on its own, through fleet verify --auto-sync).'; fi) Merge and maintain sessions are held until it matches; running sessions are left as they are. This is not a sign of tampering. Behind on:
+        notify --level alert --incident "wrapper-integrity$INC" "Plugin check on $host${session:+ (session $session)}: the pin checkout ($PIN_DIR) is behind main, and files the sessions load changed there. $(if [ -n "$sync_why" ]; then printf 'Auto-sync could not fast-forward it: %s. Please bring the checkout back to main and run fleet sync.' "$sync_why"; elif [ "$auto_sync" = 1 ]; then printf 'Auto-syncing: fleet sync is running for it now.'; else printf 'Run fleet sync (a supervised host also does it on its own, through fleet verify --auto-sync).'; fi) Merge and maintain sessions are held until it matches; running sessions are left as they are. This is not a sign of tampering. Behind on:
 $lines
-Details: fleet verify" && printf '%s\n' "$fp|$auto_sync|$latch_why" >"$LATCH" && date +%s >"$LATCH.at"
+Details: fleet verify" && printf '%s\n' "$fp|$auto_sync|$sync_why" >"$LATCH"
       elif [ "$only_stale" = 0 ] && [ "$(cat "$LATCH" 2>/dev/null)" != "$fp" ]; then
         summary="$(sed -n 's/^summary: //p' <<<"$out" | tail -1)"
         hint="$(sed -n 's/^hint: //p' <<<"$out" | tail -1)"

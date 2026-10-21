@@ -89,6 +89,8 @@ main() {
   # unchanged, so step 4 would see nothing to do: it reinstalls these anyway. The list lives on disk (pin-recut.reinstall)
   # until every config dir and cache this sync covers has been reinstalled, so a sync that was interrupted, or that had to
   # refuse a marketplace, is finished by the next one. recut_keep: what this run could not finish (' * ' = a whole dir).
+  # Each config dir and cache that has been reinstalled is recorded in pin-recut.done (engsys#253): it is not reinstalled
+  # again, so a dir left to a running session's restart (and reinstalled by it) does not keep the others churning.
   local recut_markets="" recut_keep="" recut_file="$FLEET_STATE/pin-recut.reinstall" rm_line
   if [ -f "$recut_file" ]; then
     while IFS= read -r rm_line; do
@@ -344,6 +346,8 @@ main() {
     exit "$drift"
   fi
   if [ -n "$only_session" ]; then
+    # it started while this ran: its dir was left alone, like any running session's (and stays recorded for its restart)
+    [ -z "$deferred" ] || fleet_die "session $only_session started while its dir was being synced: left behind the pins until it restarts (fleet restart $only_session)"
     say "session $only_session: its config dir is at the pins"
     exit 0
   fi
@@ -413,7 +417,7 @@ sync_claude_plugins() {
     cur="$(marketplace_list_json | jq -r --arg m "$m" '.[] | select(.name == $m) | .ref // ""')"
     # engsys#219: a re-cut pinned tag moved the checkout to a new commit under the same ref, so the installed plugin files are
     # behind it although the marketplace ref and the plugin version still match: reinstall this marketplace like a moved ref
-    moved=0; case " $recut_markets " in *" $m "*) moved=1 ;; esac
+    moved=0; ! recut_pending "$m" "${SYNC_CFG:-$HOME/.claude}" || moved=1
     if [ "$cur" != "$ref" ] || [ "$moved" = 1 ]; then
       if [ "$check" = 1 ]; then
         if [ "$moved" = 1 ] && [ "$cur" = "$ref" ]; then say "marketplace $m is waiting for a plugin reinstall (its pinned tag was re-cut)"
@@ -481,6 +485,10 @@ sync_claude_plugins() {
     done <<<"${m_plugins[$i]}"
   done
   [ -z "$bad" ] || fleet_die "after the plugin step these enabled plugins are not installed at the pin:$bad. NOT synced. Re-run: fleet sync. If a plugin stays at the wrong version: claude plugin uninstall --scope user <plugin@marketplace> (from a directory outside any project), then fleet sync."
+  # every marketplace not refused is now installed afresh at the pin in this dir: a re-cut reinstall is done here
+  if [ "$check" != 1 ]; then
+    for m in "${markets[@]}"; do case "$refused" in *" $m "*) ;; *) recut_done "$m" "${SYNC_CFG:-$HOME/.claude}" ;; esac; done
+  fi
 }
 
 say() { echo "fleet-sync: $*"; }
@@ -532,13 +540,31 @@ recut_note() { # recut_note <marketplace>: this run adopted a re-cut tag of it; 
   local m="$1" f="$FLEET_STATE/pin-recut.reinstall"
   mkdir -p "$FLEET_STATE"
   case " $recut_markets " in *" $m "*) ;; *) recut_markets+=" $m"; printf '%s\n' "$m" >>"$f" ;; esac
+  # a re-cut adopted now needs every dir again, whatever an earlier one of the same marketplace recorded
+  local d="$FLEET_STATE/pin-recut.done" dl
+  [ -f "$d" ] || return 0
+  dl="$(awk -F'|' -v m="$m" '$1 != m' "$d")"
+  if [ -n "$dl" ]; then printf '%s\n' "$dl" >"$d"; else rm -f "$d"; fi
 }
 recut_settle() { # drop from the pending file every marketplace this run reinstalled everywhere; keep the rest
-  local f="$FLEET_STATE/pin-recut.reinstall" m left=""
+  local f="$FLEET_STATE/pin-recut.reinstall" d="$FLEET_STATE/pin-recut.done" m left="" dl
   for m in $recut_markets; do
     case "$recut_keep" in *" * "* | *" $m "*) left+="$m"$'\n' ;; esac
   done
   if [ -n "$left" ]; then printf '%s' "$left" >"$f"; else rm -f "$f"; fi
+  [ -f "$d" ] || return 0
+  # the per-dir record of a settled marketplace goes with it
+  dl="$(RECUT_LEFT="$left" awk -F'|' 'BEGIN { n = split(ENVIRON["RECUT_LEFT"], k, "\n"); for (i = 1; i <= n; i++) if (k[i] != "") kept[k[i]] = 1 } NF > 1 && ($1 in kept)' "$d")"
+  if [ -n "$dl" ]; then printf '%s\n' "$dl" >"$d"; else rm -f "$d"; fi
+}
+# recut_pending <marketplace> <dir | harness:<h>> → 0 when that dir or cache still needs the re-cut reinstall
+recut_pending() {
+  case " $recut_markets " in *" $1 "*) ;; *) return 1 ;; esac
+  ! grep -Fxq -- "$1|$2" "$FLEET_STATE/pin-recut.done" 2>/dev/null
+}
+recut_done() { # recut_done <marketplace> <dir | harness:<h>>: the re-cut reinstall is done there
+  recut_pending "$1" "$2" || return 0
+  mkdir -p "$FLEET_STATE"; printf '%s|%s\n' "$1" "$2" >>"$FLEET_STATE/pin-recut.done"
 }
 
 # --- the plugin CLI, kept away from project settings (engsys#112) -----------------------------------
@@ -704,7 +730,7 @@ sync_non_claude_plugins() { # sync_non_claude_plugins <check> <engsys_target> [t
         fi
       fi
       # engsys#219: a re-cut pinned tag leaves the version and the cache dir as they were: copy the plugin again from the moved checkout
-      moved=0; case " $recut_markets " in *" $m "*) moved=1 ;; esac
+      moved=0; ! recut_pending "$m" "harness:$target_h" || moved=1
       if [ "$cur_ver" != "$want" ] || [ ! -d "$cache_dir" ] || [ "$moved" = 1 ]; then
         if [ "$check_mode" = 1 ]; then
           if [ "$moved" = 1 ] && [ "$cur_ver" = "$want" ]; then say "plugin $p@$m ($target_h) is waiting for a reinstall (its pinned tag was re-cut)"
@@ -749,6 +775,7 @@ sync_non_claude_plugins() { # sync_non_claude_plugins <check> <engsys_target> [t
         cp "$cfg_file" "$FLEET_STATE/agy-plugins.json" 2>/dev/null || true
       fi
     fi
+    for m in "${markets[@]}"; do recut_done "$m" "harness:$target_h"; done   # engsys#253: this cache has the re-cut now
   fi
 }
 

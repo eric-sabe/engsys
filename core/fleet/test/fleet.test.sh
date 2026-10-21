@@ -107,6 +107,11 @@ run_launch_line() { local f; case "$1" in ". "*) eval "f=${1#. }"; [ -f "$f" ] |
 case "$sub" in
   list-windows) cat "$F/windows" ;;
   list-panes)
+    # $F/flip-<w> = N: the window's claude "starts" (cmd node) after N more list-panes calls (a session coming up mid-run)
+    for ff in "$F"/flip-*; do
+      [ -f "$ff" ] || continue
+      n="$(cat "$ff")"; if [ "$n" -le 0 ]; then echo node >"$F/cmd-${ff##*/flip-}"; rm -f "$ff"; else echo $((n - 1)) >"$ff"; fi
+    done
     case "$fmt" in
       *window_name*) while IFS= read -r wn; do [ -z "$wn" ] || [ ! -f "$F/cmd-$wn" ] || { l="${fmt//"#{window_name}"/$wn}"; l="${l//"#{pane_current_command}"/$(cat "$F/cmd-$wn")}"; printf '%s\n' "$l" | tr '\t' _; }; done <"$F/windows" ;;
       *pane_pid*) cat "$F/pid-$w" 2>/dev/null || exit 1 ;;
@@ -1079,6 +1084,24 @@ rc_is "a deferred dir that cannot be synced: the launch is refused" 1
 has "…saying what failed and how to retry" "$OUT" "fleet sync left its config dir behind while it ran, and syncing it now failed"
 eq "…nothing reached tmux" "$(grep -c send-keys "$FAKE/tmux.log" || true)" 0
 eq "…and it stays deferred" "$(cat "$STATE/sync-deferred")" "acme-mm"
+# a session that comes up while sync --session runs on its dir: left alone, and the run says so (not "at the pins")
+rm -rf "$(stub_state acme-mm)" "$SESS/acme-mm/plugins"; running acme-mm; echo zsh >"$FAKE/tmux/cmd-acme-mm"; echo 1 >"$FAKE/tmux/flip-acme-mm"
+m="$(mark)"; run fleet sync --session acme-mm
+rc_is "sync --session of a session that starts mid-run fails" 1
+has "…saying it was left until its restart" "$OUT" "session acme-mm started while its dir was being synced"
+hasnt "…not that it is at the pins" "$OUT" "its config dir is at the pins"
+eq "…and no claude ran on it" "$(on_dir "$m" acme-mm)" ""
+eq "…it stays deferred" "$(cat "$STATE/sync-deferred")" "acme-mm"
+rm -f "$STATE/sync-deferred" "$FAKE/tmux/flip-acme-mm"
+# the deferred list is edited under a lock: concurrent edits lose nothing
+cat >"$T/defer-case.sh" <<'SH'
+. "$ENGSYS_HOST/core/fleet/lib/fleet-env.sh"; . "$ENGSYS_HOST/core/fleet/lib/session-dirs.sh"
+for i in $(seq 1 12); do fleet_sync_deferred_set add "s$i" & done; wait
+for i in $(seq 1 6); do fleet_sync_deferred_set drop "s$i" & done; wait
+SH
+FLEET_INSTANCE="$INST" ENGSYS_HOST="$ENGSYS_HOST" bash "$T/defer-case.sh"
+eq "concurrent adds and drops of the deferred list: none lost" "$(sort -V "$STATE/sync-deferred" | paste -sd' ' -)" "s7 s8 s9 s10 s11 s12"
+if [ -e "$STATE/locks/sync-deferred.lock" ]; then bad "…and the lock is released"; else ok "…and the lock is released"; fi
 rm -f "$STATE/sync-deferred"
 cp "$T/flc.bak" "$LC"; rm -rf "$SESS" "$FAKE/tmux" "$FAKE/claude-cfg"; : >"$FAKE/tmux.log"
 
@@ -1673,6 +1696,44 @@ SEG="$(since "$m")"
 has "the instance marketplace was re-added at the same ref" "$SEG" "plugin marketplace add https://github.com/acme/acme-fleet.git#v0.2.0"
 has "…and its plugin reinstalled" "$SEG" "plugin install ctx@acme"
 rm -f "$LC"
+git -C "$ENGSYS_HOST" checkout -q v1.4.0 2>/dev/null || true
+
+echo "== P4. engsys#253: a re-cut with a running session settles once its restart reinstalled it, with no churn meanwhile"
+setconf "INSTANCE_MARKETPLACE=" "GH_APP_ENV=" "ENGSYS_REF=v1.4.0" "FLEET_CLAUDE_CONFIG_DIR=$FCFG" "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on"
+SESS="$FCFG.sessions"; rm -rf "$SESS" "$FAKE/claude-cfg" "$FAKE/tmux" "$STATE/sync-deferred" "$STATE/pin-recut.done"; : >"$FAKE/tmux.log"
+run fleet config-dir init; login_all acme-mm acme-build acme-security acme-rel
+run fleet sync
+rc_is "baseline per-session sync exits 0" 0
+running acme-build; k2_files acme-build acme-build
+recut_engsys "p4"
+m="$(mark)"; run fleet sync
+rc_is "the re-cut is adopted while acme-build runs" 0
+has "…the stopped dirs are reinstalled" "$(on_dir "$m" acme-rel)" "plugin marketplace remove engsys"
+eq "…the running one is not touched" "$(on_dir "$m" acme-build)" ""
+eq "…it is left to its restart" "$(cat "$STATE/sync-deferred")" "acme-build"
+eq "…and the reinstall stays pending for it" "$(cat "$STATE/pin-recut.reinstall" 2>/dev/null || echo none)" engsys
+lc0="$(cat "$STATE/last-change")"; sleep 1
+m="$(mark)"; run fleet sync
+hasnt "a sync before its restart does not reinstall the stopped dirs again" "$(since "$m")" "plugin marketplace remove engsys"
+eq "…nor restamp the last change" "$(cat "$STATE/last-change")" "$lc0"
+eq "…acme-build still waits" "$(cat "$STATE/sync-deferred")" "acme-build"
+run fleet status
+has "status: acme-build waits for its restart (its dir still needs the re-cut)" "$OUT" "running, behind the pins until restarted: acme-build"
+# the restart: down, relaunched (an interactive role: no integrity gate in this sandbox); the launch reinstalls its dir
+: >"$FAKE/tmux/windows"; rm -f "$FAKE/tmux/cmd-acme-build"; : >"$FAKE/tmux.log"
+m="$(mark)"; run fleet launch acme-build
+rc_is "acme-build relaunches" 0
+has "…its dir got the re-cut reinstall first" "$(on_dir "$m" acme-build)" "plugin marketplace remove engsys"
+if [ -e "$STATE/sync-deferred" ]; then bad "…and it is no longer deferred"; else ok "…and it is no longer deferred"; fi
+# running again on the reinstalled dir (the real CLI rewrites these files; the stub keeps its state elsewhere)
+running acme-build; k2_files acme-build acme-build
+m="$(mark)"; run fleet sync
+rc_is "the next sync exits 0" 0
+eq "…clears the pending re-cut reinstall" "$(cat "$STATE/pin-recut.reinstall" 2>/dev/null || echo none)" none
+if [ -e "$STATE/pin-recut.done" ]; then bad "…and its per-dir record"; else ok "…and its per-dir record"; fi
+hasnt "…without reinstalling any dir" "$(since "$m")" "plugin marketplace remove engsys"
+has "…acme-build is at the pins (from its files)" "$OUT" "(session acme-build, own login): session running, its dir is at the pins"
+rm -rf "$SESS" "$FAKE/claude-cfg" "$FAKE/tmux"; : >"$FAKE/tmux.log"; rm -f "$LC" "$STATE/sync-deferred"
 git -C "$ENGSYS_HOST" checkout -q v1.4.0 2>/dev/null || true
 
 echo "== O. engsys#212: per-session adoption: early warnings, and no /login advice over SSH"

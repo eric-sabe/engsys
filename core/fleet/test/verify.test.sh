@@ -983,6 +983,14 @@ has "…saying why" "$OUT" "Not held, not alerted"
 has "…still printing what is behind" "$OUT" "MISMATCH"
 eq "…no alert" "$(comments)" "$c0"
 eq "…no claude" "$(calls)" 0
+jq '. + {hooks: {SessionStart: [{hooks: [{type: "command", command: "/bin/echo planted"}]}]}}' "$PS/settings.json" >"$PS/s.tmp" && mv "$PS/s.tmp" "$PS/settings.json"
+rm -f "$I/.fleet"/verify-wrappers*.json; c0="$(comments)"
+run fleet verify --alert --max-age 0 --session acme-mm
+rc_is "…but a planted user-scope hook beside the version lag is a MISMATCH, deferred or not" 1
+has "…naming the hook" "$OUT" "runs a command not on VERIFY_ALLOWED_USER_HOOKS"
+hasnt "…not passed as a deferral" "$OUT" "Not held, not alerted"
+eq "…and alerted" "$(comments)" "$((c0 + 1))"
+files_from_fixture
 echo zsh >"$FAKE/tmux-cmd"
 run fleet verify --alert --max-age 0 --session acme-mm
 rc_is "…once it is down (and no --auto-sync to sync it), the dir is a MISMATCH again" 1
@@ -1028,24 +1036,17 @@ has "…by git alone" "$OUT" "fast-forwarding it (git only, no claude)"
 eq "…with no claude call at all (call log)" "$(calls)" 0
 eq "…and the pin checkout is at the tip" "$(git -C "$APP" rev-parse HEAD)" "$(git -C "$APP" rev-parse origin/main)"
 
-echo "…a change of the pins with sessions running is deferred, alerted, and re-alerted"
+echo "…a change of the pins with sessions running auto-syncs too: sync itself leaves the running session's dir alone (engsys#253)"
 git -C "$W2" pull -q origin main
 jq '.enabledPlugins["zz@engsys"] = true' "$W2/.claude/settings.json" >"$W2/.claude/s.tmp" && mv "$W2/.claude/s.tmp" "$W2/.claude/settings.json"
 commit_all "$W2" "pins change"; git -C "$W2" push -q origin HEAD:main
-rm -f "$I/.fleet"/verify-wrappers*.json; : >"$FAKE/claude.calls"; g0="$(said 'Auto-sync is deferred')"
+rm -f "$I/.fleet"/verify-wrappers*.json; : >"$FAKE/claude.calls"; pre_ff="$(git -C "$APP" rev-parse HEAD)"
 run fleet verify --alert --auto-sync --max-age 15 --session acme-mm
-rc_is "a pins change with a session running: still a mismatch (hold stands)" 1
-has "…says the sync is deferred, and that it does not clear by itself" "$OUT" "does not clear by itself while they run"
-hasnt "…did not auto-sync" "$OUT" "auto-syncing"
-eq "…and started no claude at all (call log)" "$(calls)" 0
-eq "…one alert" "$(said 'Auto-sync is deferred')" "$((g0 + 1))"
-has "…saying fleet sync by hand leaves each running session's dir to its restart (engsys#253)" "$(grep 'Auto-sync is deferred' "$FAKE/gh.log" | tail -n 1)" "leaves each running one's dir to its restart"
-has "…and the login check was skipped, said so" "$OUT" "login not checked: session acme-mm is running"
-printf 'acme-mm\nacme-security\n' >"$FAKE/tmux-windows"
-run fleet verify --alert --auto-sync --max-age 15 --session acme-mm
-eq "…a different set of running sessions does not alert again" "$(said 'Auto-sync is deferred')" "$((g0 + 1))"
-VERIFY_DEFER_REALERT_MIN=0 run fleet verify --alert --auto-sync --max-age 15 --session acme-mm
-eq "…but the re-alert interval elapsing does" "$(said 'Auto-sync is deferred')" "$((g0 + 2))"
+has "a pins change with a session running: auto-syncs, saying the running dir is left to its restart" "$OUT" "auto-syncing (fleet sync, no restarts; a running session's own dir is left to its restart)"
+hasnt "…not deferred as a whole" "$OUT" "sync deferred"
+hasnt "…and no claude on the running session's dir (call log)" "$(cat "$FAKE/claude.calls")" "$PS|"
+rm -f "$I/.fleet/sync-deferred"   # what that sync left for acme-mm's restart (this stub claude can't sync it)
+git -C "$APP" reset -q --hard "$pre_ff"   # that sync fast-forwarded the pin checkout: behind again, for the cases below
 ORIGIN_URL="$(git -C "$APP" remote get-url origin)"; git -C "$APP" remote set-url origin "$T/no-such-origin.git"
 : >"$FAKE/tmux-windows"; : >"$FAKE/claude.calls"
 run fleet verify --alert --auto-sync --max-age 15 --session acme-mm
@@ -1055,8 +1056,7 @@ hasnt "…and nothing was synced" "$OUT" "auto-syncing"
 git -C "$APP" remote set-url origin "$ORIGIN_URL"
 : >"$FAKE/tmux-windows"; : >"$FAKE/claude.calls"
 run fleet verify --alert --auto-sync --max-age 15 --session acme-mm
-hasnt "with nothing running the sync is not deferred" "$OUT" "sync deferred"
-has "…it runs (fleet sync, which may use claude)" "$OUT" "the pins changed: auto-syncing (fleet sync, no restarts)"
+has "with nothing running it auto-syncs as well" "$OUT" "the pins changed: auto-syncing (fleet sync, no restarts"
 git -C "$APP" fetch -q origin; git -C "$APP" reset -q --hard origin/main 2>/dev/null || true
 rm -f "$FAKE/tmux-windows" "$FAKE/tmux-cmd" "$FAKE/auth.json"; printf '%s\n' "$CONF0" >"$I/fleet/fleet.conf"
 

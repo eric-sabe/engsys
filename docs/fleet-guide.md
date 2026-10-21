@@ -1201,12 +1201,14 @@ is synced when the session is down, before its new process starts:
   launch is refused, and the next supervisor tick tries again.
 - The supervisor's per-session check (`fleet verify --auto-sync --session <name>`) does the same once the session is
   down. So a monster that exits after its rotation request is not held by a dir that was only waiting.
-- While the session still runs, a periodic `fleet verify --max-age` of its deferred dir prints any mismatch and
-  passes, with no alert. The session runs what it loaded at start. A held gate would also stop the supervisor from
+- While the session still runs, a periodic `fleet verify --max-age` of its deferred dir passes, with no alert, when
+  every problem it finds is an install at another version than the pin (`version` lines, what a deferred pin change
+  looks like); it prints them. Any other problem (a hook, settings, user-scope config, memory) is alerted and held as
+  always. The session runs what it loaded at start. A held gate would also stop the supervisor from
   cycling a monster that sits idle after its rotation request. This leaves no gap: the launch syncs the dir and
   verifies it again, without `--max-age`, before the session starts. Residual risk: `.fleet/sync-deferred` is host
-  state. A process running as the fleet's user could add a live session to it and quiet that session's mismatch
-  alert until the session restarts. Such a process could already edit `fleet.conf` or the verify cache.
+  state. A process running as the fleet's user could add a live session to it and quiet that session's
+  version-mismatch alert until the session restarts. Such a process could already edit `fleet.conf` or the verify cache.
 
 `fleet status` (`fleet sync --check`) reads a running session's dir from its files (`plugins/installed_plugins.json`,
 `plugins/known_marketplaces.json`, the settings) and skips its login check. It lists a running dir that is behind as
@@ -1236,7 +1238,9 @@ commit: sync records the moved marketplace in `.fleet/pin-recut.reinstall` and r
 config dir (remove, add `#<ref>`, install), and copies the Copilot and Antigravity plugin caches again (engsys#219).
 The entry is removed only after every dir and cache the run covers has been done, so an interrupted sync, or a
 `~/.claude` marketplace that sync had to refuse, is finished by the next one; `fleet sync --check` reports it
-as drift (`waiting for a plugin reinstall`) until then.
+as drift (`waiting for a plugin reinstall`) until then. Each dir and cache that has been reinstalled is recorded in
+`.fleet/pin-recut.done` and is not reinstalled again (engsys#253). So a running session's dir, left to its restart
+and reinstalled by it, counts as done, and the next sync clears the entry without reinstalling the other dirs.
 
 ### Recipes
 
@@ -1525,7 +1529,8 @@ lists its sha256.
 **A pin checkout behind main.** The supervisor's check runs `fleet verify --auto-sync`: when the only
 problems are `stale` files and the pin checkout is on the default branch with no uncommitted changes to
 tracked files (and nothing untracked in `.claude/`), it runs `fleet sync --no-jobs` itself (fast-forward and
-plugin reconcile, no restarts), at most once per tick, and verifies again. `--no-jobs` never reloads
+plugin reconcile, no restarts), at most once per tick, and verifies again. It does so while sessions run too: sync
+leaves a running session's own dir to that session's restart (engsys#253). `--no-jobs` never reloads
 launchd jobs (the supervisor runs inside one, and a reload would kill it): if the job files changed with
 the pin, it alerts `fleet-jobs-changed` asking you to run `fleet install-jobs`. A dirty, diverged or off-branch
 checkout keeps the mismatch, alerted as "the pin checkout is behind main", not as tampering.
