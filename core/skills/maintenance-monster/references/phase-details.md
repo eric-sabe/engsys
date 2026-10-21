@@ -707,7 +707,7 @@ The registry is loaded only from the fleet instance repo or `FLEET_STATE` (both 
    - Treats broken probes (`statuspage` non-200 or malformed JSON) as `unknown`, preserving `last_known_state` rather than silently reporting `healthy`.
 2. **Status Board & Broadcast (`board.mjs` / `weather-check.mjs`)**:
    - Renders `<!-- fleet-health --> ... <!-- /fleet-health -->` (including machine-readable `<!-- fleet-health-json: {...} -->` and dual UTC + operator-time timestamps) onto the status board issue via fenced `mnt-act.sh guard`.
-   - Fires `fleet notify --incident fhd-<service>` only on confirmed, non-suppressed transitions (`--level action` when `down` or `hold_merges`, `--level info` when `degraded`, and `--resolve` on recovery).
+   - Fires `fleet notify --incident fhd-<service>` only on confirmed, non-suppressed transitions (`--level alert --everyone` when `down` or `hold_merges`: the channel with no mention plus a DM to every operator, engsys#238; `--level info` when `degraded`; `--resolve` on recovery). The board link rides as `--re` only when it is a plain https URL; otherwise the alert goes out without it.
    - Feeds `mm-watch.sh` and `mnt-watch.sh` (`FHD_CHANGE <service> <state>`, plus `— hold merges, pause claims` when set) and the `SessionStart` / `UserPromptSubmit` hook (`weather-check.mjs`, which reads `<FLEET_STATE>/fhd/board-cache.json` and injects only service ids, states and those two gates, never advice text).
    - `fleet health invoke` runs a fixed invoke kind and always needs an approved operator gate (`--approved-gate`); a registry `requires_gate: false` can't remove it.
 3. **Structured Friction Reporting & Correlation (`incidents.mjs`)**:

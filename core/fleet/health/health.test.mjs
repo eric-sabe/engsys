@@ -42,6 +42,7 @@ import {
   fetchBoardCached,
   applyBoardToGitHub,
   notifyTransitions,
+  notifyLink,
 } from './board.mjs';
 import { runCli } from './cli.mjs';
 
@@ -542,7 +543,9 @@ describe('P1-B (#98): Status board rendering, ETag caching, and transition notif
     assert.equal(calls.length, 1, 'only root-cause transition notifies');
     assert.ok(calls[0].includes('--incident'));
     assert.ok(calls[0].includes('fhd-github-api'));
-    assert.ok(calls[0].includes('action'));
+    // engsys#238: an outage is for every operator, the channel plus a DM to each, with the board link.
+    assert.deepEqual(calls[0].slice(0, 5), ['--level', 'alert', '--everyone', '--incident', 'fhd-github-api']);
+    assert.deepEqual(calls[0].slice(5, 7), ['--re', 'https://github.com/acme/app/issues/42']);
     assert.equal(res[1].skipped, true);
 
     // Recovery resolves the incident
@@ -553,6 +556,25 @@ describe('P1-B (#98): Status board rendering, ETag caching, and transition notif
     );
     assert.equal(calls.length, 2);
     assert.ok(calls[1].includes('--resolve'));
+  });
+
+  test('notifyTransitions: degraded is an info FYI; a link notify would reject is dropped, never the alert (engsys#238)', () => {
+    const reg = parseRegistry(SAMPLE_YAML);
+    const calls = [];
+    notifyTransitions(reg, [{ service: 'aks-staging', from: 'healthy', to: 'degraded', detail: 'slow', suppressed_by: null }],
+      { stateDir: '/tmp/state', repo: 'acme/app', issue: 42, notifyExec: (a) => calls.push(a) });
+    assert.deepEqual(calls[0].slice(0, 2), ['--level', 'info']);
+    assert.ok(!calls[0].includes('--everyone'));
+    for (const boardUrl of ['http://status.example.com', 'https://x/a b', 'https://x/<!here>']) {
+      const c = [];
+      notifyTransitions(reg, [{ service: 'github-api', from: 'healthy', to: 'down', detail: 'out', suppressed_by: null }],
+        { stateDir: '/tmp/state', boardUrl, notifyExec: (a) => c.push(a) });
+      assert.equal(c.length, 1, boardUrl);
+      assert.ok(!c[0].includes('--re'), boardUrl);
+      assert.deepEqual(c[0].slice(0, 3), ['--level', 'alert', '--everyone']);
+    }
+    assert.equal(notifyLink('https://github.com/acme/app/issues/42'), 'https://github.com/acme/app/issues/42');
+    assert.equal(notifyLink('http://x'), '');
   });
 });
 
