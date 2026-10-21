@@ -62,6 +62,11 @@ security_sensitive_label: security   # a PR carrying this label always needs the
 # bus and the tick watch it (engsys#241). A request, not a trust signal: removing it never lets a PR through. Must
 # differ from security_sensitive_label. The maintenance monster reads it from this file too.
 security_review_label: security-review-requested
+# Minutes a review request may stand at a PR's head with no signed verdict before the tick escalates it once,
+# owner-routed (`fleet notify --level action --author <PR author>`: a fleet App's PR DMs that fleet's operator).
+# Escalated at once, whatever this says, when the security lane is clearly unavailable: its self-authored skip
+# note or no-signing-key note on the PR, or the maintain baton free or expired. 0 turns it off (engsys#246).
+security_review_escalate_minutes: 30
 
 # Globs (against changed files) whose PRs merge early to minimize queue-wide
 # rebase churn — lockfiles, CI workflow files, schemas, shared-package APIs.

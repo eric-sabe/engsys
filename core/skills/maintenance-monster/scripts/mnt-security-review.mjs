@@ -9,7 +9,7 @@
 //
 //   mnt-security-review.mjs list --repo owner/name [--session NAME] [--label L] [--config FILE]...
 //     → one JSON object: {label, labelSource, session, signer, prs: [{number, head, url, author, isDraft,
-//        selfAuthored, selfWhy, skipNoted}]}
+//        selfAuthored, selfWhy, skipNoted, noSignerNoted}]}
 //
 // Label: --label, else core/lib/security-sensitive.mjs reviewLabelOf over the merge configs preflight reads (the
 // $ENGSYS_MM_CONFIG file, .claude/merge-monster.yml in the cwd, the fleet-config-dir copy, then each --config): the first
@@ -25,6 +25,9 @@
 // reported selfAuthored (fail closed: the lane cannot tell its own PRs apart).
 // skipNoted: a comment starting `<!-- security-review-self-skip -->` is already on the PR (say so once).
 // signer: whether ENGSYS_SECURITY_VERDICT_KEY_FILE is set in this session (no key, no verdict: alert instead).
+// noSignerNoted: a comment starting `<!-- security-review-no-signer -->` is already on the PR. With signer false the lane
+// says so on each waiting PR once, so the merge monster escalates that PR at once instead of after its timeout
+// (engsys#246).
 //
 // Exit: 0 listed | 1 error (gh, config) | 2 usage.
 import { spawnSync } from 'node:child_process';
@@ -34,6 +37,7 @@ import { reviewLabelOf, discoverConfigs } from '../../../lib/security-sensitive.
 import { isMainEntry } from '../../../lib/is-main.mjs';
 
 export const SKIP_MARKER = '<!-- security-review-self-skip -->';
+export const NO_SIGNER_MARKER = '<!-- security-review-no-signer -->';
 const MARKER_LINE = /^ {0,3}<!-- mm-handoff -->\s*$/;
 const FENCE = /^ {0,3}(```|~~~)/;
 const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -109,7 +113,8 @@ export function list({ repo, session, fleetId, label, configs = [], env = proces
     if (!(p.labels ?? []).some((l) => String(l?.name ?? '').toLowerCase() === want)) continue; // gh's filter, verified
     const issue = JSON.parse(gh(['api', `repos/${repo}/issues/${p.number}`]));
     const comments = pages(gh(['api', '--paginate', `repos/${repo}/issues/${p.number}/comments?per_page=100`]));
-    prs.push({ number: p.number, head: p.headRefOid, url: p.url, author: p.author?.login ?? null, isDraft: !!p.isDraft, ...classify({ issue, comments, session, fleetId }) });
+    prs.push({ number: p.number, head: p.headRefOid, url: p.url, author: p.author?.login ?? null, isDraft: !!p.isDraft, ...classify({ issue, comments, session, fleetId }),
+      noSignerNoted: comments.some((c) => String(c?.body ?? '').trimStart().startsWith(NO_SIGNER_MARKER)) });
   }
   prs.sort((a, b) => a.number - b.number);
   return { label: lbl.label, labelSource: lbl.source, session: session || null, signer: Boolean(env.ENGSYS_SECURITY_VERDICT_KEY_FILE), prs };

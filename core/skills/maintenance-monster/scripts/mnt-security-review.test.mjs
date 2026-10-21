@@ -95,7 +95,7 @@ esac
     { number: 32, headRefOid: 'c'.repeat(40), url: 'u32', author: { login: 'x' }, isDraft: false, labels: [label('other')] },
   ]);
   write('issue-31.json', { body: handoff('acme-build') });
-  write('comments-31.json', '[{"body":"hi"}]\n[{"body":"page two"}]\n');
+  write('comments-31.json', '[{"body":"hi"}]\n[{"body":"<!-- security-review-no-signer -->\\nno key"}]\n');
   write('issue-30.json', { body: handoff('acme-maintain') });
   write('comments-30.json', '[]');
   fs.mkdirSync(path.join(T, 'home'));
@@ -116,6 +116,8 @@ esac
     assert.equal(r.json.signer, false);
     assert.deepEqual(r.json.prs.map((p) => [p.number, p.selfAuthored]), [[30, true], [31, false]]);
     assert.equal(r.json.prs[1].head, 'a'.repeat(40));
+    // engsys#246: the no-signer note, found on any comment page, so the lane says it once per PR
+    assert.deepEqual(r.json.prs.map((p) => [p.number, p.noSignerNoted]), [[30, false], [31, true]]);
     const log = fs.readFileSync(path.join(T, 'gh.log'), 'utf8');
     assert.match(log, /pr list -R acme\/app --state open --limit 200 --label security-review-requested/);
     assert.doesNotMatch(log, /issues\/32/, 'a PR without the label is not read');

@@ -431,7 +431,7 @@ or config) stays exit 1 and is a bounce.
 
 | Step | Who | What |
 |---|---|---|
-| 1 | merge (you) | exit 3 and the rest of the preflight clean → add the review request label (`securityVerdict.reviewLabel`; config `security_review_label`, default `security-review-requested`) once, fenced; comment once ("security review requested for `<head>`"); keep `mm:ready`; do not queue. Operator-gated or migration-bearing → post the `merge` gate request now (§ Operator gates). |
+| 1 | merge (you) | exit 3 and the rest of the preflight clean → add the review request label (`securityVerdict.reviewLabel`; config `security_review_label`, default `security-review-requested`) once, fenced; comment once (`<!-- security-review-request head="<sha>" -->` then "security review requested for `<head>`"); keep `mm:ready`; do not queue. Operator-gated or migration-bearing → post the `merge` gate request now (§ Operator gates). |
 | 2 | security lane (maintenance monster with the signing key) | lists labeled PRs (`mnt-security-reviews.sh`), runs Nyx at the head, posts the signed verdict, removes the label (maintenance-monster SKILL.md § Security review requests). It never reviews a PR it authored: those stay labeled for an operator. |
 | 3 | merge (you) | `VERDICT_WAKE #N` from the bus (label removed, or a new `<!-- nyx-review -->` comment on a labeled PR) or the tick → re-run preflight. Pass → `mm:queued`, and a gate request already posted for this head is re-checked as is. Exit 3 with the label gone (`label_removed_no_verdict`) → label it again once. FINDINGS → bounce. |
 
@@ -455,6 +455,30 @@ The tick and the bus resolve the label with preflight's own discovery
 (`core/lib/security-sensitive.mjs review-label`); if it cannot be resolved
 (two configs disagree), they say so in a `CONFIG_WARNING` line (escalate
 once) and watch the default meanwhile, while preflight fails closed.
+
+**A request nobody answers (engsys#246).** The label used to be the only
+thing that ended the wait, so a security lane that was down, stuck,
+usage-limited, missing its key or skipping the PR as self-authored left the
+PR parked forever, silently. Now every tick (`mm-security-stale.mjs`, after
+the verdict backstop) measures, for each PR whose preflight answers exit 3
+with the label on, how long the request has stood **at the current head**:
+from the first label event or bot-written request comment at or after the
+head push (the label kept across a push counts from the push). Past
+`security_review_escalate_minutes` (merge config, default 30, `0` = off) it
+sends one `fleet notify --level action --author <PR author> --re <PR url>
+--incident security-review-stale-<owner>-<repo>-<N>` (engsys#238: a fleet
+App's PR DMs that fleet's operator, a human's this host's operator) and
+prints `SECURITY_REVIEW_STALE #N <reason> head=<sha12> notified`. It
+escalates **at once** when the lane is clearly unavailable: its
+`<!-- security-review-self-skip -->` note (`self_authored_skip`), its
+`<!-- security-review-no-signer -->` note (`security_lane_no_key`), or the
+maintain baton free or expired (`security_lane_down`). Only bot-written
+comments count, so a human comment neither moves the clock nor fakes an
+outage. The latch (`.watch/secstale.<N>`) is per PR and head: a new head
+resolves the incident and restarts the clock; the PR leaving the watch (the
+verdict landed, it merged, closed or left the queue) resolves it
+(`SECURITY_REVIEW_STALE_RESOLVED #N`). Journal those lines; do not notify
+again yourself.
 
 ## Failure handling (active PR goes red)
 

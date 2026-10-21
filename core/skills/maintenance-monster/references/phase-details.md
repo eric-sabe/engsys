@@ -468,9 +468,13 @@ meanwhile, and the merge preflight fails closed on the same configs.
    `signed_findings_on_earlier_head_unresolved` (the FINDINGS stays sticky
    until a fresh signed verdict for the new head), so the merge monster
    labels it again and you review the new head.
-1. **No signer** (`signer: false`): post nothing, leave the label, one
+1. **No signer** (`signer: false`): leave the label, one
    `fleet notify --level alert --incident security-review-signer` per
-   session. The fleet's problem, not the PR's.
+   session. The fleet's problem, not the PR's, but say so on the PR once
+   (unless `noSignerNoted`): a fenced comment starting
+   `<!-- security-review-no-signer -->`, so the merge monster escalates the
+   waiting PR to its owner at once instead of after its timeout
+   (engsys#246). No review, no verdict.
 2. **Self-authored** (`selfAuthored: true`): skip. Post the
    `<!-- security-review-self-skip -->` note once (`skipNoted` says whether
    it is there), leave the label for an operator, escalate once.
