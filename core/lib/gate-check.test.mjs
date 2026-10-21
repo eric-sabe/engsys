@@ -1104,3 +1104,104 @@ describe('renderGateRequest: requested time', () => {
     assert.deepEqual(parseGateRequest(body), { id: 'deploy-prod-2', kind: 'deploy', target: 'acme/app:prod@v1.2.3' });
   });
 });
+
+describe('engsys#238: a gate request addresses the operator of the fleet that opened the PR', () => {
+  const REG_TEXT = [
+    'version: 1',
+    'operators_team: FeedFrwd/fleet-operators',
+    'fleets:',
+    '  eric:',
+    '    operator: eric-sabe',
+    '    github_app: feedfrwd-fleet-eric',
+    '    github_app_id: 1000001',
+    '    slack_operator: U0000000001',
+    '  mark-fleet:',
+    '    operator: mdbardsley',
+    '    github_app: feedfrwd-fleet-mark-fleet',
+    '    github_app_id: 1000002',
+    '    slack_operator: U0000000002',
+  ].join('\n') + '\n';
+  const FTEAM = 'FeedFrwd/fleet-operators';
+  const routes = (author) => ({
+    [`GET /repos/${REPO}/pulls/${PR}`]: { status: 200, json: { user: { login: author } } },
+    [`GET /repos/${REPO}/issues/${PR}/comments`]: [],
+  });
+  const resolver = async () => {
+    const fed = await import('../fleet/lib/federation.mjs');
+    const reg = fed.parseFederation(REG_TEXT);
+    return (login) => fed.fleetForBot(reg, login);
+  };
+  const request = async (author, extra = {}) => postGateRequest(fakeApi(routes(author)), {
+    repo: REPO, pr: String(PR), gate: 'merge-412', kind: 'merge', target: TGT, what: 'merge #412', operatorsTeam: FTEAM, dryRun: true, env: {},
+    resolveOwner: await resolver(), ...extra,
+  });
+
+  test('mark-fleet bot author: @mdbardsley is mentioned, the team is named without a ping', async () => {
+    const res = await request('feedfrwd-fleet-mark-fleet[bot]');
+    assert.deepEqual(res.owner, { fleet: 'mark-fleet', login: 'mdbardsley', slack_operator: 'U0000000002' });
+    assert.match(res.body, /\*\*For:\*\* @mdbardsley, operator of fleet `mark-fleet`/);
+    assert.match(res.body, /a member of FeedFrwd\/fleet-operators submits/);
+    assert.doesNotMatch(res.body, /@FeedFrwd\/fleet-operators|@eric-sabe/);
+    assert.deepEqual(parseGateRequest(res.body), { id: 'merge-412', kind: 'merge', target: TGT });
+  });
+
+  test('fleet eric bot author: @eric-sabe', async () => {
+    const res = await request('feedfrwd-fleet-eric[bot]');
+    assert.equal(res.owner.login, 'eric-sabe');
+    assert.match(res.body, /\*\*For:\*\* @eric-sabe, operator of fleet `eric`/);
+    assert.doesNotMatch(res.body, /@mdbardsley/);
+  });
+
+  test('a human author (even a fleet operator) or an unknown bot keeps the team mention', async () => {
+    for (const author of ['eric-sabe', 'someone', 'dependabot[bot]']) {
+      const res = await request(author);
+      assert.equal(res.owner, null, author);
+      assert.match(res.body, /a member of @FeedFrwd\/fleet-operators/);
+      assert.doesNotMatch(res.body, /\*\*For:\*\*/);
+    }
+  });
+
+  test('an unreadable PR or no resolver degrades to the team mention, never blocks the request', async () => {
+    const api = fakeApi({ [`GET /repos/${REPO}/issues/${PR}/comments`]: [] }); // the PR read 404s
+    const res = await postGateRequest(api, { repo: REPO, pr: String(PR), gate: 'merge-412', kind: 'merge', target: TGT, what: 'm', operatorsTeam: FTEAM, dryRun: true, env: {}, resolveOwner: await resolver() });
+    assert.equal(res.owner, null);
+    const noResolver = await request('feedfrwd-fleet-mark-fleet[bot]', { resolveOwner: undefined });
+    assert.equal(noResolver.owner, null);
+  });
+
+  test('renderGateRequest ignores a malformed owner (no forged mention)', () => {
+    const body = renderGateRequest({ id: 'merge-412', kind: 'merge', target: TGT, what: 'm', operatorsTeam: FTEAM, owner: { fleet: 'x', login: 'a b @everyone' } });
+    assert.doesNotMatch(body, /\*\*For:\*\*/);
+    assert.match(body, /@FeedFrwd\/fleet-operators/);
+  });
+
+  test('CLI request reads the registry from FEDERATION_FILE and prints the owner', async () => {
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-owner-'));
+    try {
+      const file = path.join(dir, 'federation.yml');
+      fs.writeFileSync(file, REG_TEXT);
+      const out = sink();
+      const code = await main(['request', '--repo', REPO, '--pr', String(PR), '--kind', 'merge', '--target', TGT, '--what', 'merge it', '--gate', 'merge-412', '--operators-team', FTEAM, '--dry-run'],
+        { api: fakeApi(routes('feedfrwd-fleet-mark-fleet[bot]')), out, err: sink(), env: { FEDERATION_FILE: file } });
+      assert.equal(code, 0);
+      assert.equal(JSON.parse(out.text).owner.fleet, 'mark-fleet');
+      const err = sink();
+      const out2 = sink();
+      const code2 = await main(['request', '--repo', REPO, '--pr', String(PR), '--kind', 'merge', '--target', TGT, '--what', 'merge it', '--gate', 'merge-412', '--operators-team', FTEAM, '--dry-run'],
+        { api: fakeApi(routes('feedfrwd-fleet-mark-fleet[bot]')), out: out2, err, env: { FEDERATION_FILE: path.join(dir, 'bad.yml') } });
+      assert.equal(code2, 0, 'a missing registry is single-fleet mode, not an error');
+      assert.equal(JSON.parse(out2.text).owner, null);
+      fs.writeFileSync(path.join(dir, 'bad.yml'), 'version: 2\n');
+      const err3 = sink();
+      const code3 = await main(['request', '--repo', REPO, '--pr', String(PR), '--kind', 'merge', '--target', TGT, '--what', 'merge it', '--gate', 'merge-412', '--operators-team', FTEAM, '--dry-run'],
+        { api: fakeApi(routes('feedfrwd-fleet-mark-fleet[bot]')), out: sink(), err: err3, env: { FEDERATION_FILE: path.join(dir, 'bad.yml') } });
+      assert.equal(code3, 0, 'an invalid registry warns and keeps the team mention');
+      assert.match(err3.text, /cannot read the fleet registry/);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

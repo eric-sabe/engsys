@@ -834,11 +834,6 @@
         "reason": "Reworded in SKILL.md § Operator gates (request/nudge/verify/record, exit codes 0/3/4/1, self_is_operator, no operators → no gate)."
       },
       {
-        "unit": "nudge the operator once, with the request url",
-        "section": "Operator gates (approval happens in GitHub)",
-        "reason": "Reworded in SKILL.md § Operator gates (request/nudge/verify/record, exit codes 0/3/4/1, self_is_operator, no operators → no gate)."
-      },
-      {
         "unit": "verify on every wake for that pr, including each tick delta that names it ({\"k\":\"gate\",\"pr\":n,…}; the tick reports any new comment or review on a pr parked mm:blocked), and once on the session's first tick (read-only, auto-approved)",
         "section": "Operator gates (approval happens in GitHub)",
         "reason": "Reworded in SKILL.md § Operator gates (request/nudge/verify/record, exit codes 0/3/4/1, self_is_operator, no operators → no gate)."
@@ -1090,6 +1085,11 @@
       }
     ],
     "superseded_ok": [
+      {
+        "unit": "nudge the operator once, with the request url",
+        "section": "Operator gates (approval happens in GitHub)",
+        "reason": "engsys#238 narrowed it to the PR's owning operator: SKILL.md and runbook § Operator gates step 2 say nudge only the PR's owning operator, once, with the request url (fleet notify --for <owner.fleet>)."
+      },
       {
         "unit": "local_deadline / low_remaining / expired → run mm-baton.sh renew (exit 0: retry the act; exit 1: § lost baton)",
         "section": "The baton (lease, fence, handover)",

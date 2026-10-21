@@ -106,7 +106,7 @@ fleets:
     github_app: acme-fleet-alice            # bot login: acme-fleet-alice[bot]
     github_app_id: 1000001                  # the App's numeric id; required with 2+ enabled fleets
     cloud_identity: fleet-alice             # e.g. an Azure SP, AWS IAM role or GCP service account
-    slack_operator: U0000000001             # Slack member id to mention for this fleet
+    slack_operator: U0000000001             # Slack member id: this fleet's DMs (fleet notify --for, alerts)
     status_issue: 11                        # this fleet's own heartbeat/digest issue in acme/acme-fleet
     timezone: America/New_York              # optional: IANA zone for times shown to people (default UTC)
     clock: 12h                              # optional: 12h or 24h (default 24h); machine timestamps stay ISO UTC
@@ -532,7 +532,8 @@ otherwise perform on a human's say-so.
 ## 7. Slack: the fleet's own voice, calm by default
 
 - **One Slack app per fleet**, owned by the org's workspace: `Acme Fleet (alice)`, `Acme Fleet (bob)`.
-  Bot scope `chat:write` only, and the bot is invited to the escalation channel.
+  Bot scopes `chat:write` and `im:write` (to DM an operator), and the bot is invited to the escalation
+  channel.
 - **No read scopes.** Approvals come from GitHub, so a fleet never needs to read Slack. This retires the
   optional `messaging.operator_slack` reply-reading feature in the
   [merge-monster config](../core/skills/merge-monster/config.example.yml).
@@ -543,21 +544,32 @@ otherwise perform on a human's say-so.
   install.
 - **The token lives on the host**, in a `chmod 600` env file under `~/.config/<org>/` (for example
   `~/.config/acme/slack.env`), never committed, referenced from `fleet.conf` as `SLACK_ENV`.
-- **Mentions:** a real Slack user group (for example `@fleet-operators`, sent as `<!subteam^…>`) for
-  anything that needs any operator; the fleet's own operator, from the registry, for fleet-local
-  issues. Plain text "@fleet-operators" notifies nobody, so create the group.
+- **No channel ping** (operator decision 2026-10-20, engsys#238). People are reached by DM, through the
+  registry's `slack_operator`; the channel is the shared record, never `@here` and never a user group.
+  - An alert every operator should see goes to the escalation channel with no mention, **and** a DM to
+    each `slack_operator` in `federation.yml`.
+  - Anything meant for one operator is a DM to that operator only (`fleet notify --for <fleet-id|login>`).
+  - A gate request DMs only the operator of the fleet that authored the PR: the author `<github_app>[bot]`
+    maps to its fleet, then to `operator` (the GitHub mention on the request) and `slack_operator` (the
+    DM). A human or unknown author keeps the `operators_team` mention on GitHub and a channel post that
+    pings nobody.
+  - `SLACK_OPERATORS_GROUP_ID` is retired: nothing reads it, and an env file that still sets it works.
 
 ### `fleet notify`
 
 One command, in engsys core, that every monster and job uses:
 
 ```bash
-fleet notify --level info|action|alert --re <github-url> "<text>"
+fleet notify --level info|action|alert [--for <fleet-id|github-login>] [--no-mention] --re <github-url> "<text>"
+fleet notify --sweep [--repo <owner/name>] [--apply]
 ```
 
-It posts with the fleet's bot token, prefixes the fleet id, mentions the right people for the level,
-and falls back to a comment on the fleet's status issue if Slack is unreachable. Monsters stop using a
-person's Slack connector for fleet posts.
+It posts with the fleet's bot token, prefixes the fleet id, routes by the rules above, and falls back to
+a comment on the fleet's status issue if Slack is unreachable. Monsters stop using a person's Slack
+connector for fleet posts. A `--for` recipient the registry can't resolve (or whose DM Slack refuses)
+falls back, loudly, to the channel, and the post says who it was meant for. An incident's latch stores
+the DM channel and every DM thread it opened, so replies and `--resolve` land in the same threads.
+`--sweep` resolves the latches whose pull request already merged or closed (dry run unless `--apply`).
 
 ### Message format
 
@@ -575,8 +587,8 @@ What to do: approve the PR on GitHub: <link>. Nothing else is blocked.
   | Level | Meaning | Mentions | Emoji |
   |---|---|---|---|
   | `info` | FYI | none | ℹ️ |
-  | `action` | a human decision is needed | the fleet's operator, once | 👋 |
-  | `alert` | something is down or stuck | the operators group, once | ⚠️ |
+  | `action` | a human decision is needed | a DM to the `--for` operator; else this fleet's operator in the channel, once | 👋 |
+  | `alert` | something is down or stuck | nobody in the channel; a DM to every operator, once | ⚠️ |
 
   Emoji are informational. Never 🚨 or 🔴.
 - **One post per incident**, then thread replies, then one "resolved" reply. The escalate-once latch

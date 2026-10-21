@@ -9,9 +9,10 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import {
-  apiBase, composeText, escapeSlack, incidentSlug, mentionFor, missingSlackConfig, parseArgs, parseEnvFile,
-  resolveFleetId, validateArgs,
+  apiBase, composeText, escapeSlack, incidentSlug, latchPr, mentionFor, missingSlackConfig, parseArgs, parseEnvFile,
+  planRoute, resolveFleetId, slackMention, validateArgs,
 } from './notify.mjs';
+import { parseFederation } from './lib/federation.mjs';
 
 const SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), 'notify.mjs');
 
@@ -64,6 +65,12 @@ test('validateArgs: --resolve requires --incident; text optional on resolve', ()
   assert.doesNotThrow(() => validateArgs({ level: 'info', resolve: true, incident: 'x', text: '' }));
 });
 
+test('validateArgs: --resolve needs neither --level nor --re', () => {
+  assert.doesNotThrow(() => validateArgs({ resolve: true, incident: 'x', text: '' }));
+  assert.doesNotThrow(() => validateArgs({ level: 'action', resolve: true, incident: 'x', text: '' }));
+  assert.throws(() => validateArgs({ level: 'nope', resolve: true, incident: 'x', text: '' }), /must be one of/);
+});
+
 test('validateArgs: non-resolve calls need a message', () => {
   assert.throws(() => validateArgs({ level: 'info', text: '' }), /a message is required/);
 });
@@ -73,25 +80,24 @@ test('incidentSlug: sanitizes to a safe filename', () => {
   assert.equal(incidentSlug('simple-key.1'), 'simple-key.1');
 });
 
-test('mentionFor: info mentions nobody', () => {
-  assert.equal(mentionFor('info', { SLACK_OPERATOR_ID: 'U1', SLACK_OPERATORS_GROUP_ID: 'S1' }), '');
+test('mentionFor: info and alert mention nobody in the channel; action only this host\'s operator (engsys#238)', () => {
+  const cfg = { SLACK_OPERATOR_ID: 'U0000000001', SLACK_OPERATORS_GROUP_ID: 'S1' };
+  assert.equal(mentionFor('info', cfg), '');
+  assert.equal(mentionFor('alert', cfg), '');
+  assert.equal(mentionFor('action', cfg), '<@U0000000001>');
 });
 
-test('mentionFor: action prefers the named operator, else the group', () => {
-  assert.equal(mentionFor('action', { SLACK_OPERATOR_ID: 'U1', SLACK_OPERATORS_GROUP_ID: 'S1' }), '<@U1>');
-  assert.equal(mentionFor('action', { SLACK_OPERATORS_GROUP_ID: 'S1' }), '<!subteam^S1>');
+test('mentionFor: the retired group and @here are never used, whatever is configured', () => {
+  for (const level of ['info', 'action', 'alert']) {
+    assert.doesNotMatch(mentionFor(level, { SLACK_OPERATORS_GROUP_ID: 'S1' }), /subteam|here|undefined/);
+    assert.equal(mentionFor(level, {}), '');
+  }
 });
 
-test('mentionFor: alert prefers the group over the operator', () => {
-  assert.equal(mentionFor('alert', { SLACK_OPERATOR_ID: 'U1', SLACK_OPERATORS_GROUP_ID: 'S1' }), '<!subteam^S1>');
-});
-
-test('mentionFor: no group yet degrades (alert: operator, then @here; action: group, then @here)', () => {
-  assert.equal(mentionFor('alert', { SLACK_OPERATOR_ID: 'U1' }), '<@U1>');
-  assert.equal(mentionFor('alert', {}), '<!here>');
-  assert.equal(mentionFor('action', {}), '<!here>');
-  assert.equal(mentionFor('info', {}), '');
-  assert.doesNotMatch(mentionFor('alert', { SLACK_OPERATORS_GROUP_ID: '' }), /subteam|undefined/);
+test('slackMention: only a valid member id becomes markup (mention escaping)', () => {
+  assert.equal(slackMention('U0123ABC'), '<@U0123ABC>');
+  for (const bad of ['<!here>', 'U1> <!channel', 'u0123', '', null, undefined, 'S999']) assert.equal(slackMention(bad), '', String(bad));
+  assert.equal(mentionFor('action', { SLACK_OPERATOR_ID: '!here>' }), '');
 });
 
 test('composeText: fleet prefix + emoji, no mention', () => {
@@ -141,6 +147,7 @@ const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'engsys-notify-test-'));
 let server;
 let apiUrl;
 let posts = []; // every chat.postMessage body the stub received
+let opens = []; // every conversations.open `users` the stub received
 let failNext = false;
 
 before(async () => {
@@ -149,6 +156,13 @@ before(async () => {
     req.on('data', (d) => { body += d; });
     req.on('end', () => {
       res.setHeader('Content-Type', 'application/json');
+      if (req.url === '/conversations.open') {
+        const { users } = JSON.parse(body);
+        opens.push(users);
+        if (users === 'UREFUSED1') { res.end(JSON.stringify({ ok: false, error: 'missing_scope' })); return; }
+        res.end(JSON.stringify({ ok: true, channel: { id: `D${users}` } }));
+        return;
+      }
       if (req.url === '/chat.postMessage') {
         const parsed = JSON.parse(body);
         posts.push({ ...parsed, authorization: req.headers.authorization });
@@ -246,28 +260,31 @@ test('action level: mentions the named operator once, links the GitHub url, neve
   assert.doesNotMatch(posts[0].text, /reply (here|in slack)/i);
 });
 
-test('alert level: mentions the operators group', async () => {
-  posts = [];
-  const r = await run(['--level', 'alert', 'db is down'], { env: { SLACK_ENV: slackEnv('d.env') } });
+test('alert level, single-fleet: the channel with no mention, a DM to this host\'s operator (engsys#238)', async () => {
+  posts = []; opens = [];
+  const r = await run(['--level', 'alert', 'db is down'], { env: { SLACK_ENV: slackEnv('d.env', { SLACK_OPERATOR_ID: 'U42' }) } });
   assert.equal(r.code, 0, r.stderr);
-  assert.equal(posts[0].text, '[alice] ⚠️ <!subteam^S999> db is down');
+  assert.deepEqual(opens, ['U42']);
+  const channel = posts.find((p) => p.channel === 'C123');
+  assert.equal(channel.text, '[alice] ⚠️ db is down');
+  assert.equal(posts.find((p) => p.channel === 'DU42').text, '[alice] ⚠️ db is down');
 });
 
 test('incident latch: first post opens a thread, later calls reply, no re-mention', async () => {
   posts = [];
-  const env = { SLACK_ENV: slackEnv('e.env'), FLEET_STATE: stateDir() };
-  const r1 = await run(['--level', 'alert', '--incident', 'db-down', 'db is down'], { env });
+  const env = { SLACK_ENV: slackEnv('e.env', { SLACK_OPERATOR_ID: 'U42' }), FLEET_STATE: stateDir() };
+  const r1 = await run(['--level', 'action', '--re', 'https://x/1', '--incident', 'db-down', 'db is down'], { env });
   assert.equal(r1.code, 0, r1.stderr);
-  assert.equal(posts[0].text, '[alice] ⚠️ <!subteam^S999> db is down');
+  assert.equal(posts[0].text, '[alice] 👋 <@U42> db is down\n\nApprove or act on GitHub: https://x/1');
   assert.equal('thread_ts' in posts[0], false);
   const firstTs = posts[0] && JSON.parse((await fs.promises.readFile(
     path.join(env.FLEET_STATE, 'notify', 'db-down.json'), 'utf8',
   ))).ts;
   assert.ok(firstTs);
 
-  const r2 = await run(['--level', 'alert', '--incident', 'db-down', 'still down'], { env });
+  const r2 = await run(['--level', 'action', '--re', 'https://x/1', '--incident', 'db-down', 'still down'], { env });
   assert.equal(r2.code, 0, r2.stderr);
-  assert.equal(posts[1].text, '[alice] ⚠️ still down'); // no mention on the reply
+  assert.equal(posts[1].text, '[alice] 👋 still down\n\nApprove or act on GitHub: https://x/1'); // no mention on the reply
   assert.equal(posts[1].thread_ts, firstTs);
 });
 
@@ -292,7 +309,7 @@ test('--resolve posts one thread reply and clears the latch', async () => {
 
 test('repeated identical calls within the latch do not re-mention (each reply is plain)', async () => {
   posts = [];
-  const env = { SLACK_ENV: slackEnv('g.env'), FLEET_STATE: stateDir() };
+  const env = { SLACK_ENV: slackEnv('g.env', { SLACK_OPERATOR_ID: 'U42' }), FLEET_STATE: stateDir() };
   await run(['--level', 'action', '--re', 'https://x/9', '--incident', 'inc-1', 'decide'], { env });
   await run(['--level', 'action', '--re', 'https://x/9', '--incident', 'inc-1', 'decide'], { env });
   await run(['--level', 'action', '--re', 'https://x/9', '--incident', 'inc-1', 'decide'], { env });
@@ -422,4 +439,200 @@ test('time format set, Slack down: the GitHub fallback comment reads in the flee
   const logged = fs.readFileSync(log, 'utf8');
   assert.match(logged, /stale since 5 Oct 15:44 CEST/);
   assert.ok(!logged.includes('<!date^'), 'no Slack token in a GitHub comment');
+});
+
+// --- routing: DMs, owner-aware recipients, latches in DMs, sweep (engsys#238) ----------------------
+
+const REG_TEXT = [
+  'version: 1',
+  'fleets:',
+  '  eric:',
+  '    operator: eric-sabe',
+  '    github_app: feedfrwd-fleet-eric',
+  '    slack_operator: U0000000001',
+  '  mark-fleet:',
+  '    operator: mdbardsley',
+  '    github_app: feedfrwd-fleet-mark-fleet',
+  '    slack_operator: U0000000002',
+  '  quiet:',
+  '    operator: quiet-op',
+  '  refused:',
+  '    operator: refused-op',
+  '    slack_operator: UREFUSED1',
+].join('\n') + '\n';
+const REG = parseFederation(REG_TEXT);
+function regFile() {
+  const f = path.join(TMP, 'federation.yml');
+  fs.writeFileSync(f, REG_TEXT);
+  return f;
+}
+
+test('planRoute: alert → channel without mention + a DM per registry operator', () => {
+  const r = planRoute({ level: 'alert', cfg: { SLACK_OPERATOR_ID: 'U0000000009' }, reg: REG });
+  assert.deepEqual(r.channel, { mention: '' });
+  assert.deepEqual(r.dms, ['U0000000001', 'U0000000002', 'UREFUSED1']);
+});
+
+test('planRoute: --for resolves a fleet id, an operator login or a fleet bot to one DM', () => {
+  for (const who of ['mark-fleet', 'mdbardsley', 'MDBardsley', 'feedfrwd-fleet-mark-fleet[bot]']) {
+    const r = planRoute({ level: 'action', forWho: who, cfg: { SLACK_OPERATOR_ID: 'U0000000009' }, reg: REG });
+    assert.equal(r.channel, null, who);
+    assert.deepEqual(r.dms, ['U0000000002'], who);
+  }
+});
+
+test('planRoute: an unknown or Slack-less recipient falls back to the channel, loudly', () => {
+  const cfg = { SLACK_OPERATOR_ID: 'U0000000009' };
+  const unknown = planRoute({ level: 'action', forWho: 'nobody', cfg, reg: REG });
+  assert.deepEqual(unknown.channel, { mention: '<@U0000000009>' });
+  assert.equal(unknown.meantFor, 'nobody');
+  assert.match(unknown.warning, /not in the fleet registry/);
+  assert.match(planRoute({ level: 'info', forWho: 'quiet', cfg, reg: REG }).warning, /fleet quiet has no slack_operator/);
+  assert.match(planRoute({ level: 'action', forWho: 'eric', cfg, reg: null }).warning, /no fleet registry/);
+  assert.deepEqual(planRoute({ level: 'action', noMention: true, cfg, reg: REG }).channel, { mention: '' });
+});
+
+test('validateArgs: --for never goes with alert; --sweep stands alone', () => {
+  assert.throws(() => validateArgs({ level: 'alert', for: 'eric', text: 'x' }), /--for does not apply to --level alert/);
+  assert.throws(() => validateArgs({ level: 'info', for: '', text: 'x' }), /--for needs/);
+  assert.doesNotThrow(() => validateArgs({ sweep: true, apply: true, repo: 'acme/app', text: '' }));
+  assert.throws(() => validateArgs({ sweep: true, text: 'x' }), /--sweep takes only/);
+  assert.throws(() => validateArgs({ level: 'info', apply: true, text: 'x' }), /--apply goes with --sweep/);
+  assert.throws(() => validateArgs({ sweep: true, repo: 'bad repo', text: '' }), /--repo must be/);
+});
+
+test('latchPr: a PR link, or mm-<N> with --repo', () => {
+  assert.deepEqual(latchPr('mm-gate-x', { re: 'https://github.com/acme/app/pull/9#issuecomment-1' }), { repo: 'acme/app', number: 9 });
+  assert.deepEqual(latchPr('mm-12', {}, 'acme/app'), { repo: 'acme/app', number: 12 });
+  assert.equal(latchPr('mm-12', {}), null);
+  assert.equal(latchPr('x', { re: 'https://github.com/acme/app/issues/9' }), null);
+  assert.equal(latchPr('x', { re: 'https://evil.example/acme/app/pull/9' }), null);
+});
+
+test('--for: a DM to that operator only, no channel post and no mention', async () => {
+  posts = []; opens = [];
+  const r = await run(['--level', 'action', '--for', 'feedfrwd-fleet-mark-fleet[bot]', '--re', 'https://github.com/acme/app/pull/9', 'approve merge'],
+    { env: { SLACK_ENV: slackEnv('dm.env', { SLACK_OPERATOR_ID: 'U0000000001' }), FEDERATION_FILE: regFile() } });
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(opens, ['U0000000002']);
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].channel, 'DU0000000002');
+  assert.equal(posts[0].text, '[alice] 👋 approve merge\n\nApprove or act on GitHub: https://github.com/acme/app/pull/9');
+});
+
+test('--for an unknown recipient: the channel, loudly, saying who it was for (escaped)', async () => {
+  posts = []; opens = [];
+  const r = await run(['--level', 'action', '--for', '<!here>', '--re', 'https://x/1', 'decide'],
+    { env: { SLACK_ENV: slackEnv('unk.env', { SLACK_OPERATOR_ID: 'U0000000001' }), FEDERATION_FILE: regFile() } });
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stderr, /--for <!here>: not in the fleet registry; posting to the channel instead of a DM/);
+  assert.deepEqual(opens, []);
+  assert.equal(posts[0].channel, 'C123');
+  assert.match(posts[0].text, /^\[alice\] 👋 <@U0000000001> decide\n\n\(Meant as a DM for &lt;!here&gt;, who could not be reached/);
+  assert.doesNotMatch(posts[0].text, /<!here>/);
+});
+
+test('--for a DM Slack refuses: falls back to the channel, loudly', async () => {
+  posts = []; opens = [];
+  const r = await run(['--level', 'info', '--for', 'refused', 'fyi'], { env: { SLACK_ENV: slackEnv('ref.env'), FEDERATION_FILE: regFile() } });
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stderr, /DM to UREFUSED1 failed \(missing_scope\)/);
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].channel, 'C123');
+  assert.match(posts[0].text, /Meant as a DM for refused/);
+});
+
+test('alert with a registry: the channel with no mention, plus a DM to every operator', async () => {
+  posts = []; opens = [];
+  const r = await run(['--level', 'alert', 'baton lost'], { env: { SLACK_ENV: slackEnv('al.env', { SLACK_OPERATOR_ID: 'U0000000009' }), FEDERATION_FILE: regFile() } });
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(opens, ['U0000000001', 'U0000000002', 'UREFUSED1']);
+  assert.deepEqual(posts.map((p) => p.channel), ['DU0000000001', 'DU0000000002', 'C123']);
+  for (const p of posts) assert.equal(p.text, '[alice] ⚠️ baton lost');
+  assert.match(r.stderr, /DM to UREFUSED1 failed/);
+});
+
+test('a DM incident: replies and --resolve thread in the DM, and the latch stores the DM channel', async () => {
+  posts = []; opens = [];
+  const env = { SLACK_ENV: slackEnv('dmi.env'), FEDERATION_FILE: regFile(), FLEET_STATE: stateDir() };
+  const base = ['--level', 'action', '--re', 'https://github.com/acme/app/pull/9#issuecomment-5', '--incident', 'mm-gate-merge-1'];
+  await run([...base, '--for', 'mark-fleet', 'approve'], { env });
+  const latchFile = path.join(env.FLEET_STATE, 'notify', 'mm-gate-merge-1.json');
+  const latch = JSON.parse(fs.readFileSync(latchFile, 'utf8'));
+  assert.equal(latch.channel, 'DU0000000002');
+  assert.equal(latch.re, 'https://github.com/acme/app/pull/9#issuecomment-5');
+  await run([...base, 'still waiting'], { env }); // no --for: the latch decides where it goes
+  assert.equal(posts[1].channel, 'DU0000000002');
+  assert.equal(posts[1].thread_ts, latch.ts);
+  const r = await run(['--resolve', '--incident', 'mm-gate-merge-1'], { env }); // no --level or --re needed
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(posts[2], { channel: 'DU0000000002', text: '✅ resolved', thread_ts: latch.ts, authorization: 'Bearer xoxb-test-token' });
+  assert.equal(fs.existsSync(latchFile), false);
+  assert.deepEqual(opens, ['U0000000002'], 'replies reuse the stored DM channel');
+});
+
+test('an alert incident resolves in the channel thread and in every DM thread', async () => {
+  posts = []; opens = [];
+  const env = { SLACK_ENV: slackEnv('ali.env'), FEDERATION_FILE: regFile(), FLEET_STATE: stateDir() };
+  await run(['--level', 'alert', '--incident', 'disk', 'disk full'], { env });
+  const latch = JSON.parse(fs.readFileSync(path.join(env.FLEET_STATE, 'notify', 'disk.json'), 'utf8'));
+  assert.equal(latch.channel, 'C123');
+  assert.deepEqual(latch.dms.map((d) => d.channel), ['DU0000000001', 'DU0000000002']);
+  const n = posts.length;
+  await run(['--level', 'alert', '--incident', 'disk', '--resolve'], { env });
+  const resolved = posts.slice(n);
+  assert.deepEqual(resolved.map((p) => [p.channel, p.text]), [['C123', '✅ resolved'], ['DU0000000001', '✅ resolved'], ['DU0000000002', '✅ resolved']]);
+  assert.equal(resolved[0].thread_ts, latch.ts);
+  assert.equal(resolved[1].thread_ts, latch.dms[0].ts);
+});
+
+test('--no-mention: an action post in the channel mentions nobody', async () => {
+  posts = [];
+  const r = await run(['--level', 'action', '--no-mention', '--re', 'https://x/1', 'team gate'], { env: { SLACK_ENV: slackEnv('nm.env', { SLACK_OPERATOR_ID: 'U0000000001' }) } });
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(posts[0].text, '[alice] 👋 team gate\n\nApprove or act on GitHub: https://x/1');
+});
+
+test('--sweep: dry run lists the latches of merged/closed PRs and changes nothing; --apply resolves them', async () => {
+  const fakeBin = path.join(TMP, 'fakebin-sweep');
+  fs.mkdirSync(fakeBin, { recursive: true });
+  const log = path.join(TMP, 'gh-sweep.log');
+  fs.writeFileSync(path.join(fakeBin, 'gh'), `#!/usr/bin/env bash
+printf '%s\\n' "$*" >> '${log}'
+case "$*" in
+  *search/issues*) echo '{"n":[15]}' ;;
+  *repos/acme/app/issues/9\\ *) echo '{"state":"closed","pr":true,"merged":true}' ;;
+  *repos/acme/app/issues/12\\ *) echo '{"state":"open","pr":true,"merged":false}' ;;
+  *repos/acme/app/issues/15\\ *) echo '{"state":"closed","pr":true,"merged":false}' ;;
+  *) exit 1 ;;
+esac
+`, { mode: 0o755 });
+  const env = { SLACK_ENV: slackEnv('sw.env'), FLEET_STATE: stateDir() };
+  const dir = path.join(env.FLEET_STATE, 'notify');
+  fs.mkdirSync(dir, { recursive: true });
+  const latches = {
+    'mm-gate-merge-20261021-ab12': { ts: '1.1', channel: 'DU0000000002', re: 'https://github.com/acme/app/pull/9#issuecomment-5' },
+    'mm-12': { ts: '1.2', channel: 'C123' },
+    'mm-gate-merge-20261001-cd34': { ts: '1.3', channel: 'C123' },
+    'seat-limit': { ts: '1.4', channel: 'C123' },
+  };
+  for (const [k, v] of Object.entries(latches)) fs.writeFileSync(path.join(dir, `${k}.json`), JSON.stringify(v));
+
+  posts = [];
+  let r = await run(['--sweep', '--repo', 'acme/app'], { env, fakeBin });
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /would {4}mm-gate-merge-20261021-ab12: acme\/app#9 merged/);
+  assert.match(r.stdout, /would {4}mm-gate-merge-20261001-cd34: acme\/app#15 closed/);
+  assert.match(r.stdout, /open {5}mm-12: acme\/app#12 is still open/);
+  assert.match(r.stdout, /skip {5}seat-limit: not tied to a pull request/);
+  assert.match(r.stdout, /sweep: 4 open latches, 2 would be resolved \(dry run; --apply to resolve\), 1 still open, 1 skipped/);
+  assert.equal(posts.length, 0, 'a dry run posts nothing');
+  assert.equal(fs.readdirSync(dir).length, 4, 'a dry run clears nothing');
+  assert.match(fs.readFileSync(log, 'utf8'), /search\/issues -f q="merge-20261001-cd34" repo:acme\/app is:pr in:comments/);
+
+  r = await run(['--sweep', '--repo', 'acme/app', '--apply'], { env, fakeBin });
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /2 resolved/);
+  assert.deepEqual(posts.map((p) => [p.channel, p.thread_ts, p.text]), [['C123', '1.3', '✅ resolved'], ['DU0000000002', '1.1', '✅ resolved']]);
+  assert.deepEqual(fs.readdirSync(dir).sort(), ['mm-12.json', 'seat-limit.json']);
 });

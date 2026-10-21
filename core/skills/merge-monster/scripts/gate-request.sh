@@ -8,7 +8,8 @@
 #   --target  on a PR: owner/name#N@<full 40-hex head sha>; on an issue: e.g. alert:dependabot/42
 #   --gate    optional; default <kind>-<utc timestamp>-<4 hex>. Must be [a-z0-9-], unique on the thread.
 #
-# Prints JSON {id, url, comment_id, author}. Exit 0 posted, 1 error.
+# Prints JSON {id, url, comment_id, author, owner} (owner: the PR's fleet operator from FEDERATION_FILE,
+# or null; engsys#238). Exit 0 posted, 1 error.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 lib="$here/../../../lib/gate-check.mjs"
