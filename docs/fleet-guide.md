@@ -1419,29 +1419,19 @@ same check against the **engsys release itself** (`ENGSYS_REF` on the engsys rep
 `source` of its entry in that release's `.claude-plugin/marketplace.json`, for example `./stacks/lang/typescript`),
 in every dir covered above. A tampered, missing or extra file is a mismatch (named as an `engsys stack pack` in the
 launch-hold message); a pack the pin enables but that is not installed, or that the release's marketplace file does
-not list, is "not verified". The engsys release's on-default-branch check is the strict one, so a pack never gets the
-instance warning below. A real install is byte-identical to its release directory (Claude Code adds only `.in_use/`,
+not list, is "not verified". A real install is byte-identical to its release directory (Claude Code adds only `.in_use/`,
 which the scan skips), so enabling a pack in the pin needs no allowlist.
 
-*Migration note: an instance tag off the default branch is a warning for now* (eric-sabe/engsys#227, staged).
-The engsys release must be on the default branch (anything else is a mismatch). Instance tags cut by `fleet pin`
-before #227 sit on a `release:` stamp commit off their default branch (the stamp was tagged without being merged,
-so `FeedFrwd/ff-engsys-fleet`'s v0.1.15 to v0.1.20 all diverge); `fleet pin` now merges the stamp through a release
-PR and tags the default branch (section 7, recipes). Enforcing at once would hold those fleets' merge and maintain
-sessions, so for the **instance** marketplace only, a tag that is not on the default
-branch prints `WARNING instance release ...` and sends one info-level alert (latched per distinct warning, resolved
-when it clears), and the exit code is unchanged. Everything else about the instance check still enforces: the file
-hashes against the tag's tree, a pin that is not a tag, an unreadable `source`.
-
-To enforce it: cut an instance release whose tag is on the default branch (identical to it or an ancestor of it,
-GitHub's `compare` says `ahead` or `identical`; `fleet pin --release next` does that now: merge its release PR and
-re-run it), pin it, then set `INSTANCE_OFF_MAIN=enforce` in
-`fleet.conf` and check `fleet verify` is clean (exit 0, no `WARNING instance release`). From then on an off-main
-instance tag is a mismatch like engsys, and holds the launch (`components: instance release (...)`). The setting can
-only tighten: it never relaxes the engsys release, and the built-in default
-(`INSTANCE_OFF_MAIN_ENFORCED` in `lib/verify-wrappers.mjs`) becomes `true` in a later engsys release, once every
-fleet that has an instance plugin tags on its default branch. A mismatch's launch-hold message names what failed
-(the engsys plugin, a stack pack, an instance plugin, an instance release, the host kit, ...).
+**The instance release must be on its default branch** (eric-sabe/engsys#227), like the engsys release: its tag
+must be the default branch's tip or an ancestor of it (GitHub's `compare` says `identical` or `ahead`). Anything
+else (`diverged`, `behind`) is a mismatch, `release    <plugin>: vX.Y.Z of <repo> is commit ..., which is not on main`,
+alerted and holding merge and maintain launches like any other (`components: instance release (...)` in the
+launch-hold message). To recover, cut a release on the default branch: `fleet pin --release next` opens the release
+PR, merge it, then re-run the same command (section 7, recipes). Tags cut by `fleet pin` before #227 sit on a
+`release:` stamp commit off the default branch, so a fleet still pinned to one is held until it moves to a newer
+release. The `INSTANCE_OFF_MAIN` setting of the warn-only stage is gone: `fleet verify` notes a leftover line in
+`fleet.conf` and ignores it. A mismatch's launch-hold message names what failed (the engsys plugin, a stack pack,
+an instance plugin, an instance release, the host kit, ...).
 
 **The pin checkout's `.claude/` and its hooks.** Claude Code loads `PIN_DIR/.claude/` (settings, hooks,
 agents, commands, skills) into every session, and a settings hook runs whatever script it names. Its trust
@@ -1786,7 +1776,6 @@ format) overrides it per machine. Environment values for `ENGSYS_REF` / `INSTANC
 | `QUOTA_COOLDOWN_MIN` | no | Ignored (accepted from older configs): the supervisor never fails over, so there is nothing to fail back from |
 | `ENGSYS_MARKETPLACE` | no | Default `engsys` |
 | `INSTANCE_MARKETPLACE` | no | The instance's own marketplace name (for example `acme`). Empty means no instance plugin: no instance release, and the instance checkout is not pinned |
-| `INSTANCE_OFF_MAIN` | no | `warn` (default) or `enforce`: whether an instance release tag that is not on its repo's default branch is a warning or a verify mismatch that holds merge and maintain launches. It can only tighten the built-in default (section 6, instance marketplace) |
 | `WORKTREES_DIR` | no | Agent worktrees directory; created by `launch`; available to templates for `--add-dir` |
 | `GH_APP_ENV` | no | Path to the GitHub App env file. Set means identity kit on |
 | `FLEET_CLAUDE_CONFIG_DIR` | no | A separate Claude Code config dir for the fleet, with its own login (§ 6.1). Every fleet command and every launched session runs with `CLAUDE_CONFIG_DIR` set to it; `fleet sync` installs the plugins there and `fleet verify` checks it. An absolute path (or `~/…`). Never inherited from the caller's environment. Unset means `~/.claude` |
