@@ -606,12 +606,47 @@ function truncateToBytes(s, maxBytes) {
 	return s.slice(0, lo);
 }
 
+// engsys#191: the share of brief_bytes held back for lessons + pointers, so a large overlay can
+// never crowd them all out (see renderBrief).
+export const OVERLAY_RESERVE_SHARE = 0.5;
+export const OVERLAY_TRUNCATED_MARKER = '[overlay truncated to fit brief_bytes]';
+
+/**
+ * Cut `overlay` to whole lines within `maxBytes`, ending with OVERLAY_TRUNCATED_MARKER when
+ * anything was dropped. Returns '' when not even one line plus the marker fits.
+ */
+function fitOverlay(overlay, maxBytes) {
+	if (byteLen(overlay) <= maxBytes) return overlay;
+	const room = maxBytes - byteLen(OVERLAY_TRUNCATED_MARKER) - 1;
+	const kept = [];
+	let used = 0;
+	for (const line of overlay.split('\n')) {
+		const cost = byteLen(line) + (kept.length > 0 ? 1 : 0);
+		if (used + cost > room) break;
+		kept.push(line);
+		used += cost;
+	}
+	// A cut inside a fenced block would leave it open and swallow the lessons after it — back up to
+	// before the unclosed fence.
+	if (kept.filter((l) => /^\s*```/.test(l)).length % 2 === 1) {
+		while (kept.length > 0 && !/^\s*```/.test(kept.pop()));
+	}
+	while (kept.length > 0 && kept[kept.length - 1].trim() === '') kept.pop();
+	return kept.length > 0 ? `${kept.join('\n')}\n${OVERLAY_TRUNCATED_MARKER}` : '';
+}
+
 /**
  * Render the final brief text: the overlay, then up to `lessons.length` Class A lesson
  * title+excerpt blocks, then each pointer as ONE structured line (renderPointerLine — never free
  * text). The whole thing is capped at `budgetBytes` (default 2048), dropping from the END
  * (pointers first, then lessons) rather than mid-truncating a block, so what survives is always
  * whole lines/sections.
+ *
+ * The overlay's share is capped first (engsys#191): lessons + pointers are guaranteed up to
+ * OVERLAY_RESERVE_SHARE of the budget, and the overlay gets whatever is left. An overlay that
+ * would eat into that reserve is cut to whole lines plus OVERLAY_TRUNCATED_MARKER. When the
+ * lessons and pointers need less than the reserve, the overlay keeps the slack, so a short
+ * brief never loses overlay text it had room for.
  */
 export function renderBrief({ overlay = '', lessons = [], pointers = [] } = {}, budgetBytes = DEFAULTS.brief_bytes) {
 	// Each section carries the key(s) it represents (or `null` for the overlay, which has none) so
@@ -620,7 +655,6 @@ export function renderBrief({ overlay = '', lessons = [], pointers = [] } = {}, 
 	// and lessonKeys/pointerKeys were previously computed from the pre-truncation selection, so a
 	// tight budget could silently log/report a key whose content was never actually rendered).
 	const sections = [];
-	if (overlay) sections.push({ line: overlay.trim(), kind: null, key: null });
 	for (const l of lessons) {
 		const excerpt = l.body ? firstLine(l.body, l.title) : '';
 		const prefix = l.title ? `**${l.title}**` : '';
@@ -629,6 +663,13 @@ export function renderBrief({ overlay = '', lessons = [], pointers = [] } = {}, 
 	for (const p of pointers) {
 		const line = renderPointerLine(p);
 		if (line) sections.push({ line, kind: 'pointer', key: p.key });
+	}
+	if (overlay) {
+		// +1 for the newline that joins the overlay to the first lesson/pointer line.
+		const restBytes = sections.length > 0 ? byteLen(sections.map((s) => s.line).join('\n')) + 1 : 0;
+		const reserve = Math.min(restBytes, Math.floor(budgetBytes * OVERLAY_RESERVE_SHARE));
+		const fitted = fitOverlay(overlay.trim(), budgetBytes - reserve);
+		if (fitted) sections.unshift({ line: fitted, kind: null, key: null });
 	}
 
 	let text = sections.map((s) => s.line).join('\n');
