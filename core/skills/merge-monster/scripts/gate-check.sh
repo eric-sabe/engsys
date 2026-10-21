@@ -11,6 +11,9 @@
 #   --target / --kind REQUIRED: what you are about to act on; a request naming anything else → exit 1
 #
 # Prints one JSON verdict. Exit: 0 approved, 3 waiting, 4 denied, 1 error (incl. stale/ambiguous).
+# A waiting merge gate whose head an operator already approved BEFORE the request (or the latest push) carries
+# `early_approvals` {count, actors, floor_source, note}: those never count (engsys#240); relay the note so the
+# operator approves once more.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 lib="$here/../../../lib/gate-check.mjs"

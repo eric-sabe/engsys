@@ -471,6 +471,77 @@ describe('merge gates (PR review)', () => {
   });
 });
 
+describe('engsys#240: approvals given before the gate request (security-gated PRs)', () => {
+  const G = 'merge-412';
+  const req = (at = T(0)) => requestComment(G, 'merge', TGT, at);
+
+  test('approve x3 → verdict → late request on the same head: still waiting (floor kept), and it says why', () => {
+    // keystone#4668: three approvals on the validated head while the PR waited for its verdict, then the request.
+    const reviews = [review(ALICE, 'APPROVED', SHA, T(-40)), review(ALICE, 'APPROVED', SHA, T(-25)), review(ALICE, 'APPROVED', SHA, T(-8))];
+    const v = evaluateGate(prFacts([req()], { reviews }), OPTS(G, 'merge'));
+    assert.equal(v.status, 'waiting');
+    assert.equal(v.exit, EXIT.WAITING);
+    assert.deepEqual(v.early_approvals.actors, ['alice']);
+    assert.equal(v.early_approvals.count, 3);
+    assert.equal(v.early_approvals.floor_source, 'gate request');
+    assert.match(v.reason, /3 earlier approvals on this head \(by @alice\) don't count because they pre-date the gate request; approve once more/);
+    assert.match(reasons(v), /approval is not newer than the gate request/);
+  });
+
+  test('…one more approval after the request opens it, and no early note is left on the verdict', () => {
+    const reviews = [review(ALICE, 'APPROVED', SHA, T(-40)), review(ALICE, 'APPROVED', SHA, T(-8)), review(ALICE, 'APPROVED', SHA, T(5))];
+    const v = evaluateGate(prFacts([req()], { reviews }), OPTS(G, 'merge'));
+    assert.equal(v.status, 'approved');
+    assert.equal(v.approval.at, T(5));
+    assert.equal(v.early_approvals, undefined);
+  });
+
+  test('one early approval reads in the singular', () => {
+    const v = evaluateGate(prFacts([req()], { reviews: [review(BOB, 'APPROVED', SHA, T(-3))] }), OPTS(G, 'merge'));
+    assert.match(v.reason, /1 earlier approval on this head \(by @bob\) doesn't count because it pre-dates the gate request/);
+  });
+
+  test('early request (option b): request → approve → verdict → re-check of the SAME request opens it', () => {
+    // The request is posted when the PR is ready apart from its verdict; the operator approves while the verdict
+    // is pending; once the verdict lands, merge-monster re-runs gate-check on that request (no new one).
+    const facts = prFacts([req(T(0))], { reviews: [review(ALICE, 'APPROVED', SHA, T(5))] });
+    const v = evaluateGate(facts, OPTS(G, 'merge'));
+    assert.equal(v.status, 'approved');
+    assert.equal(v.request.at, T(0));
+  });
+
+  test('…a push after the approval still voids it (new head: stale; force-push back to the head: floor)', () => {
+    const reviews = [review(ALICE, 'APPROVED', SHA, T(5))];
+    const moved = evaluateGate(prFacts([req()], { reviews, pr: { state: 'open', merged: false, head_sha: OLD_SHA } }), OPTS(G, 'merge'));
+    assert.equal(moved.status, 'error');
+    assert.equal(moved.stale, true);
+    const forced = evaluateGate(prFacts([req()], { reviews, pushFloor: { at: T(9), source: 'latest force-push' } }), OPTS(G, 'merge'));
+    assert.equal(forced.status, 'waiting');
+    assert.equal(forced.early_approvals.floor_source, 'latest force-push');
+    assert.match(forced.reason, /pre-dates the latest force-push; approve once more/);
+  });
+
+  test('only qualifying approvals of THIS head count as early ones', () => {
+    const reviews = [
+      review(MALLORY, 'APPROVED', SHA, T(-5)), // not a member
+      review(HELPER, 'APPROVED', SHA, T(-5)), // a bot
+      review(BOT, 'APPROVED', SHA, T(-5)), // the requester
+      review(ALICE, 'APPROVED', OLD_SHA, T(-5)), // another head
+      review(BOB, 'COMMENTED', SHA, T(-5)), // not an approval
+    ];
+    const v = evaluateGate(prFacts([req()], { reviews }), OPTS(G, 'merge'));
+    assert.equal(v.status, 'waiting');
+    assert.equal(v.early_approvals, undefined);
+    assert.doesNotMatch(v.reason, /earlier approval/);
+  });
+
+  test('the request itself says approvals given before it do not count', () => {
+    const body = renderGateRequest({ id: G, kind: 'merge', target: TGT, what: 'merge #412 (security review pending)' });
+    assert.match(body, /\*\*Approvals given before this request do not count\*\*, even on this same commit: if you approved earlier, approve once more\./);
+    assert.deepEqual(parseGateRequest(body), { id: G, kind: 'merge', target: TGT });
+  });
+});
+
 
 describe('missing operators source fails closed', () => {
   test('evaluateGate', () => {
@@ -627,6 +698,17 @@ describe('checkGate against a fake GitHub', () => {
     assert.equal((await checkGate(fakeApi(routes), CHECK('merge-412', 'merge'))).status, 'approved');
     assert.equal((await checkGate(fakeApi(routes, { reviewDecision: 'REVIEW_REQUIRED' }), CHECK('merge-412', 'merge'))).status, 'waiting');
     assert.equal((await checkGate(fakeApi(routes, { reviewDecision: null }), CHECK('merge-412', 'merge'))).status, 'approved');
+  });
+
+  test('engsys#240: early approvals on the head are read live and reported through checkGate', async () => {
+    const routes = prRoutes([requestComment('merge-412', 'merge')], {
+      reviews: [review(ALICE, 'APPROVED', SHA, T(-20)), review(ALICE, 'APPROVED', SHA, T(-5))], members: { alice: ACTIVE },
+    });
+    const api = fakeApi(routes);
+    const v = await checkGate(api, CHECK('merge-412', 'merge'));
+    assert.equal(v.status, 'waiting');
+    assert.equal(v.early_approvals.count, 2);
+    assert.ok(api.calls.includes('GET /orgs/acme/teams/fleet-operators/memberships/alice'));
   });
 
   test('L6: a missing pullRequest object in GraphQL is an error, never "no review required"', async () => {
