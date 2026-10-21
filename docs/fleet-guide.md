@@ -1205,16 +1205,20 @@ runs of the same command:
    dir). When the default branch doesn't carry that version yet, the stamp is pushed to `release/vX.Y.Z`
    and opened as a PR titled `release: vX.Y.Z` on the instance repo, and `fleet pin` **stops with exit 3**,
    printing the PR URL: nothing is tagged and no pin PR is opened, even with `--engsys` in the same command.
-   Re-running while that PR is open reports the same PR; it never opens a second one.
+   Re-running while that PR is open reports the same PR; it never opens a second one. If the PR was closed
+   without merging, a re-run says so and re-creates it (the `release/vX.Y.Z` branch is force-pushed again
+   and a new PR is opened); to abandon a release, don't re-run.
 2. **Tag.** Merge the release PR (any merge method), then re-run the same command. The default branch now
    carries the version, so the run tags the default branch's commit itself (an annotated tag), pushes the
    tag, creates the GitHub release (`--verify-tag`) and goes on to the pin PR below.
 
-An existing tag is used as is. `next` picks the version the default branch already carries when that is past
-every tag (a merged release PR that is not tagged yet: it is tagged, not bumped again); otherwise it is the
-latest tag's patch + 1, and if nothing is new on the default branch since the latest tag, that release is
-reused. Tags cut before #227 sit on a `release: vX` stamp commit off the default branch; `next` treats their
-parent as what they shipped, so both shapes work.
+An existing tag is used as is (that is how you roll back); a new version below the latest tag, or below the
+version the default branch carries, is refused. `next` picks the version the default branch already carries
+when that is past every tag (a merged release PR that is not tagged yet: it is tagged, not bumped again);
+otherwise, if the latest tag is the default branch's current commit (nothing new), that release is reused, and
+in any other case it is the latest tag's patch + 1. A tag cut before #227 sits on a `release: vX` stamp commit
+off the default branch and is never reused, even when nothing else changed: the first `next` after upgrading
+opens a release PR for the following patch, which moves the fleet onto a tag on the default branch.
 
 Then the pin PR: only the marketplace refs change (verified with a `jq` strip-diff), `PREPUSH_SETUP_CMD`
 runs first if set, it is pushed normally and an open PR for the same pins is reused. `REVIEW_CMD`, if set,
@@ -1237,6 +1241,9 @@ consume your own fork, cut the bump commit and release there first. Then on the 
 ```bash
 fleet pin --engsys vX.Y.Z            # add --release next to ship an instance change in the same PR
 ```
+
+With `--release next` in the same command, a release that still needs its release PR stops the run first
+(exit 3, no pin PR): merge the release PR, then re-run the same command to get the one pin PR for both.
 
 **Then, when the sessions can go down:**
 
@@ -1661,7 +1668,8 @@ is what you pinned against.
 ### Changing a model, and rolling a change out
 
 1. Edit the knob in `fleet/fleet.conf`, PR it to the instance repo.
-2. `fleet pin --release next` (release, pin, sync). Alternatively try a value on one host first by putting it
+2. `fleet pin --release next`: it opens the instance release PR and stops; merge it, then re-run the same
+   command (tag, pin, sync). Alternatively try a value on one host first by putting it
    in `~/.config/<org>/fleet.local.conf` and running `fleet restart <session>`.
 3. `fleet restart <session>` when it can go down. Monsters pick the new env on relaunch.
 4. Stage it: interactive roles first, then the monsters after a week of clean journals. Before promoting an
