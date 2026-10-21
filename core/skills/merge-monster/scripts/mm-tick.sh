@@ -18,6 +18,13 @@
 #                                     tick's run may have hit a transient gh error), label_removed_no_verdict (the
 #                                     label is gone but no valid verdict is there: request the review again). Once
 #                                     per outcome and head. A failed run keeps the PR watched (still parked).
+#        SECURITY_REVIEW_STALE #N <reason> head=<sha12> notified|notify_failed
+#                                     engsys#246: a security-review request went unanswered past
+#                                     security_review_escalate_minutes at this head (unanswered_<M>min), or the lane is
+#                                     clearly unavailable (self_authored_skip, security_lane_no_key, security_lane_down);
+#                                     the tick already sent the owner-routed `fleet notify` (mm-security-stale.mjs).
+#                                     Journal it; once per PR and head.
+#        SECURITY_REVIEW_STALE_RESOLVED #N <why>  that escalation resolved (verdict landed, PR left the watch, new head)
 #        AGENT_OVERDUE … / AGENT_STALE …   from the watchdog scan
 #        HANDBACK_INCOMPLETE …             a subagent handed back unfinished work: resume it or take it over
 #        BATON_HANDOVER merge <fleet>      federation.yml moved the role's home (§ Handover)
@@ -153,6 +160,7 @@ KEY_FILE="$(monster_cfg_child "$CONFIG" ready_requirements security_verdict_key_
 verdict_lines() {
   local n rc out err head key why labeled wait_new="$W/verdict-wait.new" open cands f
   : >"$wait_new"
+  : >"$W/secstale-due"
   open=$(printf '%s' "$SNAP" | jq -r '.[].number' 2>/dev/null | sort -u)
   cands=$( { printf '%s' "$SNAP" | jq -r '.[] | select(.securityReview == true) | .number' 2>/dev/null
              cat "$W/verdict-wait" 2>/dev/null || true; } | sort -un)
@@ -176,7 +184,7 @@ verdict_lines() {
     [ -n "$head" ] || head=$(printf '%s' "$err" | jq -r '.head // empty' 2>/dev/null | head -c 12)
     case "$rc" in
       3) printf '%s\n' "$n" >>"$wait_new"
-         if [ "$labeled" = 0 ]; then key="label_removed_no_verdict"; else rm -f "$W/verdict.$n"; continue; fi ;;
+         if [ "$labeled" = 0 ]; then key="label_removed_no_verdict"; else rm -f "$W/verdict.$n"; printf '%s\n' "$n" >>"$W/secstale-due"; continue; fi ;;
       0) key="preflight_pass" ;;
       # a failure keeps the PR watched: it may be a transient gh error, and a real one (FINDINGS for this head) ends
       # the watch by itself once the model bounces the PR (no mm: label) or the lane removes the request label
@@ -192,6 +200,12 @@ verdict_lines() {
 }
 if [ "$SNAP_OK" = 1 ]; then
   while IFS= read -r l; do [ -n "$l" ] && DELTA+=("$l"); done < <(verdict_lines)
+  # 2c. a review request nobody answers (engsys#246): past security_review_escalate_minutes at this head, or at once when
+  # the security lane is clearly unavailable, one owner-routed `fleet notify` per PR and head; resolved when it leaves
+  # the watch. Never fails the tick (its errors go to .watch/secstale.err).
+  while IFS= read -r l; do [ -n "$l" ] && DELTA+=("$l"); done < <(node "$here/mm-security-stale.mjs" --repo "$REPO" --state-dir "$W" \
+    --label "$REVIEW_LABEL" --waiting "$(tr '\n' ' ' <"$W/secstale-due" 2>/dev/null || true)" \
+    --watched "$(tr '\n' ' ' <"$W/verdict-wait" 2>/dev/null || true)" ${CONFIG:+--config "$CONFIG"} 2>>"$W/secstale.err" || true)
 fi
 
 # 3. subagent backstop scan ------------------------------------------------------------------------

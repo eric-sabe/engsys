@@ -95,9 +95,9 @@ esac
     { number: 32, headRefOid: 'c'.repeat(40), url: 'u32', author: { login: 'x' }, isDraft: false, labels: [label('other')] },
   ]);
   write('issue-31.json', { body: handoff('acme-build') });
-  write('comments-31.json', '[{"body":"hi"}]\n[{"body":"page two"}]\n');
+  write('comments-31.json', `[{"body":"hi"},{"body":"<!-- security-review-no-signer head=\\"${'b'.repeat(40)}\\" -->\\nanother head"}]\n[{"body":"<!-- security-review-no-signer head=\\"${'a'.repeat(40)}\\" -->\\nno key"}]\n`);
+  write('comments-30.json', `[{"body":"<!-- security-review-no-signer head=\\"${'a'.repeat(40)}\\" -->\\nfor PR 31's head, not this one"}]`);
   write('issue-30.json', { body: handoff('acme-maintain') });
-  write('comments-30.json', '[]');
   fs.mkdirSync(path.join(T, 'home'));
   fs.mkdirSync(path.join(T, 'cwd'));
   const env = { PATH: process.env.PATH, HOME: path.join(T, 'home'), CLAUDE_CONFIG_DIR: path.join(T, 'home'), FAKE: T, FLEET_GH: stub, ENGSYS_SESSION: 'acme-maintain' };
@@ -116,6 +116,8 @@ esac
     assert.equal(r.json.signer, false);
     assert.deepEqual(r.json.prs.map((p) => [p.number, p.selfAuthored]), [[30, true], [31, false]]);
     assert.equal(r.json.prs[1].head, 'a'.repeat(40));
+    // engsys#246: the no-signer note for THIS head, found on any comment page (one for another head does not count)
+    assert.deepEqual(r.json.prs.map((p) => [p.number, p.noSignerNoted]), [[30, false], [31, true]]);
     const log = fs.readFileSync(path.join(T, 'gh.log'), 'utf8');
     assert.match(log, /pr list -R acme\/app --state open --limit 200 --label security-review-requested/);
     assert.doesNotMatch(log, /issues\/32/, 'a PR without the label is not read');

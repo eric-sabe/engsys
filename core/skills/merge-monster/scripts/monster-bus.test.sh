@@ -41,6 +41,12 @@ if [ -n "$jq_expr" ]; then jq -r "$jq_expr" "$f"; else cat "$f"; fi
 SH
 chmod +x "$T/bin/gh"
 export PATH="$T/bin:$PATH" FAKE="$T" FLEET_GH="$T/bin/gh" ENGSYS_SESSION=acme-mm ENGSYS_SESSION_RUN=r1 ENGSYS_SINGLETON_ROLE=merge   # armed as the launcher arms a merge monster
+# The stale-review escalation (engsys#246) reads the maintain lease and notifies through these stubs, never the network:
+# the lease is held unless $FAKE/lane says otherwise, and every notify is logged.
+printf '#!/usr/bin/env bash\ncat "$FAKE/lane" 2>/dev/null || echo %s\n' "'{\"state\":\"held\"}'" >"$T/bin/lane-stub.sh"
+printf '#!/usr/bin/env bash\necho "notify $*" >>"$FAKE/notify.log"\n' >"$T/bin/notify-stub.sh"
+chmod +x "$T/bin/lane-stub.sh" "$T/bin/notify-stub.sh"
+export MM_LANE_STATUS_CMD="bash $T/bin/lane-stub.sh" BATON_NOTIFY_CMD="bash $T/bin/notify-stub.sh"
 unset FLEET_ID FEDERATION_FILE GH_TOKEN GITHUB_TOKEN GH_APP_ENV_FILE FLEET_INBOX_DIR CLAUDE_CODE_AUTO_COMPACT_WINDOW ANTHROPIC_MODEL CLAUDE_MODEL
 
 ok() { pass=$((pass + 1)); echo "  ok   $1"; }
@@ -295,6 +301,25 @@ run "${VTICK[@]}" --config "$T/vcfg.yml"
 has "security_review_label from --config is the label watched (case-insensitive)" '"number":18,'
 has "  …marked" '"securityReview":true'
 case "$(cat "$T/pf.log")" in *"--pr 18 --config $T/vcfg.yml"*) ok "  …and --config reaches the preflight" ;; *) bad "  …and --config reaches the preflight" "$(cat "$T/pf.log")" ;; esac
+# engsys#246: an unanswered request, with the security lane down, is escalated by the tick itself, once
+held merge; date +%s >"$T/state/.watch/last-heartbeat"
+printf '[%s]\n' "$(labeled_pr 20)" >"$T/resp/pr-list"; echo 3 >"$T/pf-rc"; : >"$T/notify.log"
+echo '{"state":"free"}' >"$T/lane"
+run "${VTICK[@]}"
+has "a waiting request with the maintain baton free → SECURITY_REVIEW_STALE at once" "SECURITY_REVIEW_STALE #20 security_lane_down head="
+case "$(cat "$T/notify.log")" in *"notify --level action"*"--incident security-review-stale-acme__app-20 "*) ok "  …the tick sent the action notify for that PR, with its own incident" ;; *) bad "  …the tick sent the action notify for that PR, with its own incident" "$(cat "$T/notify.log")" ;; esac
+run "${VTICK[@]}"
+hasnt "  …once per PR and head" "SECURITY_REVIEW_STALE #20"
+printf '[%s]\n' "$(pr_json 20 CLEAN)" >"$T/resp/pr-list"; echo 0 >"$T/pf-rc"
+run "${VTICK[@]}"
+has "  …and the verdict landing resolves it" "SECURITY_REVIEW_STALE_RESOLVED #20 left_the_watch"
+case "$(cat "$T/notify.log")" in *"notify --resolve --incident security-review-stale-acme__app-20"*) ok "  …through fleet notify --resolve" ;; *) bad "  …through fleet notify --resolve" "$(cat "$T/notify.log")" ;; esac
+printf 'security_review_escalate_minutes: 0\n' >"$T/off.yml"
+printf '[%s]\n' "$(labeled_pr 21)" >"$T/resp/pr-list"; echo 3 >"$T/pf-rc"; : >"$T/notify.log"
+run "${VTICK[@]}" --config "$T/off.yml"
+hasnt "security_review_escalate_minutes: 0 → no escalation, even with the lane down" "SECURITY_REVIEW_STALE"
+[ -s "$T/notify.log" ] && bad "  …and nothing notified" "$(cat "$T/notify.log")" || ok "  …and nothing notified"
+rm -f "$T/lane" "$T/notify.log"
 rm -rf "$T/state"/baton-* "$T/state/.watch" "$T/resp"/* "$T/pf-rc" "$T/pf.log"
 # the bus: label removal and a new nyx-review comment are events
 nyx_gql() { # nyx_gql <id>...: the PR's last comments, one nyx-review per id plus an unrelated one

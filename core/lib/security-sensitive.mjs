@@ -119,6 +119,30 @@ export function reviewLabelOf(configs) {
   return out;
 }
 
+/** How long a security-review request may go unanswered before the merge monster escalates it (engsys#246). */
+export const DEFAULT_REVIEW_ESCALATE_MINUTES = 30;
+
+/**
+ * security_review_escalate_minutes from config texts [{ source, text }] (engsys#246): the first that sets it wins (the
+ * same order as the review label), else DEFAULT_REVIEW_ESCALATE_MINUTES; 0 turns the escalation off. A value that is
+ * not a whole number of minutes, or a config that does not parse, is reported as `warning` and never fails the caller:
+ * the default applies, because an escalation that silently stopped is the failure this setting exists to prevent.
+ * → { minutes, source, warning }
+ */
+export function reviewEscalateMinutesOf(configs) {
+  const warnings = [];
+  for (const c of configs) {
+    let cfg;
+    try { cfg = parseYaml(c.text); } catch (e) { warnings.push(`${c.source}: ${e.message}`); continue; }
+    const v = cfg && typeof cfg === 'object' ? cfg.security_review_escalate_minutes : undefined;
+    if (v === undefined || v === null) continue;
+    if (Number.isSafeInteger(v) && v >= 0) return { minutes: v, source: c.source, warning: warnings.join('; ') };
+    warnings.push(`${c.source}: security_review_escalate_minutes must be a whole number of minutes (0 = off), got ${JSON.stringify(v)}`);
+    break;
+  }
+  return { minutes: DEFAULT_REVIEW_ESCALATE_MINUTES, source: 'default', warning: warnings.join('; ') };
+}
+
 /** The merge configs mm-preflight.sh reads, in its order, each read now: [{ source, text }]. An unreadable one throws. */
 export function discoverConfigs({ repo, extra = [], env = process.env, cwd = process.cwd() }) {
   const paths = [];
