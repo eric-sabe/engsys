@@ -3,11 +3,20 @@
 #
 #   1. engsys: the tag must already exist on the engsys remote (its releases are cut by hand from the
 #      maintainer's login); if it doesn't, the error prints the exact `gh release create` command.
-#   2. instance (only when INSTANCE_MARKETPLACE is set): `--release next` (patch + 1 over the latest v*
-#      tag) or `--release vX.Y.Z` cuts a release of the instance repo's origin/main: a stamp commit that
-#      sets metadata.version in .claude-plugin/marketplace.json and version in every plugin listed there,
-#      `claude plugin validate`, an annotated tag, the tag pushed, a GitHub release. An existing tag is
-#      used as is. `next` with nothing new on main since the last release reuses the last release.
+#   2. instance (only when INSTANCE_MARKETPLACE is set): `--release next` or `--release vX.Y.Z` releases the
+#      instance repo's origin/main, and the tag goes on main itself (eric-sabe/engsys#227). The release
+#      version is stamped as metadata.version in .claude-plugin/marketplace.json and version in every
+#      plugin listed there, then `claude plugin validate` (scratch config dir).
+#        - main doesn't carry that version yet: the stamp is pushed to release/vX.Y.Z and opened as a PR
+#          `release: vX.Y.Z` on the instance repo, and the run STOPS (exit 3) — no tag, no pin PR. Merge
+#          it, then re-run the same command. A re-run while it is open reports the same PR; if it was
+#          closed without merging, a re-run says so and re-creates it (force-pushes the branch, new PR).
+#        - main carries it (the release PR merged): an annotated tag on main's commit, the tag pushed, a
+#          GitHub release, then on to step 3.
+#      An existing tag is used as is (a rollback); a new version below the latest tag or main's version is
+#      refused. `next` is the version main already carries when that is past every tag (a merged, untagged
+#      release PR); otherwise the latest v* tag when it IS main's commit (nothing new), else patch + 1 over
+#      it. A tag off main (cut before #227 on a `release: vX` stamp commit) is never reused: next bumps past it.
 #   3. opens the pin PR in PIN_REPO: .claude/settings.json marketplace refs only (verified with a jq
 #      strip-diff), PREPUSH_SETUP_CMD, a normal push, then REVIEW_CMD (if set) is run in the PR worktree
 #      and its output posted as a comment opening with REVIEW_MARKER. READY_LABEL is added when the
@@ -22,6 +31,7 @@
 #        fleet pin --engsys v1.2.0                    # adopt an engsys release
 #        fleet pin --engsys v1.2.0 --release next     # both, one pin PR
 #        add --no-wait to stop after the PR is queued (then run `fleet sync` after it merges)
+#        exit 3: the instance release PR is open (just opened, or still open) — merge it, then re-run
 # The instance-release flag is --release (not --instance): --instance names the instance DIRECTORY
 # (`fleet --instance <dir> pin ...`). PIN_POLL_SECS (default 60) overrides the poll interval.
 # Runs on the fleet host, where gh/git act as the fleet identity.
@@ -144,25 +154,46 @@ stamp_json() { # stamp_json <file> <version> <jq program using $v>
   jq --indent 2 --arg v "$2" "$3" "$1" >"$1.new" && cat "$1.new" >"$1" && rm -f "$1.new"
 }
 
-release_instance() { # release_instance <vX.Y.Z|next> <owner/repo> → echoes the tag to pin
+ver_gt() { # ver_gt <X.Y.Z> <X.Y.Z> — the first is the higher version
+  local IFS=. i; local -a a b
+  read -r -a a <<<"$1"; read -r -a b <<<"$2"
+  for i in 0 1 2; do
+    if ((10#${a[i]} > 10#${b[i]})); then return 0; fi
+    if ((10#${a[i]} < 10#${b[i]})); then return 1; fi
+  done
+  return 1
+}
+
+# A release is tagged on the instance repo's main itself (eric-sabe/engsys#227): main must carry the
+# version first. When it doesn't, the stamp goes out as a `release: vX.Y.Z` PR and the run stops (exit 3);
+# after that PR merges, the same command tags the merged main commit. Tags cut before #227 sit off main on
+# a `release: vX` stamp commit; `next` never reuses one, so the first run after #227 moves the fleet onto main.
+release_instance() { # release_instance <vX.Y.Z|next> <owner/repo> → echoes the tag to pin (exit 3: release PR open)
   exec 3>&1 1>&2
-  local want="$1" repo="$2" latest base ver wt mf src dir manifest n_all n_src
+  local want="$1" repo="$2" latest l base main_sha main_ver ver wt mf src dir manifest n_all n_src cfg branch pr_url on_main f closed
   local plugin_dirs=()
   must git -C "$FLEET_REPO" fetch -q --tags origin
+  main_sha="$(git -C "$FLEET_REPO" rev-parse refs/remotes/origin/main)" || fleet_die "$repo has no origin/main in $FLEET_REPO"
+  main_ver="$(git -C "$FLEET_REPO" show refs/remotes/origin/main:.claude-plugin/marketplace.json 2>/dev/null | jq -r '.metadata.version // empty' 2>/dev/null || true)"
+  [[ "$main_ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || main_ver=""
   latest="$(git -C "$FLEET_REPO" tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)"
   if [ "$want" = next ]; then
-    if [ -z "$latest" ]; then
+    l="${latest#v}"
+    if [ -n "$main_ver" ] && ver_gt "$main_ver" "${l:-0.0.0}"; then
+      # main is ahead of every tag: a merged release PR that isn't tagged yet — tag that version, don't bump again
+      want="v$main_ver"
+    elif [ -z "$latest" ]; then
       want=v0.1.0
     else
-      # a release tag sits on a stamp commit ("release: vX") on top of the main commit it shipped
       base="$(git -C "$FLEET_REPO" rev-parse "$latest^{commit}")" || fleet_die "can't resolve $latest"
-      case "$(git -C "$FLEET_REPO" log -1 --format=%s "$base")" in
-        'release: '*) base="$(git -C "$FLEET_REPO" rev-parse "$base^")" || fleet_die "can't resolve the base of $latest" ;;
-      esac
-      if [ "$(git -C "$FLEET_REPO" rev-parse refs/remotes/origin/main)" = "$base" ]; then
+      # reuse only a tag on main: a pre-#227 tag sits off main on a stamp commit ("release: vX") and is
+      # never reused, even when its parent is main — next bumps past it, through a release PR
+      if [ "$main_sha" = "$base" ]; then
         say "nothing new on $repo main since $latest — pinning $latest"
         emit "$latest"; return 0
       fi
+      git -C "$FLEET_REPO" merge-base --is-ancestor "$base" "$main_sha" \
+        || say "$latest is not on $repo main (a stamp commit tagged before eric-sabe/engsys#227) — releasing past it"
       ver="${latest#v}"; want="v${ver%.*}.$(( ${ver##*.} + 1 ))"
     fi
   fi
@@ -172,9 +203,14 @@ release_instance() { # release_instance <vX.Y.Z|next> <owner/repo> → echoes th
     emit "$want"; return 0
   fi
   ver="${want#v}"
+  # a new release can't go below what is already released or on main (an existing tag, above, is a rollback)
+  [ -z "$latest" ] || ! ver_gt "${latest#v}" "$ver" \
+    || fleet_die "$want is below the latest release $latest — release a higher version, or pin an existing tag"
+  [ -z "$main_ver" ] || ! ver_gt "$main_ver" "$ver" \
+    || fleet_die "$repo main already carries version $main_ver, past $want — release v$main_ver or later"
   wt="$FLEET_STATE/wt-release"
   rm_worktree "$FLEET_REPO" "$wt"
-  must git -C "$FLEET_REPO" worktree add -q --detach "$wt" refs/remotes/origin/main
+  must git -C "$FLEET_REPO" worktree add -q --detach "$wt" "$main_sha"
 
   # Stamp: marketplace version, then every plugin the marketplace lists (its source is a relative
   # directory holding .claude-plugin/plugin.json; an entry that carries its own version is stamped too).
@@ -202,20 +238,55 @@ release_instance() { # release_instance <vX.Y.Z|next> <owner/repo> → echoes th
   [ "$n_src" = "$n_all" ] || say "WARNING $((n_all - n_src)) plugin(s) in the marketplace have a non-directory source — not stamped"
   [ "$(jq -r .metadata.version "$mf")" = "$ver" ] || fleet_die "version stamp failed in $mf"
 
-  must claude plugin validate "$wt"
-  for dir in ${plugin_dirs[@]+"${plugin_dirs[@]}"}; do must claude plugin validate "$dir"; done
+  # validate with a scratch config dir: the check reads the tree only and must not touch the host's Claude state
+  cfg="$(mktemp -d "$FLEET_STATE/validate-cfg.XXXXXX")" || fleet_die "couldn't make a scratch config dir in $FLEET_STATE"
+  trap 'rm -rf "$cfg"' EXIT   # this runs in $(...): the trap covers a failed validation too
+  must env CLAUDE_CONFIG_DIR="$cfg" claude plugin validate "$wt"
+  for dir in ${plugin_dirs[@]+"${plugin_dirs[@]}"}; do must env CLAUDE_CONFIG_DIR="$cfg" claude plugin validate "$dir"; done
+  rm -rf "$cfg"
 
-  must git -C "$wt" commit -q --allow-empty -am "release: $want"
-  must git -C "$wt" tag -a "$want" -m "$INSTANCE_MARKETPLACE $want"
-  git -C "$wt" push -q origin "refs/tags/$want" || {
-    git -C "$FLEET_REPO" tag -d "$want" >/dev/null   # never leave an unpushed tag that a re-run would treat as released
-    fleet_die "pushing tag $want to $repo failed (the local tag was removed; re-run to retry)"
-  }
-  gh release create "$want" -R "$repo" --verify-tag --generate-notes \
-    || fleet_die "tag $want is pushed but the GitHub release failed. Create it: gh release create $want -R $repo --verify-tag --generate-notes   then re-run"
+  # main carries the version when the stamp changed no JSON value (a formatter on main may lay the files
+  # out differently from jq; that alone must not open another release PR)
+  on_main=1
+  while IFS= read -r f; do
+    [ "$(git -C "$wt" show "HEAD:$f" | jq -S . 2>/dev/null)" = "$(jq -S . "$wt/$f")" ] || { on_main=0; break; }
+  done < <(git -C "$wt" diff --name-only)
+  if [ "$on_main" = 1 ]; then
+    # main already carries the version (the release PR merged): tag main's commit itself
+    rm_worktree "$FLEET_REPO" "$wt"
+    must git -C "$FLEET_REPO" tag -a "$want" -m "$INSTANCE_MARKETPLACE $want" "$main_sha"
+    git -C "$FLEET_REPO" push -q origin "refs/tags/$want" || {
+      git -C "$FLEET_REPO" tag -d "$want" >/dev/null   # never leave an unpushed tag that a re-run would treat as released
+      fleet_die "pushing tag $want to $repo failed (the local tag was removed; re-run to retry)"
+    }
+    gh release create "$want" -R "$repo" --verify-tag --generate-notes \
+      || fleet_die "tag $want is pushed but the GitHub release failed. Create it: gh release create $want -R $repo --verify-tag --generate-notes   then re-run"
+    say "released $INSTANCE_MARKETPLACE $want (tagged on $repo main at $(git -C "$FLEET_REPO" rev-parse --short "$main_sha"))"
+    emit "$want"; return 0
+  fi
+
+  # main doesn't carry the version yet: the stamp goes out as a PR, and nothing is tagged or pinned until it merges
+  branch="release/$want"
+  pr_url="$(gh pr list -R "$repo" --head "$branch" --state open --json url -q '.[0].url // empty')" \
+    || fleet_die "couldn't list open PRs in $repo"
+  if [ -z "$pr_url" ]; then
+    closed="$(gh pr list -R "$repo" --head "$branch" --state closed --json url -q '.[0].url // empty' || true)"
+    [ -z "$closed" ] || say "the earlier release PR for $want ($closed) was closed without merging — re-creating it"
+    must git -C "$wt" commit -q -am "release: $want"
+    say "pushing $branch…"
+    must git -C "$wt" push -q --force origin "HEAD:refs/heads/$branch"   # our own generated branch; --force covers a re-run after a half-finished push
+    must gh pr create -R "$repo" --head "$branch" --base main --title "release: $want" --body "Stamps version \`$ver\` into \`.claude-plugin/marketplace.json\` and every plugin it lists (nothing else).
+
+Opened by \`fleet pin\` on the fleet host. A release is tagged on main itself (eric-sabe/engsys#227): after this merges, re-running the same \`fleet pin\` command tags the merged main commit $want, creates the GitHub release and opens the pin PR."
+    pr_url="$(gh pr view "$branch" -R "$repo" --json url -q .url)" && [ -n "$pr_url" ] \
+      || fleet_die "couldn't find the PR just created for $branch in $repo"
+    say "opened the release PR for $INSTANCE_MARKETPLACE $want: $pr_url"
+  else
+    say "the release PR for $INSTANCE_MARKETPLACE $want is already open: $pr_url"
+  fi
   rm_worktree "$FLEET_REPO" "$wt"
-  say "released $INSTANCE_MARKETPLACE $want ($(git -C "$FLEET_REPO" rev-parse --short refs/remotes/origin/main) + version stamp)"
-  emit "$want"
+  say "$want is not released yet (nothing tagged, no pin PR). Merge $pr_url, then re-run the same command."
+  exit 3
 }
 
 # --- pin PR ------------------------------------------------------------------------------------
