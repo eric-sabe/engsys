@@ -537,11 +537,12 @@ not let a PR through.
 
 **A request nobody answers (engsys#246).** If the security lane is down, stuck, usage-limited, missing its key or
 skipping the PR as self-authored, the merge monster's tick escalates the request once per PR and head:
-`fleet notify --level action --author <PR author> --incident security-review-stale-<owner>-<repo>-<N>`, a DM to the
+`fleet notify --level action --author <PR author> --incident security-review-stale-<owner>__<repo>-<N>`, a DM to the
 operator of the fleet that opened the PR (this host's operator for a human's PR). It fires after
 `security_review_escalate_minutes` at the current head (merge config, default 30; `0` turns it off), and at once when
 the lane is clearly unavailable: the maintain baton is free or expired, or the lane left its self-authored skip note or
-its no-signing-key note (`<!-- security-review-no-signer -->`) on the PR. A new head restarts the clock; the verdict
+its no-signing-key note for the current head (`<!-- security-review-no-signer head="…" -->`) on the PR; only the
+fleet's own bots' comments count. A new head restarts the clock; the verdict
 landing, or the PR merging, closing or leaving the queue, resolves the incident.
 
 **The monster batons.** A session the fleet launched (`ENGSYS_SESSION` and `ENGSYS_SESSION_RUN` set) may

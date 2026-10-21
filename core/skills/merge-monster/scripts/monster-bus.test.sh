@@ -307,13 +307,13 @@ printf '[%s]\n' "$(labeled_pr 20)" >"$T/resp/pr-list"; echo 3 >"$T/pf-rc"; : >"$
 echo '{"state":"free"}' >"$T/lane"
 run "${VTICK[@]}"
 has "a waiting request with the maintain baton free → SECURITY_REVIEW_STALE at once" "SECURITY_REVIEW_STALE #20 security_lane_down head="
-case "$(cat "$T/notify.log")" in *"notify --level action"*"--incident security-review-stale-acme-app-20 "*) ok "  …the tick sent the action notify for that PR, with its own incident" ;; *) bad "  …the tick sent the action notify for that PR, with its own incident" "$(cat "$T/notify.log")" ;; esac
+case "$(cat "$T/notify.log")" in *"notify --level action"*"--incident security-review-stale-acme__app-20 "*) ok "  …the tick sent the action notify for that PR, with its own incident" ;; *) bad "  …the tick sent the action notify for that PR, with its own incident" "$(cat "$T/notify.log")" ;; esac
 run "${VTICK[@]}"
 hasnt "  …once per PR and head" "SECURITY_REVIEW_STALE #20"
 printf '[%s]\n' "$(pr_json 20 CLEAN)" >"$T/resp/pr-list"; echo 0 >"$T/pf-rc"
 run "${VTICK[@]}"
 has "  …and the verdict landing resolves it" "SECURITY_REVIEW_STALE_RESOLVED #20 left_the_watch"
-case "$(cat "$T/notify.log")" in *"notify --resolve --incident security-review-stale-acme-app-20"*) ok "  …through fleet notify --resolve" ;; *) bad "  …through fleet notify --resolve" "$(cat "$T/notify.log")" ;; esac
+case "$(cat "$T/notify.log")" in *"notify --resolve --incident security-review-stale-acme__app-20"*) ok "  …through fleet notify --resolve" ;; *) bad "  …through fleet notify --resolve" "$(cat "$T/notify.log")" ;; esac
 printf 'security_review_escalate_minutes: 0\n' >"$T/off.yml"
 printf '[%s]\n' "$(labeled_pr 21)" >"$T/resp/pr-list"; echo 3 >"$T/pf-rc"; : >"$T/notify.log"
 run "${VTICK[@]}" --config "$T/off.yml"

@@ -472,7 +472,9 @@ meanwhile, and the merge preflight fails closed on the same configs.
    `fleet notify --level alert --incident security-review-signer` per
    session. The fleet's problem, not the PR's, but say so on the PR once
    (unless `noSignerNoted`): a fenced comment starting
-   `<!-- security-review-no-signer -->`, so the merge monster escalates the
+   `<!-- security-review-no-signer head="<head>" -->` (the listed head, in
+   full; the merge monster honors it only for that head, so a note left
+   before the key came back never counts later), so it escalates the
    waiting PR to its owner at once instead of after its timeout
    (engsys#246). No review, no verdict.
 2. **Self-authored** (`selfAuthored: true`): skip. Post the

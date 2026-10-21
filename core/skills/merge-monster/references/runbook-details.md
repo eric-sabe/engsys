@@ -466,15 +466,19 @@ from the first label event or bot-written request comment at or after the
 head push (the label kept across a push counts from the push). Past
 `security_review_escalate_minutes` (merge config, default 30, `0` = off) it
 sends one `fleet notify --level action --author <PR author> --re <PR url>
---incident security-review-stale-<owner>-<repo>-<N>` (engsys#238: a fleet
+--incident security-review-stale-<owner>__<repo>-<N>` (engsys#238: a fleet
 App's PR DMs that fleet's operator, a human's this host's operator) and
 prints `SECURITY_REVIEW_STALE #N <reason> head=<sha12> notified`. It
 escalates **at once** when the lane is clearly unavailable: its
 `<!-- security-review-self-skip -->` note (`self_authored_skip`), its
-`<!-- security-review-no-signer -->` note (`security_lane_no_key`), or the
-maintain baton free or expired (`security_lane_down`). Only bot-written
-comments count, so a human comment neither moves the clock nor fakes an
-outage. The latch (`.watch/secstale.<N>`) is per PR and head: a new head
+`<!-- security-review-no-signer head="<this head>" -->` note (`security_lane_no_key`), or the
+maintain baton free or expired (`security_lane_down`). Only the fleet's
+own bots' comments count (the enabled fleets' `<github_app>[bot]` in
+`federation.yml`, else any bot), so a human's or another App's comment
+neither moves the clock nor fakes an outage. The head push time is the
+commit's committer date, which the pusher sets: a future date is clamped to
+now, a head that changed while the tick watched starts its clock no earlier
+than that tick, and a recorded start never moves later. The latch (`.watch/secstale.<N>`) is per PR and head: a new head
 resolves the incident and restarts the clock; the PR leaving the watch (the
 verdict landed, it merged, closed or left the queue) resolves it
 (`SECURITY_REVIEW_STALE_RESOLVED #N`). Journal those lines; do not notify

@@ -6,13 +6,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  authorLogin, decide, escalationText, incidentKey, laneFrom, prFacts, tick, NO_SIGNER_MARKER, SKIP_MARKER,
+  authorLogin, clockStart, decide, escalationText, fleetBots, incidentKey, laneFrom, prFacts, tick, SKIP_MARKER,
 } from './mm-security-stale.mjs';
 import { reviewEscalateMinutesOf, DEFAULT_REVIEW_ESCALATE_MINUTES } from '../../../lib/security-sensitive.mjs';
 
 const LABEL = 'security-review-requested';
 const H1 = 'a'.repeat(40);
 const H2 = 'b'.repeat(40);
+const noSigner = (head) => `<!-- security-review-no-signer head="${head}" -->\nno key`;
 const T0 = Date.parse('2026-10-21T10:00:00Z');
 const at = (min) => new Date(T0 + min * 60000).toISOString();
 const BOT = { __typename: 'Bot', login: 'feedfrwd-fleet-mark' };
@@ -34,8 +35,10 @@ describe('pure helpers', () => {
     assert.equal(authorLogin(null), '');
   });
 
-  test('incidentKey is per repo and PR', () => {
-    assert.equal(incidentKey('acme/app', 7), 'security-review-stale-acme-app-7');
+  test('incidentKey is per repo and PR, and unambiguous across repos', () => {
+    assert.equal(incidentKey('acme/app', 7), 'security-review-stale-acme__app-7');
+    assert.notEqual(incidentKey('a-b/c', 1), incidentKey('a/b-c', 1));
+    assert.notEqual(incidentKey('a/b-1', 2), incidentKey('a/b', 12));
   });
 
   test('prFacts: the clock starts at the first label event or bot request comment at or after the head push', () => {
@@ -61,8 +64,46 @@ describe('pure helpers', () => {
   test('prFacts: the lane notes count only from a bot', () => {
     assert.equal(prFacts(pr({ nodes: [comment(1, `${SKIP_MARKER}\nmine`)] }), LABEL).skipNote, true);
     assert.equal(prFacts(pr({ nodes: [comment(1, `${SKIP_MARKER}\nfake`, HUMAN)] }), LABEL).skipNote, false);
-    assert.equal(prFacts(pr({ nodes: [comment(1, `${NO_SIGNER_MARKER}\nno key`)] }), LABEL).noSignerNote, true);
-    assert.equal(prFacts(pr({ nodes: [comment(1, `quoting ${NO_SIGNER_MARKER}`)] }), LABEL).noSignerNote, false);
+    assert.equal(prFacts(pr({ nodes: [comment(1, noSigner(H1))] }), LABEL).noSignerNote, true);
+    assert.equal(prFacts(pr({ nodes: [comment(1, `quoting ${noSigner(H1)}`)] }), LABEL).noSignerNote, false);
+  });
+
+  test('prFacts: the no-signer note counts only for the current head (the key may be back since)', () => {
+    assert.equal(prFacts(pr({ head: H2, nodes: [comment(1, noSigner(H1))] }), LABEL).noSignerNote, false);
+    assert.equal(prFacts(pr({ head: H2, nodes: [comment(1, noSigner(H2.slice(0, 12)))] }), LABEL).noSignerNote, true, 'a 12+ hex prefix');
+    assert.equal(prFacts(pr({ nodes: [comment(1, '<!-- security-review-no-signer -->\nlegacy, no head')] }), LABEL).noSignerNote, false);
+  });
+
+  test('prFacts: with a registry, only the fleet\'s own bots count; the request phrase only at the start', () => {
+    const reg = { fleets: { eric: { github_app: 'feedfrwd-fleet-eric' }, mark: { github_app: 'feedfrwd-fleet-mark' }, old: { github_app: 'feedfrwd-fleet-old', enabled: false } } };
+    const bots = fleetBots(reg);
+    assert.deepEqual([...bots], ['feedfrwd-fleet-eric[bot]', 'feedfrwd-fleet-mark[bot]']);
+    assert.equal(fleetBots({ fleets: {} }), null, 'no App in the registry: any bot');
+    const other = { __typename: 'Bot', login: 'some-other-app' };
+    const retired = { __typename: 'Bot', login: 'feedfrwd-fleet-old' };
+    for (const a of [other, retired]) {
+      assert.equal(prFacts(pr({ nodes: [comment(1, `${SKIP_MARKER}\nx`, a)] }), LABEL, { bots }).skipNote, false, a.login);
+      assert.equal(prFacts(pr({ nodes: [comment(1, noSigner(H1), a)] }), LABEL, { bots }).noSignerNote, false, a.login);
+    }
+    assert.equal(prFacts(pr({ nodes: [comment(1, `${SKIP_MARKER}\nx`, { __typename: 'Bot', login: 'feedfrwd-fleet-eric' })] }), LABEL, { bots }).skipNote, true);
+    assert.equal(prFacts(pr({ nodes: [comment(1, `${SKIP_MARKER}\nx`, other)] }), LABEL).skipNote, true, 'no registry: any bot, as before');
+    // another App's request comment does not move the clock; neither does the phrase mid-comment
+    const f = prFacts(pr({ committed: 0, nodes: [comment(2, 'security review requested for `a`', other), comment(3, 'note: security review requested earlier'), labeled(9)] }), LABEL, { bots });
+    assert.equal(f.requestAt, T0 + 9 * 60000);
+  });
+
+  test('prFacts: a future-dated head commit is clamped to now, so it cannot hold the alert off', () => {
+    const f = prFacts(pr({ committed: 10000, nodes: [labeled(5)] }), LABEL, { now: T0 + 20 * 60000 });
+    assert.equal(f.headAt, T0 + 20 * 60000);
+    assert.equal(f.requestAt, T0 + 20 * 60000);
+  });
+
+  test('clockStart: never before the tick that saw the head change, never later than a recorded start', () => {
+    const facts = { requestAt: T0 };
+    assert.equal(clockStart({ facts, firstSeen: T0 + 5 }), T0);
+    assert.equal(clockStart({ facts, firstSeen: T0 + 5, headSeenAt: T0 + 60000 }), T0 + 60000, 'a back-dated head keeps no old clock');
+    assert.equal(clockStart({ facts: { requestAt: T0 + 9e6 }, firstSeen: T0, startAt: T0 + 60000 }), T0 + 60000, 'a later read cannot postpone it');
+    assert.equal(clockStart({ facts: null, firstSeen: T0 + 7 }), T0 + 7);
   });
 
   test('laneFrom: free or expired is unavailable; held, an error or nothing is not news', () => {
@@ -152,7 +193,7 @@ describe('tick against stub gh, notifier and lease status', () => {
     assert.equal(step(dir, 30), '', '29 min after the request: not yet');
     assert.match(step(dir, 31), /^SECURITY_REVIEW_STALE #7 unanswered_30min head=aaaaaaaaaaaa notified\n$/);
     assert.equal(calls().length, 1);
-    assert.match(calls()[0], /^--level action --author feedfrwd-fleet-mark\[bot\] --re https:\/\/github\.com\/acme\/app\/pull\/7 --incident security-review-stale-acme-app-7 Security review for PR #7/);
+    assert.match(calls()[0], /^--level action --author feedfrwd-fleet-mark\[bot\] --re https:\/\/github\.com\/acme\/app\/pull\/7 --incident security-review-stale-acme__app-7 Security review for PR #7/);
     assert.equal(step(dir, 45), '');
     assert.equal(calls().length, 1, 'latched per PR and head');
   });
@@ -176,7 +217,7 @@ describe('tick against stub gh, notifier and lease status', () => {
     assert.equal(step(dir, 33, { waiting: [], watched: [7] }), '', 'still watched (a failed run): kept');
     assert.ok(fs.existsSync(path.join(dir, 'secstale.7')));
     assert.equal(step(dir, 34, { waiting: [], watched: [] }), 'SECURITY_REVIEW_STALE_RESOLVED #7 left_the_watch\n');
-    assert.equal(calls().at(-1), '--resolve --incident security-review-stale-acme-app-7');
+    assert.equal(calls().at(-1), '--resolve --incident security-review-stale-acme__app-7');
     assert.equal(fs.existsSync(path.join(dir, 'secstale.7')), false);
   });
 
@@ -198,7 +239,7 @@ describe('tick against stub gh, notifier and lease status', () => {
 
   test('the lane\'s no-signer note escalates at once', () => {
     const dir = fresh();
-    write('pr-7.json', pr({ nodes: [labeled(0), comment(1, `${NO_SIGNER_MARKER}\nno key`)] }));
+    write('pr-7.json', pr({ nodes: [labeled(0), comment(1, noSigner(H1))] }));
     assert.match(step(dir, 2), /SECURITY_REVIEW_STALE #7 security_lane_no_key/);
   });
 
@@ -208,6 +249,39 @@ describe('tick against stub gh, notifier and lease status', () => {
     write('lane.json', { state: 'unknown', expired: true, expiredForMs: 25 * 60000 });
     assert.match(step(dir, 2), /SECURITY_REVIEW_STALE #7 security_lane_down head=aaaaaaaaaaaa notified/);
     assert.match(calls()[0], /the maintain baton expired 25 min ago/);
+  });
+
+  test('a future-dated commit cannot hold the alert off: the start is recorded and kept', () => {
+    const dir = fresh();
+    write('pr-7.json', pr({ committed: 100000, nodes: [labeled(1)] }));
+    assert.equal(step(dir, 2), '');
+    assert.equal(step(dir, 31), '', 'not yet: 29 min since the first tick');
+    assert.match(step(dir, 33), /SECURITY_REVIEW_STALE #7 unanswered_30min/);
+  });
+
+  test('a back-dated new head does not inherit the old head\'s clock', () => {
+    const dir = fresh();
+    write('pr-7.json', pr({ committed: 0, nodes: [labeled(0)] }));
+    step(dir, 10);
+    // the new head claims an old commit date and no new request comment: the label events all look "after the push"
+    write('pr-7.json', pr({ head: H2, committed: -100, nodes: [labeled(0)] }));
+    assert.equal(step(dir, 20), '', 'the change was seen at 20');
+    assert.equal(step(dir, 45), '', 'only 25 min since the head change');
+    assert.match(step(dir, 51), /SECURITY_REVIEW_STALE #7 unanswered_30min head=bbbbbbbbbbbb/);
+  });
+
+  test('another App\'s skip note does not escalate when the registry names the fleet\'s bots', () => {
+    const dir = fresh();
+    const reg = path.join(T, 'federation.yml');
+    fs.writeFileSync(reg, 'version: 1\nfleets:\n  eric:\n    github_app: feedfrwd-fleet-eric\n  mark:\n    github_app: feedfrwd-fleet-mark\n');
+    write('pr-7.json', pr({ nodes: [labeled(0), comment(1, `${SKIP_MARKER}\nfake`, { __typename: 'Bot', login: 'some-other-app' })] }));
+    const out = sink();
+    tick({ repo: 'acme/app', dir, waiting: [7], watched: [7], minutes: 30, label: LABEL, now: T0 + 2 * 60000, env: { ...env, FEDERATION_FILE: reg }, out });
+    assert.equal(out.text, '');
+    write('pr-7.json', pr({ nodes: [labeled(0), comment(1, `${SKIP_MARKER}\nreal`, BOT)] }));
+    const out2 = sink();
+    tick({ repo: 'acme/app', dir, waiting: [7], watched: [7], minutes: 30, label: LABEL, now: T0 + 3 * 60000, env: { ...env, FEDERATION_FILE: reg }, out: out2 });
+    assert.match(out2.text, /self_authored_skip/);
   });
 
   test('0 disables it: nothing is sent, whatever the clock or the lane', () => {
