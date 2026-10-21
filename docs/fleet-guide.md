@@ -957,7 +957,7 @@ lists, several documents, tabs in indentation, and plain values a YAML parser co
 
 | Command | Output |
 |---|---|
-| `fleet federation validate [file]` | `ok: … (N fleets, M repo roles)`; exit 1 listing every problem. With `FLEET_ID` set, the id must be a declared fleet. No file: `single-fleet mode`, exit 0 |
+| `fleet federation validate [file] [--online]` | `ok: … (N fleets, M repo roles)`; exit 1 listing every problem. With `FLEET_ID` set, the id must be a declared fleet. No file: `single-fleet mode`, exit 0. `--online` (engsys#238) also asks GitHub that each `github_app` slug is a live App whose id is `github_app_id`: owner routing and the cross-fleet sender check match a bot by slug, so a stale slug misroutes or rejects that fleet's PRs and messages. No network or no `gh` is a warning, not a failure |
 | `fleet federation get <path>` | one value, for example `get repos.acme/app.merge.home` prints `alice`; maps and lists print as JSON. Defaults are filled in (`failover` reads `escalate` when unset) |
 | `fleet federation home <owner/repo> <merge\|maintain>` | the home fleet id |
 | `fleet federation address <addr>` | `{"fleet":…,"session":…}` (below) |
