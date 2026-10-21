@@ -8,7 +8,10 @@
 #   status --federation [--json]  every fleet (heartbeat ages) and every baton (holder, expiry,
 #                                 holder != home flag), read-only
 #   pin ...                       release the instance + open the pin PR (see `fleet pin --help`)
-#   sync [--check]                host checkouts + plugin reinstall to match the pins (no restarts)
+#   sync [--check]                host checkouts + plugin reinstall to match the pins (no restarts). A running
+#                                 session's own dir (per-session mode) is left to its restart, which syncs it
+#   sync --include-running        also sync running sessions' own dirs (risky: claude on their live logins)
+#   sync --session <name>         just that stopped session's own dir (what a relaunch runs)
 #   restart [--stale|--all|<name>...] [--force]
 #                                 cycle sessions when you're ready (no args = status)
 #   launch [<name> [--force-excluded] [--skip-verify]] | --check <name>

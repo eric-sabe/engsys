@@ -62,6 +62,16 @@
 # is not running, nothing shares the token, so the CLI is used and the check fails closed as before. Residual: a
 # claude started by hand on that dir outside tmux is not seen.
 #
+# A dir `fleet sync` left behind while its session ran (engsys#253, .fleet/sync-deferred) is behind the pins on purpose
+# until the session restarts. With --auto-sync and --session, once that session is down, verify first syncs its dir
+# (`sync.sh --session`), so the supervisor's relaunch is not held by a dir that was only waiting. While it still runs, a
+# periodic check (--max-age) that finds a mismatch in it prints it and passes (exit 0, no alert): the session is on
+# what it loaded at start, and holding the gate would stop the supervisor from cycling a monster that sits idle after
+# its rotation request. That is no gap at the gate: `fleet launch` syncs the dir and verifies it again, without
+# --max-age, before it starts the session. Residual: the list is a file in .fleet/, so a process running as the fleet's
+# user could add a live session's name to it and quiet that session's mismatch alert until it restarts (it could
+# already edit fleet.conf or the verify cache, verify-wrappers.mjs).
+#
 # Exit: 0 match | 1 MISMATCH | 3 not verified (GitHub unreachable, no pin or not a tag, nothing installed)
 #       | 2 usage. Merge and maintain sessions start only on 0 (engsys#86 review H1).
 #
@@ -114,6 +124,10 @@ if [ "$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION" = on ]; then
   sdir="$(fleet_session_config_dir "$session")" || { echo "fleet verify: --session $session: not a name that can have its own config dir" >&2; exit 2; }
   names="$(fleet_session_dir_names --include-excluded)"
   grep -Fxq -- "$session" <<<"$names" || { echo "fleet verify: --session $session: not a session on this host that uses the fleet's config dir" >&2; exit 2; }
+  # engsys#253: a dir fleet sync deferred while the session ran is synced now that it is down (before the env points at it)
+  if [ "$auto_sync" = 1 ] && ! fleet_sync_deferred_run "$session"; then
+    echo "fleet verify: could not sync $sdir, which fleet sync deferred while $session ran (above); checking it as it is"
+  fi
   FLEET_CLAUDE_CONFIG_DIR="$sdir" CLAUDE_CONFIG_DIR="$sdir"; export FLEET_CLAUDE_CONFIG_DIR CLAUDE_CONFIG_DIR
   SFX=".$session" INC="-$session"
 elif [ -n "$session" ]; then
@@ -398,7 +412,7 @@ if [ "$only_stale" = 1 ] && [ "$auto_sync" = 1 ]; then
       fi
       sync_why="the pin checkout could not fast-forward to origin/$def_branch"
     elif [ "$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION" = on ] && [ -n "$max_age" ] && live_now="$(fleet_live_sessions | paste -sd' ' -)" && [ -n "$live_now" ]; then
-      sync_deferred=1 sync_why="the pins changed, and moving the plugins needs claude on every session dir, which a periodic check never starts on a running session's login: sync deferred while $(wc -w <<<"$live_now" | tr -d ' ') session(s) run ($live_now). This does not clear by itself while they run: stop or restart them (it then runs on its own), or run fleet sync by hand, which does start claude on the live logins (a small risk of logging a session out)"
+      sync_deferred=1 sync_why="the pins changed, and moving the plugins needs claude on every session dir, which a periodic check never starts on a running session's login: sync deferred while $(wc -w <<<"$live_now" | tr -d ' ') session(s) run ($live_now). This does not clear by itself while they run: stop or restart them (it then runs on its own), or run fleet sync by hand, which syncs the host and every stopped session's dir and leaves each running one's dir to its restart (engsys#253)"
     else
     echo "fleet verify: the pin checkout is behind $def_branch and the pins changed: auto-syncing (fleet sync, no restarts)"
     # --no-jobs: this runs inside the supervisor's own launchd job, which a job reload would kill.
@@ -413,9 +427,16 @@ if [ "$only_stale" = 1 ] && [ "$auto_sync" = 1 ]; then
   if [ "$sync_deferred" = 1 ]; then out="$out"$'\n'"fleet verify: $sync_why"
   else out="$out"$'\n'"fleet verify: could not auto-sync: $sync_why"; fi
 fi
+# engsys#253: a running session whose dir fleet sync deferred is behind the pins until it restarts; the launch re-verifies
+# (a pin checkout behind main is still reported and alerted as such: that one is fleet sync's to fix)
+deferred_pass=0
+if [ "$rc" = 1 ] && [ "$only_stale" = 0 ] && live_session && fleet_sync_deferred "$session"; then
+  out="$out"$'\n'"fleet verify: session $session is running on what it loaded before fleet sync, which left its dir alone while it runs; the dir is synced and verified again before it relaunches (fleet restart $session). Not held, not alerted."
+  rc=0 deferred_pass=1
+fi
 printf '%s\n' "$out"
 
-if [ "$alert" = 1 ]; then
+if [ "$alert" = 1 ] && [ "$deferred_pass" = 0 ]; then
   # the info-level incident of the warn-only stage (engsys#227): closed once, whatever this run found — an
   # off-main instance tag is now a mismatch, alerted (and held) below like any other
   if [ -f "$OFFMAIN_LATCH" ] && [ "$rc" != 3 ]; then

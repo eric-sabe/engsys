@@ -13,10 +13,15 @@
 //                                          as disabled), so the guard hook is never reported as loading when it might not
 // Output: the same entry shape the verifier reads from the CLI: { id, version, scope, enabled, installPath, projectPath? }.
 //
+// --marketplaces: instead, what `claude plugin marketplace list --json` gives `fleet sync --check` (engsys#253), from
+// <dir>/plugins/known_marketplaces.json ({ <name>: { source: { source, url | repo, ref? }, installLocation } }):
+// [{ name, ref }], ref '' when the source pins none (a `#<ref>` on a git url counts as its ref).
+//
 // Fail closed: an unreadable or malformed file is an error (exit 1, nothing on stdout); the caller reports "not
 // verified". A file that does not exist is an empty source (a dir with nothing installed lists `[]` too).
 //
 // Usage: plugin-list-from-files.mjs --config-dir <dir> --project-dir <dir>
+//        plugin-list-from-files.mjs --config-dir <dir> --marketplaces
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -78,14 +83,33 @@ export function pluginListFromFiles({ configDir, projectDir }) {
   return out;
 }
 
+export function marketplaceListFromFiles({ configDir }) {
+  const file = path.join(configDir, 'plugins', 'known_marketplaces.json');
+  const known = readJson(file);
+  if (known === undefined) return [];
+  if (!isObj(known)) throw new Error(`${file} is not a JSON object`);
+  const out = [];
+  for (const [name, v] of Object.entries(known)) {
+    if (!isObj(v) || (v.source !== undefined && !isObj(v.source))) throw new Error(`${file}: marketplace ${name} is not an object with a source`);
+    const src = v.source ?? {};
+    if (src.ref !== undefined && typeof src.ref !== 'string') throw new Error(`${file}: marketplace ${name} has a non-string ref`);
+    let ref = src.ref ?? '';
+    if (!ref && typeof src.url === 'string' && src.url.includes('#')) ref = src.url.slice(src.url.indexOf('#') + 1);
+    out.push({ name, ref });
+  }
+  return out;
+}
+
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
   const a = process.argv.slice(2);
   const arg = (n) => { const i = a.indexOf(n); return i >= 0 ? a[i + 1] : undefined; };
   const configDir = arg('--config-dir');
   const projectDir = arg('--project-dir');
-  if (!configDir || !projectDir) { console.error('usage: plugin-list-from-files.mjs --config-dir <dir> --project-dir <dir>'); process.exit(2); }
+  const markets = a.includes('--marketplaces');
+  if (!configDir || (!projectDir && !markets)) { console.error('usage: plugin-list-from-files.mjs --config-dir <dir> (--project-dir <dir> | --marketplaces)'); process.exit(2); }
   try {
-    process.stdout.write(JSON.stringify(pluginListFromFiles({ configDir, projectDir })) + '\n');
+    const out = markets ? marketplaceListFromFiles({ configDir }) : pluginListFromFiles({ configDir, projectDir });
+    process.stdout.write(JSON.stringify(out) + '\n');
   } catch (e) {
     console.error(`plugin-list-from-files: ${e.message}`);
     process.exit(1);

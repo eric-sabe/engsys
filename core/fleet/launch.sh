@@ -27,6 +27,10 @@
 # (and refuses when the alert can't be delivered).
 # No config file or environment variable turns it on, and the supervisor never passes it.
 #
+# One login per session: a session's own dir that `fleet sync` left behind while the session ran (engsys#253,
+# .fleet/sync-deferred) is synced here, before the integrity check and the start (`sync.sh --session <name> --no-jobs`),
+# so a restart after a pin change starts on the pins. A sync that fails refuses that session.
+#
 # Claude-only: a merge, maintain, broker (any monster), supervised or security-lane session (5th field
 # security*) is refused when HARNESS is anything but claude, whether it came from fleet.conf,
 # fleet.local.conf, the environment or a HARNESS= line in the roster. A whole-roster launch starts the
@@ -277,6 +281,11 @@ session_dir_problem() { # session_dir_problem <name>
   if [ "$li" = false ]; then echo "its own Claude login ($d) is not logged in: CLAUDE_CONFIG_DIR=$d claude (/login, then /exit)"; return 0; fi
   return 1
 }
+# deferred_dir_synced <name> → 0 when <name>'s own dir is not waiting for a sync, or was just synced (engsys#253)
+deferred_dir_synced() {
+  [ "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:-off}" = on ] && [ "$launch_harness" = claude ] && uses_fleet_config_dir "$1" || return 0
+  fleet_sync_deferred_run "$1"
+}
 # The supervisor reads a seat-limit line only from a pane it knows it launched: record the pane of every
 # supervised session started here (the supervisor's own relaunches come through here too).
 record_panes() { # record_panes <name>...
@@ -299,6 +308,7 @@ if [ -n "$name" ]; then
   grep -q "^$name|" "$FLEET_STATE/roster" || fleet_die "no session named '$name' in the roster"
   harness_refused "$name" && fleet_die "not launching $name on HARNESS=$launch_harness: merge, maintain, broker and security sessions run on Claude only"
   if why_dir="$(session_dir_problem "$name")"; then fleet_die "not launching $name: $why_dir"; fi
+  deferred_dir_synced "$name" || fleet_die "not launching $name: fleet sync left its config dir behind while it ran, and syncing it now failed (above). Retry: fleet sync --session $name"
   if is_singleton "$name" && [ "$skip_verify" = 1 ]; then
     {
       echo "fleet: ################################################################################"
@@ -347,6 +357,12 @@ while IFS= read -r line; do
         refused=$((refused + 1))
         continue
       fi
+      if ! deferred_dir_synced "$n"; then
+        echo "SKIPPED: $n (fleet sync left its config dir behind while it ran, and syncing it now failed; retry: fleet sync --session $n)" >&2
+        printf '# own config dir not synced: %s\n' "$n" >>"$host_roster"
+        refused=$((refused + 1))
+        continue
+      fi
       if is_singleton "$n" && ! singleton_integrity_ok "$n"; then
         echo "skip: $n, $why_held (fleet verify)"
         printf '# plugin integrity held: %s (%s)\n' "$n" "$why_held" >>"$host_roster"
@@ -357,12 +373,12 @@ while IFS= read -r line; do
   printf '%s\n' "$line" >>"$host_roster"
 done <"$FLEET_STATE/roster"
 if [ "$kept" = 0 ]; then
-  [ "$refused" = 0 ] || fleet_die "$refused session(s) refused (SKIPPED above: a Claude-only session on HARNESS=$launch_harness, or a session without its own Claude login); nothing else to launch"
+  [ "$refused" = 0 ] || fleet_die "$refused session(s) refused (SKIPPED above: a Claude-only session on HARNESS=$launch_harness, or a session without its own Claude login or synced dir); nothing else to launch"
   echo "fleet: no roster session runs on this host; nothing to launch"; exit 0
 fi
 lrc=0; bash "$LAUNCHER" --roster "$host_roster" --launch-dir "$FLEET_STATE/launch" "${VERDICT_KEY_ARGS[@]+"${VERDICT_KEY_ARGS[@]}"}" || lrc=$?
 # shellcheck disable=SC2046 # names are [a-z0-9-] only
 record_panes $(awk -F'|' '/^[A-Za-z0-9][A-Za-z0-9._-]*\|/ { print $1 }' "$host_roster")
 [ "$refused" != 0 ] || exit "$lrc"
-echo "fleet: $refused session(s) refused (SKIPPED above: a Claude-only session on HARNESS=$launch_harness, or a session without its own Claude login)" >&2
+echo "fleet: $refused session(s) refused (SKIPPED above: a Claude-only session on HARNESS=$launch_harness, or a session without its own Claude login or synced dir)" >&2
 exit $(( lrc != 0 ? lrc : 1 ))

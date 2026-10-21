@@ -143,3 +143,26 @@ fleet_live_sessions() {
     [ -z "$n" ] || ! fleet_session_alive "$n" || printf '%s\n' "$n"
   done < <(roster_names)
 }
+
+# The sessions whose own dir `fleet sync` left behind because they were running (engsys#253): a second claude on a live
+# session's login can rotate its refresh token out from under it (anthropics/claude-code#88583). One name per line in
+# $FLEET_STATE/sync-deferred; the dir is synced when the session is down: by `fleet launch` before it starts the session,
+# and by the supervisor's `fleet verify --auto-sync --session` before it judges the dir.
+fleet_sync_deferred() { # fleet_sync_deferred <name> → 0 when <name>'s dir is waiting for a sync
+  grep -Fxq -- "$1" "$FLEET_STATE/sync-deferred" 2>/dev/null
+}
+fleet_sync_deferred_set() { # fleet_sync_deferred_set add|drop <name>
+  local f="$FLEET_STATE/sync-deferred" t
+  [ "$1" = add ] || [ -f "$f" ] || return 0
+  [ "$1" != add ] || ! fleet_sync_deferred "$2" || return 0
+  mkdir -p "$FLEET_STATE"; t="$(mktemp "$f.XXXXXX")"
+  { grep -Fxv -- "$2" "$f" 2>/dev/null || true; [ "$1" != add ] || printf '%s\n' "$2"; } >"$t"
+  if [ -s "$t" ]; then mv "$t" "$f"; else rm -f "$t" "$f"; fi
+}
+# fleet_sync_deferred_run <name> → syncs <name>'s own dir when fleet sync deferred it and the session is not running now
+# (rc 0 when there was nothing to do too). --no-jobs: the callers can run inside the supervisor's launchd job.
+fleet_sync_deferred_run() {
+  fleet_sync_deferred "$1" && ! fleet_session_alive "$1" || return 0
+  echo "fleet: session $1 is down and fleet sync left its config dir behind while it ran: syncing that dir now" >&2
+  bash "$FLEET_KIT_DIR/sync.sh" --instance "$FLEET_REPO" --no-jobs --session "$1" </dev/null >&2
+}

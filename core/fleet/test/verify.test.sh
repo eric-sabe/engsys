@@ -971,6 +971,27 @@ rc_is "a tampered wrapper is still a MISMATCH on the file path" 1
 eq "…without claude" "$(calls)" 0
 restore
 
+echo "…engsys#253: a running session whose dir fleet sync deferred passes, unalerted, until it restarts"
+plugins '[{id: "engsys@engsys", version: "0.9.0", scope: "user", enabled: true, installPath: $c}]'; files_from_fixture
+echo acme-mm >"$FAKE/tmux-windows"; : >"$FAKE/claude.calls"; rm -f "$I/.fleet"/verify-wrappers*.json
+run fleet verify --max-age 0 --session acme-mm
+rc_is "a running session's dir behind the pin, not deferred: MISMATCH" 1
+echo acme-mm >"$I/.fleet/sync-deferred"; c0="$(comments)"
+run fleet verify --alert --max-age 0 --session acme-mm
+rc_is "…deferred by fleet sync: passes (the launch re-verifies)" 0
+has "…saying why" "$OUT" "Not held, not alerted"
+has "…still printing what is behind" "$OUT" "MISMATCH"
+eq "…no alert" "$(comments)" "$c0"
+eq "…no claude" "$(calls)" 0
+echo zsh >"$FAKE/tmux-cmd"
+run fleet verify --alert --max-age 0 --session acme-mm
+rc_is "…once it is down (and no --auto-sync to sync it), the dir is a MISMATCH again" 1
+echo node >"$FAKE/tmux-cmd"
+run fleet verify --session acme-mm
+rc_is "…and the launch-style check of the running session (no --max-age) is not relaxed" 1
+rm -f "$I/.fleet/sync-deferred" "$I/.fleet"/verify-wrappers*.json "$I/.fleet"/verify-wrappers.alerted*
+plugins "$DEFAULT_PLUGINS"; files_from_fixture
+
 echo "…fail closed: an unreadable or malformed file-derived list is 'not verified', never ok"
 cp "$PS/plugins/installed_plugins.json" "$T/ip.good"; cp "$PS/settings.json" "$T/st.good"
 bad_case() { # bad_case <desc> — the last run must be exit 3 with no claude
@@ -1018,7 +1039,7 @@ has "…says the sync is deferred, and that it does not clear by itself" "$OUT" 
 hasnt "…did not auto-sync" "$OUT" "auto-syncing"
 eq "…and started no claude at all (call log)" "$(calls)" 0
 eq "…one alert" "$(said 'Auto-sync is deferred')" "$((g0 + 1))"
-has "…warning that fleet sync by hand starts claude on live logins" "$(grep 'Auto-sync is deferred' "$FAKE/gh.log" | tail -n 1)" "does start claude on the live logins"
+has "…saying fleet sync by hand leaves each running session's dir to its restart (engsys#253)" "$(grep 'Auto-sync is deferred' "$FAKE/gh.log" | tail -n 1)" "leaves each running one's dir to its restart"
 has "…and the login check was skipped, said so" "$OUT" "login not checked: session acme-mm is running"
 printf 'acme-mm\nacme-security\n' >"$FAKE/tmux-windows"
 run fleet verify --alert --auto-sync --max-age 15 --session acme-mm

@@ -62,6 +62,7 @@ case "${1:-}" in
     case "${2:-}" in
       list) cat "$S/marketplaces.json" ;;
       add)
+        [ ! -f "$FAKE/claude-add-fail" ] || { echo "add exploded" >&2; exit 1; }
         arg="$3"; url="${arg%%#*}"; ref=""
         case "$arg" in *'#'*) ref="${arg#*#}" ;; esac
         tmp="$(mktemp -d)"
@@ -854,7 +855,9 @@ has "…naming it and the command" "$OUT" "SKIPPED: acme-security (its own Claud
 has "…while the other sessions start" "$(tl acme-mm)" "export CLAUDE_CONFIG_DIR=$SESS/acme-mm"
 hasnt "…and the logged-out one does not" "$(cat "$FAKE/tmux.log")" "[acme:acme-security]"
 login_all acme-security
-# sync: the pinned plugins go into every session dir; a missing dir is drift for that session only
+# sync: the pinned plugins go into every session dir; a missing dir is drift for that session only (no session runs here:
+# a running one's dir is left to its restart, K2)
+rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"
 rm -rf "$SESS/acme-rel"; setconf "FLEET_CLAUDE_CONFIG_DIR=$FCFG" "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on"
 m="$(mark)"; run fleet sync
 rc_is "per-session sync exits 0 (a missing dir is a warning)" 0
@@ -985,6 +988,99 @@ run fleet verify
 rc_is "per-session on without FLEET_CLAUDE_CONFIG_DIR is a config error" 3
 has "…saying so" "$OUT" "needs FLEET_CLAUDE_CONFIG_DIR"
 cp "$T/flc.bak" "$LC"; rm -rf "$SESS" "$FAKE/tmux"; : >"$FAKE/tmux.log"
+
+echo "== K2. engsys#253: sync and status start no claude on a running session's own dir; its restart syncs it"
+setconf "FLEET_CLAUDE_CONFIG_DIR=$FCFG" "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on"
+rm -rf "$FAKE/claude-cfg" "$STATE/sync-deferred"; run fleet config-dir init; login_all acme-mm acme-build acme-security acme-rel
+run fleet sync
+rc_is "every session down: sync covers every dir" 0
+stub_state() { printf '%s/claude-cfg/%s' "$FAKE" "$(printf '%s' "$SESS/$1" | tr '/' '_')"; }
+running() { mkdir -p "$FAKE/tmux"; : >"$FAKE/tmux/windows"; local n; for n in "$@"; do echo "$n" >>"$FAKE/tmux/windows"; echo node >"$FAKE/tmux/cmd-$n"; done; }
+on_dir() { since "$1" | grep "CFG=$SESS/$2\$" || true; }
+ILOG="$STATE/claude-invocations.log"
+# the running sessions' dirs fall behind (their plugin state is gone); the stopped ones too
+running acme-mm acme-security
+rm -rf "$FAKE/claude-cfg"; rm -f "$ILOG"
+m="$(mark)"; run fleet sync
+rc_is "sync with two sessions running exits 0" 0
+eq "no claude on acme-mm's dir while it runs" "$(on_dir "$m" acme-mm)" ""
+eq "…nor on acme-security's" "$(on_dir "$m" acme-security)" ""
+hasnt "…and none in the invocation log" "$(cat "$ILOG" 2>/dev/null)" "$SESS/acme-mm"
+has "a stopped session's dir is synced as before" "$(on_dir "$m" acme-build)" "plugin install"
+has "…and acme-rel's" "$(on_dir "$m" acme-rel)" "plugin install"
+has "each running one is reported, with what picks it up" "$OUT" "claude config dir: $SESS/acme-mm (session acme-mm, own login): session running, not synced now — restart to pick up"
+has "…and summed up with the override and its risk" "$OUT" "not synced, running: acme-mm acme-security"
+has "…naming the override" "$OUT" "fleet sync --include-running (risky"
+eq "…and both are recorded for their restart" "$(sort "$STATE/sync-deferred" | paste -sd' ' -)" "acme-mm acme-security"
+# fleet status: --check reads a running session's dir from its files, never its login
+k2_files() { # k2_files <session> <from session>: write <from>'s stub plugin state as <session>'s own plugin files
+  local s; s="$(stub_state "$2")"; mkdir -p "$SESS/$1/plugins"
+  jq 'map({key: .name, value: {source: {source: "git", url: .url, ref: .ref}}}) | from_entries' "$s/marketplaces.json" >"$SESS/$1/plugins/known_marketplaces.json"
+  jq '{version: 2, plugins: (map({key: .id, value: [{scope, version, installPath: ""}]}) | from_entries)}' "$s/plugins.json" >"$SESS/$1/plugins/installed_plugins.json"
+}
+k2_files acme-security acme-build; rm -rf "$SESS/acme-mm/plugins"
+rm -f "$ILOG"; m="$(mark)"; run fleet status
+eq "status: no claude on acme-mm's dir" "$(on_dir "$m" acme-mm)" ""
+eq "…nor on acme-security's" "$(on_dir "$m" acme-security)" ""
+hasnt "…none in the invocation log" "$(cat "$ILOG" 2>/dev/null)" "$SESS/acme-mm "
+hasnt "…for either" "$(cat "$ILOG" 2>/dev/null)" "$SESS/acme-security "
+has "…the stopped dirs are still asked (no live login there)" "$(on_dir "$m" acme-build)" "auth status"
+has "…says the login of a running one was not checked" "$OUT" "$SESS/acme-mm (session acme-mm, own login), login not checked"
+has "…reads a running dir's marketplace from its files" "$OUT" "marketplace engsys is at 'absent'"
+hasnt "…and finds the one whose files match the pins in sync" "$(sed -n "\|$SESS/acme-security|,\|claude config dir: $SESS/acme-rel|p" <<<"$OUT")" "is at"
+has "…the host itself is in sync" "$OUT" "host is in sync with the pins"
+has "…and the behind running one waits for its restart, not a sync" "$OUT" "running, behind the pins until restarted: acme-mm (fleet restart --stale"
+run fleet sync --check
+rc_is "…sync --check exits 0: nothing left for a sync to do" 0
+m="$(mark)"; run fleet sync
+has "a running session whose dir is at the pins (read from its files) is not deferred" "$OUT" "(session acme-security, own login): session running, its dir is at the pins"
+eq "…only the behind one is" "$(cat "$STATE/sync-deferred")" "acme-mm"
+eq "…and neither got a claude" "$(on_dir "$m" acme-mm)$(on_dir "$m" acme-security)" ""
+# --session refuses a running session; --include-running is the explicit override
+run fleet sync --session acme-mm
+rc_is "sync --session on a running session is refused" 1
+has "…saying it syncs at its restart" "$OUT" "session acme-mm is running"
+FLEET_SYNC_INCLUDE_RUNNING=1 run fleet sync
+eq "an inherited FLEET_SYNC_INCLUDE_RUNNING is not the flag" "$(cat "$STATE/sync-deferred")" "acme-mm"
+m="$(mark)"; run fleet sync --include-running
+rc_is "sync --include-running exits 0" 0
+has "…syncs the running session's dir" "$(on_dir "$m" acme-mm)" "plugin install"
+has "…with a warning naming the risk" "$OUT" "WARNING --include-running: syncing $SESS/acme-mm while session acme-mm runs on it"
+if [ -e "$STATE/sync-deferred" ]; then bad "…and nothing is left deferred"; else ok "…and nothing is left deferred"; fi
+# the pin cycle: sync defers the running monster; its relaunch (fleet launch, as restart and the supervisor do) syncs it first
+rm -rf "$(stub_state acme-mm)"; running acme-mm
+run fleet sync; eq "acme-mm deferred again" "$(cat "$STATE/sync-deferred")" "acme-mm"
+echo zsh >"$FAKE/tmux/cmd-acme-mm"
+run fleet sync --check
+has "an exited session's dir is checked through the CLI again (no live login)" "$OUT" "$SESS/acme-mm (session acme-mm, own login), logged in"
+: >"$FAKE/tmux/windows"; rm -f "$FAKE/tmux/cmd-acme-mm"; : >"$FAKE/tmux.log"
+m="$(mark)"; run fleet launch acme-mm
+rc_is "the relaunch of a deferred session succeeds" 0
+has "…its dir was synced first" "$(on_dir "$m" acme-mm)" "plugin install engsys@engsys"
+has "…saying so" "$OUT" "session acme-mm is down and fleet sync left its config dir behind"
+has "…then it was verified and launched" "$(tl acme-mm)" "export CLAUDE_CONFIG_DIR=$SESS/acme-mm && command claude"
+if [ -e "$STATE/sync-deferred" ]; then bad "…and it is no longer deferred"; else ok "…and it is no longer deferred"; fi
+m="$(mark)"; : >"$FAKE/tmux/windows"; run fleet launch acme-mm
+eq "a launch with nothing deferred installs nothing" "$(on_dir "$m" acme-mm | grep -c 'plugin install' || true)" 0
+# the supervisor's per-session tick: once the session is down, verify --auto-sync syncs the deferred dir before judging it
+rm -rf "$(stub_state acme-security)" "$SESS/acme-security/plugins"; running acme-security; run fleet sync
+eq "acme-security deferred" "$(cat "$STATE/sync-deferred")" "acme-security"
+: >"$FAKE/tmux/windows"; m="$(mark)"
+run fleet verify --alert --auto-sync --max-age 15 --session acme-security
+rc_is "the supervisor's check of the stopped, deferred session syncs its dir, then passes" 0
+has "…synced" "$(on_dir "$m" acme-security)" "plugin install engsys@engsys"
+if [ -e "$STATE/sync-deferred" ]; then bad "…and it is no longer deferred"; else ok "…and it is no longer deferred"; fi
+# a deferred sync that fails refuses that session's launch
+rm -rf "$(stub_state acme-mm)"; running acme-mm; run fleet sync; : >"$FAKE/tmux/windows"; rm -f "$FAKE/tmux/cmd-acme-mm"
+touch "$FAKE/claude-add-fail"; : >"$FAKE/tmux.log"
+run fleet launch acme-mm
+rm -f "$FAKE/claude-add-fail"
+rc_is "a deferred dir that cannot be synced: the launch is refused" 1
+has "…saying what failed and how to retry" "$OUT" "fleet sync left its config dir behind while it ran, and syncing it now failed"
+eq "…nothing reached tmux" "$(grep -c send-keys "$FAKE/tmux.log" || true)" 0
+eq "…and it stays deferred" "$(cat "$STATE/sync-deferred")" "acme-mm"
+rm -f "$STATE/sync-deferred"
+cp "$T/flc.bak" "$LC"; rm -rf "$SESS" "$FAKE/tmux" "$FAKE/claude-cfg"; : >"$FAKE/tmux.log"
 
 echo "== F. supervise"
 rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"; : >"$FAKE/gh.log"
