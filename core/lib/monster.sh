@@ -39,6 +39,13 @@
 #   monster_handback_prune STATE_DIR    drop other launches' lines from that log (the buses, once at start)
 #   monster_context_tokens TRANSCRIPT   the main thread's last assistant usage (input + cache creation + cache
 #                                       read), read from the last 64 KB of the transcript; empty when none
+#   monster_review_label REPO [CONFIG]  sets MONSTER_REVIEW_LABEL, the security-review request label the merge preflight
+#                                       names (core/lib/security-sensitive.mjs review-label: the discovered merge configs,
+#                                       CONFIG as one more source; engsys#231), and MONSTER_REVIEW_LABEL_WARN: empty, or
+#                                       why it could not be resolved (a cross-config conflict, an unreadable config). Then
+#                                       the label falls back to security-review-requested so the watch keeps running,
+#                                       and the caller must say so loudly (preflight itself fails closed on the same
+#                                       config, so no PR passes meanwhile)
 #   monster_rotation_status STATE_DIR STATUS THRESHOLD [TRANSCRIPT]
 #                                       sets MONSTER_STATUS, the heartbeat status to write: over THRESHOLD
 #                                       tokens (0 = never) with nothing active, `rotation requested — ctx <N>k`,
@@ -62,6 +69,18 @@ if [ -n "${GH_APP_ENV_FILE:-}" ]; then
   fi
   unset _monster_id_bin
 fi
+
+monster_review_label() {
+  local out rc=0 why
+  MONSTER_REVIEW_LABEL="" MONSTER_REVIEW_LABEL_WARN=""
+  out=$(node "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/security-sensitive.mjs" review-label --repo "$1" ${2:+--config "$2"} 2>&1) || rc=$?
+  if [ "$rc" = 0 ] && [ -n "$out" ]; then MONSTER_REVIEW_LABEL="$out"; return 0; fi
+  MONSTER_REVIEW_LABEL=security-review-requested
+  why=$(printf '%s' "$out" | jq -r '.reason // empty' 2>/dev/null || true)
+  [ -n "$why" ] || why=$(printf '%s' "${out:-exit $rc}" | tr '\n' ' ' | head -c 200)
+  MONSTER_REVIEW_LABEL_WARN="security review label unresolved (${why:0:220}): watching the default 'security-review-requested'; fix security_review_label in the merge configs"
+  return 0
+}
 
 monster_sha256() {
   if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'

@@ -449,7 +449,11 @@ shows up as a delta; at startup, list them once. The list itself:
 reads the label from the same merge configs preflight reads (`$ENGSYS_MM_CONFIG`,
 `.claude/merge-monster.yml`, the fleet-config-dir copy; two that disagree are
 an error, never a guess), lists the open PRs carrying it (the label is
-re-checked on each PR), and classifies each.
+re-checked on each PR), and classifies each. If the label cannot be
+resolved (that conflict, or an unreadable config), `mnt-snapshot.sh`
+reports `security_reviews.label_error` and `mnt-watch.sh` prints a
+`CONFIG_WARNING`: escalate once; the watch keeps the default label
+meanwhile, and the merge preflight fails closed on the same configs.
 
 **Per PR, in order:**
 

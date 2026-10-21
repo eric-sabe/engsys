@@ -196,6 +196,18 @@ has "mnt-watch.sh: a labeled PR is a SECURITY_REVIEW event" "SECURITY_REVIEW #42
 printf '[%s]\n' "$(review_pr 42 eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee)" >"$T/resp/pr-list"
 ENGSYS_SINGLETON_ROLE=maintain bus 2 "$MNT/mnt-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents
 has "  …and again for a new head" "SECURITY_REVIEW #42 head=eeeeeeeeeeee"
+printf 'security_review_label: needs-nyx\n' >"$T/lbl-a.yml"; printf 'security_sensitive_label: needs-nyx\n' >"$T/lbl-s.yml"
+ENGSYS_MM_CONFIG="$T/lbl-a.yml" ENGSYS_SINGLETON_ROLE=maintain bus 2 "$MNT/mnt-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents
+hasnt "  …a consistent configured label: no warning (positive control)" "CONFIG_WARNING security review"
+run env ENGSYS_MM_CONFIG="$T/lbl-a.yml" bash "$MNT/mnt-snapshot.sh" --repo acme/app
+hasnt "mnt-snapshot.sh: no label_error when the label resolves" "label_error"
+mkdir -p "$T/wd/.claude"; cp "$T/lbl-s.yml" "$T/wd/.claude/merge-monster.yml"
+cd "$T/wd"
+run env ENGSYS_MM_CONFIG="$T/lbl-a.yml" bash "$MNT/mnt-snapshot.sh" --repo acme/app
+has "  …an unresolvable label (the review label is another config's sensitive label) is reported in the snapshot" '"label_error": "security review label unresolved'
+ENGSYS_MM_CONFIG="$T/lbl-a.yml" ENGSYS_SINGLETON_ROLE=maintain bus 2 "$MNT/mnt-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents
+has "mnt-watch.sh: …and the bus says so (CONFIG_WARNING)" "CONFIG_WARNING security review label unresolved"
+cd "$HERE"; rm -rf "$T/wd"
 rm -rf "$T/state"/baton-* "$T/state/.watch" "$T/resp"/*
 
 echo "the security verdict wakes the merge monster (engsys#241)"
@@ -249,9 +261,25 @@ printf '[%s]\n' "$(labeled_pr 16)" >"$T/resp/pr-list"; run "${VTICK[@]}"; printf
 echo 1 >"$T/pf-rc"; echo signed_findings_for_head >"$T/pf-why"
 run "${VTICK[@]}"
 has "a signed FINDINGS lands → preflight_fail with the reason" "VERDICT_WAKE #16 preflight_fail:signed_findings_for_head head=cccccccccccc"
+: >"$T/pf.log"
 run "${VTICK[@]}"
-[ "$OUT" = NOOP ] && ok "  …and the PR is no longer watched once it failed" || bad "  …no longer watched" "$OUT"
+[ "$OUT" = NOOP ] && ok "  …once (latched)" || bad "  …once (latched)" "$OUT"
+[ -s "$T/pf.log" ] && ok "  …but still watched while it keeps its mm: label (the failure may be transient)" || bad "  …still watched" "$(cat "$T/pf.log")"
+printf '[%s]\n' "$(pr_json 16 CLEAN | sed 's/"labels":\[{"name":"mm:ready"}\]/"labels":[]/')" >"$T/resp/pr-list"; : >"$T/pf.log"
+run "${VTICK[@]}"
+[ -s "$T/pf.log" ] && bad "  …until the model bounces it (no mm: label)" "$(cat "$T/pf.log")" || ok "  …until the model bounces it (no mm: label)"
 rm -f "$T/pf-why"
+# a transient gh failure on a parked PR does not drop it from the wait
+printf '[%s]\n' "$(labeled_pr 19)" >"$T/resp/pr-list"; echo 3 >"$T/pf-rc"
+run "${VTICK[@]}"
+printf '[%s]\n' "$(pr_json 19 CLEAN)" >"$T/resp/pr-list"
+run "${VTICK[@]}"
+echo 1 >"$T/pf-rc"; echo 'gh: HTTP 502' >"$T/pf-why"
+run "${VTICK[@]}"
+has "a transient preflight error on a parked PR wakes once" "VERDICT_WAKE #19 preflight_fail:gh head="
+echo 0 >"$T/pf-rc"; rm -f "$T/pf-why"
+run "${VTICK[@]}"
+has "  …and the PR stays watched: the verdict landing still wakes it" "VERDICT_WAKE #19 preflight_pass"
 # the verdict is posted but the label stays (the lane stopped before removing it): the backstop still wakes once
 printf '[%s]\n' "$(labeled_pr 17)" >"$T/resp/pr-list"; echo 3 >"$T/pf-rc"
 run "${VTICK[@]}"
@@ -285,9 +313,23 @@ printf '[%s]\n' "$(pr_json 20 CLEAN)" >"$T/resp/pr-list"
 bus 3 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents
 has "  …and so is the label's removal" "VERDICT_WAKE #20 label_removed"
 [ "$(count_of 'VERDICT_WAKE #20 label_removed')" = 1 ] && ok "  …once" || bad "  …once" "$OUT"
+printf '[%s]\n' "$(labeled_pr 21)" >"$T/resp/pr-list"; nyx_gql IC_old
+bus 3 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents
+hasnt "  …a PR labeled later with a nyx-review comment already on it: no wake for that old comment" "VERDICT_WAKE #21 nyx_review_comment"
 rm -f "$T/resp/pr-list"
 bus 2 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents
 hasnt "  …an unreadable PR list is no event" "VERDICT_WAKE"
+# a review-label conflict across merge configs is said loudly, never silently replaced by the default
+printf 'security_review_label: needs-nyx\n' >"$T/lbl-a.yml"; printf 'security_review_label: other\n' >"$T/lbl-b.yml"
+ENGSYS_MM_CONFIG="$T/lbl-a.yml" bus 2 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents --config "$T/lbl-b.yml"
+has "mm-watch.sh: a review-label conflict is a CONFIG_WARNING line" "CONFIG_WARNING security review label unresolved"
+held merge; mkdir -p "$T/state/.watch"; date +%s >"$T/state/.watch/last-heartbeat"; echo '[]' >"$T/resp/pr-list"
+run env ENGSYS_MM_CONFIG="$T/lbl-a.yml" MM_PREFLIGHT="$T/bin/preflight-stub.sh" FLEET_ID=alice "${TICK[@]}" --config "$T/lbl-b.yml"
+has "mm-tick.sh: …a delta line too" "CONFIG_WARNING security review label unresolved"
+has "  …naming the conflict" "'needs-nyx'"
+run env ENGSYS_MM_CONFIG="$T/lbl-a.yml" MM_PREFLIGHT="$T/bin/preflight-stub.sh" FLEET_ID=alice "${TICK[@]}" --config "$T/lbl-b.yml"
+hasnt "  …once per reason" "CONFIG_WARNING"
+rm -rf "$T/state"/baton-*
 rm -rf "$T/state/.watch" "$T/resp"/*
 
 echo "pulse_max (engsys#123)"

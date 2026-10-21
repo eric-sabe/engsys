@@ -13,6 +13,8 @@ set -euo pipefail
 # shellcheck source=../../../lib/fleet-gh.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/fleet-gh.sh"
 fleet_gh_resolve
+# shellcheck source=../../../lib/monster.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/monster.sh"
 
 REPO="" DEFBRANCH="main" REVIEW_LABEL=""
 while [ $# -gt 0 ]; do
@@ -73,11 +75,18 @@ fi
 
 # --- security-review requests (engsys#231) ---------------------------------
 # A failed read is `available: false`, never an empty (clean-looking) list.
-[ -n "$REVIEW_LABEL" ] || REVIEW_LABEL=$(node "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/security-sensitive.mjs" review-label --repo "$REPO" 2>/dev/null) || REVIEW_LABEL=""
-[ -n "$REVIEW_LABEL" ] || REVIEW_LABEL=security-review-requested
+# An unresolved label (a cross-config conflict) is reported in security_reviews.label_error (a tick delta) and on
+# stderr, never silently replaced by the default.
+REVIEW_LABEL_ERROR=""
+if [ -z "$REVIEW_LABEL" ]; then
+  monster_review_label "$REPO"
+  REVIEW_LABEL="$MONSTER_REVIEW_LABEL" REVIEW_LABEL_ERROR="$MONSTER_REVIEW_LABEL_WARN"
+  [ -z "$REVIEW_LABEL_ERROR" ] || echo "mnt-snapshot: $REVIEW_LABEL_ERROR" >&2
+fi
 if REVIEW_RAW=$("$FLEET_GH" pr list -R "$REPO" --state open --limit 200 --label "$REVIEW_LABEL" --json number,headRefOid,labels 2>/dev/null) \
   && REVIEW_PRS=$(printf '%s' "$REVIEW_RAW" | jq -c --arg rl "$(printf '%s' "$REVIEW_LABEL" | tr '[:upper:]' '[:lower:]')" \
-    '[ .[] | select(any(.labels[]; (.name | ascii_downcase) == $rl)) | {number, head: .headRefOid} ] | sort_by(.number)' 2>/dev/null); then
+    '[ .[] | select(any(.labels[]; (.name | ascii_downcase) == $rl)) | {number, head: .headRefOid} ] | sort_by(.number)' 2>/dev/null) \
+  && [ -n "$REVIEW_PRS" ]; then
   REVIEW_AVAILABLE=true
 else
   REVIEW_AVAILABLE=false REVIEW_PRS="[]"
@@ -108,11 +117,13 @@ jq -n \
   --argjson services_ci "$SERVICES_CI" \
   --argjson review_available "$REVIEW_AVAILABLE" \
   --argjson review_prs "$REVIEW_PRS" \
+  --arg review_label_error "$REVIEW_LABEL_ERROR" \
   '{
     dependabot_prs: $dependabot_prs,
     dependabot_alerts: { available: $dep_alerts_available, count: $dep_alerts_count, items: $dep_alerts },
     codeql_alerts: { available: $codeql_alerts_available, count: $codeql_alerts_count, items: $codeql_alerts },
     secret_scan_latest: $secret_scan,
     services_ci_latest_push: $services_ci,
-    security_reviews: { available: $review_available, count: ($review_prs | length), items: $review_prs }
+    security_reviews: ({ available: $review_available, count: ($review_prs | length), items: $review_prs }
+      + (if $review_label_error != "" then {label_error: $review_label_error} else {} end))
   }'

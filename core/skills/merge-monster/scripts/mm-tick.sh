@@ -13,9 +13,11 @@
 #        VERDICT_WAKE #N <cause> head=<sha12>  engsys#241: the security-verdict backstop re-ran mm-preflight.sh for a PR
 #                                     that carries the review request label or was parked waiting on a verdict, and
 #                                     its outcome moved: preflight_pass (the verdict landed: continue, and re-check an
-#                                     existing gate request for this head), preflight_fail:<reason> (handle as any
-#                                     preflight failure), label_removed_no_verdict (the label is gone but no valid
-#                                     verdict is there: request the review again). Once per outcome and head.
+#                                     existing gate request for this head), preflight_fail:<reason> (re-run preflight
+#                                     yourself, as for every VERDICT_WAKE; bounce only if YOUR run fails too: the
+#                                     tick's run may have hit a transient gh error), label_removed_no_verdict (the
+#                                     label is gone but no valid verdict is there: request the review again). Once
+#                                     per outcome and head. A failed run keeps the PR watched (still parked).
 #        AGENT_OVERDUE … / AGENT_STALE …   from the watchdog scan
 #        HANDBACK_INCOMPLETE …             a subagent handed back unfinished work: resume it or take it over
 #        BATON_HANDOVER merge <fleet>      federation.yml moved the role's home (§ Handover)
@@ -120,8 +122,17 @@ gate_lines() {
   done
 }
 # the label preflight names (the same discovery, --config as one more source; engsys#231)
-REVIEW_LABEL="$(node "$here/../../../lib/security-sensitive.mjs" review-label --repo "$REPO" ${CONFIG:+--config "$CONFIG"} 2>/dev/null)" || REVIEW_LABEL=""
-[ -n "$REVIEW_LABEL" ] || REVIEW_LABEL=security-review-requested
+monster_review_label "$REPO" "$CONFIG"
+REVIEW_LABEL="$MONSTER_REVIEW_LABEL"
+# a conflict is said loudly, once per distinct reason (preflight fails closed on the same configs meanwhile)
+if [ -n "$MONSTER_REVIEW_LABEL_WARN" ]; then
+  echo "mm-tick: $MONSTER_REVIEW_LABEL_WARN" >&2
+  if [ "$(cat "$W/review-label-warn.said" 2>/dev/null || true)" != "$MONSTER_REVIEW_LABEL_WARN" ]; then
+    DELTA+=("CONFIG_WARNING ${MONSTER_REVIEW_LABEL_WARN:0:280}"); printf '%s\n' "$MONSTER_REVIEW_LABEL_WARN" >"$W/review-label-warn.said"
+  fi
+else
+  rm -f "$W/review-label-warn.said"
+fi
 SNAP_OK=0
 if SNAP=$(bash "$here/mm-snapshot.sh" --repo "$REPO" --review-label "$REVIEW_LABEL" 2>&1); then
   SNAP_OK=1
@@ -167,7 +178,10 @@ verdict_lines() {
       3) printf '%s\n' "$n" >>"$wait_new"
          if [ "$labeled" = 0 ]; then key="label_removed_no_verdict"; else rm -f "$W/verdict.$n"; continue; fi ;;
       0) key="preflight_pass" ;;
-      *) why=$(printf '%s' "$err" | jq -r '.reason // empty' 2>/dev/null | cut -d: -f1 | tr -c 'A-Za-z0-9_\n-' '_' | head -c 60)
+      # a failure keeps the PR watched: it may be a transient gh error, and a real one (FINDINGS for this head) ends
+      # the watch by itself once the model bounces the PR (no mm: label) or the lane removes the request label
+      *) printf '%s\n' "$n" >>"$wait_new"
+         why=$(printf '%s' "$err" | jq -r '.reason // empty' 2>/dev/null | cut -d: -f1 | tr -c 'A-Za-z0-9_\n-' '_' | head -c 60)
          key="preflight_fail:${why:-exit_$rc}" ;;
     esac
     [ "$(cat "$W/verdict.$n" 2>/dev/null || true)" != "$key ${head:--}" ] || continue

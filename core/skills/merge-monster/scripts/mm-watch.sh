@@ -116,14 +116,15 @@ PULSE_MAX="${PULSE_OUT%%$'\t'*}" PULSE_WARN="${PULSE_OUT#*$'\t'}"
 ROTATE_OUT="$(monster_rotate_tokens "$(monster_cfg_scalar "$CONFIG" rotate_context_tokens)")"
 ROTATE_WARN="${ROTATE_OUT#*$'\t'}"
 # the label preflight names (the same discovery, --config as one more source; engsys#231)
-REVIEW_LABEL="$(node "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/security-sensitive.mjs" review-label --repo "$REPO" ${CONFIG:+--config "$CONFIG"} 2>/dev/null)" || REVIEW_LABEL=""
-[ -n "$REVIEW_LABEL" ] || REVIEW_LABEL=security-review-requested
+monster_review_label "$REPO" "$CONFIG"
+REVIEW_LABEL="$MONSTER_REVIEW_LABEL"   # a conflict: CONFIG_WARNING below (escalate once), and on stderr
 
 W="$DIR/.watch"
 mkdir -p "$W"
 touch "$W/ready.tsv" "$W/deps.tsv" "$W/dirty.tsv" "$W/checks.tsv" "$W/mainrun.txt"
 [ -z "$PULSE_WARN" ] || echo "CONFIG_WARNING ${PULSE_WARN:0:280}"
 [ -z "$ROTATE_WARN" ] || echo "CONFIG_WARNING ${ROTATE_WARN:0:280}"
+[ -z "$MONSTER_REVIEW_LABEL_WARN" ] || { echo "CONFIG_WARNING ${MONSTER_REVIEW_LABEL_WARN:0:280}"; echo "mm-watch: $MONSTER_REVIEW_LABEL_WARN" >&2; }
 monster_handback_prune "$DIR" # drop earlier launches' hand-back lines (engsys#137 review)
 
 # --- baton keepalive (see the header) ----------------------------------------
@@ -257,12 +258,14 @@ fhd_event() {
 # --- security verdict landing (engsys#241) -------------------------------------
 # The security lane posts a signed `<!-- nyx-review -->` comment and removes the request label: neither is an mm: label
 # or a check, so nothing above sees it. secreview.tsv holds the PRs that carried the label last cycle; nyx.seen the
-# nyx-review comment ids seen on them (the first cycle of a fresh state dir only records, so a restart does not re-fire).
+# nyx-review comment ids seen on them (the first cycle of a fresh state dir, and a PR's first labeled cycle, only record, so
+# a restart or a new label does not fire for a comment that was already there).
 # A failed read changes nothing (no false "label removed").
 NYX_RE='^\s*<!-- nyx-review -->'
 verdict_event() {
   local raw n ids id woke first=0
   raw=$("$FLEET_GH" pr list -R "$REPO" --state open --limit 200 --label "$REVIEW_LABEL" --json number,labels 2>/dev/null) || return 0
+  printf '%s' "$raw" | jq -e 'type == "array"' >/dev/null 2>&1 || return 0   # no list is no answer, never "no label anywhere"
   printf '%s' "$raw" | jq -r --arg rl "$(printf '%s' "$REVIEW_LABEL" | tr '[:upper:]' '[:lower:]')" \
     '.[] | select(any(.labels[]; (.name | ascii_downcase) == $rl)) | .number' 2>/dev/null | LC_ALL=C sort -u >"$W/secreview.new" || return 0
   [ -f "$W/secreview.tsv" ] || first=1
@@ -277,7 +280,9 @@ verdict_event() {
       query($owner: String!, $name: String!, $number: Int!) {
         repository(owner: $owner, name: $name) { pullRequest(number: $number) { comments(last: 10) { nodes { id body } } } } }' 2>/dev/null \
       | jq -r --arg re "$NYX_RE" '.data.repository.pullRequest.comments.nodes[]? | select((.body // "") | test($re)) | .id' 2>/dev/null) || continue
-    woke=0
+    # a PR newly labeled this cycle only records its existing comments: the wake is for a verdict that lands after
+    # the request (an older nyx-review comment is preflight's business, and the tick re-preflights the PR anyway)
+    woke=0; grep -qxF "$n" "$W/secreview.tsv" || woke=1
     for id in $ids; do
       printf '%s\t%s\n' "$n" "$id" >>"$W/nyx.new"
       if [ "$first" = 0 ] && [ "$woke" = 0 ] && ! grep -qxF "$(printf '%s\t%s' "$n" "$id")" "$W/nyx.seen"; then

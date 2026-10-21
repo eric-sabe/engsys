@@ -105,8 +105,9 @@ ROTATE_WARN="${ROTATE_OUT#*$'\t'}"
 W="$DIR/.watch"
 mkdir -p "$W"
 touch "$W/deps_pr.tsv" "$W/dep_alerts.tsv" "$W/codeql_alerts.tsv" "$W/secretrun.txt" "$W/trivyrun.txt" "$W/secreview.tsv"
-REVIEW_LABEL=$(node "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/security-sensitive.mjs" review-label --repo "$REPO" 2>/dev/null) || REVIEW_LABEL=""
-[ -n "$REVIEW_LABEL" ] || REVIEW_LABEL=security-review-requested
+monster_review_label "$REPO"
+REVIEW_LABEL="$MONSTER_REVIEW_LABEL"
+[ -z "$MONSTER_REVIEW_LABEL_WARN" ] || { echo "CONFIG_WARNING ${MONSTER_REVIEW_LABEL_WARN:0:280}"; echo "mnt-watch: $MONSTER_REVIEW_LABEL_WARN" >&2; }
 [ -z "$PULSE_WARN" ] || echo "CONFIG_WARNING ${PULSE_WARN:0:280}"
 [ -z "$ROTATE_WARN" ] || echo "CONFIG_WARNING ${ROTATE_WARN:0:280}"
 monster_handback_prune "$DIR" # drop earlier launches' hand-back lines (engsys#137 review)

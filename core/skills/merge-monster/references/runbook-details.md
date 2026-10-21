@@ -448,7 +448,13 @@ is an `mm:` label or a check, so the bus watches them explicitly
 re-runs preflight for each PR that carries the label or was parked waiting
 on a verdict (remembered in `.watch/verdict-wait`), whatever the deltas, and
 reports a `VERDICT_WAKE` line only when the outcome moved (latched per PR,
-outcome and head), so an unchanged wait stays `NOOP`.
+outcome and head), so an unchanged wait stays `NOOP`. A failed run
+(`preflight_fail:<reason>`, possibly a transient `gh` error) keeps the PR
+watched: re-run preflight yourself and bounce only if your run fails too.
+The tick and the bus resolve the label with preflight's own discovery
+(`core/lib/security-sensitive.mjs review-label`); if it cannot be resolved
+(two configs disagree), they say so in a `CONFIG_WARNING` line (escalate
+once) and watch the default meanwhile, while preflight fails closed.
 
 ## Failure handling (active PR goes red)
 
