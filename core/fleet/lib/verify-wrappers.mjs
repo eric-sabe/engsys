@@ -1705,7 +1705,7 @@ export async function run(argv, {
       if (mrel !== rel && mrel.status !== 'ahead' && mrel.status !== 'identical') {
         const line = `${mp.id}: ${mp.tag} of ${mp.repo} is commit ${mrel.commit}, which is not on ${mrel.defaultBranch} (compare: ${mrel.status})`;
         if (offMainEnforced) problems.push(`release    ${line}`);
-        else marketWarnings.push(`instance release ${line}; allowed for now, a MISMATCH once enforced: INSTANCE_OFF_MAIN=enforce in fleet.conf, or the default (eric-sabe/engsys#227)`);
+        else marketWarnings.push(`instance release ${line}; allowed for now, a MISMATCH once enforced: INSTANCE_OFF_MAIN=enforce in fleet.conf, or the default; the next 'fleet pin --release next' tags the default branch (eric-sabe/engsys#227)`);
       }
       const mfSha = mrel.tree.get(MARKETPLACE_FILE);
       if (!mfSha) throw new Unverified(`${mp.repo}@${mp.tag} has no ${MARKETPLACE_FILE}`);

@@ -14,7 +14,7 @@ KIT_SRC="$(cd "$HERE/.." && pwd -P)"      # core/fleet
 . "$HERE/sandbox.sh"
 
 G="$FAKE/gh"; mkdir -p "$G/comments"
-: >"$FAKE/gh.log"; : >"$FAKE/claude.log"; : >"$FAKE/review.log"; : >"$FAKE/sync.log"
+: >"$FAKE/gh.log"; : >"$FAKE/claude.log"; : >"$FAKE/claude.env"; : >"$FAKE/review.log"; : >"$FAKE/sync.log"
 
 # --- the kit under test ------------------------------------------------------------------------
 KIT="$T/kit"
@@ -29,6 +29,7 @@ SH
 cat >"$T/bin/claude" <<'SH'
 #!/usr/bin/env bash
 echo "$*" >>"$FAKE/claude.log"
+echo "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR:-}" >>"$FAKE/claude.env"
 if [ "${1:-} ${2:-}" = "plugin validate" ]; then
   [ ! -e "$FAKE/validate.fail" ] || { echo "stub claude: validation failed" >&2; exit 1; }
   echo "Validation passed"; exit 0
@@ -37,35 +38,40 @@ exit 2
 SH
 cat >"$T/bin/gh" <<'SH'
 #!/usr/bin/env bash
-# stub gh: pr list|create|view|comment|edit, release create. State: $FAKE/gh/pr.json (the one PR),
-# $FAKE/gh/counter, $FAKE/gh/comments/NNN, $FAKE/gh/view-states (optional: `pr view --json state` answers, one per call).
+# stub gh: pr list|create|view|comment|edit, release create. State: one PR per repo — $FAKE/gh/pr.json for
+# the pin repo (acme/app), $FAKE/gh/pr.<owner>_<repo>.json for any other —, $FAKE/gh/counter,
+# $FAKE/gh/comments/NNN, $FAKE/gh/view-states (optional: `pr view --json state` answers, one per call).
 G="$FAKE/gh"; mkdir -p "$G/comments"
 echo "gh $*" >>"$FAKE/gh.log"
 arg() { local want="$1" prev="" a; shift; for a in "$@"; do if [ "$prev" = "$want" ]; then echo "$a"; return; fi; prev="$a"; done; }
-url="https://github.com/acme/app/pull"
+repo="$(arg -R "$@")"; repo="${repo:-acme/app}"
+url="https://github.com/$repo/pull"
+pj="$G/pr.json"; [ "$repo" = acme/app ] || pj="$G/pr.${repo//\//_}.json"
+q="$(arg -q "$@")"
+out() { if [ -n "$q" ]; then jq -r "$q"; else cat; fi; }
 case "${1:-} ${2:-}" in
   "pr list")
     h="$(arg --head "$@")"
-    if [ -f "$G/pr.json" ] && jq -e --arg h "$h" '.head == $h and .state == "OPEN"' "$G/pr.json" >/dev/null; then
-      jq -c '[{number, labels: [.labels[] | {name: .}]}]' "$G/pr.json"
+    if [ -f "$pj" ] && jq -e --arg h "$h" '.head == $h and .state == "OPEN"' "$pj" >/dev/null; then
+      jq -c --arg u "$url" '[{number, url: "\($u)/\(.number)", labels: [.labels[] | {name: .}]}]' "$pj" | out
     else
-      echo '[]'
+      echo '[]' | out
     fi ;;
   "pr create")
     n=$(( $(cat "$G/counter" 2>/dev/null || echo 40) + 1 )); echo "$n" >"$G/counter"
     jq -n --argjson n "$n" --arg h "$(arg --head "$@")" --arg t "$(arg --title "$@")" \
-      '{number: $n, head: $h, title: $t, state: "OPEN", labels: []}' >"$G/pr.json"
+      '{number: $n, head: $h, title: $t, state: "OPEN", labels: []}' >"$pj"
     echo "$url/$n" ;;
   "pr view")
-    q="$(arg -q "$@")"
     case "$q" in
-      .number) jq -r .number "$G/pr.json" ;;
+      .number) jq -r .number "$pj" ;;
+      .url) echo "$url/$(jq -r .number "$pj")" ;;
       .state)
         if [ -s "$G/view-states" ]; then
           head -n1 "$G/view-states"
           if [ "$(wc -l <"$G/view-states")" -gt 1 ]; then tail -n +2 "$G/view-states" >"$G/view-states.new"; mv "$G/view-states.new" "$G/view-states"; fi
         else
-          jq -r .state "$G/pr.json"
+          jq -r .state "$pj"
         fi ;;
     esac ;;
   "pr comment")
@@ -73,11 +79,11 @@ case "${1:-} ${2:-}" in
     cat >"$f"; echo "$url/$3#issuecomment-1" ;;
   "pr edit")
     l="$(arg --add-label "$@")"
-    if [ -n "$l" ]; then jq --arg l "$l" '.labels += [$l] | .labels |= unique' "$G/pr.json" >"$G/pr.new" && mv "$G/pr.new" "$G/pr.json"; fi
+    if [ -n "$l" ]; then jq --arg l "$l" '.labels += [$l] | .labels |= unique' "$pj" >"$G/pr.new" && mv "$G/pr.new" "$pj"; fi
     echo "$url/$3" ;;
   "release create")
-    git ls-remote --exit-code --tags "https://github.com/$(arg -R "$@").git" "refs/tags/$3" >/dev/null || { echo "stub gh: no such tag on the remote: $3" >&2; exit 1; }
-    echo "https://github.com/$(arg -R "$@")/releases/tag/$3" ;;
+    git ls-remote --exit-code --tags "https://github.com/$repo.git" "refs/tags/$3" >/dev/null || { echo "stub gh: no such tag on the remote: $3" >&2; exit 1; }
+    echo "https://github.com/$repo/releases/tag/$3" ;;
 esac
 exit 0
 SH
@@ -104,8 +110,8 @@ seed_engsys_ver 1.1.0; commit_all "$E" "engsys 1.1.0"; git -C "$E" tag v1.1.0
 git -C "$E" commit -q --allow-empty -m "engsys 1.1.1 without manifest bump"; git -C "$E" tag v1.1.1
 push_all "$E"     # v1.2.0 is deliberately not released; v1.1.1 has stale 1.1.0 manifests
 
-# the instance repo: main at "instance base"; v0.1.0 is a stamp commit ON TOP of it (as real releases are),
-# tagged and pushed as a tag only — main never carries the stamp
+# the instance repo: main at "instance base"; v0.1.0 is a stamp commit ON TOP of it (as releases were cut
+# before engsys#227), tagged and pushed as a tag only — main never carries the stamp
 I="$T/seed/acme-fleet"
 seed_repo acme/acme-fleet "$I"
 mkdir -p "$I/fleet" "$I/.claude-plugin" "$I/plugin/.claude-plugin" "$I/plugins/tools/.claude-plugin"
@@ -190,10 +196,10 @@ last_comment() { local f; f="$(ls "$G/comments"/* | tail -n1)"; cat "$f"; }
 pr_field() { jq -r "$1" "$G/pr.json"; }
 rem_diff() { git --git-dir="$PINREM" diff -U0 main "$1" | grep -E '^[-+][^-+]' || true; } # changed content lines only
 reset() { # a clean slate between scenarios: no PR, no branches on the remote, empty logs
-  rm -rf "$G/pr.json" "$G/view-states" "$G/comments"; mkdir -p "$G/comments"
+  rm -rf "$G/pr.json" "$G/view-states" "$G/comments"; rm -f "$G"/pr.*.json; mkdir -p "$G/comments"
   local b
   for b in $(git --git-dir="$PINREM" for-each-ref --format='%(refname:short)' refs/heads/chore); do git --git-dir="$PINREM" branch -q -D "$b"; done
-  : >"$FAKE/gh.log"; : >"$FAKE/review.log"; : >"$FAKE/sync.log"; : >"$FAKE/claude.log"
+  : >"$FAKE/gh.log"; : >"$FAKE/review.log"; : >"$FAKE/sync.log"; : >"$FAKE/claude.log"; : >"$FAKE/claude.env"
   rm -f "$FAKE/review.out" "$FAKE/review.rc" "$FAKE/setup.cwd" "$FAKE/validate.fail"
   conf_reset
 }
@@ -346,36 +352,77 @@ eq "labeled directly" "$(pr_field '.labels | join(",")')" "mm:ready"
 has "…and says why" "$OUT" "no REVIEW_CMD configured"
 [ ! -e "$FAKE/setup.cwd" ] && ok "an empty PREPUSH_SETUP_CMD runs nothing" || bad "an empty PREPUSH_SETUP_CMD runs nothing"
 
-echo "== F. a new instance release"
+echo "== F. a new instance release: a release PR first, then the tag on main"
 reset
 echo "later work" >"$I/notes.txt"; commit_all "$I" "post-release work on main"; git -C "$I" push -q origin main
 NEWMAIN="$(git -C "$I" rev-parse HEAD)"
+IPR="$G/pr.acme_acme-fleet.json"
 touch "$FAKE/validate.fail"
 run fleet pin --engsys v1.1.0 --release next --no-wait
 rc_is "a failing plugin validation stops the release" 1
 eq "…nothing was tagged on the remote" "$(git --git-dir="$INSTREM" tag -l | paste -sd' ' -)" v0.1.0
 eq "…no release, no PR" "$(gcount 'release create')$(gcount 'pr create')" 00
-rm -f "$FAKE/validate.fail"; : >"$FAKE/claude.log"
+eq "…no release branch pushed" "$(git --git-dir="$INSTREM" for-each-ref --format='%(refname:short)' refs/heads/release)" ""
+[ -z "$(ls -d "$STATE"/validate-cfg.* 2>/dev/null)" ] && ok "…and the scratch config dir is gone" || bad "…and the scratch config dir is gone"
+rm -f "$FAKE/validate.fail"; : >"$FAKE/claude.log"; : >"$FAKE/claude.env"
+
+# main doesn't carry 0.1.1: the stamp goes out as a PR on the instance repo, and the run stops
 run fleet pin --engsys v1.1.0 --release next --no-wait
-rc_is "exits 0" 0
-has "patch + 1 over the latest" "$OUT" "released acme v0.1.1"
-has "the non-directory plugin source is called out" "$OUT" "non-directory source"
-git --git-dir="$INSTREM" rev-parse -q --verify refs/tags/v0.1.1 >/dev/null && ok "tag v0.1.1 pushed" || bad "tag v0.1.1 pushed"
-eq "the tag is annotated" "$(git -C "$INST" cat-file -t v0.1.1)" tag
-eq "the tag sits on a stamp commit" "$(git -C "$INST" log -1 --format=%s 'v0.1.1^{commit}')" "release: v0.1.1"
-eq "…on top of the main commit it shipped" "$(git -C "$INST" rev-parse 'v0.1.1^')" "$NEWMAIN"
+rc_is "version not on main: exits 3 (release PR open)" 3
+has "…names the PR" "$OUT" "opened the release PR for acme v0.1.1: https://github.com/acme/acme-fleet/pull/"
+has "…and says what to do" "$OUT" "Merge https://github.com/acme/acme-fleet/pull/"
+has "…then re-run" "$OUT" "then re-run the same command"
+has "the release PR is opened on the instance repo" "$(cat "$FAKE/gh.log")" "gh pr create -R acme/acme-fleet --head release/v0.1.1 --base main --title release: v0.1.1"
+eq "…titled release: vX.Y.Z" "$(jq -r .title "$IPR")" "release: v0.1.1"
+eq "no tag on the remote" "$(git --git-dir="$INSTREM" tag -l | paste -sd' ' -)" v0.1.0
+eq "no local tag left behind" "$(git -C "$INST" tag -l 'v0.1.1')" ""
+eq "no GitHub release" "$(gcount 'release create')" 0
+eq "no pin PR (the --engsys bump waits too)" "$(gcount 'pr create -R acme/app')" 0
+eq "no pin branch" "$(git --git-dir="$PINREM" for-each-ref --format='%(refname:short)' refs/heads/chore)" ""
 eq "main itself is untouched" "$(git --git-dir="$INSTREM" rev-parse main)" "$NEWMAIN"
-at() { git -C "$INST" show "v0.1.1:$1"; }
-eq "marketplace metadata.version stamped" "$(at .claude-plugin/marketplace.json | jq -r .metadata.version)" 0.1.1
-eq "plugin ctx stamped" "$(at plugin/.claude-plugin/plugin.json | jq -r .version)" 0.1.1
-eq "plugin tools stamped" "$(at plugins/tools/.claude-plugin/plugin.json | jq -r .version)" 0.1.1
+eq "the branch holds one stamp commit" "$(git --git-dir="$INSTREM" log -1 --format=%s release/v0.1.1)" "release: v0.1.1"
+eq "…on top of main" "$(git --git-dir="$INSTREM" rev-parse 'release/v0.1.1^')" "$NEWMAIN"
+at() { git --git-dir="$INSTREM" show "$1:$2"; }
+eq "marketplace metadata.version stamped" "$(at release/v0.1.1 .claude-plugin/marketplace.json | jq -r .metadata.version)" 0.1.1
+eq "plugin ctx stamped" "$(at release/v0.1.1 plugin/.claude-plugin/plugin.json | jq -r .version)" 0.1.1
+eq "plugin tools stamped" "$(at release/v0.1.1 plugins/tools/.claude-plugin/plugin.json | jq -r .version)" 0.1.1
 eq "the marketplace changed only its version" \
-  "$(at .claude-plugin/marketplace.json | jq -S 'del(.metadata.version)')" "$(git -C "$INST" show "$NEWMAIN:.claude-plugin/marketplace.json" | jq -S 'del(.metadata.version)')"
+  "$(at release/v0.1.1 .claude-plugin/marketplace.json | jq -S 'del(.metadata.version)')" "$(at "$NEWMAIN" .claude-plugin/marketplace.json | jq -S 'del(.metadata.version)')"
 eq "the plugin manifests changed only their version" \
-  "$(at plugins/tools/.claude-plugin/plugin.json | jq -S 'del(.version)')" "$(git -C "$INST" show "$NEWMAIN:plugins/tools/.claude-plugin/plugin.json" | jq -S 'del(.version)')"
+  "$(at release/v0.1.1 plugins/tools/.claude-plugin/plugin.json | jq -S 'del(.version)')" "$(at "$NEWMAIN" plugins/tools/.claude-plugin/plugin.json | jq -S 'del(.version)')"
+has "the non-directory plugin source is called out" "$OUT" "non-directory source"
 matches "the marketplace was validated" "$(cat "$FAKE/claude.log")" "plugin validate ${STATE}/wt-release\$"
 has "plugin ctx was validated" "$(cat "$FAKE/claude.log")" "plugin validate $STATE/wt-release/plugin"
 has "plugin tools was validated" "$(cat "$FAKE/claude.log")" "plugin validate $STATE/wt-release/plugins/tools"
+matches "…with a scratch config dir" "$(sort -u "$FAKE/claude.env")" "^CLAUDE_CONFIG_DIR=$STATE/validate-cfg\.[A-Za-z0-9]+\$"
+[ -z "$(ls -d "$STATE"/validate-cfg.* 2>/dev/null)" ] && ok "…removed afterwards" || bad "…removed afterwards"
+noworktrees "instance repo" "$INST"
+
+run fleet pin --engsys v1.1.0 --release next --no-wait
+rc_is "re-run with the release PR open: exits 3 again" 3
+has "…reports the open PR" "$OUT" "the release PR for acme v0.1.1 is already open: https://github.com/acme/acme-fleet/pull/"
+eq "…no duplicate PR" "$(gcount 'pr create')" 1
+eq "…still no tag" "$(git --git-dir="$INSTREM" tag -l | paste -sd' ' -)" v0.1.0
+run fleet pin --release v0.1.1 --no-wait
+rc_is "an explicit version not on main stops the same way" 3; eq "…same PR" "$(gcount 'pr create')" 1
+noworktrees "instance repo" "$INST"
+
+# the release PR is squash-merged; next must tag that version on main, not bump again
+git -C "$I" fetch -q origin release/v0.1.1 && git -C "$I" merge -q --squash FETCH_HEAD >/dev/null
+git -C "$I" commit -q -m "release: v0.1.1 (#$(jq -r .number "$IPR"))"; git -C "$I" push -q origin main
+jq '.state = "MERGED"' "$IPR" >"$IPR.new" && mv "$IPR.new" "$IPR"
+RELMAIN="$(git -C "$I" rev-parse HEAD)"
+: >"$FAKE/gh.log"
+run fleet pin --engsys v1.1.0 --release next --no-wait
+rc_is "after the merge: exits 0" 0
+has "next tags the version main carries" "$OUT" "released acme v0.1.1 (tagged on acme/acme-fleet main at"
+eq "…no new release PR" "$(gcount 'pr create -R acme/acme-fleet')" 0
+git --git-dir="$INSTREM" rev-parse -q --verify refs/tags/v0.1.1 >/dev/null && ok "tag v0.1.1 pushed" || bad "tag v0.1.1 pushed"
+eq "the tag is annotated" "$(git --git-dir="$INSTREM" cat-file -t v0.1.1)" tag
+eq "the tag is main's commit itself" "$(git --git-dir="$INSTREM" rev-parse 'v0.1.1^{commit}')" "$RELMAIN"
+git --git-dir="$INSTREM" merge-base --is-ancestor v0.1.1 main && ok "the tag is on main" || bad "the tag is on main"
+eq "main is untouched by the tagging" "$(git --git-dir="$INSTREM" rev-parse main)" "$RELMAIN"
+eq "the tagged tree carries 0.1.1" "$(at v0.1.1 plugins/tools/.claude-plugin/plugin.json | jq -r .version)" 0.1.1
 has "the GitHub release was created for the tag" "$(cat "$FAKE/gh.log")" "gh release create v0.1.1 -R acme/acme-fleet --verify-tag --generate-notes"
 eq "…once" "$(gcount 'release create')" 1
 noworktrees "instance repo" "$INST"
@@ -387,6 +434,13 @@ eq "the pin PR pins the new release (refs only)" "$(rem_diff "$BR")" \
 +        "ref": "v0.1.1"'
 has "the pin PR title names both" "$(pr_field .title)" "chore(fleet): pin engsys v1.1.0, acme v0.1.1"
 eq "and it is labeled" "$(pr_field '.labels | join(",")')" "mm:ready"
+run fleet pin --engsys v1.1.0 --release next --no-wait
+rc_is "next with nothing new since a tag on main" 0
+has "…reuses it (the merged release: commit is not walked past)" "$OUT" "nothing new on acme/acme-fleet main since v0.1.1 — pinning v0.1.1"
+eq "…no second release" "$(gcount 'release create')" 1
+run fleet pin --release v0.0.9 --no-wait
+rc_is "a version below the one main carries is refused" 1; has "…saying why" "$OUT" "main already carries version 0.1.1, past v0.0.9"
+eq "…no PR" "$(gcount 'pr create -R acme/acme-fleet')" 0
 run fleet pin --engsys v1.1.0 --release v0.1.1 --no-wait
 rc_is "an explicit existing tag is reused" 0; has "…said so" "$OUT" "acme v0.1.1 already released — pinning it"
 eq "…no second release" "$(gcount 'release create')" 1
@@ -441,5 +495,26 @@ run bash "$KIT/bin/fleet" --instance "$INST" pin --help
 rc_is "fleet pin --help exits 0" 0; has "…documents --release" "$OUT" "--release"
 run bash "$KIT/pin.sh" --instance "$INST" --engsys v1.0.0 --release v0.1.0
 rc_is "pin.sh run directly takes a leading --instance <dir>" 0; has "…and works" "$OUT" "no PR needed"
+
+echo "== J. next after a merged, untagged release PR tags that version (not latest + 1)"
+reset
+IPR="$G/pr.acme_acme-fleet.json"
+echo "minor work" >"$I/minor.txt"; commit_all "$I" "a feature on main"; git -C "$I" push -q origin main
+run fleet pin --release v0.2.0 --no-wait
+rc_is "an explicit minor release opens its PR" 3
+has "…for v0.2.0" "$OUT" "opened the release PR for acme v0.2.0"
+git -C "$I" fetch -q origin release/v0.2.0 && git -C "$I" merge -q --ff-only FETCH_HEAD
+echo "more work" >>"$I/minor.txt"
+# a formatter on main lays the stamped manifests out differently: the values, not the bytes, decide
+jq -c . "$I/.claude-plugin/marketplace.json" >"$I/mf.tmp" && mv "$I/mf.tmp" "$I/.claude-plugin/marketplace.json"
+commit_all "$I" "more work after the release PR merged"; git -C "$I" push -q origin main
+jq '.state = "MERGED"' "$IPR" >"$IPR.new" && mv "$IPR.new" "$IPR"
+run fleet pin --release next --no-wait
+rc_is "next exits 0" 0
+has "…releases v0.2.0, the version main carries" "$OUT" "released acme v0.2.0"
+eq "…no v0.1.2 bump" "$(git --git-dir="$INSTREM" tag -l v0.1.2)" ""
+eq "…on main's head" "$(git --git-dir="$INSTREM" rev-parse 'v0.2.0^{commit}')" "$(git --git-dir="$INSTREM" rev-parse main)"
+eq "…no second release PR" "$(gcount 'pr create -R acme/acme-fleet')" 1
+has "…and the pin PR moves acme to it" "$(pr_field .title)" "acme v0.2.0"
 
 finish pin.test

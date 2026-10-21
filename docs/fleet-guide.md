@@ -1135,7 +1135,7 @@ once (section 6.4).
 | Step | Command | What it does | Touches running sessions? |
 |---|---|---|---|
 | **status** | `fleet status` | fleet id and registry homes (§ 6.10), pins vs host (checkouts, marketplaces, plugins) and which sessions are behind | no |
-| **pin** | `fleet pin --engsys vX.Y.Z` · `fleet pin --release next` · both | release your instance plugin, open the pin PR, get it reviewed and labeled, wait for the merge, then sync | no |
+| **pin** | `fleet pin --engsys vX.Y.Z` · `fleet pin --release next` · both | release your instance plugin (a release PR to merge first, then a re-run tags it), open the pin PR, get it reviewed and labeled, wait for the merge, then sync | no |
 | **sync** | `fleet sync` | make the host match the merged pins | no |
 | **restart** | `fleet restart --stale` · `fleet restart acme-build` | cycle sessions onto what is installed, whenever you are ready | **yes** |
 
@@ -1195,11 +1195,26 @@ models in `fleet/fleet.conf`, roster, host templates):
 fleet pin --release next
 ```
 
-`next` is the next patch tag (`v0.1.1` to `v0.1.2`), or pass an explicit `vX.Y.Z`. The release is a stamp
-commit on top of the default branch that sets `metadata.version` in `.claude-plugin/marketplace.json` and
-`version` in every plugin it lists (Claude Code caches plugins by version, so every release needs a
-distinct one, and you never edit versions by hand), then `claude plugin validate`, tag, push the tag and
-create a GitHub release. If nothing is new since the last release, it reuses that release.
+`next` is the next patch tag (`v0.1.1` to `v0.1.2`), or pass an explicit `vX.Y.Z`. A release is tagged on
+the default branch itself (eric-sabe/engsys#227), so the version has to land there first, through a PR, in two
+runs of the same command:
+
+1. **Release PR.** The release version is stamped as `metadata.version` in `.claude-plugin/marketplace.json`
+   and `version` in every plugin it lists (Claude Code caches plugins by version, so every release needs a
+   distinct one, and you never edit versions by hand), then `claude plugin validate` (with a scratch config
+   dir). When the default branch doesn't carry that version yet, the stamp is pushed to `release/vX.Y.Z`
+   and opened as a PR titled `release: vX.Y.Z` on the instance repo, and `fleet pin` **stops with exit 3**,
+   printing the PR URL: nothing is tagged and no pin PR is opened, even with `--engsys` in the same command.
+   Re-running while that PR is open reports the same PR; it never opens a second one.
+2. **Tag.** Merge the release PR (any merge method), then re-run the same command. The default branch now
+   carries the version, so the run tags the default branch's commit itself (an annotated tag), pushes the
+   tag, creates the GitHub release (`--verify-tag`) and goes on to the pin PR below.
+
+An existing tag is used as is. `next` picks the version the default branch already carries when that is past
+every tag (a merged release PR that is not tagged yet: it is tagged, not bumped again); otherwise it is the
+latest tag's patch + 1, and if nothing is new on the default branch since the latest tag, that release is
+reused. Tags cut before #227 sit on a `release: vX` stamp commit off the default branch; `next` treats their
+parent as what they shipped, so both shapes work.
 
 Then the pin PR: only the marketplace refs change (verified with a `jq` strip-diff), `PREPUSH_SETUP_CMD`
 runs first if set, it is pushed normally and an open PR for the same pins is reused. `REVIEW_CMD`, if set,
@@ -1209,7 +1224,7 @@ or a match for `REVIEW_BLOCK_REGEX` (default `critical|warning`, case-insensitiv
 read the output, then add the label yourself once you are satisfied. `fleet pin` then waits (up to
 `PIN_WAIT_MAX_MIN`, default 240) for the merge and runs `fleet sync`. Ctrl-C while waiting is safe; run
 `fleet sync` later. `--no-wait` stops after the PR is queued. Interrupted anywhere? Re-run the same
-command: an existing release tag and an open PR for the same pins are reused.
+command: an existing release tag, an open release PR and an open PR for the same pins are reused.
 
 **Adopt an engsys release.** engsys releases are cut by its maintainers, not by the fleet's App. In
 engsys, a release starts with a version-bump PR (set `version` in `package.json`, run
@@ -1388,16 +1403,18 @@ instance warning below. A real install is byte-identical to its release director
 which the scan skips), so enabling a pack in the pin needs no allowlist.
 
 *Migration note: an instance tag off the default branch is a warning for now* (eric-sabe/engsys#227, staged).
-The engsys release must be on the default branch (anything else is a mismatch). Fleets that tag `release:` commits
-off their default branch (`fleet pin --release next` stamps the version on a commit on top of origin/main and tags
-that commit without merging it, so `FeedFrwd/ff-engsys-fleet`'s v0.1.15 to v0.1.18 all diverge) would otherwise
-hold their merge and maintain sessions, so for the **instance** marketplace only, a tag that is not on the default
+The engsys release must be on the default branch (anything else is a mismatch). Instance tags cut by `fleet pin`
+before #227 sit on a `release:` stamp commit off their default branch (the stamp was tagged without being merged,
+so `FeedFrwd/ff-engsys-fleet`'s v0.1.15 to v0.1.20 all diverge); `fleet pin` now merges the stamp through a release
+PR and tags the default branch (section 7, recipes). Enforcing at once would hold those fleets' merge and maintain
+sessions, so for the **instance** marketplace only, a tag that is not on the default
 branch prints `WARNING instance release ...` and sends one info-level alert (latched per distinct warning, resolved
 when it clears), and the exit code is unchanged. Everything else about the instance check still enforces: the file
 hashes against the tag's tree, a pin that is not a tag, an unreadable `source`.
 
 To enforce it: cut an instance release whose tag is on the default branch (identical to it or an ancestor of it,
-GitHub's `compare` says `ahead` or `identical`), pin it (`fleet pin`), then set `INSTANCE_OFF_MAIN=enforce` in
+GitHub's `compare` says `ahead` or `identical`; `fleet pin --release next` does that now: merge its release PR and
+re-run it), pin it, then set `INSTANCE_OFF_MAIN=enforce` in
 `fleet.conf` and check `fleet verify` is clean (exit 0, no `WARNING instance release`). From then on an off-main
 instance tag is a mismatch like engsys, and holds the launch (`components: instance release (...)`). The setting can
 only tighten: it never relaxes the engsys release, and the built-in default
