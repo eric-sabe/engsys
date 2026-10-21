@@ -3,7 +3,8 @@
 // Design: docs/multi-fleet.md § 1 (registry) and § 3 (addresses); operator guide: fleet-guide.md
 // "Registry (multi-fleet)".
 //
-//   node federation.mjs validate [file]                 exit 0 valid (or no file: single-fleet), 1 invalid
+//   node federation.mjs validate [file] [--online]      exit 0 valid (or no file: single-fleet), 1 invalid; --online also
+//                                                       checks each github_app slug resolves to its github_app_id
 //   node federation.mjs get <path> [--file f]           e.g. repos.acme/app.merge.home; objects print as JSON
 //   node federation.mjs home <owner/repo> <role> [--file f]
 //   node federation.mjs address <addr>                  {"fleet": ..., "session": ...} (bare = own FLEET_ID)
@@ -30,6 +31,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
 import { operatorSource } from '../../lib/gate-check.mjs';
 import { hermeticGit } from '../../lib/git-env.mjs';
 import { CLOCKS, isValidTimeZone } from '../../lib/operator-time.mjs';
@@ -670,22 +672,61 @@ export function statusLines(reg, { fleetId = null, file = '' } = {}) {
   return lines;
 }
 
+/**
+ * `validate --online` (engsys#238): each fleet's `github_app` slug must name the App whose id is `github_app_id`. Owner
+ * routing (fleetForBot) matches a PR author `<slug>[bot]` by slug alone, so a stale slug silently turns every PR of that
+ * fleet into "unknown author" (the team is mentioned and the host operator gets the DM). `lookup(slug)` returns the App's
+ * id, null when GitHub has no App by that slug, or throws when it can't tell (no network, no gh). Returns
+ * { errors, warnings }.
+ */
+export function checkAppSlugs(reg, lookup = ghAppId) {
+  const errors = [], warnings = [];
+  for (const [id, f] of Object.entries(reg?.fleets ?? {})) {
+    if (!f.github_app) continue;
+    let got;
+    try {
+      got = lookup(f.github_app);
+    } catch (e) {
+      warnings.push(`fleets.${id}.github_app ${f.github_app}: not checked online (${e.message.split('\n')[0]})`);
+      continue;
+    }
+    if (got === null) errors.push(`fleets.${id}.github_app: GitHub has no App with the slug ${show(f.github_app)} visible to this token (its bot would be ${f.github_app}[bot]); use the App's current slug`);
+    else if (f.github_app_id && got !== f.github_app_id) errors.push(`fleets.${id}.github_app: the App ${show(f.github_app)} has id ${got}, but github_app_id is ${f.github_app_id}`);
+  }
+  return { errors, warnings };
+}
+
+export function ghAppId(slug, { gh = 'gh' } = {}) {
+  let out;
+  try {
+    out = execFileSync(gh, ['api', `apps/${slug}`, '--jq', '.id'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 15000 });
+  } catch (e) {
+    if (/HTTP 404|Not Found/.test(`${e.stderr ?? ''}${e.stdout ?? ''}`)) return null;
+    throw new Error(e.code === 'ENOENT' ? 'gh not found' : (String(e.stderr || e.message).trim() || 'gh api failed'));
+  }
+  const id = Number(out.trim());
+  if (!Number.isInteger(id) || id <= 0) throw new Error(`gh api apps/${slug} returned no App id (${show(out.trim().slice(0, 40))})`);
+  return id;
+}
+
 // --- CLI -----------------------------------------------------------------------------------------
 
-const USAGE = `usage: federation.mjs validate [file]
+const USAGE = `usage: federation.mjs validate [file] [--online]
        federation.mjs get <path> [--file f]
        federation.mjs home <owner/repo> <role> [--file f]
        federation.mjs address <addr>
        federation.mjs status [--file f]
        federation.mjs status-issue [--file f]`;
 
-export function main(argv, { env = process.env, out = process.stdout, err = process.stderr, cwd = process.cwd() } = {}) {
+export function main(argv, { env = process.env, out = process.stdout, err = process.stderr, cwd = process.cwd(), appLookup } = {}) {
   const say = (s) => out.write(`${s}\n`);
   const warn = (s) => err.write(`federation: ${s}\n`);
   const args = [];
   let file = null;
+  let online = false;
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === '--file') {
+    if (argv[i] === '--online') online = true;
+    else if (argv[i] === '--file') {
       if (!argv[i + 1]) { warn('--file needs a path'); return EXIT.ERROR; }
       file = argv[++i];
     } else if (argv[i].startsWith('--file=')) file = argv[i].slice(7);
@@ -718,6 +759,11 @@ export function main(argv, { env = process.env, out = process.stdout, err = proc
         if (fleetId && !reg.fleets[fleetId]) { warn(`${target}: ${fleetIdProblems(reg, fleetId).join('; ')}`); return EXIT.ERROR; }
         const roles = Object.values(reg.repos).reduce((n, r) => n + Object.keys(r).length, 0);
         const nf = Object.keys(reg.fleets).length;
+        if (online) {
+          const { errors, warnings } = checkAppSlugs(reg, appLookup);
+          for (const w of warnings) warn(`WARNING ${w}`);
+          if (errors.length) { warn(`${target}: ${errors.join('; ')}`); return EXIT.ERROR; }
+        }
         say(`ok: ${target} (${nf} fleet${nf === 1 ? '' : 's'}, ${roles} repo role${roles === 1 ? '' : 's'})`);
         for (const w of registryWarnings(reg)) warn(`WARNING ${w}`);
         return EXIT.OK;
