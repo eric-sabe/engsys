@@ -18,13 +18,22 @@ try { require('node:sqlite'); } catch { SQLITE_AVAILABLE = false; }
 import { fileURLToPath } from 'node:url';
 import { hermeticGit } from '../lib/git-env.mjs';
 import {
+	consumePendingDispatch,
 	extractAgentType,
 	extractPrompt,
 	extractTargetAgentType,
 	main,
+	recordPendingDispatch,
 	resolveTouchedPaths,
 	runMemoryBrief,
 } from './subagent-memory-inject.mjs';
+
+// engsys#262: the operator's memory.yml is ENGSYS_MEMORY_CONFIG, else $CLAUDE_CONFIG_DIR/memory.yml, else
+// ~/.claude/memory.yml — so the developer's (or a fleet session's) own file would leak into every test here that
+// doesn't set one. Start from none: no explicit path, no config dir, and an empty HOME.
+delete process.env.ENGSYS_MEMORY_CONFIG;
+delete process.env.CLAUDE_CONFIG_DIR;
+process.env.HOME = mkdtempSync(join(tmpdir(), 'memory-test-home-'));
 
 const SCRIPT = fileURLToPath(new URL('./subagent-memory-inject.mjs', import.meta.url));
 
@@ -493,5 +502,88 @@ describe('CLI end to end', () => {
 			rmSync(parent, { recursive: true, force: true });
 			rmSync(origin, { recursive: true, force: true });
 		}
+	});
+});
+
+// engsys#262: a teammate dispatch (Agent with `name`) reaches SubagentStart with the teammate NAME as
+// agent_type (`bert-p2`), never the dispatched subagent_type (`engsys:bert`) the pending record is filed under.
+describe('pending dispatch for a teammate-name agent_type (engsys#262)', () => {
+	const repos = [];
+	after(() => { for (const d of repos) rmSync(d, { recursive: true, force: true }); });
+	function repo() {
+		const dir = mkdtempSync(join(tmpdir(), 'inject-262-'));
+		repos.push(dir);
+		hermeticGit(dir, ['init', '-q'], { isolateConfig: true });
+		return dir;
+	}
+	const dispatch = (cwd, toolInput, ts) => recordPendingDispatch({ session_id: 's-262', tool_input: toolInput }, { cwd, now: () => ts });
+	const start = (cwd, agentType, ts) => consumePendingDispatch({ session_id: 's-262', agent_type: agentType }, { cwd, now: () => ts });
+
+	test('matched by the recorded teammate name, carrying the dispatched subagent_type', () => {
+		const cwd = repo();
+		dispatch(cwd, { subagent_type: 'engsys:isabelle', prompt: 'other work' }, 1000);
+		dispatch(cwd, { subagent_type: 'engsys:bert', name: 'bert-p2', prompt: 'investigate the brief' }, 1001);
+		const got = start(cwd, 'bert-p2', 1002);
+		assert.equal(got?.matchedBy, 'name');
+		assert.equal(got?.agentType, 'engsys:bert');
+		assert.match(got?.prompt ?? '', /investigate the brief/);
+		const plain = start(cwd, 'engsys:isabelle', 1003);
+		assert.equal(plain?.matchedBy, 'type', 'positive control: a plain typed dispatch still matches by type');
+		assert.match(plain?.prompt ?? '', /other work/);
+	});
+
+	test('no name on record: falls back to the NEWEST same-session record, which lends no identity', () => {
+		const cwd = repo();
+		dispatch(cwd, { subagent_type: 'engsys:isabelle', prompt: 'older' }, 1000);
+		dispatch(cwd, { subagent_type: 'engsys:bert', prompt: 'newest' }, 1005);
+		recordPendingDispatch({ session_id: 'other-session', tool_input: { subagent_type: 'engsys:bert', prompt: 'not this session' } }, { cwd, now: () => 1009 });
+		const got = start(cwd, 'bert-p2', 1010);
+		assert.equal(got?.matchedBy, 'newest');
+		assert.match(got?.prompt ?? '', /newest/);
+	});
+
+	test('a namespaced agent_type whose own record is gone takes no other dispatch\'s record', () => {
+		const cwd = repo();
+		dispatch(cwd, { subagent_type: 'engsys:bert', name: 'bert-p2', prompt: 'bert work' }, 1000);
+		assert.equal(start(cwd, 'engsys:isabelle', 1001), null);
+		assert.equal(start(cwd, 'bert-p2', 1002)?.matchedBy, 'name', '…and the record is still there for its own teammate start');
+	});
+
+	test('expired records are never matched, by name or as the newest', () => {
+		const cwd = repo();
+		dispatch(cwd, { subagent_type: 'engsys:bert', name: 'bert-p2', prompt: 'stale' }, 1000);
+		assert.equal(start(cwd, 'bert-p2', 1000 + 31_000), null);
+	});
+
+	test('end to end: a teammate dispatched as engsys:nyx is briefed and logged as nyx, not as its teammate name', { skip: !SQLITE_AVAILABLE }, () => {
+		const parent = mkdtempSync(join(tmpdir(), 'inject-262-e2e-'));
+		const origin = mkdtempSync(join(tmpdir(), 'inject-262-origin-'));
+		repos.push(parent, origin);
+		const GIT_OPTS = ['-c', 'user.name=a', '-c', 'user.email=a@b.c'];
+		hermeticGit(origin, [...GIT_OPTS, 'init', '-q', '--bare'], { isolateConfig: true });
+		hermeticGit(parent, [...GIT_OPTS, 'init', '-q'], { isolateConfig: true });
+		hermeticGit(parent, [...GIT_OPTS, 'remote', 'add', 'origin', 'https://github.com/fixture/repo.git'], { isolateConfig: true });
+		hermeticGit(parent, [...GIT_OPTS, 'remote', 'set-url', '--push', 'origin', origin], { isolateConfig: true });
+		mkdirSync(join(parent, 'docs', 'agent-lessons'), { recursive: true });
+		writeFileSync(
+			join(parent, 'docs', 'agent-lessons', 'nyx-only.md'),
+			'---\nglobs: []\nstacks: []\nroles: ["nyx"]\nkeywords: []\nsecurity: false\nsupersedes: []\n---\n\n# Nyx role lesson\n\n**Trigger:** A security review.\n',
+		);
+		hermeticGit(parent, [...GIT_OPTS, 'add', '-A'], { isolateConfig: true });
+		hermeticGit(parent, [...GIT_OPTS, 'commit', '-q', '-m', 'init'], { isolateConfig: true });
+		hermeticGit(parent, [...GIT_OPTS, 'push', '-q', '-f', 'origin', 'HEAD:main'], { isolateConfig: true });
+		hermeticGit(parent, [...GIT_OPTS, 'update-ref', 'refs/remotes/origin/main', 'HEAD'], { isolateConfig: true });
+		const env = { ...process.env, NODE_NO_WARNINGS: '1', ENGSYS_MEMORY_REPOS: 'fixture/repo' };
+		execFileSync('node', [SCRIPT, 'pre-agent'], {
+			input: JSON.stringify({ session_id: 's-e2e', cwd: parent, hook_event_name: 'PreToolUse', tool_name: 'Agent', tool_input: { subagent_type: 'engsys:nyx', name: 'nyx-221', prompt: 'review the diff' } }),
+			encoding: 'utf8', env,
+		});
+		const out = execFileSync('node', [SCRIPT], {
+			input: JSON.stringify({ session_id: 's-e2e', cwd: parent, hook_event_name: 'SubagentStart', agent_id: 'a-1', agent_type: 'nyx-221' }),
+			encoding: 'utf8', env,
+		});
+		assert.match(JSON.parse(out).hookSpecificOutput?.additionalContext ?? '', /lesson:nyx-only/, 'the nyx-scoped lesson reaches the nyx teammate');
+		const rows = readFileSync(join(parent, '.git', 'engsys-memory', 'injections.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+		assert.equal(rows.at(-1).agent_type, 'engsys:nyx', 'logged (and Class B-excluded) as nyx');
 	});
 });

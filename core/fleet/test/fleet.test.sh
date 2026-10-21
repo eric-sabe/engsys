@@ -830,6 +830,9 @@ rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"; run fleet launch
 rc_is "per-session launch exits 0" 0
 for n in acme-mm acme-build acme-security acme-rel; do
   has "$n: launched on its own dir" "$(tl "$n")" "export CLAUDE_CONFIG_DIR=$SESS/$n && command claude"
+  # engsys#262: its own dir has no memory.yml, so the memory brief reads the fleet dir's, decided after the env file
+  has "$n: …ENGSYS_MEMORY_CONFIG=<fleet dir>/memory.yml, just before its config dir" "$(tl "$n")" "export ENGSYS_MEMORY_CONFIG=$FCFG/memory.yml && export CLAUDE_CONFIG_DIR=$SESS/$n && command claude"
+  has "$n: …and cleared before the env file, so no env-file value survives" "$(tl "$n")" "unset ENGSYS_MEMORY_CONFIG && unset ENGSYS_MM_CONFIG && cd "
 done
 eq "no two sessions share a config dir" "$(for n in acme-mm acme-build acme-security acme-rel; do tl "$n" | grep -o "export CLAUDE_CONFIG_DIR=[^ ]*"; done | sort | uniq -d | wc -l | tr -d ' ')" 0
 hasnt "the shared base dir is on no launch line" "$(cat "$FAKE/tmux.log")" "export CLAUDE_CONFIG_DIR=$FCFG &&"
@@ -842,6 +845,7 @@ has "acme-mm: its own dir" "$(tl acme-mm)" "export CLAUDE_CONFIG_DIR=$SESS/acme-
 has "…the baton gate sees the same dir as FLEET_CLAUDE_CONFIG_DIR" "$(tl acme-mm)" "export FLEET_CLAUDE_CONFIG_DIR=$SESS/acme-mm FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised"
 has "acme-security: its own dir" "$(tl acme-security)" "export CLAUDE_CONFIG_DIR=$SESS/acme-security && command claude"
 has "acme-build (interactive): ~/.claude" "$(tl acme-build)" "unset CLAUDE_CONFIG_DIR && command claude"
+hasnt "acme-build (interactive): no ENGSYS_MEMORY_CONFIG, so its brief reads ~/.claude/memory.yml (engsys#262)" "$(tl acme-build)" "export ENGSYS_MEMORY_CONFIG"
 hasnt "…never a session dir" "$(tl acme-build)" "$SESS/acme-build"
 run fleet config-dir init
 hasnt "init under scope supervised: no dir for an interactive role" "$OUT" "session acme-build"
@@ -988,6 +992,7 @@ eq "…nothing reached tmux" "$(grep -c send-keys "$FAKE/tmux.log" || true)" 0
 setconf "FLEET_CLAUDE_CONFIG_DIR=$FCFG"
 rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"; run fleet launch
 has "per-session off: the shared base dir again" "$(tl acme-mm)" "export CLAUDE_CONFIG_DIR=$FCFG && command claude"
+hasnt "per-session off: no ENGSYS_MEMORY_CONFIG, the shared dir holds memory.yml itself (engsys#262)" "$(tl acme-mm)" "export ENGSYS_MEMORY_CONFIG"
 setconf "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on"
 run fleet verify
 rc_is "per-session on without FLEET_CLAUDE_CONFIG_DIR is a config error" 3

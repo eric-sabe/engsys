@@ -43,6 +43,12 @@ import {
 } from './memory-brief.mjs';
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+// engsys#262: the operator's memory.yml is ENGSYS_MEMORY_CONFIG, else $CLAUDE_CONFIG_DIR/memory.yml, else
+// ~/.claude/memory.yml — so the developer's (or a fleet session's) own file would leak into every test here that
+// doesn't set one. Start from none: no explicit path, no config dir, and an empty HOME.
+delete process.env.ENGSYS_MEMORY_CONFIG;
+delete process.env.CLAUDE_CONFIG_DIR;
+process.env.HOME = mkdtempSync(join(tmpdir(), 'memory-test-home-'));
 
 // hermeticGit scrubs GIT_DIR etc. so these calls can never target the real repo if this suite runs
 // under a pre-push hook (core/lessons-library/git-core-bare-flip-breaks-all-worktrees.md); identity
@@ -267,6 +273,37 @@ describe('loadConfig', () => {
 			if (prevConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prevConfigDir;
 			rmSync(dir, { recursive: true, force: true });
 			rmSync(fleetConfigDir, { recursive: true, force: true });
+		}
+	});
+
+	test('the operator config is ~/.claude/memory.yml when CLAUDE_CONFIG_DIR is unset, and ENGSYS_MEMORY_CONFIG over a per-session dir that has none (engsys#262)', () => {
+		const dir = makeRepo({});
+		const home = mktmp();
+		const fleetDir = mktmp();
+		const sessionDir = mktmp();
+		const prev = { HOME: process.env.HOME, CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR, ENGSYS_MEMORY_CONFIG: process.env.ENGSYS_MEMORY_CONFIG };
+		try {
+			mkdirSync(join(home, '.claude'));
+			writeFileSync(join(home, '.claude', 'memory.yml'), 'brief_bytes: 3072\noperator_signing_key_fingerprints: ["SHA256:home"]\n');
+			writeFileSync(join(fleetDir, 'memory.yml'), 'brief_bytes: 4096\noperator_signing_key_fingerprints: ["SHA256:fleet"]\n');
+
+			delete process.env.CLAUDE_CONFIG_DIR; delete process.env.ENGSYS_MEMORY_CONFIG;
+			process.env.HOME = home;
+			let cfg = loadConfig(dir);
+			assert.equal(cfg.brief_bytes, 3072, 'interactive: ~/.claude/memory.yml (before engsys#262: the 2048 default)');
+			assert.deepEqual(cfg.operator_signing_key_fingerprints, ['SHA256:home'], 'the operator file is an operator-controlled source for the signing keys too');
+
+			process.env.CLAUDE_CONFIG_DIR = sessionDir;
+			cfg = loadConfig(dir);
+			assert.equal(cfg.brief_bytes, 2048, 'negative control: a per-session dir with no memory.yml, and no ~/.claude fallback once CLAUDE_CONFIG_DIR is set');
+
+			process.env.ENGSYS_MEMORY_CONFIG = join(fleetDir, 'memory.yml');
+			cfg = loadConfig(dir);
+			assert.equal(cfg.brief_bytes, 4096, 'ENGSYS_MEMORY_CONFIG names the fleet dir\'s own');
+			assert.deepEqual(cfg.operator_signing_key_fingerprints, ['SHA256:fleet']);
+		} finally {
+			for (const [k, v] of Object.entries(prev)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+			for (const d of [dir, home, fleetDir, sessionDir]) rmSync(d, { recursive: true, force: true });
 		}
 	});
 

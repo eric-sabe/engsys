@@ -163,7 +163,11 @@ export function recordPendingDispatch(input, { cwd, now = () => Date.now() } = {
 		const prompt = [firstString(toolInput?.description), firstString(toolInput?.prompt)].filter(Boolean).join('\n').slice(0, 8192);
 		const promptPaths = extractPathsFromPrompt(prompt);
 		const worktree = extractWorktreeFromInput(toolInput, prompt);
-		const record = { ts, sessionId, agentKey, prompt, promptPaths, worktree };
+		// engsys#262: a TEAMMATE dispatch (`tool_input.name`) reaches SubagentStart with its teammate
+		// name as `agent_type` (e.g. `bert-p2`), not the dispatched `subagent_type` — the record keeps
+		// both, so SubagentStart can match it by name and recover the real agent type.
+		const name = firstString(toolInput?.name);
+		const record = { ts, sessionId, agentKey, agentType: rawAgent === 'any' ? null : rawAgent, name: name ? safeIdToken(name) : null, prompt, promptPaths, worktree };
 		const file = path.join(pendingDir, `${sessionId}--${agentKey}--${ts}-${process.pid}-${Math.random().toString(36).slice(2, 8)}.json`);
 		fs.writeFileSync(file, JSON.stringify(record), { mode: 0o600 });
 		try { fs.chmodSync(file, 0o600); } catch { /* best effort */ }
@@ -173,7 +177,17 @@ export function recordPendingDispatch(input, { cwd, now = () => Date.now() } = {
 	}
 }
 
-/** Pop the oldest non-expired pending dispatch matching `(session_id, bareAgent(agent_type))` (#142). */
+/** Pop the pending dispatch for this SubagentStart (#142, engsys#262), first match wins:
+ *   1. the oldest record filed under `(session_id, bareAgent(agent_type))` — a plain dispatch, where
+ *      SubagentStart's `agent_type` IS the dispatched `subagent_type`; an untyped (`any`) record too
+ *      when the session holds no typed one, or when the start carries no agent type;
+ *   2. the oldest record whose teammate `name` equals `agent_type` — a teammate dispatch, where
+ *      SubagentStart reports the teammate name (`bert-p2`) instead of the type (`engsys:bert`);
+ *   3. the NEWEST same-session record — a last resort so a teammate dispatch whose name was not
+ *      recorded still gets its own (just-filed) prompt rather than none. Never for a namespaced
+ *      `agent_type` (`engsys:isabelle`), which is a dispatched type and not a teammate name.
+ * Returns the parsed record plus `matchedBy` (`'type'` | `'name'` | `'newest'`); only a `'type'` or
+ * `'name'` match vouches for the record's `agentType`. */
 export function consumePendingDispatch(input, { cwd, now = () => Date.now() } = {}) {
 	try {
 		const cacheDir = resolveCacheDir(cwd);
@@ -186,8 +200,17 @@ export function consumePendingDispatch(input, { cwd, now = () => Date.now() } = 
 		if (files.length === 0) return null;
 
 		const sessionId = safeIdToken(firstString(input?.session_id) ?? 'default');
-		const agentKey = safeIdToken(bareAgent(extractAgentType(input)) || 'any');
+		const startAgent = extractAgentType(input);
+		const agentKey = safeIdToken(bareAgent(startAgent) || 'any');
 		const sessionFiles = files.filter((f) => f.startsWith(`${sessionId}--`));
+		const read = (f) => {
+			try { return JSON.parse(fs.readFileSync(path.join(pendingDir, f), 'utf8')); } catch { return null; }
+		};
+		const take = (f, parsed, matchedBy) => {
+			try { fs.rmSync(path.join(pendingDir, f), { force: true }); } catch { /* best effort */ }
+			return parsed && ts - (parsed.ts ?? 0) <= PENDING_TTL_MS ? { ...parsed, matchedBy } : null;
+		};
+
 		const hasTypedForSession = sessionFiles.some((f) => !f.startsWith(`${sessionId}--any--`));
 		const prefixes = agentKey === 'any' || !hasTypedForSession
 			? [`${sessionId}--${agentKey}--`, `${sessionId}--any--`]
@@ -195,15 +218,21 @@ export function consumePendingDispatch(input, { cwd, now = () => Date.now() } = 
 		for (const prefix of prefixes) {
 			const match = sessionFiles.find((f) => f.startsWith(prefix));
 			if (!match) continue;
-			const full = path.join(pendingDir, match);
-			let parsed = null;
-			try {
-				parsed = JSON.parse(fs.readFileSync(full, 'utf8'));
-			} catch { parsed = null; }
-			try { fs.rmSync(full, { force: true }); } catch { /* best effort */ }
-			if (parsed && ts - (parsed.ts ?? 0) <= PENDING_TTL_MS) return parsed;
+			const hit = take(match, read(match), 'type');
+			if (hit) return hit;
 		}
-		return null;
+
+		const live = sessionFiles
+			.map((f) => ({ f, parsed: read(f) }))
+			.filter(({ parsed }) => parsed && ts - (parsed.ts ?? 0) <= PENDING_TTL_MS);
+		const startName = startAgent ? safeIdToken(startAgent) : null;
+		const byName = startName ? live.filter(({ parsed }) => parsed.name === startName).sort((a, b) => a.parsed.ts - b.parsed.ts)[0] : null;
+		if (byName) return take(byName.f, byName.parsed, 'name');
+		// A namespaced agent_type (`engsys:isabelle`) is a dispatched type, never a teammate name: its
+		// own record is gone (expired or consumed), and another dispatch's prompt is not its to take.
+		if (startAgent && startAgent.includes(':')) return null;
+		const newest = live.sort((a, b) => b.parsed.ts - a.parsed.ts)[0];
+		return newest ? take(newest.f, newest.parsed, 'newest') : null;
 	} catch {
 		return null;
 	}
@@ -409,7 +438,7 @@ export async function main({ argv = process.argv.slice(2), stdin = process.stdin
 	// to. An UNRECOGNIZED (but non-empty) target still reaches the ordinary allow-unless-excluded
 	// path below, same as any other agent name `isClassBExcluded` doesn't know — that's the
 	// existing policy, not something this fix changes.
-	const agentType = isPreAgent ? extractTargetAgentType(input, { rawStdin }) : extractAgentType(input);
+	let agentType = isPreAgent ? extractTargetAgentType(input, { rawStdin }) : extractAgentType(input);
 	if (isPreAgent && !agentType) {
 		write('{}');
 		return 0;
@@ -432,6 +461,13 @@ export async function main({ argv = process.argv.slice(2), stdin = process.stdin
 		// dispatch (prompt, prompt paths, worktree) was silently lost on every non-Claude harness.
 		const lookupInput = isPreAgent && input ? { ...input, agent_type: agentType } : input;
 		const pending = lookupInput ? consumePendingDispatch(lookupInput, { cwd, now }) : null;
+		// engsys#262: a teammate start reports its teammate name as agent_type; the record matched BY
+		// that name carries the dispatched subagent_type, which is what lesson `roles` and the Class B
+		// exclusion set are keyed on (a `nyx-221` teammate is still Nyx). A `'newest'` fallback match
+		// lends only its prompt and paths, never its identity.
+		if (!isPreAgent && pending?.matchedBy === 'name' && typeof pending.agentType === 'string' && pending.agentType) {
+			agentType = pending.agentType;
+		}
 		const prompt = extractPrompt(input) || pending?.prompt || '';
 		let diffCwd = cwd;
 		if (pending?.worktree) {

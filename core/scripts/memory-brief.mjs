@@ -53,6 +53,7 @@ import {
 	MARKER_SHAPE_RE,
 	queryIndex,
 	readFrontmatter,
+	readOperatorMemoryConfig,
 	resolveCacheDir,
 	resolveReviewedSha,
 	validatePointerEvent,
@@ -91,9 +92,11 @@ export const DEFAULTS = {
 /**
  * Load `.claude/memory.yml` — the trust allowlists and markers (docs/memory-spec.md §10) — from
  * the REVIEWED SHA, never the working tree (engsys#140 N5 — Nyx re-review), and ONLY when
- * `repoRoot`'s `origin` remote is in the `repos` allowlist (#145). Merges with `memory.yml` in the
- * fleet config dir (`CLAUDE_CONFIG_DIR`) and plugin config dir (`CLAUDE_PLUGIN_ROOT`), then
- * defaults. Scalar list fields are coerced to one-item lists (#155).
+ * `repoRoot`'s `origin` remote is in the `repos` allowlist (#145). Merges with the operator's
+ * `memory.yml` (index-db.mjs `resolveMemoryConfigPath`: `ENGSYS_MEMORY_CONFIG`, else
+ * `CLAUDE_CONFIG_DIR/memory.yml`, else `~/.claude/memory.yml` — engsys#262) and the plugin config
+ * dir's (`CLAUDE_PLUGIN_ROOT`), then defaults. Precedence for scalars: operator > repo > plugin;
+ * list fields are unioned. Scalar list fields are coerced to one-item lists (#155).
  */
 // engsys#187: unioned like UNION_FIELDS, but ONLY from the reviewed-SHA repo config and the fleet
 // config dir (the two sources the operator controls) — the plugin config is not a source for it.
@@ -115,14 +118,9 @@ export function loadConfig(repoRoot, { sha, pluginRoot, allowedRepos, log = null
 			if (isPlainObject(parsed)) pluginConfig = parsed;
 		} catch { /* no plugin config dir copy */ }
 	}
-	let fleetConfig = null;
-	if (process.env.CLAUDE_CONFIG_DIR) {
-		try {
-			const raw = fs.readFileSync(path.join(process.env.CLAUDE_CONFIG_DIR, 'memory.yml'), 'utf8');
-			const parsed = parseYaml(raw);
-			if (isPlainObject(parsed)) fleetConfig = parsed;
-		} catch { /* no fleet config dir copy either */ }
-	}
+	// The operator's memory.yml (engsys#262): ENGSYS_MEMORY_CONFIG, else CLAUDE_CONFIG_DIR/memory.yml,
+	// else ~/.claude/memory.yml — the same single file resolveAllowedRepos reads.
+	const fleetConfig = readOperatorMemoryConfig();
 	const allowlisted = repoRoot ? isRepoAllowlisted(repoRoot, { pluginRoot: pRoot, allowedRepos }) : false;
 	const reviewedSha = allowlisted ? (sha ?? resolveReviewedSha(repoRoot)) : null;
 	let repoConfig = null;

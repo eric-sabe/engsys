@@ -37,7 +37,17 @@ import {
 	isValidPointerKey,
 	validatePointerEvent,
 	resolveReviewedSha,
+	resolveAllowedRepos,
+	resolveMemoryConfigPath,
+	readOperatorMemoryConfig,
 } from './index-db.mjs';
+
+// engsys#262: the operator's memory.yml is ENGSYS_MEMORY_CONFIG, else $CLAUDE_CONFIG_DIR/memory.yml, else
+// ~/.claude/memory.yml — so the developer's (or a fleet session's) own file would leak into every test here that
+// doesn't set one. Start from none: no explicit path, no config dir, and an empty HOME.
+delete process.env.ENGSYS_MEMORY_CONFIG;
+delete process.env.CLAUDE_CONFIG_DIR;
+process.env.HOME = mkdtempSync(join(tmpdir(), 'memory-test-home-'));
 
 // A plain `git init`/`git config` here would inherit any GIT_DIR exported by a pre-push hook and
 // rewrite the DEVELOPER'S real repo (core/lessons-library/git-core-bare-flip-breaks-all-worktrees.md)
@@ -264,6 +274,63 @@ describe('scope project Class A to an allowlisted repo (#145)', () => {
 			rmSync(unlisted, { recursive: true, force: true });
 			rmSync(listed, { recursive: true, force: true });
 			rmSync(fleetDir, { recursive: true, force: true });
+		}
+	});
+
+	// engsys#262: the operator's memory.yml is ONE file — ENGSYS_MEMORY_CONFIG, else
+	// $CLAUDE_CONFIG_DIR/memory.yml, else ~/.claude/memory.yml — and never a repo path.
+	test('resolveMemoryConfigPath: ENGSYS_MEMORY_CONFIG, then CLAUDE_CONFIG_DIR, then ~/.claude (engsys#262)', () => {
+		assert.equal(resolveMemoryConfigPath({ ENGSYS_MEMORY_CONFIG: '/fleet/memory.yml', CLAUDE_CONFIG_DIR: '/fleet.sessions/mm', HOME: '/h' }), '/fleet/memory.yml');
+		assert.equal(resolveMemoryConfigPath({ CLAUDE_CONFIG_DIR: '/fleet.sessions/mm', HOME: '/h' }), join('/fleet.sessions/mm', 'memory.yml'));
+		assert.equal(resolveMemoryConfigPath({ HOME: '/h' }), join('/h', '.claude', 'memory.yml'), 'CLAUDE_CONFIG_DIR unset: Claude Code\'s default dir');
+		assert.equal(resolveMemoryConfigPath({ ENGSYS_MEMORY_CONFIG: 'memory.yml', HOME: '/h' }), null, 'a relative explicit path is refused, never resolved against the (repo) cwd');
+		assert.equal(resolveMemoryConfigPath({ ENGSYS_MEMORY_CONFIG: '', CLAUDE_CONFIG_DIR: '/c', HOME: '/h' }), join('/c', 'memory.yml'), 'an empty value is unset');
+	});
+
+	test('readOperatorMemoryConfig: a YAML mapping or null (engsys#262)', () => {
+		const dir = mkdtempSync(join(tmpdir(), 'memory-idx-opcfg-'));
+		try {
+			writeFileSync(join(dir, 'memory.yml'), 'repos: [acme/app]\nbrief_bytes: 3072\n');
+			writeFileSync(join(dir, 'list.yml'), '- a\n- b\n');
+			assert.deepEqual(readOperatorMemoryConfig({ ENGSYS_MEMORY_CONFIG: join(dir, 'memory.yml') }), { repos: ['acme/app'], brief_bytes: 3072 });
+			assert.equal(readOperatorMemoryConfig({ ENGSYS_MEMORY_CONFIG: join(dir, 'list.yml') }), null, 'not a mapping');
+			assert.equal(readOperatorMemoryConfig({ ENGSYS_MEMORY_CONFIG: join(dir, 'absent.yml') }), null, 'absent');
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('the allowlist is read from ~/.claude/memory.yml when CLAUDE_CONFIG_DIR is unset, and from ENGSYS_MEMORY_CONFIG over a per-session dir that has none (engsys#262)', () => {
+		const listed = makeRepo({ remoteUrl: 'https://github.com/acme/listed-app.git' });
+		const home = mkdtempSync(join(tmpdir(), 'memory-idx-home-'));
+		const fleetDir = mkdtempSync(join(tmpdir(), 'memory-idx-fleet-'));
+		const sessionDir = mkdtempSync(join(tmpdir(), 'memory-idx-session-'));
+		const prev = { HOME: process.env.HOME, CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR, ENGSYS_MEMORY_CONFIG: process.env.ENGSYS_MEMORY_CONFIG };
+		try {
+			mkdirSync(join(home, '.claude'));
+			writeFileSync(join(home, '.claude', 'memory.yml'), 'repos: [acme/listed-app]\n');
+			writeFileSync(join(fleetDir, 'memory.yml'), 'repos: [acme/listed-app]\n');
+			// a repo-local .claude/memory.yml listing itself is never a source (#145)
+			mkdirSync(join(listed, '.claude'), { recursive: true });
+			writeFileSync(join(listed, '.claude', 'memory.yml'), 'repos: [acme/listed-app]\n');
+
+			// interactive: no CLAUDE_CONFIG_DIR -> ~/.claude/memory.yml (before engsys#262: nothing at all)
+			delete process.env.CLAUDE_CONFIG_DIR; delete process.env.ENGSYS_MEMORY_CONFIG;
+			process.env.HOME = home;
+			assert.equal(isRepoAllowlisted(listed), true);
+			assert.ok(loadClassADocs(resolveClassARoots(listed), {}, { repoRoot: listed }).docs.some((d) => d.key === 'lesson:one'), 'project Class A loads');
+
+			// a fleet session on its own login dir: that dir has no memory.yml, so it alone allowlists nothing...
+			process.env.HOME = sessionDir; // and HOME is no fallback once CLAUDE_CONFIG_DIR is set
+			process.env.CLAUDE_CONFIG_DIR = sessionDir;
+			assert.equal(isRepoAllowlisted(listed), false, 'negative control: per-session dir only');
+			// ...and the launcher's ENGSYS_MEMORY_CONFIG points it at the fleet dir's own
+			process.env.ENGSYS_MEMORY_CONFIG = join(fleetDir, 'memory.yml');
+			assert.equal(isRepoAllowlisted(listed), true);
+			assert.ok(resolveAllowedRepos().has('acme/listed-app'));
+		} finally {
+			for (const [k, v] of Object.entries(prev)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+			for (const d of [listed, home, fleetDir, sessionDir]) rmSync(d, { recursive: true, force: true });
 		}
 	});
 
