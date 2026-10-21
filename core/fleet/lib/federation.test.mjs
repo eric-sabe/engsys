@@ -8,7 +8,7 @@ import path from 'node:path';
 import {
   parseYaml, validateFederation, parseFederation, loadFederation, resolveFederationFile, checkFleetId,
   fleetIdProblems, getPath, roleHome, parseAddress, isOwnAddress, statusLines, main, FederationError, FLEET_ID_RE,
-  repoFromRemoteUrl, instanceRepo, statusIssueTarget, registryWarnings,
+  repoFromRemoteUrl, instanceRepo, statusIssueTarget, registryWarnings, fleetForBot, recipientFor, slackOperators,
 } from './federation.mjs';
 import { hermeticGit } from '../../lib/git-env.mjs';
 
@@ -558,4 +558,27 @@ test('get reads the new keys for the shell', () => {
   const code = main(['get', 'fleets.eric.clock', '--file', f], { out: { write: (s) => { out += s; } }, err: { write() {} } });
   assert.equal(code, 0);
   assert.equal(out.trim(), '12h');
+});
+
+test('fleetForBot / recipientFor / slackOperators: who a notify or gate request addresses (engsys#238)', () => {
+  const reg = parseFederation(DOC);
+  const bob = { fleet: 'bob', operator: 'bob', slack_operator: 'U0000000002' };
+  assert.deepEqual(fleetForBot(reg, 'acme-fleet-bob[bot]'), bob);
+  assert.deepEqual(fleetForBot(reg, 'ACME-Fleet-Bob[bot]'), bob);
+  assert.equal(fleetForBot(reg, 'bob'), null, 'a human (even an operator) is never a fleet bot');
+  assert.equal(fleetForBot(reg, 'other[bot]'), null);
+  assert.equal(fleetForBot(null, 'acme-fleet-bob[bot]'), null);
+  for (const who of ['bob', 'BOB', 'acme-fleet-bob[bot]']) assert.deepEqual(recipientFor(reg, who), bob, who);
+  assert.equal(recipientFor(reg, 'nobody'), null);
+  assert.equal(recipientFor(reg, '__proto__'), null);
+  assert.equal(recipientFor(null, 'bob'), null);
+  assert.deepEqual(slackOperators(reg), ['U0000000001', 'U0000000002']);
+  assert.deepEqual(slackOperators(null), []);
+});
+
+test('fleetForBot / slackOperators skip a fleet that is enabled: false (engsys#238)', () => {
+  const reg = parseFederation(DOC.replace(/(  bob:\n(?:    .*\n)*?)    enabled: true/, '$1    enabled: false'));
+  assert.equal(reg.fleets.bob.enabled, false);
+  assert.equal(fleetForBot(reg, 'acme-fleet-bob[bot]'), null);
+  assert.deepEqual(slackOperators(reg), ['U0000000001']);
 });

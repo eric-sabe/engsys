@@ -107,7 +107,7 @@ Same substrate as Merge Monster, with this config's `state_dir` and the shared s
 
 ## Escalation
 
-`mnt:escalated` label + diagnosis comment on the tracking issue (or PR), then `fleet notify --level action --re <issue-or-PR-url> --incident mnt-<finding-id> "<what the finding is, why it doesn't fit auto-fix/expert-assisted, what decision is needed>"` (falls back to a ledger comment on its own). Escalations are never silent and never block the rest of the queue. Resolve the incident (`fleet notify ... --resolve`) once the finding is fixed, dismissed, or handed off.
+`mnt:escalated` label + diagnosis comment on the tracking issue (or PR), then `fleet notify --level action --re <issue-or-PR-url> --incident mnt-<finding-id> "<what the finding is, why it doesn't fit auto-fix/expert-assisted, what decision is needed>"` (a DM to this host's operator, engsys#238; falls back to a ledger comment on its own). Escalations are never silent and never block the rest of the queue. Resolve the incident (`fleet notify ... --resolve`) once the finding is fixed, dismissed, or handed off.
 
 ## Cross-session messaging
 

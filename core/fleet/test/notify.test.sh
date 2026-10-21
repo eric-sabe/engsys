@@ -61,6 +61,11 @@ const server = http.createServer((req, res) => {
   req.on('data', (d) => { body += d; });
   req.on('end', () => {
     res.setHeader('Content-Type', 'application/json');
+    if (req.url === '/conversations.open') {
+      const { users } = JSON.parse(body);
+      res.end(JSON.stringify({ ok: true, channel: { id: `D${users}` } }));
+      return;
+    }
     if (req.url === '/chat.postMessage') {
       fs.appendFileSync(postsFile, body + '\n');
       n += 1;
@@ -91,7 +96,9 @@ hasnt "no thread_ts on a first, non-incident post" "$POST1" 'thread_ts'
 run bash "$KIT/bin/fleet" --instance "$I" notify --level alert --incident sandbox-down "it is down"
 rc_is "alert notify (first post of an incident) exits 0" 0
 POST2="$(tail -1 "$POSTS_FILE")"
-has "alert mentions the operators group" "$POST2" '<!subteam^S999>'
+# engsys#238: no channel ping. SLACK_OPERATORS_GROUP_ID is retired: still set above, tolerated, never used.
+hasnt "alert mentions nobody in the channel (no retired group)" "$POST2" 'subteam'
+hasnt "alert mentions nobody in the channel (no @here)" "$POST2" '<!here>'
 LATCH="$I/.fleet/notify/sandbox-down.json"
 [ -f "$LATCH" ] && ok "incident latch file was written under FLEET_STATE/notify/" || bad "incident latch file was written under FLEET_STATE/notify/"
 
@@ -100,6 +107,22 @@ rc_is "resolve exits 0" 0
 POST3="$(tail -1 "$POSTS_FILE")"
 has "resolve posts the standard resolved text" "$POST3" '"text":"✅ resolved"'
 [ -f "$LATCH" ] && bad "latch cleared after resolve" || ok "latch cleared after resolve"
+
+# --- run: --for resolves the recipient through federation.yml (FEDERATION_FILE via fleet-env.sh) -----
+cat >"$I/federation.yml" <<EOF
+version: 1
+fleets:
+  acme:
+    operator: acme-op
+    github_app: acme-fleet
+    slack_operator: U0000000007
+EOF
+run bash "$KIT/bin/fleet" --instance "$I" notify --level action --for "acme-fleet[bot]" --re "https://github.com/acme/app/pull/9" "approve this"
+rc_is "--for notify exits 0" 0
+POST4="$(tail -1 "$POSTS_FILE")"
+has "--for posts to the operator's DM channel (engsys#238)" "$POST4" '"channel":"DU0000000007"'
+hasnt "a DM carries no mention" "$POST4" '<@'
+rm -f "$I/federation.yml"
 
 # --- run: Slack API failure falls back to gh issue comment, never fails the caller --------------
 touch "$POSTS_FILE.fail"

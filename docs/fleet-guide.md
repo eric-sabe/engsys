@@ -848,15 +848,16 @@ broker post escalations through it instead of an operator's personal Slack conne
 appears as the fleet's own bot, not as whoever happens to be signed in). It's optional: without it,
 escalations fall back to a GitHub comment on their own, with no further configuration needed.
 
-**One Slack app per fleet**, created in the org's workspace (for example "Acme Fleet (acme)"), scope
-`chat:write` only, no read scopes, because approvals come from GitHub, never a Slack reply. Manifest:
+**One Slack app per fleet**, created in the org's workspace (for example "Acme Fleet (acme)"), scopes
+`chat:write` and `im:write` (to DM an operator), no read scopes, because approvals come from GitHub,
+never a Slack reply. Manifest:
 
 ```yaml
 display_information:
   name: Acme Fleet (acme)
 oauth_config:
   scopes:
-    bot: [chat:write]
+    bot: [chat:write, im:write]
 settings:
   org_deploy_enabled: false
   socket_mode_enabled: false
@@ -868,15 +869,18 @@ Install it to the workspace, invite the bot to the escalation channel, then put 
 ```sh
 SLACK_BOT_TOKEN=xoxb-...          # the app's Bot User OAuth Token
 SLACK_CHANNEL_ID=C0XXXXXXXXX      # the escalation channel the bot was invited to
-SLACK_OPERATORS_GROUP_ID=S0XXXXXXXXX  # optional: a real Slack user group (e.g. @acme-operators)
-SLACK_OPERATOR_ID=UXXXXXXXXX      # optional: this fleet's own operator, preferred for `action` posts
+SLACK_OPERATOR_ID=UXXXXXXXXX      # optional: this host's operator, DMed when the registry names no slack_operator for FLEET_ID
 FLEET_ID=acme                     # optional: prefixes every post, e.g. "[acme] ..."; fleet.conf's FLEET_ID wins when set
 ```
 
-Only the token and channel are required. Mentions degrade gracefully: `action` mentions the operator,
-else the group; `alert` mentions the group, else the operator; with neither set, both fall back to
-`@here` in the channel. Creating a user group needs a Slack workspace admin, so a fleet can start with
-just the token, channel and its operator's member id, and add the group later.
+Only the token and channel are required. Routing (engsys#238, no channel ping): `action` and `alert`
+DM this host's operator (`federation.yml` `fleets.<FLEET_ID>.slack_operator`, else `SLACK_OPERATOR_ID`);
+`--for <fleet-id|github-login>` DMs another operator; `--author <PR author>` DMs the PR's fleet operator;
+`--level alert --everyone` posts in the channel with no mention and DMs every enabled fleet's operator;
+`info` and `--no-mention` post in the channel, pinging nobody. Never `@here`, never a user group:
+`SLACK_OPERATORS_GROUP_ID` is retired and ignored when an older env file still sets it. Gate requests DM
+the operator of the fleet that authored the PR (`multi-fleet.md` § 7). To resolve incident latches whose
+PR already merged or closed: `fleet notify --sweep --repo <owner/name>` (dry run), then `--apply`.
 
 Point `fleet.conf`'s `SLACK_ENV` at that path (and optionally `NOTIFY_FALLBACK_ISSUE=owner/repo#N` for
 the GitHub-comment fallback). Never commit the file, and never reuse another bot's token: see
@@ -915,7 +919,7 @@ fleets:
     github_app: acme-fleet-alice       # App slug; the bot login is acme-fleet-alice[bot]
     github_app_id: 1000001             # the App's numeric id (its settings page); required with 2+ enabled fleets
     cloud_identity: fleet-alice
-    slack_operator: U0000000001        # Slack member id
+    slack_operator: U0000000001        # Slack member id: fleet notify DMs this operator
     status_issue: 11                   # this fleet's status issue in the instance repo
     timezone: America/New_York         # IANA zone for times shown to people (default UTC)
     clock: 12h                         # 12h or 24h (default 24h)

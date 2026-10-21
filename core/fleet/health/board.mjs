@@ -827,8 +827,15 @@ export function applyBoardToGitHub({
   return { updated: true, bodyFile };
 }
 
+/** A link `fleet notify --re` accepts (a plain https URL, engsys#238), else '' so the alert still goes out without it. */
+export function notifyLink(url) {
+  return typeof url === 'string' && /^https:\/\/[^\s<>|`]{1,500}$/.test(url) ? url : '';
+}
+
 /**
  * Notify Slack / fallback issue on confirmed, non-suppressed service transitions via `core/fleet/notify.mjs`.
+ * An outage (`down`, or `hold_merges`) is for every operator: `--level alert --everyone`, the channel with
+ * no mention plus a DM to each operator (engsys#238). `degraded` is an FYI: `--level info`, the channel.
  */
 export function notifyTransitions(
   registry,
@@ -847,9 +854,10 @@ export function notifyTransitions(
   const servicesMap = registry?.services || registry?.servicesMap || {};
   const boardIssue = issue || registry?.board?.issue || registry?.board_issue || null;
   const boardRepo = repo || registry?.board?.repo || '';
-  const resolvedUrl =
+  const resolvedUrl = notifyLink(
     boardUrl ||
-    (boardRepo && boardIssue ? `https://github.com/${boardRepo}/issues/${String(boardIssue).replace(/^#/, '')}` : '');
+    (boardRepo && boardIssue ? `https://github.com/${boardRepo}/issues/${String(boardIssue).replace(/^#/, '')}` : ''),
+  );
 
   const runNotify =
     notifyExec ||
@@ -893,7 +901,7 @@ export function notifyTransitions(
     if (t.to === 'degraded' || t.to === 'down') {
       const holdMerges = Boolean(t.hold_merges || svcConfig?.impact?.hold_merges);
       const wantsAction = t.to === 'down' || holdMerges;
-      const level = wantsAction ? (resolvedUrl ? 'action' : 'alert') : 'info';
+      const level = wantsAction ? 'alert' : 'info';
       const advice = deriveServiceAdvice(svcConfig, {
         state: t.to,
         advice: t.advice,
@@ -901,7 +909,7 @@ export function notifyTransitions(
         suppressed_by: t.suppressed_by,
       });
       const msg = `FHD: ${svcConfig.name || t.service} (${t.service}) is ${t.to.toUpperCase()} — ${advice}`;
-      const args = ['--level', level, '--incident', incidentKey];
+      const args = ['--level', level, ...(wantsAction ? ['--everyone'] : []), '--incident', incidentKey];
       if (resolvedUrl) {
         args.push('--re', resolvedUrl);
       }

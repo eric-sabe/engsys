@@ -17,7 +17,8 @@
 //   evaluateGate(facts, opts)               -> verdict; pure, the whole rule set lives here
 //   collectFacts(api, opts)                 -> facts; reads GitHub through `api`
 //   checkGate(api, opts)                    -> verdict (collectFacts + evaluateGate)
-//   postGateRequest(api, opts)              -> { id, url, comment_id, author }
+//   postGateRequest(api, opts)              -> { id, url, comment_id, author, owner }  (owner: the PR's fleet
+//                                              operator from the registry, or null; engsys#238)
 //
 // CLI:
 //   node gate-check.mjs check   --repo o/r (--pr N | --issue N) --gate ID
@@ -25,6 +26,9 @@
 //                               --requester LOGIN --target T --kind K
 //   node gate-check.mjs request --repo o/r (--pr N | --issue N) --kind K --target T --what TEXT
 //                               [--gate ID] [--operators-team org/slug | --operators login:id,...] [--dry-run]
+// `request` on a PR in a fleet session (FEDERATION_FILE set) reads the PR author: a fleet App's bot gets that
+// fleet's operator @-mentioned and returned as `owner` (for `fleet notify --for <owner.fleet>`), and the
+// operator source is named without a ping; a human or unknown author keeps the team mention (engsys#238).
 // `check` prints one JSON verdict on stdout. Exit: 0 approved, 3 waiting, 4 denied, 1 error (bad
 // input, missing config, unreadable API, stale or ambiguous gate). Anything unexpected fails closed.
 // A waiting merge gate reports `early_approvals` when qualifying operators approved its exact head before
@@ -70,6 +74,8 @@ export const OPERATOR_ENTRY_RE = /^([A-Za-z0-9](?:[A-Za-z0-9-]{0,38})):([1-9][0-
 /** Logins that are never an operator, whatever the API says (`ghost` is the deleted-user placeholder). */
 const DENIED_LOGINS = new Set(['ghost']);
 const NODE_ID_RE = /^[A-Za-z0-9_=-]{1,100}$/;
+/** A fleet id, as federation.mjs FLEET_ID_RE (the owning fleet a gate request names, engsys#238). */
+const FLEET_RE = /^[a-z][a-z0-9-]{1,20}$/;
 
 /**
  * Which operator source applies: the team when `operatorsTeam` is set (it wins), else the
@@ -163,7 +169,7 @@ function oneLine(s, max) {
  * Render the request comment. The marker is always line 1 (check reads it only in leading
  * position). `what` is agent prose and is flattened to one line with comment markers removed.
  */
-export function renderGateRequest({ id, kind, target, what, operatorsTeam, operators, thread = 'pr', requestedAt = null }) {
+export function renderGateRequest({ id, kind, target, what, operatorsTeam, operators, thread = 'pr', requestedAt = null, owner = null }) {
   if (!GATE_ID_RE.test(id ?? '')) throw new TypeError(`gate-check: invalid gate id ${JSON.stringify(id)}`);
   if (!KIND_RE.test(kind ?? '')) throw new TypeError(`gate-check: invalid kind ${JSON.stringify(kind)}`);
   if (!TARGET_RE.test(target ?? '')) throw new TypeError(`gate-check: invalid target ${JSON.stringify(target)}`);
@@ -172,13 +178,18 @@ export function renderGateRequest({ id, kind, target, what, operatorsTeam, opera
     throw new TypeError('gate-check: a gate on a pull request (and every merge gate) needs a target of the form owner/repo#N@<40-hex head sha>');
   }
   const src = operatorSource({ operatorsTeam, operators });
-  const who = src?.type === 'team' ? `a member of @${src.team}` : src?.type === 'list' ? `an operator (${src.entries.map((e) => `@${e.login}`).join(', ')})` : 'an operator';
+  // A fleet-authored PR (engsys#238) mentions only the operator of the fleet that owns it; the team and
+  // the allowlist are then named without an @, so they are not pinged, and any of them can still approve.
+  const own = owner && LOGIN_RE.test(owner.login ?? '') && FLEET_RE.test(owner.fleet ?? '') ? owner : null;
+  const at = own ? '' : '@';
+  const who = src?.type === 'team' ? `a member of ${at}${src.team}` : src?.type === 'list' ? `an operator (${src.entries.map((e) => `${at}${e.login}`).join(', ')})` : 'an operator';
   const lines = [
     `<!-- gate-request id="${id}" kind="${kind}" target="${target}" -->`,
     `### Gate request \`${id}\` (${kind})`,
     '',
     `**What:** ${oneLine(what, 300) || '(not stated)'}`,
     `**Target:** \`${target}\``,
+    ...(own ? [`**For:** @${own.login}, operator of fleet \`${own.fleet}\`, which opened this pull request`] : []),
     ...(requestedAt ? [`**Requested:** ${oneLine(requestedAt, 60)}`] : []),
     '',
   ];
@@ -742,17 +753,52 @@ function operatorRequestedAt(env, now = new Date()) {
   return isConfigured(env) ? formatFromEnv(now, env, { now }) : null;
 }
 
+/**
+ * The fleet that owns a pull request (engsys#238): `resolveOwner(<PR author login>)`, which maps a fleet
+ * App's bot to `{ fleet, operator, slack_operator }` (federation.mjs fleetForBot). Null on an issue
+ * thread, with no resolver, for a human or unknown author, or when the PR can't be read: the request
+ * then keeps the team mention, so a lookup problem never blocks a gate.
+ */
+async function prOwner(api, { repo, number, thread, resolveOwner }) {
+  if (thread !== 'pr' || typeof resolveOwner !== 'function') return null;
+  try {
+    const { status, json } = await api.request('GET', `/repos/${repo}/pulls/${number}`);
+    const owner = status === 200 ? resolveOwner(json?.user?.login) : null;
+    return owner?.operator ? { fleet: owner.fleet, login: owner.operator, slack_operator: owner.slack_operator ?? null } : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Post a gate request. Refuses an id already used on the thread. */
 export async function postGateRequest(api, opts) {
   const { number, thread } = validateCommon(opts, false);
   const id = opts.gate ?? newGateId(opts.kind);
-  const body = renderGateRequest({ id, kind: opts.kind, target: opts.target, what: opts.what, operatorsTeam: opts.operatorsTeam, operators: opts.operators, thread, requestedAt: operatorRequestedAt(opts.env ?? process.env) });
+  const owner = await prOwner(api, { repo: opts.repo, number, thread, resolveOwner: opts.resolveOwner });
+  const body = renderGateRequest({ id, kind: opts.kind, target: opts.target, what: opts.what, operatorsTeam: opts.operatorsTeam, operators: opts.operators, thread, requestedAt: operatorRequestedAt(opts.env ?? process.env), owner });
   const comments = await listAll(api, `/repos/${opts.repo}/issues/${number}/comments`, 'reading comments');
   if (comments.some((c) => parseGateRequest(c.body)?.id === id)) throw new Error(`a gate request with id "${id}" already exists on ${opts.repo}#${number}`);
-  if (opts.dryRun) return { id, dry_run: true, body };
+  if (opts.dryRun) return { id, dry_run: true, owner, body };
   const { status, json } = await api.request('POST', `/repos/${opts.repo}/issues/${number}/comments`, { body });
   if (status !== 201) throw new Error(`HTTP ${status} posting the gate request${json?.message ? `: ${json.message}` : ''}`);
-  return { id, url: json.html_url, comment_id: json.id, author: json.user?.login ?? null };
+  return { id, url: json.html_url, comment_id: json.id, author: json.user?.login ?? null, owner };
+}
+
+/**
+ * The PR-owner resolver from the fleet registry (FEDERATION_FILE, set in every fleet session env), or
+ * null in single-fleet mode or when the registry can't be loaded (warned on `err`; the request then
+ * keeps the team mention). federation.mjs imports this module, so it is loaded lazily here.
+ */
+async function registryOwnerResolver(env, err) {
+  if (!env.FEDERATION_FILE) return null;
+  try {
+    const fed = await import('../fleet/lib/federation.mjs');
+    const reg = fed.loadFederation(env.FEDERATION_FILE);
+    return reg ? (login) => fed.fleetForBot(reg, login) : null;
+  } catch (e) {
+    err.write(`gate-check: warning: cannot read the fleet registry ${env.FEDERATION_FILE} (${e.message}); the request mentions the operator source instead of the PR's fleet operator\n`);
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -767,7 +813,7 @@ const USAGE = `usage:
                          [--gate ID] [--operators-team org/slug | --operators login:id,...] [--dry-run]
 exit (check): 0 approved, 3 waiting, 4 denied, 1 error`;
 
-export async function main(argv, { api = ghApiClient(), out = process.stdout, err = process.stderr } = {}) {
+export async function main(argv, { api = ghApiClient(), out = process.stdout, err = process.stderr, env = process.env } = {}) {
   const [cmd, ...rest] = argv;
   let values;
   try {
@@ -798,7 +844,7 @@ export async function main(argv, { api = ghApiClient(), out = process.stdout, er
   if (cmd === 'request') {
     try {
       if (!opts.kind || !opts.target) throw new TypeError('request needs --kind and --target');
-      const res = await postGateRequest(api, opts);
+      const res = await postGateRequest(api, { ...opts, env, resolveOwner: await registryOwnerResolver(env, err) });
       out.write(JSON.stringify(res, null, 2) + '\n');
       return 0;
     } catch (e) {

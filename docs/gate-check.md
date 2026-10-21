@@ -44,7 +44,8 @@ comment, so a merge approval can never double as approval to run a migration in 
    must be `owner/repo#N@<full 40-character head SHA>` (a 7-character prefix is cheap to collide).
    On an issue it is a short identifier such as `alert:dependabot/42` or `prod@v1.4.0`.
 2. **Nudge.** The agent tells the operator, in its session and in Slack, with the request link. The
-   nudge says "approve on GitHub", never "reply here".
+   nudge says "approve on GitHub", never "reply here". On a PR a fleet opened, the request mentions,
+   and the Slack nudge DMs, only that fleet's operator (`owner`, below; engsys#238).
 3. **Approve or refuse on GitHub.** A PR review **Approve** (kind `merge`) or a comment that reads
    exactly `/approve <gate-id>`. `/deny <gate-id> <reason>` refuses.
 4. **Verify.** On each wake the agent runs `gate-check.sh` and acts only on exit 0. If the operator
@@ -171,8 +172,13 @@ node core/lib/gate-check.mjs check --repo o/r (--pr N | --issue N) --gate ID \
   (--operators-team org/slug | --operators login:id,login:id) --requester LOGIN --target T --kind K
 ```
 
-`request` prints `{id, url, comment_id, author}`; record `author` and pass it as `--requester` on
-every later check. Without `--gate` it generates `<kind>-<utc yyyymmddhhmmss>-<4 hex>`. It refuses an
+`request` prints `{id, url, comment_id, author, owner}`; record `author` and pass it as `--requester` on
+every later check. `owner` (engsys#238): when `FEDERATION_FILE` names the fleet registry and the PR's
+author is a fleet App's bot (`<github_app>[bot]`), it is `{fleet, login, slack_operator}` for that
+fleet's operator, whom the comment @-mentions; the operator source is then named without an `@`, so
+the team is not pinged, and any operator can still approve (validation is unchanged). A human or
+unknown author, an issue thread, no registry, or an unreadable PR or registry → `owner: null` and the
+team mention, as before. Hand `owner.fleet` to `fleet notify --for`. Without `--gate` it generates `<kind>-<utc yyyymmddhhmmss>-<4 hex>`. It refuses an
 id that already has a request on the thread. Gate ids are `[a-z0-9-]`, at most 80 characters.
 
 `check` prints one JSON verdict (`status`, `gate`, `kind`, `target`, `request`, `floor`,

@@ -103,7 +103,7 @@ FLEET_HARNESS="$HARNESS"
 [[ "$VERIFY_MAX_AGE_MIN" =~ ^[0-9]+$ ]] || fleet_die "VERIFY_MAX_AGE_MIN must be a whole number of minutes (got '$VERIFY_MAX_AGE_MIN')"
 : "${LOG_DIR:=$HOME/Library/Logs/${FLEET_ORG}-fleet}"
 # `fleet notify` config. SLACK_ENV: path to the bot's env file (SLACK_BOT_TOKEN, SLACK_CHANNEL_ID,
-# SLACK_OPERATORS_GROUP_ID, optional SLACK_OPERATOR_ID, FLEET_ID unless fleet.conf sets it) — empty means Slack is
+# optional SLACK_OPERATOR_ID, FLEET_ID unless fleet.conf sets it; SLACK_OPERATORS_GROUP_ID is retired, engsys#238) — empty means Slack is
 # unconfigured, notify falls back straight to NOTIFY_FALLBACK_ISSUE (owner/repo#N, also empty-ok).
 : "${SLACK_ENV:=}"
 : "${NOTIFY_FALLBACK_ISSUE:=}"
