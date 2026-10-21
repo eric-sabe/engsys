@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { pluginListFromFiles } from './plugin-list-from-files.mjs';
+import { pluginListFromFiles, marketplaceListFromFiles } from './plugin-list-from-files.mjs';
 import { selectInstalls } from './verify-wrappers.mjs';
 
 const MOD = path.join(path.dirname(fileURLToPath(import.meta.url)), 'plugin-list-from-files.mjs');
@@ -89,4 +89,24 @@ test('selectInstalls gives the same verdict on the file-derived list as on the C
     const files = pluginListFromFiles({ ...dirs({ installed: { version: 2, plugins }, user: { enabledPlugins: en } }), projectDir: proj });
     assert.deepEqual(cli(files), cli(list), name);
   }
+});
+
+test('the marketplace list (engsys#253): name and ref, from known_marketplaces.json', () => {
+  const cfg = tmp();
+  assert.deepEqual(marketplaceListFromFiles({ configDir: cfg }), [], 'no file: nothing known');
+  put(path.join(cfg, 'plugins', 'known_marketplaces.json'), {
+    engsys: { source: { source: 'git', url: 'https://github.com/e/engsys.git', ref: 'v2.3.2' }, installLocation: '/m/engsys' },
+    hashed: { source: { source: 'git', url: 'https://github.com/a/b.git#v1.0.0' } },
+    official: { source: { source: 'github', repo: 'anthropics/claude-plugins-official' } },
+  });
+  assert.deepEqual(marketplaceListFromFiles({ configDir: cfg }), [
+    { name: 'engsys', ref: 'v2.3.2' }, { name: 'hashed', ref: 'v1.0.0' }, { name: 'official', ref: '' },
+  ]);
+  const r = spawnSync('node', [MOD, '--config-dir', cfg, '--marketplaces']);
+  assert.equal(r.status, 0);
+  assert.equal(JSON.parse(r.stdout.toString())[0].ref, 'v2.3.2');
+  put(path.join(cfg, 'plugins', 'known_marketplaces.json'), '[1]');
+  const bad = spawnSync('node', [MOD, '--config-dir', cfg, '--marketplaces']);
+  assert.equal(bad.status, 1, 'malformed fails closed');
+  assert.equal(bad.stdout.toString(), '');
 });

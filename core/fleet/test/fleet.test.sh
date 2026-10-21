@@ -62,6 +62,7 @@ case "${1:-}" in
     case "${2:-}" in
       list) cat "$S/marketplaces.json" ;;
       add)
+        [ ! -f "$FAKE/claude-add-fail" ] || { echo "add exploded" >&2; exit 1; }
         arg="$3"; url="${arg%%#*}"; ref=""
         case "$arg" in *'#'*) ref="${arg#*#}" ;; esac
         tmp="$(mktemp -d)"
@@ -106,6 +107,11 @@ run_launch_line() { local f; case "$1" in ". "*) eval "f=${1#. }"; [ -f "$f" ] |
 case "$sub" in
   list-windows) cat "$F/windows" ;;
   list-panes)
+    # $F/flip-<w> = N: the window's claude "starts" (cmd node) after N more list-panes calls (a session coming up mid-run)
+    for ff in "$F"/flip-*; do
+      [ -f "$ff" ] || continue
+      n="$(cat "$ff")"; if [ "$n" -le 0 ]; then echo node >"$F/cmd-${ff##*/flip-}"; rm -f "$ff"; else echo $((n - 1)) >"$ff"; fi
+    done
     case "$fmt" in
       *window_name*) while IFS= read -r wn; do [ -z "$wn" ] || [ ! -f "$F/cmd-$wn" ] || { l="${fmt//"#{window_name}"/$wn}"; l="${l//"#{pane_current_command}"/$(cat "$F/cmd-$wn")}"; printf '%s\n' "$l" | tr '\t' _; }; done <"$F/windows" ;;
       *pane_pid*) cat "$F/pid-$w" 2>/dev/null || exit 1 ;;
@@ -854,7 +860,9 @@ has "…naming it and the command" "$OUT" "SKIPPED: acme-security (its own Claud
 has "…while the other sessions start" "$(tl acme-mm)" "export CLAUDE_CONFIG_DIR=$SESS/acme-mm"
 hasnt "…and the logged-out one does not" "$(cat "$FAKE/tmux.log")" "[acme:acme-security]"
 login_all acme-security
-# sync: the pinned plugins go into every session dir; a missing dir is drift for that session only
+# sync: the pinned plugins go into every session dir; a missing dir is drift for that session only (no session runs here:
+# a running one's dir is left to its restart, K2)
+rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"
 rm -rf "$SESS/acme-rel"; setconf "FLEET_CLAUDE_CONFIG_DIR=$FCFG" "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on"
 m="$(mark)"; run fleet sync
 rc_is "per-session sync exits 0 (a missing dir is a warning)" 0
@@ -985,6 +993,172 @@ run fleet verify
 rc_is "per-session on without FLEET_CLAUDE_CONFIG_DIR is a config error" 3
 has "…saying so" "$OUT" "needs FLEET_CLAUDE_CONFIG_DIR"
 cp "$T/flc.bak" "$LC"; rm -rf "$SESS" "$FAKE/tmux"; : >"$FAKE/tmux.log"
+
+echo "== K2. engsys#253: sync and status start no claude on a running session's own dir; its restart syncs it"
+setconf "FLEET_CLAUDE_CONFIG_DIR=$FCFG" "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on"
+rm -rf "$FAKE/claude-cfg" "$STATE/sync-deferred"; run fleet config-dir init; login_all acme-mm acme-build acme-security acme-rel
+run fleet sync
+rc_is "every session down: sync covers every dir" 0
+stub_state() { printf '%s/claude-cfg/%s' "$FAKE" "$(printf '%s' "$SESS/$1" | tr '/' '_')"; }
+running() { mkdir -p "$FAKE/tmux"; : >"$FAKE/tmux/windows"; local n; for n in "$@"; do echo "$n" >>"$FAKE/tmux/windows"; echo node >"$FAKE/tmux/cmd-$n"; done; }
+on_dir() { since "$1" | grep "CFG=$SESS/$2\$" || true; }
+ILOG="$STATE/claude-invocations.log"
+# the running sessions' dirs fall behind (their plugin state is gone); the stopped ones too
+running acme-mm acme-security
+rm -rf "$FAKE/claude-cfg"; rm -f "$ILOG"
+m="$(mark)"; run fleet sync
+rc_is "sync with two sessions running exits 0" 0
+eq "no claude on acme-mm's dir while it runs" "$(on_dir "$m" acme-mm)" ""
+eq "…nor on acme-security's" "$(on_dir "$m" acme-security)" ""
+hasnt "…and none in the invocation log" "$(cat "$ILOG" 2>/dev/null)" "$SESS/acme-mm"
+has "a stopped session's dir is synced as before" "$(on_dir "$m" acme-build)" "plugin install"
+has "…and acme-rel's" "$(on_dir "$m" acme-rel)" "plugin install"
+has "each running one is reported, with what picks it up" "$OUT" "claude config dir: $SESS/acme-mm (session acme-mm, own login): session running, not synced now — restart to pick up"
+has "…and summed up with the override and its risk" "$OUT" "not synced, running: acme-mm acme-security"
+has "…naming the override" "$OUT" "fleet sync --include-running (risky"
+eq "…and both are recorded for their restart" "$(sort "$STATE/sync-deferred" | paste -sd' ' -)" "acme-mm acme-security"
+# fleet status: --check reads a running session's dir from its files, never its login
+k2_files() { # k2_files <session> <from session>: write <from>'s stub plugin state as <session>'s own plugin files
+  local s; s="$(stub_state "$2")"; mkdir -p "$SESS/$1/plugins"
+  jq 'map({key: .name, value: {source: {source: "git", url: .url, ref: .ref}}}) | from_entries' "$s/marketplaces.json" >"$SESS/$1/plugins/known_marketplaces.json"
+  jq '{version: 2, plugins: (map({key: .id, value: [{scope, version, installPath: ""}]}) | from_entries)}' "$s/plugins.json" >"$SESS/$1/plugins/installed_plugins.json"
+}
+k2_files acme-security acme-build; rm -rf "$SESS/acme-mm/plugins"
+rm -f "$ILOG"; m="$(mark)"; run fleet status
+eq "status: no claude on acme-mm's dir" "$(on_dir "$m" acme-mm)" ""
+eq "…nor on acme-security's" "$(on_dir "$m" acme-security)" ""
+hasnt "…none in the invocation log" "$(cat "$ILOG" 2>/dev/null)" "$SESS/acme-mm "
+hasnt "…for either" "$(cat "$ILOG" 2>/dev/null)" "$SESS/acme-security "
+has "…the stopped dirs are still asked (no live login there)" "$(on_dir "$m" acme-build)" "auth status"
+has "…says the login of a running one was not checked" "$OUT" "$SESS/acme-mm (session acme-mm, own login), login not checked"
+has "…reads a running dir's marketplace from its files" "$OUT" "marketplace engsys is at 'absent'"
+hasnt "…and finds the one whose files match the pins in sync" "$(sed -n "\|$SESS/acme-security|,\|claude config dir: $SESS/acme-rel|p" <<<"$OUT")" "is at"
+has "…the host itself is in sync" "$OUT" "host is in sync with the pins"
+has "…and the behind running one waits for its restart, not a sync" "$OUT" "running, behind the pins until restarted: acme-mm (fleet restart --stale"
+run fleet sync --check
+rc_is "…sync --check exits 0: nothing left for a sync to do" 0
+m="$(mark)"; run fleet sync
+has "a running session whose dir is at the pins (read from its files) is not deferred" "$OUT" "(session acme-security, own login): session running, its dir is at the pins"
+eq "…only the behind one is" "$(cat "$STATE/sync-deferred")" "acme-mm"
+eq "…and neither got a claude" "$(on_dir "$m" acme-mm)$(on_dir "$m" acme-security)" ""
+# --session refuses a running session; --include-running is the explicit override
+run fleet sync --session acme-mm
+rc_is "sync --session on a running session is refused" 1
+has "…saying it syncs at its restart" "$OUT" "session acme-mm is running"
+FLEET_SYNC_INCLUDE_RUNNING=1 run fleet sync
+eq "an inherited FLEET_SYNC_INCLUDE_RUNNING is not the flag" "$(cat "$STATE/sync-deferred")" "acme-mm"
+m="$(mark)"; run fleet sync --include-running
+rc_is "sync --include-running exits 0" 0
+has "…syncs the running session's dir" "$(on_dir "$m" acme-mm)" "plugin install"
+has "…with a warning naming the risk" "$OUT" "WARNING --include-running: syncing $SESS/acme-mm while session acme-mm runs on it"
+if [ -e "$STATE/sync-deferred" ]; then bad "…and nothing is left deferred"; else ok "…and nothing is left deferred"; fi
+# the pin cycle: sync defers the running monster; its relaunch (fleet launch, as restart and the supervisor do) syncs it first
+rm -rf "$(stub_state acme-mm)"; running acme-mm
+run fleet sync; eq "acme-mm deferred again" "$(cat "$STATE/sync-deferred")" "acme-mm"
+echo zsh >"$FAKE/tmux/cmd-acme-mm"
+run fleet sync --check
+has "an exited session's dir is checked through the CLI again (no live login)" "$OUT" "$SESS/acme-mm (session acme-mm, own login), logged in"
+: >"$FAKE/tmux/windows"; rm -f "$FAKE/tmux/cmd-acme-mm"; : >"$FAKE/tmux.log"
+m="$(mark)"; run fleet launch acme-mm
+rc_is "the relaunch of a deferred session succeeds" 0
+has "…its dir was synced first" "$(on_dir "$m" acme-mm)" "plugin install engsys@engsys"
+has "…saying so" "$OUT" "session acme-mm is down and fleet sync left its config dir behind"
+has "…then it was verified and launched" "$(tl acme-mm)" "export CLAUDE_CONFIG_DIR=$SESS/acme-mm && command claude"
+if [ -e "$STATE/sync-deferred" ]; then bad "…and it is no longer deferred"; else ok "…and it is no longer deferred"; fi
+m="$(mark)"; : >"$FAKE/tmux/windows"; run fleet launch acme-mm
+eq "a launch with nothing deferred installs nothing" "$(on_dir "$m" acme-mm | grep -c 'plugin install' || true)" 0
+# the supervisor's per-session tick: once the session is down, verify --auto-sync syncs the deferred dir before judging it
+rm -rf "$(stub_state acme-security)" "$SESS/acme-security/plugins"; running acme-security; run fleet sync
+eq "acme-security deferred" "$(cat "$STATE/sync-deferred")" "acme-security"
+: >"$FAKE/tmux/windows"; m="$(mark)"
+run fleet verify --alert --auto-sync --max-age 15 --session acme-security
+rc_is "the supervisor's check of the stopped, deferred session syncs its dir, then passes" 0
+has "…synced" "$(on_dir "$m" acme-security)" "plugin install engsys@engsys"
+if [ -e "$STATE/sync-deferred" ]; then bad "…and it is no longer deferred"; else ok "…and it is no longer deferred"; fi
+# a deferred sync that fails refuses that session's launch
+rm -rf "$(stub_state acme-mm)"; running acme-mm; run fleet sync; : >"$FAKE/tmux/windows"; rm -f "$FAKE/tmux/cmd-acme-mm"
+touch "$FAKE/claude-add-fail"; : >"$FAKE/tmux.log"
+run fleet launch acme-mm
+rm -f "$FAKE/claude-add-fail"
+rc_is "a deferred dir that cannot be synced: the launch is refused" 1
+has "…saying what failed and how to retry" "$OUT" "fleet sync left its config dir behind while it ran, and syncing it now failed"
+eq "…nothing reached tmux" "$(grep -c send-keys "$FAKE/tmux.log" || true)" 0
+eq "…and it stays deferred" "$(cat "$STATE/sync-deferred")" "acme-mm"
+# a session that comes up while sync --session runs on its dir: left alone, and the run says so (not "at the pins")
+rm -rf "$(stub_state acme-mm)" "$SESS/acme-mm/plugins"; running acme-mm; echo zsh >"$FAKE/tmux/cmd-acme-mm"; echo 1 >"$FAKE/tmux/flip-acme-mm"
+m="$(mark)"; run fleet sync --session acme-mm
+rc_is "sync --session of a session that starts mid-run fails" 1
+has "…saying it was left until its restart" "$OUT" "session acme-mm started while its dir was being synced"
+hasnt "…not that it is at the pins" "$OUT" "its config dir is at the pins"
+eq "…and no claude ran on it" "$(on_dir "$m" acme-mm)" ""
+eq "…it stays deferred" "$(cat "$STATE/sync-deferred")" "acme-mm"
+rm -f "$STATE/sync-deferred" "$FAKE/tmux/flip-acme-mm"
+# the deferred list is edited under a lock: concurrent edits lose nothing
+cat >"$T/defer-case.sh" <<'SH'
+. "$ENGSYS_HOST/core/fleet/lib/fleet-env.sh"; . "$ENGSYS_HOST/core/fleet/lib/session-dirs.sh"
+for i in $(seq 1 12); do fleet_sync_deferred_set add "s$i" & done; wait
+for i in $(seq 1 6); do fleet_sync_deferred_set drop "s$i" & done; wait
+SH
+FLEET_INSTANCE="$INST" ENGSYS_HOST="$ENGSYS_HOST" bash "$T/defer-case.sh"
+eq "concurrent adds and drops of the deferred list: none lost" "$(sort -V "$STATE/sync-deferred" | paste -sd' ' -)" "s7 s8 s9 s10 s11 s12"
+if [ -e "$STATE/locks/sync-deferred.lock" ]; then bad "…and the lock is released"; else ok "…and the lock is released"; fi
+rm -f "$STATE/sync-deferred"
+cp "$T/flc.bak" "$LC"; rm -rf "$SESS" "$FAKE/tmux" "$FAKE/claude-cfg"; : >"$FAKE/tmux.log"
+
+echo "== K3. engsys#253: an unattended sync leaves ~/.claude alone while an interactive role runs on it; a long deferral is alerted once"
+setconf "FLEET_CLAUDE_CONFIG_DIR=$FCFG" "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on" "FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised" "NOTIFY_FALLBACK_ISSUE=acme/acme-fleet#5"
+rm -rf "$FAKE/claude-cfg" "$FAKE/claude" "$FAKE/tmux" "$STATE"/sync-deferred*; run fleet config-dir init; login_all acme-mm acme-security acme-rel
+UMARK="$STATE/sync-deferred.user-claude"
+user_calls() { since "$1" | grep 'CFG=unset$' || true; }
+running acme-build
+m="$(mark)"; run fleet sync --no-jobs
+rc_is "unattended sync (--no-jobs) with an interactive role running on ~/.claude exits 0" 0
+eq "…no claude on ~/.claude" "$(user_calls "$m")" ""
+has "…saying why, and what to run" "$OUT" "in use by acme-build, not synced by this unattended run"
+if [ -f "$UMARK" ]; then ok "…recorded for verify's alert text"; else bad "…recorded for verify's alert text"; fi
+has "…the session dirs are still synced" "$(on_dir "$m" acme-mm)" "plugin install"
+m="$(mark)"; run fleet sync --check
+eq "fleet status (sync --check) starts no claude on ~/.claude while an interactive role runs on it" "$(user_calls "$m")" ""
+has "…reads its files and says its login was not checked" "$OUT" "$HOME/.claude (interactive roles), login not checked"
+m="$(mark)"; run fleet sync
+has "the operator's own fleet sync still syncs ~/.claude while it is in use" "$(user_calls "$m")" "plugin install"
+if [ -f "$UMARK" ]; then bad "…and clears the record"; else ok "…and clears the record"; fi
+rm -rf "$FAKE/claude"; : >"$FAKE/tmux/windows"
+m="$(mark)"; run fleet sync --no-jobs
+has "unattended, with no interactive role running, ~/.claude is synced as before" "$(user_calls "$m")" "plugin install"
+# a session left deferred for longer than SYNC_DEFER_ALERT_HOURS: one action-level notify, resolved once it is synced
+cat >"$T/defer-alert.sh" <<'SH'
+. "$ENGSYS_HOST/core/fleet/lib/fleet-env.sh"; . "$ENGSYS_HOST/core/fleet/lib/session-dirs.sh"
+fleet_sync_deferred_alert "${DEFER_URL-https://github.com/acme/app/issues/11}"
+SH
+dalert() { FLEET_INSTANCE="$INST" ENGSYS_HOST="$ENGSYS_HOST" bash "$T/defer-alert.sh" >/dev/null 2>&1; }
+dsaid() { grep -c -- "$1" "$FAKE/gh.log" || true; }
+FLEET_INSTANCE="$INST" ENGSYS_HOST="$ENGSYS_HOST" bash -c '. "$ENGSYS_HOST/core/fleet/lib/fleet-env.sh"; . "$ENGSYS_HOST/core/fleet/lib/session-dirs.sh"; fleet_sync_deferred_set add acme-mm'
+: >"$FAKE/gh.log"; dalert
+eq "a fresh deferral is not alerted" "$(dsaid 'running on its old plugins')" 0
+echo $(( $(date +%s) - 25 * 3600 )) >"$STATE/sync-deferred.since/acme-mm"
+dalert
+eq "deferred for over 24h: one notify" "$(dsaid 'session acme-mm has been running on its old plugins for over 24h')" 1
+has "…saying how to fix it" "$(cat "$FAKE/gh.log")" "fleet restart acme-mm"
+dalert
+eq "…latched: not again on the next tick" "$(dsaid 'running on its old plugins')" 1
+SYNC_DEFER_ALERT_HOURS=48 dalert; rm -f "$STATE/sync-deferred.alerted.acme-mm"; SYNC_DEFER_ALERT_HOURS=48 dalert
+eq "…the threshold is SYNC_DEFER_ALERT_HOURS" "$(dsaid 'running on its old plugins')" 1
+dalert
+FLEET_INSTANCE="$INST" ENGSYS_HOST="$ENGSYS_HOST" bash -c '. "$ENGSYS_HOST/core/fleet/lib/fleet-env.sh"; . "$ENGSYS_HOST/core/fleet/lib/session-dirs.sh"; fleet_sync_deferred_set drop acme-mm'
+dalert
+if [ -e "$STATE/sync-deferred.alerted.acme-mm" ] || [ -e "$STATE/sync-deferred.since/acme-mm" ]; then bad "synced at its restart: the incident is resolved (latch and since record gone)"; else ok "synced at its restart: the incident is resolved (latch and since record gone)"; fi
+dalert
+eq "…and not alerted again" "$(dsaid 'session acme-mm has been running on its old plugins')" 2
+# a link notify would refuse (--re must be a plain https URL, engsys#238) is left out: posted at info level, still latched
+FLEET_INSTANCE="$INST" ENGSYS_HOST="$ENGSYS_HOST" bash -c '. "$ENGSYS_HOST/core/fleet/lib/fleet-env.sh"; . "$ENGSYS_HOST/core/fleet/lib/session-dirs.sh"; fleet_sync_deferred_set add acme-mm'
+echo $(( $(date +%s) - 25 * 3600 )) >"$STATE/sync-deferred.since/acme-mm"
+DEFER_URL="http://github.com/acme/app/issues/11" dalert
+eq "a non-https link: still posted once" "$(dsaid 'session acme-mm has been running on its old plugins')" 3
+hasnt "…without the refused link" "$(grep 'running on its old plugins' "$FAKE/gh.log" | tail -n 1)" "http://github.com"
+if [ -f "$STATE/sync-deferred.alerted.acme-mm" ]; then ok "…and latched"; else bad "…and latched"; fi
+rm -rf "$STATE"/sync-deferred*
+cp "$T/flc.bak" "$LC"; rm -rf "$SESS" "$FAKE/tmux" "$FAKE/claude-cfg"; : >"$FAKE/tmux.log"
 
 echo "== F. supervise"
 rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"; : >"$FAKE/gh.log"
@@ -1577,6 +1751,44 @@ SEG="$(since "$m")"
 has "the instance marketplace was re-added at the same ref" "$SEG" "plugin marketplace add https://github.com/acme/acme-fleet.git#v0.2.0"
 has "…and its plugin reinstalled" "$SEG" "plugin install ctx@acme"
 rm -f "$LC"
+git -C "$ENGSYS_HOST" checkout -q v1.4.0 2>/dev/null || true
+
+echo "== P4. engsys#253: a re-cut with a running session settles once its restart reinstalled it, with no churn meanwhile"
+setconf "INSTANCE_MARKETPLACE=" "GH_APP_ENV=" "ENGSYS_REF=v1.4.0" "FLEET_CLAUDE_CONFIG_DIR=$FCFG" "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on"
+SESS="$FCFG.sessions"; rm -rf "$SESS" "$FAKE/claude-cfg" "$FAKE/tmux" "$STATE/sync-deferred" "$STATE/pin-recut.done"; : >"$FAKE/tmux.log"
+run fleet config-dir init; login_all acme-mm acme-build acme-security acme-rel
+run fleet sync
+rc_is "baseline per-session sync exits 0" 0
+running acme-build; k2_files acme-build acme-build
+recut_engsys "p4"
+m="$(mark)"; run fleet sync
+rc_is "the re-cut is adopted while acme-build runs" 0
+has "…the stopped dirs are reinstalled" "$(on_dir "$m" acme-rel)" "plugin marketplace remove engsys"
+eq "…the running one is not touched" "$(on_dir "$m" acme-build)" ""
+eq "…it is left to its restart" "$(cat "$STATE/sync-deferred")" "acme-build"
+eq "…and the reinstall stays pending for it" "$(cat "$STATE/pin-recut.reinstall" 2>/dev/null || echo none)" engsys
+lc0="$(cat "$STATE/last-change")"; sleep 1
+m="$(mark)"; run fleet sync
+hasnt "a sync before its restart does not reinstall the stopped dirs again" "$(since "$m")" "plugin marketplace remove engsys"
+eq "…nor restamp the last change" "$(cat "$STATE/last-change")" "$lc0"
+eq "…acme-build still waits" "$(cat "$STATE/sync-deferred")" "acme-build"
+run fleet status
+has "status: acme-build waits for its restart (its dir still needs the re-cut)" "$OUT" "running, behind the pins until restarted: acme-build"
+# the restart: down, relaunched (an interactive role: no integrity gate in this sandbox); the launch reinstalls its dir
+: >"$FAKE/tmux/windows"; rm -f "$FAKE/tmux/cmd-acme-build"; : >"$FAKE/tmux.log"
+m="$(mark)"; run fleet launch acme-build
+rc_is "acme-build relaunches" 0
+has "…its dir got the re-cut reinstall first" "$(on_dir "$m" acme-build)" "plugin marketplace remove engsys"
+if [ -e "$STATE/sync-deferred" ]; then bad "…and it is no longer deferred"; else ok "…and it is no longer deferred"; fi
+# running again on the reinstalled dir (the real CLI rewrites these files; the stub keeps its state elsewhere)
+running acme-build; k2_files acme-build acme-build
+m="$(mark)"; run fleet sync
+rc_is "the next sync exits 0" 0
+eq "…clears the pending re-cut reinstall" "$(cat "$STATE/pin-recut.reinstall" 2>/dev/null || echo none)" none
+if [ -e "$STATE/pin-recut.done" ]; then bad "…and its per-dir record"; else ok "…and its per-dir record"; fi
+hasnt "…without reinstalling any dir" "$(since "$m")" "plugin marketplace remove engsys"
+has "…acme-build is at the pins (from its files)" "$OUT" "(session acme-build, own login): session running, its dir is at the pins"
+rm -rf "$SESS" "$FAKE/claude-cfg" "$FAKE/tmux"; : >"$FAKE/tmux.log"; rm -f "$LC" "$STATE/sync-deferred"
 git -C "$ENGSYS_HOST" checkout -q v1.4.0 2>/dev/null || true
 
 echo "== O. engsys#212: per-session adoption: early warnings, and no /login advice over SSH"

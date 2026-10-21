@@ -52,6 +52,10 @@
 # lease before any relaunch and relaunches only where this fleet is home and no live baton is held
 # (fleet-supervisor.sh header; engsys#62).
 #
+# It also posts one `fleet notify --level action --incident sync-deferred-<name>` for a session that has run for longer than
+# SYNC_DEFER_ALERT_HOURS (fleet.conf, default 24) on a config dir fleet sync left behind the pins (engsys#253), and
+# resolves it once the session restarted.
+#
 # Usage: supervise.sh [--instance <dir>]
 set -euo pipefail
 if [ "${1:-}" = --instance ]; then FLEET_INSTANCE="${2:?--instance needs a directory}"; export FLEET_INSTANCE; shift 2; fi
@@ -131,6 +135,16 @@ grep -q '^HARNESS=' "$conf" || printf 'HARNESS=%s\n' "${PRIMARY_HARNESS:-$HARNES
 if [ -n "$status_target" ] && ! grep -q '^STATUS_URL=' "$conf"; then
   printf 'STATUS_URL=https://github.com/%s/issues/%s\n' "${status_target%%#*}" "${status_target##*#}" >>"$conf"
 fi
+# A session whose own dir fleet sync has left behind for longer than SYNC_DEFER_ALERT_HOURS (engsys#253): one action-level
+# notify each, linked to the status issue (else the first ledger), resolved once it restarts. Never stops the tick.
+defer_url="$(sed -n 's/^STATUS_URL=//p' "$conf" | tail -n 1)"
+if [ -z "$defer_url" ]; then
+  d_repo="$(sed -n 's/^REPO=//p' "$conf" | tail -n 1)"; d_ledger="$(awk -F'|' '/^[a-z0-9][a-z0-9._-]*[|][0-9]+[|]/ { print $2; exit }' "$conf")"
+  [ -z "$d_repo" ] || [ -z "$d_ledger" ] || defer_url="https://github.com/$d_repo/issues/$d_ledger"
+fi
+# shellcheck source=lib/session-dirs.sh
+. "$FLEET_KIT_DIR/lib/session-dirs.sh"
+fleet_sync_deferred_alert "$defer_url" || true
 # Nothing to supervise, but an unreadable registry is what paused the monsters (or an open alert needs
 # resolving): run the tick anyway, for the alert.
 if [ "$kept" = 0 ] && { fleet_host_registry_alert >/dev/null || [ -f "$FLEET_REPO/logs/fleet-supervisor/host-health.alerted" ]; }; then

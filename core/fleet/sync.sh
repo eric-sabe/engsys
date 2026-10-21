@@ -20,6 +20,17 @@
 # With FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on (engsys#205) step 4 runs in every session's own config dir
 # (<FLEET_CLAUDE_CONFIG_DIR>.sessions/<name>; one that does not exist yet is reported as drift and skipped),
 # each with its own login report.
+# A RUNNING session's own dir is left alone (engsys#253): a second claude process on its login can rotate the refresh
+# token out from under the session (anthropics/claude-code#88583), and `claude auth status` / `plugin list` /
+# `marketplace` / `install` are all such processes. Sync reads that dir's files instead; one that is behind is skipped,
+# reported as "running — restart to pick up" and recorded in .fleet/sync-deferred; the dir is synced when the session is down, right before it starts again
+# (`fleet launch`, and the supervisor's `fleet verify --auto-sync --session`, both run `sync.sh --session <name>`). So
+# `fleet sync`, then `fleet restart --stale` is still the whole pin cycle. `--check` (what `fleet status` runs) reads a
+# running session's dir from its files (lib/plugin-list-from-files.mjs) and skips the login check, so it starts no
+# claude on it either. (A shared dir, FLEET_CLAUDE_CONFIG_DIR without per-session mode or ~/.claude, is synced and
+# checked as before: its sessions share one login and race each other anyway; per-session mode is the fix for that.
+# Except ~/.claude under scope supervised while an interactive role runs on it: --check reads its files, and an
+# unattended run, --no-jobs, leaves it alone.)
 # Anything that changed is stamped in .fleet/last-change; `fleet restart` uses that stamp to tell which
 # running sessions are behind. Running sessions keep their loaded plugins (the old cache dirs stay on
 # disk) until restarted.
@@ -29,15 +40,25 @@
 #        sync.sh [--instance <dir>] --no-jobs # never (re)load or unload launchd jobs: what `fleet verify
 #                                             # --auto-sync` runs from inside the supervisor job, which a
 #                                             # reload would kill. Changed job files are alerted instead.
+#        sync.sh [--instance <dir>] --include-running
+#                                             # RISKY: sync running sessions' own dirs too (claude on their live
+#                                             # logins; it can log a session out). Only when a restart is not an option.
+#        sync.sh [--instance <dir>] --session <name> [--no-jobs]
+#                                             # (per-session mode) just that session's own dir, at the pins as
+#                                             # they stand; no checkouts, no jobs. Refused while it runs.
 set -euo pipefail
 
 main() {
-  local check=0
+  local check=0 only_session=""
   if [ "${1:-}" = --instance ]; then FLEET_INSTANCE="${2:?--instance needs a directory}"; export FLEET_INSTANCE; shift 2; fi
+  # only the flag sets it (an inherited value is dropped); it is carried across the re-execs below
+  [ -n "${FLEET_SYNC_RESUMED:-}" ] || unset FLEET_SYNC_INCLUDE_RUNNING
   while [ $# -gt 0 ]; do
     case "$1" in
       --check) check=1 ;;
       --no-jobs) export FLEET_SYNC_NO_JOBS=1 ;; # carried across the re-execs below
+      --include-running) export FLEET_SYNC_INCLUDE_RUNNING=1 ;;
+      --session) only_session="${2:?--session needs a session name}"; shift ;;
       -h | --help) sed -n '2,/^set -/{/^set -/!p;}' "$0"; exit 0 ;;
       *) echo "fleet-sync: unknown arg: $1" >&2; exit 2 ;;
     esac
@@ -50,15 +71,28 @@ main() {
   if [ "${PRIMARY_HARNESS:-${HARNESS:-claude}}" = "claude" ]; then
     command -v claude >/dev/null || fleet_die "claude is required"
   fi
+  if [ -n "$only_session" ]; then
+    [ "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:-off}" = on ] && [ "${PRIMARY_HARNESS:-${HARNESS:-claude}}" = claude ] \
+      || fleet_die "--session needs FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on (and the claude harness)"
+    fleet_roster_prepare
+    local own_names; own_names="$(fleet_session_dir_names --include-excluded)"   # captured: grep -q would SIGPIPE the producer
+    fleet_session_config_dir "$only_session" >/dev/null && grep -Fxq -- "$only_session" <<<"$own_names" \
+      || fleet_die "--session $only_session: not a session on this host that uses the fleet's config dir"
+    if [ "$check" = 0 ] && [ "${FLEET_SYNC_INCLUDE_RUNNING:-0}" != 1 ] && fleet_session_alive "$only_session"; then
+      fleet_die "session $only_session is running: its dir is synced when it restarts (fleet restart $only_session)"
+    fi
+  fi
 
   # State carried across the re-execs below (a moved checkout means new code, so we start over).
   local resumed="${FLEET_SYNC_RESUMED:-}" prev_instance="${FLEET_SYNC_PREV_INSTANCE:-}" prev_engsys="${FLEET_SYNC_PREV_ENGSYS:-}"
-  local changed="${FLEET_SYNC_CHANGED:-0}" drift=0
+  local changed="${FLEET_SYNC_CHANGED:-0}" drift=0 deferred=
   unset FLEET_SYNC_RESUMED FLEET_SYNC_PREV_INSTANCE FLEET_SYNC_PREV_ENGSYS FLEET_SYNC_CHANGED
   # recut_markets: the marketplaces whose pinned tag was re-cut and adopted (engsys#219). The ref and the plugin version are
   # unchanged, so step 4 would see nothing to do: it reinstalls these anyway. The list lives on disk (pin-recut.reinstall)
   # until every config dir and cache this sync covers has been reinstalled, so a sync that was interrupted, or that had to
   # refuse a marketplace, is finished by the next one. recut_keep: what this run could not finish (' * ' = a whole dir).
+  # Each config dir and cache that has been reinstalled is recorded in pin-recut.done (engsys#253): it is not reinstalled
+  # again, so a dir left to a running session's restart (and reinstalled by it) does not keep the others churning.
   local recut_markets="" recut_keep="" recut_file="$FLEET_STATE/pin-recut.reinstall" rm_line
   if [ -f "$recut_file" ]; then
     while IFS= read -r rm_line; do
@@ -69,7 +103,8 @@ main() {
   [ "$check" = 1 ] || pin_moved_flush
 
   # --- 1. pin repo checkout (pin source) ---------------------------------------------------------
-  if [ -z "$resumed" ]; then
+  # --session: one session's dir at the pins as they stand; steps 1-3 (and 5) are the full sync's
+  if [ -z "$resumed" ] && [ -z "$only_session" ]; then
     git -C "$PIN_DIR" rev-parse --git-dir >/dev/null 2>&1 || fleet_die "PIN_DIR is not a git checkout: $PIN_DIR"
     git -C "$PIN_DIR" fetch -q origin
     local pin_branch default_branch
@@ -105,7 +140,7 @@ main() {
   fi
 
   # --- 2. the instance repo at its pin (then continue from the NEW checkout) ---------------------
-  if [ -n "$INSTANCE_MARKETPLACE" ]; then
+  if [ -n "$INSTANCE_MARKETPLACE" ] && [ -z "$only_session" ]; then
     local have_instance irecut=0
     have_instance="$(fleet_git_at "$FLEET_REPO")"
     # engsys#216: HEAD can sit on a stale local copy of the pinned instance tag too (a re-cut release)
@@ -138,7 +173,9 @@ main() {
   # --- 3. engsys host checkout (the kit's own code — re-exec from it) ----------------------------
   [ -e "$ENGSYS_DIR/.git" ] || fleet_die "engsys checkout not found at $ENGSYS_DIR — git clone <engsys repo> $ENGSYS_DIR"
   local have_engsys engsys_target="$ENGSYS_DIR"
-  if [ "${FLEET_ISOLATE_ENGSYS_WORKTREE:-0}" = 1 ]; then
+  if [ -n "$only_session" ]; then
+    :
+  elif [ "${FLEET_ISOLATE_ENGSYS_WORKTREE:-0}" = 1 ]; then
     engsys_target="$FLEET_STATE/engsys"
     if [ -e "$engsys_target/.git" ]; then
       have_engsys="$(fleet_git_at "$engsys_target")"
@@ -202,7 +239,7 @@ main() {
       fi
     fi
   fi
-  if [ "$check" = 1 ] && [ -e "$engsys_target/.git" ]; then
+  if [ "$check" = 1 ] && [ -z "$only_session" ] && [ -e "$engsys_target/.git" ]; then
     local engsys_st=""
     if ! engsys_st="$(git -c core.fsmonitor=false -c core.hooksPath=/dev/null -C "$engsys_target" status --porcelain 2>/dev/null)" || [ -n "$engsys_st" ]; then
       say "engsys checkout ($engsys_target) has uncommitted or untracked changes"; drift=1
@@ -230,7 +267,11 @@ main() {
     # The fleet's config dir (or ~/.claude when none is set); with FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised
     # the interactive roles run on ~/.claude, so that one gets the pinned plugins too (user scope only).
     local cfg_dirs=("${FLEET_CLAUDE_CONFIG_DIR:-}") sess_n
-    if [ "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:-off}" = on ]; then
+    if [ -n "$only_session" ]; then
+      cfg_dirs=("$(fleet_session_config_dir "$only_session")")
+      # this run covers one dir: a re-cut reinstall pending for the others stays pending
+      recut_keep=" * "
+    elif [ "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:-off}" = on ]; then
       # one login per session (engsys#205): the pinned plugins go into every session's own dir, not a shared one
       cfg_dirs=()
       fleet_roster_prepare
@@ -239,21 +280,65 @@ main() {
       done < <(fleet_session_dir_names)
       [ "${#cfg_dirs[@]}" -gt 0 ] || fleet_die "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on, but no session on this host uses the fleet's config dir"
     fi
-    if [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] && [ "${FLEET_CLAUDE_CONFIG_DIR_SCOPE:-all}" = supervised ]; then cfg_dirs+=(""); fi
-    local cfg_dir ps_bad=""
+    if [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] && [ "${FLEET_CLAUDE_CONFIG_DIR_SCOPE:-all}" = supervised ] && [ -z "$only_session" ]; then cfg_dirs+=(""); fi
+    local cfg_dir ps_bad="" own_sess drift_before
     for cfg_dir in "${cfg_dirs[@]}"; do
-      SYNC_CFG="$cfg_dir"
+      SYNC_CFG="$cfg_dir" SYNC_LIVE=0 own_sess=""
+      [ -z "$cfg_dir" ] || [ "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:-off}" != on ] || own_sess="${cfg_dir##*/}"
+      # ~/.claude under scope supervised belongs to the interactive roles. Unattended (--no-jobs: the supervisor's
+      # verify --auto-sync) it gets no claude while one of them runs on it (engsys#253); the operator's own fleet sync
+      # still syncs it, as before.
+      # --check (fleet status) reads its files while one of them runs on it, as fleet verify does (engsys#223).
+      if [ -z "$cfg_dir" ] && [ "$check" = 1 ] && [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] && [ -n "$(user_claude_live)" ]; then SYNC_LIVE=1; fi
+      if [ -z "$cfg_dir" ] && [ "$check" = 0 ] && [ "${FLEET_SYNC_NO_JOBS:-0}" = 1 ] && [ "${FLEET_SYNC_INCLUDE_RUNNING:-0}" != 1 ]; then
+        local user_live; user_live="$(user_claude_live)"
+        if [ -n "$user_live" ]; then
+          if ( SYNC_LIVE=1 check=1 drift=0; sync_claude_plugins >/dev/null 2>&1; [ "$drift" = 0 ] ); then
+            say "claude config dir: $HOME/.claude (interactive roles): in use by$user_live, at the pins"
+            rm -f "$FLEET_STATE/sync-deferred.user-claude"
+          else
+            say "claude config dir: $HOME/.claude (interactive roles): in use by$user_live, not synced by this unattended run (a second claude on their login can log them out). Run fleet sync yourself"
+            mkdir -p "$FLEET_STATE"; date +%s >"$FLEET_STATE/sync-deferred.user-claude"; recut_keep=" * "
+          fi
+          continue
+        fi
+      fi
+      if [ -n "$own_sess" ] && [ -d "$cfg_dir" ] && fleet_session_alive "$own_sess"; then
+        SYNC_LIVE=1
+        if [ "$check" = 0 ] && [ "${FLEET_SYNC_INCLUDE_RUNNING:-0}" != 1 ]; then
+          # read from its files whether it is behind at all (a subshell: --check's own logic, quiet; unreadable = behind)
+          if ( check=1 drift=0; sync_claude_plugins >/dev/null 2>&1; [ "$drift" = 0 ] ); then
+            say "claude config dir: $cfg_dir (session $own_sess, own login): session running, its dir is at the pins"
+            fleet_sync_deferred_set drop "$own_sess"
+          else
+            say "claude config dir: $cfg_dir (session $own_sess, own login): session running, not synced now — restart to pick up (fleet restart --stale, or fleet restart $own_sess)"
+            fleet_sync_deferred_set add "$own_sess"; deferred+=" $own_sess"; recut_keep=" * "
+          fi
+          continue
+        fi
+        if [ "$check" = 0 ]; then   # --include-running: as before engsys#253, the CLI on the live login
+          warn "--include-running: syncing $cfg_dir while session $own_sess runs on it; a second claude on its login can log it out (anthropics/claude-code#88583)"
+          SYNC_LIVE=0
+        fi
+      fi
       # a session dir that does not exist yet must not stop the other sessions' sync: report it as drift
       if [ -n "$cfg_dir" ] && [ "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:-off}" = on ] && [ ! -d "$cfg_dir" ]; then
         say "claude config dir: $cfg_dir (session ${cfg_dir##*/}) does not exist"
         warn "session ${cfg_dir##*/} has no config dir yet: fleet config-dir init --session ${cfg_dir##*/}, then log in with CLAUDE_CONFIG_DIR=$cfg_dir claude (fleet guide § 6.1). Its plugins are not synced."
         drift=1; ps_bad="$ps_bad ${cfg_dir##*/}"; recut_keep=" * "; continue
       fi
+      drift_before="$drift"
       if ! claude_config_report "$check"; then
         drift=1
         [ "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:-off}" != on ] || ps_bad="$ps_bad ${cfg_dir##*/}"
       fi
       sync_claude_plugins
+      # --check: a running session's own dir that is behind waits for its restart (sync leaves it alone), not for a sync
+      if [ "$check" = 1 ] && [ "$SYNC_LIVE" = 1 ] && [ -n "$own_sess" ] && [ "$drift" = 1 ] && [ "$drift_before" = 0 ]; then
+        drift=0; deferred+=" $own_sess"
+      fi
+      [ "$check" = 1 ] || [ -z "$own_sess" ] || fleet_sync_deferred_set drop "$own_sess"
+      [ "$check" = 1 ] || [ -n "$cfg_dir" ] || rm -f "$FLEET_STATE/sync-deferred.user-claude"
     done
     # engsys#212: turning the flag on before the dirs exist and are logged in is the common adoption slip; say so once
     if [ -n "$ps_bad" ]; then
@@ -278,7 +363,14 @@ main() {
   # --- report ------------------------------------------------------------------------------------
   if [ "$check" = 1 ]; then
     if [ "$drift" = 0 ]; then say "host is in sync with the pins"; else say "host is BEHIND the pins — run: fleet sync"; fi
+    [ -z "$deferred" ] || say "running, behind the pins until restarted:$deferred (fleet restart --stale; their dirs are synced as they relaunch)"
     exit "$drift"
+  fi
+  if [ -n "$only_session" ]; then
+    # it started while this ran: its dir was left alone, like any running session's (and stays recorded for its restart)
+    [ -z "$deferred" ] || fleet_die "session $only_session started while its dir was being synced: left behind the pins until it restarts (fleet restart $only_session)"
+    say "session $only_session: its config dir is at the pins"
+    exit 0
   fi
 
   # --- 5. launchd jobs, when their templates (or the config they render from) changed ------------
@@ -315,6 +407,7 @@ main() {
   else
     say "already in sync."
   fi
+  [ -z "$deferred" ] || say "not synced, running:$deferred. Each one's dir is synced when it restarts (fleet restart --stale), before the new process starts. To sync them now anyway: fleet sync --include-running (risky: a second claude on a live login can log the session out)"
   echo
   bash "$FLEET_KIT_DIR/restart.sh" --instance "$FLEET_REPO" --status
 }
@@ -342,10 +435,10 @@ sync_claude_plugins() {
   installed="$(user_plugins)"
   for i in "${!markets[@]}"; do
     m="${markets[$i]}" ref="${m_refs[$i]}" repo="${m_repos[$i]}"
-    cur="$(plugin_cli marketplace list --json | jq -r --arg m "$m" '.[] | select(.name == $m) | .ref // ""')"
+    cur="$(marketplace_list_json | jq -r --arg m "$m" '.[] | select(.name == $m) | .ref // ""')"
     # engsys#219: a re-cut pinned tag moved the checkout to a new commit under the same ref, so the installed plugin files are
     # behind it although the marketplace ref and the plugin version still match: reinstall this marketplace like a moved ref
-    moved=0; case " $recut_markets " in *" $m "*) moved=1 ;; esac
+    moved=0; ! recut_pending "$m" "${SYNC_CFG:-$HOME/.claude}" || moved=1
     if [ "$cur" != "$ref" ] || [ "$moved" = 1 ]; then
       if [ "$check" = 1 ]; then
         if [ "$moved" = 1 ] && [ "$cur" = "$ref" ]; then say "marketplace $m is waiting for a plugin reinstall (its pinned tag was re-cut)"
@@ -413,6 +506,10 @@ sync_claude_plugins() {
     done <<<"${m_plugins[$i]}"
   done
   [ -z "$bad" ] || fleet_die "after the plugin step these enabled plugins are not installed at the pin:$bad. NOT synced. Re-run: fleet sync. If a plugin stays at the wrong version: claude plugin uninstall --scope user <plugin@marketplace> (from a directory outside any project), then fleet sync."
+  # every marketplace not refused is now installed afresh at the pin in this dir: a re-cut reinstall is done here
+  if [ "$check" != 1 ]; then
+    for m in "${markets[@]}"; do case "$refused" in *" $m "*) ;; *) recut_done "$m" "${SYNC_CFG:-$HOME/.claude}" ;; esac; done
+  fi
 }
 
 say() { echo "fleet-sync: $*"; }
@@ -464,13 +561,31 @@ recut_note() { # recut_note <marketplace>: this run adopted a re-cut tag of it; 
   local m="$1" f="$FLEET_STATE/pin-recut.reinstall"
   mkdir -p "$FLEET_STATE"
   case " $recut_markets " in *" $m "*) ;; *) recut_markets+=" $m"; printf '%s\n' "$m" >>"$f" ;; esac
+  # a re-cut adopted now needs every dir again, whatever an earlier one of the same marketplace recorded
+  local d="$FLEET_STATE/pin-recut.done" dl
+  [ -f "$d" ] || return 0
+  dl="$(awk -F'|' -v m="$m" '$1 != m' "$d")"
+  if [ -n "$dl" ]; then printf '%s\n' "$dl" >"$d"; else rm -f "$d"; fi
 }
 recut_settle() { # drop from the pending file every marketplace this run reinstalled everywhere; keep the rest
-  local f="$FLEET_STATE/pin-recut.reinstall" m left=""
+  local f="$FLEET_STATE/pin-recut.reinstall" d="$FLEET_STATE/pin-recut.done" m left="" dl
   for m in $recut_markets; do
     case "$recut_keep" in *" * "* | *" $m "*) left+="$m"$'\n' ;; esac
   done
   if [ -n "$left" ]; then printf '%s' "$left" >"$f"; else rm -f "$f"; fi
+  [ -f "$d" ] || return 0
+  # the per-dir record of a settled marketplace goes with it
+  dl="$(RECUT_LEFT="$left" awk -F'|' 'BEGIN { n = split(ENVIRON["RECUT_LEFT"], k, "\n"); for (i = 1; i <= n; i++) if (k[i] != "") kept[k[i]] = 1 } NF > 1 && ($1 in kept)' "$d")"
+  if [ -n "$dl" ]; then printf '%s\n' "$dl" >"$d"; else rm -f "$d"; fi
+}
+# recut_pending <marketplace> <dir | harness:<h>> → 0 when that dir or cache still needs the re-cut reinstall
+recut_pending() {
+  case " $recut_markets " in *" $1 "*) ;; *) return 1 ;; esac
+  ! grep -Fxq -- "$1|$2" "$FLEET_STATE/pin-recut.done" 2>/dev/null
+}
+recut_done() { # recut_done <marketplace> <dir | harness:<h>>: the re-cut reinstall is done there
+  recut_pending "$1" "$2" || return 0
+  mkdir -p "$FLEET_STATE"; printf '%s|%s\n' "$1" "$2" >>"$FLEET_STATE/pin-recut.done"
 }
 
 # --- the plugin CLI, kept away from project settings (engsys#112) -----------------------------------
@@ -488,6 +603,7 @@ sync_tmp() { # call in the main shell (not in $(…)) so later calls share it; r
 # The fleet's own Claude config dir when fleet.conf sets FLEET_CLAUDE_CONFIG_DIR (its user-scope plugins are
 # what every fleet session loads), else the account's ~/.claude; never an inherited CLAUDE_CONFIG_DIR.
 SYNC_CFG="${FLEET_CLAUDE_CONFIG_DIR:-}"   # the config dir the plugin step works on ('' = ~/.claude)
+SYNC_LIVE=0                              # 1: a session runs on SYNC_CFG; --check reads its files, sync never gets here
 fleet_claude() {
   if [ -n "$SYNC_CFG" ]; then CLAUDE_CONFIG_DIR="$SYNC_CFG" fleet_dir_lock "$SYNC_CFG" claude "$@"
   else fleet_log_claude_call "$HOME/.claude" claude "$@"; env -u CLAUDE_CONFIG_DIR claude "$@"; fi
@@ -530,6 +646,10 @@ claude_config_report() {
     [ "$1" = 1 ] || fleet_die "FLEET_CLAUDE_CONFIG_DIR $SYNC_CFG does not exist. One-time setup: fleet config-dir init, log in with CLAUDE_CONFIG_DIR=$SYNC_CFG claude, then fleet sync (fleet guide § 6.1)"
     say "claude config dir: $dir$what does not exist"; return 1
   fi
+  if [ "$SYNC_LIVE" = 1 ]; then   # engsys#253: no claude on a live login; the supervisor's pane watch sees an expired one
+    say "claude config dir: $dir$what, login not checked (a session is running on it)"
+    return 0
+  fi
   li="$( (cd "$SYNC_TMP/cwd" && fleet_claude auth status --json) 2>/dev/null | jq -r 'if .loggedIn == true then "logged in" elif .loggedIn == false then "NOT logged in" else "login unknown" end' 2>/dev/null || true)"
   if [ "$li" = "NOT logged in" ] && fleet_keychain_unreadable; then
     # engsys#210: not a login problem; don't hold, don't skip the plugin work
@@ -547,8 +667,28 @@ claude_config_report() {
   fi
   return 0
 }
+# user_claude_live → " <name>…" of the running roster sessions on ~/.claude (scope supervised: the interactive roles)
+user_claude_live() {
+  [ -f "$FLEET_REPO/fleet/roster.tmpl" ] || return 0
+  fleet_roster_prepare
+  local n out=""
+  while IFS= read -r n; do
+    [ -z "$n" ] || uses_fleet_config_dir "$n" || out+=" $n"
+  done < <(fleet_live_sessions)
+  printf '%s' "$out"
+}
 user_plugins() { # "<id>\t<version>" for each user-scope install (the list also shows per-project installs)
-  plugin_cli list --json | jq -r '.[] | select((.scope // "user") == "user") | [.id, (.version // "")] | @tsv'
+  plugin_list_json | jq -r '.[] | select((.scope // "user") == "user") | [.id, (.version // "")] | @tsv'
+}
+# A live dir (SYNC_LIVE=1, only ever read in --check) is read from its files: no claude process on the session's login
+# (engsys#253). Unreadable or malformed files fail like a failed CLI call.
+plugin_list_json() {
+  if [ "$SYNC_LIVE" = 1 ]; then node "$FLEET_KIT_DIR/lib/plugin-list-from-files.mjs" --config-dir "${SYNC_CFG:-$HOME/.claude}" --project-dir "$SYNC_TMP/cwd"
+  else plugin_cli list --json; fi
+}
+marketplace_list_json() {
+  if [ "$SYNC_LIVE" = 1 ]; then node "$FLEET_KIT_DIR/lib/plugin-list-from-files.mjs" --config-dir "${SYNC_CFG:-$HOME/.claude}" --marketplaces
+  else plugin_cli marketplace list --json; fi
 }
 installed_version() { # installed_version <id> <user_plugins output> → its version; exit 1 if not installed
   awk -F'\t' -v id="$1" '$1 == id { print $2; found = 1; exit } END { exit !found }' <<<"$2"
@@ -621,7 +761,7 @@ sync_non_claude_plugins() { # sync_non_claude_plugins <check> <engsys_target> [t
         fi
       fi
       # engsys#219: a re-cut pinned tag leaves the version and the cache dir as they were: copy the plugin again from the moved checkout
-      moved=0; case " $recut_markets " in *" $m "*) moved=1 ;; esac
+      moved=0; ! recut_pending "$m" "harness:$target_h" || moved=1
       if [ "$cur_ver" != "$want" ] || [ ! -d "$cache_dir" ] || [ "$moved" = 1 ]; then
         if [ "$check_mode" = 1 ]; then
           if [ "$moved" = 1 ] && [ "$cur_ver" = "$want" ]; then say "plugin $p@$m ($target_h) is waiting for a reinstall (its pinned tag was re-cut)"
@@ -666,6 +806,7 @@ sync_non_claude_plugins() { # sync_non_claude_plugins <check> <engsys_target> [t
         cp "$cfg_file" "$FLEET_STATE/agy-plugins.json" 2>/dev/null || true
       fi
     fi
+    for m in "${markets[@]}"; do recut_done "$m" "harness:$target_h"; done   # engsys#253: this cache has the re-cut now
   fi
 }
 

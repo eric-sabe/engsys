@@ -87,7 +87,8 @@ echo "gh $*" >>"$FAKE/gh.log"
 c="$(cat "$FAKE/commit")"
 if [ "${1:-}" = api ] && [ -f "$FAKE/gh-fail" ]; then echo "error connecting to api.github.com" >&2; exit 1; fi
 case "${1:-} ${2:-}" in
-  "api repos/vendor/engsys/git/ref/tags/v1.0.0") printf '{"ref":"refs/tags/v1.0.0","object":{"type":"commit","sha":"%s"}}\n' "$c" ;;
+  # v0.9.0: an older release (engsys#253: a deferred dir behind the pin is checked against its own release), same tree
+  "api repos/vendor/engsys/git/ref/tags/v1.0.0" | "api repos/vendor/engsys/git/ref/tags/v0.9.0") printf '{"ref":"refs/tags/v1.0.0","object":{"type":"commit","sha":"%s"}}\n' "$c" ;;
   "api repos/vendor/engsys") echo '{"default_branch":"main"}' ;;
   "api repos/vendor/engsys/compare/$c...main?per_page=1") printf '{"status":"%s"}\n' "$(cat "$FAKE/compare-status")" ;;
   "api repos/vendor/engsys/git/trees/$c?recursive=1") cat "$FAKE/tree.json" ;;
@@ -971,6 +972,44 @@ rc_is "a tampered wrapper is still a MISMATCH on the file path" 1
 eq "…without claude" "$(calls)" 0
 restore
 
+echo "…engsys#253: a running session whose dir fleet sync deferred passes, unalerted, until it restarts"
+plugins '[{id: "engsys@engsys", version: "0.9.0", scope: "user", enabled: true, installPath: $c}]'; files_from_fixture
+echo acme-mm >"$FAKE/tmux-windows"; : >"$FAKE/claude.calls"; rm -f "$I/.fleet"/verify-wrappers*.json
+run fleet verify --max-age 0 --session acme-mm
+rc_is "a running session's dir behind the pin, not deferred: MISMATCH" 1
+echo acme-mm >"$I/.fleet/sync-deferred"; c0="$(comments)"
+run fleet verify --alert --max-age 0 --session acme-mm
+rc_is "…deferred by fleet sync: passes (the launch re-verifies)" 0
+has "…saying why" "$OUT" "Not held, not alerted"
+has "…after checking the behind install against its own release" "$OUT" "each install behind the pin matches its own release (engsys@engsys v0.9.0)"
+has "…still printing what is behind" "$OUT" "MISMATCH"
+eq "…no alert" "$(comments)" "$c0"
+eq "…no claude" "$(calls)" 0
+tamper; c0="$(comments)"
+run fleet verify --alert --max-age 0 --session acme-mm
+rc_is "…but a tampered file of the old version it runs is a MISMATCH, deferred or not" 1
+has "…saying its installs do not match their own release" "$OUT" "do NOT match their own release either"
+has "…naming the file" "$OUT" "mm-act.sh"
+hasnt "…not passed as a deferral" "$OUT" "Not held, not alerted"
+eq "…and alerted" "$(comments)" "$((c0 + 1))"
+restore; rm -f "$I/.fleet"/verify-wrappers*.json "$I/.fleet"/verify-wrappers.alerted*
+jq '. + {hooks: {SessionStart: [{hooks: [{type: "command", command: "/bin/echo planted"}]}]}}' "$PS/settings.json" >"$PS/s.tmp" && mv "$PS/s.tmp" "$PS/settings.json"
+rm -f "$I/.fleet"/verify-wrappers*.json; c0="$(comments)"
+run fleet verify --alert --max-age 0 --session acme-mm
+rc_is "…but a planted user-scope hook beside the version lag is a MISMATCH, deferred or not" 1
+has "…naming the hook" "$OUT" "runs a command not on VERIFY_ALLOWED_USER_HOOKS"
+hasnt "…not passed as a deferral" "$OUT" "Not held, not alerted"
+eq "…and alerted" "$(comments)" "$((c0 + 1))"
+files_from_fixture
+echo zsh >"$FAKE/tmux-cmd"
+run fleet verify --alert --max-age 0 --session acme-mm
+rc_is "…once it is down (and no --auto-sync to sync it), the dir is a MISMATCH again" 1
+echo node >"$FAKE/tmux-cmd"
+run fleet verify --session acme-mm
+rc_is "…and the launch-style check of the running session (no --max-age) is not relaxed" 1
+rm -f "$I/.fleet/sync-deferred" "$I/.fleet"/verify-wrappers*.json "$I/.fleet"/verify-wrappers.alerted*
+plugins "$DEFAULT_PLUGINS"; files_from_fixture
+
 echo "…fail closed: an unreadable or malformed file-derived list is 'not verified', never ok"
 cp "$PS/plugins/installed_plugins.json" "$T/ip.good"; cp "$PS/settings.json" "$T/st.good"
 bad_case() { # bad_case <desc> — the last run must be exit 3 with no claude
@@ -1007,24 +1046,17 @@ has "…by git alone" "$OUT" "fast-forwarding it (git only, no claude)"
 eq "…with no claude call at all (call log)" "$(calls)" 0
 eq "…and the pin checkout is at the tip" "$(git -C "$APP" rev-parse HEAD)" "$(git -C "$APP" rev-parse origin/main)"
 
-echo "…a change of the pins with sessions running is deferred, alerted, and re-alerted"
+echo "…a change of the pins with sessions running auto-syncs too: sync itself leaves the running session's dir alone (engsys#253)"
 git -C "$W2" pull -q origin main
 jq '.enabledPlugins["zz@engsys"] = true' "$W2/.claude/settings.json" >"$W2/.claude/s.tmp" && mv "$W2/.claude/s.tmp" "$W2/.claude/settings.json"
 commit_all "$W2" "pins change"; git -C "$W2" push -q origin HEAD:main
-rm -f "$I/.fleet"/verify-wrappers*.json; : >"$FAKE/claude.calls"; g0="$(said 'Auto-sync is deferred')"
+rm -f "$I/.fleet"/verify-wrappers*.json; : >"$FAKE/claude.calls"; pre_ff="$(git -C "$APP" rev-parse HEAD)"
 run fleet verify --alert --auto-sync --max-age 15 --session acme-mm
-rc_is "a pins change with a session running: still a mismatch (hold stands)" 1
-has "…says the sync is deferred, and that it does not clear by itself" "$OUT" "does not clear by itself while they run"
-hasnt "…did not auto-sync" "$OUT" "auto-syncing"
-eq "…and started no claude at all (call log)" "$(calls)" 0
-eq "…one alert" "$(said 'Auto-sync is deferred')" "$((g0 + 1))"
-has "…warning that fleet sync by hand starts claude on live logins" "$(grep 'Auto-sync is deferred' "$FAKE/gh.log" | tail -n 1)" "does start claude on the live logins"
-has "…and the login check was skipped, said so" "$OUT" "login not checked: session acme-mm is running"
-printf 'acme-mm\nacme-security\n' >"$FAKE/tmux-windows"
-run fleet verify --alert --auto-sync --max-age 15 --session acme-mm
-eq "…a different set of running sessions does not alert again" "$(said 'Auto-sync is deferred')" "$((g0 + 1))"
-VERIFY_DEFER_REALERT_MIN=0 run fleet verify --alert --auto-sync --max-age 15 --session acme-mm
-eq "…but the re-alert interval elapsing does" "$(said 'Auto-sync is deferred')" "$((g0 + 2))"
+has "a pins change with a session running: auto-syncs, saying the running dir is left to its restart" "$OUT" "auto-syncing (fleet sync, no restarts; a running session's own dir is left to its restart)"
+hasnt "…not deferred as a whole" "$OUT" "sync deferred"
+hasnt "…and no claude on the running session's dir (call log)" "$(cat "$FAKE/claude.calls")" "$PS|"
+rm -f "$I/.fleet/sync-deferred"   # what that sync left for acme-mm's restart (this stub claude can't sync it)
+git -C "$APP" reset -q --hard "$pre_ff"   # that sync fast-forwarded the pin checkout: behind again, for the cases below
 ORIGIN_URL="$(git -C "$APP" remote get-url origin)"; git -C "$APP" remote set-url origin "$T/no-such-origin.git"
 : >"$FAKE/tmux-windows"; : >"$FAKE/claude.calls"
 run fleet verify --alert --auto-sync --max-age 15 --session acme-mm
@@ -1034,8 +1066,7 @@ hasnt "…and nothing was synced" "$OUT" "auto-syncing"
 git -C "$APP" remote set-url origin "$ORIGIN_URL"
 : >"$FAKE/tmux-windows"; : >"$FAKE/claude.calls"
 run fleet verify --alert --auto-sync --max-age 15 --session acme-mm
-hasnt "with nothing running the sync is not deferred" "$OUT" "sync deferred"
-has "…it runs (fleet sync, which may use claude)" "$OUT" "the pins changed: auto-syncing (fleet sync, no restarts)"
+has "with nothing running it auto-syncs as well" "$OUT" "the pins changed: auto-syncing (fleet sync, no restarts"
 git -C "$APP" fetch -q origin; git -C "$APP" reset -q --hard origin/main 2>/dev/null || true
 rm -f "$FAKE/tmux-windows" "$FAKE/tmux-cmd" "$FAKE/auth.json"; printf '%s\n' "$CONF0" >"$I/fleet/fleet.conf"
 

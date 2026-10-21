@@ -84,7 +84,7 @@ runs them for you from an **instance repo** (section 4):
 | `fleet status --federation [--json]` | every fleet (operator, enabled, status issue, fleet and broker heartbeat ages, relay) and every baton (home, standby, live holder, expiry, `!` when the holder's fleet is not the home). Read-only; a row that cannot be read shows `?` and a note |
 | `fleet xray [--role <r>\|--session <s>] [--timeline] [--diagnose] [--watch] [--json]` | 10-subsystem runtime inspection, live 9-hook synthetic self-test, session/monster deep-dive, chronological behavior timeline, and automated root-cause diagnosis & remediation playbook |
 | `fleet pin` | release your instance plugin and open the pin PR (section 7) |
-| `fleet sync` | make the host match the pins: checkouts and plugins (including `HARNESS_FALLBACK` plugin caches). Touches no running session |
+| `fleet sync` | make the host match the pins: checkouts and plugins (including `HARNESS_FALLBACK` plugin caches). Touches no running session; in per-session mode a running session's own dir is left to its restart (§ 7, What sync does) |
 | `fleet restart` | cycle sessions onto what is installed, when you choose |
 | `fleet launch [<name>]` | render templates and start missing sessions |
 | `fleet supervise` | one supervisor tick (what the launchd job runs) |
@@ -600,6 +600,12 @@ So no two long-lived sessions may share a login:
 - `fleet verify` checks every session dir (plugins against the release, user-scope items, login) and prints a block
   per dir; the verdict, the alert (`wrapper-integrity-<session>`) and the hold are per session, so one tampered or
   logged-out dir holds only its session (`fleet verify --session <name>` asks about one).
+- **Sync and status leave a running session's dir alone (engsys#253).** `fleet sync` does not run `claude` on the
+  own dir of a session that is running (`claude auth status`, `plugin list`, `marketplace …` and `plugin install` are
+  each a second process on its login). It reports that dir as "session running, not synced now — restart to pick up"
+  and records it in `.fleet/sync-deferred`. The dir is synced when the session restarts, before the new process
+  starts (§ 7, What sync does). `fleet status` (`fleet sync --check`) reads a running session's dir from its files
+  and does not check its login. The supervisor's pane watch catches an expired login.
 - **Fleet commands add no refreshers.** `claude auth status --json` and `claude plugin list --json` both contact
   api.anthropic.com, even in a dir with no login (observed against an empty temp config dir with a local proxy:
   two CONNECTs each), so on a logged-in dir they are extra processes on a credential its session is also
@@ -1192,6 +1198,43 @@ The pins are in the pin repo's `.claude/settings.json` (section 3). `fleet sync`
 `fleet sync --check` reports drift only. Sync refuses to run over uncommitted changes to tracked files in
 either checkout (it names the checkout). It never restarts anything.
 
+**Running sessions' own dirs (per-session mode, engsys#253).** Step 4 skips the own dir of a session that is running
+(a claude process in its tmux window). Any `claude` call there, even `auth status` or `plugin list`, is a second
+process on that session's login and can rotate its refresh token out from under it
+([anthropics/claude-code#88583](https://github.com/anthropics/claude-code/issues/88583)). Sync reads that dir's files
+to see whether it is behind. If it is already at the pins, sync says so and moves on. If it is behind, sync prints
+`session running, not synced now — restart to pick up` and records the session in `.fleet/sync-deferred`. The dir
+is synced when the session is down, before its new process starts:
+
+- `fleet launch <name>` (what `fleet restart` and the supervisor relaunch through) runs
+  `fleet sync --session <name> --no-jobs` for a deferred session before the integrity check. If that sync fails, the
+  launch is refused, and the next supervisor tick tries again.
+- The supervisor's per-session check (`fleet verify --auto-sync --session <name>`) does the same once the session is
+  down. So a monster that exits after its rotation request is not held by a dir that was only waiting.
+- A session left that way for longer than `SYNC_DEFER_ALERT_HOURS` (fleet.conf, default 24) gets one
+  `fleet notify --level action` (incident `sync-deferred-<name>`, linked to the status issue or the first ledger),
+  posted by the supervisor's tick and resolved once the session has restarted.
+- While the session still runs, a periodic `fleet verify --max-age` of its deferred dir passes, with no alert, when
+  every problem it finds is an install at another version than the pin (`version` lines, what a deferred pin change
+  looks like) and each of those installs matches its own release, file by file (the old tag, from GitHub); it prints
+  them. Any other problem (a hook, settings, user-scope config, memory, a changed file of the old version) is alerted
+  and held as always; an old release that can't be read is "not verified". The session runs what it loaded at start. A held gate would also stop the supervisor from
+  cycling a monster that sits idle after its rotation request. This leaves no gap: the launch syncs the dir and
+  verifies it again, without `--max-age`, before the session starts. Residual risk: `.fleet/sync-deferred` is host
+  state. A process running as the fleet's user could add a live session to it and quiet that session's
+  version-mismatch alert until the session restarts. Such a process could already edit `fleet.conf` or the verify cache.
+
+`fleet status` (`fleet sync --check`) reads a running session's dir from its files (`plugins/installed_plugins.json`,
+`plugins/known_marketplaces.json`, the settings) and skips its login check. It lists a running dir that is behind as
+`running, behind the pins until restarted`, not as host drift. `fleet sync --include-running` syncs the running dirs
+anyway, the way sync did before. Use it only when a restart is not an option: it can log a session out.
+`fleet sync --session <name>` syncs one stopped session's dir at the pins as they stand, with no checkout moves and
+no job reloads. A shared dir (`FLEET_CLAUDE_CONFIG_DIR` without per-session mode, or `~/.claude`) is synced and
+checked as before: its sessions share one login and race each other anyway. One exception: `~/.claude` under scope
+`supervised` while an interactive role runs on it. `fleet status` reads its files then, and an unattended sync
+(`--no-jobs`, what the supervisor's `fleet verify --auto-sync` runs) leaves it alone, says so, and the integrity alert
+then tells you to run `fleet sync` yourself.
+
 **A re-cut pinned tag** (engsys#214, #216). A pinned release tag can be moved on origin (a re-cut). Sync asks
 origin (`git ls-remote`, the peeled tag) whether the checkout's local copy of the pinned tag is still origin's
 commit, for the engsys checkout, the engsys worktree under `FLEET_ISOLATE_ENGSYS_WORKTREE=1` and the instance
@@ -1212,7 +1255,9 @@ commit: sync records the moved marketplace in `.fleet/pin-recut.reinstall` and r
 config dir (remove, add `#<ref>`, install), and copies the Copilot and Antigravity plugin caches again (engsys#219).
 The entry is removed only after every dir and cache the run covers has been done, so an interrupted sync, or a
 `~/.claude` marketplace that sync had to refuse, is finished by the next one; `fleet sync --check` reports it
-as drift (`waiting for a plugin reinstall`) until then.
+as drift (`waiting for a plugin reinstall`) until then. Each dir and cache that has been reinstalled is recorded in
+`.fleet/pin-recut.done` and is not reinstalled again (engsys#253). So a running session's dir, left to its restart
+and reinstalled by it, counts as done, and the next sync clears the entry without reinstalling the other dirs.
 
 ### Recipes
 
@@ -1283,6 +1328,9 @@ fleet restart --stale
 - **Monsters** get a typed rotation request. Each finishes its current step (never mid-merge), posts its
   digest and a final `rotation requested` heartbeat, and stops; the supervisor relaunches it on the new
   versions within about 5 minutes. Check `fleet status` a few minutes later.
+- In per-session mode, sync left each running session's own dir behind (engsys#253). Each restart syncs that dir
+  just before the new process starts, so `fleet restart --stale` (or one name at a time, as in the canary below)
+  completes the upgrade.
 - **Interactive roles** are cycled only when idle (`/exit`, then relaunch). A busy one (mid-turn) is
   skipped: re-run later, or `fleet restart acme-build --force` to interrupt it first.
 - **Exited or missing** windows are simply relaunched.
@@ -1498,7 +1546,8 @@ lists its sha256.
 **A pin checkout behind main.** The supervisor's check runs `fleet verify --auto-sync`: when the only
 problems are `stale` files and the pin checkout is on the default branch with no uncommitted changes to
 tracked files (and nothing untracked in `.claude/`), it runs `fleet sync --no-jobs` itself (fast-forward and
-plugin reconcile, no restarts), at most once per tick, and verifies again. `--no-jobs` never reloads
+plugin reconcile, no restarts), at most once per tick, and verifies again. It does so while sessions run too: sync
+leaves a running session's own dir to that session's restart (engsys#253). `--no-jobs` never reloads
 launchd jobs (the supervisor runs inside one, and a reload would kill it): if the job files changed with
 the pin, it alerts `fleet-jobs-changed` asking you to run `fleet install-jobs`. A dirty, diverged or off-branch
 checkout keeps the mismatch, alerted as "the pin checkout is behind main", not as tampering.
@@ -1797,6 +1846,7 @@ format) overrides it per machine. Environment values for `ENGSYS_REF` / `INSTANC
 | `FLEET_CLAUDE_CONFIG_DIR_SCOPE` | no | `all` (default): every launched session runs on `FLEET_CLAUDE_CONFIG_DIR`. `supervised`: only the lines positively classified as interactive keep `~/.claude`; everything else (monsters, supervised and security-tier lines, anything unclassified) runs on the fleet dir. `fleet sync` keeps the pinned plugins in both, and `fleet verify` also checks the engsys install in `~/.claude` (§ 6.1). Never inherited from the caller's environment |
 | `VERIFY_ALLOWED_USER_PLUGINS` | no | Space-separated `name@marketplace` user-scope plugins `fleet verify` reports as `allowed` instead of a mismatch (§ 6.1). Never inherited from the caller's environment |
 | `VERIFY_ALLOWED_USER_FILES` | no | Space-separated sha256 hashes of user-scope agents, commands, skills, rules, memory files and MCP server definitions that `fleet verify` accepts (§ 7, "User-scope configuration besides settings"). Never inherited from the caller's environment |
+| `SYNC_DEFER_ALERT_HOURS` | no | Hours a session may run on a config dir `fleet sync` left behind the pins (per-session mode) before the supervisor posts one `fleet notify --level action` asking for its restart (§ 7, What sync does). Default 24 |
 | `VERIFY_ALLOWED_USER_HOOKS` | no | Space-separated sha256 content hashes of user-scope hooks and settings commands (`statusLine`, `apiKeyHelper`, any `*Helper` / `*Command`, …) that `fleet verify` accepts (§ 7, "User-scope settings"). The hash covers the command and every file it runs, and is printed in the mismatch line. Never inherited from the caller's environment |
 | `REVIEW_CMD` | no | Review run in the pin PR's worktree (for example `<your-review-cli> review --base origin/main`). Empty means no review; the label only |
 | `REVIEW_MARKER` | no | Marker line opening the review comment (for example `<!-- local-review-findings -->`) |

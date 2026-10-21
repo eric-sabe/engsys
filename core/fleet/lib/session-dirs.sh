@@ -143,3 +143,68 @@ fleet_live_sessions() {
     [ -z "$n" ] || ! fleet_session_alive "$n" || printf '%s\n' "$n"
   done < <(roster_names)
 }
+
+# The sessions whose own dir `fleet sync` left behind because they were running (engsys#253): a second claude on a live
+# session's login can rotate its refresh token out from under it (anthropics/claude-code#88583). One name per line in
+# $FLEET_STATE/sync-deferred; the dir is synced when the session is down: by `fleet launch` before it starts the session,
+# and by the supervisor's `fleet verify --auto-sync --session` before it judges the dir.
+fleet_sync_deferred() { # fleet_sync_deferred <name> → 0 when <name>'s dir is waiting for a sync
+  grep -Fxq -- "$1" "$FLEET_STATE/sync-deferred" 2>/dev/null
+}
+# A full sync, a launch's `sync.sh --session` and the supervisor's can each edit the list, so the read-modify-write runs
+# under a mkdir lock (atomic). The edit takes milliseconds: a lock held for 10 s belongs to a holder that died, and is taken over.
+fleet_sync_deferred_set() { # fleet_sync_deferred_set add|drop <name>
+  local f="$FLEET_STATE/sync-deferred" l="$FLEET_STATE/locks/sync-deferred.lock" t i=0 rc=0
+  [ "$1" = add ] || [ -f "$f" ] || return 0
+  [ "$1" != add ] || ! fleet_sync_deferred "$2" || return 0
+  mkdir -p "$FLEET_STATE/locks"
+  until mkdir "$l" 2>/dev/null; do
+    i=$((i + 1)); [ "$i" -lt 100 ] || { rm -rf "$l"; i=0; continue; }
+    sleep 0.1
+  done
+  t="$(mktemp "$f.XXXXXX")" || rc=1
+  if [ "$rc" = 0 ]; then
+    { grep -Fxv -- "$2" "$f" 2>/dev/null || true; [ "$1" != add ] || printf '%s\n' "$2"; } >"$t"
+    if [ -s "$t" ]; then mv "$t" "$f"; else rm -f "$t" "$f"; fi
+    # since when (fleet_sync_deferred_alert): kept from the first deferral until the dir is synced
+    mkdir -p "$f.since"
+    if [ "$1" = add ]; then [ -f "$f.since/$2" ] || date +%s >"$f.since/$2"; else rm -f "$f.since/$2"; fi
+  fi
+  rmdir "$l" 2>/dev/null || true
+  return "$rc"
+}
+# fleet_sync_deferred_alert [<github url>] → once per tick (supervise.sh): one `fleet notify --level action` per session
+# deferred for longer than SYNC_DEFER_ALERT_HOURS (fleet.conf, default 24), latched in sync-deferred.alerted.<name>,
+# and resolved once the session is no longer deferred. A deferral never clears by itself while the session runs.
+# The action level needs a link (--re, an https URL with no markup: notify.mjs refuses anything else, engsys#238): the
+# caller's status or ledger issue; with none that qualifies it is posted as info. Routing (the host operator's DM for
+# action) is notify's.
+fleet_sync_deferred_alert() {
+  local url="${1:-}" h="${SYNC_DEFER_ALERT_HOURS:-24}" f="$FLEET_STATE/sync-deferred" lf n at now host lvl
+  [[ "$h" =~ ^[0-9]+$ ]] || h=24
+  now="$(date +%s)" host="$(hostname -s 2>/dev/null || echo this host)"
+  for lf in "$f".alerted.*; do
+    [ -f "$lf" ] || continue
+    n="${lf##*.alerted.}"
+    fleet_sync_deferred "$n" && continue
+    node "$FLEET_KIT_DIR/notify.mjs" --incident "sync-deferred-$n" --resolve "Resolved: session $n on $host restarted, and its config dir was synced to the pins." >&2 && rm -f "$lf"
+  done
+  [ -f "$f" ] || return 0
+  lvl=(--level info)
+  local re_ok='^https://[^][:space:]<>|`]+$'
+  if [ "${#url}" -le 508 ] && [[ "$url" =~ $re_ok ]]; then lvl=(--level action --re "$url"); fi
+  while IFS= read -r n; do
+    [ -n "$n" ] && [ ! -f "$f.alerted.$n" ] || continue
+    at="$(cat "$f.since/$n" 2>/dev/null)" && [[ "$at" =~ ^[0-9]+$ ]] || continue
+    [ $((now - at)) -ge $((h * 3600)) ] || continue
+    node "$FLEET_KIT_DIR/notify.mjs" "${lvl[@]}" --incident "sync-deferred-$n" "Fleet on $host: session $n has been running on its old plugins for over ${h}h. fleet sync left its config dir behind the pins while it runs (a second claude on its login can log it out), and it is synced when the session restarts. Please restart it when convenient: fleet restart $n (or fleet restart --stale)." >&2 \
+      && date +%s >"$f.alerted.$n"
+  done <"$f"
+}
+# fleet_sync_deferred_run <name> → syncs <name>'s own dir when fleet sync deferred it and the session is not running now
+# (rc 0 when there was nothing to do too). --no-jobs: the callers can run inside the supervisor's launchd job.
+fleet_sync_deferred_run() {
+  fleet_sync_deferred "$1" && ! fleet_session_alive "$1" || return 0
+  echo "fleet: session $1 is down and fleet sync left its config dir behind while it ran: syncing that dir now" >&2
+  bash "$FLEET_KIT_DIR/sync.sh" --instance "$FLEET_REPO" --no-jobs --session "$1" </dev/null >&2
+}
