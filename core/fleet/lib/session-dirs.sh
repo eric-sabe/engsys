@@ -176,7 +176,9 @@ fleet_sync_deferred_set() { # fleet_sync_deferred_set add|drop <name>
 # fleet_sync_deferred_alert [<github url>] → once per tick (supervise.sh): one `fleet notify --level action` per session
 # deferred for longer than SYNC_DEFER_ALERT_HOURS (fleet.conf, default 24), latched in sync-deferred.alerted.<name>,
 # and resolved once the session is no longer deferred. A deferral never clears by itself while the session runs.
-# The action level needs a link (--re): the caller's status or ledger issue; without one it is posted as info.
+# The action level needs a link (--re, an https URL with no markup: notify.mjs refuses anything else, engsys#238): the
+# caller's status or ledger issue; with none that qualifies it is posted as info. Routing (the host operator's DM for
+# action) is notify's.
 fleet_sync_deferred_alert() {
   local url="${1:-}" h="${SYNC_DEFER_ALERT_HOURS:-24}" f="$FLEET_STATE/sync-deferred" lf n at now host lvl
   [[ "$h" =~ ^[0-9]+$ ]] || h=24
@@ -185,10 +187,12 @@ fleet_sync_deferred_alert() {
     [ -f "$lf" ] || continue
     n="${lf##*.alerted.}"
     fleet_sync_deferred "$n" && continue
-    node "$FLEET_KIT_DIR/notify.mjs" --level info --incident "sync-deferred-$n" --resolve "Resolved: session $n on $host restarted, and its config dir was synced to the pins." >&2 && rm -f "$lf"
+    node "$FLEET_KIT_DIR/notify.mjs" --incident "sync-deferred-$n" --resolve "Resolved: session $n on $host restarted, and its config dir was synced to the pins." >&2 && rm -f "$lf"
   done
   [ -f "$f" ] || return 0
-  lvl=(--level action --re "$url"); [ -n "$url" ] || lvl=(--level info)
+  lvl=(--level info)
+  local re_ok='^https://[^][:space:]<>|`]+$'
+  if [ "${#url}" -le 508 ] && [[ "$url" =~ $re_ok ]]; then lvl=(--level action --re "$url"); fi
   while IFS= read -r n; do
     [ -n "$n" ] && [ ! -f "$f.alerted.$n" ] || continue
     at="$(cat "$f.since/$n" 2>/dev/null)" && [[ "$at" =~ ^[0-9]+$ ]] || continue

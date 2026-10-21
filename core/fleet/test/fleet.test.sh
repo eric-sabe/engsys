@@ -1117,6 +1117,9 @@ eq "…no claude on ~/.claude" "$(user_calls "$m")" ""
 has "…saying why, and what to run" "$OUT" "in use by acme-build, not synced by this unattended run"
 if [ -f "$UMARK" ]; then ok "…recorded for verify's alert text"; else bad "…recorded for verify's alert text"; fi
 has "…the session dirs are still synced" "$(on_dir "$m" acme-mm)" "plugin install"
+m="$(mark)"; run fleet sync --check
+eq "fleet status (sync --check) starts no claude on ~/.claude while an interactive role runs on it" "$(user_calls "$m")" ""
+has "…reads its files and says its login was not checked" "$OUT" "$HOME/.claude (interactive roles), login not checked"
 m="$(mark)"; run fleet sync
 has "the operator's own fleet sync still syncs ~/.claude while it is in use" "$(user_calls "$m")" "plugin install"
 if [ -f "$UMARK" ]; then bad "…and clears the record"; else ok "…and clears the record"; fi
@@ -1126,7 +1129,7 @@ has "unattended, with no interactive role running, ~/.claude is synced as before
 # a session left deferred for longer than SYNC_DEFER_ALERT_HOURS: one action-level notify, resolved once it is synced
 cat >"$T/defer-alert.sh" <<'SH'
 . "$ENGSYS_HOST/core/fleet/lib/fleet-env.sh"; . "$ENGSYS_HOST/core/fleet/lib/session-dirs.sh"
-fleet_sync_deferred_alert https://github.com/acme/app/issues/11
+fleet_sync_deferred_alert "${DEFER_URL-https://github.com/acme/app/issues/11}"
 SH
 dalert() { FLEET_INSTANCE="$INST" ENGSYS_HOST="$ENGSYS_HOST" bash "$T/defer-alert.sh" >/dev/null 2>&1; }
 dsaid() { grep -c -- "$1" "$FAKE/gh.log" || true; }
@@ -1147,6 +1150,13 @@ dalert
 if [ -e "$STATE/sync-deferred.alerted.acme-mm" ] || [ -e "$STATE/sync-deferred.since/acme-mm" ]; then bad "synced at its restart: the incident is resolved (latch and since record gone)"; else ok "synced at its restart: the incident is resolved (latch and since record gone)"; fi
 dalert
 eq "…and not alerted again" "$(dsaid 'session acme-mm has been running on its old plugins')" 2
+# a link notify would refuse (--re must be a plain https URL, engsys#238) is left out: posted at info level, still latched
+FLEET_INSTANCE="$INST" ENGSYS_HOST="$ENGSYS_HOST" bash -c '. "$ENGSYS_HOST/core/fleet/lib/fleet-env.sh"; . "$ENGSYS_HOST/core/fleet/lib/session-dirs.sh"; fleet_sync_deferred_set add acme-mm'
+echo $(( $(date +%s) - 25 * 3600 )) >"$STATE/sync-deferred.since/acme-mm"
+DEFER_URL="http://github.com/acme/app/issues/11" dalert
+eq "a non-https link: still posted once" "$(dsaid 'session acme-mm has been running on its old plugins')" 3
+hasnt "…without the refused link" "$(grep 'running on its old plugins' "$FAKE/gh.log" | tail -n 1)" "http://github.com"
+if [ -f "$STATE/sync-deferred.alerted.acme-mm" ]; then ok "…and latched"; else bad "…and latched"; fi
 rm -rf "$STATE"/sync-deferred*
 cp "$T/flc.bak" "$LC"; rm -rf "$SESS" "$FAKE/tmux" "$FAKE/claude-cfg"; : >"$FAKE/tmux.log"
 

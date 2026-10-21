@@ -29,7 +29,8 @@
 # running session's dir from its files (lib/plugin-list-from-files.mjs) and skips the login check, so it starts no
 # claude on it either. (A shared dir, FLEET_CLAUDE_CONFIG_DIR without per-session mode or ~/.claude, is synced and
 # checked as before: its sessions share one login and race each other anyway; per-session mode is the fix for that.
-# Except: an unattended run, --no-jobs, leaves ~/.claude alone while an interactive role runs on it.)
+# Except ~/.claude under scope supervised while an interactive role runs on it: --check reads its files, and an
+# unattended run, --no-jobs, leaves it alone.)
 # Anything that changed is stamped in .fleet/last-change; `fleet restart` uses that stamp to tell which
 # running sessions are behind. Running sessions keep their loaded plugins (the old cache dirs stay on
 # disk) until restarted.
@@ -287,6 +288,8 @@ main() {
       # ~/.claude under scope supervised belongs to the interactive roles. Unattended (--no-jobs: the supervisor's
       # verify --auto-sync) it gets no claude while one of them runs on it (engsys#253); the operator's own fleet sync
       # still syncs it, as before.
+      # --check (fleet status) reads its files while one of them runs on it, as fleet verify does (engsys#223).
+      if [ -z "$cfg_dir" ] && [ "$check" = 1 ] && [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] && [ -n "$(user_claude_live)" ]; then SYNC_LIVE=1; fi
       if [ -z "$cfg_dir" ] && [ "$check" = 0 ] && [ "${FLEET_SYNC_NO_JOBS:-0}" = 1 ] && [ "${FLEET_SYNC_INCLUDE_RUNNING:-0}" != 1 ]; then
         local user_live; user_live="$(user_claude_live)"
         if [ -n "$user_live" ]; then

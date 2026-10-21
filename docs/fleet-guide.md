@@ -1220,9 +1220,10 @@ is synced when the session is down, before its new process starts:
 anyway, the way sync did before. Use it only when a restart is not an option: it can log a session out.
 `fleet sync --session <name>` syncs one stopped session's dir at the pins as they stand, with no checkout moves and
 no job reloads. A shared dir (`FLEET_CLAUDE_CONFIG_DIR` without per-session mode, or `~/.claude`) is synced and
-checked as before: its sessions share one login and race each other anyway. One exception: an unattended sync
-(`--no-jobs`, what the supervisor's `fleet verify --auto-sync` runs) leaves `~/.claude` (scope `supervised`) alone
-while an interactive role runs on it, says so, and the integrity alert then tells you to run `fleet sync` yourself.
+checked as before: its sessions share one login and race each other anyway. One exception: `~/.claude` under scope
+`supervised` while an interactive role runs on it. `fleet status` reads its files then, and an unattended sync
+(`--no-jobs`, what the supervisor's `fleet verify --auto-sync` runs) leaves it alone, says so, and the integrity alert
+then tells you to run `fleet sync` yourself.
 
 **A re-cut pinned tag** (engsys#214, #216). A pinned release tag can be moved on origin (a re-cut). Sync asks
 origin (`git ls-remote`, the peeled tag) whether the checkout's local copy of the pinned tag is still origin's
