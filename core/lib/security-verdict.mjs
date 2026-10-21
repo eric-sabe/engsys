@@ -243,7 +243,8 @@ export async function main(argv = process.argv.slice(2), { exec = execFileSync, 
     // Never sign a verdict for a SHA that is not the PR's head right now.
     let head;
     try {
-      head = exec('gh', ['pr', 'view', String(pr), '-R', repo, '--json', 'headRefOid', '--jq', '.headRefOid'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000 }).trim().toLowerCase();
+      // Both gh calls fit inside the baton guard's 30 s kill (10 s + 15 s), so a fenced post never dies mid-flight.
+      head = exec('gh', ['pr', 'view', String(pr), '-R', repo, '--json', 'headRefOid', '--jq', '.headRefOid'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10000 }).trim().toLowerCase();
     } catch (e) { die(`could not read the PR head: ${e.message}`, 3); }
     if (head !== String(sha).toLowerCase()) die(`--sha ${sha} is not the PR head ${head}; refusing to sign`, 1);
     let comment;
@@ -258,7 +259,7 @@ export async function main(argv = process.argv.slice(2), { exec = execFileSync, 
     let failed = null;
     try {
       fs.writeFileSync(tmp, comment, { mode: 0o600, flag: 'wx' });
-      exec('gh', ['pr', 'comment', String(pr), '-R', repo, '--body-file', tmp], { stdio: ['ignore', 'inherit', 'inherit'], timeout: 60000 });
+      exec('gh', ['pr', 'comment', String(pr), '-R', repo, '--body-file', tmp], { stdio: ['ignore', 'inherit', 'inherit'], timeout: 15000 });
     } catch (e) { failed = e; } finally { fs.rmSync(tmpDir, { recursive: true, force: true }); }
     if (failed) die(`gh pr comment failed: ${failed.message}`, 3); // after the cleanup: die() exits at once
     return 0;

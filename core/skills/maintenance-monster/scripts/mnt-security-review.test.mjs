@@ -7,7 +7,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { handoffSessions, namesSession, classify, reviewLabelOf, SKIP_MARKER } from './mnt-security-review.mjs';
+import { handoffSessions, namesSession, classify, SKIP_MARKER } from './mnt-security-review.mjs';
+import { reviewLabelOf } from '../../../lib/security-sensitive.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const handoff = (session) => `<!-- mm-handoff -->\nsession: ${session}\ndepends_on: []\n`;
@@ -65,6 +66,11 @@ describe('reviewLabelOf', () => {
     assert.equal(reviewLabelOf([{ source: 'a', text: 'security_review_label: needs-nyx\n' }, { source: 'b', text: 'security_review_label: NEEDS-NYX\n' }]).label, 'needs-nyx');
     assert.throws(() => reviewLabelOf([{ source: 'a', text: 'security_review_label: x\n' }, { source: 'b', text: 'security_review_label: y\n' }]), /'x' in a but 'y' in b/);
     assert.throws(() => reviewLabelOf([{ source: 'a', text: 'security_sensitive_globs: oops\n' }]), /security_config_unreadable: a/);
+  });
+  test('the review label must differ from every source\'s sensitive label, not only its own file\'s', () => {
+    assert.throws(() => reviewLabelOf([{ source: 'a', text: 'security_review_label: needs-nyx\n' }, { source: 'b', text: 'security_sensitive_label: Needs-Nyx\n' }]), /is the security_sensitive_label of b/);
+    assert.throws(() => reviewLabelOf([{ source: 'a', text: 'security_sensitive_label: security-review-requested\n' }]), /must differ from security_sensitive_label/, 'the default review label too (caught within the file)');
+    assert.equal(reviewLabelOf([{ source: 'a', text: 'security_sensitive_label: sec\n' }, { source: 'b', text: 'security_review_label: needs-nyx\n' }]).label, 'needs-nyx', 'positive control');
   });
 });
 

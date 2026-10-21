@@ -2,6 +2,9 @@ import { describe, it } from 'node:test';
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import assert from 'node:assert/strict';
+import os from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { compileGlob, loadPolicy, decide, GITHUB_FILE_LIMIT } from './security-sensitive.mjs';
 
 const m = (glob, p) => compileGlob(glob).test(p);
@@ -108,5 +111,23 @@ describe('config.example.yml', () => {
     const on = text.replace('  # - services/dashboard/app/(auth)/**', '  - services/dashboard/app/(auth)/**');
     assert.deepEqual(parseYaml(on).security_sensitive_globs, ['services/dashboard/app/(auth)/**']);
     assert.equal(parseYaml(on).ready_requirements.sdd_contract, false);
+  });
+});
+
+describe('review-label CLI (engsys#231): one resolver for the tick, the buses and the maintenance monster', () => {
+  const run = (args, env) => spawnSync(process.execPath, [new URL('./security-sensitive.mjs', import.meta.url).pathname, 'review-label', ...args], { encoding: 'utf8', env, cwd: env.HOME });
+  const T = fs.mkdtempSync(path.join(os.tmpdir(), 'ss-rl-'));
+  const env = { PATH: process.env.PATH, HOME: T, CLAUDE_CONFIG_DIR: T };
+  it('the default, ENGSYS_MM_CONFIG, then --config as one more source; conflicts exit 1', () => {
+    assert.equal(run(['--repo', 'acme/app'], env).stdout, 'security-review-requested\n');
+    fs.writeFileSync(path.join(T, 'a.yml'), 'security_review_label: needs-nyx\n');
+    fs.writeFileSync(path.join(T, 'b.yml'), 'security_review_label: other\n');
+    assert.equal(run(['--repo', 'acme/app'], { ...env, ENGSYS_MM_CONFIG: path.join(T, 'a.yml') }).stdout, 'needs-nyx\n');
+    assert.equal(run(['--repo', 'acme/app', '--config', path.join(T, 'b.yml')], env).stdout, 'other\n');
+    const r = run(['--repo', 'acme/app', '--config', path.join(T, 'b.yml')], { ...env, ENGSYS_MM_CONFIG: path.join(T, 'a.yml') });
+    assert.equal(r.status, 1);
+    assert.match(r.stdout, /'needs-nyx' in .*a\.yml but 'other' in .*b\.yml/);
+    assert.equal(run([], env).status, 1, 'usage');
+    fs.rmSync(T, { recursive: true, force: true });
   });
 });

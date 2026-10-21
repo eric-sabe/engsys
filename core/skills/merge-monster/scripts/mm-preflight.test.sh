@@ -393,6 +393,10 @@ hasnt "  …not a review request" "security_review_required"
 files README.md; LABELS='[{"name":"security-review-requested"}]' view
 run --config "$CFG" --security-key-file "$KEY"
 rc_is "the review label alone requires nothing (it is a request, not a sensitivity marker)" 0
+printf 'security_review_label: needs-nyx\n' >"$T/rl.yml"; printf 'security_sensitive_label: Needs-Nyx\n' >"$T/sl.yml"
+RC=0; OUT="$(ENGSYS_MM_CONFIG="$T/rl.yml" bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --config "$T/sl.yml" --security-verdict --security-key-file "$KEY" 2>&1)" || RC=$?
+rc_is "…and so is one source's review label equal to another source's sensitive label" 1
+has "  …naming it" "is also a security_sensitive_label"
 printf 'security_review_label: security\nsecurity_sensitive_label: Security\n' >"$T/same.yml"
 run --config "$T/same.yml" --security-verdict --security-key-file "$KEY"
 rc_is "a review label equal to the sensitive label is refused (removing it would drop the requirement)" 1

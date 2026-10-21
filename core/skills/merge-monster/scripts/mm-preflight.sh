@@ -155,6 +155,7 @@ done
 SEC_REASONS="[]"
 REVIEW_LABEL="security-review-requested"   # security_review_label (engsys#231); the first source that sets it, all must agree
 REVIEW_LABEL_FROM=""
+SENS_LABELS=()
 if [ "${#SS_CONFIGS[@]}" -gt 0 ] || [ "$SEC_VERDICT" -eq 1 ]; then
   command -v node >/dev/null && [ -f "$SS_SCRIPT" ] || sec_fail "security_config_unreadable: node or security-sensitive.mjs not found"
   SS_LIST=("${SS_CONFIGS[@]+"${SS_CONFIGS[@]}"}"); [ "${#SS_LIST[@]}" -gt 0 ] || SS_LIST=("")
@@ -163,6 +164,7 @@ if [ "${#SS_CONFIGS[@]}" -gt 0 ] || [ "$SEC_VERDICT" -eq 1 ]; then
     SS_CFG=(); [ -z "$c" ] || SS_CFG=(--config "$c")
     SS_POLICY=$(node "$SS_SCRIPT" policy ${SS_CFG[@]+"${SS_CFG[@]}"}) || sec_fail "$(jq -r '.reason // "security_config_unreadable"' <<<"$SS_POLICY" 2>/dev/null || echo security_config_unreadable)"
     if [ "$(jq -r '.signedVerdict' <<<"$SS_POLICY")" = true ]; then SEC_VERDICT=1; fi
+    SENS_LABELS+=("$(jq -r '.label' <<<"$SS_POLICY")")
     if [ "$(jq -r '.reviewLabelSet // false' <<<"$SS_POLICY")" = true ]; then
       RL="$(jq -r '.reviewLabel' <<<"$SS_POLICY")"
       if [ -z "$REVIEW_LABEL_FROM" ]; then REVIEW_LABEL="$RL" REVIEW_LABEL_FROM="$c"
@@ -171,6 +173,11 @@ if [ "${#SS_CONFIGS[@]}" -gt 0 ] || [ "$SEC_VERDICT" -eq 1 ]; then
       fi
     fi
     SS_GLOBS=$((SS_GLOBS + $(jq -r '.globs' <<<"$SS_POLICY")))
+  done
+  # across sources too (each file checks only itself): removing the request must never remove the requirement
+  for l in ${SENS_LABELS[@]+"${SENS_LABELS[@]}"}; do
+    [ "$(printf '%s' "$l" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s' "$REVIEW_LABEL" | tr '[:upper:]' '[:lower:]')" ] \
+      || sec_fail "security_config_unreadable: the review label '$REVIEW_LABEL' is also a security_sensitive_label"
   done
   if [ "$SEC_VERDICT" -eq 1 ]; then
     # the list is projected to the two path fields (the API also returns each file's patch text) and handed to jq as a

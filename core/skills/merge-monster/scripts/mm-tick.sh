@@ -37,7 +37,8 @@
 #   --rotate-context-tokens  passed to the heartbeat (engsys#125): over it with nothing active, the heartbeat
 #                        status becomes `rotation requested — ctx <N>k` and ROTATION_REQUESTED is a delta line
 #   --heartbeat-minutes  the tick cadence; a heartbeat is due after 0.75 x this (default 10)
-#   The verdict backstop reads security_review_label (default security-review-requested) and
+#   The verdict backstop watches the review label preflight names (core/lib/security-sensitive.mjs review-label over the
+#   discovered merge configs plus --config; default security-review-requested), reads
 #   ready_requirements.security_verdict_key_file from --config, and hands --config to mm-preflight.sh (which can only
 #   add requirements from it). MM_PREFLIGHT overrides the preflight script (tests point it at a stub).
 set -euo pipefail
@@ -118,7 +119,8 @@ gate_lines() {
       || printf '{"k":"gate","pr":%s,"error":"unreadable"}\n' "$n"
   done
 }
-REVIEW_LABEL="$(monster_cfg_scalar "$CONFIG" security_review_label)"
+# the label preflight names (the same discovery, --config as one more source; engsys#231)
+REVIEW_LABEL="$(node "$here/../../../lib/security-sensitive.mjs" review-label --repo "$REPO" ${CONFIG:+--config "$CONFIG"} 2>/dev/null)" || REVIEW_LABEL=""
 [ -n "$REVIEW_LABEL" ] || REVIEW_LABEL=security-review-requested
 SNAP_OK=0
 if SNAP=$(bash "$here/mm-snapshot.sh" --repo "$REPO" --review-label "$REVIEW_LABEL" 2>&1); then

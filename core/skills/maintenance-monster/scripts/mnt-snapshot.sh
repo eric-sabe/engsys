@@ -5,7 +5,7 @@
 # The model deep-dives individual findings itself (gh api / gh pr view).
 # Also the open PRs that ask the security lane for a signed verdict (engsys#231): security_reviews.items =
 # [{number, head}] for PRs carrying the review request label (--review-label, default: security_review_label
-# from the merge config, found by mnt-security-review.mjs label, else security-review-requested), so a new
+# from the merge configs, found by core/lib/security-sensitive.mjs review-label, else security-review-requested), so a new
 # request, or a new head on a requested PR, is a tick delta.
 #
 # Usage: mnt-snapshot.sh --repo owner/name [--default-branch main] [--review-label LABEL]
@@ -73,7 +73,7 @@ fi
 
 # --- security-review requests (engsys#231) ---------------------------------
 # A failed read is `available: false`, never an empty (clean-looking) list.
-[ -n "$REVIEW_LABEL" ] || REVIEW_LABEL=$(node "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/mnt-security-review.mjs" label --repo "$REPO" 2>/dev/null) || REVIEW_LABEL=""
+[ -n "$REVIEW_LABEL" ] || REVIEW_LABEL=$(node "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/security-sensitive.mjs" review-label --repo "$REPO" 2>/dev/null) || REVIEW_LABEL=""
 [ -n "$REVIEW_LABEL" ] || REVIEW_LABEL=security-review-requested
 if REVIEW_RAW=$("$FLEET_GH" pr list -R "$REPO" --state open --limit 200 --label "$REVIEW_LABEL" --json number,headRefOid,labels 2>/dev/null) \
   && REVIEW_PRS=$(printf '%s' "$REVIEW_RAW" | jq -c --arg rl "$(printf '%s' "$REVIEW_LABEL" | tr '[:upper:]' '[:lower:]')" \

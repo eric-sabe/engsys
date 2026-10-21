@@ -55,8 +55,8 @@
 #                             2.25 x heartbeat_minutes (--heartbeat-minutes, else the config's), else 20m
 #   --stale-lock-minutes      with heartbeat_minutes, bounds pulse_max so the lease always lapses before
 #                             the heartbeat reads stale (a CONFIG_WARNING line says when it clamps)
-#   --config                  the monster's yml, read for pulse_max, heartbeat_minutes, stale_lock_minutes, dependabot.auto_merge
-#                             and security_review_label
+#   --config                  the monster's yml, read for pulse_max, heartbeat_minutes, stale_lock_minutes and dependabot.auto_merge,
+#                             and one more source for the review label (core/lib/security-sensitive.mjs review-label)
 #   --health-config           optional fleet-health.yml path for Fleet Health Desk board watching
 #   --no-dependabot           skip the Dependabot PR poll (no DEPENDABOT events)
 #
@@ -115,7 +115,8 @@ PULSE_OUT="$(monster_pulse_max "${PULSE_MAX:-$(monster_cfg_scalar "$CONFIG" puls
 PULSE_MAX="${PULSE_OUT%%$'\t'*}" PULSE_WARN="${PULSE_OUT#*$'\t'}"
 ROTATE_OUT="$(monster_rotate_tokens "$(monster_cfg_scalar "$CONFIG" rotate_context_tokens)")"
 ROTATE_WARN="${ROTATE_OUT#*$'\t'}"
-REVIEW_LABEL="$(monster_cfg_scalar "$CONFIG" security_review_label)"
+# the label preflight names (the same discovery, --config as one more source; engsys#231)
+REVIEW_LABEL="$(node "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/security-sensitive.mjs" review-label --repo "$REPO" ${CONFIG:+--config "$CONFIG"} 2>/dev/null)" || REVIEW_LABEL=""
 [ -n "$REVIEW_LABEL" ] || REVIEW_LABEL=security-review-requested
 
 W="$DIR/.watch"
