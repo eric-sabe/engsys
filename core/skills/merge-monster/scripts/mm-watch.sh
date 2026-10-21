@@ -26,6 +26,11 @@
 #   BATON_IDLE merge …        keepalive stopped: no model activity for --pulse-max
 #   FLEET_MSG              a cross-fleet message is waiting in this session's inbox (engsys#77; multi-fleet only):
 #                          run the command the line names (msg.mjs inbox --mark-read), then msg.mjs read <url>
+#   VERDICT_WAKE #N label_removed | nyx_review_comment
+#                          engsys#241: a PR lost the security-review request label (config security_review_label,
+#                          default security-review-requested), or a new `<!-- nyx-review -->` comment landed on a PR
+#                          that carries it: the verdict may have landed. Re-run preflight for #N (and re-check its
+#                          gate request at that head). The tick re-preflights such PRs every time as the backstop.
 #   STOP                   ledger issue closed (kill switch) — script exits
 #   HANDBACK_INCOMPLETE <agent> (<id>): <remains>
 #                         a subagent handed back unfinished work (the engsys hand-back hook's log
@@ -50,7 +55,8 @@
 #                             2.25 x heartbeat_minutes (--heartbeat-minutes, else the config's), else 20m
 #   --stale-lock-minutes      with heartbeat_minutes, bounds pulse_max so the lease always lapses before
 #                             the heartbeat reads stale (a CONFIG_WARNING line says when it clamps)
-#   --config                  the monster's yml, read for pulse_max, heartbeat_minutes, stale_lock_minutes and dependabot.auto_merge
+#   --config                  the monster's yml, read for pulse_max, heartbeat_minutes, stale_lock_minutes, dependabot.auto_merge
+#                             and security_review_label
 #   --health-config           optional fleet-health.yml path for Fleet Health Desk board watching
 #   --no-dependabot           skip the Dependabot PR poll (no DEPENDABOT events)
 #
@@ -109,6 +115,8 @@ PULSE_OUT="$(monster_pulse_max "${PULSE_MAX:-$(monster_cfg_scalar "$CONFIG" puls
 PULSE_MAX="${PULSE_OUT%%$'\t'*}" PULSE_WARN="${PULSE_OUT#*$'\t'}"
 ROTATE_OUT="$(monster_rotate_tokens "$(monster_cfg_scalar "$CONFIG" rotate_context_tokens)")"
 ROTATE_WARN="${ROTATE_OUT#*$'\t'}"
+REVIEW_LABEL="$(monster_cfg_scalar "$CONFIG" security_review_label)"
+[ -n "$REVIEW_LABEL" ] || REVIEW_LABEL=security-review-requested
 
 W="$DIR/.watch"
 mkdir -p "$W"
@@ -245,6 +253,42 @@ fhd_event() {
   fi
 }
 
+# --- security verdict landing (engsys#241) -------------------------------------
+# The security lane posts a signed `<!-- nyx-review -->` comment and removes the request label: neither is an mm: label
+# or a check, so nothing above sees it. secreview.tsv holds the PRs that carried the label last cycle; nyx.seen the
+# nyx-review comment ids seen on them (the first cycle of a fresh state dir only records, so a restart does not re-fire).
+# A failed read changes nothing (no false "label removed").
+NYX_RE='^\s*<!-- nyx-review -->'
+verdict_event() {
+  local raw n ids id woke first=0
+  raw=$("$FLEET_GH" pr list -R "$REPO" --state open --limit 200 --label "$REVIEW_LABEL" --json number,labels 2>/dev/null) || return 0
+  printf '%s' "$raw" | jq -r --arg rl "$(printf '%s' "$REVIEW_LABEL" | tr '[:upper:]' '[:lower:]')" \
+    '.[] | select(any(.labels[]; (.name | ascii_downcase) == $rl)) | .number' 2>/dev/null | LC_ALL=C sort -u >"$W/secreview.new" || return 0
+  [ -f "$W/secreview.tsv" ] || first=1
+  touch "$W/secreview.tsv" "$W/nyx.seen"
+  [ "$first" = 1 ] || LC_ALL=C comm -23 "$W/secreview.tsv" "$W/secreview.new" | while IFS= read -r n; do
+    [ -n "$n" ] && echo "VERDICT_WAKE #$n label_removed"
+  done
+  : >"$W/nyx.new"
+  while IFS= read -r n; do
+    case "$n" in '' | *[!0-9]*) continue ;; esac
+    ids=$("$FLEET_GH" api graphql -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F number="$n" -f query='
+      query($owner: String!, $name: String!, $number: Int!) {
+        repository(owner: $owner, name: $name) { pullRequest(number: $number) { comments(last: 10) { nodes { id body } } } } }' 2>/dev/null \
+      | jq -r --arg re "$NYX_RE" '.data.repository.pullRequest.comments.nodes[]? | select((.body // "") | test($re)) | .id' 2>/dev/null) || continue
+    woke=0
+    for id in $ids; do
+      printf '%s\t%s\n' "$n" "$id" >>"$W/nyx.new"
+      if [ "$first" = 0 ] && [ "$woke" = 0 ] && ! grep -qxF "$(printf '%s\t%s' "$n" "$id")" "$W/nyx.seen"; then
+        echo "VERDICT_WAKE #$n nyx_review_comment"; woke=1
+      fi
+    done
+  done <"$W/secreview.new"
+  # bounded: the newest PRs' entries are kept
+  LC_ALL=C sort -u "$W/nyx.seen" "$W/nyx.new" | sort -t "$(printf '\t')" -k1,1n | tail -n 2000 >"$W/nyx.keep" && mv "$W/nyx.keep" "$W/nyx.seen"
+  mv "$W/secreview.new" "$W/secreview.tsv"
+}
+
 while true; do
   baton_tick || exit 0
   agents_event
@@ -370,6 +414,7 @@ while true; do
     fi
   fi
 
+  verdict_event
   fhd_event
   inbox_event
   sleep "$INTERVAL"
