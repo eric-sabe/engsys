@@ -43,7 +43,9 @@
 #
 # Verdict required, none valid (engsys#231): a PR the gate requires a verdict for, with no authentic FINDINGS and no
 # authentic PASS for its head (verify's `no_valid_verdict`; an unsigned or forged claim beside it is ignored once a signed
-# verdict lands), is not a failure of the PR, it only needs a review. That case
+# verdict lands), is not a failure of the PR, it only needs a review. Neither is a signed FINDINGS on an EARLIER head with
+# nothing signed for the current one (verdictReason signed_findings_on_earlier_head_unresolved, state findings): still
+# blocking, but the author's fix needs a fresh review to clear it. FINDINGS signed for the current head stays exit 1. That case
 # has its own exit code and reason so the merge session can request the review without parsing text: exit 3, the full
 # snapshot on stdout as on success (securityVerdict carries reviewRequired: true, reviewLabel and requiredBy, so the
 # rest of the preflight can still be judged: engsys#240's early gate request needs "clean apart from the verdict"), and
@@ -218,8 +220,14 @@ if [ "$SEC_VERDICT" -eq 1 ]; then
   [ "$SEC_REQUIRE" -eq 1 ] && SV_ARGS+=(--require)
   SV_RC=0
   SECURITY_JSON=$(jq -c '.comments // []' <<<"$VIEW" | node "$SV_SCRIPT" "${SV_ARGS[@]}") || SV_RC=$?
-  # verdict required, none valid: its own outcome (exit 3 below), never a plain failure (engsys#231)
-  if [ "$SV_RC" -eq 1 ] && [ "$SEC_REQUIRE" -eq 1 ] && [ "$(jq -r '.state // ""' <<<"$SECURITY_JSON" 2>/dev/null)" = missing ]; then
+  # verdict required, none valid: its own outcome (exit 3 below), never a plain failure (engsys#231). So is a signed
+  # FINDINGS on an EARLIER head with nothing signed for this one (signed_findings_on_earlier_head_unresolved): it stays
+  # sticky, but only a fresh signed verdict for this head clears it, and asking for that review is the only way to get
+  # one (a fix push would otherwise loop bounce -> re-ready forever). FINDINGS for THIS head stays exit 1.
+  SV_STATE="$(jq -r '.state // ""' <<<"$SECURITY_JSON" 2>/dev/null || true)"
+  SV_REASON="$(jq -r '.reason // ""' <<<"$SECURITY_JSON" 2>/dev/null || true)"
+  if { [ "$SV_RC" -eq 1 ] && [ "$SEC_REQUIRE" -eq 1 ] && [ "$SV_STATE" = missing ]; } \
+    || { [ "$SV_RC" -eq 4 ] && [ "$SV_STATE" = findings ] && [ "$SV_REASON" = signed_findings_on_earlier_head_unresolved ]; }; then
     REVIEW_NEEDED=1; SV_RC=0
   fi
   [ "$SV_RC" -ne 0 ] || [ -z "$SECURITY_JSON" ] || SECURITY_JSON=$(jq -c --argjson r "$SEC_REQUIRE" --argjson why "$SEC_REASONS" --arg l "$REVIEW_LABEL" --argjson need "$REVIEW_NEEDED" \
@@ -233,7 +241,7 @@ fi
 
 if [ "$REVIEW_NEEDED" -eq 1 ]; then
   jq -c -n --argjson s "$SECURITY_JSON" --arg h "$(jq -r '.headRefOid // ""' <<<"$VIEW")" \
-    '{ok: false, state: "missing", reason: "security_review_required", verdictReason: ($s.reason // "no_valid_verdict"), reviewLabel: $s.reviewLabel, head: $h, requiredBy: ($s.requiredBy // [])}' >&2
+    '{ok: false, state: ($s.state // "missing"), reason: "security_review_required", verdictReason: ($s.reason // "no_valid_verdict"), reviewLabel: $s.reviewLabel, head: $h, requiredBy: ($s.requiredBy // [])}' >&2
 fi
 jq -n --argjson view "$VIEW" --argjson security "$SECURITY_JSON" --argjson threads "$THREADS" --argjson full "$FULL" --argjson contract "$CONTRACT_JSON" '
   def leading_markers: (capture("^(?<lead>(\\s*<!--[\\s\\S]*?-->)+)")? // {lead: ""}).lead

@@ -418,10 +418,14 @@ discipline).
 With signed security verdicts on, `mm-preflight.sh` itself decides which PRs
 need a signed `nyx-review` PASS for their head. When one needs it and has no
 valid verdict at all (no authentic FINDINGS, no authentic PASS for this head),
-preflight exits **3** with reason `security_review_required` (stderr:
+or its latest authentic verdict is a FINDINGS signed for an **earlier** head
+(the author pushed a fix; `verdictReason`
+`signed_findings_on_earlier_head_unresolved`, still blocking until a fresh
+signed verdict for the new head), preflight exits **3** with reason
+`security_review_required` (stderr:
 `{"ok":false,"state":"missing","reason":"security_review_required","verdictReason":"no_valid_verdict","reviewLabel":…,"head":…,"requiredBy":[…]}`),
 and still prints the full snapshot on stdout, `securityVerdict.reviewRequired:
-true`. Every other verdict failure (signed FINDINGS, sticky across pushes;
+true`. Every other verdict failure (a signed FINDINGS for the current head;
 an unsigned or forged claim on a PR that needs no verdict; an unreadable key
 or config) stays exit 1 and is a bounce.
 

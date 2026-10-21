@@ -522,7 +522,8 @@ has no in-repo config and gets no exported `ENGSYS_MM_CONFIG` keeps the old opt-
 The capability to probe for is `mm-preflight.sh --capabilities` (it also prints `security-review-request` from the
 release that added the request flow below).
 
-**Requesting a verdict (engsys#231, #240, #241).** A PR that needs a verdict and has none at all is not a failed PR:
+**Requesting a verdict (engsys#231, #240, #241).** A PR that needs a verdict and has none at all (or whose only blocking verdict is a FINDINGS signed for an earlier
+head, after a fix push) is not a failed PR:
 `mm-preflight.sh` exits **3** with reason `security_review_required` (the full snapshot still on stdout). The merge
 monster then adds the review request label (merge config `security_review_label`, default `security-review-requested`;
 it must differ from `security_sensitive_label`), keeps the PR parked with `mm:ready` on, and, when the PR is

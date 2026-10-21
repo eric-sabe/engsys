@@ -432,7 +432,8 @@ policy dismissals from that list; a week with none still gets a one-line
 **Who asks, who answers.** With signed security verdicts on (merge config
 `ready_requirements.signed_security_verdict: true`), `mm-preflight.sh` decides
 which PRs need a signed `<!-- nyx-review -->` PASS for their head. When one
-has no valid verdict, preflight exits 3 (`security_review_required`) and the
+has no valid verdict, or only a signed FINDINGS for an earlier head, preflight
+exits 3 (`security_review_required`) and the
 merge monster adds the review request label (merge config
 `security_review_label`, default `security-review-requested`) and parks the
 PR. The security lane answers: the maintenance session the launcher gave
@@ -458,7 +459,11 @@ re-checked on each PR), and classifies each.
    means a signed PASS is already there (a session that stopped between
    posting and unlabeling): just remove the label. A signed FINDINGS for
    this head (exit 1, `signed_findings_for_head`) likewise: remove the label;
-   the author has to push a fix, which asks again.
+   the merge monster bounces the PR. When the author pushes a fix, preflight
+   on the new head answers exit 3 with `verdictReason`
+   `signed_findings_on_earlier_head_unresolved` (the FINDINGS stays sticky
+   until a fresh signed verdict for the new head), so the merge monster
+   labels it again and you review the new head.
 1. **No signer** (`signer: false`): post nothing, leave the label, one
    `fleet notify --level alert --incident security-review-signer` per
    session. The fleet's problem, not the PR's.

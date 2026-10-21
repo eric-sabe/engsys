@@ -101,10 +101,12 @@ echo "a FINDINGS verdict is sticky across a push (engsys#197 review)"
 FIND_OLD="$(sign "$KEY" "$OLD_SHA" FINDINGS 'Finding: F1.' 60)"
 view "$FIND_OLD"
 run --security-verdict --security-key-file "$KEY"
-rc_is "FINDINGS signed for the OLD head still fails on the new head (a whitespace push does not clear it)" 1
+rc_is "FINDINGS signed for the OLD head still blocks on the new head (a whitespace push does not clear it): exit 3, ask for a review" 3
 has "  …as unresolved on an earlier head" "signed_findings_on_earlier_head_unresolved"
+has "  …reported as a review request (engsys#231 review: a fix push must ask again)" '"reason":"security_review_required"'
+hasnt "  …never as passing" '"state": "verified"'
 run --require-security-verdict --security-key-file "$KEY"
-rc_is "  …in require mode too" 1
+rc_is "  …in require mode too" 3
 view "$FIND_OLD" "$(sign "$KEY" "$HEAD_SHA" PASS 'Fixed; no findings.' 5)"
 run --security-verdict --security-key-file "$KEY"
 rc_is "a later signed PASS for the new head clears it (positive control)" 0
@@ -351,6 +353,27 @@ mkdir -p "$T/cfg5/plugins/cache/acme-fleet/acme/1.0.0/repos/ACME"
 cp -R "$PLUG/repos/acme/app" "$T/cfg5/plugins/cache/acme-fleet/acme/1.0.0/repos/ACME/App"
 RC=0; OUT="$(cd "$T/cfg0" && CLAUDE_CONFIG_DIR="$T/cfg5" bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --security-key-file "$KEY" 2>&1)" || RC=$?
 rc_is "directories named ACME/App are found for acme/app (case-insensitive listing)" 3
+
+echo "engsys#231 review: FINDINGS -> fix push -> review again"
+cd "$T/cfg0"; files "services/dashboard/app/(auth)/x.tsx"
+view "$(sign "$KEY" "$OLD_SHA" FINDINGS 'Finding: F1.' 60)"
+RC=0; bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --config "$CFG" --security-key-file "$KEY" >"$T/out.json" 2>"$T/err.json" || RC=$?
+OUT="$(cat "$T/err.json")"
+rc_is "FINDINGS on an earlier head, the fix pushed (no verdict for the new head yet): exit 3" 3
+[ "$(jq -r .verdictReason "$T/err.json")" = signed_findings_on_earlier_head_unresolved ] && [ "$(jq -r .state "$T/err.json")" = findings ] \
+  && ok "  …with a distinct verdictReason and state findings" || bad "  …verdictReason" "$OUT"
+jq -e '.securityVerdict.reviewRequired == true and .securityVerdict.ok == false' "$T/out.json" >/dev/null && ok "  …stdout snapshot flags the review, still not ok" || bad "  …stdout" "$(cat "$T/out.json")"
+view "$(sign "$KEY" "$OLD_SHA" FINDINGS 'Finding: F1.' 60)" "$(sign "$KEY" "$HEAD_SHA" FINDINGS 'Still F1.' 5)"
+run --config "$CFG" --security-key-file "$KEY"
+rc_is "FINDINGS signed for the CURRENT head stays a plain failure (exit 1)" 1
+hasnt "  …no review request" "security_review_required"
+view "$(sign "$KEY" "$OLD_SHA" FINDINGS 'Finding: F1.' 60)" "$(sign "$KEY" "$HEAD_SHA" PASS 'Fixed.' 5)"
+run --config "$CFG" --security-key-file "$KEY"
+rc_is "a later signed PASS for the new head after the earlier FINDINGS: exit 0" 0
+view "$(sign "$KEY" "$OLD_SHA" FINDINGS 'Finding: F1.' 60)" "$UNSIGNED"
+run --config "$CFG" --security-key-file "$KEY"
+rc_is "an unsigned PASS claim beside the earlier FINDINGS does not clear it (still a review request, never a pass)" 3
+cd "$HERE"
 
 echo "engsys#231: verdict required, none valid is its own machine-readable outcome (exit 3, security_review_required)"
 cd "$T/cfg0"
