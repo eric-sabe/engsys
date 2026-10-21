@@ -103,6 +103,9 @@ case "${1:-} ${2:-}" in
       | jq -R -s '{truncated: false, tree: [split("\n")[] | select(length > 0) | split("\t") | {type: "blob", sha: .[0], path: .[1]}]}' ;;
   "api repos/acme/fleet/git/blobs/"*) IR="$(cat "$FAKE/instrepo")"
     printf '{"encoding":"base64","content":"%s"}\n' "$(git -C "$IR" cat-file blob "${2##*/}" | base64 | tr -d '\n')" ;;
+  "api orgs/acme/teams/fleet-operators/members?per_page=100&page="*) pwd -P >"$FAKE/gh-team.cwd"   # engsys#230: the operators team, and where it was asked from
+    [ -f "$FAKE/team.json" ] || { echo '{"message":"Not Found"}'; echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+    case "$2" in *page=1) cat "$FAKE/team.json" ;; *) echo '[]' ;; esac ;;
   "api "*) echo '{"message":"Not Found"}'; echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
   "issue comment"*) [ ! -f "$FAKE/comment-fail" ] || { echo "gh: HTTP 502" >&2; exit 1; } ;;
   *) echo "stub gh: unexpected: $*" >&2; exit 1 ;;
@@ -599,6 +602,34 @@ rc_is "the reviewed copy, allowlisted: passes" 0
 printf 'operator_user_ids: [6666]\n' >>"$HOME/.claude/memory.yml"
 run fleet verify
 rc_is "an edit (an added operator id) is a mismatch again" 1
+
+echo "…and with the federation's operators_team, its operator_user_ids must be the team's members"
+cp "$REVIEWED_MEM" "$HOME/.claude/memory.yml"
+printf 'version: 1\noperators_team: acme/fleet-operators\nfleets:\n  one:\n    operator: alice\n    host: h1\n    github_app: acme-fleet\n    status_issue: 5\n    enabled: true\n' >"$I/federation.yml"
+echo '[{"login":"alice","id":1001}]' >"$FAKE/team.json"; rm -f "$FAKE/gh-team.cwd"
+run fleet verify
+rc_is "the list matches the team: passes" 0
+has "…and says so" "$OUT" "operator_user_ids in $HOME/.claude/memory.yml match the 1 member(s) of acme/fleet-operators"
+eq "…the team was read from the pin checkout (eric-sabe/engsys#257)" "$(cat "$FAKE/gh-team.cwd" 2>/dev/null)" "$(cd "$APP" && pwd -P)"
+echo '[{"login":"alice","id":1001},{"login":"bob","id":1002}]' >"$FAKE/team.json"
+run fleet verify
+rc_is "a member who is not listed is a mismatch" 1
+has "…named" "$OUT" "listed but not a member: []; member but not listed: [1002]"
+rm -f "$FAKE/team.json"
+run fleet verify
+rc_is "a team that can't be read is not verified, never a pass" 3
+has "…saying why" "$OUT" "can't read the members of acme/fleet-operators"
+echo '[{"login":"alice","id":1001}]' >"$FAKE/team.json"
+printf 'version: 1\noperators_team: [\n' >"$I/federation.yml"
+run fleet verify
+rc_is "a federation file that can't be read is not verified" 3
+has "…saying so" "$OUT" "can't read operators_team from $I/federation.yml"
+printf 'version: 1\nfleets:\n  one:\n    operator: alice\n    host: h1\n    github_app: acme-fleet\n    status_issue: 5\n    enabled: true\n' >"$I/federation.yml"
+rm -f "$FAKE/gh-team.cwd"
+run fleet verify
+rc_is "no operators_team declared: nothing to compare" 0
+eq "…and the team is not read" "$(cat "$FAKE/gh-team.cwd" 2>/dev/null || echo none)" none
+rm -f "$I/federation.yml" "$FAKE/team.json"
 rm -f "$HOME/.claude/memory.yml"
 run fleet verify
 rc_is "absent passes (no copy adds no trust)" 0

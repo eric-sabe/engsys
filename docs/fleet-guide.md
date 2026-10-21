@@ -1599,9 +1599,20 @@ the **reviewed** copy (the one in your instance repo at its pinned tag), never a
 
 An absent `memory.yml` passes: no copy adds no trust. With one login per session, each
 `<FLEET_CLAUDE_CONFIG_DIR>.sessions/<name>` is checked the same way, so a copy there passes only if it is the
-reviewed one. Only the config dirs `fleet verify` covers are checked: with `FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised`,
-a `~/.claude/memory.yml` the interactive roles load is not. Whether `fleet verify` should also compare
-`operator_user_ids` with an operators team is still open.
+reviewed one.
+
+When the federation file declares `operators_team`, the `operator_user_ids` in that `memory.yml` must be exactly
+the team's members (numeric user ids). Keep the team closed with no child teams: GitHub counts a child team's
+members as members. A listed id that is not a member, or a member who is not listed, is a mismatch. A team that
+can't be read (network, token scope, the wrong App installation) is "not verified", never a pass. The team is
+read with `PIN_DIR` as the working directory, because the fleet's `gh` shim picks the App installation from the
+working directory's `origin` for org-scoped calls (eric-sabe/engsys#257). So the team must be in an org the App
+installation for `PIN_REPO`'s owner can read; `fleet verify` warns when the team's org is not `PIN_REPO`'s owner.
+Like the release check, a pass is reused within `--max-age` while the local files are unchanged, so a membership
+change shows on the next full check.
+
+Only the config dirs `fleet verify` covers are checked: with `FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised`, a
+`~/.claude/memory.yml` the interactive roles load is not, so keep any host-side check of that copy until it is.
 
 Also a mismatch, at every scope: `disableAllHooks`, or an
 `env` key in a protected family (`ENGSYS_*`, `FLEET_*`, `HARNESS*`, `COPILOT_*`, `AGY_*`, `NODE_*`,

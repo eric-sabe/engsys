@@ -1355,6 +1355,112 @@ test('memory.yml in a config dir is hash-pinned like CLAUDE.md; a per-session di
   assert.ok(userConfigItems({ configDir: cfg }).items.some((i) => i.what === path.join(cfg, 'memory.yml') && i.hash === recipe));
 });
 
+test('--operators-team: memory.yml operator_user_ids must equal the team members; an unreadable team is not verified (engsys#230)', async () => {
+  const { memoryOperatorIds, compareOperatorIds, fetchTeamMemberIds } = await import('./verify-wrappers.mjs');
+  const root = makeCache();
+  const proj = tmp('verify-ops-proj-');
+  const userDir = tmp('verify-ops-user-');
+  fs.mkdirSync(path.join(proj, '.claude'));
+  fs.writeFileSync(path.join(proj, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { 'engsys@engsys': true } }));
+  const plugins = pluginList([userEntry(root)]);
+  const mem = path.join(userDir, 'memory.yml');
+  let calls = [];
+  let members = ['116529267', '158602644'];
+  const teamMembers = async ({ team, cwd }) => {
+    calls.push({ team, cwd });
+    if (members instanceof Error) throw members;
+    return members;
+  };
+  const cache = path.join(tmp('verify-ops-cache-'), 'c.json');
+  let clock = 1_000_000;
+  const runWith = async (extra = ['--operators-team', 'FeedFrwd/fleet-operators']) => {
+    const c = capture();
+    const code = await run(['--repo', 'eric-sabe/engsys', '--tag', 'v9.9.9', '--plugin-id', 'engsys@engsys', '--project-dir', proj,
+      '--plugins', plugins, '--check-settings', '--user-settings-dir', userDir, ...extra],
+    { fetch: async () => release, teamMembers, projectLocal: () => null, now: () => clock, out: c.out });
+    return { code, text: c.text() };
+  };
+
+  let r = await runWith();
+  assert.equal(r.code, 0, `no memory.yml: nothing to compare\n${r.text}`);
+  assert.equal(calls.length, 0, 'and the team is not read');
+
+  fs.writeFileSync(mem, '# eric-sabe, mdbardsley\noperator_user_ids: [158602644, 116529267]\n');
+  r = await runWith();
+  assert.equal(r.code, 0, r.text);
+  assert.match(r.text, /operator_user_ids in .*memory\.yml match the 2 member\(s\) of FeedFrwd\/fleet-operators/);
+  assert.deepEqual(calls, [{ team: 'FeedFrwd/fleet-operators', cwd: proj }], 'read once, from the pin checkout (eric-sabe/engsys#257)');
+
+  fs.writeFileSync(mem, 'operator_user_ids: [116529267, 158602644, 6666]\n');
+  r = await runWith();
+  assert.equal(r.code, 1, 'an extra listed id is drift');
+  assert.match(r.text, /^ {2}operators {2}\S+memory\.yml operator_user_ids differ from the members of FeedFrwd\/fleet-operators: listed but not a member: \[6666\]; member but not listed: \[\]$/m);
+  assert.match(r.text, /^summary: 1 problems: memory\.yml operator list \(1\)$/m);
+  assert.match(r.text, /^components: settings or user-scope config$/m);
+  assert.doesNotMatch(r.text, /^hint: set up a separate fleet config dir/m, 'not a user-scope sharing problem');
+
+  fs.writeFileSync(mem, 'operator_user_ids: [116529267]\n');
+  r = await runWith();
+  assert.equal(r.code, 1, 'a member who is not listed is drift too');
+  assert.match(r.text, /listed but not a member: \[\]; member but not listed: \[158602644\]/);
+
+  members = new Unverified('gh api orgs/FeedFrwd/teams/fleet-operators/members?per_page=100&page=1 failed: HTTP 404');
+  fs.writeFileSync(mem, 'operator_user_ids: [116529267, 158602644]\n');
+  r = await runWith();
+  assert.equal(r.code, 3, 'an unreadable team is never a pass');
+  assert.match(r.text, /^verify: not verified: can't read the members of FeedFrwd\/fleet-operators to compare with operator_user_ids in \S+memory\.yml: gh api .* HTTP 404$/m);
+  members = ['116529267', '158602644'];
+
+  for (const [body, why] of [['repos: [a/b]\n', /has no operator_user_ids/], ['operator_user_ids: [eric-sabe]\n', /not numeric user ids: "eric-sabe"/]]) {
+    fs.writeFileSync(mem, body);
+    r = await runWith();
+    assert.equal(r.code, 1, body);
+    assert.match(r.text, why);
+  }
+  fs.writeFileSync(mem, 'operator_user_ids: [116529267, 158602644]\n');
+
+  // the team in another org than the pin repo: the #257 warning
+  r = await runWith(['--operators-team', 'Other/ops', '--pin-repo', 'acme/app']);
+  assert.match(r.text, /WARNING the operators team Other\/ops is not in acme\/app's org; .*eric-sabe\/engsys#257/);
+  // without the flag nothing is compared
+  calls = [];
+  assert.equal((await runWith([])).code, 0);
+  assert.equal(calls.length, 0);
+  assert.equal((await runWith(['--operators-team', 'not a team'])).code, 2);
+
+  // the cache: an unchanged memory.yml reuses the pass; a changed one asks the team again
+  calls = [];
+  const cached = ['--operators-team', 'FeedFrwd/fleet-operators', '--cache', cache, '--max-age-min', '15'];
+  assert.equal((await runWith(cached)).code, 0);
+  clock += 60_000;
+  r = await runWith(cached);
+  assert.equal(r.code, 0);
+  assert.match(r.text, /operator_user_ids in .* match the members of FeedFrwd\/fleet-operators \(unchanged/);
+  assert.equal(calls.length, 1, 'served from the cache');
+  fs.writeFileSync(mem, 'operator_user_ids: [116529267, 158602644, 6666]\n');
+  assert.equal((await runWith(cached)).code, 1, 'a changed list is checked again at once');
+  assert.equal(calls.length, 2);
+
+  // the pieces
+  assert.deepEqual(memoryOperatorIds('operator_user_ids: 5\n').ids, ['5'], 'a scalar is a one-item list, as the brief reads it');
+  assert.deepEqual(memoryOperatorIds('operator_user_ids:\n  - 8\n  - "7"\n').ids, ['7', '8']);
+  assert.deepEqual(compareOperatorIds({ file: 'f', team: 't', listed: ['1'], members: ['1'] }), []);
+  // fetchTeamMemberIds through a stub gh: paginated, run in cwd, empty or non-numeric is Unverified
+  const bin = tmp('verify-ops-gh-');
+  const ghStub = path.join(bin, 'gh');
+  fs.writeFileSync(ghStub, `#!/bin/sh\npwd -P >>"${bin}/cwd"\ncase "$2" in\n  *page=1) node -e 'console.log(JSON.stringify(Array.from({length:100},(_, i)=>({id:i+1}))))' ;;\n  *page=2) echo '[{"id":101}]' ;;\nesac\n`);
+  fs.chmodSync(ghStub, 0o755);
+  const ids = await fetchTeamMemberIds({ team: 'Acme/ops', cwd: proj, gh: ghStub });
+  assert.equal(ids.length, 101);
+  assert.deepEqual(fs.readFileSync(path.join(bin, 'cwd'), 'utf8').trim().split('\n'), [fs.realpathSync(proj), fs.realpathSync(proj)]);
+  fs.writeFileSync(ghStub, '#!/bin/sh\necho "[]"\n');
+  await assert.rejects(fetchTeamMemberIds({ team: 'Acme/ops', cwd: proj, gh: ghStub }), (e) => e instanceof Unverified && /no members/.test(e.message));
+  fs.writeFileSync(ghStub, '#!/bin/sh\necho \'[{"login":"x"}]\'\n');
+  await assert.rejects(fetchTeamMemberIds({ team: 'Acme/ops', cwd: proj, gh: ghStub }), (e) => e instanceof Unverified && /no numeric id/.test(e.message));
+  fs.writeFileSync(ghStub, '#!/bin/sh\necho "gh: Not Found (HTTP 404)" >&2; exit 1\n');
+  await assert.rejects(fetchTeamMemberIds({ team: 'Acme/ops', cwd: proj, gh: ghStub }), (e) => e instanceof Unverified && e.httpStatus === 404);
+});
+
 test('synced claude.ai skills: grouped per bucket, never trusted by source, and the sync switch is checked (engsys#201)', async () => {
   const home = tmp('verify-synced-home-');
   const cfg = path.join(home, 'fleet-claude');

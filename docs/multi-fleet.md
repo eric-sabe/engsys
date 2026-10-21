@@ -142,7 +142,8 @@ repos:
   status issue: a missing block then counts as stale, not as unmonitored. The default is not supervised.
 - **`operators_team`** is the operator source `gate-check` reads (section 6). A user-owned repo has no
   teams, so `operators: [login:account-id, ...]` is accepted instead, with the same rules as
-  [gate-check.md](gate-check.md#configuration-and-permissions).
+  [gate-check.md](gate-check.md#configuration-and-permissions). `fleet verify` also holds a fleet config dir's
+  `memory.yml` `operator_user_ids` to the team's members (engsys#230, [fleet-guide.md](fleet-guide.md) § 7).
 - **`github_app_id`** is the App's numeric id, which the API reports on every comment the App makes
   (`performed_via_github_app.id`). Cross-fleet messages are matched on it as well as on the bot login
   (section 4), so it is required once two or more fleets are enabled; `fleet federation validate` and
