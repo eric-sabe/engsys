@@ -611,10 +611,25 @@ const canonicalJson = (v) => (Array.isArray(v) ? `[${v.map(canonicalJson).join('
     : JSON.stringify(v));
 
 /**
+ * Files at the top of a config dir that sessions load: Claude Code's memory files, and the engsys memory
+ * brief's memory.yml (engsys#230), whose operator and member id lists are UNION fields, so an edit or a planted
+ * copy adds trust. Absent is fine: no copy adds no trust.
+ */
+export const USER_CONFIG_FILES = ['CLAUDE.md', 'CLAUDE.local.md', 'memory.yml'];
+
+/** The hash VERIFY_ALLOWED_USER_FILES lists for a config-dir file: sha256 over its path relative to the dir and its content. */
+export const userFileHash = (rel, buf) => crypto.createHash('sha256').update(`engsys-user-file-v1\0${rel}\0`).update(buf).digest('hex');
+
+/** Why a memory.yml line matters, and which hash to allowlist (engsys#230). */
+const MEMORY_YML_HINT = 'it holds the memory brief\'s trust lists: allowlist the hash of the reviewed copy, never one read off the host';
+
+/**
  * The user-scope configuration a fleet session loads besides settings, with the hash an operator
  * allowlists for each (VERIFY_ALLOWED_USER_FILES). → { items: [{ what, hash }], problems }
- *   - every file under <configDir>/{agents,commands,skills,rules} and <configDir>/CLAUDE.md: sha256 over
- *     its path relative to the config dir and its content (symlinks followed once, loops refused);
+ *   - every file under <configDir>/{agents,commands,skills,rules} and each of USER_CONFIG_FILES:
+ *     userFileHash over its path relative to the config dir and its content (symlinks followed once, loops
+ *     refused). A per-session dir (<dir>.sessions/<name>) is a config dir too, so a memory.yml there must also be
+ *     the reviewed copy (the rule ff-engsys-fleet's scripts/memory-config-check.sh applied);
  *   - every MCP server definition: `mcpServers` in the user state file (claudeJson: <configDir>/.claude.json
  *     with a fleet config dir, else ~/.claude.json), its `projects[<projectDir>].mcpServers`, and
  *     `mcpServers` in <configDir>/settings*.json: sha256 over the server name and its canonical JSON.
@@ -623,7 +638,6 @@ const canonicalJson = (v) => (Array.isArray(v) ? `[${v.map(canonicalJson).join('
 export function userConfigItems({ configDir, claudeJson = '', projectDir = '' }) {
   const items = [];
   const problems = [];
-  const fileHash = (rel, buf) => crypto.createHash('sha256').update(`engsys-user-file-v1\0${rel}\0`).update(buf).digest('hex');
   const seen = new Set();
   const walk = (abs, rel, depth) => {
     let st;
@@ -634,7 +648,7 @@ export function userConfigItems({ configDir, claudeJson = '', projectDir = '' })
       if (seen.has(real) || depth > 12) { problems.push(`user-cfg   ${abs} is a directory loop`); return; }
       seen.add(real);
       for (const e of fs.readdirSync(abs).sort()) { if (e !== '.DS_Store') walk(path.join(abs, e), `${rel}/${e}`, depth + 1); }
-    } else if (st.isFile()) items.push({ what: `${path.join(configDir, rel)}`, hash: fileHash(rel, fs.readFileSync(abs)) });
+    } else if (st.isFile()) items.push({ what: `${path.join(configDir, rel)}`, hash: userFileHash(rel, fs.readFileSync(abs)) });
     else problems.push(`user-cfg   ${abs} is not a regular file`);
   };
   for (const d of USER_CONFIG_DIRS) {
@@ -642,7 +656,7 @@ export function userConfigItems({ configDir, claudeJson = '', projectDir = '' })
     try { fs.lstatSync(abs); } catch { continue; }
     walk(abs, d, 0);
   }
-  for (const name of ['CLAUDE.md', 'CLAUDE.local.md']) {
+  for (const name of USER_CONFIG_FILES) {
     const abs = path.join(configDir, name);
     try { fs.lstatSync(abs); } catch { continue; }
     walk(abs, name, 0);
@@ -849,8 +863,8 @@ export function checkSettingsDetailed({
       warnings.push(`${path.join(userSettingsDir, 'settings.json')} does not set ${on.join(' and ')} to false, so Claude Code may sync claude.ai skills or plugins into this fleet config dir; run: fleet config-dir init (it retrofits an existing dir), or fleet sync`);
     }
   }
-  // User-scope configuration loaded besides settings (agents, commands, skills, rules, memory, MCP
-  // servers): each must be on VERIFY_ALLOWED_USER_FILES. Checked when allowedUserFiles is passed.
+  // User-scope configuration loaded besides settings (agents, commands, skills, rules, memory files,
+  // memory.yml, MCP servers): each must be on VERIFY_ALLOWED_USER_FILES. Checked when allowedUserFiles is passed.
   if (userSettingsDir && allowedUserFiles) {
     const allowedF = allowedUserFiles instanceof Set ? allowedUserFiles : parseAllowedFiles(allowedUserFiles);
     const uc = userConfigItems({ configDir: userSettingsDir, claudeJson, projectDir });
@@ -866,7 +880,7 @@ export function checkSettingsDetailed({
       // <bucket>/..., or the .bucket-<bucket> marker beside it; any other loose file under synced/ keeps its own line
       const b = rel === null ? null : rel.includes(path.sep) ? rel.split(path.sep)[0] : /^\.bucket-[^.].*$/.test(rel) ? rel.slice('.bucket-'.length) : null;
       if (b !== null) buckets.set(b, (buckets.get(b) || 0) + 1);
-      else problems.push(`user-cfg   ${it.what} is not on VERIFY_ALLOWED_USER_FILES (sha256 ${it.hash})`);
+      else problems.push(`user-cfg   ${it.what} is not on VERIFY_ALLOWED_USER_FILES (sha256 ${it.hash})${it.what === path.join(userSettingsDir, 'memory.yml') ? `; ${MEMORY_YML_HINT}` : ''}`);
     }
     for (const [b, n] of [...buckets].sort()) {
       problems.push(`user-cfg   ${path.join(syncedRoot, b)} holds ${n} synced claude.ai skill file(s) not on VERIFY_ALLOWED_USER_FILES (${SYNCED_HINT})`);

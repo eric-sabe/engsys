@@ -22,9 +22,10 @@
 # unless VERIFY_ALLOWED_USER_HOOKS (fleet.conf, space-separated sha256 content hashes, printed in the
 # mismatch line) lists it; listed ones are reported as `allowed`. The pin checkout's auto-loaded files
 # (.claude/, CLAUDE.md files, .mcp.json, settings-command targets) must also be identical at the tip.
-# User-scope agents, commands, skills, rules, CLAUDE.md and MCP server definitions in that config dir (and
-# its .claude.json) are a mismatch unless VERIFY_ALLOWED_USER_FILES (fleet.conf, sha256 per item, printed
-# in the mismatch line) lists them, and so is any CLAUDE.md / CLAUDE.local.md above PIN_DIR up to $HOME.
+# User-scope agents, commands, skills, rules, CLAUDE.md, memory.yml (the memory brief's trust lists, engsys#230)
+# and MCP server definitions in that config dir (and its .claude.json) are a mismatch unless
+# VERIFY_ALLOWED_USER_FILES (fleet.conf, sha256 per item, printed in the mismatch line) lists them, and so is
+# any CLAUDE.md / CLAUDE.local.md above PIN_DIR up to $HOME.
 #
 #   --alert          post `fleet notify --level alert` once per incident, and resolve it on the next pass:
 #                      wrapper-integrity             a mismatch (latch: .fleet/verify-wrappers.alerted, holding

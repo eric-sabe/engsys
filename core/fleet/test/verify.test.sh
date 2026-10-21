@@ -584,6 +584,26 @@ rm -f "$HOME/git/CLAUDE.md" "$HOME/.claude.json"; rm -rf "$HOME/.claude/agents";
 run fleet verify
 rc_is "cleaned up: passes" 0
 
+echo "== engsys#230: memory.yml in the config dir is pinned by VERIFY_ALLOWED_USER_FILES (the hash of the reviewed copy)"
+REVIEWED_MEM="$T/reviewed-memory.yml"; printf 'repos: [acme/app]\noperator_user_ids: [1001]\n' >"$REVIEWED_MEM"
+cp "$REVIEWED_MEM" "$HOME/.claude/memory.yml"
+run fleet verify
+rc_is "an unlisted memory.yml is a mismatch" 1
+has "…named, with the hint" "$OUT" "$HOME/.claude/memory.yml is not on VERIFY_ALLOWED_USER_FILES"
+has "…to allowlist the reviewed copy" "$OUT" "allowlist the hash of the reviewed copy"
+MH="$({ printf 'engsys-user-file-v1\0memory.yml\0'; cat "$REVIEWED_MEM"; } | shasum -a 256 | cut -d' ' -f1)"
+has "…and the documented recipe gives the hash verify printed" "$OUT" "(sha256 $MH)"
+printf '%s\nVERIFY_ALLOWED_USER_FILES=%s\n' "$CONF0" "$MH" >"$I/fleet/fleet.conf"
+run fleet verify
+rc_is "the reviewed copy, allowlisted: passes" 0
+printf 'operator_user_ids: [6666]\n' >>"$HOME/.claude/memory.yml"
+run fleet verify
+rc_is "an edit (an added operator id) is a mismatch again" 1
+rm -f "$HOME/.claude/memory.yml"
+run fleet verify
+rc_is "absent passes (no copy adds no trust)" 0
+printf '%s\n' "$CONF0" >"$I/fleet/fleet.conf"
+
 echo "== fleet config-dir init: a fresh fleet config dir with only the settings unattended sessions need"
 mkdir -p "$HOME/.claude"
 jq -n '{skipDangerousModePermissionPrompt: true, skipAutoPermissionPrompt: true, autoMode: {allow: ["$defaults"]}, effortLevel: "high",
@@ -918,6 +938,20 @@ run fleet verify --max-age 0 --session acme-mm
 rc_is "--max-age 0 (no cache) passes too" 0
 eq "…still no claude process" "$(calls)" 0
 eq "…and none is logged in the invocation log" "$(cat "$I/.fleet/claude-invocations.log" 2>/dev/null || echo none)" "none"
+
+echo "…engsys#230: a memory.yml in a session's own dir: absent is fine, present must be the reviewed copy"
+printf 'operator_user_ids: [6666]\n' >"$PS/memory.yml"
+run fleet verify --max-age 0 --session acme-mm
+rc_is "a planted memory.yml in the session dir is a mismatch" 1
+has "…named" "$OUT" "$PS/memory.yml is not on VERIFY_ALLOWED_USER_FILES"
+cp "$REVIEWED_MEM" "$PS/memory.yml"
+printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\nFLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on\nVERIFY_ALLOWED_USER_FILES=%s\n' "$CONF0" "$PCFG" "$MH" >"$I/fleet/fleet.conf"
+run fleet verify --max-age 0 --session acme-mm
+rc_is "the reviewed copy, allowlisted: passes" 0
+rm -f "$PS/memory.yml"
+printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\nFLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on\n' "$CONF0" "$PCFG" >"$I/fleet/fleet.conf"
+run fleet verify --max-age 0 --session acme-mm
+rc_is "removed: passes" 0
 
 echo "…the launch gate (no --max-age) still uses the CLI, though the session is running"
 : >"$FAKE/claude.calls"

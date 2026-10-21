@@ -1309,6 +1309,52 @@ test('user-scope config: agents, commands, skills, rules, memory and MCP servers
     .filter((l) => /user-cfg/.test(l)), []);
 });
 
+test('memory.yml in a config dir is hash-pinned like CLAUDE.md; a per-session dir may have none, or the reviewed copy (engsys#230)', async () => {
+  const { userConfigItems, userFileHash } = await import('./verify-wrappers.mjs');
+  const { execFileSync } = await import('node:child_process');
+  const home = tmp('verify-memyml-home-');
+  const cfg = path.join(home, 'fleet-claude');
+  const sess = path.join(`${cfg}.sessions`, 'acme-mm');
+  const proj = path.join(home, 'git', 'app');
+  fs.mkdirSync(path.join(proj, '.claude'), { recursive: true });
+  fs.mkdirSync(cfg, { recursive: true }); fs.mkdirSync(sess, { recursive: true });
+  const reviewed = 'repos: [acme/app]\noperator_user_ids: [1001]\n';
+  // the operator's recipe (docs/fleet-guide.md): hash the REVIEWED copy, never the installed one
+  const reviewedHash = execFileSync('sh', ['-c', 'printf "engsys-user-file-v1\\0memory.yml\\0"; cat', '--'], { input: reviewed })
+    .toString('latin1');
+  const recipe = (await import('node:crypto')).createHash('sha256').update(Buffer.from(reviewedHash, 'latin1')).digest('hex');
+  assert.equal(recipe, userFileHash('memory.yml', Buffer.from(reviewed)), 'the documented printf recipe gives the hash verify compares');
+  const check = (dir, allowed = '') => checkSettingsDetailed({ projectDir: proj, userSettingsDir: dir, projectVerified: true, home,
+    claudeJson: path.join(dir, '.claude.json'), allowedUserFiles: parseAllowedFiles(allowed) });
+
+  assert.deepEqual(check(cfg).problems, [], 'positive control: no memory.yml passes (absent adds no trust)');
+  fs.writeFileSync(path.join(cfg, 'memory.yml'), reviewed);
+  let p = check(cfg).problems;
+  assert.equal(p.length, 1);
+  assert.match(p[0], /^user-cfg\s+\S+\/fleet-claude\/memory\.yml is not on VERIFY_ALLOWED_USER_FILES \(sha256 [0-9a-f]{64}\); it holds the memory brief's trust lists: allowlist the hash of the reviewed copy/);
+  assert.equal(groupProblems(p)[0].label, 'user-scope skills/agents/files');
+  assert.deepEqual(check(cfg, recipe).problems, [], 'the reviewed copy, allowlisted: passes');
+  assert.ok(check(cfg, recipe).info.some((l) => /fleet-claude\/memory\.yml .* \(VERIFY_ALLOWED_USER_FILES\)/.test(l)));
+  fs.writeFileSync(path.join(cfg, 'memory.yml'), reviewed.replace('[1001]', '[1001, 6666]'));
+  assert.match(check(cfg, recipe).problems.join('\n'), /fleet-claude\/memory\.yml is not on VERIFY_ALLOWED_USER_FILES/, 'an added operator id is drift');
+  fs.writeFileSync(path.join(cfg, 'memory.yml'), reviewed);
+  // the hash binds the name: the same bytes as a CLAUDE.md are a different item
+  assert.notEqual(userFileHash('CLAUDE.md', Buffer.from(reviewed)), recipe);
+
+  // per-session dir (<dir>.sessions/<name>): absent is fine; present must be the reviewed copy
+  assert.deepEqual(check(sess, recipe).problems, [], 'a per-session dir without memory.yml passes');
+  fs.writeFileSync(path.join(sess, 'memory.yml'), 'operator_user_ids: [6666]\n');
+  assert.match(check(sess, recipe).problems.join('\n'), /acme-mm\/memory\.yml is not on VERIFY_ALLOWED_USER_FILES/, 'a planted copy in a session dir is drift');
+  fs.writeFileSync(path.join(sess, 'memory.yml'), reviewed);
+  assert.deepEqual(check(sess, recipe).problems, [], 'a copy identical to the reviewed one passes, as memory-config-check.sh allowed');
+  // a symlink to the reviewed copy is read through (like the brief does); a dangling one is a problem
+  fs.rmSync(path.join(sess, 'memory.yml')); fs.symlinkSync(path.join(cfg, 'memory.yml'), path.join(sess, 'memory.yml'));
+  assert.deepEqual(check(sess, recipe).problems, []);
+  fs.rmSync(path.join(sess, 'memory.yml')); fs.symlinkSync(path.join(home, 'nowhere.yml'), path.join(sess, 'memory.yml'));
+  assert.match(check(sess, recipe).problems.join('\n'), /acme-mm\/memory\.yml is a dangling link or unreadable/);
+  assert.ok(userConfigItems({ configDir: cfg }).items.some((i) => i.what === path.join(cfg, 'memory.yml') && i.hash === recipe));
+});
+
 test('synced claude.ai skills: grouped per bucket, never trusted by source, and the sync switch is checked (engsys#201)', async () => {
   const home = tmp('verify-synced-home-');
   const cfg = path.join(home, 'fleet-claude');
