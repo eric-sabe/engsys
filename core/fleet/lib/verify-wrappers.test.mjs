@@ -925,46 +925,44 @@ test('instance marketplace plugin: fail closed when it cannot be checked (engsys
   // GitHub can't be reached for the instance repo
   r = await run3(pluginList([userEntry(eng), instEntry(acme)]), { fetch: async ({ repo }) => { if (repo === 'acme/fleet') throw new Unverified('gh api failed: 404'); return release; } });
   assert.equal(r.rc, 3); assert.match(r.text, /not verified against acme\/fleet@v3\.4\.5: gh api failed: 404/);
-  // the instance tag is off the default branch: a WARNING for now (eric-sabe/engsys#227), the files still enforce
+  // the instance tag is off the default branch: a MISMATCH like the engsys release (eric-sabe/engsys#227)
   const offMain = { fetch: async ({ repo }) => (repo === 'acme/fleet' ? instanceRelease({ status: 'diverged' }) : release) };
   r = await run3(pluginList([userEntry(eng), instEntry(acme)]), offMain);
-  assert.equal(r.rc, 0, r.text); assert.match(r.text, /verify: WARNING instance release acme@acme-fleet: v3\.4\.5 of acme\/fleet is commit d+, which is not on main \(compare: diverged\).*engsys#227/);
+  assert.equal(r.rc, 1, r.text);
+  assert.match(r.text, /release\s+acme@acme-fleet: v3\.4\.5 of acme\/fleet is commit d+, which is not on main \(compare: diverged\); cut a release on main: fleet pin --release next \(merge its release PR, then re-run it\)/);
+  assert.match(r.text, /^components: instance release \(acme@acme-fleet\)$/m);
+  assert.doesNotMatch(r.text, /WARNING instance release/); assert.doesNotMatch(r.text, /allowed for now/);
+  // the old switch is still accepted (an older caller) and changes nothing
+  r = await run3(pluginList([userEntry(eng), instEntry(acme)]), offMain, ['--enforce-instance-on-main', ...MARKET]);
+  assert.equal(r.rc, 1, 'the legacy flag is a no-op: still a mismatch');
+  // a modified file is a mismatch beside it
   fs.appendFileSync(path.join(acme, 'bin', 'acme-guard'), 'tampered\n');
   r = await run3(pluginList([userEntry(eng), instEntry(acme)]), offMain);
-  assert.equal(r.rc, 1, 'an off-main instance tag does not excuse a modified file'); assert.match(r.text, /modified\s+\S+\/bin\/acme-guard/);
+  assert.equal(r.rc, 1); assert.match(r.text, /modified\s+\S+\/bin\/acme-guard/); assert.match(r.text, /which is not on main/);
   fs.writeFileSync(path.join(acme, 'bin', 'acme-guard'), INSTANCE_FILES['plugins/acme/bin/acme-guard']);
-  // the one switch: enforced, the same tag is a MISMATCH like engsys
-  r = await run3(pluginList([userEntry(eng), instEntry(acme)]), { ...offMain, instanceOffMainEnforced: true });
-  assert.equal(r.rc, 1); assert.match(r.text, /release\s+acme@acme-fleet: v3\.4\.5 of acme\/fleet is commit d+, which is not on main/);
-  // --enforce-instance-on-main (fleet.conf INSTANCE_OFF_MAIN=enforce) is the same switch, and only ever tightens
-  r = await run3(pluginList([userEntry(eng), instEntry(acme)]), offMain, ['--enforce-instance-on-main', ...MARKET]);
-  assert.equal(r.rc, 1); assert.match(r.text, /release\s+acme@acme-fleet: v3\.4\.5 of acme\/fleet is commit d+, which is not on main/);
-  assert.match(r.text, /^components: instance release \(acme@acme-fleet\)$/m); assert.doesNotMatch(r.text, /WARNING instance release/);
-  r = await run3(pluginList([userEntry(eng), instEntry(acme)]), { ...offMain, instanceOffMainEnforced: true }, ['--enforce-instance-on-main', ...MARKET]);
-  assert.equal(r.rc, 1, 'both on is still enforced');
-  r = await run3(pluginList([userEntry(eng), instEntry(acme)]), {}, ['--enforce-instance-on-main', ...MARKET]);
-  assert.equal(r.rc, 0, 'positive control: an ahead (or identical) instance tag passes when enforced\n' + r.text);
-  for (const status of ['identical', 'behind']) {
-    r = await run3(pluginList([userEntry(eng), instEntry(acme)]), { fetch: async ({ repo }) => (repo === 'acme/fleet' ? instanceRelease({ status }) : release) }, ['--enforce-instance-on-main', ...MARKET]);
-    assert.equal(r.rc, status === 'identical' ? 0 : 1, `enforced, compare ${status}`);
+  // ahead (an ancestor of main) and identical (main's tip) pass; behind / diverged don't
+  for (const status of ['ahead', 'identical', 'behind', 'diverged']) {
+    r = await run3(pluginList([userEntry(eng), instEntry(acme)]), { fetch: async ({ repo }) => (repo === 'acme/fleet' ? instanceRelease({ status }) : release) });
+    assert.equal(r.rc, status === 'ahead' || status === 'identical' ? 0 : 1, `compare ${status}\n${r.text}`);
   }
-  // a pass cached while the tag was only a warning is not reused once enforcement is on
+  // a pass cached while the tag was only a warning (before #227) is never served; a malformed record is a miss, never a crash
   {
     const cacheFile = path.join(tmp('verify-cache-file-'), 'c.json');
     const plugins = pluginList([userEntry(eng), instEntry(acme)]);
     const withCache = ['--cache', cacheFile, '--max-age-min', '30'];
-    assert.equal((await run3(plugins, offMain, [...MARKET, ...withCache])).rc, 0);
-    assert.equal((await run3(plugins, offMain, [...MARKET, ...withCache])).rc, 0, 'warn mode: cached');
-    assert.equal((await run3(plugins, offMain, ['--enforce-instance-on-main', ...MARKET, ...withCache])).rc, 1, 'enforcing: the cached warning pass is not served');
-    // a malformed cache record (writable by a session) is a miss when enforcing, never a crash
-    assert.equal((await run3(plugins, offMain, [...MARKET, ...withCache])).rc, 0); // a mismatch removed the cache: write it again
-    fs.writeFileSync(cacheFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(cacheFile, 'utf8')), result: 'ok', warnings: 'not an array' }));
+    assert.equal((await run3(plugins, {}, [...MARKET, ...withCache])).rc, 0);
+    const rec = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
     let rechecked = 0;
     const counting = async (a) => { rechecked++; return fetch(a); };
-    assert.equal((await run3(plugins, { fetch: counting }, ['--enforce-instance-on-main', ...MARKET, ...withCache])).rc, 0, 'enforcing, malformed cached warnings: an ahead tag passes');
+    assert.equal((await run3(plugins, { fetch: counting }, [...MARKET, ...withCache])).rc, 0, 'an on-main pass is cached');
+    assert.equal(rechecked, 0, 'served from the cache');
+    fs.writeFileSync(cacheFile, JSON.stringify({ ...rec, warnings: ['instance release acme@acme-fleet: v3.4.5 of acme/fleet is commit x, which is not on main (compare: diverged); allowed for now'] }));
+    assert.equal((await run3(plugins, offMain, [...MARKET, ...withCache])).rc, 1, 'a warn-era cached pass is not served');
+    fs.writeFileSync(cacheFile, JSON.stringify({ ...rec, warnings: 'not an array' }));
+    assert.equal((await run3(plugins, { fetch: counting }, [...MARKET, ...withCache])).rc, 0, 'malformed cached warnings: an ahead tag passes');
     assert.ok(rechecked > 0, 'the release was fetched again: a miss, not a cache hit');
   }
-  // the engsys tag off the default branch is still a MISMATCH, whatever the switch says
+  // the engsys tag off the default branch is a MISMATCH too
   r = await run3(pluginList([userEntry(eng), instEntry(acme)]), { fetch: async ({ repo }) => (repo === 'acme/fleet' ? inst : { ...release, status: 'diverged' }) });
   assert.equal(r.rc, 1); assert.match(r.text, /release\s+v9\.9\.9 is commit c+, which is not on main/);
   // the release's marketplace file can't say where the plugin comes from: not verified, no directory is guessed
@@ -1054,13 +1052,11 @@ test('engsys stack pack: checked against the engsys release itself, in each dir 
   const ghost = ['--market-plugin', 'engsys-ghost@engsys|eric-sabe/engsys|v9.9.9'];
   c = capture();
   assert.equal(await run([...args(pluginList([userEntry(makeCache()), packEntry(makePack(), { id: 'engsys-ghost@engsys' })])), ...ghost], { fetch, blob, out: c.out }), 3);
-  // the pack is held to the engsys release's strict on-main check, whatever the instance switch says, and it is a single problem
-  for (const enforced of [false, true]) {
-    c = capture();
-    assert.equal(await run([...args(pluginList([userEntry(makeCache()), packEntry(makePack())])), ...PACK], { fetch: async () => rel('diverged'), blob, out: c.out, instanceOffMainEnforced: enforced }), 1);
-    assert.equal((c.text().match(/which is not on main/g) || []).length, 1, 'one release problem, not one per pack');
-    assert.doesNotMatch(c.text(), /WARNING instance release/);
-  }
+  // the pack is held to the engsys release's on-main check, and it is a single problem
+  c = capture();
+  assert.equal(await run([...args(pluginList([userEntry(makeCache()), packEntry(makePack())])), ...PACK], { fetch: async () => rel('diverged'), blob, out: c.out }), 1);
+  assert.equal((c.text().match(/which is not on main/g) || []).length, 1, 'one release problem, not one per pack');
+  assert.doesNotMatch(c.text(), /WARNING instance release/);
   // one release fetch serves the engsys plugin and its packs
   fetches = 0;
   assert.equal(await run([...args(pluginList([userEntry(makeCache()), packEntry(makePack())])), ...PACK], { fetch, blob, out: capture().out }), 0);
