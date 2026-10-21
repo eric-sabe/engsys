@@ -23,8 +23,9 @@
 //
 // Usage:
 //   security-verdict.mjs keygen --key-file PATH           create PATH (0600, never overwrites)
-//   security-verdict.mjs post --repo O/N --pr N --sha SHA --verdict PASS|FINDINGS --body-file F
-//                                                         (needs ENGSYS_SECURITY_VERDICT_KEY_FILE)
+//   security-verdict.mjs post --repo O/N --pr N --sha SHA --verdict PASS|FINDINGS --body-file F|-
+//                                                         (needs ENGSYS_SECURITY_VERDICT_KEY_FILE; `-` reads the review
+//                                                         text on stdin: how the baton guard hands it over, engsys#231)
 //   security-verdict.mjs verify --repo O/N --pr N --sha SHA --key-file PATH [--require] [--max-age-hours H]
 //                                                         (comments as JSON on stdin: gh's `comments` array)
 // verify prints one JSON object. Exit: 0 ok (or nothing to check) | 1 not verified | 4 verified FINDINGS |
@@ -32,6 +33,8 @@
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { isMainEntry } from './is-main.mjs';
@@ -231,7 +234,7 @@ export async function main(argv = process.argv.slice(2), { exec = execFileSync, 
   }
   if (cmd === 'post') {
     const { repo, pr, sha, verdict } = values;
-    if (!repo || !pr || !sha || !verdict || !values['body-file']) die('usage: post --repo O/N --pr N --sha SHA --verdict PASS|FINDINGS --body-file F', 2);
+    if (!repo || !pr || !sha || !verdict || !values['body-file']) die('usage: post --repo O/N --pr N --sha SHA --verdict PASS|FINDINGS --body-file F|-', 2);
     // Only a security-lane session is handed the key file path (the launcher unsets it everywhere else).
     const keyFile = env.ENGSYS_SECURITY_VERDICT_KEY_FILE;
     if (!keyFile) die('not a security-lane session (ENGSYS_SECURITY_VERDICT_KEY_FILE is unset); refusing to sign a verdict', 1);
@@ -245,14 +248,19 @@ export async function main(argv = process.argv.slice(2), { exec = execFileSync, 
     if (head !== String(sha).toLowerCase()) die(`--sha ${sha} is not the PR head ${head}; refusing to sign`, 1);
     let comment;
     try {
-      comment = signVerdict({ key, repo, pr, sha, verdict, reviewText: fs.readFileSync(values['body-file'], 'utf8'), now });
+      const reviewText = values['body-file'] === '-' ? readStdin() : fs.readFileSync(values['body-file'], 'utf8');
+      comment = signVerdict({ key, repo, pr, sha, verdict, reviewText, now });
     } catch (e) { die(e.message, 2); }
-    const tmp = `${values['body-file']}.signed.${crypto.randomBytes(6).toString('hex')}`;
-    // Exclusive create (wx) with mode 0600: never follows or reuses an existing path.
-    fs.writeFileSync(tmp, comment, { mode: 0o600, flag: 'wx' });
+    // The signed body goes to a fresh private directory (0700), created exclusively with mode 0600: never next to the
+    // review file (which may be stdin), never following or reusing an existing path.
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nyx-verdict-'));
+    const tmp = path.join(tmpDir, 'signed.md');
+    let failed = null;
     try {
+      fs.writeFileSync(tmp, comment, { mode: 0o600, flag: 'wx' });
       exec('gh', ['pr', 'comment', String(pr), '-R', repo, '--body-file', tmp], { stdio: ['ignore', 'inherit', 'inherit'], timeout: 60000 });
-    } catch (e) { die(`gh pr comment failed: ${e.message}`, 3); } finally { fs.rmSync(tmp, { force: true }); }
+    } catch (e) { failed = e; } finally { fs.rmSync(tmpDir, { recursive: true, force: true }); }
+    if (failed) die(`gh pr comment failed: ${failed.message}`, 3); // after the cleanup: die() exits at once
     return 0;
   }
   if (cmd === 'verify') {

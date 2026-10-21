@@ -4,8 +4,9 @@
 // attacker-authored PR content and could omit --require-security-verdict (by injection or by mistake).
 //
 //   security-sensitive.mjs policy --config FILE
-//       → {"signedVerdict":bool,"globs":N,"label":"security"}   (config keys: ready_requirements.signed_security_verdict,
-//         security_sensitive_globs, security_sensitive_label)
+//       → {"signedVerdict":bool,"globs":N,"label":"security","reviewLabel":"security-review-requested","reviewLabelSet":bool}
+//         (config keys: ready_requirements.signed_security_verdict, security_sensitive_globs, security_sensitive_label,
+//         security_review_label; reviewLabelSet says whether the config names the review label itself)
 //   security-sensitive.mjs decide [--config FILE] < {"files":[{filename,previous_filename?}],"changedFiles":N,"labels":[...]}
 //       → {"ok":true,"required":bool,"reasons":[...],"matched":[<=20 paths]}
 //
@@ -27,6 +28,8 @@ const { parseYaml } = require('./yaml.js');
 
 export const GITHUB_FILE_LIMIT = 3000;
 export const DEFAULT_LABEL = 'security';
+/** The label that asks the security lane for a signed verdict (engsys#231): merge-monster adds it, maintenance removes it. */
+export const DEFAULT_REVIEW_LABEL = 'security-review-requested';
 
 const esc = (c) => c.replace(/[\\^$.*+?()[\]{}|/-]/g, '\\$&');
 
@@ -42,7 +45,7 @@ export function compileGlob(glob) {
   return new RegExp(`^${re}$`);
 }
 
-/** → { signedVerdict, globs: [string], label }. Throws on a config that cannot be read or has malformed keys. */
+/** → { signedVerdict, globs: [string], label, reviewLabel, reviewLabelSet }. Throws on a config that cannot be read or has malformed keys. */
 export function loadPolicy(text) {
   const cfg = parseYaml(text);
   if (!cfg || typeof cfg !== 'object') throw new Error('config is not a mapping');
@@ -50,8 +53,14 @@ export function loadPolicy(text) {
   if (!Array.isArray(g) || g.some((x) => typeof x !== 'string' || !x.trim())) throw new Error('security_sensitive_globs must be a list of non-empty strings');
   const label = cfg.security_sensitive_label ?? DEFAULT_LABEL;
   if (typeof label !== 'string' || !label.trim()) throw new Error('security_sensitive_label must be a non-empty string');
+  const reviewLabel = cfg.security_review_label ?? DEFAULT_REVIEW_LABEL;
+  if (typeof reviewLabel !== 'string' || !reviewLabel.trim()) throw new Error('security_review_label must be a non-empty string');
+  if (reviewLabel.trim().toLowerCase() === label.trim().toLowerCase()) throw new Error('security_review_label must differ from security_sensitive_label (removing the request would drop the requirement)');
   const rr = cfg.ready_requirements;
-  return { signedVerdict: Boolean(rr && typeof rr === 'object' && rr.signed_security_verdict === true), globs: g.map((x) => x.trim()), label: label.trim() };
+  return {
+    signedVerdict: Boolean(rr && typeof rr === 'object' && rr.signed_security_verdict === true), globs: g.map((x) => x.trim()), label: label.trim(),
+    reviewLabel: reviewLabel.trim(), reviewLabelSet: cfg.security_review_label != null,
+  };
 }
 
 /** → { required, reasons, matched }. Throws Error('security_file_list_unreadable: ...') when the list can't be trusted. */
@@ -90,9 +99,10 @@ function main(argv) {
   let policy;
   if (config) {
     try { policy = loadPolicy(fs.readFileSync(config, 'utf8')); } catch (e) { fail(`security_config_unreadable: ${e.message}`); }
-  } else policy = { signedVerdict: false, globs: [], label: DEFAULT_LABEL };
+  } else policy = { signedVerdict: false, globs: [], label: DEFAULT_LABEL, reviewLabel: DEFAULT_REVIEW_LABEL, reviewLabelSet: false };
   if (cmd === 'policy') {
-    process.stdout.write(`${JSON.stringify({ signedVerdict: policy.signedVerdict, globs: policy.globs.length, label: policy.label })}\n`);
+    const { signedVerdict, label, reviewLabel, reviewLabelSet } = policy;
+    process.stdout.write(`${JSON.stringify({ signedVerdict, globs: policy.globs.length, label, reviewLabel, reviewLabelSet })}\n`);
     return;
   }
   if (cmd === 'decide') {

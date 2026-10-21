@@ -3,18 +3,23 @@
 # (re)building: open Dependabot PRs, open Dependabot/CodeQL alert counts, and
 # the latest push/dispatch conclusions for Secret Scan + services-ci (Trivy).
 # The model deep-dives individual findings itself (gh api / gh pr view).
+# Also the open PRs that ask the security lane for a signed verdict (engsys#231): security_reviews.items =
+# [{number, head}] for PRs carrying the review request label (--review-label, default: security_review_label
+# from the merge config, found by mnt-security-review.mjs label, else security-review-requested), so a new
+# request, or a new head on a requested PR, is a tick delta.
 #
-# Usage: mnt-snapshot.sh --repo owner/name [--default-branch main]
+# Usage: mnt-snapshot.sh --repo owner/name [--default-branch main] [--review-label LABEL]
 set -euo pipefail
 # shellcheck source=../../../lib/fleet-gh.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/fleet-gh.sh"
 fleet_gh_resolve
 
-REPO="" DEFBRANCH="main"
+REPO="" DEFBRANCH="main" REVIEW_LABEL=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) REPO="$2"; shift 2 ;;
     --default-branch) DEFBRANCH="$2"; shift 2 ;;
+    --review-label) REVIEW_LABEL="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -66,6 +71,18 @@ else
   CODEQL_ALERTS_COUNT="null"
 fi
 
+# --- security-review requests (engsys#231) ---------------------------------
+# A failed read is `available: false`, never an empty (clean-looking) list.
+[ -n "$REVIEW_LABEL" ] || REVIEW_LABEL=$(node "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/mnt-security-review.mjs" label --repo "$REPO" 2>/dev/null) || REVIEW_LABEL=""
+[ -n "$REVIEW_LABEL" ] || REVIEW_LABEL=security-review-requested
+if REVIEW_RAW=$("$FLEET_GH" pr list -R "$REPO" --state open --limit 200 --label "$REVIEW_LABEL" --json number,headRefOid,labels 2>/dev/null) \
+  && REVIEW_PRS=$(printf '%s' "$REVIEW_RAW" | jq -c --arg rl "$(printf '%s' "$REVIEW_LABEL" | tr '[:upper:]' '[:lower:]')" \
+    '[ .[] | select(any(.labels[]; (.name | ascii_downcase) == $rl)) | {number, head: .headRefOid} ] | sort_by(.number)' 2>/dev/null); then
+  REVIEW_AVAILABLE=true
+else
+  REVIEW_AVAILABLE=false REVIEW_PRS="[]"
+fi
+
 # --- latest Secret Scan workflow_run on the default branch -----------------
 SECRET_SCAN=$("$FLEET_GH" run list -R "$REPO" --branch "$DEFBRANCH" --workflow "Secret Scan" --limit 1 \
   --json databaseId,conclusion,status \
@@ -89,10 +106,13 @@ jq -n \
   --argjson codeql_alerts_count "$CODEQL_ALERTS_COUNT" \
   --argjson secret_scan "$SECRET_SCAN" \
   --argjson services_ci "$SERVICES_CI" \
+  --argjson review_available "$REVIEW_AVAILABLE" \
+  --argjson review_prs "$REVIEW_PRS" \
   '{
     dependabot_prs: $dependabot_prs,
     dependabot_alerts: { available: $dep_alerts_available, count: $dep_alerts_count, items: $dep_alerts },
     codeql_alerts: { available: $codeql_alerts_available, count: $codeql_alerts_count, items: $codeql_alerts },
     secret_scan_latest: $secret_scan,
-    services_ci_latest_push: $services_ci
+    services_ci_latest_push: $services_ci,
+    security_reviews: { available: $review_available, count: ($review_prs | length), items: $review_prs }
   }'

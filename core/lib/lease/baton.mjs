@@ -67,7 +67,7 @@
 //   keepalive --detach [--pulse-max 20m]   the watch bus's call: adopt this session's running
 //              renewer, or start one detached (see "The keepalive outlives its bus")  exit 0 | 1 | 3 | 5
 //   fence      the check before a mutating act                            exit 0 held | 1 | 3 | 5
-//   guard -- <gh …|gate-request.sh …|fleet msg send …>   fence, then run the command (30 s timeout)
+//   guard -- <gh …|gate-request.sh …|fleet msg send …|security-verdict.mjs post …>   fence, then run the command (30 s timeout)
 //   merge      --pr N --sha S --method merge|squash|rebase                exit 0 merged | 1 | 3
 //   release    [--reason rotation|exit|handover]                          exit 0 | 1 lost | 3
 //   status     lease + local view (never the token)
@@ -1080,9 +1080,11 @@ function defaultParentAlive() {
 /**
  * What `guard` may run: `gh …` (never a merge of any form, which goes through `merge` and its sha
  * pin, and never `--admin`), `git [-C dir] push [--force-with-lease] origin <PR head branch>` (an
- * allowlist, checked against the PR by guard()), this engsys's own gate-request.sh, or `fleet msg send …`
+ * allowlist, checked against the PR by guard()), this engsys's own gate-request.sh, `fleet msg send …`
  * (this engsys's core/fleet/msg.mjs, the cross-fleet message post, its --body-file confined to stdin or
- * the session's tmp/: guardedMsgArgs). The guard is a fence, not a way around the permission system, so
+ * the session's tmp/: guardedMsgArgs), or this engsys's own `security-verdict.mjs post …` (the security lane's
+ * signed verdict, engsys#231; its --body-file confined the same way, since the review text is posted publicly).
+ * The guard is a fence, not a way around the permission system, so
  * it runs nothing else. `cwd` is the session's working directory (the guard runs where the session does);
  * `root` is where the session was launched (sessionRoot), whose tmp/ is the one a body file may sit in.
  */
@@ -1152,6 +1154,20 @@ export function guardCommand(argv, { cwd = process.cwd(), root = cwd } = {}) {
     const { args: msgArgs, input } = guardedMsgArgs(sub, cwd, root);
     return { exe: process.execPath, args: [ownMsg, ...msgArgs], ...(input !== undefined ? { input } : {}) };
   }
+  // `security-verdict.mjs post …` (engsys#231): this engsys's own core/lib/security-verdict.mjs, the post subcommand only.
+  // The signing key still comes from the session's ENGSYS_SECURITY_VERDICT_KEY_FILE (the guard adds no authority).
+  if (basename(exe) === "security-verdict.mjs") {
+    const own = resolve(HERE, "..", "security-verdict.mjs");
+    let real;
+    try { real = realpathSync(exe); } catch { real = null; }
+    let ownReal;
+    try { ownReal = realpathSync(own); } catch { ownReal = own; }
+    if (real !== ownReal) throw new LeaseUsageError(`guard runs only this engsys's security-verdict.mjs (${own})`);
+    if (args[0] !== "post") throw new LeaseUsageError("guard runs `security-verdict.mjs post …` only (verify and keygen need no fence)");
+    const { args: postArgs, input } = guardedMsgArgs(args.slice(1), cwd, root, "security-verdict.mjs post");
+    if (!postArgs.some((a) => a === "--body-file" || a.startsWith("--body-file="))) throw new LeaseUsageError("guard: security-verdict.mjs post needs --body-file");
+    return { exe: process.execPath, args: [ownReal, "post", ...postArgs], ...(input !== undefined ? { input } : {}) };
+  }
   if (basename(exe) === "gate-request.sh") {
     const own = resolve(HERE, "..", "..", "skills", "merge-monster", "scripts", "gate-request.sh");
     let real;
@@ -1161,7 +1177,7 @@ export function guardCommand(argv, { cwd = process.cwd(), root = cwd } = {}) {
     if (real !== ownReal) throw new LeaseUsageError(`guard runs only this engsys's gate-request.sh (${own})`);
     return { exe: "bash", args: [real, ...args] };
   }
-  throw new LeaseUsageError(`guard runs gh, git push, gate-request.sh or fleet msg send only, not ${JSON.stringify(exe)}`);
+  throw new LeaseUsageError(`guard runs gh, git push, gate-request.sh, fleet msg send or security-verdict.mjs post only, not ${JSON.stringify(exe)}`);
 }
 
 /**
@@ -1180,15 +1196,15 @@ export function guardCommand(argv, { cwd = process.cwd(), root = cwd } = {}) {
  */
 export const MAX_GUARDED_BODY = 256 * 1024;
 
-export function guardedMsgArgs(sub, cwd, root = cwd) {
+export function guardedMsgArgs(sub, cwd, root = cwd, what = "fleet msg send") {
   const args = [];
   let input;
   let seen = false;
   const take = (value) => {
-    if (seen) throw new LeaseUsageError("guard: fleet msg send takes one --body-file");
+    if (seen) throw new LeaseUsageError(`guard: ${what} takes one --body-file`);
     seen = true;
     if (value === "-") return value;
-    input = guardedBody(value, cwd, root);
+    input = guardedBody(value, cwd, root, what);
     return "-";
   };
   for (let i = 0; i < sub.length; i++) {
@@ -1233,8 +1249,8 @@ export function readBounded(fd, cap) {
   return buf.subarray(0, n).toString("utf8");
 }
 
-function guardedBody(value, cwd, sessionDir = cwd) {
-  const refuse = (why) => new LeaseUsageError(`guard: fleet msg send --body-file must be - (stdin) or a file under the session's tmp/ (${why})`);
+function guardedBody(value, cwd, sessionDir = cwd, what = "fleet msg send") {
+  const refuse = (why) => new LeaseUsageError(`guard: ${what} --body-file must be - (stdin) or a file under the session's tmp/ (${why})`);
   if (typeof value !== "string" || value === "") throw refuse("no file named");
   let root;
   try { root = realpathSync(sessionDir); } catch { throw refuse(`cannot resolve the session directory ${sessionDir}`); }

@@ -47,14 +47,25 @@ describe('compileGlob: the fleet dialect', () => {
 describe('loadPolicy', () => {
   it('reads the keys, with the default label', () => {
     const p = loadPolicy('ready_requirements:\n  signed_security_verdict: true\nsecurity_sensitive_globs:\n  - a/**\n  - services/(x)/**\n');
-    assert.deepEqual(p, { signedVerdict: true, globs: ['a/**', 'services/(x)/**'], label: 'security' });
+    assert.deepEqual(p, {
+      signedVerdict: true, globs: ['a/**', 'services/(x)/**'], label: 'security', reviewLabel: 'security-review-requested', reviewLabelSet: false,
+    });
     assert.equal(loadPolicy('security_sensitive_label: sec-review\n').label, 'sec-review');
     assert.equal(loadPolicy('repo: a/b\n').signedVerdict, false);
+  });
+  it('engsys#231: security_review_label names the review request, and says whether the config set it', () => {
+    const p = loadPolicy('security_review_label: needs-nyx\n');
+    assert.equal(p.reviewLabel, 'needs-nyx');
+    assert.equal(p.reviewLabelSet, true);
+    assert.equal(loadPolicy('security_review_label: security-review-requested\n').reviewLabelSet, true, 'set explicitly, even to the default');
   });
   it('refuses malformed values', () => {
     assert.throws(() => loadPolicy('security_sensitive_globs: oops\n'), /list of non-empty strings/);
     assert.throws(() => loadPolicy('security_sensitive_globs:\n  - ""\n'), /non-empty/);
     assert.throws(() => loadPolicy('security_sensitive_label: ""\n'), /non-empty/);
+    assert.throws(() => loadPolicy('security_review_label: ""\n'), /non-empty/);
+    // removing the request label must never remove the requirement
+    assert.throws(() => loadPolicy('security_review_label: Security\n'), /must differ from security_sensitive_label/);
   });
 });
 

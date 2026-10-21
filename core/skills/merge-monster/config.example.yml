@@ -56,6 +56,12 @@ security_sensitive_globs:   # a block list; uncomment the examples below
   # - services/dashboard/app/(auth)/**
   # - "**/*.bicep"
 security_sensitive_label: security   # a PR carrying this label always needs the verdict
+# The label that asks the security lane for a signed verdict (engsys#231). When preflight exits 3
+# (security_review_required: the PR needs a verdict and has none), merge-monster adds it and keeps the PR parked; the
+# maintenance monster holding the signing key reviews the head with Nyx, posts the signed verdict and removes it; the
+# bus and the tick watch it (engsys#241). A request, not a trust signal: removing it never lets a PR through. Must
+# differ from security_sensitive_label. The maintenance monster reads it from this file too.
+security_review_label: security-review-requested
 
 # Globs (against changed files) whose PRs merge early to minimize queue-wide
 # rebase churn — lockfiles, CI workflow files, schemas, shared-package APIs.

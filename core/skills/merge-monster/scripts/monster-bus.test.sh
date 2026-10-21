@@ -173,6 +173,31 @@ run env FLEET_ID=alice "${MTICK[@]}"
 [ "$OUT" = NOOP ] && ok "  …then NOOP" || bad "  …then NOOP" "$OUT"
 rm -rf "$T/state"/baton-* "$T/state/.watch" "$T/resp"/*
 
+echo "the maintenance monster sees security-review requests (engsys#231)"
+held maintain; mkdir -p "$T/state/.watch"; date +%s >"$T/state/.watch/last-heartbeat"
+RSHA=dddddddddddddddddddddddddddddddddddddddd
+labeled_pr() { pr_json "$1" CLEAN | sed 's/"labels":\[{"name":"mm:ready"}\]/"labels":[{"name":"mm:ready"},{"name":"'"${2:-security-review-requested}"'"}]/'; }
+review_pr() { labeled_pr "$1" | sed 's/"number":'"$1"',/"number":'"$1"',"headRefOid":"'"${2:-$RSHA}"'",/'; }
+printf '[%s,%s]\n' "$(review_pr 40)" "$(pr_json 41 CLEAN)" >"$T/resp/pr-list"; echo '[]' >"$T/resp/run-list"
+run env FLEET_ID=alice "${MTICK[@]}"
+rc_is "mnt-tick.sh with a labeled PR → exit 0" 0
+has "  …the request is in the snapshot delta, with its head" '+ {"k":"security_reviews","number":40,"head":"'"$RSHA"'"}'
+hasnt "  …and an unlabeled PR is not" '"k":"security_reviews","number":41'
+run env FLEET_ID=alice "${MTICK[@]}"
+[ "$OUT" = NOOP ] && ok "  …then NOOP while it waits" || bad "  …then NOOP while it waits" "$OUT"
+printf '[%s]\n' "$(review_pr 40 eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee)" >"$T/resp/pr-list"
+run env FLEET_ID=alice "${MTICK[@]}"
+has "  …a new head on the labeled PR is a delta (review the new head)" '"number":40,"head":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"'
+rm -rf "$T/state/.watch"; mkdir -p "$T/state/.watch"; date +%s >"$T/state/.watch/last-heartbeat"
+printf '[%s]\n' "$(review_pr 42)" >"$T/resp/pr-list"
+ENGSYS_SINGLETON_ROLE=maintain bus 2 "$MNT/mnt-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents
+has "mnt-watch.sh: a labeled PR is a SECURITY_REVIEW event" "SECURITY_REVIEW #42 head=dddddddddddd"
+[ "$(count_of 'SECURITY_REVIEW #42')" = 1 ] && ok "  …once across cycles" || bad "  …once across cycles" "$OUT"
+printf '[%s]\n' "$(review_pr 42 eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee)" >"$T/resp/pr-list"
+ENGSYS_SINGLETON_ROLE=maintain bus 2 "$MNT/mnt-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents
+has "  …and again for a new head" "SECURITY_REVIEW #42 head=eeeeeeeeeeee"
+rm -rf "$T/state"/baton-* "$T/state/.watch" "$T/resp"/*
+
 echo "pulse_max (engsys#123)"
 pm() { monster_pulse_max "$@" | cut -f1; }
 pw() { monster_pulse_max "$@" | cut -f2; }
