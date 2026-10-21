@@ -400,10 +400,14 @@ export function evaluateGate(facts, opts) {
     const waiting = (reason, extra = {}) => ({ ...base, status: 'waiting', exit: EXIT.WAITING, reason, ...extra, ignored });
     if (!approval) {
       // engsys#240: say plainly when an operator already approved this very head before the floor (typically
-      // while the PR waited for its security verdict), instead of failing silently. Every APPROVED review counts
-      // here, not only each reviewer's latest, because that is what the operator remembers doing. The floor
-      // itself is unchanged: none of these opens the gate.
+      // while the PR waited for its security verdict), instead of failing silently. Only operators whose LATEST
+      // decisive review is still an approval of this head count (one who later requested changes is not told to
+      // "approve once more"); each such operator's earlier approvals of the head are what they remember giving.
+      // The floor itself is unchanged: none of these opens the gate.
+      const stillApproving = new Set([...latest.values()]
+        .filter((r) => r.state === 'APPROVED' && r.commit_id === prTarget.sha).map((r) => r.user.login));
       const early = (facts.reviews ?? []).filter((r) => r.state === 'APPROVED' && r.commit_id === prTarget.sha
+        && stillApproving.has(r.user?.login)
         && Number.isFinite(ts(r.submitted_at)) && !(ts(r.submitted_at) > floor) && qualifies(r.user) === null);
       const reason = `no qualifying review approval on ${prTarget.sha.slice(0, 12)} newer than the ${floorSource}`;
       if (!early.length) return waiting(reason);

@@ -521,6 +521,17 @@ describe('engsys#240: approvals given before the gate request (security-gated PR
     assert.match(forced.reason, /pre-dates the latest force-push; approve once more/);
   });
 
+  test("an operator whose latest review requested changes is not told to approve once more (review: latest state only)", () => {
+    const reviews = [review(ALICE, 'APPROVED', SHA, T(-20)), review(ALICE, 'CHANGES_REQUESTED', SHA, T(-10)), review(BOB, 'APPROVED', SHA, T(-5))];
+    const v = evaluateGate(prFacts([req()], { reviews }), OPTS(G, 'merge'));
+    assert.equal(v.status, 'waiting');
+    assert.deepEqual(v.early_approvals.actors, ['bob']);
+    assert.equal(v.early_approvals.count, 1);
+    const only = evaluateGate(prFacts([req()], { reviews: reviews.slice(0, 2) }), OPTS(G, 'merge'));
+    assert.equal(only.early_approvals, undefined, 'alice alone: no "approve once more"');
+    assert.doesNotMatch(only.reason, /approve once more/);
+  });
+
   test('only qualifying approvals of THIS head count as early ones', () => {
     const reviews = [
       review(MALLORY, 'APPROVED', SHA, T(-5)), // not a member

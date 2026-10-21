@@ -153,7 +153,8 @@ The floor is the latest of the request time and signals 2 and 3; the verdict nam
 
 An approval older than the floor never counts, even on the gate's own head: an operator who approved
 before the request had not seen its **What** line. The request says so, and when a `merge` gate is
-waiting while qualifying operators already approved that exact head before the floor, the verdict
+waiting while qualifying operators already approved that exact head before the floor (counting only
+operators whose latest decisive review is still that approval), the verdict
 carries `early_approvals` (`count`, `actors`, `floor_source`, `note`) and its `reason` ends with the
 note ("N earlier approvals on this head don't count …; approve once more"), so the agent can tell the
 operator instead of failing silently (engsys#240). The floor itself is unchanged. To keep that window
