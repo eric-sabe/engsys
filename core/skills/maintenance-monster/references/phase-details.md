@@ -427,6 +427,87 @@ digest: alert link, policy, shape, evidence, commit. The operator audits
 policy dismissals from that list; a week with none still gets a one-line
 "no policy dismissals" so the silence is visible.
 
+## Security review requests (engsys#231)
+
+**Who asks, who answers.** With signed security verdicts on (merge config
+`ready_requirements.signed_security_verdict: true`), `mm-preflight.sh` decides
+which PRs need a signed `<!-- nyx-review -->` PASS for their head. When one
+has no valid verdict, or only a signed FINDINGS for an earlier head, preflight
+exits 3 (`security_review_required`) and the
+merge monster adds the review request label (merge config
+`security_review_label`, default `security-review-requested`) and parks the
+PR. The security lane answers: the maintenance session the launcher gave
+`ENGSYS_SECURITY_VERDICT_KEY_FILE` (the `security.env` / `nyx.env` line,
+engsys#229). Every other session only verifies; `security-verdict.mjs post`
+refuses without that variable.
+
+**Finding requests.** `mnt-watch.sh` prints `SECURITY_REVIEW #N head=<sha12>`
+when a PR gains the label or its head moves while labeled; the tick's
+snapshot carries `security_reviews.items` (`{number, head}`), so the same
+shows up as a delta; at startup, list them once. The list itself:
+`<skill-dir>/scripts/mnt-security-reviews.sh --repo <repo>` (read-only). It
+reads the label from the same merge configs preflight reads (`$ENGSYS_MM_CONFIG`,
+`.claude/merge-monster.yml`, the fleet-config-dir copy; two that disagree are
+an error, never a guess), lists the open PRs carrying it (the label is
+re-checked on each PR), and classifies each. If the label cannot be
+resolved (that conflict, or an unreadable config), `mnt-snapshot.sh`
+reports `security_reviews.label_error` and `mnt-watch.sh` prints a
+`CONFIG_WARNING`: escalate once; the watch keeps the default label
+meanwhile, and the merge preflight fails closed on the same configs.
+
+**Per PR, in order:**
+
+0. **Already answered?** Run
+   `<engsys-root>/skills/merge-monster/scripts/mm-preflight.sh --repo <repo> --pr N --security-key-file <$ENGSYS_SECURITY_VERDICT_KEY_FILE>`
+   first: exit 0 with `securityVerdict.state: verified` for the listed head
+   means a signed PASS is already there (a session that stopped between
+   posting and unlabeling): just remove the label. A signed FINDINGS for
+   this head (exit 1, `signed_findings_for_head`) likewise: remove the label;
+   the merge monster bounces the PR. When the author pushes a fix, preflight
+   on the new head answers exit 3 with `verdictReason`
+   `signed_findings_on_earlier_head_unresolved` (the FINDINGS stays sticky
+   until a fresh signed verdict for the new head), so the merge monster
+   labels it again and you review the new head.
+1. **No signer** (`signer: false`): post nothing, leave the label, one
+   `fleet notify --level alert --incident security-review-signer` per
+   session. The fleet's problem, not the PR's.
+2. **Self-authored** (`selfAuthored: true`): skip. Post the
+   `<!-- security-review-self-skip -->` note once (`skipNoted` says whether
+   it is there), leave the label for an operator, escalate once.
+3. **Review**: Nyx (no `model` parameter: its frontmatter pins the security
+   model) on the diff at the listed head, read-only, review text to a file
+   under the session's `tmp/` (the guard posts only a body from there or
+   stdin; the text becomes a public comment, so no secrets, no internal
+   paths beyond the repo). Map its outcome to `PASS` (nothing that must block
+   the merge) or `FINDINGS` (anything that must). Post it fenced
+   (`mnt-act.sh guard -- node <engsys-root>/lib/security-verdict.mjs post …
+   --body-file tmp/<file>`), then remove the label (fenced `gh pr edit
+   --remove-label`). `post` re-reads the head and refuses a SHA that is not
+   the head any more: drop the draft and review the new head.
+
+**How "self-authored" is decided, and why.** Every fleet session pushes and
+comments as the same GitHub App, so the PR author and commit authors cannot
+tell sessions apart. What does is the `<!-- mm-handoff -->` block this
+session writes into every PR it opens (§ The loop, Drive: `session:
+<session_name>` or `<FLEET_ID>:<session_name>`). A PR is self-authored when
+**any** handoff block on it, in the body or any comment, by **anyone**, names
+this session (`--session`, default `$ENGSYS_SESSION`; with `FLEET_ID` set only
+`<FLEET_ID>:<name>` or the bare name). Authorship of the block is ignored on
+purpose: a false "self" leaves the PR labeled for an operator (safe), while
+trusting only some writers could let the lane sign its own work. With no
+session name at all, every PR counts as self-authored. Residual: a PR this
+session pushed to without writing a handoff block naming itself (e.g. a fix
+commit on someone else's PR) is not detected; never push to a PR and then
+review it, and the separate signer identity (eric-sabe/engsys#220) is the
+real fix.
+
+**Labels and phase.** The request label is not an `mnt:` or `mm:` label.
+Removing it after the verdict is posted is the one label write this session
+makes on another session's PR, and it is allowed in every phase, read_only
+included: it answers a request; it fixes nothing. Removing it never lets a
+PR through on its own: the merge monster's preflight still needs the signed
+verdict, and it re-runs preflight when the label goes (engsys#241).
+
 ## Expert routing
 
 | Category                                     | Agent      |

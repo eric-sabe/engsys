@@ -173,6 +173,165 @@ run env FLEET_ID=alice "${MTICK[@]}"
 [ "$OUT" = NOOP ] && ok "  …then NOOP" || bad "  …then NOOP" "$OUT"
 rm -rf "$T/state"/baton-* "$T/state/.watch" "$T/resp"/*
 
+echo "the maintenance monster sees security-review requests (engsys#231)"
+held maintain; mkdir -p "$T/state/.watch"; date +%s >"$T/state/.watch/last-heartbeat"
+RSHA=dddddddddddddddddddddddddddddddddddddddd
+labeled_pr() { pr_json "$1" CLEAN | sed 's/"labels":\[{"name":"mm:ready"}\]/"labels":[{"name":"mm:ready"},{"name":"'"${2:-security-review-requested}"'"}]/'; }
+review_pr() { labeled_pr "$1" | sed 's/"number":'"$1"',/"number":'"$1"',"headRefOid":"'"${2:-$RSHA}"'",/'; }
+printf '[%s,%s]\n' "$(review_pr 40)" "$(pr_json 41 CLEAN)" >"$T/resp/pr-list"; echo '[]' >"$T/resp/run-list"
+run env FLEET_ID=alice "${MTICK[@]}"
+rc_is "mnt-tick.sh with a labeled PR → exit 0" 0
+has "  …the request is in the snapshot delta, with its head" '+ {"k":"security_reviews","number":40,"head":"'"$RSHA"'"}'
+hasnt "  …and an unlabeled PR is not" '"k":"security_reviews","number":41'
+run env FLEET_ID=alice "${MTICK[@]}"
+[ "$OUT" = NOOP ] && ok "  …then NOOP while it waits" || bad "  …then NOOP while it waits" "$OUT"
+printf '[%s]\n' "$(review_pr 40 eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee)" >"$T/resp/pr-list"
+run env FLEET_ID=alice "${MTICK[@]}"
+has "  …a new head on the labeled PR is a delta (review the new head)" '"number":40,"head":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"'
+rm -rf "$T/state/.watch"; mkdir -p "$T/state/.watch"; date +%s >"$T/state/.watch/last-heartbeat"
+printf '[%s]\n' "$(review_pr 42)" >"$T/resp/pr-list"
+ENGSYS_SINGLETON_ROLE=maintain bus 2 "$MNT/mnt-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents
+has "mnt-watch.sh: a labeled PR is a SECURITY_REVIEW event" "SECURITY_REVIEW #42 head=dddddddddddd"
+[ "$(count_of 'SECURITY_REVIEW #42')" = 1 ] && ok "  …once across cycles" || bad "  …once across cycles" "$OUT"
+printf '[%s]\n' "$(review_pr 42 eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee)" >"$T/resp/pr-list"
+ENGSYS_SINGLETON_ROLE=maintain bus 2 "$MNT/mnt-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents
+has "  …and again for a new head" "SECURITY_REVIEW #42 head=eeeeeeeeeeee"
+printf 'security_review_label: needs-nyx\n' >"$T/lbl-a.yml"; printf 'security_sensitive_label: needs-nyx\n' >"$T/lbl-s.yml"
+ENGSYS_MM_CONFIG="$T/lbl-a.yml" ENGSYS_SINGLETON_ROLE=maintain bus 2 "$MNT/mnt-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents
+hasnt "  …a consistent configured label: no warning (positive control)" "CONFIG_WARNING security review"
+run env ENGSYS_MM_CONFIG="$T/lbl-a.yml" bash "$MNT/mnt-snapshot.sh" --repo acme/app
+hasnt "mnt-snapshot.sh: no label_error when the label resolves" "label_error"
+mkdir -p "$T/wd/.claude"; cp "$T/lbl-s.yml" "$T/wd/.claude/merge-monster.yml"
+cd "$T/wd"
+run env ENGSYS_MM_CONFIG="$T/lbl-a.yml" bash "$MNT/mnt-snapshot.sh" --repo acme/app
+has "  …an unresolvable label (the review label is another config's sensitive label) is reported in the snapshot" '"label_error": "security review label unresolved'
+ENGSYS_MM_CONFIG="$T/lbl-a.yml" ENGSYS_SINGLETON_ROLE=maintain bus 2 "$MNT/mnt-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents
+has "mnt-watch.sh: …and the bus says so (CONFIG_WARNING)" "CONFIG_WARNING security review label unresolved"
+cd "$HERE"; rm -rf "$T/wd"
+rm -rf "$T/state"/baton-* "$T/state/.watch" "$T/resp"/*
+
+echo "the security verdict wakes the merge monster (engsys#241)"
+# A stub preflight: exit code from $FAKE/pf-rc (default 3, "verdict required, none valid"), reason from $FAKE/pf-why.
+cat >"$T/bin/preflight-stub.sh" <<'SH'
+#!/usr/bin/env bash
+echo "preflight $*" >>"$FAKE/pf.log"
+rc=$(cat "$FAKE/pf-rc" 2>/dev/null || echo 3)
+echo '{"headRefOid":"cccccccccccccccccccccccccccccccccccccccc"}'
+[ "$rc" = 0 ] || printf '{"ok":false,"reason":"%s","head":"cccccccccccccccccccccccccccccccccccccccc"}\n' "$(cat "$FAKE/pf-why" 2>/dev/null || echo security_review_required)" >&2
+exit "$rc"
+SH
+chmod +x "$T/bin/preflight-stub.sh"
+held merge; mkdir -p "$T/state/.watch"; date +%s >"$T/state/.watch/last-heartbeat"
+VTICK=(env MM_PREFLIGHT="$T/bin/preflight-stub.sh" FLEET_ID=alice "${TICK[@]}")
+printf '[%s]\n' "$(labeled_pr 15)" >"$T/resp/pr-list"; echo 3 >"$T/pf-rc"; : >"$T/pf.log"
+run "${VTICK[@]}"
+has "a PR carrying the review request label is marked in the snapshot" '"number":15,'
+has "  …as securityReview" '"securityReview":true'
+case "$(cat "$T/pf.log")" in *"--repo acme/app --pr 15"*) ok "  …and the tick re-preflights it" ;; *) bad "  …and the tick re-preflights it" "$(cat "$T/pf.log")" ;; esac
+hasnt "  …still waiting (exit 3): no VERDICT_WAKE" "VERDICT_WAKE"
+: >"$T/pf.log"
+run "${VTICK[@]}"
+[ "$OUT" = NOOP ] && ok "an unchanged wait is exactly NOOP" || bad "an unchanged wait is exactly NOOP" "$OUT"
+[ -s "$T/pf.log" ] && ok "  …although preflight ran again (every tick, regardless of deltas)" || bad "  …although preflight ran again" "$(cat "$T/pf.log")"
+# the security lane posts the signed PASS and removes the label: the next tick re-preflights and proceeds
+printf '[%s]\n' "$(pr_json 15 CLEAN)" >"$T/resp/pr-list"; echo 0 >"$T/pf-rc"; : >"$T/pf.log"
+run "${VTICK[@]}"
+has "label removed + verdict posted → the next tick re-preflights (remembered wait) and wakes the model" "VERDICT_WAKE #15 preflight_pass head=cccccccccccc"
+has "  …beside the snapshot delta for the label" '- {"number":15,'
+[ "$(count_of VERDICT_WAKE)" = 1 ] && ok "  …once" || bad "  …once" "$OUT"
+: >"$T/pf.log"
+run "${VTICK[@]}"
+[ "$OUT" = NOOP ] && ok "  …then NOOP: the PR is no longer waiting" || bad "  …then NOOP: the PR is no longer waiting" "$OUT"
+[ -s "$T/pf.log" ] && bad "  …and no more preflight runs for it" "$(cat "$T/pf.log")" || ok "  …and no more preflight runs for it"
+# the label is removed but no valid verdict is there
+printf '[%s]\n' "$(labeled_pr 16)" >"$T/resp/pr-list"; echo 3 >"$T/pf-rc"
+run "${VTICK[@]}"
+hasnt "a newly labeled PR that still waits: no wake" "VERDICT_WAKE"
+printf '[%s]\n' "$(pr_json 16 CLEAN)" >"$T/resp/pr-list"
+run "${VTICK[@]}"
+has "label removed, still no valid verdict → label_removed_no_verdict (request it again)" "VERDICT_WAKE #16 label_removed_no_verdict"
+: >"$T/pf.log"
+run "${VTICK[@]}"
+[ "$OUT" = NOOP ] && ok "  …once (latched)" || bad "  …once (latched)" "$OUT"
+[ -s "$T/pf.log" ] && ok "  …while it stays parked and re-preflighted" || bad "  …while it stays parked" "$(cat "$T/pf.log")"
+printf '[%s]\n' "$(pr_json 16 CLEAN | sed 's/"labels":\[{"name":"mm:ready"}\]/"labels":[]/')" >"$T/resp/pr-list"; : >"$T/pf.log"
+run "${VTICK[@]}"
+[ -s "$T/pf.log" ] && bad "  …until it leaves the pipeline (no mm: label): then it is forgotten" "$(cat "$T/pf.log")" || ok "  …until it leaves the pipeline (no mm: label): then it is forgotten"
+printf '[%s]\n' "$(labeled_pr 16)" >"$T/resp/pr-list"; run "${VTICK[@]}"; printf '[%s]\n' "$(pr_json 16 CLEAN)" >"$T/resp/pr-list"; run "${VTICK[@]}"
+echo 1 >"$T/pf-rc"; echo signed_findings_for_head >"$T/pf-why"
+run "${VTICK[@]}"
+has "a signed FINDINGS lands → preflight_fail with the reason" "VERDICT_WAKE #16 preflight_fail:signed_findings_for_head head=cccccccccccc"
+: >"$T/pf.log"
+run "${VTICK[@]}"
+[ "$OUT" = NOOP ] && ok "  …once (latched)" || bad "  …once (latched)" "$OUT"
+[ -s "$T/pf.log" ] && ok "  …but still watched while it keeps its mm: label (the failure may be transient)" || bad "  …still watched" "$(cat "$T/pf.log")"
+printf '[%s]\n' "$(pr_json 16 CLEAN | sed 's/"labels":\[{"name":"mm:ready"}\]/"labels":[]/')" >"$T/resp/pr-list"; : >"$T/pf.log"
+run "${VTICK[@]}"
+[ -s "$T/pf.log" ] && bad "  …until the model bounces it (no mm: label)" "$(cat "$T/pf.log")" || ok "  …until the model bounces it (no mm: label)"
+rm -f "$T/pf-why"
+# a transient gh failure on a parked PR does not drop it from the wait
+printf '[%s]\n' "$(labeled_pr 19)" >"$T/resp/pr-list"; echo 3 >"$T/pf-rc"
+run "${VTICK[@]}"
+printf '[%s]\n' "$(pr_json 19 CLEAN)" >"$T/resp/pr-list"
+run "${VTICK[@]}"
+echo 1 >"$T/pf-rc"; echo 'gh: HTTP 502' >"$T/pf-why"
+run "${VTICK[@]}"
+has "a transient preflight error on a parked PR wakes once" "VERDICT_WAKE #19 preflight_fail:gh head="
+echo 0 >"$T/pf-rc"; rm -f "$T/pf-why"
+run "${VTICK[@]}"
+has "  …and the PR stays watched: the verdict landing still wakes it" "VERDICT_WAKE #19 preflight_pass"
+# the verdict is posted but the label stays (the lane stopped before removing it): the backstop still wakes once
+printf '[%s]\n' "$(labeled_pr 17)" >"$T/resp/pr-list"; echo 3 >"$T/pf-rc"
+run "${VTICK[@]}"
+echo 0 >"$T/pf-rc"
+run "${VTICK[@]}"
+has "a PASS while the label is still on → one wake" "VERDICT_WAKE #17 preflight_pass"
+run "${VTICK[@]}"
+[ "$OUT" = NOOP ] && ok "  …latched per head" || bad "  …latched per head" "$OUT"
+# a configured label
+printf 'security_review_label: needs-nyx\n' >"$T/vcfg.yml"
+printf '[%s]\n' "$(labeled_pr 18 Needs-Nyx)" >"$T/resp/pr-list"; echo 3 >"$T/pf-rc"; : >"$T/pf.log"
+run "${VTICK[@]}" --config "$T/vcfg.yml"
+has "security_review_label from --config is the label watched (case-insensitive)" '"number":18,'
+has "  …marked" '"securityReview":true'
+case "$(cat "$T/pf.log")" in *"--pr 18 --config $T/vcfg.yml"*) ok "  …and --config reaches the preflight" ;; *) bad "  …and --config reaches the preflight" "$(cat "$T/pf.log")" ;; esac
+rm -rf "$T/state"/baton-* "$T/state/.watch" "$T/resp"/* "$T/pf-rc" "$T/pf.log"
+# the bus: label removal and a new nyx-review comment are events
+nyx_gql() { # nyx_gql <id>...: the PR's last comments, one nyx-review per id plus an unrelated one
+  local nodes='{"id":"IC_other","body":"lgtm"}' i
+  for i in "$@"; do nodes="$nodes,{\"id\":\"$i\",\"body\":\"<!-- nyx-review -->\\nNYX-VERDICT: PASS\"}"; done
+  printf '{"data":{"repository":{"pullRequest":{"comments":{"nodes":[%s]}}}}}\n' "$nodes" >"$T/resp/api-graphql"
+}
+printf '[%s]\n' "$(labeled_pr 20)" >"$T/resp/pr-list"; nyx_gql IC_n1
+bus 2 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents
+hasnt "mm-watch.sh: the first cycle only records what is there (a restart does not re-fire)" "VERDICT_WAKE"
+nyx_gql IC_n1 IC_n2 IC_n3
+bus 3 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents
+has "  …a new nyx-review comment on a labeled PR is an event" "VERDICT_WAKE #20 nyx_review_comment"
+[ "$(count_of 'VERDICT_WAKE #20 nyx_review_comment')" = 1 ] && ok "  …once, for two new comments over several cycles" || bad "  …once" "$OUT"
+printf '[%s]\n' "$(pr_json 20 CLEAN)" >"$T/resp/pr-list"
+bus 3 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents
+has "  …and so is the label's removal" "VERDICT_WAKE #20 label_removed"
+[ "$(count_of 'VERDICT_WAKE #20 label_removed')" = 1 ] && ok "  …once" || bad "  …once" "$OUT"
+printf '[%s]\n' "$(labeled_pr 21)" >"$T/resp/pr-list"; nyx_gql IC_old
+bus 3 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents
+hasnt "  …a PR labeled later with a nyx-review comment already on it: no wake for that old comment" "VERDICT_WAKE #21 nyx_review_comment"
+rm -f "$T/resp/pr-list"
+bus 2 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents
+hasnt "  …an unreadable PR list is no event" "VERDICT_WAKE"
+# a review-label conflict across merge configs is said loudly, never silently replaced by the default
+printf 'security_review_label: needs-nyx\n' >"$T/lbl-a.yml"; printf 'security_review_label: other\n' >"$T/lbl-b.yml"
+ENGSYS_MM_CONFIG="$T/lbl-a.yml" bus 2 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents --config "$T/lbl-b.yml"
+has "mm-watch.sh: a review-label conflict is a CONFIG_WARNING line" "CONFIG_WARNING security review label unresolved"
+held merge; mkdir -p "$T/state/.watch"; date +%s >"$T/state/.watch/last-heartbeat"; echo '[]' >"$T/resp/pr-list"
+run env ENGSYS_MM_CONFIG="$T/lbl-a.yml" MM_PREFLIGHT="$T/bin/preflight-stub.sh" FLEET_ID=alice "${TICK[@]}" --config "$T/lbl-b.yml"
+has "mm-tick.sh: …a delta line too" "CONFIG_WARNING security review label unresolved"
+has "  …naming the conflict" "'needs-nyx'"
+run env ENGSYS_MM_CONFIG="$T/lbl-a.yml" MM_PREFLIGHT="$T/bin/preflight-stub.sh" FLEET_ID=alice "${TICK[@]}" --config "$T/lbl-b.yml"
+hasnt "  …once per reason" "CONFIG_WARNING"
+rm -rf "$T/state"/baton-*
+rm -rf "$T/state/.watch" "$T/resp"/*
+
 echo "pulse_max (engsys#123)"
 pm() { monster_pulse_max "$@" | cut -f1; }
 pw() { monster_pulse_max "$@" | cut -f2; }

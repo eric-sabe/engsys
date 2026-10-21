@@ -10,6 +10,10 @@
 #   CODEQL_ALERT <id> <rule> <sev>  new open code-scanning alert
 #   SECRET_ALERT <run>         latest Secret Scan workflow_run concluded failure
 #   TRIVY_RED <run>            latest push/dispatch services-ci run concluded failure
+#   SECURITY_REVIEW #N head=<sha12>  a PR asks the security lane for a signed verdict (engsys#231): it gained the review
+#                              request label (security_review_label in the merge config, default
+#                              security-review-requested), or its head moved while labeled (SKILL.md § Security
+#                              review requests)
 #   BATON_LOST maintain <code>   this session lost the maintain baton: stop all mutations now (the
 #                          bus exits; the alert is already sent)
 #   BATON_HANDOVER maintain <fleet>  federation.yml moved the role's home: finish (never mid-merge),
@@ -100,7 +104,10 @@ ROTATE_WARN="${ROTATE_OUT#*$'\t'}"
 
 W="$DIR/.watch"
 mkdir -p "$W"
-touch "$W/deps_pr.tsv" "$W/dep_alerts.tsv" "$W/codeql_alerts.tsv" "$W/secretrun.txt" "$W/trivyrun.txt"
+touch "$W/deps_pr.tsv" "$W/dep_alerts.tsv" "$W/codeql_alerts.tsv" "$W/secretrun.txt" "$W/trivyrun.txt" "$W/secreview.tsv"
+monster_review_label "$REPO"
+REVIEW_LABEL="$MONSTER_REVIEW_LABEL"
+[ -z "$MONSTER_REVIEW_LABEL_WARN" ] || { echo "CONFIG_WARNING ${MONSTER_REVIEW_LABEL_WARN:0:280}"; echo "mnt-watch: $MONSTER_REVIEW_LABEL_WARN" >&2; }
 [ -z "$PULSE_WARN" ] || echo "CONFIG_WARNING ${PULSE_WARN:0:280}"
 [ -z "$ROTATE_WARN" ] || echo "CONFIG_WARNING ${ROTATE_WARN:0:280}"
 monster_handback_prune "$DIR" # drop earlier launches' hand-back lines (engsys#137 review)
@@ -281,6 +288,15 @@ while true; do
       --jq '.[] | "\(.number)\t\(.rule.id)\t\(.rule.security_severity_level // "unknown")"' 2>/dev/null); then
     printf '%s\n' "$OUT" | sed '/^$/d' | sort > "$W/codeql_alerts.new"
     emit_diff "$W/codeql_alerts.tsv" "$W/codeql_alerts.new" "CODEQL_ALERT"
+  fi
+
+  # --- security-review requests (engsys#231) --------------------------------
+  # Keyed by PR and head, so a new head on a labeled PR asks again. The label is verified on each PR (gh's filter).
+  if OUT=$("$FLEET_GH" pr list -R "$REPO" --state open --limit 200 --label "$REVIEW_LABEL" --json number,headRefOid,labels 2>/dev/null) \
+    && OUT=$(printf '%s' "$OUT" | jq -r --arg rl "$(printf '%s' "$REVIEW_LABEL" | tr '[:upper:]' '[:lower:]')" \
+      '.[] | select(any(.labels[]; (.name | ascii_downcase) == $rl)) | "#\(.number) head=\(.headRefOid[0:12])"' 2>/dev/null); then
+    printf '%s\n' "$OUT" | sed '/^$/d' | sort > "$W/secreview.new"
+    emit_diff "$W/secreview.tsv" "$W/secreview.new" "SECURITY_REVIEW"
   fi
 
   # --- latest Secret Scan workflow_run went red -----------------------------

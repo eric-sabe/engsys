@@ -10,6 +10,14 @@
 #        + <item> / - <item>          a PR appeared in / left the snapshot, or changed (one of each); for a
 #                                     PR parked mm:blocked, a {"k":"gate",…} line whose comment / review
 #                                     counts moved means: run gate-check for it
+#        VERDICT_WAKE #N <cause> head=<sha12>  engsys#241: the security-verdict backstop re-ran mm-preflight.sh for a PR
+#                                     that carries the review request label or was parked waiting on a verdict, and
+#                                     its outcome moved: preflight_pass (the verdict landed: continue, and re-check an
+#                                     existing gate request for this head), preflight_fail:<reason> (re-run preflight
+#                                     yourself, as for every VERDICT_WAKE; bounce only if YOUR run fails too: the
+#                                     tick's run may have hit a transient gh error), label_removed_no_verdict (the
+#                                     label is gone but no valid verdict is there: request the review again). Once
+#                                     per outcome and head. A failed run keeps the PR watched (still parked).
 #        AGENT_OVERDUE … / AGENT_STALE …   from the watchdog scan
 #        HANDBACK_INCOMPLETE …             a subagent handed back unfinished work: resume it or take it over
 #        BATON_HANDOVER merge <fleet>      federation.yml moved the role's home (§ Handover)
@@ -31,6 +39,10 @@
 #   --rotate-context-tokens  passed to the heartbeat (engsys#125): over it with nothing active, the heartbeat
 #                        status becomes `rotation requested — ctx <N>k` and ROTATION_REQUESTED is a delta line
 #   --heartbeat-minutes  the tick cadence; a heartbeat is due after 0.75 x this (default 10)
+#   The verdict backstop watches the review label preflight names (core/lib/security-sensitive.mjs review-label over the
+#   discovered merge configs plus --config; default security-review-requested), reads
+#   ready_requirements.security_verdict_key_file from --config, and hands --config to mm-preflight.sh (which can only
+#   add requirements from it). MM_PREFLIGHT overrides the preflight script (tests point it at a stub).
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../../../lib/fleet-gh.sh
@@ -109,10 +121,77 @@ gate_lines() {
       || printf '{"k":"gate","pr":%s,"error":"unreadable"}\n' "$n"
   done
 }
-if SNAP=$(bash "$here/mm-snapshot.sh" --repo "$REPO" 2>&1); then
+# the label preflight names (the same discovery, --config as one more source; engsys#231)
+monster_review_label "$REPO" "$CONFIG"
+REVIEW_LABEL="$MONSTER_REVIEW_LABEL"
+# a conflict is said loudly, once per distinct reason (preflight fails closed on the same configs meanwhile)
+if [ -n "$MONSTER_REVIEW_LABEL_WARN" ]; then
+  echo "mm-tick: $MONSTER_REVIEW_LABEL_WARN" >&2
+  if [ "$(cat "$W/review-label-warn.said" 2>/dev/null || true)" != "$MONSTER_REVIEW_LABEL_WARN" ]; then
+    DELTA+=("CONFIG_WARNING ${MONSTER_REVIEW_LABEL_WARN:0:280}"); printf '%s\n' "$MONSTER_REVIEW_LABEL_WARN" >"$W/review-label-warn.said"
+  fi
+else
+  rm -f "$W/review-label-warn.said"
+fi
+SNAP_OK=0
+if SNAP=$(bash "$here/mm-snapshot.sh" --repo "$REPO" --review-label "$REVIEW_LABEL" 2>&1); then
+  SNAP_OK=1
   while IFS= read -r l; do [ -n "$l" ] && DELTA+=("$l"); done < <({ printf '%s' "$SNAP" | monster_snapshot_lines; gate_lines | jq -c . 2>/dev/null; } | monster_delta "$W")
 else
   DELTA+=("SNAPSHOT_ERROR $(printf '%s' "$SNAP" | tr '\n' ' ' | head -c 200)")
+fi
+
+# 2b. security-verdict backstop (engsys#241) ------------------------------------------------------------
+# A verdict arrives as a PR comment plus the removal of a non-mm: label, which the snapshot delta alone reports late or
+# not at all. So, whatever the deltas, every tick re-runs mm-preflight.sh for each PR that carries the review request
+# label, or was parked waiting on a verdict (remembered in .watch/verdict-wait while preflight keeps answering exit 3 and
+# the PR keeps an mm: label),
+# and reports a VERDICT_WAKE line when the outcome moved (latched per PR in .watch/verdict.<N>: outcome and head), so
+# an unchanged wait stays NOOP. It only wakes the model; the model's own preflight still decides.
+PREFLIGHT="${MM_PREFLIGHT:-$here/mm-preflight.sh}"
+KEY_FILE="$(monster_cfg_child "$CONFIG" ready_requirements security_verdict_key_file)"
+verdict_lines() {
+  local n rc out err head key why labeled wait_new="$W/verdict-wait.new" open cands f
+  : >"$wait_new"
+  open=$(printf '%s' "$SNAP" | jq -r '.[].number' 2>/dev/null | sort -u)
+  cands=$( { printf '%s' "$SNAP" | jq -r '.[] | select(.securityReview == true) | .number' 2>/dev/null
+             cat "$W/verdict-wait" 2>/dev/null || true; } | sort -un)
+  # a latch outlives neither the label nor the wait: a PR asked again later is judged afresh
+  for f in "$W"/verdict.[0-9]*; do
+    [ -f "$f" ] || continue
+    printf '%s\n' "$cands" | grep -qx "${f##*.}" || rm -f "$f"
+  done
+  for n in $cands; do
+    case "$n" in '' | *[!0-9]*) continue ;; esac
+    printf '%s\n' "$open" | grep -qx "$n" || { rm -f "$W/verdict.$n"; continue; } # closed or merged: forget it
+    labeled=$(printf '%s' "$SNAP" | jq -r --argjson n "$n" '[.[] | select(.number == $n and .securityReview == true)] | length' 2>/dev/null)
+    # a remembered PR that left the pipeline (no mm: label: bounced, or withdrawn) is no longer parked
+    if [ "$labeled" = 0 ] && [ "$(printf '%s' "$SNAP" | jq -r --argjson n "$n" '[.[] | select(.number == $n) | (.mm // [])[]] | length' 2>/dev/null)" = 0 ]; then
+      rm -f "$W/verdict.$n"; continue
+    fi
+    rc=0
+    out=$(bash "$PREFLIGHT" --repo "$REPO" --pr "$n" ${CONFIG:+--config "$CONFIG"} ${KEY_FILE:+--security-key-file "$KEY_FILE"} 2>"$W/verdict.err") || rc=$?
+    err=$(tail -n 1 "$W/verdict.err" 2>/dev/null || true)
+    head=$(printf '%s' "$out" | jq -r '.headRefOid // empty' 2>/dev/null | head -c 12)
+    [ -n "$head" ] || head=$(printf '%s' "$err" | jq -r '.head // empty' 2>/dev/null | head -c 12)
+    case "$rc" in
+      3) printf '%s\n' "$n" >>"$wait_new"
+         if [ "$labeled" = 0 ]; then key="label_removed_no_verdict"; else rm -f "$W/verdict.$n"; continue; fi ;;
+      0) key="preflight_pass" ;;
+      # a failure keeps the PR watched: it may be a transient gh error, and a real one (FINDINGS for this head) ends
+      # the watch by itself once the model bounces the PR (no mm: label) or the lane removes the request label
+      *) printf '%s\n' "$n" >>"$wait_new"
+         why=$(printf '%s' "$err" | jq -r '.reason // empty' 2>/dev/null | cut -d: -f1 | tr -c 'A-Za-z0-9_\n-' '_' | head -c 60)
+         key="preflight_fail:${why:-exit_$rc}" ;;
+    esac
+    [ "$(cat "$W/verdict.$n" 2>/dev/null || true)" != "$key ${head:--}" ] || continue
+    printf '%s %s\n' "$key" "${head:--}" >"$W/verdict.$n"
+    printf 'VERDICT_WAKE #%s %s head=%s\n' "$n" "$key" "${head:--}"
+  done
+  mv "$wait_new" "$W/verdict-wait"
+}
+if [ "$SNAP_OK" = 1 ]; then
+  while IFS= read -r l; do [ -n "$l" ] && DELTA+=("$l"); done < <(verdict_lines)
 fi
 
 # 3. subagent backstop scan ------------------------------------------------------------------------

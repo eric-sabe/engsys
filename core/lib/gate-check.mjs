@@ -27,6 +27,8 @@
 //                               [--gate ID] [--operators-team org/slug | --operators login:id,...] [--dry-run]
 // `check` prints one JSON verdict on stdout. Exit: 0 approved, 3 waiting, 4 denied, 1 error (bad
 // input, missing config, unreadable API, stale or ambiguous gate). Anything unexpected fails closed.
+// A waiting merge gate reports `early_approvals` when qualifying operators approved its exact head before
+// the floor (engsys#240): they still do not count, but the caller can say so instead of failing silently.
 //
 // Trust model. Every comment and review body is attacker-influenceable text. It is matched against
 // two strict, anchored grammars (the request marker and `/approve|/deny <id>`) and otherwise never
@@ -183,8 +185,9 @@ export function renderGateRequest({ id, kind, target, what, operatorsTeam, opera
   if (REVIEW_KINDS.has(kind)) {
     lines.push(
       `**To approve:** ${who} submits a PR review with **Approve** on commit \`${pr.sha.slice(0, 12)}\` ` +
-        '(Files changed, then Review changes, then Approve). Pushing new commits invalidates the approval; ' +
-        'a review submitted before this request does not count.',
+        '(Files changed, then Review changes, then Approve). Pushing new commits invalidates the approval.',
+      '',
+      '**Approvals given before this request do not count**, even on this same commit: if you approved earlier, approve once more.',
     );
   } else {
     lines.push(
@@ -394,8 +397,26 @@ export function evaluateGate(facts, opts) {
       if (why) { ignore(r.user.login, 'review', url, why); continue; }
       if (!approval || at > ts(approval.submitted_at)) approval = r;
     }
-    const waiting = (reason) => ({ ...base, status: 'waiting', exit: EXIT.WAITING, reason, ignored });
-    if (!approval) return waiting(`no qualifying review approval on ${prTarget.sha.slice(0, 12)} newer than the ${floorSource}`);
+    const waiting = (reason, extra = {}) => ({ ...base, status: 'waiting', exit: EXIT.WAITING, reason, ...extra, ignored });
+    if (!approval) {
+      // engsys#240: say plainly when an operator already approved this very head before the floor (typically
+      // while the PR waited for its security verdict), instead of failing silently. Only operators whose LATEST
+      // decisive review is still an approval of this head count (one who later requested changes is not told to
+      // "approve once more"); each such operator's earlier approvals of the head are what they remember giving.
+      // The floor itself is unchanged: none of these opens the gate.
+      const stillApproving = new Set([...latest.values()]
+        .filter((r) => r.state === 'APPROVED' && r.commit_id === prTarget.sha).map((r) => r.user.login));
+      const early = (facts.reviews ?? []).filter((r) => r.state === 'APPROVED' && r.commit_id === prTarget.sha
+        && stillApproving.has(r.user?.login)
+        && Number.isFinite(ts(r.submitted_at)) && !(ts(r.submitted_at) > floor) && qualifies(r.user) === null);
+      const reason = `no qualifying review approval on ${prTarget.sha.slice(0, 12)} newer than the ${floorSource}`;
+      if (!early.length) return waiting(reason);
+      const actors = [...new Set(early.map((r) => r.user.login))];
+      const n = early.length;
+      const note = `${n} earlier approval${n === 1 ? '' : 's'} on this head (by ${actors.map((a) => `@${a}`).join(', ')}) ` +
+        `${n === 1 ? "doesn't" : "don't"} count because ${n === 1 ? 'it pre-dates' : 'they pre-date'} the ${floorSource}; approve once more`;
+      return waiting(`${reason}. ${note}`, { early_approvals: { count: n, actors, floor_source: floorSource, note } });
+    }
     if (changesRequested.length) return waiting(`outstanding change requests from ${changesRequested.join(', ')}`);
     // APPROVED: GitHub agrees. Empty/null: the base branch requires no review for this PR, so the
     // qualifying operator approval above (with no change requests) is the whole decision.

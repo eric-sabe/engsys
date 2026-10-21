@@ -151,6 +151,17 @@ commit's dates are set by whoever made it). gate-check therefore combines three 
 
 The floor is the latest of the request time and signals 2 and 3; the verdict names which one won.
 
+An approval older than the floor never counts, even on the gate's own head: an operator who approved
+before the request had not seen its **What** line. The request says so, and when a `merge` gate is
+waiting while qualifying operators already approved that exact head before the floor (counting only
+operators whose latest decisive review is still that approval), the verdict
+carries `early_approvals` (`count`, `actors`, `floor_source`, `note`) and its `reason` ends with the
+note ("N earlier approvals on this head don't count …; approve once more"), so the agent can tell the
+operator instead of failing silently (engsys#240). The floor itself is unchanged. To keep that window
+small, merge-monster posts the request for a security-gated PR as soon as it is otherwise ready, before
+the security verdict lands, and re-checks that same request once it does (merge-monster runbook §
+Operator gates).
+
 ## CLI
 
 ```bash
@@ -165,8 +176,9 @@ every later check. Without `--gate` it generates `<kind>-<utc yyyymmddhhmmss>-<4
 id that already has a request on the thread. Gate ids are `[a-z0-9-]`, at most 80 characters.
 
 `check` prints one JSON verdict (`status`, `gate`, `kind`, `target`, `request`, `floor`,
-`operator_source`, `caller`, `self_is_operator` when set, then `approval` or `denial` or `reason`,
-plus `ignored`: each candidate that did not count, and why).
+`operator_source`, `caller`, `self_is_operator` when set, then `approval` or `denial` or `reason`
+(and `early_approvals` on a waiting `merge` gate, above), plus `ignored`: each candidate that did not
+count, and why).
 
 | Exit | Status | Meaning |
 |---|---|---|

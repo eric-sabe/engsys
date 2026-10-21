@@ -261,6 +261,24 @@ describe('CLI', () => {
     assert.equal(bad.code, 3);
   });
 
+  it('engsys#231: post reads the review text from stdin with --body-file - (the baton guard hands it over that way)', async () => {
+    const posted = [];
+    const exec = (cmd, args) => {
+      if (args[1] === 'view') return `${SHA}\n`;
+      const f = args[args.indexOf('--body-file') + 1];
+      assert.ok(!f.startsWith(dir), 'the signed copy lives in its own temp dir, not beside the review');
+      assert.equal(fs.statSync(f).mode & 0o777, 0o600);
+      posted.push({ f, body: fs.readFileSync(f, 'utf8') });
+      return '';
+    };
+    const r = await capture(['post', '--repo', REPO, '--pr', String(PR), '--sha', SHA, '--verdict', 'FINDINGS', '--body-file', '-'], { exec, env: { ENGSYS_SECURITY_VERDICT_KEY_FILE: keyFile }, readStdin: () => REVIEW, now });
+    assert.equal(r.code, 0);
+    assert.equal(posted.length, 1);
+    assert.ok(!fs.existsSync(posted[0].f), 'and is removed after posting');
+    const v = await capture(['verify', '--repo', REPO, '--pr', String(PR), '--sha', SHA, '--key-file', keyFile], { readStdin: () => JSON.stringify([{ body: posted[0].body }]), now });
+    assert.equal(JSON.parse(v.out).state, 'findings');
+  });
+
   it('negative: post refuses outside a security-lane session (no key path in the env), and for a SHA that is not the PR head', async () => {
     const bodyFile = path.join(dir, 'r2.md');
     fs.writeFileSync(bodyFile, REVIEW);

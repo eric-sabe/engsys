@@ -502,7 +502,7 @@ verdict. It stops accidental and naive forgery, not a hostile session on the sam
 from an interactive role cannot post a valid verdict; the review has to run in the security lane. The signing grant is
 narrower than the security model: the merge monster runs Opus 4.8 and reads attacker-authored PR content, so it is not given the
 key path and cannot mint a PASS (`post` refuses), but it still verifies, because `mm-preflight.sh` reads the key file by path.
-The maintenance monster runs on the security env file, so it holds the signing grant, but it signs verdicts only on PRs it did not author: a PR the maintenance monster wrote itself waits for an operator (the fleet's context enforces this; the launcher does not tell authors apart). The key path
+The maintenance monster runs on the security env file, so it holds the signing grant, but it signs verdicts only on PRs it did not author: a PR the maintenance monster wrote itself waits for an operator (its skill's § Security review requests: any `<!-- mm-handoff -->` block on the PR naming the session marks it as its own; the launcher does not tell authors apart). The key path
 reaches a session only on its own launch line, never the launcher's or the tmux server's environment. The real
 boundary is a separate GitHub identity for the security lane (eric-sabe/engsys#220); the keystone-side gate that reads these
 verdicts is wired separately.
@@ -519,7 +519,21 @@ brackets, dots) is literal, no braces. It fails closed: an unreadable config (`s
 shorter than the PR's `changed_files` (`security_file_list_unreadable`), an unreadable key (`key_unavailable`); a PR with
 more than 3000 files, which GitHub does not list in full, requires the verdict. Residual: a repo that is not fleet-managed,
 has no in-repo config and gets no exported `ENGSYS_MM_CONFIG` keeps the old opt-in behaviour.
-The capability to probe for is `mm-preflight.sh --capabilities`.
+The capability to probe for is `mm-preflight.sh --capabilities` (it also prints `security-review-request` from the
+release that added the request flow below).
+
+**Requesting a verdict (engsys#231, #240, #241).** A PR that needs a verdict and has none at all (or whose only blocking verdict is a FINDINGS signed for an earlier
+head, after a fix push) is not a failed PR:
+`mm-preflight.sh` exits **3** with reason `security_review_required` (the full snapshot still on stdout). The merge
+monster then adds the review request label (merge config `security_review_label`, default `security-review-requested`;
+it must differ from `security_sensitive_label`), keeps the PR parked with `mm:ready` on, and, when the PR is
+operator-gated, posts its gate request right away, so approvals given while it waits count. The maintenance monster
+holding the signing key lists labeled PRs (`mnt-security-reviews.sh`), runs Nyx at the head, posts the signed verdict
+through its fence (`mnt-act.sh guard -- node …/security-verdict.mjs post … --body-file tmp/<file>`; the guard accepts
+only this engsys's own script and confines the body like a `fleet msg send`) and removes the label. The merge
+monster's bus wakes on the label's removal or a new `<!-- nyx-review -->` comment, and its tick re-runs preflight for
+every labeled or parked PR each time as a backstop. The label is a request, never a trust signal: removing it does
+not let a PR through.
 
 **The monster batons.** A session the fleet launched (`ENGSYS_SESSION` and `ENGSYS_SESSION_RUN` set) may
 take, renew or act on the merge or maintain baton only when the launcher armed it for that role

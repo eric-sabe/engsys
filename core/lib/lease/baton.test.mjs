@@ -539,7 +539,7 @@ test("guard: fences, then runs the command; refuses everything but gh and this e
   assert.equal(r.stdout, "ok\n");
   assert.deepEqual(s.spawned[0].args, ["pr", "edit", "12", "--add-label", "mm:active"]);
   assert.equal(s.spawned[0].opts.timeout, 30_000);
-  assert.throws(() => guardCommand(["rm", "-rf", "/"]), /gh, git push, gate-request\.sh or fleet msg send only/);
+  assert.throws(() => guardCommand(["rm", "-rf", "/"]), /gh, git push, gate-request\.sh, fleet msg send or security-verdict\.mjs post only/);
   assert.throws(() => guardCommand(["gh", "pr", "merge", "12"]), /merges go through/);
   assert.throws(() => guardCommand(["gh", "-R", "o/r", "pr", "merge", "12"]), /merges go through/);
   assert.throws(() => guardCommand(["gh", "api", "-X", "PUT", "repos/o/r/pulls/12/merge"]), /merges go through/);
@@ -573,7 +573,7 @@ test("guard: `fleet msg send` (engsys#77) runs this engsys's msg.mjs; other subc
   }
   assert.equal(readFileSync(body, "utf8"), "bounced #12\n");
   assert.throws(() => guardCommand(["fleet", "msg", "inbox"]), /fleet msg send/);
-  assert.throws(() => guardCommand(["fleet", "status"]), /gh, git push, gate-request\.sh or fleet msg send only/);
+  assert.throws(() => guardCommand(["fleet", "status"]), /gh, git push, gate-request\.sh, fleet msg send or security-verdict\.mjs post only/);
   assert.throws(() => guardCommand(["/tmp/msg.mjs", "send"]), /only this engsys's msg\.mjs/);
   assert.throws(() => guardCommand(["node", "/tmp/msg.mjs", "send"]), /only this engsys's msg\.mjs/);
 });
@@ -623,6 +623,37 @@ test("guard: `fleet msg send --body-file` is confined to stdin or the session's 
   const bare = realpathSync(mkdtempSync(join(tmpdir(), "baton-guard-msg-")));
   assert.throws(() => guardCommand(["fleet", "msg", "send", "--to", "bob:x", "--body-file", "tmp/b.txt"], { cwd: bare }), /does not exist/);
   assert.equal(guardCommand(["fleet", "msg", "send", "--to", "bob:x", "--body-file", "-"], { cwd: bare }).args.at(-1), "-", "stdin needs no tmp/");
+});
+
+test("guard: `security-verdict.mjs post` (engsys#231) runs this engsys's own script, post only, its body confined like fleet msg send", async () => {
+  const own = realpathSync(fileURLToPath(new URL("../security-verdict.mjs", import.meta.url)));
+  const cwd = sessionDir();
+  const sha = "a".repeat(40);
+  const post = ["post", "--repo", "o/r", "--pr", "12", "--sha", sha, "--verdict", "PASS"];
+  for (const argv of [[own, ...post, "--body-file", "tmp/b.txt"], ["node", own, ...post, "--body-file", "tmp/b.txt"]]) {
+    const c = guardCommand(argv, { cwd });
+    assert.equal(c.exe, process.execPath, argv.join(" "));
+    assert.deepEqual(c.args, [own, ...post, "--body-file", "-"]);
+    assert.equal(c.input, "bounced #12\n", "the checked review text goes to the child on stdin");
+  }
+  assert.equal(guardCommand([own, ...post, "--body-file", "-"], { cwd }).input, undefined, "a heredoc body passes through");
+  assert.throws(() => guardCommand([own, ...post, "--body-file", "secret.txt"], { cwd }), /security-verdict\.mjs post --body-file must be - \(stdin\) or a file under the session's tmp\/.*outside/);
+  assert.throws(() => guardCommand([own, ...post, "--body-file", "/etc/hosts"], { cwd }), /outside/);
+  assert.throws(() => guardCommand([own, ...post], { cwd }), /needs --body-file/);
+  assert.throws(() => guardCommand([own, "verify", "--repo", "o/r"], { cwd }), /post …` only/);
+  assert.throws(() => guardCommand([own, "keygen", "--key-file", "/tmp/k"], { cwd }), /post …` only/);
+  assert.throws(() => guardCommand(["/tmp/security-verdict.mjs", ...post, "--body-file", "-"], { cwd }), /only this engsys's security-verdict\.mjs/);
+  assert.throws(() => guardCommand(["node", "/tmp/security-verdict.mjs", ...post, "--body-file", "-"], { cwd }), /only this engsys's security-verdict\.mjs/);
+  // through the fence: refused without the baton, run (with the body on stdin) once it is held
+  const w = world();
+  const s = session(w);
+  const before = await s.baton.guard([own, ...post, "--body-file", "-"]);
+  assert.notEqual(before.exit, 0);
+  assert.equal(s.spawned.length, 0, "no baton: nothing posted");
+  await s.baton.startup();
+  const r = await s.baton.guard([own, ...post, "--body-file", "-"]);
+  assert.equal(r.exit, 0);
+  assert.deepEqual(s.spawned.at(-1).args, [own, ...post, "--body-file", "-"]);
 });
 
 test("guard: --body-file refuses a hardlink in tmp/ (engsys#108 L3a)", () => {

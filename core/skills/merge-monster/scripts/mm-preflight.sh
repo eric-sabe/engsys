@@ -41,17 +41,31 @@
 # in-repo config and no exported ENGSYS_MM_CONFIG keeps the old opt-in behaviour (the launcher exports ENGSYS_MM_CONFIG
 # for merge-role lines; --config is optional and only adds). The capability probe is --capabilities, not this text.
 #
+# Verdict required, none valid (engsys#231): a PR the gate requires a verdict for, with no authentic FINDINGS and no
+# authentic PASS for its head (verify's `no_valid_verdict`; an unsigned or forged claim beside it is ignored once a signed
+# verdict lands), is not a failure of the PR, it only needs a review. Neither is a signed FINDINGS on an EARLIER head with
+# nothing signed for the current one (verdictReason signed_findings_on_earlier_head_unresolved, state findings): still
+# blocking, but the author's fix needs a fresh review to clear it. FINDINGS signed for the current head stays exit 1. That case
+# has its own exit code and reason so the merge session can request the review without parsing text: exit 3, the full
+# snapshot on stdout as on success (securityVerdict carries reviewRequired: true, reviewLabel and requiredBy, so the
+# rest of the preflight can still be judged: engsys#240's early gate request needs "clean apart from the verdict"), and
+# one JSON line on stderr: {"ok":false,"state":"missing","reason":"security_review_required","verdictReason":
+# "no_valid_verdict","reviewLabel":L,"head":SHA,"requiredBy":[...]}. reviewLabel is security_review_label from the
+# config (default security-review-requested; set explicitly in two sources, the values must agree). Every other verdict
+# failure stays exit 1.
+#
 # What this defends: a forgotten flag, a wrong --config, a model mistake, fully (every discoverable source counts and the
 # strictest wins). A prompt injection only partially: a session runs as the same OS user, so it can still run this script with
 # a different environment or reach the key file; the boundary is a separate GitHub identity for the security lane (#220).
 #
-# Usage: mm-preflight.sh --capabilities     (prints security-verdict and security-sensitive-globs, exit 0; unknown flag = old kit)
+# Usage: mm-preflight.sh --capabilities     (prints security-verdict, security-sensitive-globs and security-review-request,
+#                                           exit 0; unknown flag = old kit)
 #        mm-preflight.sh --repo owner/name --pr N [--full] [--config FILE]
 #                        [--security-verdict [--require-security-verdict] [--security-key-file PATH]]
 set -euo pipefail
 # --capabilities (engsys#229): one token per line, no GitHub, no config. An older kit has no such flag and exits 2
 # ("unknown arg"), which is how a caller tells the two apart without grepping source text.
-if [ "${1:-}" = --capabilities ] && [ $# -eq 1 ]; then printf 'security-verdict\nsecurity-sensitive-globs\n'; exit 0; fi
+if [ "${1:-}" = --capabilities ] && [ $# -eq 1 ]; then printf 'security-verdict\nsecurity-sensitive-globs\nsecurity-review-request\n'; exit 0; fi
 # shellcheck source=../../../lib/fleet-gh.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/fleet-gh.sh"
 fleet_gh_resolve
@@ -141,6 +155,9 @@ for c in "$MM_ENV_CONFIG" "$([ ! -f .claude/merge-monster.yml ] || echo .claude/
   SS_CONFIGS+=("$c")   # no de-duplication: a repeat is harmless, and a substring match could drop a config
 done
 SEC_REASONS="[]"
+REVIEW_LABEL="security-review-requested"   # security_review_label (engsys#231); the first source that sets it, all must agree
+REVIEW_LABEL_FROM=""
+SENS_LABELS=()
 if [ "${#SS_CONFIGS[@]}" -gt 0 ] || [ "$SEC_VERDICT" -eq 1 ]; then
   command -v node >/dev/null && [ -f "$SS_SCRIPT" ] || sec_fail "security_config_unreadable: node or security-sensitive.mjs not found"
   SS_LIST=("${SS_CONFIGS[@]+"${SS_CONFIGS[@]}"}"); [ "${#SS_LIST[@]}" -gt 0 ] || SS_LIST=("")
@@ -149,7 +166,20 @@ if [ "${#SS_CONFIGS[@]}" -gt 0 ] || [ "$SEC_VERDICT" -eq 1 ]; then
     SS_CFG=(); [ -z "$c" ] || SS_CFG=(--config "$c")
     SS_POLICY=$(node "$SS_SCRIPT" policy ${SS_CFG[@]+"${SS_CFG[@]}"}) || sec_fail "$(jq -r '.reason // "security_config_unreadable"' <<<"$SS_POLICY" 2>/dev/null || echo security_config_unreadable)"
     if [ "$(jq -r '.signedVerdict' <<<"$SS_POLICY")" = true ]; then SEC_VERDICT=1; fi
+    SENS_LABELS+=("$(jq -r '.label' <<<"$SS_POLICY")")
+    if [ "$(jq -r '.reviewLabelSet // false' <<<"$SS_POLICY")" = true ]; then
+      RL="$(jq -r '.reviewLabel' <<<"$SS_POLICY")"
+      if [ -z "$REVIEW_LABEL_FROM" ]; then REVIEW_LABEL="$RL" REVIEW_LABEL_FROM="$c"
+      elif [ "$(printf '%s' "$RL" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s' "$REVIEW_LABEL" | tr '[:upper:]' '[:lower:]')" ]; then
+        sec_fail "security_config_unreadable: security_review_label is '$REVIEW_LABEL' in $REVIEW_LABEL_FROM but '$RL' in $c"
+      fi
+    fi
     SS_GLOBS=$((SS_GLOBS + $(jq -r '.globs' <<<"$SS_POLICY")))
+  done
+  # across sources too (each file checks only itself): removing the request must never remove the requirement
+  for l in ${SENS_LABELS[@]+"${SENS_LABELS[@]}"}; do
+    [ "$(printf '%s' "$l" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s' "$REVIEW_LABEL" | tr '[:upper:]' '[:lower:]')" ] \
+      || sec_fail "security_config_unreadable: the review label '$REVIEW_LABEL' is also a security_sensitive_label"
   done
   if [ "$SEC_VERDICT" -eq 1 ]; then
     # the list is projected to the two path fields (the API also returns each file's patch text) and handed to jq as a
@@ -176,6 +206,7 @@ if [ "${#SS_CONFIGS[@]}" -gt 0 ] || [ "$SEC_VERDICT" -eq 1 ]; then
 fi
 
 SECURITY_JSON="null"
+REVIEW_NEEDED=0
 if [ "$SEC_VERDICT" -eq 1 ]; then
   # Fail closed on every path below: no key, no head SHA, no node, or any non-zero verdict exit.
   [ -n "$SEC_KEY_FILE" ] || SEC_KEY_FILE="${FLEET_STATE:+$FLEET_STATE/security-verdict.key}"
@@ -189,7 +220,18 @@ if [ "$SEC_VERDICT" -eq 1 ]; then
   [ "$SEC_REQUIRE" -eq 1 ] && SV_ARGS+=(--require)
   SV_RC=0
   SECURITY_JSON=$(jq -c '.comments // []' <<<"$VIEW" | node "$SV_SCRIPT" "${SV_ARGS[@]}") || SV_RC=$?
-  [ "$SV_RC" -ne 0 ] || [ -z "$SECURITY_JSON" ] || SECURITY_JSON=$(jq -c --argjson r "$SEC_REQUIRE" --argjson why "$SEC_REASONS" '. + {requiredBy: (if $r == 1 then $why else [] end)}' <<<"$SECURITY_JSON" 2>/dev/null || printf '%s' "$SECURITY_JSON")
+  # verdict required, none valid: its own outcome (exit 3 below), never a plain failure (engsys#231). So is a signed
+  # FINDINGS on an EARLIER head with nothing signed for this one (signed_findings_on_earlier_head_unresolved): it stays
+  # sticky, but only a fresh signed verdict for this head clears it, and asking for that review is the only way to get
+  # one (a fix push would otherwise loop bounce -> re-ready forever). FINDINGS for THIS head stays exit 1.
+  SV_STATE="$(jq -r '.state // ""' <<<"$SECURITY_JSON" 2>/dev/null || true)"
+  SV_REASON="$(jq -r '.reason // ""' <<<"$SECURITY_JSON" 2>/dev/null || true)"
+  if { [ "$SV_RC" -eq 1 ] && [ "$SEC_REQUIRE" -eq 1 ] && [ "$SV_STATE" = missing ]; } \
+    || { [ "$SV_RC" -eq 4 ] && [ "$SV_STATE" = findings ] && [ "$SV_REASON" = signed_findings_on_earlier_head_unresolved ]; }; then
+    REVIEW_NEEDED=1; SV_RC=0
+  fi
+  [ "$SV_RC" -ne 0 ] || [ -z "$SECURITY_JSON" ] || SECURITY_JSON=$(jq -c --argjson r "$SEC_REQUIRE" --argjson why "$SEC_REASONS" --arg l "$REVIEW_LABEL" --argjson need "$REVIEW_NEEDED" \
+    '. + {requiredBy: (if $r == 1 then $why else [] end), reviewLabel: $l} + (if $need == 1 then {reviewRequired: true} else {} end)' <<<"$SECURITY_JSON" 2>/dev/null || printf '%s' "$SECURITY_JSON")
   if [ "$SV_RC" -ne 0 ]; then
     if [ -n "$SECURITY_JSON" ]; then echo "$SECURITY_JSON" >&2
     else echo '{"ok":false,"state":"error","reason":"security_verdict_check_failed"}' >&2; fi
@@ -197,6 +239,10 @@ if [ "$SEC_VERDICT" -eq 1 ]; then
   fi
 fi
 
+if [ "$REVIEW_NEEDED" -eq 1 ]; then
+  jq -c -n --argjson s "$SECURITY_JSON" --arg h "$(jq -r '.headRefOid // ""' <<<"$VIEW")" \
+    '{ok: false, state: ($s.state // "missing"), reason: "security_review_required", verdictReason: ($s.reason // "no_valid_verdict"), reviewLabel: $s.reviewLabel, head: $h, requiredBy: ($s.requiredBy // [])}' >&2
+fi
 jq -n --argjson view "$VIEW" --argjson security "$SECURITY_JSON" --argjson threads "$THREADS" --argjson full "$FULL" --argjson contract "$CONTRACT_JSON" '
   def leading_markers: (capture("^(?<lead>(\\s*<!--[\\s\\S]*?-->)+)")? // {lead: ""}).lead
     | [scan("<!--[\\s\\S]*?-->") | gsub("\\s+"; " ") | .[0:200]];
@@ -214,4 +260,4 @@ jq -n --argjson view "$VIEW" --argjson security "$SECURITY_JSON" --argjson threa
   | if $contract != null then . + {contractCheck: $contract} else . end
   | if $security != null then . + {securityVerdict: $security} else . end
   | if $full == 1 then . else .comments |= ((. // []) | project) end'
-
+[ "$REVIEW_NEEDED" -eq 0 ] || exit 3

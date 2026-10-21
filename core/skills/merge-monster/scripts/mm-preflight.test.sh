@@ -89,7 +89,7 @@ run --security-verdict --security-key-file "$KEY"
 rc_is "a verdict signed for an older head passes through as no verdict when not required (no replay credit)" 0
 has "  …reported as only_stale_verdicts" "only_stale_verdicts"
 run --require-security-verdict --security-key-file "$KEY"
-rc_is "…and fails when a verdict is required" 1
+rc_is "…and fails when a verdict is required" 3
 has "  …as no_valid_verdict" "no_valid_verdict"
 
 view "$(sign "$KEY" "$HEAD_SHA" FINDINGS 'Finding: F1.')"
@@ -101,10 +101,12 @@ echo "a FINDINGS verdict is sticky across a push (engsys#197 review)"
 FIND_OLD="$(sign "$KEY" "$OLD_SHA" FINDINGS 'Finding: F1.' 60)"
 view "$FIND_OLD"
 run --security-verdict --security-key-file "$KEY"
-rc_is "FINDINGS signed for the OLD head still fails on the new head (a whitespace push does not clear it)" 1
+rc_is "FINDINGS signed for the OLD head still blocks on the new head (a whitespace push does not clear it): exit 3, ask for a review" 3
 has "  …as unresolved on an earlier head" "signed_findings_on_earlier_head_unresolved"
+has "  …reported as a review request (engsys#231 review: a fix push must ask again)" '"reason":"security_review_required"'
+hasnt "  …never as passing" '"state": "verified"'
 run --require-security-verdict --security-key-file "$KEY"
-rc_is "  …in require mode too" 1
+rc_is "  …in require mode too" 3
 view "$FIND_OLD" "$(sign "$KEY" "$HEAD_SHA" PASS 'Fixed; no findings.' 5)"
 run --security-verdict --security-key-file "$KEY"
 rc_is "a later signed PASS for the new head clears it (positive control)" 0
@@ -115,7 +117,7 @@ rc_is "re-posting an earlier authentic PASS after a later FINDINGS does not flip
 
 view
 run --require-security-verdict --security-key-file "$KEY"
-rc_is "--require with no verdict at all fails" 1
+rc_is "--require with no verdict at all fails" 3
 run --security-verdict --security-key-file "$KEY"
 rc_is "…and without --require a PR with no nyx-review comment passes (presence stays with review_marker)" 0
 
@@ -158,11 +160,11 @@ has "  …the gate ran (turned on by the config)" "\"state\": \"none\""
 files "services/dashboard/app/(auth)/login/page.tsx"
 view
 run --config "$CFG" --security-key-file "$KEY"
-rc_is "a route-group path with no signed PASS is blocked although the session omitted the flag" 1
+rc_is "a route-group path with no signed PASS is blocked although the session omitted the flag" 3
 has "  …reason" "no_valid_verdict"
 view "$UNSIGNED"
 run --config "$CFG" --security-key-file "$KEY"
-rc_is "…an unsigned PASS comment does not satisfy it" 1
+rc_is "…an unsigned PASS comment does not satisfy it" 3
 view "$GOOD"
 run --config "$CFG" --security-key-file "$KEY"
 rc_is "…a signed PASS for the head does (positive control)" 0
@@ -170,16 +172,16 @@ has "  …recorded why it was required" "glob:services/dashboard/app/(auth)/**"
 view
 files "services/dashboard/app/api/auth/[...nextauth]/route.ts"
 run --config "$CFG" --security-key-file "$KEY"
-rc_is "a [...nextauth] path matches literally and needs the verdict" 1
+rc_is "a [...nextauth] path matches literally and needs the verdict" 3
 files "services/dashboard/app/api/auth/n/route.ts" "services/dashboard/app/auth/page.tsx" "services/dashboard/app/authx/page.tsx"
 run --config "$CFG" --security-key-file "$KEY"
 rc_is "brackets and parentheses are not regex: n/ and auth/ do not match" 0
 files infrastructure/main.bicep
 run --config "$CFG" --security-key-file "$KEY"
-rc_is "**/x.bicep matches a nested file" 1
+rc_is "**/x.bicep matches a nested file" 3
 files main.bicep
 run --config "$CFG" --security-key-file "$KEY"
-rc_is "…and a root-level one" 1
+rc_is "…and a root-level one" 3
 # a large PR: patch bodies of several MB per page must not reach an argument list (E2BIG)
 node -e 'const big="x".repeat(400000);const a=[];for(let i=0;i<30;i++)a.push({filename:"f"+i+".md",patch:big});process.stdout.write(JSON.stringify(a))' >"$T/files.json"; echo 30 >"$T/changed"
 run --config "$CFG" --security-key-file "$KEY"
@@ -187,22 +189,22 @@ rc_is "30 files with 400 KB patches each: listed and judged, not an argument-siz
 # renames: both the new and the old path count
 jq -n '[{filename:"docs/moved.md", previous_filename:"services/dashboard/app/(auth)/old.tsx", status:"renamed"}]' >"$T/files.json"; echo 1 >"$T/changed"
 run --config "$CFG" --security-key-file "$KEY"
-rc_is "a rename OUT of a sensitive path is sensitive (old path)" 1
+rc_is "a rename OUT of a sensitive path is sensitive (old path)" 3
 jq -n '[{filename:"services/dashboard/app/(auth)/new.tsx", previous_filename:"docs/old.md", status:"renamed"}]' >"$T/files.json"
 run --config "$CFG" --security-key-file "$KEY"
-rc_is "a rename INTO a sensitive path is sensitive (new path)" 1
+rc_is "a rename INTO a sensitive path is sensitive (new path)" 3
 # the label alone
 files README.md
 LABELS='[{"name":"Security"}]' view
 run --config "$CFG" --security-key-file "$KEY"
-rc_is "the security label alone requires the verdict (case-insensitive)" 1
+rc_is "the security label alone requires the verdict (case-insensitive)" 3
 LABELS='[{"name":"docs"}]' view
 run --config "$CFG" --security-key-file "$KEY"
 rc_is "…another label does not (positive control)" 0
 # pagination: pages come back as concatenated arrays
 printf '[{"filename":"a.md"}]\n[{"filename":".github/workflows/ci.yml"}]\n' >"$T/files.json"; echo 2 >"$T/changed"
 run --config "$CFG" --security-key-file "$KEY"
-rc_is "a sensitive file on page 2 is found" 1
+rc_is "a sensitive file on page 2 is found" 3
 # fail closed
 printf '[{"filename":"a.md"}]\n' >"$T/files.json"; echo 5 >"$T/changed"
 run --config "$CFG" --security-key-file "$KEY"
@@ -210,7 +212,7 @@ rc_is "a file list shorter than changed_files fails closed" 1
 has "  …naming it" "security_file_list_unreadable"
 printf '[{"filename":"a.md"}]\n' >"$T/files.json"; echo 3001 >"$T/changed"
 run --config "$CFG" --security-key-file "$KEY"
-rc_is "more than 3000 changed files cannot be listed in full: the verdict is required" 1
+rc_is "more than 3000 changed files cannot be listed in full: the verdict is required" 3
 has "  …naming the reason" "no_valid_verdict"
 view "$GOOD"
 run --config "$CFG" --security-key-file "$KEY"
@@ -237,10 +239,10 @@ run --config "$T/off.yml" --security-key-file "$KEY"
 rc_is "config without signed_security_verdict: the gate stays off (opt-in unchanged)" 0
 view
 RC=0; OUT="$(ENGSYS_MM_CONFIG="$CFG" bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --security-key-file "$KEY" 2>&1)" || RC=$?
-rc_is "ENGSYS_MM_CONFIG supplies the config when --config is omitted" 1
+rc_is "ENGSYS_MM_CONFIG supplies the config when --config is omitted" 3
 mkdir -p "$T/wd/.claude"; cp "$CFG" "$T/wd/.claude/merge-monster.yml"
 RC=0; OUT="$(cd "$T/wd" && bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --security-key-file "$KEY" 2>&1)" || RC=$?
-rc_is "…and so does .claude/merge-monster.yml in the cwd" 1
+rc_is "…and so does .claude/merge-monster.yml in the cwd" 3
 # the head moves between `pr view` and the file list: fail closed rather than judge two different commits
 files "services/api/x.ts"; view; printf '%s\n' "$OLD_SHA" >"$T/headsha"
 run --config "$CFG" --security-key-file "$KEY"
@@ -251,9 +253,9 @@ printf '%s\n' "$HEAD_SHA" >"$T/headsha"
 printf 'repo: x\n' >"$T/weak.yml"
 files "services/dashboard/app/(auth)/x.tsx"; view
 RC=0; OUT="$(ENGSYS_MM_CONFIG="$CFG" bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --config "$T/weak.yml" --security-key-file "$KEY" 2>&1)" || RC=$?
-rc_is "a weak --config does not replace ENGSYS_MM_CONFIG" 1
+rc_is "a weak --config does not replace ENGSYS_MM_CONFIG" 3
 RC=0; OUT="$(cd "$T/wd" && bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --config "$T/weak.yml" --security-key-file "$KEY" 2>&1)" || RC=$?
-rc_is "…nor the repo's .claude/merge-monster.yml" 1
+rc_is "…nor the repo's .claude/merge-monster.yml" 3
 run --config "$T/weak.yml" --security-key-file "$KEY"
 rc_is "…and on its own a weak config (no globs, gate not on) is what it says, unchanged (positive control)" 0
 RC=0; OUT="$(ENGSYS_MM_CONFIG="$T/nope.yml" bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --config "$CFG" --security-key-file "$KEY" 2>&1)" || RC=$?
@@ -262,14 +264,14 @@ rc_is "an unreadable discoverable config fails closed even when --config is fine
 mkdir -p "$T/my dir"; cp "$T/weak.yml" "$T/my dir/.claude"
 files "services/dashboard/app/(auth)/x.tsx"; view
 RC=0; OUT="$(cd "$T/wd" && ENGSYS_MM_CONFIG="$T/my dir/.claude" bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --security-key-file "$KEY" 2>&1)" || RC=$?
-rc_is "a weak config whose path contains a space does not drop the repo's stricter config" 1
+rc_is "a weak config whose path contains a space does not drop the repo's stricter config" 3
 # --require-security-verdict can still ask for more, never for less
 files README.md
 run --config "$CFG" --require-security-verdict --security-key-file "$KEY"
-rc_is "the flag still requires a verdict when nothing sensitive changed" 1
+rc_is "the flag still requires a verdict when nothing sensitive changed" 3
 # the capability the fleet probes for, and the signing grant
 RC=0; OUT="$(bash "$HERE/mm-preflight.sh" --capabilities 2>&1)" || RC=$?
-if [ "$RC" = 0 ] && [ "$OUT" = "$(printf 'security-verdict\nsecurity-sensitive-globs')" ]; then ok "--capabilities reports the two tokens the fleet probes for"; else bad "capabilities tokens" "$OUT"; fi
+if [ "$RC" = 0 ] && [ "$OUT" = "$(printf 'security-verdict\nsecurity-sensitive-globs\nsecurity-review-request')" ]; then ok "--capabilities reports the tokens the fleet probes for"; else bad "capabilities tokens" "$OUT"; fi
 printf 'review\n' >"$T/body.md"
 RC=0; OUT="$(env -u ENGSYS_SECURITY_VERDICT_KEY_FILE node "$SV" post --repo acme/app --pr 7 --sha "$HEAD_SHA" --verdict PASS --body-file "$T/body.md" 2>&1)" || RC=$?
 rc_is "security-verdict post refuses without ENGSYS_SECURITY_VERDICT_KEY_FILE" 1
@@ -285,7 +287,7 @@ cp "$CFG" "$PLUG/repos/acme/app/merge-monster.yml"
 jq -n --arg p "$PLUG" '{version:2, plugins:{"acme@acme-fleet":[{scope:"user", installPath:$p, version:"1.0.0"}]}}' >"$FLEETCFG/plugins/installed_plugins.json"
 files "services/dashboard/app/(auth)/x.tsx"; view
 RC=0; OUT="$(cd "$T/cfg0" && CLAUDE_CONFIG_DIR="$FLEETCFG" bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --security-key-file "$KEY" 2>&1)" || RC=$?
-rc_is "no flag, no --config, no env, no repo config: the fleet copy still blocks a sensitive PR without a verdict" 1
+rc_is "no flag, no --config, no env, no repo config: the fleet copy still blocks a sensitive PR without a verdict" 3
 has "  …through the gate" "no_valid_verdict"
 files README.md
 RC=0; OUT="$(cd "$T/cfg0" && CLAUDE_CONFIG_DIR="$FLEETCFG" bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --security-key-file "$KEY" 2>&1)" || RC=$?
@@ -295,7 +297,7 @@ has "  …gate ran" '"state": "none"'
 rm -f "$FLEETCFG/plugins/installed_plugins.json"
 files "services/dashboard/app/(auth)/x.tsx"
 RC=0; OUT="$(cd "$T/cfg0" && CLAUDE_CONFIG_DIR="$FLEETCFG" bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --security-key-file "$KEY" 2>&1)" || RC=$?
-rc_is "found through plugins/cache without installed_plugins.json" 1
+rc_is "found through plugins/cache without installed_plugins.json" 3
 has "  …and it was the sensitive-path gate that blocked it" "no_valid_verdict"
 # fleet-managed but no merge config: fail closed, a session --config cannot paper over it
 FLEETCFG2="$T/cfg2"; mkdir -p "$FLEETCFG2/plugins/cache/acme-fleet/acme/1.0.0/repos/acme/app"
@@ -315,13 +317,13 @@ echo "engsys#229 review round: capabilities, pruned env config, repointed config
 RC=0; OUT="$(bash "$HERE/mm-preflight.sh" --capabilities 2>&1)" || RC=$?
 rc_is "--capabilities exits 0 without touching GitHub (no gh, no repo)" 0
 eq_out() { if [ "$OUT" = "$2" ]; then ok "$1"; else bad "$1" "$OUT"; fi; }
-eq_out "…and prints exactly the two tokens, one per line" "$(printf 'security-verdict\nsecurity-sensitive-globs')"
+eq_out "…and prints exactly the three tokens, one per line" "$(printf 'security-verdict\nsecurity-sensitive-globs\nsecurity-review-request')"
 RC=0; OUT="$(bash "$HERE/mm-preflight.sh" --capabilities --repo a/b 2>&1)" || RC=$?
 rc_is "…and only as the sole argument (anything else is the normal usage path)" 2
 # a pruned ENGSYS_MM_CONFIG falls back to the discovered copy, with a warning
 files "services/dashboard/app/(auth)/x.tsx"; view
 RC=0; OUT="$(cd "$T/cfg0" && CLAUDE_CONFIG_DIR="$FLEETCFG" ENGSYS_MM_CONFIG="$T/pruned/merge-monster.yml" bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --security-key-file "$KEY" 2>&1)" || RC=$?
-rc_is "a pruned ENGSYS_MM_CONFIG with a discovered copy: the copy is enforced (blocked without a verdict)" 1
+rc_is "a pruned ENGSYS_MM_CONFIG with a discovered copy: the copy is enforced (blocked without a verdict)" 3
 has "  …it was the gate, not a config failure" "no_valid_verdict"
 has "  …with a warning" "ENGSYS_MM_CONFIG"
 files README.md
@@ -334,23 +336,95 @@ has "  …naming it" "security_config_unreadable"
 files "services/dashboard/app/(auth)/x.tsx"
 mkdir -p "$T/empty"
 RC=0; OUT="$(cd "$T/cfg0" && CLAUDE_CONFIG_DIR="$T/empty" FLEET_CLAUDE_CONFIG_DIR="$FLEETCFG" bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --security-key-file "$KEY" 2>&1)" || RC=$?
-rc_is "CLAUDE_CONFIG_DIR=<empty> does not escape: \$FLEET_CLAUDE_CONFIG_DIR is searched" 1
+rc_is "CLAUDE_CONFIG_DIR=<empty> does not escape: \$FLEET_CLAUDE_CONFIG_DIR is searched" 3
 has "  …by the gate" "no_valid_verdict"
 mkdir -p "$T/fleetdir.sessions/acme-mm/plugins/cache/acme-fleet/acme/1.0.0/repos/acme"
 cp -R "$PLUG/repos/acme/app" "$T/fleetdir.sessions/acme-mm/plugins/cache/acme-fleet/acme/1.0.0/repos/acme/app"
 mkdir -p "$T/fleetdir"
 RC=0; OUT="$(cd "$T/cfg0" && CLAUDE_CONFIG_DIR="$T/empty" FLEET_CLAUDE_CONFIG_DIR="$T/fleetdir" bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --security-key-file "$KEY" 2>&1)" || RC=$?
-rc_is "…and so are the per-session dirs beside it (<dir>.sessions/*)" 1
+rc_is "…and so are the per-session dirs beside it (<dir>.sessions/*)" 3
 mkdir -p "$T/home/.claude/plugins/cache/acme-fleet/acme/1.0.0/repos/acme"
 cp -R "$PLUG/repos/acme/app" "$T/home/.claude/plugins/cache/acme-fleet/acme/1.0.0/repos/acme/app"
 RC=0; OUT="$(cd "$T/cfg0" && CLAUDE_CONFIG_DIR="$T/empty" bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --security-key-file "$KEY" 2>&1)" || RC=$?
-rc_is "…and ~/.claude" 1
+rc_is "…and ~/.claude" 3
 rm -rf "$T/home/.claude"
 # a differently cased directory name
 mkdir -p "$T/cfg5/plugins/cache/acme-fleet/acme/1.0.0/repos/ACME"
 cp -R "$PLUG/repos/acme/app" "$T/cfg5/plugins/cache/acme-fleet/acme/1.0.0/repos/ACME/App"
 RC=0; OUT="$(cd "$T/cfg0" && CLAUDE_CONFIG_DIR="$T/cfg5" bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --security-key-file "$KEY" 2>&1)" || RC=$?
-rc_is "directories named ACME/App are found for acme/app (case-insensitive listing)" 1
+rc_is "directories named ACME/App are found for acme/app (case-insensitive listing)" 3
+
+echo "engsys#231 review: FINDINGS -> fix push -> review again"
+cd "$T/cfg0"; files "services/dashboard/app/(auth)/x.tsx"
+view "$(sign "$KEY" "$OLD_SHA" FINDINGS 'Finding: F1.' 60)"
+RC=0; bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --config "$CFG" --security-key-file "$KEY" >"$T/out.json" 2>"$T/err.json" || RC=$?
+OUT="$(cat "$T/err.json")"
+rc_is "FINDINGS on an earlier head, the fix pushed (no verdict for the new head yet): exit 3" 3
+[ "$(jq -r .verdictReason "$T/err.json")" = signed_findings_on_earlier_head_unresolved ] && [ "$(jq -r .state "$T/err.json")" = findings ] \
+  && ok "  …with a distinct verdictReason and state findings" || bad "  …verdictReason" "$OUT"
+jq -e '.securityVerdict.reviewRequired == true and .securityVerdict.ok == false' "$T/out.json" >/dev/null && ok "  …stdout snapshot flags the review, still not ok" || bad "  …stdout" "$(cat "$T/out.json")"
+view "$(sign "$KEY" "$OLD_SHA" FINDINGS 'Finding: F1.' 60)" "$(sign "$KEY" "$HEAD_SHA" FINDINGS 'Still F1.' 5)"
+run --config "$CFG" --security-key-file "$KEY"
+rc_is "FINDINGS signed for the CURRENT head stays a plain failure (exit 1)" 1
+hasnt "  …no review request" "security_review_required"
+view "$(sign "$KEY" "$OLD_SHA" FINDINGS 'Finding: F1.' 60)" "$(sign "$KEY" "$HEAD_SHA" PASS 'Fixed.' 5)"
+run --config "$CFG" --security-key-file "$KEY"
+rc_is "a later signed PASS for the new head after the earlier FINDINGS: exit 0" 0
+view "$(sign "$KEY" "$OLD_SHA" FINDINGS 'Finding: F1.' 60)" "$UNSIGNED"
+run --config "$CFG" --security-key-file "$KEY"
+rc_is "an unsigned PASS claim beside the earlier FINDINGS does not clear it (still a review request, never a pass)" 3
+cd "$HERE"
+
+echo "engsys#231: verdict required, none valid is its own machine-readable outcome (exit 3, security_review_required)"
+cd "$T/cfg0"
+files "services/dashboard/app/(auth)/x.tsx"; view
+RC=0; bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --config "$CFG" --security-key-file "$KEY" >"$T/out.json" 2>"$T/err.json" || RC=$?
+OUT="$(cat "$T/err.json")"
+rc_is "a sensitive PR with no verdict exits 3, not 1" 3
+[ "$(jq -r .reason "$T/err.json")" = security_review_required ] && ok "  …stderr: one JSON line, reason security_review_required" || bad "stderr reason" "$OUT"
+[ "$(jq -r .verdictReason "$T/err.json")" = no_valid_verdict ] && [ "$(jq -r .head "$T/err.json")" = "$HEAD_SHA" ] && ok "  …with the verify reason and the head it is about" || bad "stderr fields" "$OUT"
+[ "$(jq -r .reviewLabel "$T/err.json")" = security-review-requested ] && ok "  …and the label to request it with (default security-review-requested)" || bad "stderr label" "$OUT"
+jq -e '.requiredBy | index("glob:services/dashboard/app/(auth)/**")' "$T/err.json" >/dev/null && ok "  …and why it is required" || bad "stderr requiredBy" "$OUT"
+OUT="$(cat "$T/out.json")"
+jq -e '.securityVerdict.reviewRequired == true and .securityVerdict.state == "missing" and .securityVerdict.reviewLabel == "security-review-requested"' "$T/out.json" >/dev/null \
+  && ok "  …stdout: the full snapshot, securityVerdict.reviewRequired (the rest of the preflight can still be judged)" || bad "stdout snapshot" "$OUT"
+jq -e '.reviewThreads and .headRefOid and (.comments | type) == "object"' "$T/out.json" >/dev/null && ok "  …with the other preflight fields" || bad "stdout other fields" "$OUT"
+printf 'security_review_label: needs-nyx\n' >>"$CFG.2"; cat "$CFG" >>"$CFG.2"
+RC=0; bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --config "$CFG.2" --security-key-file "$KEY" >"$T/out.json" 2>"$T/err.json" || RC=$?
+OUT="$(cat "$T/err.json")"
+rc_is "security_review_label from the config" 3
+[ "$(jq -r .reviewLabel "$T/err.json")" = needs-nyx ] && [ "$(jq -r .securityVerdict.reviewLabel "$T/out.json")" = needs-nyx ] && ok "  …names the label on both streams" || bad "configured label" "$OUT"
+printf 'security_review_label: other-label\n' >"$T/lbl.yml"
+RC=0; OUT="$(ENGSYS_MM_CONFIG="$T/lbl.yml" bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --config "$CFG.2" --security-key-file "$KEY" 2>&1)" || RC=$?
+rc_is "two sources naming different review labels fail closed" 1
+has "  …naming both" "security_review_label is 'other-label'"
+printf 'security_review_label: NEEDS-NYX\n' >"$T/lbl.yml"
+RC=0; OUT="$(ENGSYS_MM_CONFIG="$T/lbl.yml" bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --config "$CFG.2" --security-key-file "$KEY" 2>&1)" || RC=$?
+rc_is "…the same label in another case agrees (positive control)" 3
+view "$(sign "$KEY" "$HEAD_SHA" FINDINGS 'Finding: F1.')"
+run --config "$CFG" --security-key-file "$KEY"
+rc_is "a signed FINDINGS on a required PR stays a plain failure (exit 1, not a review request)" 1
+hasnt "  …no review requested" "security_review_required"
+view "$GOOD"
+run --config "$CFG" --security-key-file "$KEY"
+rc_is "a signed PASS for the head: exit 0" 0
+has "  …and the snapshot still names the review label (for whoever clears it)" '"reviewLabel": "security-review-requested"'
+files README.md; view "$UNSIGNED"
+run --config "$CFG" --security-key-file "$KEY"
+rc_is "a forged claim on a PR that needs no verdict stays exit 1 (forged_or_unsigned)" 1
+hasnt "  …not a review request" "security_review_required"
+files README.md; LABELS='[{"name":"security-review-requested"}]' view
+run --config "$CFG" --security-key-file "$KEY"
+rc_is "the review label alone requires nothing (it is a request, not a sensitivity marker)" 0
+printf 'security_review_label: needs-nyx\n' >"$T/rl.yml"; printf 'security_sensitive_label: Needs-Nyx\n' >"$T/sl.yml"
+RC=0; OUT="$(ENGSYS_MM_CONFIG="$T/rl.yml" bash "$HERE/mm-preflight.sh" --repo acme/app --pr 7 --config "$T/sl.yml" --security-verdict --security-key-file "$KEY" 2>&1)" || RC=$?
+rc_is "…and so is one source's review label equal to another source's sensitive label" 1
+has "  …naming it" "is also a security_sensitive_label"
+printf 'security_review_label: security\nsecurity_sensitive_label: Security\n' >"$T/same.yml"
+run --config "$T/same.yml" --security-verdict --security-key-file "$KEY"
+rc_is "a review label equal to the sensitive label is refused (removing it would drop the requirement)" 1
+has "  …as an unreadable config" "security_config_unreadable"
+cd "$HERE"
 
 echo "$pass passed, $fail failed."
 [ "$fail" = 0 ]

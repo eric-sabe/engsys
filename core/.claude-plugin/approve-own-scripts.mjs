@@ -23,7 +23,7 @@ import { parseHookInput, recordHookTelemetry, resolvePluginRoot } from '../lib/h
 // own lease; the fenced mutations, mm-act.sh / mnt-act.sh, stay behind a prompt), merge preflight, session-sync, the read-only approval verifier (gate-check.sh only reads GitHub; its
 // sibling gate-request.sh posts a comment, so it stays behind a prompt), and the read-only false-positive
 // candidate finder (mnt-fp-candidates.sh never mutates; its sibling mnt-fp-dismiss.sh does, so it stays
-// behind a prompt). Setup (creates labels/ledgers) and session launch/supervision are
+// behind a prompt), and the read-only security-review request lister (mnt-security-reviews.sh, engsys#231). Setup (creates labels/ledgers) and session launch/supervision are
 // deliberately NOT here — those stay behind a human prompt.
 export const ALLOWED = new Set([
   'merge-monster/scripts/mm-agent-reg.sh',
@@ -42,6 +42,7 @@ export const ALLOWED = new Set([
   'maintenance-monster/scripts/mnt-tick.sh',
   'maintenance-monster/scripts/mnt-baton.sh',
   'maintenance-monster/scripts/mnt-fp-candidates.sh',
+  'maintenance-monster/scripts/mnt-security-reviews.sh',
   'resource-broker/scripts/broker-watch.sh',
   'resource-broker/scripts/broker-heartbeat.sh',
   'resource-broker/scripts/broker-tick.sh',

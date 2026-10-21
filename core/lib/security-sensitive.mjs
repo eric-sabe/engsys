@@ -4,10 +4,17 @@
 // attacker-authored PR content and could omit --require-security-verdict (by injection or by mistake).
 //
 //   security-sensitive.mjs policy --config FILE
-//       → {"signedVerdict":bool,"globs":N,"label":"security"}   (config keys: ready_requirements.signed_security_verdict,
-//         security_sensitive_globs, security_sensitive_label)
+//       → {"signedVerdict":bool,"globs":N,"label":"security","reviewLabel":"security-review-requested","reviewLabelSet":bool}
+//         (config keys: ready_requirements.signed_security_verdict, security_sensitive_globs, security_sensitive_label,
+//         security_review_label; reviewLabelSet says whether the config names the review label itself)
 //   security-sensitive.mjs decide [--config FILE] < {"files":[{filename,previous_filename?}],"changedFiles":N,"labels":[...]}
 //       → {"ok":true,"required":bool,"reasons":[...],"matched":[<=20 paths]}
+//   security-sensitive.mjs review-label --repo owner/name [--config FILE]...
+//       → the review request label alone, one line (engsys#231): security_review_label from the first of the merge configs
+//         mm-preflight.sh reads ($ENGSYS_MM_CONFIG, .claude/merge-monster.yml in the cwd, the fleet-config-dir copy, then
+//         each --config) that sets it, else security-review-requested. Two sources naming different labels, or a review
+//         label equal to any source's security_sensitive_label, is exit 1 with a reason. One resolver for the merge
+//         monster's tick and bus and for the maintenance monster, so both sides watch the label preflight names.
 //
 // A PR needs the verdict when it carries the label (default `security`) or when ANY changed file matches a glob,
 // by its new path and by its old path (a rename out of a sensitive directory still counts). Fail closed: an
@@ -21,12 +28,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import { resolve as resolveFleetConfig, defaultConfigDirs } from './mm-config.mjs';
 
 const require = createRequire(import.meta.url);
 const { parseYaml } = require('./yaml.js');
 
 export const GITHUB_FILE_LIMIT = 3000;
 export const DEFAULT_LABEL = 'security';
+/** The label that asks the security lane for a signed verdict (engsys#231): merge-monster adds it, maintenance removes it. */
+export const DEFAULT_REVIEW_LABEL = 'security-review-requested';
 
 const esc = (c) => c.replace(/[\\^$.*+?()[\]{}|/-]/g, '\\$&');
 
@@ -42,7 +52,7 @@ export function compileGlob(glob) {
   return new RegExp(`^${re}$`);
 }
 
-/** → { signedVerdict, globs: [string], label }. Throws on a config that cannot be read or has malformed keys. */
+/** → { signedVerdict, globs: [string], label, reviewLabel, reviewLabelSet }. Throws on a config that cannot be read or has malformed keys. */
 export function loadPolicy(text) {
   const cfg = parseYaml(text);
   if (!cfg || typeof cfg !== 'object') throw new Error('config is not a mapping');
@@ -50,8 +60,14 @@ export function loadPolicy(text) {
   if (!Array.isArray(g) || g.some((x) => typeof x !== 'string' || !x.trim())) throw new Error('security_sensitive_globs must be a list of non-empty strings');
   const label = cfg.security_sensitive_label ?? DEFAULT_LABEL;
   if (typeof label !== 'string' || !label.trim()) throw new Error('security_sensitive_label must be a non-empty string');
+  const reviewLabel = cfg.security_review_label ?? DEFAULT_REVIEW_LABEL;
+  if (typeof reviewLabel !== 'string' || !reviewLabel.trim()) throw new Error('security_review_label must be a non-empty string');
+  if (reviewLabel.trim().toLowerCase() === label.trim().toLowerCase()) throw new Error('security_review_label must differ from security_sensitive_label (removing the request would drop the requirement)');
   const rr = cfg.ready_requirements;
-  return { signedVerdict: Boolean(rr && typeof rr === 'object' && rr.signed_security_verdict === true), globs: g.map((x) => x.trim()), label: label.trim() };
+  return {
+    signedVerdict: Boolean(rr && typeof rr === 'object' && rr.signed_security_verdict === true), globs: g.map((x) => x.trim()), label: label.trim(),
+    reviewLabel: reviewLabel.trim(), reviewLabelSet: cfg.security_review_label != null,
+  };
 }
 
 /** → { required, reasons, matched }. Throws Error('security_file_list_unreadable: ...') when the list can't be trusted. */
@@ -77,11 +93,62 @@ export function decide(policy, { files, changedFiles, labels }) {
   return { required: reasons.length > 0, reasons, matched: matched.slice(0, 20) };
 }
 
+/**
+ * The review label from config texts [{ source, text }] (engsys#231). The first that sets security_review_label wins; a
+ * second naming a different label throws, and so does a review label equal to ANY source's security_sensitive_label
+ * (loadPolicy checks that within one file only): removing the request must never remove the requirement.
+ * → { label, source }
+ */
+export function reviewLabelOf(configs) {
+  let label = null;
+  let source = null;
+  const sensitive = [];
+  for (const c of configs) {
+    let p;
+    try { p = loadPolicy(c.text); } catch (e) { throw new Error(`security_config_unreadable: ${c.source}: ${e.message}`); }
+    sensitive.push({ label: p.label, source: c.source });
+    if (!p.reviewLabelSet) continue;
+    if (label === null) { label = p.reviewLabel; source = c.source; continue; }
+    if (p.reviewLabel.toLowerCase() !== label.toLowerCase()) {
+      throw new Error(`security_config_unreadable: security_review_label is '${label}' in ${source} but '${p.reviewLabel}' in ${c.source}`);
+    }
+  }
+  const out = label === null ? { label: DEFAULT_REVIEW_LABEL, source: 'default' } : { label, source };
+  const clash = sensitive.find((x) => x.label.toLowerCase() === out.label.toLowerCase());
+  if (clash) throw new Error(`security_config_unreadable: the review label '${out.label}' is the security_sensitive_label of ${clash.source}`);
+  return out;
+}
+
+/** The merge configs mm-preflight.sh reads, in its order, each read now: [{ source, text }]. An unreadable one throws. */
+export function discoverConfigs({ repo, extra = [], env = process.env, cwd = process.cwd() }) {
+  const paths = [];
+  if (env.ENGSYS_MM_CONFIG) paths.push(env.ENGSYS_MM_CONFIG);
+  const inRepo = path.join(cwd, '.claude', 'merge-monster.yml');
+  if (fs.existsSync(inRepo)) paths.push(inRepo);
+  paths.push(...resolveFleetConfig({ slug: repo, configDirs: defaultConfigDirs(env) }).configs);
+  paths.push(...extra);
+  return paths.map((p) => {
+    try { return { source: p, text: fs.readFileSync(p, 'utf8') }; } catch (e) { throw new Error(`security_config_unreadable: ${p}: ${e.message}`); }
+  });
+}
+
 function readStdin() { return fs.readFileSync(0, 'utf8'); }
 function fail(reason) { process.stdout.write(`${JSON.stringify({ ok: false, reason })}\n`); process.exit(1); }
 
 function main(argv) {
   const [cmd, ...rest] = argv;
+  if (cmd === 'review-label') {
+    let repo = '';
+    const extra = [];
+    for (let i = 0; i < rest.length; i++) {
+      if (rest[i] === '--repo') repo = rest[++i] ?? '';
+      else if (rest[i] === '--config') extra.push(rest[++i] ?? '');
+      else fail(`unknown argument: ${rest[i]}`);
+    }
+    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) fail('usage: security-sensitive.mjs review-label --repo owner/name [--config FILE]...');
+    try { process.stdout.write(`${reviewLabelOf(discoverConfigs({ repo, extra: extra.filter(Boolean) })).label}\n`); } catch (e) { fail(e.message); }
+    return;
+  }
   let config = '';
   for (let i = 0; i < rest.length; i++) {
     if (rest[i] === '--config') config = rest[++i] ?? '';
@@ -90,9 +157,10 @@ function main(argv) {
   let policy;
   if (config) {
     try { policy = loadPolicy(fs.readFileSync(config, 'utf8')); } catch (e) { fail(`security_config_unreadable: ${e.message}`); }
-  } else policy = { signedVerdict: false, globs: [], label: DEFAULT_LABEL };
+  } else policy = { signedVerdict: false, globs: [], label: DEFAULT_LABEL, reviewLabel: DEFAULT_REVIEW_LABEL, reviewLabelSet: false };
   if (cmd === 'policy') {
-    process.stdout.write(`${JSON.stringify({ signedVerdict: policy.signedVerdict, globs: policy.globs.length, label: policy.label })}\n`);
+    const { signedVerdict, label, reviewLabel, reviewLabelSet } = policy;
+    process.stdout.write(`${JSON.stringify({ signedVerdict, globs: policy.globs.length, label, reviewLabel, reviewLabelSet })}\n`);
     return;
   }
   if (cmd === 'decide') {
@@ -101,7 +169,7 @@ function main(argv) {
     try { process.stdout.write(`${JSON.stringify({ ok: true, ...decide(policy, input ?? {}) })}\n`); } catch (e) { fail(e.message); }
     return;
   }
-  fail('usage: security-sensitive.mjs policy|decide [--config FILE]');
+  fail('usage: security-sensitive.mjs policy|decide [--config FILE] | review-label --repo owner/name [--config FILE]...');
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main(process.argv.slice(2));
