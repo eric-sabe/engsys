@@ -690,20 +690,23 @@ export function checkAppSlugs(reg, lookup = ghAppId) {
       warnings.push(`fleets.${id}.github_app ${f.github_app}: not checked online (${e.message.split('\n')[0]})`);
       continue;
     }
-    if (got === null) errors.push(`fleets.${id}.github_app: GitHub has no App with the slug ${show(f.github_app)} (its bot would be ${f.github_app}[bot]); use the App's current slug`);
+    if (got === null) errors.push(`fleets.${id}.github_app: GitHub has no App with the slug ${show(f.github_app)} visible to this token (its bot would be ${f.github_app}[bot]); use the App's current slug`);
     else if (f.github_app_id && got !== f.github_app_id) errors.push(`fleets.${id}.github_app: the App ${show(f.github_app)} has id ${got}, but github_app_id is ${f.github_app_id}`);
   }
   return { errors, warnings };
 }
 
-function ghAppId(slug) {
+export function ghAppId(slug, { gh = 'gh' } = {}) {
+  let out;
   try {
-    const out = execFileSync('gh', ['api', `apps/${slug}`, '--jq', '.id'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 15000 });
-    return Number(out.trim());
+    out = execFileSync(gh, ['api', `apps/${slug}`, '--jq', '.id'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 15000 });
   } catch (e) {
     if (/HTTP 404|Not Found/.test(`${e.stderr ?? ''}${e.stdout ?? ''}`)) return null;
     throw new Error(e.code === 'ENOENT' ? 'gh not found' : (String(e.stderr || e.message).trim() || 'gh api failed'));
   }
+  const id = Number(out.trim());
+  if (!Number.isInteger(id) || id <= 0) throw new Error(`gh api apps/${slug} returned no App id (${show(out.trim().slice(0, 40))})`);
+  return id;
 }
 
 // --- CLI -----------------------------------------------------------------------------------------

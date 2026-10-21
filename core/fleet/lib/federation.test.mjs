@@ -8,7 +8,7 @@ import path from 'node:path';
 import {
   parseYaml, validateFederation, parseFederation, loadFederation, resolveFederationFile, checkFleetId,
   fleetIdProblems, getPath, roleHome, parseAddress, isOwnAddress, statusLines, main, FederationError, FLEET_ID_RE,
-  repoFromRemoteUrl, instanceRepo, statusIssueTarget, registryWarnings, fleetForBot, recipientFor, slackOperators, checkAppSlugs,
+  repoFromRemoteUrl, instanceRepo, statusIssueTarget, registryWarnings, fleetForBot, recipientFor, slackOperators, checkAppSlugs, ghAppId,
 } from './federation.mjs';
 import { hermeticGit } from '../../lib/git-env.mjs';
 
@@ -589,7 +589,7 @@ test('validate --online: each github_app slug must resolve to its github_app_id 
   const look = (slug) => (slug in apps ? apps[slug] : null);
   assert.deepEqual(checkAppSlugs(reg, look).errors, ['fleets.fb.github_app: the App "app-b" has id 99, but github_app_id is 22']);
   const stale = checkAppSlugs(reg, (slug) => (slug === 'app-a' ? null : look(slug)));
-  assert.match(stale.errors[0], /fleets\.fa\.github_app: GitHub has no App with the slug "app-a"/);
+  assert.match(stale.errors[0], /fleets\.fa\.github_app: GitHub has no App with the slug "app-a" visible to this token/);
   const offline = checkAppSlugs(reg, () => { throw new Error('gh not found'); });
   assert.deepEqual(offline.errors, [], 'no network is a warning, never a failure');
   assert.equal(offline.warnings.length, 3);
@@ -601,8 +601,26 @@ test('validate --online: each github_app slug must resolve to its github_app_id 
   assert.equal(run(['validate', f, '--online'], look).code, 0);
   const bad = run(['validate', f, '--online'], () => null);
   assert.equal(bad.code, 1);
-  assert.match(bad.e, /no App with the slug "app-a"/);
+  assert.match(bad.e, /no App with the slug "app-a" visible to this token/);
   let called = false;
   assert.equal(run(['validate', f], () => { called = true; return null; }).code, 0, 'offline validate is unchanged');
   assert.equal(called, false);
+});
+
+test('ghAppId reads gh: an id, a 404, a 403, junk output, no gh (engsys#256 review)', () => {
+  const d = tmp();
+  const gh = path.join(d, 'gh');
+  fs.writeFileSync(gh, `#!/bin/sh
+case "$2" in
+  apps/good) echo 5013025 ;;
+  apps/gone) echo 'gh: Not Found (HTTP 404)' >&2; exit 1 ;;
+  apps/hidden) echo 'gh: Resource not accessible by integration (HTTP 403)' >&2; exit 1 ;;
+  apps/junk) echo 'null' ;;
+esac
+`, { mode: 0o755 });
+  assert.equal(ghAppId('good', { gh }), 5013025);
+  assert.equal(ghAppId('gone', { gh }), null);
+  assert.throws(() => ghAppId('hidden', { gh }), /HTTP 403/);
+  assert.throws(() => ghAppId('junk', { gh }), /returned no App id/);
+  assert.throws(() => ghAppId('good', { gh: path.join(d, 'no-such-gh') }), /gh not found/);
 });
