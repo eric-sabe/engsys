@@ -1201,10 +1201,14 @@ is synced when the session is down, before its new process starts:
   launch is refused, and the next supervisor tick tries again.
 - The supervisor's per-session check (`fleet verify --auto-sync --session <name>`) does the same once the session is
   down. So a monster that exits after its rotation request is not held by a dir that was only waiting.
+- A session left that way for longer than `SYNC_DEFER_ALERT_HOURS` (fleet.conf, default 24) gets one
+  `fleet notify --level action` (incident `sync-deferred-<name>`, linked to the status issue or the first ledger),
+  posted by the supervisor's tick and resolved once the session has restarted.
 - While the session still runs, a periodic `fleet verify --max-age` of its deferred dir passes, with no alert, when
   every problem it finds is an install at another version than the pin (`version` lines, what a deferred pin change
-  looks like); it prints them. Any other problem (a hook, settings, user-scope config, memory) is alerted and held as
-  always. The session runs what it loaded at start. A held gate would also stop the supervisor from
+  looks like) and each of those installs matches its own release, file by file (the old tag, from GitHub); it prints
+  them. Any other problem (a hook, settings, user-scope config, memory, a changed file of the old version) is alerted
+  and held as always; an old release that can't be read is "not verified". The session runs what it loaded at start. A held gate would also stop the supervisor from
   cycling a monster that sits idle after its rotation request. This leaves no gap: the launch syncs the dir and
   verifies it again, without `--max-age`, before the session starts. Residual risk: `.fleet/sync-deferred` is host
   state. A process running as the fleet's user could add a live session to it and quiet that session's
@@ -1216,7 +1220,9 @@ is synced when the session is down, before its new process starts:
 anyway, the way sync did before. Use it only when a restart is not an option: it can log a session out.
 `fleet sync --session <name>` syncs one stopped session's dir at the pins as they stand, with no checkout moves and
 no job reloads. A shared dir (`FLEET_CLAUDE_CONFIG_DIR` without per-session mode, or `~/.claude`) is synced and
-checked as before: its sessions share one login and race each other anyway.
+checked as before: its sessions share one login and race each other anyway. One exception: an unattended sync
+(`--no-jobs`, what the supervisor's `fleet verify --auto-sync` runs) leaves `~/.claude` (scope `supervised`) alone
+while an interactive role runs on it, says so, and the integrity alert then tells you to run `fleet sync` yourself.
 
 **A re-cut pinned tag** (engsys#214, #216). A pinned release tag can be moved on origin (a re-cut). Sync asks
 origin (`git ls-remote`, the peeled tag) whether the checkout's local copy of the pinned tag is still origin's
@@ -1829,6 +1835,7 @@ format) overrides it per machine. Environment values for `ENGSYS_REF` / `INSTANC
 | `FLEET_CLAUDE_CONFIG_DIR_SCOPE` | no | `all` (default): every launched session runs on `FLEET_CLAUDE_CONFIG_DIR`. `supervised`: only the lines positively classified as interactive keep `~/.claude`; everything else (monsters, supervised and security-tier lines, anything unclassified) runs on the fleet dir. `fleet sync` keeps the pinned plugins in both, and `fleet verify` also checks the engsys install in `~/.claude` (§ 6.1). Never inherited from the caller's environment |
 | `VERIFY_ALLOWED_USER_PLUGINS` | no | Space-separated `name@marketplace` user-scope plugins `fleet verify` reports as `allowed` instead of a mismatch (§ 6.1). Never inherited from the caller's environment |
 | `VERIFY_ALLOWED_USER_FILES` | no | Space-separated sha256 hashes of user-scope agents, commands, skills, rules, memory files and MCP server definitions that `fleet verify` accepts (§ 7, "User-scope configuration besides settings"). Never inherited from the caller's environment |
+| `SYNC_DEFER_ALERT_HOURS` | no | Hours a session may run on a config dir `fleet sync` left behind the pins (per-session mode) before the supervisor posts one `fleet notify --level action` asking for its restart (§ 7, What sync does). Default 24 |
 | `VERIFY_ALLOWED_USER_HOOKS` | no | Space-separated sha256 content hashes of user-scope hooks and settings commands (`statusLine`, `apiKeyHelper`, any `*Helper` / `*Command`, …) that `fleet verify` accepts (§ 7, "User-scope settings"). The hash covers the command and every file it runs, and is printed in the mismatch line. Never inherited from the caller's environment |
 | `REVIEW_CMD` | no | Review run in the pin PR's worktree (for example `<your-review-cli> review --base origin/main`). Empty means no review; the label only |
 | `REVIEW_MARKER` | no | Marker line opening the review comment (for example `<!-- local-review-findings -->`) |

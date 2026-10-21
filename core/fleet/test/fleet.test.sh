@@ -1105,6 +1105,51 @@ if [ -e "$STATE/locks/sync-deferred.lock" ]; then bad "…and the lock is releas
 rm -f "$STATE/sync-deferred"
 cp "$T/flc.bak" "$LC"; rm -rf "$SESS" "$FAKE/tmux" "$FAKE/claude-cfg"; : >"$FAKE/tmux.log"
 
+echo "== K3. engsys#253: an unattended sync leaves ~/.claude alone while an interactive role runs on it; a long deferral is alerted once"
+setconf "FLEET_CLAUDE_CONFIG_DIR=$FCFG" "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on" "FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised" "NOTIFY_FALLBACK_ISSUE=acme/acme-fleet#5"
+rm -rf "$FAKE/claude-cfg" "$FAKE/claude" "$FAKE/tmux" "$STATE"/sync-deferred*; run fleet config-dir init; login_all acme-mm acme-security acme-rel
+UMARK="$STATE/sync-deferred.user-claude"
+user_calls() { since "$1" | grep 'CFG=unset$' || true; }
+running acme-build
+m="$(mark)"; run fleet sync --no-jobs
+rc_is "unattended sync (--no-jobs) with an interactive role running on ~/.claude exits 0" 0
+eq "…no claude on ~/.claude" "$(user_calls "$m")" ""
+has "…saying why, and what to run" "$OUT" "in use by acme-build, not synced by this unattended run"
+if [ -f "$UMARK" ]; then ok "…recorded for verify's alert text"; else bad "…recorded for verify's alert text"; fi
+has "…the session dirs are still synced" "$(on_dir "$m" acme-mm)" "plugin install"
+m="$(mark)"; run fleet sync
+has "the operator's own fleet sync still syncs ~/.claude while it is in use" "$(user_calls "$m")" "plugin install"
+if [ -f "$UMARK" ]; then bad "…and clears the record"; else ok "…and clears the record"; fi
+rm -rf "$FAKE/claude"; : >"$FAKE/tmux/windows"
+m="$(mark)"; run fleet sync --no-jobs
+has "unattended, with no interactive role running, ~/.claude is synced as before" "$(user_calls "$m")" "plugin install"
+# a session left deferred for longer than SYNC_DEFER_ALERT_HOURS: one action-level notify, resolved once it is synced
+cat >"$T/defer-alert.sh" <<'SH'
+. "$ENGSYS_HOST/core/fleet/lib/fleet-env.sh"; . "$ENGSYS_HOST/core/fleet/lib/session-dirs.sh"
+fleet_sync_deferred_alert https://github.com/acme/app/issues/11
+SH
+dalert() { FLEET_INSTANCE="$INST" ENGSYS_HOST="$ENGSYS_HOST" bash "$T/defer-alert.sh" >/dev/null 2>&1; }
+dsaid() { grep -c -- "$1" "$FAKE/gh.log" || true; }
+FLEET_INSTANCE="$INST" ENGSYS_HOST="$ENGSYS_HOST" bash -c '. "$ENGSYS_HOST/core/fleet/lib/fleet-env.sh"; . "$ENGSYS_HOST/core/fleet/lib/session-dirs.sh"; fleet_sync_deferred_set add acme-mm'
+: >"$FAKE/gh.log"; dalert
+eq "a fresh deferral is not alerted" "$(dsaid 'running on its old plugins')" 0
+echo $(( $(date +%s) - 25 * 3600 )) >"$STATE/sync-deferred.since/acme-mm"
+dalert
+eq "deferred for over 24h: one notify" "$(dsaid 'session acme-mm has been running on its old plugins for over 24h')" 1
+has "…saying how to fix it" "$(cat "$FAKE/gh.log")" "fleet restart acme-mm"
+dalert
+eq "…latched: not again on the next tick" "$(dsaid 'running on its old plugins')" 1
+SYNC_DEFER_ALERT_HOURS=48 dalert; rm -f "$STATE/sync-deferred.alerted.acme-mm"; SYNC_DEFER_ALERT_HOURS=48 dalert
+eq "…the threshold is SYNC_DEFER_ALERT_HOURS" "$(dsaid 'running on its old plugins')" 1
+dalert
+FLEET_INSTANCE="$INST" ENGSYS_HOST="$ENGSYS_HOST" bash -c '. "$ENGSYS_HOST/core/fleet/lib/fleet-env.sh"; . "$ENGSYS_HOST/core/fleet/lib/session-dirs.sh"; fleet_sync_deferred_set drop acme-mm'
+dalert
+if [ -e "$STATE/sync-deferred.alerted.acme-mm" ] || [ -e "$STATE/sync-deferred.since/acme-mm" ]; then bad "synced at its restart: the incident is resolved (latch and since record gone)"; else ok "synced at its restart: the incident is resolved (latch and since record gone)"; fi
+dalert
+eq "…and not alerted again" "$(dsaid 'session acme-mm has been running on its old plugins')" 2
+rm -rf "$STATE"/sync-deferred*
+cp "$T/flc.bak" "$LC"; rm -rf "$SESS" "$FAKE/tmux" "$FAKE/claude-cfg"; : >"$FAKE/tmux.log"
+
 echo "== F. supervise"
 rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"; : >"$FAKE/gh.log"
 jq -n --arg b "last: $(iso 200) — status: working" '{state: "OPEN", body: $b}' >"$FAKE/ledger-11.json"

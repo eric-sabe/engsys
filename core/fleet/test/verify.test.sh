@@ -87,7 +87,8 @@ echo "gh $*" >>"$FAKE/gh.log"
 c="$(cat "$FAKE/commit")"
 if [ "${1:-}" = api ] && [ -f "$FAKE/gh-fail" ]; then echo "error connecting to api.github.com" >&2; exit 1; fi
 case "${1:-} ${2:-}" in
-  "api repos/vendor/engsys/git/ref/tags/v1.0.0") printf '{"ref":"refs/tags/v1.0.0","object":{"type":"commit","sha":"%s"}}\n' "$c" ;;
+  # v0.9.0: an older release (engsys#253: a deferred dir behind the pin is checked against its own release), same tree
+  "api repos/vendor/engsys/git/ref/tags/v1.0.0" | "api repos/vendor/engsys/git/ref/tags/v0.9.0") printf '{"ref":"refs/tags/v1.0.0","object":{"type":"commit","sha":"%s"}}\n' "$c" ;;
   "api repos/vendor/engsys") echo '{"default_branch":"main"}' ;;
   "api repos/vendor/engsys/compare/$c...main?per_page=1") printf '{"status":"%s"}\n' "$(cat "$FAKE/compare-status")" ;;
   "api repos/vendor/engsys/git/trees/$c?recursive=1") cat "$FAKE/tree.json" ;;
@@ -980,9 +981,18 @@ echo acme-mm >"$I/.fleet/sync-deferred"; c0="$(comments)"
 run fleet verify --alert --max-age 0 --session acme-mm
 rc_is "…deferred by fleet sync: passes (the launch re-verifies)" 0
 has "…saying why" "$OUT" "Not held, not alerted"
+has "…after checking the behind install against its own release" "$OUT" "each install behind the pin matches its own release (engsys@engsys v0.9.0)"
 has "…still printing what is behind" "$OUT" "MISMATCH"
 eq "…no alert" "$(comments)" "$c0"
 eq "…no claude" "$(calls)" 0
+tamper; c0="$(comments)"
+run fleet verify --alert --max-age 0 --session acme-mm
+rc_is "…but a tampered file of the old version it runs is a MISMATCH, deferred or not" 1
+has "…saying its installs do not match their own release" "$OUT" "do NOT match their own release either"
+has "…naming the file" "$OUT" "mm-act.sh"
+hasnt "…not passed as a deferral" "$OUT" "Not held, not alerted"
+eq "…and alerted" "$(comments)" "$((c0 + 1))"
+restore; rm -f "$I/.fleet"/verify-wrappers*.json "$I/.fleet"/verify-wrappers.alerted*
 jq '. + {hooks: {SessionStart: [{hooks: [{type: "command", command: "/bin/echo planted"}]}]}}' "$PS/settings.json" >"$PS/s.tmp" && mv "$PS/s.tmp" "$PS/settings.json"
 rm -f "$I/.fleet"/verify-wrappers*.json; c0="$(comments)"
 run fleet verify --alert --max-age 0 --session acme-mm

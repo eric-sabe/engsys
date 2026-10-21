@@ -28,7 +28,8 @@
 # `fleet sync`, then `fleet restart --stale` is still the whole pin cycle. `--check` (what `fleet status` runs) reads a
 # running session's dir from its files (lib/plugin-list-from-files.mjs) and skips the login check, so it starts no
 # claude on it either. (A shared dir, FLEET_CLAUDE_CONFIG_DIR without per-session mode or ~/.claude, is synced and
-# checked as before: its sessions share one login and race each other anyway; per-session mode is the fix for that.)
+# checked as before: its sessions share one login and race each other anyway; per-session mode is the fix for that.
+# Except: an unattended run, --no-jobs, leaves ~/.claude alone while an interactive role runs on it.)
 # Anything that changed is stamped in .fleet/last-change; `fleet restart` uses that stamp to tell which
 # running sessions are behind. Running sessions keep their loaded plugins (the old cache dirs stay on
 # disk) until restarted.
@@ -283,6 +284,22 @@ main() {
     for cfg_dir in "${cfg_dirs[@]}"; do
       SYNC_CFG="$cfg_dir" SYNC_LIVE=0 own_sess=""
       [ -z "$cfg_dir" ] || [ "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:-off}" != on ] || own_sess="${cfg_dir##*/}"
+      # ~/.claude under scope supervised belongs to the interactive roles. Unattended (--no-jobs: the supervisor's
+      # verify --auto-sync) it gets no claude while one of them runs on it (engsys#253); the operator's own fleet sync
+      # still syncs it, as before.
+      if [ -z "$cfg_dir" ] && [ "$check" = 0 ] && [ "${FLEET_SYNC_NO_JOBS:-0}" = 1 ] && [ "${FLEET_SYNC_INCLUDE_RUNNING:-0}" != 1 ]; then
+        local user_live; user_live="$(user_claude_live)"
+        if [ -n "$user_live" ]; then
+          if ( SYNC_LIVE=1 check=1 drift=0; sync_claude_plugins >/dev/null 2>&1; [ "$drift" = 0 ] ); then
+            say "claude config dir: $HOME/.claude (interactive roles): in use by$user_live, at the pins"
+            rm -f "$FLEET_STATE/sync-deferred.user-claude"
+          else
+            say "claude config dir: $HOME/.claude (interactive roles): in use by$user_live, not synced by this unattended run (a second claude on their login can log them out). Run fleet sync yourself"
+            mkdir -p "$FLEET_STATE"; date +%s >"$FLEET_STATE/sync-deferred.user-claude"; recut_keep=" * "
+          fi
+          continue
+        fi
+      fi
       if [ -n "$own_sess" ] && [ -d "$cfg_dir" ] && fleet_session_alive "$own_sess"; then
         SYNC_LIVE=1
         if [ "$check" = 0 ] && [ "${FLEET_SYNC_INCLUDE_RUNNING:-0}" != 1 ]; then
@@ -318,6 +335,7 @@ main() {
         drift=0; deferred+=" $own_sess"
       fi
       [ "$check" = 1 ] || [ -z "$own_sess" ] || fleet_sync_deferred_set drop "$own_sess"
+      [ "$check" = 1 ] || [ -n "$cfg_dir" ] || rm -f "$FLEET_STATE/sync-deferred.user-claude"
     done
     # engsys#212: turning the flag on before the dirs exist and are logged in is the common adoption slip; say so once
     if [ -n "$ps_bad" ]; then
@@ -645,6 +663,16 @@ claude_config_report() {
     warn "$dir is not logged in: claude, then /login"
   fi
   return 0
+}
+# user_claude_live → " <name>…" of the running roster sessions on ~/.claude (scope supervised: the interactive roles)
+user_claude_live() {
+  [ -f "$FLEET_REPO/fleet/roster.tmpl" ] || return 0
+  fleet_roster_prepare
+  local n out=""
+  while IFS= read -r n; do
+    [ -z "$n" ] || uses_fleet_config_dir "$n" || out+=" $n"
+  done < <(fleet_live_sessions)
+  printf '%s' "$out"
 }
 user_plugins() { # "<id>\t<version>" for each user-scope install (the list also shows per-project installs)
   plugin_list_json | jq -r '.[] | select((.scope // "user") == "user") | [.id, (.version // "")] | @tsv'

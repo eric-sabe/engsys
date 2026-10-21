@@ -166,9 +166,36 @@ fleet_sync_deferred_set() { # fleet_sync_deferred_set add|drop <name>
   if [ "$rc" = 0 ]; then
     { grep -Fxv -- "$2" "$f" 2>/dev/null || true; [ "$1" != add ] || printf '%s\n' "$2"; } >"$t"
     if [ -s "$t" ]; then mv "$t" "$f"; else rm -f "$t" "$f"; fi
+    # since when (fleet_sync_deferred_alert): kept from the first deferral until the dir is synced
+    mkdir -p "$f.since"
+    if [ "$1" = add ]; then [ -f "$f.since/$2" ] || date +%s >"$f.since/$2"; else rm -f "$f.since/$2"; fi
   fi
   rmdir "$l" 2>/dev/null || true
   return "$rc"
+}
+# fleet_sync_deferred_alert [<github url>] → once per tick (supervise.sh): one `fleet notify --level action` per session
+# deferred for longer than SYNC_DEFER_ALERT_HOURS (fleet.conf, default 24), latched in sync-deferred.alerted.<name>,
+# and resolved once the session is no longer deferred. A deferral never clears by itself while the session runs.
+# The action level needs a link (--re): the caller's status or ledger issue; without one it is posted as info.
+fleet_sync_deferred_alert() {
+  local url="${1:-}" h="${SYNC_DEFER_ALERT_HOURS:-24}" f="$FLEET_STATE/sync-deferred" lf n at now host lvl
+  [[ "$h" =~ ^[0-9]+$ ]] || h=24
+  now="$(date +%s)" host="$(hostname -s 2>/dev/null || echo this host)"
+  for lf in "$f".alerted.*; do
+    [ -f "$lf" ] || continue
+    n="${lf##*.alerted.}"
+    fleet_sync_deferred "$n" && continue
+    node "$FLEET_KIT_DIR/notify.mjs" --level info --incident "sync-deferred-$n" --resolve "Resolved: session $n on $host restarted, and its config dir was synced to the pins." >&2 && rm -f "$lf"
+  done
+  [ -f "$f" ] || return 0
+  lvl=(--level action --re "$url"); [ -n "$url" ] || lvl=(--level info)
+  while IFS= read -r n; do
+    [ -n "$n" ] && [ ! -f "$f.alerted.$n" ] || continue
+    at="$(cat "$f.since/$n" 2>/dev/null)" && [[ "$at" =~ ^[0-9]+$ ]] || continue
+    [ $((now - at)) -ge $((h * 3600)) ] || continue
+    node "$FLEET_KIT_DIR/notify.mjs" "${lvl[@]}" --incident "sync-deferred-$n" "Fleet on $host: session $n has been running on its old plugins for over ${h}h. fleet sync left its config dir behind the pins while it runs (a second claude on its login can log it out), and it is synced when the session restarts. Please restart it when convenient: fleet restart $n (or fleet restart --stale)." >&2 \
+      && date +%s >"$f.alerted.$n"
+  done <"$f"
 }
 # fleet_sync_deferred_run <name> → syncs <name>'s own dir when fleet sync deferred it and the session is not running now
 # (rc 0 when there was nothing to do too). --no-jobs: the callers can run inside the supervisor's launchd job.
