@@ -123,13 +123,16 @@ fleet_session_alive() {
   # CLI fallback): a pane whose foreground command matches it reads as "exited". Only login shells belong here; a name that
   # a running claude can show (a wrapper script's bash or sh) would make verify start a short-lived claude on its login,
   # which can rotate the refresh token out from under it (anthropics/claude-code#88583).
-  # The window name is matched exactly (tab-separated fields), and the session is live if ANY pane of ANY window of that
-  # name has a non-shell foreground command: an unrelated same-named window sitting at a shell must not hide a live one.
+  # The window name is matched exactly, and the session is live if ANY pane of ANY window of that name has a non-shell
+  # foreground command: an unrelated same-named window sitting at a shell must not hide a live one.
+  # The separator is a printable `|` with the command first, never a TAB (engsys#250): without a UTF-8 locale (launchd sets
+  # only PATH) tmux prints a TAB in format output as `_`, so no window ever matched and every live session read as exited.
+  # A command name has no `|`; everything after the first one is the window name, whatever it contains.
   # (No early `exit` in the awk: it would SIGPIPE tmux and fail the pipeline under pipefail.)
   if [ -n "${2:-}" ]; then   # scoped to one tmux session: what `fleet restart` acts on
     out="$(tmux list-panes -t "$2:$1" -F '#{pane_current_command}' 2>/dev/null | awk '$0 != "" && $0 !~ /^-?(zsh|bash|sh|fish)$/ { l = 1 } END { if (l) print "live" }')" || return 1
   else
-    out="$(tmux list-panes -a -F "#{window_name}$(printf '\t')#{pane_current_command}" 2>/dev/null | awk -F'\t' -v n="$1" '$1 == n && $2 != "" && $2 !~ /^-?(zsh|bash|sh|fish)$/ { l = 1 } END { if (l) print "live" }')" || return 1
+    out="$(tmux list-panes -a -F '#{pane_current_command}|#{window_name}' 2>/dev/null | awk -v n="$1" '{ i = index($0, "|"); c = substr($0, 1, i - 1) } i && substr($0, i + 1) == n && c != "" && c !~ /^-?(zsh|bash|sh|fish)$/ { l = 1 } END { if (l) print "live" }')" || return 1
   fi
   [ -n "$out" ]
 }

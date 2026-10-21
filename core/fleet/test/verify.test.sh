@@ -69,10 +69,14 @@ SH
 cat >"$T/bin/tmux" <<'SH'
 #!/usr/bin/env bash
 # stub tmux: $FAKE/tmux-windows lists the windows, $FAKE/tmux-cmd is every pane's foreground command
+# -F is rendered as tmux does without a UTF-8 locale (launchd): a TAB in the output comes out as `_` (engsys#250)
+fmt=""; prev=""; for a in "$@"; do [ "$prev" = -F ] && fmt="$a"; prev="$a"; done
 case "${1:-}" in
   list-windows) cat "$FAKE/tmux-windows" 2>/dev/null || exit 1 ;;
   list-panes) while IFS= read -r wn; do   # a line is "<window>" (its pane runs $FAKE/tmux-cmd) or "<window><TAB><command>"
-      [ -z "$wn" ] || case "$wn" in *"$(printf '\t')"*) printf '%s\n' "$wn" ;; *) printf '%s\t%s\n' "$wn" "$(cat "$FAKE/tmux-cmd" 2>/dev/null)" ;; esac
+      [ -n "$wn" ] || continue
+      case "$wn" in *"$(printf '\t')"*) c="${wn#*$(printf '\t')}"; wn="${wn%%$(printf '\t')*}" ;; *) c="$(cat "$FAKE/tmux-cmd" 2>/dev/null)" ;; esac
+      l="${fmt//"#{window_name}"/$wn}"; l="${l//"#{pane_current_command}"/$c}"; printf '%s\n' "$l" | tr '\t' _
     done <"$FAKE/tmux-windows" ;;
 esac
 exit 0
