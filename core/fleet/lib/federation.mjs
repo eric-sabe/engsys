@@ -543,15 +543,15 @@ export function roleHome(reg, repo, role) {
 
 /**
  * The fleet whose GitHub App is `login` (`<github_app>[bot]`, case-insensitive), as
- * `{ fleet, operator, slack_operator }` (absent fields null), or null: a human, an unknown bot or no
- * registry. Gate requests use it to address the PR's owning operator (engsys#238); a human author
+ * `{ fleet, operator, slack_operator }` (absent fields null), or null: a human, an unknown bot, a fleet
+ * that is `enabled: false`, or no registry. Gate requests use it to address the PR's owning operator (engsys#238); a human author
  * never matches, even one who is a fleet's operator, so a human's PR keeps the team mention.
  */
 export function fleetForBot(reg, login) {
   const m = typeof login === 'string' ? /^(.+)\[bot\]$/i.exec(login) : null;
   if (!reg?.fleets || !m) return null;
   const slug = m[1].toLowerCase();
-  const id = Object.keys(reg.fleets).find((k) => reg.fleets[k].github_app?.toLowerCase() === slug);
+  const id = Object.keys(reg.fleets).find((k) => reg.fleets[k].enabled !== false && reg.fleets[k].github_app?.toLowerCase() === slug);
   return id ? ownerOf(reg, id) : null;
 }
 
@@ -569,9 +569,10 @@ export function recipientFor(reg, who) {
   return id ? ownerOf(reg, id) : null;
 }
 
-/** Every distinct `slack_operator` in the registry, in fleet order (an alert DMs each, engsys#238). */
+/** Every distinct `slack_operator` of an enabled fleet, in fleet order (`fleet notify --level alert
+ * --everyone` DMs each, engsys#238). */
 export function slackOperators(reg) {
-  return [...new Set(Object.values(reg?.fleets ?? {}).map((f) => f.slack_operator).filter(Boolean))];
+  return [...new Set(Object.values(reg?.fleets ?? {}).filter((f) => f.enabled !== false).map((f) => f.slack_operator).filter(Boolean))];
 }
 
 function ownerOf(reg, id) {

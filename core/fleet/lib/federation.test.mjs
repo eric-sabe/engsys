@@ -575,3 +575,10 @@ test('fleetForBot / recipientFor / slackOperators: who a notify or gate request 
   assert.deepEqual(slackOperators(reg), ['U0000000001', 'U0000000002']);
   assert.deepEqual(slackOperators(null), []);
 });
+
+test('fleetForBot / slackOperators skip a fleet that is enabled: false (engsys#238)', () => {
+  const reg = parseFederation(DOC.replace(/(  bob:\n(?:    .*\n)*?)    enabled: true/, '$1    enabled: false'));
+  assert.equal(reg.fleets.bob.enabled, false);
+  assert.equal(fleetForBot(reg, 'acme-fleet-bob[bot]'), null);
+  assert.deepEqual(slackOperators(reg), ['U0000000001']);
+});

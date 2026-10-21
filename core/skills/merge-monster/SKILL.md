@@ -127,7 +127,7 @@ Read runbook § Subagent liveness first when `liveness:` is configured. On **eve
 
 ## Escalation
 
-`mm:escalated` label + diagnosis comment on the PR (what failed, what was tried, your read on root cause), then `fleet notify --level action --re <PR-url> --incident mm-<PR-number> "<what's blocked, what you tried, what decision is needed>"` (falls back to a ledger comment on its own). Escalations never stall the queue and are never silent. Nudge the author too. When the decision needed is a human approval, the escalation carries a gate request link (§ Operator gates). Resolve the incident (`fleet notify ... --resolve`) once the PR merges, bounces back, or the escalation otherwise clears.
+`mm:escalated` label + diagnosis comment on the PR (what failed, what was tried, your read on root cause), then `fleet notify --level action --author <PR author login> --re <PR-url> --incident mm-<PR-number> "<what's blocked, what you tried, what decision is needed>"` (a DM: a fleet bot's PR → that fleet's operator, a human's → this host's operator, engsys#238; falls back to a ledger comment on its own). Escalations never stall the queue and are never silent. Nudge the author too. When the decision needed is a human approval, the escalation carries a gate request link (§ Operator gates). Resolve the incident (`fleet notify ... --resolve`) once the PR merges, bounces back, or the escalation otherwise clears.
 
 ## Cross-session messaging
 

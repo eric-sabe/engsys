@@ -809,11 +809,6 @@
         "reason": "Reworded in SKILL.md § Dependabot (auto_merge categories after local_gate, never-auto classes via merge gate, watchdog-owned mode)."
       },
       {
-        "unit": "mm:escalated label + diagnosis comment on the pr, then fleet notify --level action --re <pr-url> --incident mm-<pr-number> \"<what's blocked, what you tried, what decision is needed>\" (the fleet's own slack voice; falls back to a ledger-issue comment on its own if slack isn't configured or reachable, never anything you have to gate)",
-        "section": "Escalation",
-        "reason": "Reworded in SKILL.md § Escalation (label, diagnosis, fleet notify incident, never silent, never stall, resolve)."
-      },
-      {
         "unit": "resolve the incident (fleet notify ... --resolve) once the pr merges, bounces back to the author, or the escalation otherwise clears",
         "section": "Escalation",
         "reason": "Reworded in SKILL.md § Escalation (label, diagnosis, fleet notify incident, never silent, never stall, resolve)."
@@ -1085,6 +1080,11 @@
       }
     ],
     "superseded_ok": [
+      {
+        "unit": "mm:escalated label + diagnosis comment on the pr, then fleet notify --level action --re <pr-url> --incident mm-<pr-number> \"<what's blocked, what you tried, what decision is needed>\" (the fleet's own slack voice; falls back to a ledger-issue comment on its own if slack isn't configured or reachable, never anything you have to gate)",
+        "section": "Escalation",
+        "reason": "engsys#238 added --author <PR author login> (a DM to the PR's fleet operator, else this host's operator); runbook § Escalation carries the reworded rule."
+      },
       {
         "unit": "nudge the operator once, with the request url",
         "section": "Operator gates (approval happens in GitHub)",

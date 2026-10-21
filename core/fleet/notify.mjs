@@ -3,22 +3,27 @@
 // default (info/action/alert, no sirens), one post per incident (thread + resolve), and a
 // GitHub-issue-comment fallback when Slack is unreachable or unconfigured. Never fails the caller.
 //
-//   fleet notify --level info|action|alert [--for <fleet-id|github-login>] [--no-mention] [--re <github-url>]
-//                [--incident <key>] [--resolve] [--require-delivery] "<text>"
+//   fleet notify --level info|action|alert [--for <fleet-id|github-login> | --author <github-login> | --everyone |
+//                --no-mention] [--re <https-url>] [--incident <key>] [--resolve] [--require-delivery] "<text>"
 //   fleet notify --resolve --incident <key>             (--level optional: the latch knows where it went)
 //   fleet notify --sweep [--repo <owner/name>] [--apply]
 //
-// Routing (engsys#238, operator decision 2026-10-20: no channel ping):
-//   alert              the escalation channel with no mention, plus a DM to every `slack_operator` in
-//                      federation.yml (SLACK_OPERATOR_ID when there is no registry). Never @here, never a group.
-//   --for <who>        (info/action) a DM to that one operator only: a fleet id, an operator's GitHub login or
-//                      a fleet App's bot login, resolved through federation.yml. An unknown recipient (or one
-//                      with no slack_operator, or a DM Slack refuses) falls back, loudly, to the channel with
-//                      the post saying who it was meant for and this host's operator mentioned.
-//   otherwise          info: the channel, no mention. action: the channel, mentioning this host's operator
-//                      (SLACK_OPERATOR_ID) unless --no-mention (a gate on a human-authored PR, whose GitHub
-//                      request already mentions the operators team).
-// SLACK_OPERATORS_GROUP_ID is retired (engsys#238): it is no longer read, and a SLACK_ENV that still sets it works.
+// Routing (engsys#238, operator decision 2026-10-20: no channel ping; anything for one operator is a DM):
+//   action / alert     a DM to THIS host's operator (federation.yml fleets.<FLEET_ID>.slack_operator, else
+//                      SLACK_OPERATOR_ID): a problem on one host is that host's operator's.
+//   --for <who>        a DM to that one operator instead: a fleet id, an operator's GitHub login or a fleet
+//                      App's bot login, resolved through federation.yml.
+//   --author <login>   a PR author: a fleet App's bot → a DM to that fleet's operator; a human or unknown
+//                      author → this host's operator (merge-monster escalations on a PR).
+//   --everyone         (alert only) a problem every operator should see: the escalation channel with no
+//                      mention, plus a DM to every enabled fleet's `slack_operator`.
+//   --no-mention       the channel, pinging nobody (a gate on a human-authored PR, whose GitHub request
+//                      already mentions the operators team).
+//   info               the channel, no mention, unless --for / --author.
+// A recipient with no Slack id, or a DM Slack refuses, falls back, loudly, to the channel: the post
+// mentions the intended recipient when their Slack id is known (else nobody) and says who it was for.
+// Never @here, never a group: SLACK_OPERATORS_GROUP_ID is retired (no longer read; a SLACK_ENV that still
+// sets it works).
 //
 // An incident latch stores where its first post went (the channel, or the DM channel) and any alert DM
 // threads, so every reply and the --resolve reply land in those same threads.
@@ -26,7 +31,8 @@
 // --sweep: resolve the latches whose pull request is already merged or closed (the `mm-gate-<id>` and
 // `mm-<PR>` incidents a merge monster never resolved). The PR comes from the latch's --re link, else
 // `mm-<N>` with --repo, else a search of --repo for the gate id. Dry run by default (prints what it
-// would resolve); --apply posts each ✅ resolved reply and clears the latch.
+// would resolve); --apply posts each ✅ resolved reply and clears the latch. `mm-<N>` matches only when
+// the latch's link is in --repo (a multi-repo host has one `mm-12` per repo).
 //
 // --require-delivery: exit 1 when the message reached neither Slack nor the fallback issue (for a caller
 // whose next step depends on the alert going out, e.g. `fleet launch --skip-verify`). Without it, notify
@@ -61,13 +67,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { humanizeText, resolveSettings } from '../lib/operator-time.mjs';
-import { loadFederation, recipientFor, slackOperators } from './lib/federation.mjs';
+import { fleetForBot, loadFederation, recipientFor, slackOperators } from './lib/federation.mjs';
 
 const LEVELS = ['info', 'action', 'alert'];
 const EMOJI = { info: 'ℹ️', action: '👋', alert: '⚠️' };
 /** A Slack member id, as federation.mjs validates `slack_operator`. Nothing else becomes a mention. */
 const SLACK_MEMBER_RE = /^[UW][A-Z0-9]{2,20}$/;
 const REPO_RE = /^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/;
+/** --re: an https URL with nothing Slack reads as markup (engsys#238: it reaches DMs unescaped). */
+const RE_URL_RE = /^https:\/\/[^\s<>|`]{1,500}$/;
 
 function die(msg, code = 2) {
   process.stderr.write(`fleet notify: ${msg}\n`);
@@ -92,7 +100,7 @@ export function parseEnvFile(text) {
 /** Parse argv (excluding node + script path) into {level, for, re, incident, resolve, sweep, text, ...}. */
 export function parseArgs(argv) {
   const out = {
-    level: null, for: null, noMention: false, re: null, incident: null, resolve: false, requireDelivery: false,
+    level: null, for: null, author: null, everyone: false, noMention: false, re: null, incident: null, resolve: false, requireDelivery: false,
     sweep: false, apply: false, repo: null, textParts: [],
   };
   for (let i = 0; i < argv.length; i++) {
@@ -100,6 +108,8 @@ export function parseArgs(argv) {
     switch (a) {
       case '--level': out.level = argv[++i]; break;
       case '--for': out.for = argv[++i]; break;
+      case '--author': out.author = argv[++i]; break;
+      case '--everyone': out.everyone = true; break;
       case '--no-mention': out.noMention = true; break;
       case '--re': out.re = argv[++i]; break;
       case '--incident': out.incident = argv[++i]; break;
@@ -127,8 +137,11 @@ export function validateArgs(args) {
   if (!args.level && !args.resolve) throw '--level is required (info|action|alert)';
   if (args.level && !LEVELS.includes(args.level)) throw `--level must be one of info|action|alert (got '${args.level}')`;
   if (args.level === 'action' && !args.re && !args.resolve) throw "--level action requires --re <github-url>";
+  if (args.re && !RE_URL_RE.test(args.re)) throw '--re must be an https URL with no spaces, <, >, | or backticks';
   if (args.for !== null && args.for !== undefined && !args.for) throw '--for needs a fleet id or GitHub login';
-  if (args.for && args.level === 'alert') throw '--for does not apply to --level alert (an alert goes to the channel and every operator)';
+  if (args.author !== null && args.author !== undefined && !args.author) throw '--author needs a GitHub login';
+  if (args.everyone && args.level !== 'alert') throw '--everyone goes with --level alert';
+  if ([args.for, args.author, args.everyone, args.noMention].filter(Boolean).length > 1) throw 'use one of --for, --author, --everyone, --no-mention';
   if (args.resolve && !args.incident) throw '--resolve requires --incident <key>';
   if (!args.resolve && !args.text) throw 'a message is required (unless --resolve)';
 }
@@ -143,37 +156,40 @@ export function slackMention(id) {
   return typeof id === 'string' && SLACK_MEMBER_RE.test(id) ? `<@${id}>` : '';
 }
 
-/** The channel mention for a level (engsys#238: no channel ping). info and alert mention nobody in the
- * channel (an alert reaches every operator by DM instead); action mentions this host's operator, when
- * SLACK_OPERATOR_ID is a valid member id. Never `<!here>`, never a user group. */
-export function mentionFor(level, cfg) {
-  return level === 'action' ? slackMention(cfg.SLACK_OPERATOR_ID) : '';
+/** This host's operator: its fleet's `slack_operator` in the registry, else SLACK_OPERATOR_ID. */
+export function hostOperator(cfg = {}, reg = null) {
+  const fromReg = reg?.fleets?.[cfg.FLEET_ID]?.slack_operator;
+  return slackMention(fromReg) ? fromReg : slackMention(cfg.SLACK_OPERATOR_ID) ? cfg.SLACK_OPERATOR_ID : null;
 }
 
 /**
  * Where a first post goes (engsys#238). Returns { channel: { mention } | null, dms: [member id],
- * meantFor, warning } (a DM route also carries `for` and `fallbackMention`, used if Slack refuses the DM): `channel` is the escalation-channel post, `dms` the operators to DM. `meantFor`
- * is set when a --for recipient could not be DMed, so the channel post says who it was for.
+ * meantFor, warning }: `channel` is the escalation-channel post, `dms` the operators to DM. A one-person
+ * route also carries `label` (who it is for) and `fallbackMention` (their mention, used if Slack refuses
+ * the DM). `meantFor` is set when the recipient could not be DMed, so the channel post says who it was for.
  */
-export function planRoute({ level, forWho = null, noMention = false, cfg = {}, reg = null }) {
-  const hostMention = noMention ? '' : mentionFor(level, cfg);
-  if (level === 'alert') {
-    const ops = reg ? slackOperators(reg) : [];
-    const dms = (ops.length ? ops : [cfg.SLACK_OPERATOR_ID]).filter((id) => slackMention(id));
-    return { channel: { mention: '' }, dms, meantFor: null, warning: '' };
+export function planRoute({ level, forWho = null, author = null, everyone = false, noMention = false, cfg = {}, reg = null }) {
+  const one = (id, label) => ({ channel: null, dms: [id], meantFor: null, label, fallbackMention: slackMention(id), warning: '' });
+  const toChannel = (label, why) => ({ channel: { mention: '' }, dms: [], meantFor: label, warning: `${label}: ${why}; posting to the channel instead of a DM` });
+  if (everyone) {
+    const ops = slackOperators(reg);
+    const host = hostOperator(cfg, reg);
+    return { channel: { mention: '' }, dms: ops.length ? ops : host ? [host] : [], meantFor: null, warning: '' };
   }
+  if (noMention || (level === 'info' && !forWho && !author)) return { channel: { mention: '' }, dms: [], meantFor: null, warning: '' };
   if (forWho) {
     const r = recipientFor(reg, forWho);
-    if (r && slackMention(r.slack_operator)) return { channel: null, dms: [r.slack_operator], meantFor: null, for: forWho, fallbackMention: mentionFor(level, cfg), warning: '' };
-    const why = !reg ? 'no fleet registry (FEDERATION_FILE)' : !r ? 'not in the fleet registry' : `fleet ${r.fleet} has no slack_operator`;
-    return {
-      channel: { mention: mentionFor(level, cfg) },
-      dms: [],
-      meantFor: forWho,
-      warning: `--for ${forWho}: ${why}; posting to the channel instead of a DM`,
-    };
+    if (r && slackMention(r.slack_operator)) return one(r.slack_operator, forWho);
+    return toChannel(forWho, !reg ? 'no fleet registry (FEDERATION_FILE)' : !r ? 'not in the fleet registry' : `fleet ${r.fleet} has no slack_operator`);
   }
-  return { channel: { mention: hostMention }, dms: [], meantFor: null, warning: '' };
+  const owner = author ? fleetForBot(reg, author) : null;
+  if (owner) {
+    if (slackMention(owner.slack_operator)) return one(owner.slack_operator, `the operator of fleet ${owner.fleet}`);
+    return toChannel(`the operator of fleet ${owner.fleet}${owner.operator ? ` (${owner.operator})` : ''}`, 'no slack_operator');
+  }
+  const host = hostOperator(cfg, reg);
+  if (host) return one(host, "this host's operator");
+  return toChannel("this host's operator", `no Slack id (fleets.${cfg.FLEET_ID || '<FLEET_ID>'}.slack_operator or SLACK_OPERATOR_ID)`);
 }
 
 /** Slack's control characters in plain text: & < > (https://api.slack.com/reference/surfaces/formatting#escaping). */
@@ -208,18 +224,21 @@ export function resolveFleetId(cfg, env = process.env) {
 
 /** Which required Slack config keys are missing (config is "unconfigured" if any are). */
 export function missingSlackConfig(cfg) {
-  // The operator and FLEET_ID are optional: mentions degrade (see mentionFor) and the fleet id also
+  // The operator and FLEET_ID are optional: routing degrades (see planRoute) and the fleet id also
   // comes from the environment.
   return ['SLACK_BOT_TOKEN', 'SLACK_CHANNEL_ID'].filter((k) => !cfg[k]);
 }
 
 /** The pull request a latch is about, { repo, number } or null: its --re link when that is a PR on
- * GitHub, else an `mm-<N>` key with `repo`. (`mm-gate-<id>` without a link is searched by the sweep.) */
+ * GitHub, else an `mm-<N>` key whose link is in `repo` (a multi-repo host has one `mm-12` per repo, so
+ * a latch with no link, or a link elsewhere, never matches). `mm-gate-<id>` is searched by the sweep. */
 export function latchPr(key, latch, repo = null) {
-  const m = typeof latch?.re === 'string' ? /^https:\/\/github\.com\/([^/\s]+\/[^/\s#?]+)\/pull\/([1-9][0-9]*)(?:[/?#]|$)/.exec(latch.re) : null;
+  const re = typeof latch?.re === 'string' ? latch.re : '';
+  const m = /^https:\/\/github\.com\/([^/\s]+\/[^/\s#?]+)\/pull\/([1-9][0-9]*)(?:[/?#]|$)/.exec(re);
   if (m && REPO_RE.test(m[1])) return { repo: m[1], number: Number(m[2]) };
   const k = /^mm-([1-9][0-9]*)$/.exec(key);
-  return k && repo ? { repo, number: Number(k[1]) } : null;
+  const linkRepo = /^https:\/\/github\.com\/([^/\s]+\/[^/\s#?]+)(?:[/?#]|$)/.exec(re)?.[1];
+  return k && repo && linkRepo === repo ? { repo, number: Number(k[1]) } : null;
 }
 
 // --- incident state (one JSON file per incident key under $FLEET_STATE/notify/) ------------------
@@ -371,7 +390,7 @@ async function postFirst({ token, cfg, route, compose }) {
       if (!route.channel) {
         // The one recipient's DM failed: fall back, loudly, to the channel (engsys#238).
         warn('posting to the channel instead of the DM');
-        route = { ...route, channel: { mention: route.fallbackMention || '' }, meantFor: route.for || user };
+        route = { ...route, channel: { mention: route.fallbackMention || '' }, meantFor: route.label || user };
       }
     }
   }
@@ -393,12 +412,16 @@ async function postReplies({ token, cfg, latch, text }) {
 
 /** Resolve one open incident: one ✅ resolved reply in each of its threads, then clear the latch.
  * Returns true when resolved; on a Slack failure falls back to GitHub and keeps the latch. */
-async function resolveIncident({ stateDir, key, latch, cfg, unconfiguredReason, fallbackIssue }) {
+async function resolveIncident({ stateDir, key, latch, cfg, unconfiguredReason, fallbackIssue, why = '' }) {
   const text = '✅ resolved';
   if (unconfiguredReason) {
+    // No Slack thread to reply in: say which incident on the fallback issue, and drop the latch so a
+    // re-run (or the next sweep) does not repeat it.
     warn(`${unconfiguredReason} — Slack not posted`);
-    fallback(text, fallbackIssue);
-    return false;
+    const prefix = cfg.FLEET_ID ? `[${cfg.FLEET_ID}] ` : '';
+    fallback(`${prefix}${text}: ${key}${why ? ` (${why})` : ''}`, fallbackIssue);
+    clearIncident(stateDir, key);
+    return true;
   }
   try {
     await postReplies({ token: cfg.SLACK_BOT_TOKEN, cfg, latch, text });
@@ -419,6 +442,7 @@ function ghJson(args) {
 function sweepTarget(key, latch, repo) {
   const pr = latchPr(key, latch, repo);
   if (pr) return { pr };
+  if (/^mm-[1-9][0-9]*$/.test(key)) return { skip: repo ? `its link is not in ${repo}, so the PR is ambiguous` : 'pass --repo to match it' };
   const g = /^mm-gate-([a-z0-9][a-z0-9-]{0,78}[a-z0-9])$/.exec(key);
   if (!g) return { skip: 'not tied to a pull request' };
   if (!repo) return { skip: 'gate latch without a link: pass --repo to search for it' };
@@ -454,7 +478,7 @@ async function sweep(args, stateDir) {
     if (st.state !== 'closed') { counts.open += 1; process.stdout.write(`open     ${key}: ${repo}#${number} is still open\n`); continue; }
     const why = `${repo}#${number} ${st.merged ? 'merged' : 'closed'}`;
     if (!args.apply) { counts.would += 1; process.stdout.write(`would    ${key}: ${why}\n`); continue; }
-    if (await resolveIncident({ stateDir, key, latch, cfg, unconfiguredReason, fallbackIssue })) {
+    if (await resolveIncident({ stateDir, key, latch, cfg, unconfiguredReason, fallbackIssue, why })) {
       counts.resolved += 1;
       process.stdout.write(`resolved ${key}: ${why}\n`);
     } else {
@@ -518,7 +542,9 @@ async function main() {
       return;
     }
     // Mention once per incident (or on every post outside one); the routing is decided only here.
-    const route = planRoute({ level: args.level, forWho: args.for, noMention: args.noMention, cfg, reg: loadRegistry() });
+    const route = planRoute({
+      level: args.level, forWho: args.for, author: args.author, everyone: args.everyone, noMention: args.noMention, cfg, reg: loadRegistry(),
+    });
     if (route.warning) warn(route.warning);
     const latch = await postFirst({ token, cfg, route, compose: (m, meant) => slack(compose(m, meant)) });
     if (args.incident) {

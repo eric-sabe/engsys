@@ -869,14 +869,15 @@ Install it to the workspace, invite the bot to the escalation channel, then put 
 ```sh
 SLACK_BOT_TOKEN=xoxb-...          # the app's Bot User OAuth Token
 SLACK_CHANNEL_ID=C0XXXXXXXXX      # the escalation channel the bot was invited to
-SLACK_OPERATOR_ID=UXXXXXXXXX      # optional: this fleet's own operator (channel `action` posts; alert DMs without a registry)
+SLACK_OPERATOR_ID=UXXXXXXXXX      # optional: this host's operator, DMed when the registry names no slack_operator for FLEET_ID
 FLEET_ID=acme                     # optional: prefixes every post, e.g. "[acme] ..."; fleet.conf's FLEET_ID wins when set
 ```
 
-Only the token and channel are required. Routing (engsys#238, no channel ping): `alert` posts in the
-channel with no mention and DMs every `slack_operator` in `federation.yml` (just `SLACK_OPERATOR_ID`
-without a registry); `--for <fleet-id|github-login>` DMs that one operator; a plain `action` post
-mentions `SLACK_OPERATOR_ID` in the channel (`--no-mention` for none). Never `@here`, never a user group:
+Only the token and channel are required. Routing (engsys#238, no channel ping): `action` and `alert`
+DM this host's operator (`federation.yml` `fleets.<FLEET_ID>.slack_operator`, else `SLACK_OPERATOR_ID`);
+`--for <fleet-id|github-login>` DMs another operator; `--author <PR author>` DMs the PR's fleet operator;
+`--level alert --everyone` posts in the channel with no mention and DMs every enabled fleet's operator;
+`info` and `--no-mention` post in the channel, pinging nobody. Never `@here`, never a user group:
 `SLACK_OPERATORS_GROUP_ID` is retired and ignored when an older env file still sets it. Gate requests DM
 the operator of the fleet that authored the PR (`multi-fleet.md` § 7). To resolve incident latches whose
 PR already merged or closed: `fleet notify --sweep --repo <owner/name>` (dry run), then `--apply`.

@@ -604,9 +604,11 @@ yours to idle-merge.
 ## Escalation
 
 `mm:escalated` label + diagnosis comment on the PR, then
-`fleet notify --level action --re <PR-url> --incident mm-<PR-number> "<what's
-blocked, what you tried, what decision is needed>"` (the fleet's own Slack
-voice; falls back to a ledger-issue comment on its own if Slack isn't
+`fleet notify --level action --author <PR author login> --re <PR-url>
+--incident mm-<PR-number> "<what's blocked, what you tried, what decision is
+needed>"` (the fleet's own Slack voice, as a DM: a fleet App's PR goes to that
+fleet's operator, a human's or an unknown bot's to this host's operator,
+engsys#238; falls back to a ledger-issue comment on its own if Slack isn't
 configured or reachable, never anything you have to gate). Escalations never
 stall the queue and are never silent. **Nudge the author** too (§ Cross-session
 messaging). When the decision needed is a human approval, the escalation

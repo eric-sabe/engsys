@@ -546,9 +546,13 @@ otherwise perform on a human's say-so.
   `~/.config/acme/slack.env`), never committed, referenced from `fleet.conf` as `SLACK_ENV`.
 - **No channel ping** (operator decision 2026-10-20, engsys#238). People are reached by DM, through the
   registry's `slack_operator`; the channel is the shared record, never `@here` and never a user group.
-  - An alert every operator should see goes to the escalation channel with no mention, **and** a DM to
-    each `slack_operator` in `federation.yml`.
-  - Anything meant for one operator is a DM to that operator only (`fleet notify --for <fleet-id|login>`).
+  - An alert every operator should see (`--level alert --everyone`) goes to the escalation channel with
+    no mention, **and** a DM to each enabled fleet's `slack_operator` in `federation.yml`.
+  - Anything meant for one operator is a DM to that operator only. `action` and `alert` default to this
+    host's operator (a seat limit, a failed relaunch or an expired login is that host's problem);
+    `--for <fleet-id|login>` names someone else; `--author <PR author>` picks the PR's fleet operator
+    (a human's PR → this host's operator). A recipient with no Slack id or a refused DM falls back to
+    the channel, mentioning them when their id is known and naming them in the text.
   - A gate request DMs only the operator of the fleet that authored the PR: the author `<github_app>[bot]`
     maps to its fleet, then to `operator` (the GitHub mention on the request) and `slack_operator` (the
     DM). A human or unknown author keeps the `operators_team` mention on GitHub and a channel post that
@@ -560,14 +564,14 @@ otherwise perform on a human's say-so.
 One command, in engsys core, that every monster and job uses:
 
 ```bash
-fleet notify --level info|action|alert [--for <fleet-id|github-login>] [--no-mention] --re <github-url> "<text>"
+fleet notify --level info|action|alert [--for <fleet-id|github-login> | --author <login> | --everyone | --no-mention] --re <https-url> "<text>"
 fleet notify --sweep [--repo <owner/name>] [--apply]
 ```
 
 It posts with the fleet's bot token, prefixes the fleet id, routes by the rules above, and falls back to
 a comment on the fleet's status issue if Slack is unreachable. Monsters stop using a person's Slack
-connector for fleet posts. A `--for` recipient the registry can't resolve (or whose DM Slack refuses)
-falls back, loudly, to the channel, and the post says who it was meant for. An incident's latch stores
+connector for fleet posts. A recipient the registry can't resolve (or whose DM Slack refuses) falls
+back, loudly, to the channel, and the post says who it was meant for. `--re` must be a plain https URL. An incident's latch stores
 the DM channel and every DM thread it opened, so replies and `--resolve` land in the same threads.
 `--sweep` resolves the latches whose pull request already merged or closed (dry run unless `--apply`).
 
@@ -587,8 +591,8 @@ What to do: approve the PR on GitHub: <link>. Nothing else is blocked.
   | Level | Meaning | Mentions | Emoji |
   |---|---|---|---|
   | `info` | FYI | none | ℹ️ |
-  | `action` | a human decision is needed | a DM to the `--for` operator; else this fleet's operator in the channel, once | 👋 |
-  | `alert` | something is down or stuck | nobody in the channel; a DM to every operator, once | ⚠️ |
+  | `action` | a human decision is needed | a DM to this host's operator (or `--for` / `--author`), once | 👋 |
+  | `alert` | something is down or stuck | a DM to this host's operator; `--everyone`: the channel, unmentioned, plus a DM to every operator | ⚠️ |
 
   Emoji are informational. Never 🚨 or 🔴.
 - **One post per incident**, then thread replies, then one "resolved" reply. The escalate-once latch
