@@ -516,16 +516,22 @@ fleet's public key in the operator's memory.yml.
 - **Per-host setup.** Set `FLEET_MEMORY_SIGNING_KEY=on` in `fleet.conf` (default off). The next `fleet launch` creates
   `<fleet state>/memory-signing.key` (Ed25519, PKCS#8 PEM, mode 0600, never replaced). Only merge and maintain lines are
   told where it is (`ENGSYS_MEMORY_SIGNING_KEY_FILE`, set by the session launcher after the env file and unset on every
-  other line). If the key can't be created, launch warns and continues; memory-sync then writes nothing.
-- **Publish the public key.** `fleet memory-pubkey` prints this host's entry, for example
-  `fleet_memory_pubkeys:\n  eric: <base64>`. Add it to the fleet's reviewed `memory.yml` in a fleet PR, together with
-  that file's `VERIFY_ALLOWED_USER_FILES` hash (#230 pins the file). A fleet with no entry, or a malformed one, is
-  untrusted. A tail `refs/engsys/memory/<role>/<fleet>` must be signed by the fleet it names; `events` by any listed fleet.
+  other line). The path reaches a session only on its launch line, so a merge or maintain monster already running
+  must be restarted (`fleet restart <name>`) to get it. If the key can't be created, launch warns and continues;
+  memory-sync then writes nothing.
+- **Needs a fleet id.** Memory refs are written per fleet, so with `FLEET_ID` unset (single-fleet mode) nothing is
+  ever written, key or not.
+- **Publish the public key.** `fleet memory-pubkey` prints this host's key as a one-key list, for example
+  `fleet_memory_pubkeys:\n  eric: [<base64>]`. Add it to the fleet's list in its reviewed `memory.yml` (a fleet with
+  several hosts lists one key per host; a single string is accepted too) in a fleet PR, together with that file's
+  `VERIFY_ALLOWED_USER_FILES` hash (#230 pins the file). A fleet with no valid key is untrusted. A tail `refs/engsys/memory/<role>/<fleet>` must be signed by the fleet it names; `events` by any listed fleet.
 - **No key, no write.** memory-sync refuses `--publish` and `--tail` without a usable key (missing, a symlink, not
-  owned by the fleet user, readable by group or other, or not Ed25519) and logs why. The heartbeat carries on.
-- **Rotation** is a new key plus a memory.yml PR. Stop the monsters, move the old key aside, `fleet launch` (it creates a
-  new one), `fleet memory-pubkey`, then replace the fleet's entry in the PR. Refs signed with the old key stop verifying
-  once the entry changes; the next write re-signs the tip.
+  owned by the fleet user, readable by group or other, or not Ed25519). The heartbeat carries on, and the reason is
+  latched in `<state_dir>/memory-sync.warn` (and printed on the heartbeat's stderr when it changes) until it is fixed.
+- **Rotation** is a new key plus memory.yml PRs. Stop the monsters, move the old key aside, `fleet launch` (it creates a
+  new one), `fleet memory-pubkey`, and add the new key to the fleet's list beside the old one: both verify during the
+  overlap, and the next heartbeat re-signs each tip with the new key (an unchanged tip too). Remove the old key in a second PR once the tips are
+  re-signed.
 - **What it does not do.** The key is readable by every process running as the fleet's macOS user, the same caveat as
   the verdict key: an attended session with a shell can read it and sign. It stops anyone holding only repo
   `contents: write` (or the bot's token on another host) from writing a ref readers trust; it is not an OS boundary.

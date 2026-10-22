@@ -745,6 +745,32 @@ writes maintain FLEET_ID=alice STUB_NODE_RC=1
 writes maintain FLEET_ID=alice ENGSYS_MEMORY_SYNC=0
 [ -z "$LOG" ] && ok "  ENGSYS_MEMORY_SYNC=0: nothing runs at all" || bad "  kill switch ignored" "$LOG"
 
+echo "memory heartbeat writes: a missing key is latched in <state>/memory-sync.warn (review L1)"
+cat >"$T/nodebin/node" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *--tail*|*--publish*) [ -z "${STUB_WRITE_ERR:-}" ] || echo "$STUB_WRITE_ERR" >&2; exit "${STUB_WRITE_RC:-0}" ;;
+esac
+exit 0
+SH
+chmod +x "$T/nodebin/node"
+rm -f "$T/mstate/memory-sync.warn"
+wsync() { RC=0; OUT="$(env PATH="$T/nodebin:$PATH" ENGSYS_MEMORY_SYNC=1 FLEET_ID=alice "$@" \
+  bash -c '. "$1"; monster_memory_tail_sync maintain acme/app "$2" s1' _ "$HERE/../../../lib/monster.sh" "$T/mstate" 2>&1 >/dev/null)" || RC=$?; }
+NOKEY="memory-sync: not written, no usable signing key: signing key /k does not exist"
+wsync STUB_WRITE_ERR="$NOKEY" STUB_WRITE_RC=1
+[ "$RC" = 0 ] && ok "  a missing key never fails the heartbeat" || bad "  heartbeat failed" "rc=$RC"
+case "$OUT" in *"no usable signing key"*) ok "  …the reason reaches the heartbeat's stderr" ;; *) bad "  …reason not shown" "$OUT" ;; esac
+[ "$(cat "$T/mstate/memory-sync.warn" 2>/dev/null)" = "$NOKEY" ] && ok "  …and is kept in <state>/memory-sync.warn" || bad "  …no warn file" "$(cat "$T/mstate/memory-sync.warn" 2>/dev/null)"
+wsync STUB_WRITE_ERR="$NOKEY" STUB_WRITE_RC=1
+[ -z "$OUT" ] && ok "  …latched: the same reason is not repeated every heartbeat" || bad "  …repeated" "$OUT"
+wsync STUB_WRITE_RC=1
+[ ! -e "$T/mstate/memory-sync.warn" ] && ok "  …cleared once the writes run without a reason (a standby without the baton says nothing)" || bad "  …warn file kept" "$(cat "$T/mstate/memory-sync.warn")"
+wsync STUB_WRITE_ERR="memory-sync: refused: --tail needs --fleet <id>" STUB_WRITE_RC=2
+has_line_out() { case "$OUT" in *"$1"*) ok "$2" ;; *) bad "$2" "$OUT" ;; esac; }
+has_line_out "memory-sync: refused" "  a refused target is surfaced the same way"
+rm -f "$T/mstate/memory-sync.warn"
+
 echo "monster-bus.test: $pass passed, $fail failed"
 [ "$fail" = 0 ]
 

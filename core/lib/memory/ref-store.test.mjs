@@ -416,6 +416,70 @@ describe('ref-store (#130)', () => {
       assert.equal((await verifyMemoryRefTip('/repo', { ref: TAIL, parent: null, sigText: signed.tip.sigText, pubkeys })).reason, 'missing_input');
     });
 
+    it('an unchanged write is a no-op: no commit, no fence call, no API write (review W1)', async () => {
+      const fake = fakeGitApi({ repo: 'owner/repo' });
+      const s = createMemoryRefStore({ repo: 'owner/repo', client: fake, sleep: async () => {} });
+      const signer = signerFor(ericKey, 'eric');
+      let fenced = 0;
+      const beforeCas = async () => { fenced++; return { held: true }; };
+      const first = await s.writeEvents({ ref: TAIL, events: [ev('a')], signer, beforeCas, replace: true });
+      assert.equal(first.noop, false);
+      const writes = [];
+      for (const m of ['createBlob', 'createTree', 'createCommit', 'cas']) {
+        const real = s.gitData[m];
+        s.gitData[m] = async (...a) => { writes.push(m); return real(...a); };
+      }
+      for (let i = 0; i < 3; i++) {
+        const again = await s.writeEvents({ ref: TAIL, events: [ev('a')], signer, beforeCas, replace: true });
+        assert.equal(again.ok, true);
+        assert.equal(again.noop, true);
+        assert.equal(again.sha, first.sha);
+      }
+      assert.deepEqual(writes, [], 'no Git Data write at all');
+      assert.equal(fenced, 1, 'the fence ran only for the one real write');
+      const merged = await s.writeEvents({ ref: TAIL, events: [ev('a')], signer, beforeCas });
+      assert.equal(merged.noop, true, 'a merge that adds nothing is a no-op too');
+      const { privateKey: rotatedKey } = crypto.generateKeyPairSync('ed25519');
+      const rotated = await s.writeEvents({ ref: TAIL, events: [ev('a')], signer: signerFor(rotatedKey, 'eric'), beforeCas, replace: true });
+      assert.equal(rotated.noop, false, 'after a key rotation the unchanged tip is re-signed with the new key, not skipped');
+      const rewrite = await s.writeEvents({ ref: TAIL, events: [ev('a')], signer: signerFor(markKey, 'mark-fleet'), beforeCas, replace: true });
+      assert.equal(rewrite.noop, false, 'content another fleet signed is re-signed, not skipped');
+      const changed = await s.writeEvents({ ref: TAIL, events: [ev('b', { updated_at: '2026-07-02T00:00:00Z' })], signer, beforeCas, replace: true });
+      assert.equal(changed.noop, false);
+      const tip = await s.readEvents({ ref: TAIL });
+      assert.deepEqual(tip.events.map((e) => e.k), ['b'], 'replace mirrors exactly the events given (the tail ref holds the current tail only)');
+    });
+
+    it('a lost CAS round re-signs over the new parent and re-asks the fence (review L7)', async () => {
+      const fake = fakeGitApi({ repo: 'owner/repo' });
+      const s = createMemoryRefStore({ repo: 'owner/repo', client: fake, sleep: async () => {} });
+      const rival = createMemoryRefStore({ repo: 'owner/repo', client: fake, sleep: async () => {} });
+      const seed = await s.writeEvents({ ref: TAIL, events: [ev('a')], signer: signerFor(ericKey, 'eric') });
+      const signedParents = [];
+      const base = signerFor(ericKey, 'eric');
+      const signer = (args) => { signedParents.push(args.parent); return base(args); };
+      let fenced = 0;
+      let rivalSha = null;
+      const beforeCas = async () => {
+        fenced++;
+        if (fenced === 1) {
+          // a concurrent writer moves the ref between our commit and our CAS: round 1 must lose
+          const r = await rival.writeEvents({ ref: TAIL, events: [ev('r', { updated_at: '2026-07-03T00:00:00Z' })], signer: signerFor(ericKey, 'eric') });
+          rivalSha = r.sha;
+        }
+        return { held: true };
+      };
+      const res = await s.writeEvents({ ref: TAIL, events: [ev('b', { updated_at: '2026-07-02T00:00:00Z' })], signer, beforeCas });
+      assert.equal(res.ok, true);
+      assert.equal(res.rounds, 2);
+      assert.equal(fenced, 2, 'the fence is asked again for the retried update');
+      assert.deepEqual(signedParents, [seed.sha, rivalSha], 'round 2 signs over the rival\'s commit, not the stale tip');
+      const tip = await s.readEvents({ ref: TAIL });
+      assert.deepEqual(tip.parents, [rivalSha]);
+      assert.equal((await verifyMemoryRefTip('/repo', { ref: TAIL, parent: tip.parents[0], content: tip.content, sigText: tip.sigText, pubkeys, resolveSha: reviewed, exec: okExec })).ok, true);
+      assert.deepEqual(tip.events.map((e) => e.k).sort(), ['a', 'b', 'r'], 'the rival\'s event is merged, not clobbered');
+    });
+
     it('a signer that throws aborts the write with nothing moved', async () => {
       const s = createMemoryRefStore({ repo: 'owner/repo', client: fakeGitApi({ repo: 'owner/repo' }), sleep: async () => {} });
       const w = await s.writeEvents({ ref: TAIL, events: [ev('a')], signer: () => { throw new Error('no key'); } });

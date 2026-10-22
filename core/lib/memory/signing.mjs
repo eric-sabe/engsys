@@ -6,7 +6,7 @@
 // committed by `web-flow` (GitHub signs them), with the App's bot only as the AUTHOR, which GitHub derives from
 // an email address the caller chooses. So the publisher signs the content itself, with a key only its fleet's
 // monsters are handed, and a reader verifies against the public keys in the operator's reviewed, hash-pinned
-// memory.yml (`fleet_memory_pubkeys`).
+// memory.yml (`fleet_memory_pubkeys`: one key or a list of keys per fleet).
 //
 // WHAT IS SIGNED. One payload binds the signature to everything that makes a tip what it is, so a signature can't
 // be replayed onto another ref, another parent or other content:
@@ -23,7 +23,7 @@
 //
 // Usage:
 //   signing.mjs keygen --key-file PATH                 create PATH (Ed25519 private key, PKCS#8 PEM, 0600; never overwrites)
-//   signing.mjs pubkey --key-file PATH [--fleet ID]    print this key's public half as a memory.yml entry
+//   signing.mjs pubkey --key-file PATH [--fleet ID]    print this key's public half as a memory.yml entry (a one-key list)
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -138,8 +138,10 @@ export function parsePublicKeyB64(value) {
 }
 
 /**
- * `config.fleet_memory_pubkeys` as Map<fleet, KeyObject>. An entry with a bad fleet name or a malformed key is
- * dropped and logged, never guessed at; anything that isn't a mapping is an empty map (nothing trusted).
+ * `config.fleet_memory_pubkeys` as Map<fleet, KeyObject[]>. A fleet's value is one key or a list of keys (one per
+ * host, and an overlap window while a key rotates); a ref verifies against any of its fleet's keys. A bad fleet name
+ * or a malformed key is dropped and logged, never guessed at (a malformed key in a list drops only that key); a fleet
+ * left with no valid key is absent, and anything that isn't a mapping is an empty map (nothing trusted).
  */
 export function resolveFleetPubkeys(config, { log = () => {} } = {}) {
   const raw = config?.fleet_memory_pubkeys;
@@ -147,9 +149,13 @@ export function resolveFleetPubkeys(config, { log = () => {} } = {}) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
   for (const [fleet, value] of Object.entries(raw)) {
     if (!FLEET_ID_RE.test(fleet)) { log(`fleet_memory_pubkeys: ignoring invalid fleet name ${JSON.stringify(fleet)}`); continue; }
-    const key = parsePublicKeyB64(value);
-    if (!key) { log(`fleet_memory_pubkeys: ignoring malformed key for fleet ${fleet}`); continue; }
-    out.set(fleet, key);
+    const keys = [];
+    for (const v of Array.isArray(value) ? value : [value]) {
+      const key = parsePublicKeyB64(v);
+      if (key) keys.push(key);
+      else log(`fleet_memory_pubkeys: ignoring malformed key for fleet ${fleet}`);
+    }
+    if (keys.length) out.set(fleet, keys);
   }
   return out;
 }
@@ -198,10 +204,12 @@ export function verifyTipSignature({ ref, parent, content, sigText, pubkeys }) {
     if (line.content !== digest) return { ok: false, reason: 'content_mismatch' };
     const namedFleet = tailRefFleet(ref);
     if (namedFleet !== null && namedFleet !== line.fleet) return { ok: false, reason: 'fleet_mismatch' };
-    const key = pubkeys instanceof Map ? pubkeys.get(line.fleet) : null;
-    if (!key) return { ok: false, reason: 'unknown_fleet' };
+    const entry = pubkeys instanceof Map ? pubkeys.get(line.fleet) : null;
+    const keys = Array.isArray(entry) ? entry : entry ? [entry] : [];
+    if (!keys.length) return { ok: false, reason: 'unknown_fleet' };
     const payload = signingPayload({ fleet: line.fleet, ref, parent: wantParent, content: digest });
-    const ok = crypto.verify(null, payload, key, Buffer.from(line.sig, 'base64'));
+    const sig = Buffer.from(line.sig, 'base64');
+    const ok = keys.some((key) => crypto.verify(null, payload, key, sig));
     return ok ? { ok: true, fleet: line.fleet } : { ok: false, reason: 'bad_signature' };
   } catch {
     return { ok: false, reason: 'verify_error' };
@@ -231,7 +239,8 @@ export function main(argv = process.argv.slice(2), { out = process.stdout, err =
     const pub = publicKeyB64(readSigningKeyFile(file));
     const fleet = values.fleet;
     if (fleet && !FLEET_ID_RE.test(fleet)) { err.write(`signing: invalid --fleet ${JSON.stringify(fleet)}\n`); return 2; }
-    out.write(fleet ? `fleet_memory_pubkeys:\n  ${fleet}: ${pub}\n` : `${pub}\n`);
+    // A list, so a fleet with several hosts (or a key mid-rotation) adds this line's key to its existing list.
+    out.write(fleet ? `fleet_memory_pubkeys:\n  ${fleet}: [${pub}]\n` : `${pub}\n`);
     return 0;
   } catch (e) {
     err.write(`signing: ${e.message}\n`);

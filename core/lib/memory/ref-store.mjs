@@ -290,6 +290,20 @@ function appendSecretQuarantine(cacheDir, entry) {
 // Git Data API CAS Ref Store
 // ---------------------------------------------------------------------------
 
+/** Is `tip` already what a write of `content` would produce? Unsigned writes: the tip carries no signature
+ * either. Signed writes: Ed25519 is deterministic, so re-signing this content over this ref and the tip's own parent
+ * must reproduce the tip's events.sig byte for byte — the same fleet AND the same key (after a key rotation the tip
+ * is re-signed, not skipped). Whether a signature verifies is the reader's check, not this one. */
+async function tipIsCurrent(tip, fullRef, content, signer) {
+  if (!signer) return tip.sigText == null;
+  if (typeof tip.sigText !== 'string') return false;
+  try {
+    return (await signer({ ref: fullRef, parent: tip.parents?.[0] ?? null, content })) === tip.sigText;
+  } catch {
+    return false;
+  }
+}
+
 export function createMemoryRefStore({
   repo,
   api,
@@ -388,6 +402,8 @@ export function createMemoryRefStore({
     // round with the exact events.jsonl about to be written and the parent it will sit on; its return is stored
     // next to it as `events.sig` (core/lib/memory/signing.mjs signTip). Throwing aborts the write.
     signer = null,
+    // F5: `true` writes exactly `events` (a mirror, e.g. a journal tail) instead of merging them into the tip's.
+    replace = false,
   } = {}) {
     const fullRef = validateMemoryRef(ref);
     if (!Array.isArray(events)) {
@@ -440,7 +456,7 @@ export function createMemoryRefStore({
         return { ok: false, error: tip.error, rejected };
       }
 
-      const merged = mergeEvents(tip.events, cleanEvents);
+      const merged = replace ? mergeEvents([], cleanEvents) : mergeEvents(tip.events, cleanEvents);
       const shouldCompact =
         Boolean(forceCompact) ||
         tip.rawLineCount > maxEvents ||
@@ -451,6 +467,12 @@ export function createMemoryRefStore({
         : merged;
 
       const jsonl = formatEventsJsonl(finalEvents);
+      // Nothing changed: the tip already holds exactly this content, signed (when a signer is given) over this ref
+      // and its own parent with this very key. No commit, no fence read, no API write — a heartbeat with nothing new
+      // costs one read (review W1).
+      if (tip.sha && jsonl === tip.content && (await tipIsCurrent(tip, fullRef, jsonl, signer))) {
+        return { ok: true, noop: true, sha: tip.sha, count: finalEvents.length, compacted: false, rounds: round, rejected };
+      }
       const blobRes = await gitData.createBlob(jsonl);
       if (blobRes.failure) {
         return { ok: false, error: blobRes.failure, rejected };

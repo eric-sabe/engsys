@@ -1588,6 +1588,8 @@ export async function runMemorySync({
       cacheDir,
       beforeCas: writeGate,
       signer,
+      // The tail ref mirrors the newest TAIL_MAX_EVENTS journal lines: it is replaced, never merged into.
+      replace: true,
     });
     return {
       ok: Boolean(tailResult.ok),

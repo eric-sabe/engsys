@@ -22,6 +22,7 @@ import {
   signTip,
   verifyTipSignature,
 } from './signing.mjs';
+import { parseYaml } from '../yaml.js';
 
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
@@ -157,6 +158,22 @@ describe('public keys (fleet_memory_pubkeys)', () => {
     assert.equal(parsePublicKeyB64(undefined), null);
   });
 
+  it('a fleet may list several keys (one per host, or a rotation overlap): a ref verifies against any of them (review L5)', () => {
+    const host2 = keyPair();
+    const map = resolveFleetPubkeys(parseYaml(`fleet_memory_pubkeys:\n  eric: [${ERIC.pub}, ${host2.pub}]\n  mark-fleet:\n    - ${MARK.pub}\n    - not-a-key\n`), { log: () => {} });
+    assert.equal(map.get('eric').length, 2);
+    assert.equal(map.get('mark-fleet').length, 1, 'a malformed key in a list drops only that key');
+    for (const priv of [ERIC.privateKey, host2.privateKey]) {
+      const sigText = signTip({ privateKey: priv, fleet: 'eric', ref: TAIL, parent: PARENT, content: CONTENT });
+      assert.deepEqual(verifyTipSignature({ ref: TAIL, parent: PARENT, content: CONTENT, sigText, pubkeys: map }), { ok: true, fleet: 'eric' });
+    }
+    const markOnly = resolveFleetPubkeys({ fleet_memory_pubkeys: { eric: ['bad', 'worse'] } });
+    assert.equal(markOnly.has('eric'), false, 'a fleet left with no valid key is absent (untrusted)');
+    const stranger = keyPair();
+    const sigText = signTip({ privateKey: stranger.privateKey, fleet: 'eric', ref: TAIL, parent: PARENT, content: CONTENT });
+    assert.equal(verifyTipSignature({ ref: TAIL, parent: PARENT, content: CONTENT, sigText, pubkeys: map }).reason, 'bad_signature');
+  });
+
   it('a value that is not a mapping trusts nobody', () => {
     for (const v of [undefined, null, 'eric: x', ['eric'], 7]) assert.equal(resolveFleetPubkeys({ fleet_memory_pubkeys: v }).size, 0);
   });
@@ -206,9 +223,8 @@ describe('the private key file', () => {
     const io = { out: { write: (s) => out.push(s) }, err: { write: () => {} } };
     assert.equal(main(['pubkey', '--key-file', file, '--fleet', 'eric'], io), 0);
     const text = out.join('');
-    const m = /^fleet_memory_pubkeys:\n {2}eric: (\S+)\n$/.exec(text);
-    assert.ok(m, text);
-    const map = resolveFleetPubkeys({ fleet_memory_pubkeys: { eric: m[1] } });
+    assert.match(text, /^fleet_memory_pubkeys:\n {2}eric: \[[A-Za-z0-9+/]{43}=\]\n$/, 'a one-key list, ready to merge into the fleet\'s list');
+    const map = resolveFleetPubkeys(parseYaml(text));
     const sigText = signTip({ privateKey: readSigningKeyFile(file), fleet: 'eric', ref: TAIL, parent: PARENT, content: CONTENT });
     assert.equal(verifyTipSignature({ ref: TAIL, parent: PARENT, content: CONTENT, sigText, pubkeys: map }).ok, true);
     assert.equal(main(['pubkey', '--key-file', file, '--fleet', '../x'], io), 2);

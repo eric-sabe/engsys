@@ -1264,6 +1264,28 @@ describe('memory-sync writers: role split and the baton fence (F5)', () => {
     }
   });
 
+  it('heartbeats with nothing new write nothing: repeated tail and publish runs are no-ops with no fence call (review W1)', async () => {
+    const dir = tmp('memory-sync-noop-');
+    try {
+      fs.writeFileSync(path.join(dir, 'delta.jsonl'), delta.map((e) => JSON.stringify(e)).join('\n') + '\n');
+      fs.writeFileSync(path.join(dir, 'journal-2026-07.jsonl'), JSON.stringify({ ts: '2026-07-01T10:00:00Z', event: 'merged', pr: 8 }) + '\n');
+      const refStore = store();
+      let fenced = 0;
+      const fence = async () => { fenced++; return { held: true }; };
+      for (let i = 0; i < 3; i++) {
+        assert.equal((await run(dir, { mode: 'tail', role: 'merge', stateDir: dir, refStore, fence })).ok, true);
+        assert.equal((await run(dir, { mode: 'publish', role: 'maintain', stateDir: dir, refStore, fence })).ok, true);
+      }
+      assert.equal(fenced, 2, 'one real write per ref; the other four runs never reached the fence');
+      // the tail ref mirrors the journal tail: a rotated journal replaces it rather than growing it
+      fs.writeFileSync(path.join(dir, 'journal-2026-07.jsonl'), JSON.stringify({ ts: '2026-07-02T10:00:00Z', event: 'bounced', pr: 9 }) + '\n');
+      await run(dir, { mode: 'tail', role: 'merge', stateDir: dir, refStore, fence });
+      assert.deepEqual((await refStore.readEvents({ ref: 'refs/engsys/memory/merge/eric' })).events.map((e) => e.text), ['bounced']);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('the tail is capped at the newest TAIL_MAX_EVENTS lines', () => {
     const dir = tmp('memory-sync-tail-cap-');
     try {

@@ -221,11 +221,15 @@ Fold the text with `normalizeUntrusted()` first; the strip uses `\p{Default_Igno
 - `--init`: walk back by recency until any cap is reached: 500 commits, 250 merged PRs, 250 issues
   (plus their comments and threads, about 3–4k events in a busy repo).
 - `--delta`: since the cursors, into the local `delta.jsonl`. Needs no write access.
-- `--publish --role maintain --state-dir DIR [--session NAME]`: merge the delta into
-  `refs/engsys/memory/events` via CAS. Run only by the single writer (§9); refused for any other role.
-- `--tail --role merge|maintain --fleet ID --state-dir DIR [--session NAME]`: mirror this session's
-  journal tail to its own `refs/engsys/memory/<role>/<fleet>` (§9). No GitHub fetch; the delta and
-  cursors are left alone.
+- `--publish --role maintain --fleet ID --state-dir DIR [--session NAME]`: merge the delta into
+  `refs/engsys/memory/events` via CAS. Run only by the single writer (§9), from the maintain
+  heartbeat; refused for any other role, and skipped without the fleet signing key. Not a manual step.
+- `--tail --role merge|maintain --fleet ID --state-dir DIR [--session NAME]`: replace this session's
+  `refs/engsys/memory/<role>/<fleet>` with its current journal tail (§9). No GitHub fetch; the delta
+  and cursors are left alone.
+- A write whose content the tip already holds, signed with this same key over this ref and the
+  tip's own parent (Ed25519 is deterministic, so re-signing must reproduce `events.sig` exactly), is
+  a no-op: no commit, no fence read, no API write. After a key rotation the tip is re-signed.
 
 ## 8. Harvest: `core/scripts/harvest-findings.mjs`
 
@@ -255,12 +259,19 @@ Fold the text with `normalizeUntrusted()` first; the strip uses `\p{Default_Igno
     lapse; a write that still overlaps a new holder's is a CAS merge by key, never a clobber.
   - Single-writer is a writer-side discipline, not a GitHub control: anyone with `contents: write`
     can force-push these refs, so the boundary is what readers verify (below).
-- **Tail content:** only the state dir's `journal-YYYY-MM.jsonl` files (regular files; a symlink is
-  never followed), the newest 200 lines, as structured `kind: journal` events: the event token
+- **Tail content:** only the state dir's `journal-YYYY-MM.jsonl` files (regular files, opened
+  with `O_NOFOLLOW`; a symlink is never followed), the newest 200 lines, as structured `kind: journal` events: the event token
   (`^[a-z][a-z0-9_.:-]{0,39}$`, else the line is skipped), its timestamp and a PR/issue number. No
-  other journal field (actor, notes, free text) is carried.
+  other journal field (actor, notes, free text) is carried. The tail ref is **replaced** on each
+  write, never merged into, so it holds at most those 200 events (the current tail), not a growing
+  history up to `max_events`.
 - **Heartbeats are skip-never-block:** a refused or failed write never fails a heartbeat, and
-  `ENGSYS_MEMORY_SYNC=0` turns every sync step off, writes included.
+  `ENGSYS_MEMORY_SYNC=0` turns every sync step off, writes included. A reason the operator must fix
+  (no usable signing key, a refused target) is latched in `<state_dir>/memory-sync.warn` and printed
+  on the heartbeat's stderr when it changes; the file is removed once the writes run without one.
+  Not holding the baton (a standby session) is normal and says nothing.
+- **Single-fleet mode writes nothing:** the writes need a fleet id, so with `FLEET_ID` unset the
+  heartbeat runs only the local `--delta` and no memory ref is ever written.
 - **Fleet signatures bind a ref to a fleet** (F5, operator decision: option A). GitHub's metadata
   can't: commits made through the Git Data API are committed by `web-flow` (GitHub signs them),
   with the App's bot only as the email-derived author (checked on the live baton refs). So every
@@ -272,7 +283,7 @@ Fold the text with `normalizeUntrusted()` first; the strip uses `\p{Default_Igno
   without a usable key (skipped `no_signing_key`, logged).
 - **Readers verify the signature** (`verifyMemoryRefTip`): ref, parent and content digest are
   recomputed from what was read, and the signature is checked against `fleet_memory_pubkeys` (§10). A
-  `<role>/<fleet>` tail must be signed by the fleet it names, `events` by any listed fleet. No entry,
+  `<role>/<fleet>` tail must be signed by the fleet it names (any of its keys), `events` by any listed fleet. No entry,
   a malformed key, a missing or malformed line, or a bad signature = untrusted. The commit's
   committer/author is not a trust input at all.
 - **Still open:** the consumer wiring (staged fetch, so compaction doesn't break non-forced fetches)
@@ -323,13 +334,15 @@ high_fanout_globs: []                   # files keyed by symbol instead of path
 brief_bytes: 2048
 max_events: 20000
 publish_role: maintain                  # must stay maintain: any other value refuses --publish (§9)
-fleet_memory_pubkeys: {}                # {<fleet>: <base64 raw 32-byte Ed25519 public key>}; fleet config dir ONLY (§9)
+fleet_memory_pubkeys: {}                # {<fleet>: <key> | [<key>, …]}, base64 raw 32-byte Ed25519; fleet config dir ONLY (§9)
 ```
 
 `fleet_memory_pubkeys` (F5) is read only from the fleet config dir's `memory.yml`, the operator's
-reviewed, hash-pinned copy, never from the plugin or repo config. Each value must be exactly 32 bytes
-of standard base64 (what `fleet memory-pubkey` prints); a malformed entry is dropped and logged, and a
-fleet with no entry is untrusted.
+reviewed, hash-pinned copy, never from the plugin or repo config. A fleet's value is one key or a list
+of keys (`eric: [k1, k2]`: one per host, and an overlap while a key rotates); a ref verifies against
+any of its fleet's keys. Each key must be exactly 32 bytes of standard base64 (what
+`fleet memory-pubkey` prints, as a one-key list); a malformed key is dropped and logged, and a fleet
+with no valid key is untrusted.
 
 ### Commit operator trust, and the real boundary it rests on
 
@@ -381,7 +394,8 @@ is just the fleet config (if any) over the defaults.
 3. **Propose** markers and bot user IDs found in recent PRs. The operator confirms them; nothing is
    trusted automatically, and Dependabot and `github-actions` are never proposed.
 4. Recommend required human review on the Class A paths.
-5. Run `memory-sync --init` (and `--publish` if this host is the writer).
+5. Run `memory-sync --init`. Publishing is not a manual step: the maintain heartbeat publishes
+   (§9), and only with a fleet id and the fleet signing key.
 
 ## 12. Verified runtime facts (Claude Code 2.1.285)
 

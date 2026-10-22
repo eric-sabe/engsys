@@ -561,11 +561,25 @@ monster_memory_tail_sync() {
     rm -f "$state_dir/memory-sync-capped.warn" 2>/dev/null || true
   fi
   if [ -n "$state_dir" ] && [ -n "${FLEET_ID:-}" ]; then
-    node "$mem_script" --tail --repo "$repo" --role "$role" --fleet "$FLEET_ID" --state-dir "$state_dir" \
-      ${session:+--session "$session"} >/dev/null 2>&1 || true
+    # A write that can't happen for a reason the operator must fix (no usable signing key, a refused target) says
+    # so on memory-sync's stderr. That reason is latched in <state_dir>/memory-sync.warn and reaches this heartbeat's
+    # stderr only when it changes; it is removed once the writes run without one. Not holding the baton is normal
+    # for a standby session and says nothing.
+    local werr wwarn wfile="$state_dir/memory-sync.warn"
+    werr="$(node "$mem_script" --tail --repo "$repo" --role "$role" --fleet "$FLEET_ID" --state-dir "$state_dir" \
+      ${session:+--session "$session"} 2>&1 >/dev/null || true)"
     if [ "$role" = maintain ]; then
-      node "$mem_script" --publish --repo "$repo" --role maintain --fleet "$FLEET_ID" --state-dir "$state_dir" \
-        ${session:+--session "$session"} >/dev/null 2>&1 || true
+      werr+=$'\n'"$(node "$mem_script" --publish --repo "$repo" --role maintain --fleet "$FLEET_ID" --state-dir "$state_dir" \
+        ${session:+--session "$session"} 2>&1 >/dev/null || true)"
+    fi
+    wwarn="$(printf '%s\n' "$werr" | grep -E '^memory-sync: (refused|not written)' | tail -n 1 || true)"
+    if [ -n "$wwarn" ]; then
+      if [ "$(cat "$wfile" 2>/dev/null || true)" != "$wwarn" ]; then
+        printf '%s\n' "$wwarn" >&2
+        [ ! -d "$state_dir" ] || printf '%s\n' "$wwarn" >"$wfile" 2>/dev/null || true
+      fi
+    else
+      rm -f "$wfile" 2>/dev/null || true
     fi
   fi
   return 0
