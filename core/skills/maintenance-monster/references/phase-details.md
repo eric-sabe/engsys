@@ -514,6 +514,51 @@ included: it answers a request; it fixes nothing. Removing it never lets a
 PR through on its own: the merge monster's preflight still needs the signed
 verdict, and it re-runs preflight when the label goes (engsys#241).
 
+## Findings harvest
+
+Off by default. The config's `findings_harvest:` block (config.example.yml) turns it on:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `false` | run the harvest at all |
+| `cadence_days` | `7` | one run per window of this many days |
+| `lookback_days` | `cadence_days` | merged PRs from this many days back are mined |
+| `apply` | `false` | open the draft docs PR; without it a run only writes the proposal locally |
+| `repo` | top-level `repo:` | the repo whose PRs are mined and where the PR opens |
+| `markers` | none | review-findings markers on top of the harvester's default `<!-- *-findings -->` / `<!-- *-review -->` |
+| `min_recurrence` | `2` | how many distinct PRs a finding family needs before it is proposed |
+| `trusted_bot_ids`, `operator_ids` | none | numeric GitHub account ids added to the trust lists from `memory.yml` |
+
+**Cadence and latch.** `mnt-tick.sh` (with `--config`) asks `mnt-harvest.sh due` every tick: read-only, no network.
+While the window is due it prints `HARVEST_DUE window=<date> since=<date>`. `mnt-harvest.sh run` latches the window in
+`<state_dir>/harvest/last.json` whatever it found (no family, a dry proposal, a PR), so a window runs once. A failed
+run (`HARVEST_ERROR`) is not latched as done: it is offered again after a six-hour back-off.
+
+**Trust.** The harvester refuses to run without a trust allowlist (docs/memory-spec.md §10): `trusted_bot_user_ids`
+and `operator_user_ids` from `memory.yml` (the repo's committed copy at a reviewed sha, the fleet config dir's copy
+through `CLAUDE_CONFIG_DIR`), plus the block's own `trusted_bot_ids` / `operator_ids`. Findings from anyone else are
+not mined. Every title it proposes is still untrusted text: the proposed lesson files say so, and so does the PR.
+
+**The write.** With `apply: true` and at least one family, `mnt-harvest.sh run`:
+
+1. creates a throwaway worktree at `origin/<default_branch>` under `<state_dir>/harvest/<window>/` and writes one
+   `docs/agent-lessons/<slug>.md` per family (a slug that exists gets a `-2` suffix: nothing is overwritten), commits;
+2. pushes it, fenced: `mnt-act.sh guard --new-branch -- git -C <worktree> push origin HEAD:refs/heads/agent/memory-harvest-<window>`;
+3. opens the PR, fenced: `gh pr create --draft`, base the default branch, body = the proposal;
+4. posts the handoff, fenced, as a comment: `<!-- mm-handoff -->` with `migration: false`, a non-empty
+   `operator_gate` (a human approves the merge after reviewing every lesson), and `session:` (qualified with
+   `FLEET_ID` when set);
+5. labels it `mm:ready`, fenced; then removes the worktree.
+
+A refused fence stops the run there (`HARVEST_ERROR`), and nothing after it is attempted. A re-run in the same window
+finds the PR by its branch and writes nothing; a run that stopped after the push reuses the pushed branch. The PR is
+docs-only, so Merge Monster's docs lane carries it, and the operator gate keeps a human in front of the merge. This
+session never merges it, pushes to it again, edits its handoff, or opens a second one for the window.
+
+**Dry.** Without `apply`, the proposal (`proposal.md`) and the raw families (`families.json`) stay in
+`<state_dir>/harvest/<window>/`; the ledger gets one comment with the count and the path. An operator who wants it
+opened can run the harvester by hand (`harvest-findings.mjs run … --apply`) or set `apply: true`.
+
 ## Expert routing
 
 | Category                                     | Agent      |

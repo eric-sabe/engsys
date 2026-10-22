@@ -85,6 +85,7 @@ const SUITES = [
   ["bash core/scripts/worker-package.test.sh"],
   ["bash core/skills/maintenance-monster/scripts/mnt-fp.test.sh"],
   ["node --test core/skills/maintenance-monster/scripts/mnt-security-review.test.mjs"],
+  ["node --test core/skills/maintenance-monster/scripts/mnt-harvest.test.mjs"],
   ["bash core/skills/merge-monster/scripts/mm-baton.test.sh"],
   ["bash core/skills/merge-monster/scripts/mm-preflight.test.sh"],
   ["node --test core/skills/merge-monster/scripts/mm-security-stale.test.mjs"],

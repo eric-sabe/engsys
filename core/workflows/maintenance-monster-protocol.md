@@ -43,6 +43,13 @@ the fleet config dir's copy) — check it, not this doc.
   — it **never merges**. The `<ns>-mm` session pilots those PRs through ready → CI →
   merge exactly like any other hand-off.
 
+- **The findings harvest (any phase, off by default):** with `findings_harvest:` enabled in its config it mines
+  recurring review-finding families from merged PRs once per window (weekly by default). With `apply: true` it opens
+  **one draft docs PR** per window (an `agent/memory-harvest-<window>` branch, `docs/agent-lessons/` files only),
+  posts an `mm-handoff` whose `operator_gate` is set, and labels it **`mm:ready`**: Merge Monster pilots it, and a
+  human approves the merge after reviewing every proposed lesson. This is the one PR it may open in Phase 1, and it
+  is authorized by that config key alone. It never merges it. Without `apply`, the proposal stays in its state dir.
+
 Producer/consumer, no baton fight: each session owns its own ledger, and
 Maintenance Monster respects Merge Monster's merge baton by definition — it
 never touches the merge step.
