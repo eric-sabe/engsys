@@ -320,6 +320,32 @@ describe('scope project Class A to an allowlisted repo (#145)', () => {
 		}
 	});
 
+	test('engsys#268 (Nyx LOW): the read uses the validated realpath — a symlink swapped in after the check is not followed', () => {
+		const repo = makeRepo({});
+		const outside = mkdtempSync(join(tmpdir(), 'memory-idx-268-toctou-'));
+		const elsewhere = mkdtempSync(join(tmpdir(), 'memory-idx-268-cwd2-'));
+		try {
+			writeFileSync(join(repo, 'evil.yml'), 'repos: [attacker/repo]\n');
+			writeFileSync(join(outside, 'good.yml'), 'repos: [fleet/own]\n');
+			const link = join(outside, 'link.yml');
+			symlinkSync(join(outside, 'good.yml'), link);
+			const opts = { repoRoot: repo, cwd: elsewhere, log: () => {} };
+			// the raw path is a symlink that passes the check; it is repointed into the repo before the read
+			const swapped = readOperatorMemoryConfig({ ENGSYS_MEMORY_CONFIG: link, HOME: elsewhere }, {
+				...opts, afterCheck: () => { rmSync(link); symlinkSync(join(repo, 'evil.yml'), link); },
+			});
+			assert.deepEqual(swapped, { repos: ['fleet/own'] }, 'the validated realpath (good.yml) is read, not the repointed link');
+			// the validated file itself is replaced by a symlink into the repo: O_NOFOLLOW refuses it (nothing read)
+			const real = join(outside, 'good.yml');
+			const refused = readOperatorMemoryConfig({ ENGSYS_MEMORY_CONFIG: real, HOME: elsewhere }, {
+				...opts, afterCheck: () => { rmSync(real); symlinkSync(join(repo, 'evil.yml'), real); },
+			});
+			assert.equal(refused, null, 'never the repo file');
+		} finally {
+			for (const d of [repo, outside, elsewhere]) rmSync(d, { recursive: true, force: true });
+		}
+	});
+
 	test('engsys#268: the allowlist ignores an in-repo ENGSYS_MEMORY_CONFIG — a repo can\'t allowlist itself through it', () => {
 		const repo = makeRepo({ remoteUrl: 'https://github.com/attacker/self.git' });
 		const prev = { ENGSYS_MEMORY_CONFIG: process.env.ENGSYS_MEMORY_CONFIG, CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR };

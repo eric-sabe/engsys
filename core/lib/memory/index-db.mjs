@@ -635,7 +635,10 @@ function realpathLoose(file) {
 
 /** The repo checkout root (any worktree of the repos holding `dirs`) that `file` resolves inside, or null. */
 export function checkoutContaining(file, dirs) {
-	const real = realpathLoose(file);
+	return checkoutContainingReal(realpathLoose(file), dirs);
+}
+
+function checkoutContainingReal(real, dirs) {
 	for (const dir of dirs) {
 		for (const root of repoCheckoutRoots(dir)) {
 			if (real === root || real.startsWith(root + path.sep)) return root;
@@ -662,29 +665,56 @@ export function checkoutContaining(file, dirs) {
  * `ENGSYS_MEMORY_REPOS` are separate sources, layered by each caller as before. Returns the path (it
  * may not exist) or null. Never throws.
  */
-export function resolveMemoryConfigPath(env = process.env, { repoRoot = null, cwd = process.cwd(), log = defaultConfigLog } = {}) {
+export function resolveMemoryConfigPath(env = process.env, opts = {}) {
+	return resolveMemoryConfig(env, opts).path;
+}
+
+/** `resolveMemoryConfigPath` plus the path to READ: for an accepted ENGSYS_MEMORY_CONFIG, the realpath that the
+ * in-repo check validated (engsys#268, Nyx LOW: reading the raw path again would let a symlink swapped in between
+ * the check and the read point it into a checkout); for the config-dir sources, the path itself. */
+function resolveMemoryConfig(env, { repoRoot = null, cwd = process.cwd(), log = defaultConfigLog } = {}) {
 	if (env.ENGSYS_MEMORY_CONFIG) {
-		if (!path.isAbsolute(env.ENGSYS_MEMORY_CONFIG)) return null;
-		const root = checkoutContaining(env.ENGSYS_MEMORY_CONFIG, [repoRoot, cwd]);
-		if (!root) return env.ENGSYS_MEMORY_CONFIG;
+		if (!path.isAbsolute(env.ENGSYS_MEMORY_CONFIG)) return { path: null, readPath: null };
+		const real = realpathLoose(env.ENGSYS_MEMORY_CONFIG);
+		const root = checkoutContainingReal(real, [repoRoot, cwd]);
+		if (!root) return { path: env.ENGSYS_MEMORY_CONFIG, readPath: real, validated: true };
 		log(`memory config: refusing ENGSYS_MEMORY_CONFIG=${env.ENGSYS_MEMORY_CONFIG}: it is inside the repo checkout ${root}, which is repo-controlled; using the next source instead (engsys#268)`);
 	}
-	if (env.CLAUDE_CONFIG_DIR) return path.join(env.CLAUDE_CONFIG_DIR, 'memory.yml');
-	let home = env.HOME;
-	if (!home) {
-		try { home = os.homedir(); } catch { home = ''; }
+	let file = null;
+	if (env.CLAUDE_CONFIG_DIR) file = path.join(env.CLAUDE_CONFIG_DIR, 'memory.yml');
+	else {
+		let home = env.HOME;
+		if (!home) {
+			try { home = os.homedir(); } catch { home = ''; }
+		}
+		file = home ? path.join(home, '.claude', 'memory.yml') : null;
 	}
-	return home ? path.join(home, '.claude', 'memory.yml') : null;
+	return { path: file, readPath: file };
 }
 
 /** `resolveMemoryConfigPath(env)` read and parsed: a plain object, or null when there is no such
  * file or it is not a YAML mapping. The single reader behind both `resolveAllowedRepos` here and
- * memory-brief.mjs's `loadConfig`, so the two can never disagree on which file is the operator's. */
+ * memory-brief.mjs's `loadConfig`, so the two can never disagree on which file is the operator's.
+ * An accepted ENGSYS_MEMORY_CONFIG is read at its validated realpath, opened with O_NOFOLLOW (that path holds no
+ * symlink, so one appearing there afterwards is refused rather than followed). */
 export function readOperatorMemoryConfig(env = process.env, opts = {}) {
-	const file = resolveMemoryConfigPath(env, opts);
-	if (!file) return null;
+	const { readPath, validated } = resolveMemoryConfig(env, opts);
+	if (!readPath) return null;
+	opts.afterCheck?.(); // test hook: the window between the in-repo check and the read
 	try {
-		const parsed = parseYaml(fs.readFileSync(file, 'utf8'));
+		let text;
+		if (validated) {
+			const fd = fs.openSync(readPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+			try {
+				if (!fs.fstatSync(fd).isFile()) return null;
+				text = fs.readFileSync(fd, 'utf8');
+			} finally {
+				fs.closeSync(fd);
+			}
+		} else {
+			text = fs.readFileSync(readPath, 'utf8');
+		}
+		const parsed = parseYaml(text);
 		return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
 	} catch {
 		return null;
