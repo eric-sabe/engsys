@@ -450,6 +450,26 @@ describe('ref-store (#130)', () => {
       assert.deepEqual(tip.events.map((e) => e.k), ['b'], 'replace mirrors exactly the events given (the tail ref holds the current tail only)');
     });
 
+    it('replace with no events empties a stale tail, re-signs after rotation, and is then a no-op', async () => {
+      const s = createMemoryRefStore({ repo: 'owner/repo', client: fakeGitApi({ repo: 'owner/repo' }), sleep: async () => {} });
+      const signer = signerFor(ericKey, 'eric');
+      await s.writeEvents({ ref: TAIL, events: [ev('a')], signer, replace: true });
+      const emptied = await s.writeEvents({ ref: TAIL, events: [], signer, replace: true });
+      assert.equal(emptied.ok, true);
+      assert.equal(emptied.noop, false, 'the stale tail is replaced');
+      let tip = await s.readEvents({ ref: TAIL });
+      assert.deepEqual(tip.events, []);
+      assert.equal((await verifyMemoryRefTip('/repo', { ref: TAIL, parent: tip.parents[0], content: tip.content, sigText: tip.sigText, pubkeys, resolveSha: reviewed, exec: okExec })).ok, true, 'the empty tail is signed');
+      assert.equal((await s.writeEvents({ ref: TAIL, events: [], signer, replace: true })).noop, true, 'an unchanged empty tail is a no-op');
+      const { privateKey: rotatedKey } = crypto.generateKeyPairSync('ed25519');
+      const resigned = await s.writeEvents({ ref: TAIL, events: [], signer: signerFor(rotatedKey, 'eric'), replace: true });
+      assert.equal(resigned.noop, false, 'after rotation the empty tail is re-signed with the new key');
+      tip = await s.readEvents({ ref: TAIL });
+      const rotatedKeys = resolveFleetPubkeys({ fleet_memory_pubkeys: { eric: publicKeyB64(rotatedKey) } });
+      assert.equal((await verifyMemoryRefTip('/repo', { ref: TAIL, parent: tip.parents[0], content: tip.content, sigText: tip.sigText, pubkeys: rotatedKeys, resolveSha: reviewed, exec: okExec })).ok, true);
+      assert.equal((await s.writeEvents({ ref: EVENTS_REF, events: [], signer })).noop, true, 'without replace, nothing to merge stays a no-op');
+    });
+
     it('a lost CAS round re-signs over the new parent and re-asks the fence (review L7)', async () => {
       const fake = fakeGitApi({ repo: 'owner/repo' });
       const s = createMemoryRefStore({ repo: 'owner/repo', client: fake, sleep: async () => {} });

@@ -295,7 +295,9 @@ Fold the text with `normalizeUntrusted()` first; the strip uses `\p{Default_Igno
   matched by numeric **user** id (§7.2): bot user ids in `trusted_bot_user_ids`, operators in
   `operator_user_ids`.
 - **Handoffs:** the tail mirror runs from each monster heartbeat, so a baton handoff strands at most
-  one heartbeat interval of journal.
+  one heartbeat interval of journal. A tail is per role and fleet, not per host: when the baton moves
+  to another host of the same fleet, the new holder's first tail write replaces the old host's tail
+  (single writer per role and fleet, by design).
 
 ## 10. Config (`.claude/memory.yml`, or `memory.yml` in the fleet config dir)
 

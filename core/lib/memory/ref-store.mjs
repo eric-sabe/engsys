@@ -435,7 +435,10 @@ export function createMemoryRefStore({
       cleanEvents.push(ev);
     }
 
-    if (cleanEvents.length === 0 && !forceCompact) {
+    // Nothing to merge is a no-op — unless `replace` asks for exactly these (zero) events: an empty journal tail
+    // still goes through the CAS loop, so a stale tail is emptied and an unchanged one is re-signed after a key
+    // rotation (the loop's own unchanged check keeps a current empty tail a no-op).
+    if (cleanEvents.length === 0 && !forceCompact && !replace) {
       const tip = await readEvents({ ref: fullRef });
       if (!tip.ok) return { ok: false, error: tip.error, rejected };
       return {
