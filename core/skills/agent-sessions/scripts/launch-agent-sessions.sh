@@ -582,8 +582,9 @@ launch_one() {
   else
     cmd+="unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && "
   fi
-  # engsys#262: decided after the env file, like the config dir itself, so an env file cannot move it.
-  if [ -n "$memory_cfg" ]; then cmd+="export ENGSYS_MEMORY_CONFIG=$(printf %q "$memory_cfg") && "; fi
+  # engsys#262: decided after the env file, like the config dir itself, so an env file can neither move it nor set
+  # one on a line that gets none (it would outrank the reviewed memory.yml).
+  if [ -n "$memory_cfg" ]; then cmd+="export ENGSYS_MEMORY_CONFIG=$(printf %q "$memory_cfg") && "; else cmd+="unset ENGSYS_MEMORY_CONFIG && "; fi
   if [ -n "$cfg_dir" ]; then cmd+="export CLAUDE_CONFIG_DIR=$(printf %q "$cfg_dir") && "; else cmd+="unset CLAUDE_CONFIG_DIR && "; fi
   # engsys#229, belt and braces beside mm-preflight's own discovery: a merge-role line is told where its repo's fleet merge
   # config is; every other line has it unset (above, before the env file). Decided after the env file, so an env file

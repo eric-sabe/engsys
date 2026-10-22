@@ -348,10 +348,9 @@ is just the fleet config (if any) over the defaults.
   removed (engsys#140 W1).
 - A **teammate** dispatch (the Agent tool with `name`) reaches SubagentStart with the teammate name
   as `agent_type` (e.g. `bert-p2`), not the dispatched `subagent_type`. The PreToolUse record keeps
-  both, and SubagentStart matches by type, then by teammate name (adopting the recorded
-  `subagent_type` for lesson roles and the Class B exclusion), then — for a non-namespaced
-  `agent_type` only — the newest same-session record, which lends its prompt but never its
-  identity (engsys#262).
+  both. SubagentStart matches by teammate name first (adopting the recorded `subagent_type` for
+  lesson roles and the Class B exclusion), then by type; a start that matches neither gets no
+  record, never another parallel dispatch's (engsys#262).
 - `node:sqlite` with FTS5 and `bm25()` works on Node 22.22.3 (SQLite 3.51.3).
 - A naive in-place SQLite rebuild by concurrent processes fails (`database is locked`) and duplicates
   rows. Temp file + rename is safe.

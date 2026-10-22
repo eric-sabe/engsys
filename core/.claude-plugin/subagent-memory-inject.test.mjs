@@ -532,24 +532,52 @@ describe('pending dispatch for a teammate-name agent_type (engsys#262)', () => {
 		assert.match(plain?.prompt ?? '', /other work/);
 	});
 
-	test('no name on record: falls back to the NEWEST same-session record, which lends no identity', () => {
+	test('parallel dispatches never swap records: an untyped dispatch beside a nyx one (review finding 1)', () => {
 		const cwd = repo();
-		dispatch(cwd, { subagent_type: 'engsys:isabelle', prompt: 'older' }, 1000);
-		dispatch(cwd, { subagent_type: 'engsys:bert', prompt: 'newest' }, 1005);
-		recordPendingDispatch({ session_id: 'other-session', tool_input: { subagent_type: 'engsys:bert', prompt: 'not this session' } }, { cwd, now: () => 1009 });
-		const got = start(cwd, 'bert-p2', 1010);
-		assert.equal(got?.matchedBy, 'newest');
-		assert.match(got?.prompt ?? '', /newest/);
+		dispatch(cwd, {
+			description: 'untyped', prompt: 'general work in /tmp',
+		}, 1000);
+		dispatch(cwd, { subagent_type: 'engsys:nyx', prompt: 'security review of services/auth/guard.ts' }, 1001);
+		// the untyped dispatch starts as general-purpose: no record of its own while a typed one is pending
+		assert.equal(start(cwd, 'general-purpose', 1002), null, 'never nyx\'s record');
+		const nyx = start(cwd, 'engsys:nyx', 1003);
+		assert.equal(nyx?.matchedBy, 'type');
+		assert.match(nyx?.prompt ?? '', /security review/, 'nyx gets its own prompt, not the untyped one');
+		assert.deepEqual(nyx?.promptPaths, ['services/auth/guard.ts']);
 	});
 
-	test('a namespaced agent_type whose own record is gone takes no other dispatch\'s record', () => {
+	test('parallel dispatches never swap records: Explore beside a typed dispatch (review finding 1)', () => {
 		const cwd = repo();
-		dispatch(cwd, { subagent_type: 'engsys:bert', name: 'bert-p2', prompt: 'bert work' }, 1000);
-		assert.equal(start(cwd, 'engsys:isabelle', 1001), null);
-		assert.equal(start(cwd, 'bert-p2', 1002)?.matchedBy, 'name', '…and the record is still there for its own teammate start');
+		dispatch(cwd, { subagent_type: 'Explore', prompt: 'explore the repo' }, 1000);
+		dispatch(cwd, { subagent_type: 'engsys:isabelle', prompt: 'implement the fix' }, 1001);
+		assert.match(start(cwd, 'engsys:isabelle', 1002)?.prompt ?? '', /implement the fix/);
+		assert.match(start(cwd, 'Explore', 1003)?.prompt ?? '', /explore the repo/);
+		assert.equal(start(cwd, 'bert-p2', 1004), null, 'an unmatched teammate start takes nothing that is left');
 	});
 
-	test('expired records are never matched, by name or as the newest', () => {
+	test('a teammate start with no name on record gets no record rather than another dispatch\'s', () => {
+		const cwd = repo();
+		dispatch(cwd, { subagent_type: 'engsys:isabelle', prompt: 'isabelle work' }, 1000);
+		dispatch(cwd, { subagent_type: 'engsys:bert', prompt: 'bert work' }, 1001);
+		assert.equal(start(cwd, 'bert-p2', 1002), null);
+		assert.match(start(cwd, 'engsys:isabelle', 1003)?.prompt ?? '', /isabelle work/, '…and both records are still there for their own starts');
+		assert.match(start(cwd, 'engsys:bert', 1004)?.prompt ?? '', /bert work/);
+	});
+
+	test('the exact name match runs before the type match: a teammate named like a bare type takes its own record (review finding 2)', () => {
+		const cwd = repo();
+		dispatch(cwd, { subagent_type: 'engsys:isabelle', prompt: 'the real isabelle' }, 1000);
+		dispatch(cwd, { subagent_type: 'engsys:nyx', name: 'isabelle', prompt: 'nyx teammate named isabelle' }, 1001);
+		const teammate = start(cwd, 'isabelle', 1002);
+		assert.equal(teammate?.matchedBy, 'name');
+		assert.equal(teammate?.agentType, 'engsys:nyx', 'it is Nyx (Class B-excluded), not isabelle');
+		assert.match(teammate?.prompt ?? '', /nyx teammate/);
+		const real = start(cwd, 'engsys:isabelle', 1003);
+		assert.equal(real?.matchedBy, 'type');
+		assert.match(real?.prompt ?? '', /the real isabelle/);
+	});
+
+	test('expired records are never matched, by name or by type', () => {
 		const cwd = repo();
 		dispatch(cwd, { subagent_type: 'engsys:bert', name: 'bert-p2', prompt: 'stale' }, 1000);
 		assert.equal(start(cwd, 'bert-p2', 1000 + 31_000), null);

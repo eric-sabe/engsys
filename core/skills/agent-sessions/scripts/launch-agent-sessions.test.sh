@@ -369,5 +369,23 @@ has "the chain is not restarted after the claude-function guard" "$(cat "$T/laun
 chain="$(cat "$T/launch-file.copy")"
 lacks "…no other ';' in the line (the only one closes the guard's group)" "${chain/|| true; \}/|| true \}}" ";"
 
+# engsys#262 (review finding 3): ENGSYS_MEMORY_CONFIG names the operator's reviewed memory.yml. Only a line on a
+# per-session login dir gets it (the fleet dir's own); every other line has it unset AFTER the env file too, so an
+# env file can't set one that would outrank the reviewed file — nor move the one a per-session line gets.
+printf 'ENGSYS_MEMORY_CONFIG=%s\n' "$T/evil-memory.yml" >"$T/w/memory.env"
+MEMLINE="acme-mm|$W|/engsys:merge-monster|--model opus|$W/memory.env"
+run claude "$MEMLINE" CLAUDE_CONFIG_DIR="$T/fleet-cfg"
+script="$(cat "$T/launch-file.copy")"
+case "$script" in *". $W/memory.env && set +a && "*"unset ENGSYS_MEMORY_CONFIG && export CLAUDE_CONFIG_DIR=$T/fleet-cfg && "*) ok "shared dir: ENGSYS_MEMORY_CONFIG is unset after the env file" ;; *) no "shared dir: unset after the env file" "$script" ;; esac
+lacks "…the env file's value is never exported" "$script" "export ENGSYS_MEMORY_CONFIG"
+run claude "$MEMLINE" CLAUDE_CONFIG_DIR=
+script="$(cat "$T/launch-file.copy")"
+case "$script" in *". $W/memory.env && set +a && "*"unset ENGSYS_MEMORY_CONFIG && unset CLAUDE_CONFIG_DIR && "*) ok "no config dir (~/.claude): unset after the env file too" ;; *) no "~/.claude: unset after the env file" "$script" ;; esac
+run claude "$MEMLINE" CLAUDE_CONFIG_DIR="$T/fleet-cfg" ENGSYS_CONFIG_DIR_SESSIONS="$T/fleet-cfg.sessions" ENGSYS_MEMORY_CONFIG="$T/inherited.yml"
+script="$(cat "$T/launch-file.copy")"
+case "$script" in *". $W/memory.env && set +a && "*"export ENGSYS_MEMORY_CONFIG=$T/fleet-cfg/memory.yml && export CLAUDE_CONFIG_DIR=$T/fleet-cfg.sessions/acme-mm && "*) ok "per-session dir: the fleet dir's memory.yml, set after the env file" ;; *) no "per-session: export after the env file" "$script" ;; esac
+lacks "…neither the env file's value nor an inherited one" "$script" "$T/inherited.yml"
+lacks "…" "$script" "export ENGSYS_MEMORY_CONFIG=$T/evil-memory.yml"
+
 echo "$pass passed, $fail failed."
 [ "$fail" = 0 ]
