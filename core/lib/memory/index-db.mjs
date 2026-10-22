@@ -25,6 +25,8 @@
 //                                                under concurrent callers (temp-file-then-rename).
 //   queryIndex(db, { text, roles, globs, stacks, limit })  -> ranked Doc[] (BM25 + frontmatter boost)
 //   closeIndex(db)                             -> best-effort close; never throws
+//   resolveMemoryConfigPath(env?)              -> the ONE operator memory.yml path (engsys#262), or null
+//   readOperatorMemoryConfig(env?)             -> that file parsed to a plain object, or null
 //
 // `opts.sqlite` (ensureIndex) and `opts.now`/`opts.fs` are injection points for tests — notably to
 // simulate "node:sqlite is unavailable" without needing an actual Node build that lacks it (§13: "the
@@ -34,6 +36,7 @@ import { execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { splitFrontmatter } from '../../scripts/validate-lessons.mjs';
@@ -587,10 +590,49 @@ export function resolveOriginRepo(repoRoot) {
 }
 
 /**
- * Trusted `repos` allowlist (#145) from fleet config (`CLAUDE_CONFIG_DIR/memory.yml`), plugin
- * config (`<pluginRoot>/memory.yml`), explicit `opts.allowedRepos`, or `ENGSYS_MEMORY_REPOS`.
- * NEVER reads `repoRoot/.claude/memory.yml` — a third-party clone or submodule must not be able to
- * allowlist itself.
+ * The operator's `memory.yml` (engsys#262): ONE file, picked by the first source that is SET —
+ *   1. `$ENGSYS_MEMORY_CONFIG`: an explicit absolute path. The fleet kit exports
+ *      `<fleet config dir>/memory.yml` here for a session it launches on a per-session login dir
+ *      (`<fleet dir>.sessions/<name>`, engsys#205), which by design carries no memory.yml of its own.
+ *      A relative value is refused (null), never resolved against the cwd — which is a repo checkout.
+ *   2. `$CLAUDE_CONFIG_DIR/memory.yml`: the session's Claude Code config dir.
+ *   3. `~/.claude/memory.yml`: Claude Code's default config dir, when CLAUDE_CONFIG_DIR is unset (an
+ *      interactive session). Before engsys#262 this case read nothing at all, so every interactive
+ *      session degraded to bundled lessons only.
+ * Never a repo-controlled path. The plugin root's own `memory.yml` (`CLAUDE_PLUGIN_ROOT`) and
+ * `ENGSYS_MEMORY_REPOS` are separate sources, layered by each caller as before. Returns the path (it
+ * may not exist) or null. Never throws.
+ */
+export function resolveMemoryConfigPath(env = process.env) {
+	if (env.ENGSYS_MEMORY_CONFIG) return path.isAbsolute(env.ENGSYS_MEMORY_CONFIG) ? env.ENGSYS_MEMORY_CONFIG : null;
+	if (env.CLAUDE_CONFIG_DIR) return path.join(env.CLAUDE_CONFIG_DIR, 'memory.yml');
+	let home = env.HOME;
+	if (!home) {
+		try { home = os.homedir(); } catch { home = ''; }
+	}
+	return home ? path.join(home, '.claude', 'memory.yml') : null;
+}
+
+/** `resolveMemoryConfigPath(env)` read and parsed: a plain object, or null when there is no such
+ * file or it is not a YAML mapping. The single reader behind both `resolveAllowedRepos` here and
+ * memory-brief.mjs's `loadConfig`, so the two can never disagree on which file is the operator's. */
+export function readOperatorMemoryConfig(env = process.env) {
+	const file = resolveMemoryConfigPath(env);
+	if (!file) return null;
+	try {
+		const parsed = parseYaml(fs.readFileSync(file, 'utf8'));
+		return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Trusted `repos` allowlist (#145), the union of: the operator's memory.yml
+ * (`readOperatorMemoryConfig` — `ENGSYS_MEMORY_CONFIG`, else `CLAUDE_CONFIG_DIR/memory.yml`, else
+ * `~/.claude/memory.yml`; engsys#262), plugin config (`<pluginRoot>/memory.yml`), explicit
+ * `opts.allowedRepos`, and `ENGSYS_MEMORY_REPOS`. NEVER reads `repoRoot/.claude/memory.yml` — a
+ * third-party clone or submodule must not be able to allowlist itself.
  */
 export function resolveAllowedRepos(opts = {}) {
 	const raw = [];
@@ -598,14 +640,11 @@ export function resolveAllowedRepos(opts = {}) {
 	if (process.env.ENGSYS_MEMORY_REPOS) {
 		raw.push(...process.env.ENGSYS_MEMORY_REPOS.split(',').map((s) => s.trim()).filter(Boolean));
 	}
-	const configDirs = [
-		process.env.CLAUDE_CONFIG_DIR ?? null,
-		opts.pluginRoot ?? process.env.CLAUDE_PLUGIN_ROOT ?? null,
-	].filter(Boolean);
-	for (const dir of configDirs) {
+	raw.push(...coerceListField(readOperatorMemoryConfig()?.repos));
+	const pluginRoot = opts.pluginRoot ?? process.env.CLAUDE_PLUGIN_ROOT ?? null;
+	if (pluginRoot) {
 		try {
-			const text = fs.readFileSync(path.join(dir, 'memory.yml'), 'utf8');
-			const parsed = parseYaml(text);
+			const parsed = parseYaml(fs.readFileSync(path.join(pluginRoot, 'memory.yml'), 'utf8'));
 			raw.push(...coerceListField(parsed?.repos));
 		} catch { /* absent or unreadable */ }
 	}

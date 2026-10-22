@@ -247,6 +247,29 @@ Fold the text with `normalizeUntrusted()` first; the strip uses `\p{Default_Igno
 
 ## 10. Config (`.claude/memory.yml`, or `memory.yml` in the fleet config dir)
 
+### Where the config is read (engsys#262)
+
+Four sources, merged by `loadConfig()` (memory-brief.mjs) and, for `repos`, `resolveAllowedRepos()`
+(index-db.mjs):
+
+1. **The operator's `memory.yml`** — ONE file, the first of these that is SET
+   (`resolveMemoryConfigPath`):
+   1. `$ENGSYS_MEMORY_CONFIG`, an absolute path (a relative one is refused, never resolved against the
+      cwd). The fleet launcher exports `<fleet config dir>/memory.yml` here for a session on its own
+      per-session login dir (`<fleet dir>.sessions/<name>`, engsys#205), which has no `memory.yml`
+      of its own by design;
+   2. `$CLAUDE_CONFIG_DIR/memory.yml`, the session's Claude Code config dir;
+   3. `~/.claude/memory.yml`, Claude Code's default config dir, when `CLAUDE_CONFIG_DIR` is unset
+      (an interactive session).
+2. **The plugin's own** `$CLAUDE_PLUGIN_ROOT/memory.yml`.
+3. **The repo's** `.claude/memory.yml` at the reviewed SHA, only for a repo already allowlisted by
+   1, 2 or 4 — never `repos` itself (a repo can't allowlist itself, #145).
+4. **`ENGSYS_MEMORY_REPOS`** (comma-separated), extra `repos` entries only.
+
+Scalars: operator file over repo over plugin. List fields are unioned. Before engsys#262 source 1 was
+`$CLAUDE_CONFIG_DIR/memory.yml` alone, so an interactive session and every per-session fleet login
+read no operator config and fell back to bundled lessons only.
+
 ```yaml
 repos: [owner/repo]                     # indexed repos; events are read from each repo's own refs
 review_markers: ["<!-- local-review-findings -->"]   # extra markers to parse; default regex also applies
@@ -293,7 +316,7 @@ is its suffix — GitHub reports only the long id, of the signing (sub)key); SSH
 `SHA256:<base64>` and compare exactly. Malformed entries are skipped, never wildcard-matched.
 
 `loadConfig()` reads BOTH the repo's own `.claude/memory.yml` (from the reviewed SHA, never the
-working tree — §2 rule 4) and the fleet config dir's `memory.yml` (`CLAUDE_CONFIG_DIR`), and
+working tree — §2 rule 4) and the operator's `memory.yml` (source 1 above), and
 **merges** them rather than one replacing the other (round 4, Nyx L4): `exclude_class_b_agents`,
 `trusted_bot_user_ids`, `operator_user_ids`, and `review_markers` are **unioned** (deduplicated) —
 a fleet-wide allowlist/marker set and a repo's own are both meant to apply, not compete. Every
@@ -323,6 +346,13 @@ is just the fleet config (if any) over the defaults.
   `subagent-memory-inject.mjs` guessed through `subagent_type`/`tool_input.prompt`/
   `tool_input.description`/etc.; none of those ever matched a real payload and the guessing was
   removed (engsys#140 W1).
+- A **teammate** dispatch (the Agent tool with `name`) reaches SubagentStart with the teammate name
+  as `agent_type` (e.g. `bert-p2`), not the dispatched `subagent_type`. The PreToolUse record keeps
+  both. SubagentStart matches by teammate name first (adopting the recorded `subagent_type` for
+  lesson roles and the Class B exclusion), then by type; a start that matches neither gets no
+  record, never another parallel dispatch's (engsys#262). Only a bare (un-namespaced) start matches by
+  name: a real typed start such as `engsys:nyx` never does, so a teammate named `engsys:nyx` can't make the
+  real Nyx adopt its type and lose the Class B exclusion.
 - `node:sqlite` with FTS5 and `bm25()` works on Node 22.22.3 (SQLite 3.51.3).
 - A naive in-place SQLite rebuild by concurrent processes fails (`database is locked`) and duplicates
   rows. Temp file + rename is safe.

@@ -18,13 +18,22 @@ try { require('node:sqlite'); } catch { SQLITE_AVAILABLE = false; }
 import { fileURLToPath } from 'node:url';
 import { hermeticGit } from '../lib/git-env.mjs';
 import {
+	consumePendingDispatch,
 	extractAgentType,
 	extractPrompt,
 	extractTargetAgentType,
 	main,
+	recordPendingDispatch,
 	resolveTouchedPaths,
 	runMemoryBrief,
 } from './subagent-memory-inject.mjs';
+
+// engsys#262: the operator's memory.yml is ENGSYS_MEMORY_CONFIG, else $CLAUDE_CONFIG_DIR/memory.yml, else
+// ~/.claude/memory.yml — so the developer's (or a fleet session's) own file would leak into every test here that
+// doesn't set one. Start from none: no explicit path, no config dir, and an empty HOME.
+delete process.env.ENGSYS_MEMORY_CONFIG;
+delete process.env.CLAUDE_CONFIG_DIR;
+process.env.HOME = mkdtempSync(join(tmpdir(), 'memory-test-home-'));
 
 const SCRIPT = fileURLToPath(new URL('./subagent-memory-inject.mjs', import.meta.url));
 
@@ -493,5 +502,128 @@ describe('CLI end to end', () => {
 			rmSync(parent, { recursive: true, force: true });
 			rmSync(origin, { recursive: true, force: true });
 		}
+	});
+});
+
+// engsys#262: a teammate dispatch (Agent with `name`) reaches SubagentStart with the teammate NAME as
+// agent_type (`bert-p2`), never the dispatched subagent_type (`engsys:bert`) the pending record is filed under.
+describe('pending dispatch for a teammate-name agent_type (engsys#262)', () => {
+	const repos = [];
+	after(() => { for (const d of repos) rmSync(d, { recursive: true, force: true }); });
+	function repo() {
+		const dir = mkdtempSync(join(tmpdir(), 'inject-262-'));
+		repos.push(dir);
+		hermeticGit(dir, ['init', '-q'], { isolateConfig: true });
+		return dir;
+	}
+	const dispatch = (cwd, toolInput, ts) => recordPendingDispatch({ session_id: 's-262', tool_input: toolInput }, { cwd, now: () => ts });
+	const start = (cwd, agentType, ts) => consumePendingDispatch({ session_id: 's-262', agent_type: agentType }, { cwd, now: () => ts });
+
+	test('matched by the recorded teammate name, carrying the dispatched subagent_type', () => {
+		const cwd = repo();
+		dispatch(cwd, { subagent_type: 'engsys:isabelle', prompt: 'other work' }, 1000);
+		dispatch(cwd, { subagent_type: 'engsys:bert', name: 'bert-p2', prompt: 'investigate the brief' }, 1001);
+		const got = start(cwd, 'bert-p2', 1002);
+		assert.equal(got?.matchedBy, 'name');
+		assert.equal(got?.agentType, 'engsys:bert');
+		assert.match(got?.prompt ?? '', /investigate the brief/);
+		const plain = start(cwd, 'engsys:isabelle', 1003);
+		assert.equal(plain?.matchedBy, 'type', 'positive control: a plain typed dispatch still matches by type');
+		assert.match(plain?.prompt ?? '', /other work/);
+	});
+
+	test('a teammate named like a namespaced type never captures the real start (re-review: Nyx stays Nyx)', () => {
+		for (const name of ['engsys:nyx', 'engsys_nyx']) {
+			const cwd = repo();
+			dispatch(cwd, { subagent_type: 'engsys:isabelle', name, prompt: 'isabelle work' }, 1000);
+			dispatch(cwd, { subagent_type: 'engsys:nyx', prompt: 'security review' }, 1001);
+			const nyx = start(cwd, 'engsys:nyx', 1002);
+			assert.equal(nyx?.matchedBy, 'type', `${name}: the real nyx start matches its own record by type`);
+			assert.match(nyx?.prompt ?? '', /security review/, `${name}: nyx keeps its own prompt`);
+			assert.notEqual(nyx?.agentType, 'engsys:isabelle', `${name}: nyx never adopts isabelle`);
+		}
+	});
+
+	test('parallel dispatches never swap records: an untyped dispatch beside a nyx one (review finding 1)', () => {
+		const cwd = repo();
+		dispatch(cwd, {
+			description: 'untyped', prompt: 'general work in /tmp',
+		}, 1000);
+		dispatch(cwd, { subagent_type: 'engsys:nyx', prompt: 'security review of services/auth/guard.ts' }, 1001);
+		// the untyped dispatch starts as general-purpose: no record of its own while a typed one is pending
+		assert.equal(start(cwd, 'general-purpose', 1002), null, 'never nyx\'s record');
+		const nyx = start(cwd, 'engsys:nyx', 1003);
+		assert.equal(nyx?.matchedBy, 'type');
+		assert.match(nyx?.prompt ?? '', /security review/, 'nyx gets its own prompt, not the untyped one');
+		assert.deepEqual(nyx?.promptPaths, ['services/auth/guard.ts']);
+	});
+
+	test('parallel dispatches never swap records: Explore beside a typed dispatch (review finding 1)', () => {
+		const cwd = repo();
+		dispatch(cwd, { subagent_type: 'Explore', prompt: 'explore the repo' }, 1000);
+		dispatch(cwd, { subagent_type: 'engsys:isabelle', prompt: 'implement the fix' }, 1001);
+		assert.match(start(cwd, 'engsys:isabelle', 1002)?.prompt ?? '', /implement the fix/);
+		assert.match(start(cwd, 'Explore', 1003)?.prompt ?? '', /explore the repo/);
+		assert.equal(start(cwd, 'bert-p2', 1004), null, 'an unmatched teammate start takes nothing that is left');
+	});
+
+	test('a teammate start with no name on record gets no record rather than another dispatch\'s', () => {
+		const cwd = repo();
+		dispatch(cwd, { subagent_type: 'engsys:isabelle', prompt: 'isabelle work' }, 1000);
+		dispatch(cwd, { subagent_type: 'engsys:bert', prompt: 'bert work' }, 1001);
+		assert.equal(start(cwd, 'bert-p2', 1002), null);
+		assert.match(start(cwd, 'engsys:isabelle', 1003)?.prompt ?? '', /isabelle work/, '…and both records are still there for their own starts');
+		assert.match(start(cwd, 'engsys:bert', 1004)?.prompt ?? '', /bert work/);
+	});
+
+	test('the exact name match runs before the type match: a teammate named like a bare type takes its own record (review finding 2)', () => {
+		const cwd = repo();
+		dispatch(cwd, { subagent_type: 'engsys:isabelle', prompt: 'the real isabelle' }, 1000);
+		dispatch(cwd, { subagent_type: 'engsys:nyx', name: 'isabelle', prompt: 'nyx teammate named isabelle' }, 1001);
+		const teammate = start(cwd, 'isabelle', 1002);
+		assert.equal(teammate?.matchedBy, 'name');
+		assert.equal(teammate?.agentType, 'engsys:nyx', 'it is Nyx (Class B-excluded), not isabelle');
+		assert.match(teammate?.prompt ?? '', /nyx teammate/);
+		const real = start(cwd, 'engsys:isabelle', 1003);
+		assert.equal(real?.matchedBy, 'type');
+		assert.match(real?.prompt ?? '', /the real isabelle/);
+	});
+
+	test('expired records are never matched, by name or by type', () => {
+		const cwd = repo();
+		dispatch(cwd, { subagent_type: 'engsys:bert', name: 'bert-p2', prompt: 'stale' }, 1000);
+		assert.equal(start(cwd, 'bert-p2', 1000 + 31_000), null);
+	});
+
+	test('end to end: a teammate dispatched as engsys:nyx is briefed and logged as nyx, not as its teammate name', { skip: !SQLITE_AVAILABLE }, () => {
+		const parent = mkdtempSync(join(tmpdir(), 'inject-262-e2e-'));
+		const origin = mkdtempSync(join(tmpdir(), 'inject-262-origin-'));
+		repos.push(parent, origin);
+		const GIT_OPTS = ['-c', 'user.name=a', '-c', 'user.email=a@b.c'];
+		hermeticGit(origin, [...GIT_OPTS, 'init', '-q', '--bare'], { isolateConfig: true });
+		hermeticGit(parent, [...GIT_OPTS, 'init', '-q'], { isolateConfig: true });
+		hermeticGit(parent, [...GIT_OPTS, 'remote', 'add', 'origin', 'https://github.com/fixture/repo.git'], { isolateConfig: true });
+		hermeticGit(parent, [...GIT_OPTS, 'remote', 'set-url', '--push', 'origin', origin], { isolateConfig: true });
+		mkdirSync(join(parent, 'docs', 'agent-lessons'), { recursive: true });
+		writeFileSync(
+			join(parent, 'docs', 'agent-lessons', 'nyx-only.md'),
+			'---\nglobs: []\nstacks: []\nroles: ["nyx"]\nkeywords: []\nsecurity: false\nsupersedes: []\n---\n\n# Nyx role lesson\n\n**Trigger:** A security review.\n',
+		);
+		hermeticGit(parent, [...GIT_OPTS, 'add', '-A'], { isolateConfig: true });
+		hermeticGit(parent, [...GIT_OPTS, 'commit', '-q', '-m', 'init'], { isolateConfig: true });
+		hermeticGit(parent, [...GIT_OPTS, 'push', '-q', '-f', 'origin', 'HEAD:main'], { isolateConfig: true });
+		hermeticGit(parent, [...GIT_OPTS, 'update-ref', 'refs/remotes/origin/main', 'HEAD'], { isolateConfig: true });
+		const env = { ...process.env, NODE_NO_WARNINGS: '1', ENGSYS_MEMORY_REPOS: 'fixture/repo' };
+		execFileSync('node', [SCRIPT, 'pre-agent'], {
+			input: JSON.stringify({ session_id: 's-e2e', cwd: parent, hook_event_name: 'PreToolUse', tool_name: 'Agent', tool_input: { subagent_type: 'engsys:nyx', name: 'nyx-221', prompt: 'review the diff' } }),
+			encoding: 'utf8', env,
+		});
+		const out = execFileSync('node', [SCRIPT], {
+			input: JSON.stringify({ session_id: 's-e2e', cwd: parent, hook_event_name: 'SubagentStart', agent_id: 'a-1', agent_type: 'nyx-221' }),
+			encoding: 'utf8', env,
+		});
+		assert.match(JSON.parse(out).hookSpecificOutput?.additionalContext ?? '', /lesson:nyx-only/, 'the nyx-scoped lesson reaches the nyx teammate');
+		const rows = readFileSync(join(parent, '.git', 'engsys-memory', 'injections.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+		assert.equal(rows.at(-1).agent_type, 'engsys:nyx', 'logged (and Class B-excluded) as nyx');
 	});
 });

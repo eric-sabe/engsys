@@ -25,6 +25,13 @@ import {
   cappedWarning,
 } from './memory-sync.mjs';
 
+// engsys#262: the operator's memory.yml is ENGSYS_MEMORY_CONFIG, else $CLAUDE_CONFIG_DIR/memory.yml, else
+// ~/.claude/memory.yml — so the developer's (or a fleet session's) own file would leak into every test here that
+// doesn't set one. Start from none: no explicit path, no config dir, and an empty HOME.
+delete process.env.ENGSYS_MEMORY_CONFIG;
+delete process.env.CLAUDE_CONFIG_DIR;
+process.env.HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-test-home-'));
+
 const OP_KEY_ID = '0123456789ABCDEF';
 const OP_KEY = { type: 'gpg', id: OP_KEY_ID.toLowerCase() };
 

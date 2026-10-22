@@ -75,6 +75,7 @@ VERDICT_KEY_FILE=""
 LAUNCH_DIR="${ENGSYS_LAUNCH_DIR:-}"
 unset ENGSYS_SECURITY_VERDICT_KEY_FILE
 unset ENGSYS_MM_CONFIG   # engsys#229: set per merge-role line below, never inherited (nor seen by the tmux server)
+unset ENGSYS_MEMORY_CONFIG   # engsys#262: set below for a line on its own per-session login dir, never inherited
 while [ $# -gt 0 ]; do
   case "$1" in
     --roster) ROSTER="$2"; shift 2 ;;
@@ -524,6 +525,7 @@ launch_one() {
   else
     cmd+="unset ENGSYS_SECURITY_VERDICT_KEY_FILE && "
   fi
+  cmd+="unset ENGSYS_MEMORY_CONFIG && "   # engsys#262: cleared here, set again below for a line on a per-session login dir
   cmd+="unset ENGSYS_MM_CONFIG && "   # engsys#229: cleared here, set again below for a merge-role line once its config dir is known
   cmd+="cd $(printf %q "$workdir") && "
   if [ -n "$session_env" ]; then
@@ -557,12 +559,15 @@ launch_one() {
   # One login per session (engsys#205): the fleet kit passes ENGSYS_CONFIG_DIR_SESSIONS (<fleet dir>.sessions) and a
   # session that gets the fleet dir runs on <that>/<its name>. The name is validated here too: nothing with a
   # slash, a leading dot or ".." can step out of that directory.
-  local gate_dir="${CLAUDE_CONFIG_DIR:-}"
+  local gate_dir="${CLAUDE_CONFIG_DIR:-}" memory_cfg=""
   if [ -n "$cfg_dir" ] && [ -n "${ENGSYS_CONFIG_DIR_SESSIONS:-}" ]; then
     case "$name" in
       '' | .* | */* | *..* | *[!A-Za-z0-9._-]*) echo "error: refusing to launch '$name': its name can't be a per-session Claude config dir name" >&2; return 1 ;;
     esac
     cfg_dir="${ENGSYS_CONFIG_DIR_SESSIONS%/}/$name"
+    # engsys#262: a per-session login dir carries no memory.yml (by design: engsys#230 pins only the fleet dir's
+    # copy), so the memory brief is pointed at the fleet dir's own, the launcher's CLAUDE_CONFIG_DIR.
+    [ -z "${CLAUDE_CONFIG_DIR:-}" ] || memory_cfg="${CLAUDE_CONFIG_DIR%/}/memory.yml"
   fi
   [ -z "$cfg_dir" ] || gate_dir="$cfg_dir"
   # A function named claude in an env file must not stand in for the binary either. The whole line is one
@@ -577,6 +582,9 @@ launch_one() {
   else
     cmd+="unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && "
   fi
+  # engsys#262: decided after the env file, like the config dir itself, so an env file can neither move it nor set
+  # one on a line that gets none (it would outrank the reviewed memory.yml).
+  if [ -n "$memory_cfg" ]; then cmd+="export ENGSYS_MEMORY_CONFIG=$(printf %q "$memory_cfg") && "; else cmd+="unset ENGSYS_MEMORY_CONFIG && "; fi
   if [ -n "$cfg_dir" ]; then cmd+="export CLAUDE_CONFIG_DIR=$(printf %q "$cfg_dir") && "; else cmd+="unset CLAUDE_CONFIG_DIR && "; fi
   # engsys#229, belt and braces beside mm-preflight's own discovery: a merge-role line is told where its repo's fleet merge
   # config is; every other line has it unset (above, before the env file). Decided after the env file, so an env file
