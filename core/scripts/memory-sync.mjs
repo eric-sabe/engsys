@@ -1843,7 +1843,8 @@ export async function main(argv = process.argv.slice(2), { out = process.stdout,
     if (res.skipped === 'no_signing_key') err.write(`memory-sync: not written, no usable signing key: ${res.reason}\n`);
     if (mode === 'consume') {
       // one stderr line per problem, for the heartbeat's latch (monster.sh); a skipped (not held) run says nothing
-      if (res.fetched === false) err.write(`memory-sync: consume: fetch failed: ${res.error}\n`);
+      // no keys configured (skipped: 'no_keys') is not a failure: nothing is fetched and nothing is said
+      if (res.ok === false && res.fetched === false) err.write(`memory-sync: consume: fetch failed: ${res.error}\n`);
       for (const w of res.warnings || []) err.write(`memory-sync: consume: ${w.replace(/^memory-consume: /, '')}\n`);
     }
     const warning = cappedWarning(res, String(values.repo || ''));

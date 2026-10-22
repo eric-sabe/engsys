@@ -531,6 +531,13 @@ fleet's public key in the operator's memory.yml.
   `<state_dir>/memory-sync.warn`). The last verified tips are kept in the local refs and in
   `<state_dir>/memory-ref-tips.json`; a host with neither trusts the first verified tip it sees (logged). To weight
   another fleet's history down, set `peer_fleet_weight` (0–1, default 0.5) in `memory.yml`, which changes its hash.
+  With no key in `fleet_memory_pubkeys` the fetch doesn't run at all. A fleet whose refs exist but whose key isn't
+  listed yet is reported once (`rejected (unknown_fleet)`), not every heartbeat.
+- **Turn-on order.** 1) Merge the `memory.yml` PR that adds every fleet's `fleet_memory_pubkeys` (with its new
+  `VERIFY_ALLOWED_USER_FILES` hash, #230) and roll it out to each host. 2) Then turn memory sync on
+  (`ENGSYS_MEMORY_SYNC`, `FLEET_MEMORY_SIGNING_KEY=on`) and restart the monsters. The other way round, each fleet's first
+  writes are refused as `unknown_fleet` by the others until the keys land, and a host's first fetch after the keys
+  arrive trusts whatever tip is current (trust on first use).
 - **Blast radius of one fleet key.** A stolen key (any process running as that fleet's user) can sign only that fleet's
   own namespace, `refs/engsys/memory/fleet/<fleet>/`. Other fleets read it as that fleet's history, weighted by
   `peer_fleet_weight`, as structured Class B pointers only (no free text reaches a brief). It cannot sign another

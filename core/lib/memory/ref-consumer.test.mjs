@@ -226,6 +226,64 @@ describe('ref-consumer: the staged fetch (engsys#266)', () => {
     assert.notEqual(f.local(ERIC_TAIL), next);
   });
 
+  it('no usable key configured: no fetch at all, nothing staged, nothing said', () => {
+    const f = fixture();
+    f.write(ERIC_TAIL, [ev('t1')]);
+    const calls = [];
+    const spy = (cmd, args, opts) => { calls.push(args.join(' ')); return exec(cmd, args, opts); };
+    for (const config of [{}, { fleet_memory_pubkeys: {} }, { fleet_memory_pubkeys: { eric: 'not-a-key' } }]) {
+      const r = f.consume({ config, exec: spy });
+      assert.deepEqual([r.ok, r.fetched, r.skipped, r.results.length], [true, false, 'no_keys', 0], JSON.stringify(config));
+      // only a malformed key is worth a line (an operator error), never the absence of keys
+      assert.deepEqual(r.logs, config.fleet_memory_pubkeys?.eric ? ['fleet_memory_pubkeys: ignoring malformed key for fleet eric'] : [], JSON.stringify(config));
+    }
+    assert.deepEqual(calls, [], 'git was never run');
+    assert.equal(git(f.consumer, ['for-each-ref', INCOMING_PREFIX.replace(/\/$/, '')]), '');
+  });
+
+  it('a fleet with no key yet (unknown_fleet) is said once, not every tick; it speaks again once the reason changes; other rejections are said every tick', () => {
+    const f = fixture();
+    f.write(tailRef('merge', 'ghost'), [ev('g')], { signer: strangerKey, fleet: 'ghost' });
+    f.write(ERIC_TAIL, [ev('x')], { sign: false });
+    let r = f.consume();
+    assert.equal(r.by[tailRef('merge', 'ghost')].reason, 'unknown_fleet');
+    assert.match(r.logs.join('\n'), /fleet\/ghost\/merge rejected \(unknown_fleet\): add the fleet's key/);
+    assert.match(r.logs.join('\n'), /fleet\/eric\/maintain rejected \(missing_or_malformed_signature\)/);
+    r = f.consume();
+    assert.equal(r.by[tailRef('merge', 'ghost')].status, 'rejected', 'still rejected');
+    assert.ok(!r.logs.some((l) => /ghost/.test(l)), 'but not said again');
+    assert.ok(r.logs.some((l) => /missing_or_malformed_signature/.test(l)), 'a bad signature is said on every tick');
+    // the key arrives: accepted, and the quiet entry is gone (a later unknown_fleet would be said again)
+    r = f.consume({ config: { fleet_memory_pubkeys: { ...KEYS, ghost: publicKeyB64(strangerKey) } } });
+    assert.equal(r.by[tailRef('merge', 'ghost')].status, 'accepted');
+    const tips = JSON.parse(fs.readFileSync(path.join(f.state, TIPS_FILE), 'utf8'));
+    assert.equal(tips.quiet['acme/app'][tailRef('merge', 'ghost')], undefined);
+  });
+
+  it('the fetch never starts gc or maintenance: gc.auto=0, maintenance.auto=false and --no-auto-maintenance; an old git without the option is retried without it', () => {
+    const f = fixture();
+    f.write(ERIC_TAIL, [ev('t1')]);
+    const fetches = [];
+    const spy = (cmd, args, opts) => { if (args.includes('fetch')) fetches.push(args.slice(2)); return exec(cmd, args, opts); };
+    f.consume({ exec: spy });
+    assert.equal(fetches.length, 1);
+    assert.deepEqual(fetches[0].slice(0, 6), ['-c', 'gc.auto=0', '-c', 'maintenance.auto=false', 'fetch', '--no-auto-maintenance']);
+    fetches.length = 0;
+    const oldGit = (cmd, args, opts) => {
+      if (args.includes('fetch')) {
+        fetches.push(args.slice(2));
+        if (args.includes('--no-auto-maintenance')) throw Object.assign(new Error('fail'), { stderr: 'error: unknown option `no-auto-maintenance\'\nusage: git fetch [<options>]' });
+      }
+      return exec(cmd, args, opts);
+    };
+    f.write(ERIC_TAIL, [ev('t2')]);
+    const r = f.consume({ exec: oldGit });
+    assert.equal(r.by[ERIC_TAIL].status, 'accepted');
+    assert.equal(fetches.length, 2);
+    assert.ok(!fetches[1].includes('--no-auto-maintenance'));
+    assert.deepEqual(fetches[1].slice(0, 5), ['-c', 'gc.auto=0', '-c', 'maintenance.auto=false', 'fetch']);
+  });
+
   it('peer_fleet_weight: default 0.5, clamped to [0, 1]', () => {
     assert.equal(peerFleetWeight({}), 0.5);
     assert.equal(peerFleetWeight({ peer_fleet_weight: 0.2 }), 0.2);

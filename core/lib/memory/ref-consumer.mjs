@@ -50,6 +50,12 @@ export const STAGED_FETCH_REFSPEC = `+${FLEET_REF_PREFIX}*:${INCOMING_PREFIX}fle
 export const TIPS_FILE = 'memory-ref-tips.json';
 export const VERIFY_CACHE_FILE = 'ref-verify-cache.json';
 const ZERO_OID = '0'.repeat(40);
+// A rejection that describes configuration, not an attack: a fleet whose key isn't in memory.yml yet. Logged once per
+// ref (then kept quiet in the tips file until the reason changes), so the heartbeat's warn file can clear while a
+// fleet waits for its pubkey PR. Every other rejection is logged on every tick.
+const QUIET_REASONS = new Set(['unknown_fleet']);
+// The staged fetch must never start gc or maintenance in the operator's checkout (dozens of worktrees share it).
+const FETCH_CONFIG = ['-c', 'gc.auto=0', '-c', 'maintenance.auto=false'];
 const OID_RE = /^[0-9a-f]{40}$/;
 
 /** Whether a reader consumes `ref`: a ref in a fleet's namespace (signing.mjs refFleet). The one place this is decided. */
@@ -94,6 +100,20 @@ function readTip(exec, repoRoot, sha) {
   return { parent: parents[0] || null, content, sigText };
 }
 
+/**
+ * The staged fetch, with gc and maintenance off (`-c gc.auto=0 -c maintenance.auto=false`, and
+ * `--no-auto-maintenance` where git has it: 2.29+; an older git that rejects the option is retried without it).
+ */
+function stagedFetch(exec, repoRoot, remote) {
+  const args = ['fetch', '--no-tags', '--prune', '--quiet', remote, STAGED_FETCH_REFSPEC];
+  try {
+    git(exec, repoRoot, [...FETCH_CONFIG, 'fetch', '--no-auto-maintenance', ...args.slice(1)], { timeout: 60_000 });
+  } catch (e) {
+    if (!/unknown option|usage: git fetch/i.test(String(e?.stderr || e?.message || ''))) throw e;
+    git(exec, repoRoot, [...FETCH_CONFIG, ...args], { timeout: 60_000 });
+  }
+}
+
 function isAncestor(exec, repoRoot, older, newer) {
   try {
     git(exec, repoRoot, ['merge-base', '--is-ancestor', older, newer]);
@@ -124,17 +144,21 @@ function writeJsonAtomic(file, data) {
  */
 export function consumeMemoryRefs(repoRoot, { remote = 'origin', repo = '', stateDir = '', config = {}, exec = execFileSync, log = () => {} } = {}) {
   const results = [];
+  const pubkeys = resolveFleetPubkeys(config, { log });
+  // No usable key: nothing could verify, so don't fetch at all (no network, no staged refs, no warnings).
+  if (!pubkeys.size) return { ok: true, fetched: false, skipped: 'no_keys', results };
   try {
-    git(exec, repoRoot, ['fetch', '--no-tags', '--prune', '--quiet', remote, STAGED_FETCH_REFSPEC], { timeout: 60_000 });
+    stagedFetch(exec, repoRoot, remote);
   } catch (e) {
     return { ok: false, fetched: false, error: String(e?.stderr || e?.message || e).trim().split('\n').pop(), results };
   }
-  const pubkeys = resolveFleetPubkeys(config, { log });
   const tipsFile = stateDir ? path.join(stateDir, TIPS_FILE) : '';
   const tips = (tipsFile && readJson(tipsFile)) || { version: 1, repos: {} };
   if (!tips.repos || typeof tips.repos !== 'object') tips.repos = {};
   const repoKey = repo || remote;
   const known = tips.repos[repoKey] && typeof tips.repos[repoKey] === 'object' ? tips.repos[repoKey] : {};
+  if (!tips.quiet || typeof tips.quiet !== 'object') tips.quiet = {};
+  const quiet = tips.quiet[repoKey] && typeof tips.quiet[repoKey] === 'object' ? tips.quiet[repoKey] : {};
   let staged = [];
   try { staged = listRefs(exec, repoRoot, INCOMING_PREFIX); } catch (e) {
     return { ok: false, fetched: true, error: `can't list the staged refs: ${String(e?.message || e)}`, results };
@@ -143,7 +167,18 @@ export function consumeMemoryRefs(repoRoot, { remote = 'origin', repo = '', stat
   for (const { ref: incoming, sha } of staged) {
     const ref = `${MEMORY_REF_PREFIX}${incoming.slice(INCOMING_PREFIX.length)}`;
     if (!isConsumedRef(ref)) continue;
-    const reject = (reason) => { results.push({ ref, status: 'rejected', reason, sha }); log(`memory-consume: ${ref} rejected (${reason}); kept the last verified tip`); };
+    const reject = (reason) => {
+      results.push({ ref, status: 'rejected', reason, sha });
+      if (QUIET_REASONS.has(reason)) {
+        if (quiet[ref] === reason) return; // already said once
+        quiet[ref] = reason;
+        tipsChanged = true;
+        log(`memory-consume: ${ref} rejected (${reason}): add the fleet's key to fleet_memory_pubkeys to read it; said once until that changes`);
+        return;
+      }
+      if (quiet[ref] !== undefined) { delete quiet[ref]; tipsChanged = true; }
+      log(`memory-consume: ${ref} rejected (${reason}); kept the last verified tip`);
+    };
     try {
       const local = localTip(exec, repoRoot, ref);
       if (local === sha) {
@@ -167,6 +202,7 @@ export function consumeMemoryRefs(repoRoot, { remote = 'origin', repo = '', stat
       git(exec, repoRoot, ['update-ref', '-m', 'engsys memory: verified staged tip', ref, sha, local || ZERO_OID]);
       known[ref] = sha;
       tipsChanged = true;
+      if (quiet[ref] !== undefined) delete quiet[ref];
       results.push({ ref, status: 'accepted', fleet: v.fleet, sha, ...(tofu ? { tofu: true } : {}) });
     } catch (e) {
       reject(`git_error: ${String(e?.stderr || e?.message || e).trim().split('\n').pop().slice(0, 200)}`);
@@ -175,6 +211,7 @@ export function consumeMemoryRefs(repoRoot, { remote = 'origin', repo = '', stat
   if (tipsFile && tipsChanged) {
     tips.version = 1;
     tips.repos[repoKey] = known;
+    tips.quiet[repoKey] = quiet;
     try { writeJsonAtomic(tipsFile, tips); } catch (e) { log(`memory-consume: can't write ${tipsFile} (${e.message}); the local refs still record the verified tips`); }
   }
   return { ok: true, fetched: true, results };
