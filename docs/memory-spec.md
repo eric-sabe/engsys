@@ -79,7 +79,8 @@ refs/engsys/memory/<role>/<fleet-id>   a monster's journal tail (one writer per 
 - **Compaction:** when the blob passes `max_events` (default 20000), the writer keeps the latest
   version of each key, drops tombstones older than 180 days, and writes a parentless commit.
 - These refs are not covered by branch rulesets, and anyone with `contents: write` can force-push
-  them. Readers therefore treat every event as Class B, and record each tip's committer.
+  them. Readers therefore treat every event as Class B, and trust a tip only through its fleet
+  signature (§9), never its committer (`web-flow` for every API-made commit).
 
 ### 3.2 Event record
 
@@ -220,8 +221,15 @@ Fold the text with `normalizeUntrusted()` first; the strip uses `\p{Default_Igno
 - `--init`: walk back by recency until any cap is reached: 500 commits, 250 merged PRs, 250 issues
   (plus their comments and threads, about 3–4k events in a busy repo).
 - `--delta`: since the cursors, into the local `delta.jsonl`. Needs no write access.
-- `--publish`: merge the delta into `refs/engsys/memory/events` via CAS. Run only by the single
-  writer (§9).
+- `--publish --role maintain --fleet ID --state-dir DIR [--session NAME]`: merge the delta into
+  `refs/engsys/memory/events` via CAS. Run only by the single writer (§9), from the maintain
+  heartbeat; refused for any other role, and skipped without the fleet signing key. Not a manual step.
+- `--tail --role merge|maintain --fleet ID --state-dir DIR [--session NAME]`: replace this session's
+  `refs/engsys/memory/<role>/<fleet>` with its current journal tail (§9). No GitHub fetch; the delta
+  and cursors are left alone.
+- A write whose content the tip already holds, signed with this same key over this ref and the
+  tip's own parent (Ed25519 is deterministic, so re-signing must reproduce `events.sig` exactly), is
+  a no-op: no commit, no fence read, no API write. After a key rotation the tip is re-signed.
 
 ## 8. Harvest: `core/scripts/harvest-findings.mjs`
 
@@ -235,15 +243,61 @@ Fold the text with `normalizeUntrusted()` first; the strip uses `\p{Default_Igno
 
 ## 9. Multi-fleet
 
-- **Writers:** exactly one writer per ref.
-  - `refs/engsys/memory/events` is written by the holder of the `maintain` baton (or a configured
-    role).
-  - Each `<role>/<fleet>` tail is written only by that fleet's session for that role.
+- **Writers:** exactly one writer per ref (F5).
+  - `refs/engsys/memory/events` is written only by the holder of the `maintain` baton
+    (`memory-sync --publish --role maintain`, from `mnt-heartbeat.sh`). Merge never writes it:
+    `--publish` is refused for any other role, for an explicit `--ref` naming another ref, and while
+    config `publish_role` is anything but `maintain`.
+  - Each `<role>/<fleet>` tail is written only by that fleet's session for that role
+    (`memory-sync --tail`, from both heartbeats, with `FLEET_ID` as the fleet: 1–40 of
+    `A-Z a-z 0-9 . _ -`).
+  - **The baton fence gates every write.** `ref-store` `writeEvents({ beforeCas })` awaits
+    `baton.mjs fence` for the writer's role and session right before each ref update (each CAS
+    round, after the commit is built): the baton must still be held with ≥ 60 s left. A refusal moves
+    nothing (`fence_refused`, reported as `skipped: "baton_not_held"`); the delta waits for the next
+    holder. The window between fence and update is seconds, and a takeover needs the 10-minute TTL to
+    lapse; a write that still overlaps a new holder's is a CAS merge by key, never a clobber.
+  - Single-writer is a writer-side discipline, not a GitHub control: anyone with `contents: write`
+    can force-push these refs, so the boundary is what readers verify (below).
+- **Tail content:** only the state dir's `journal-YYYY-MM.jsonl` files (regular files, opened
+  with `O_NOFOLLOW`; a symlink is never followed), the newest 200 lines, as structured `kind: journal` events: the event token
+  (`^[a-z][a-z0-9_.:-]{0,39}$`, else the line is skipped), its timestamp and a PR/issue number. No
+  other journal field (actor, notes, free text) is carried. The tail ref is **replaced** on each
+  write, never merged into, so it holds at most those 200 events (the current tail), not a growing
+  history up to `max_events`.
+- **Heartbeats are skip-never-block:** a refused or failed write never fails a heartbeat, and
+  `ENGSYS_MEMORY_SYNC=0` turns every sync step off, writes included. A reason the operator must fix
+  (no usable signing key, a refused target) is latched in `<state_dir>/memory-sync.warn` and printed
+  on the heartbeat's stderr when it changes; the file is removed once the writes run without one.
+  Not holding the baton (a standby session) is normal and says nothing.
+- **Single-fleet mode writes nothing:** the writes need a fleet id, so with `FLEET_ID` unset the
+  heartbeat runs only the local `--delta` and no memory ref is ever written.
+- **Fleet signatures bind a ref to a fleet** (F5, operator decision: option A). GitHub's metadata
+  can't: commits made through the Git Data API are committed by `web-flow` (GitHub signs them),
+  with the App's bot only as the email-derived author (checked on the live baton refs). So every
+  write carries an `events.sig` blob next to `events.jsonl` (`core/lib/memory/signing.mjs`): one
+  strictly parsed line holding an Ed25519 signature, made with the writer fleet's key
+  (`ENGSYS_MEMORY_SIGNING_KEY_FILE`, fleet-guide § 6.1), over
+  `engsys-memory-ref-sig\nv1\nfleet=<fleet>\nref=<full ref>\nparent=<sha|none>\ncontent=<sha256 of events.jsonl>\n`.
+  A signature can't be replayed onto another ref, parent or content. `memory-sync` writes nothing
+  without a usable key (skipped `no_signing_key`, logged).
+- **Readers verify the signature** (`verifyMemoryRefTip`): ref, parent and content digest are
+  recomputed from what was read, and the signature is checked against `fleet_memory_pubkeys` (§10). A
+  `<role>/<fleet>` tail must be signed by the fleet it names (any of its keys), `events` by any listed fleet. No entry,
+  a malformed key, a missing or malformed line, or a bad signature = untrusted. The commit's
+  committer/author is not a trust input at all.
+- **Still open:** the consumer wiring (staged fetch, so compaction doesn't break non-forced fetches)
+  is a separate, Nyx-reviewed item, and `trust.mjs` does not yet accept `author_kind: 'fleet_signed'`.
+  Until then no reader trusts these refs (§3.1).
 - **Readers:** every fleet fetches every ref.
-- **Trust map:** derived from `federation.yml`. Each enabled fleet's `github_app` is resolved to its
-  bot **user** ID; operators are resolved to numeric user IDs.
+- **Trust map:** for ref authorship, the operator memory.yml's `fleet_memory_pubkeys` (above; not
+  federation.yml, which holds App ids and slugs). For GitHub-sourced events inside a ref, authors stay
+  matched by numeric **user** id (§7.2): bot user ids in `trusted_bot_user_ids`, operators in
+  `operator_user_ids`.
 - **Handoffs:** the tail mirror runs from each monster heartbeat, so a baton handoff strands at most
-  one heartbeat interval of journal.
+  one heartbeat interval of journal. A tail is per role and fleet, not per host: when the baton moves
+  to another host of the same fleet, the new holder's first tail write replaces the old host's tail
+  (single writer per role and fleet, by design).
 
 ## 10. Config (`.claude/memory.yml`, or `memory.yml` in the fleet config dir)
 
@@ -281,8 +335,18 @@ exclude_class_b_agents: []              # agent types that get Class A only (sec
 high_fanout_globs: []                   # files keyed by symbol instead of path
 brief_bytes: 2048
 max_events: 20000
-publish_role: maintain                  # which singleton publishes refs/engsys/memory/events
+publish_role: maintain                  # must stay maintain: any other value refuses --publish (§9)
+fleet_memory_pubkeys: {}                # {<fleet>: <key> | [<key>, …]}, base64 raw 32-byte Ed25519; operator memory.yml ONLY (§9)
 ```
+
+`fleet_memory_pubkeys` (F5) is read only from the operator's `memory.yml` (source 1 above,
+`readOperatorMemoryConfig`: `ENGSYS_MEMORY_CONFIG`, else `$CLAUDE_CONFIG_DIR/memory.yml`, else
+`~/.claude/memory.yml`; in a fleet, the reviewed, hash-pinned copy in the fleet config dir), never
+from the plugin or repo config. A fleet's value is one key or a list
+of keys (`eric: [k1, k2]`: one per host, and an overlap while a key rotates); a ref verifies against
+any of its fleet's keys. Each key must be exactly 32 bytes of standard base64 (what
+`fleet memory-pubkey` prints, as a one-key list); a malformed key is dropped and logged, and a fleet
+with no valid key is untrusted.
 
 ### Commit operator trust, and the real boundary it rests on
 
@@ -334,7 +398,8 @@ is just the fleet config (if any) over the defaults.
 3. **Propose** markers and bot user IDs found in recent PRs. The operator confirms them; nothing is
    trusted automatically, and Dependabot and `github-actions` are never proposed.
 4. Recommend required human review on the Class A paths.
-5. Run `memory-sync --init` (and `--publish` if this host is the writer).
+5. Run `memory-sync --init`. Publishing is not a manual step: the maintain heartbeat publishes
+   (§9), and only with a fleet id and the fleet signing key.
 
 ## 12. Verified runtime facts (Claude Code 2.1.285)
 

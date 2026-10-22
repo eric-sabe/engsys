@@ -83,6 +83,12 @@ export const DEFAULTS = {
 	brief_bytes: 2048,
 	max_events: 20000,
 	publish_role: 'maintain',
+	// F5 (FeedFrwd/ff-engsys-fleet#60): `{ <fleet>: <base64 raw 32-byte Ed25519 public key> }`, the keys a reader
+	// verifies refs/engsys/memory/* signatures against (core/lib/memory/signing.mjs). Read ONLY from the operator's
+	// memory.yml (readOperatorMemoryConfig: ENGSYS_MEMORY_CONFIG, else $CLAUDE_CONFIG_DIR/memory.yml, else
+	// ~/.claude/memory.yml; in a fleet, the reviewed, hash-pinned copy) — never the plugin or repo config. A fleet with
+	// no valid key is untrusted.
+	fleet_memory_pubkeys: {},
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -154,6 +160,9 @@ export function loadConfig(repoRoot, { sha, pluginRoot, allowedRepos, log = null
 		...coerceListField(repoConfig?.[SIGNING_KEY_FIELD], { field: SIGNING_KEY_FIELD, log }),
 		...coerceListField(fleetConfig?.[SIGNING_KEY_FIELD], { field: SIGNING_KEY_FIELD, log }),
 	].filter((v) => typeof v === 'string' && v.trim()))];
+	// fleet_memory_pubkeys (F5): the operator file's mapping only; anything else there, or a value from any other
+	// source (plugin, repo at the reviewed SHA), is ignored (resolveFleetPubkeys then validates each entry).
+	merged.fleet_memory_pubkeys = isPlainObject(fleetConfig?.fleet_memory_pubkeys) ? { ...fleetConfig.fleet_memory_pubkeys } : {};
 	// `repos` comes ONLY from fleet/plugin config (never repoConfig, so an unlisted repo cannot allowlist itself, #145).
 	merged.repos = [...new Set([
 		...coerceListField(pluginConfig?.repos, { field: 'repos', log }),

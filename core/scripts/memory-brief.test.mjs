@@ -307,6 +307,34 @@ describe('loadConfig', () => {
 		}
 	});
 
+	test('fleet_memory_pubkeys (F5) comes ONLY from the operator memory.yml (readOperatorMemoryConfig) — never the plugin or the repo config', () => {
+		const dir = makeRepo({});
+		const fleetConfigDir = mktmp();
+		const pluginDir = mktmp();
+		const explicitDir = mktmp();
+		const prev = { CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR, ENGSYS_MEMORY_CONFIG: process.env.ENGSYS_MEMORY_CONFIG };
+		try {
+			delete process.env.CLAUDE_CONFIG_DIR; delete process.env.ENGSYS_MEMORY_CONFIG;
+			mkdirSync(join(dir, '.claude'), { recursive: true });
+			writeFileSync(join(dir, '.claude', 'memory.yml'), 'fleet_memory_pubkeys:\n  repo-fleet: AAAA\n');
+			commitAndPush(dir, 'repo memory.yml claims a key');
+			writeFileSync(join(pluginDir, 'memory.yml'), 'fleet_memory_pubkeys:\n  plugin-fleet: BBBB\n');
+			assert.deepEqual(loadConfig(dir, { pluginRoot: pluginDir }).fleet_memory_pubkeys, {}, 'no fleet config: no keys, whatever the others say');
+			writeFileSync(join(fleetConfigDir, 'memory.yml'), 'fleet_memory_pubkeys:\n  eric: CCCC\n');
+			process.env.CLAUDE_CONFIG_DIR = fleetConfigDir;
+			assert.deepEqual(loadConfig(dir, { pluginRoot: pluginDir }).fleet_memory_pubkeys, { eric: 'CCCC' });
+			writeFileSync(join(fleetConfigDir, 'memory.yml'), 'fleet_memory_pubkeys: [eric]\n');
+			assert.deepEqual(loadConfig(dir, { pluginRoot: pluginDir }).fleet_memory_pubkeys, {}, 'not a mapping: nothing');
+			// ENGSYS_MEMORY_CONFIG (a per-session login dir's pointer to the fleet dir's file) wins, as for every operator field
+			writeFileSync(join(explicitDir, 'memory.yml'), 'fleet_memory_pubkeys:\n  eric: [DDDD]\n');
+			process.env.ENGSYS_MEMORY_CONFIG = join(explicitDir, 'memory.yml');
+			assert.deepEqual(loadConfig(dir, { pluginRoot: pluginDir }).fleet_memory_pubkeys, { eric: ['DDDD'] });
+		} finally {
+			for (const [k, v] of Object.entries(prev)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+			for (const d of [dir, fleetConfigDir, pluginDir, explicitDir]) rmSync(d, { recursive: true, force: true });
+		}
+	});
+
 	describe('operator_signing_key_fingerprints sources (engsys#187)', () => {
 		const KEY = '0123456789abcdef';
 		test('positive control: unioned from the reviewed-SHA repo config and the fleet config dir', () => {

@@ -91,8 +91,9 @@ Do this:
      all Class A paths: `docs/agent-lessons/**`,
      `.claude/workflows/briefs/project-brief-overlay.md`,
      `docs/architecture/adr/**`, and `.claude/memory.yml`.
-   - Once confirmed, run `memory-sync.mjs --init` (and `--publish` if this host
-     is the configured writer; the cache directory is created lazily on first use).
+   - Once confirmed, run `memory-sync.mjs --init` (the cache directory is created
+     lazily on first use). Don't publish by hand: in a fleet the maintain heartbeat
+     publishes, signed with the fleet key (docs/memory-spec.md §9).
 
 7. **Report** what you set, what you folded in or reconciled, and list anything you
    couldn't determine so the human can confirm. Then suggest running

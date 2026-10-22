@@ -34,6 +34,7 @@
 #   heartbeat "<summary>"         write this fleet's heartbeat onto its own status issue (federation.yml
 #                                 fleets.<FLEET_ID>.status_issue); no-op in single-fleet mode. What the
 #                                 supervisor's HEARTBEAT_CMD calls once per tick.
+#   memory-pubkey                 print this host's memory signing public key as a memory.yml entry (F5)
 #   time <iso|epoch|now> [--date|--time|--relative]
 #                                 render a time the way this fleet's operator reads it (time zone +
 #                                 12h/24h, from federation.yml or fleet.conf); machine fields stay UTC
@@ -77,7 +78,7 @@ case "$cmd" in
   -h | --help | help) sed -n '2,/^set -/{/^set -/!p;}' "$0"; exit 0 ;;
   init) # the engsys CLI (this kit lives at <engsys>/core/fleet); no instance needed yet
     exec "$KIT/../../install" fleet init "$@" ;;
-  status | pin | sync | restart | launch | supervise | verify | install-jobs | notify | heartbeat | time | federation | msg | relay | health | xray | doctor | config-dir) ;;
+  status | pin | sync | restart | launch | supervise | verify | install-jobs | notify | heartbeat | time | federation | msg | relay | health | xray | doctor | config-dir | memory-pubkey) ;;
   *) echo "fleet: unknown command '$cmd' (fleet help)" >&2; exit 2 ;;
 esac
 
@@ -104,6 +105,7 @@ case "$cmd" in
   supervise) exec bash "$KIT/supervise.sh" "$@" ;;
   verify) exec bash "$KIT/verify.sh" "$@" ;;
   config-dir) exec bash "$KIT/config-dir.sh" "$@" ;;
+  memory-pubkey) exec bash "$KIT/memory-pubkey.sh" "$@" ;;
   install-jobs) exec bash "$KIT/install-jobs.sh" "$@" ;;
   notify) exec bash "$KIT/notify.sh" "$@" ;;
   heartbeat) exec bash "$KIT/heartbeat.sh" "$@" ;;

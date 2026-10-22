@@ -42,7 +42,7 @@
 #                     environment never silently falls back.
 #
 # USAGE
-#   launch-agent-sessions.sh [--roster FILE] [--verdict-key-file PATH] [--launch-dir DIR] [session-name]
+#   launch-agent-sessions.sh [--roster FILE] [--verdict-key-file PATH] [--memory-key-file PATH] [--launch-dir DIR] [session-name]
 #     no args          start every session in the roster
 #     session-name     start just that one
 #
@@ -74,12 +74,16 @@ ONLY=""
 VERDICT_KEY_FILE=""
 LAUNCH_DIR="${ENGSYS_LAUNCH_DIR:-}"
 unset ENGSYS_SECURITY_VERDICT_KEY_FILE
+# F5: the memory signing key PATH arrives the same way (--memory-key-file) and reaches only merge/maintain lines.
+MEMORY_KEY_FILE=""
+unset ENGSYS_MEMORY_SIGNING_KEY_FILE
 unset ENGSYS_MM_CONFIG   # engsys#229: set per merge-role line below, never inherited (nor seen by the tmux server)
 unset ENGSYS_MEMORY_CONFIG   # engsys#262: set below for a line on its own per-session login dir, never inherited
 while [ $# -gt 0 ]; do
   case "$1" in
     --roster) ROSTER="$2"; shift 2 ;;
     --verdict-key-file) VERDICT_KEY_FILE="$2"; shift 2 ;;
+    --memory-key-file) MEMORY_KEY_FILE="$2"; shift 2 ;;
     --launch-dir) LAUNCH_DIR="$2"; shift 2 ;;
     -h | --help) sed -n '2,66p' "$0"; exit 0 ;;
     *) ONLY="$1"; shift ;;
@@ -512,6 +516,7 @@ launch_one() {
   root="$(cd "$workdir" && pwd -P)" || { echo "error: cannot resolve workdir for '$name': $workdir" >&2; return 1; }
   cmd="export ENGSYS_SESSION=$(printf %q "$name") ENGSYS_SESSION_RUN=$(printf %q "$run") ENGSYS_SESSION_ROOT=$(printf %q "$root")"
   if [ -n "$role" ]; then cmd+=" ENGSYS_SINGLETON_ROLE=$role && "; else cmd+=" && unset ENGSYS_SINGLETON_ROLE && "; fi
+  cmd+="unset ENGSYS_MEMORY_SIGNING_KEY_FILE && "   # F5: never inherited; set below, after the env file, for merge/maintain
   # engsys#197 (option B), narrowed by engsys#229: only a security-ENV session (security.env / nyx.env, the
   # security lane) on Claude is handed the PATH of the fleet's verdict key (ENGSYS_SECURITY_VERDICT_KEY_FILE, passed
   # by core/fleet/launch.sh as --verdict-key-file from FLEET_SECURITY_VERDICT_KEY=on); every other session has it
@@ -538,6 +543,16 @@ launch_one() {
       else
         cmd+="unset ENGSYS_SECURITY_VERDICT_KEY_FILE && "
       fi
+    fi
+  fi
+  # F5: a merge or maintain line on Claude gets the PATH of the fleet's memory signing key (memory-sync signs what
+  # it writes to refs/engsys/memory/* with it); no other line does. Decided after the env file, so an env file can
+  # neither hand it to another line nor take it from a monster. Only when a key is configured (FLEET_MEMORY_SIGNING_KEY=on).
+  if [ -n "$MEMORY_KEY_FILE" ]; then
+    if [ "$HARNESS" = claude ] && { [ "$role" = merge ] || [ "$role" = maintain ]; }; then
+      cmd+="export ENGSYS_MEMORY_SIGNING_KEY_FILE=$(printf %q "$MEMORY_KEY_FILE") && "
+    else
+      cmd+="unset ENGSYS_MEMORY_SIGNING_KEY_FILE && "
     fi
   fi
   # The Claude Code config dir comes from the launcher's own environment (the fleet kit sets it from

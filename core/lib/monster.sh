@@ -536,9 +536,14 @@ monster_baton_rotate() {
   return 0
 }
 
-# monster_memory_tail_sync ROLE REPO STATE_DIR: best-effort memory delta sync on heartbeat (docs/memory-spec.md §9).
+# monster_memory_tail_sync ROLE REPO STATE_DIR [SESSION]: best-effort memory sync on heartbeat (docs/memory-spec.md §9).
+# Always the local --delta. Then, with a state dir and a FLEET_ID, the writes (F5): this role's own journal tail to
+# refs/engsys/memory/<role>/<fleet> (--tail), and, for maintain only, the shared events ref (--publish). Each write is
+# fenced on this session's baton right before the ref moves, so a session that lost its baton writes nothing, and
+# signed with the fleet key the launcher hands merge/maintain lines (ENGSYS_MEMORY_SIGNING_KEY_FILE; none = no write). Every
+# step is skip-never-block: a refusal or failure is ignored here, and ENGSYS_MEMORY_SYNC=0 turns all of it off.
 monster_memory_tail_sync() {
-  local role="$1" repo="$2" state_dir="${3:-}" mem_script
+  local role="$1" repo="$2" state_dir="${3:-}" session="${4:-}" mem_script
   [ "${ENGSYS_MEMORY_SYNC:-}" != "0" ] || return 0
   [ "${ENGSYS_MEMORY_SYNC:-0}" = 1 ] || [ -f "${CLAUDE_PROJECT_DIR:-.}/.claude/memory.yml" ] || return 0
   mem_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../scripts/memory-sync.mjs"
@@ -554,6 +559,28 @@ monster_memory_tail_sync() {
     [ -z "$state_dir" ] || [ ! -d "$state_dir" ] || printf '%s\n' "$warn" >"$state_dir/memory-sync-capped.warn" 2>/dev/null || true
   elif [ "$nrc" = 0 ] && [ -n "$state_dir" ]; then   # a failed run proves nothing: keep an earlier warning
     rm -f "$state_dir/memory-sync-capped.warn" 2>/dev/null || true
+  fi
+  if [ -n "$state_dir" ] && [ -n "${FLEET_ID:-}" ]; then
+    # A write that can't happen for a reason the operator must fix (no usable signing key, a refused target) says
+    # so on memory-sync's stderr. That reason is latched in <state_dir>/memory-sync.warn and reaches this heartbeat's
+    # stderr only when it changes; it is removed once the writes run without one. Not holding the baton is normal
+    # for a standby session and says nothing.
+    local werr wwarn wfile="$state_dir/memory-sync.warn"
+    werr="$(node "$mem_script" --tail --repo "$repo" --role "$role" --fleet "$FLEET_ID" --state-dir "$state_dir" \
+      ${session:+--session "$session"} 2>&1 >/dev/null || true)"
+    if [ "$role" = maintain ]; then
+      werr+=$'\n'"$(node "$mem_script" --publish --repo "$repo" --role maintain --fleet "$FLEET_ID" --state-dir "$state_dir" \
+        ${session:+--session "$session"} 2>&1 >/dev/null || true)"
+    fi
+    wwarn="$(printf '%s\n' "$werr" | grep -E '^memory-sync: (refused|not written)' | tail -n 1 || true)"
+    if [ -n "$wwarn" ]; then
+      if [ "$(cat "$wfile" 2>/dev/null || true)" != "$wwarn" ]; then
+        printf '%s\n' "$wwarn" >&2
+        [ ! -d "$state_dir" ] || printf '%s\n' "$wwarn" >"$wfile" 2>/dev/null || true
+      fi
+    else
+      rm -f "$wfile" 2>/dev/null || true
+    fi
   fi
   return 0
 }

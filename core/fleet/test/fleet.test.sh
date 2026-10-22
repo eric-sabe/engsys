@@ -1877,5 +1877,39 @@ rc_is "a bad value is refused" 1
 has "…saying why" "$OUT" "FLEET_SECURITY_VERDICT_KEY must be on or off"
 rm -f "$LC"
 
+echo "== Q. F5: FLEET_MEMORY_SIGNING_KEY=on gives only merge/maintain the memory signing key PATH"
+MEM_KEY="$STATE/memory-signing.key"
+rm -f "$MEM_KEY"
+setconf "FLEET_MEMORY_SIGNING_KEY=on" "FLEET_ID=acme"
+rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"; run fleet launch
+rc_is "launch with the memory signing key on exits 0" 0
+if [ -f "$MEM_KEY" ]; then ok "the key is created in the fleet state dir"; else bad "the key is created in the fleet state dir"; fi
+eq "…mode 600" "$(mode_of "$MEM_KEY")" 600
+has "…an Ed25519 PKCS#8 key" "$(head -n 1 "$MEM_KEY")" "BEGIN PRIVATE KEY"
+has "the merge monster is handed the key PATH" "$(tl acme-mm)" "export ENGSYS_MEMORY_SIGNING_KEY_FILE=$MEM_KEY"
+has "…and the maintenance monster (acme-security runs /maintenance-monster)" "$(tl acme-security)" "export ENGSYS_MEMORY_SIGNING_KEY_FILE=$MEM_KEY"
+hasnt "the key itself is on no launch line" "$(cat "$FAKE/tmux.log")" "$(sed -n 2p "$MEM_KEY")"
+for n in acme-build acme-rel; do
+  hasnt "$n (not merge/maintain) is not handed the key path" "$(tl "$n")" "export ENGSYS_MEMORY_SIGNING_KEY_FILE"
+  has "…it is unset on its line instead" "$(tl "$n")" "unset ENGSYS_MEMORY_SIGNING_KEY_FILE"
+done
+MEM_KEY_BEFORE="$(cat "$MEM_KEY")"
+rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"; run fleet launch
+eq "a second launch never replaces the key" "$(cat "$MEM_KEY")" "$MEM_KEY_BEFORE"
+run fleet memory-pubkey
+rc_is "fleet memory-pubkey exits 0" 0
+case "$OUT" in *"fleet_memory_pubkeys:"*"acme: "*"="*) ok "…and prints this fleet's memory.yml entry" ;; *) bad "…prints the memory.yml entry" "$OUT" ;; esac
+hasnt "…the public half only" "$OUT" "PRIVATE KEY"
+setconf "FLEET_MEMORY_SIGNING_KEY=off" "FLEET_ID=acme"
+rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"; run fleet launch
+hasnt "off (the default): nobody is handed the memory key path" "$(cat "$FAKE/tmux.log")" "export ENGSYS_MEMORY_SIGNING_KEY_FILE"
+run fleet memory-pubkey
+rc_is "memory-pubkey with the key off is refused" 1
+setconf "FLEET_MEMORY_SIGNING_KEY=maybe"
+run fleet launch
+rc_is "a bad value is refused" 1
+has "…saying why" "$OUT" "FLEET_MEMORY_SIGNING_KEY must be on or off"
+rm -f "$LC" "$MEM_KEY"
+
 # =============================================================================================
 finish fleet.test
