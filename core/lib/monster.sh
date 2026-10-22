@@ -538,7 +538,8 @@ monster_baton_rotate() {
 
 # monster_memory_tail_sync ROLE REPO STATE_DIR [SESSION]: best-effort memory sync on heartbeat (docs/memory-spec.md §9).
 # Always the local --delta. Then, with a state dir and a FLEET_ID, the writes (F5): this role's own journal tail to
-# refs/engsys/memory/<role>/<fleet> (--tail), and, for maintain only, the shared events ref (--publish). Each write is
+# refs/engsys/memory/fleet/<fleet>/<role> (--tail), and, for maintain only, this fleet's own events ref (--publish,
+# refs/engsys/memory/fleet/<fleet>/events; engsys#266). Each write is
 # fenced on this session's baton right before the ref moves, so a session that lost its baton writes nothing, and
 # signed with the fleet key the launcher hands merge/maintain lines (ENGSYS_MEMORY_SIGNING_KEY_FILE; none = no write). Every
 # step is skip-never-block: a refusal or failure is ignored here, and ENGSYS_MEMORY_SYNC=0 turns all of it off.

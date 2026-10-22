@@ -49,9 +49,19 @@ Events are stored as one `events.jsonl` blob in a commit tree on **custom refs i
 never on a branch:
 
 ```text
-refs/engsys/memory/events              distilled GitHub events for this repo (single writer)
-refs/engsys/memory/<role>/<fleet-id>   a monster's journal tail (one writer per role and fleet)
+refs/engsys/memory/fleet/<fleet>/events     this fleet's distilled GitHub events (its maintain baton holder)
+refs/engsys/memory/fleet/<fleet>/merge      this fleet's merge monster journal tail
+refs/engsys/memory/fleet/<fleet>/maintain   this fleet's maintenance monster journal tail
 ```
+
+**One namespace per fleet (engsys#266).** There is no shared cross-fleet `events` ref: each fleet
+publishes its own, signed with its own key, and a reader reads every fleet's. Keeping a fleet's events
+and tails under one `fleet/<fleet>/` tree makes them one prefix to fetch and one trust rule to check
+(a ref is trusted only when signed by the fleet its path names, §9). `fleet` is a fixed directory and
+never a ref itself, so it can't collide (git D/F) with the retired shared `refs/engsys/memory/events`
+or the pre-#266 `<role>/<fleet>` tails; no live repo held either (keystone had no
+`refs/engsys/memory/*` at all when this landed), so nothing was migrated. Writes to the old paths are
+refused, and readers never trust them.
 
 - **Writes** use the lease backend's CAS (`core/lib/lease/github-backend.mjs`): a new commit whose
   parent is the tip just read, then a non-forced `PATCH /git/refs/<ref>`. On a fast-forward rejection,
@@ -222,10 +232,10 @@ Fold the text with `normalizeUntrusted()` first; the strip uses `\p{Default_Igno
   (plus their comments and threads, about 3–4k events in a busy repo).
 - `--delta`: since the cursors, into the local `delta.jsonl`. Needs no write access.
 - `--publish --role maintain --fleet ID --state-dir DIR [--session NAME]`: merge the delta into
-  `refs/engsys/memory/events` via CAS. Run only by the single writer (§9), from the maintain
+  this fleet's `refs/engsys/memory/fleet/<fleet>/events` via CAS. Run only by the single writer (§9), from the maintain
   heartbeat; refused for any other role, and skipped without the fleet signing key. Not a manual step.
 - `--tail --role merge|maintain --fleet ID --state-dir DIR [--session NAME]`: replace this session's
-  `refs/engsys/memory/<role>/<fleet>` with its current journal tail (§9). No GitHub fetch; the delta
+  `refs/engsys/memory/fleet/<fleet>/<role>` with its current journal tail (§9). No GitHub fetch; the delta
   and cursors are left alone.
 - A write whose content the tip already holds, signed with this same key over this ref and the
   tip's own parent (Ed25519 is deterministic, so re-signing must reproduce `events.sig` exactly), is
@@ -244,11 +254,12 @@ Fold the text with `normalizeUntrusted()` first; the strip uses `\p{Default_Igno
 ## 9. Multi-fleet
 
 - **Writers:** exactly one writer per ref (F5).
-  - `refs/engsys/memory/events` is written only by the holder of the `maintain` baton
-    (`memory-sync --publish --role maintain`, from `mnt-heartbeat.sh`). Merge never writes it:
-    `--publish` is refused for any other role, for an explicit `--ref` naming another ref, and while
-    config `publish_role` is anything but `maintain`.
-  - Each `<role>/<fleet>` tail is written only by that fleet's session for that role
+  - A fleet's `refs/engsys/memory/fleet/<fleet>/events` is written only by that fleet's holder of
+    the `maintain` baton (`memory-sync --publish --role maintain`, from `mnt-heartbeat.sh`). Merge
+    never writes it: `--publish` is refused for any other role, for an explicit `--ref` naming any
+    other ref (the retired shared `refs/engsys/memory/events` by name), and while config
+    `publish_role` is anything but `maintain`.
+  - Each `fleet/<fleet>/<role>` tail is written only by that fleet's session for that role
     (`memory-sync --tail`, from both heartbeats, with `FLEET_ID` as the fleet: 1–40 of
     `A-Z a-z 0-9 . _ -`).
   - **The baton fence gates every write.** `ref-store` `writeEvents({ beforeCas })` awaits
@@ -283,7 +294,9 @@ Fold the text with `normalizeUntrusted()` first; the strip uses `\p{Default_Igno
   without a usable key (skipped `no_signing_key`, logged).
 - **Readers verify the signature** (`verifyMemoryRefTip`): ref, parent and content digest are
   recomputed from what was read, and the signature is checked against `fleet_memory_pubkeys` (§10). A
-  `<role>/<fleet>` tail must be signed by the fleet it names (any of its keys), `events` by any listed fleet. No entry,
+  ref must be signed by the fleet whose namespace it is in (any of its keys): a fleet's `events` and
+  its tails alike (engsys#266; before it, `events` took any listed fleet). A ref outside a fleet
+  namespace (the retired shared `events`, the old `<role>/<fleet>` tails), no entry,
   a malformed key, a missing or malformed line, or a bad signature = untrusted. The commit's
   committer/author is not a trust input at all.
 - **Still open:** the consumer wiring (staged fetch, so compaction doesn't break non-forced fetches)
@@ -309,7 +322,10 @@ Four sources, merged by `loadConfig()` (memory-brief.mjs) and, for `repos`, `res
 1. **The operator's `memory.yml`** — ONE file, the first of these that is SET
    (`resolveMemoryConfigPath`):
    1. `$ENGSYS_MEMORY_CONFIG`, an absolute path (a relative one is refused, never resolved against the
-      cwd). The fleet launcher exports `<fleet config dir>/memory.yml` here for a session on its own
+      cwd). A path inside the current repo checkout or any of its git worktrees (realpath, symlinks
+      followed; the repo holding the brief's repo root and the one holding the cwd) is repo-controlled:
+      it is refused, logged and never read, and the resolver falls through to the next source
+      (engsys#268). The fleet launcher exports `<fleet config dir>/memory.yml` here for a session on its own
       per-session login dir (`<fleet dir>.sessions/<name>`, engsys#205), which has no `memory.yml`
       of its own by design;
    2. `$CLAUDE_CONFIG_DIR/memory.yml`, the session's Claude Code config dir;
@@ -318,7 +334,12 @@ Four sources, merged by `loadConfig()` (memory-brief.mjs) and, for `repos`, `res
 2. **The plugin's own** `$CLAUDE_PLUGIN_ROOT/memory.yml`.
 3. **The repo's** `.claude/memory.yml` at the reviewed SHA, only for a repo already allowlisted by
    1, 2 or 4 — never `repos` itself (a repo can't allowlist itself, #145).
-4. **`ENGSYS_MEMORY_REPOS`** (comma-separated), extra `repos` entries only.
+4. **`ENGSYS_MEMORY_REPOS`** (comma-separated), extra `repos` entries only. A bare env value has no
+   file behind it, so the resolver can't tell where it came from (engsys#268). It can only add
+   `repos`; the fleet launcher never sets it, and `fleet verify` flags every `ENGSYS_*` key in a
+   settings `env` (the pin checkout's `.claude/settings.json` and `settings.local.json`, and the
+   fleet's user settings), so a repo can't inject it, or `ENGSYS_MEMORY_CONFIG`, through Claude
+   Code's settings.
 
 Scalars: operator file over repo over plugin. List fields are unioned. Before engsys#262 source 1 was
 `$CLAUDE_CONFIG_DIR/memory.yml` alone, so an interactive session and every per-session fleet login

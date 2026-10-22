@@ -524,7 +524,7 @@ fleet's public key in the operator's memory.yml.
 - **Publish the public key.** `fleet memory-pubkey` prints this host's key as a one-key list, for example
   `fleet_memory_pubkeys:\n  eric: [<base64>]`. Add it to the fleet's list in its reviewed `memory.yml` (a fleet with
   several hosts lists one key per host; a single string is accepted too) in a fleet PR, together with that file's
-  `VERIFY_ALLOWED_USER_FILES` hash (#230 pins the file). A fleet with no valid key is untrusted. A tail `refs/engsys/memory/<role>/<fleet>` must be signed by the fleet it names; `events` by any listed fleet.
+  `VERIFY_ALLOWED_USER_FILES` hash (#230 pins the file). A fleet with no valid key is untrusted. Each fleet writes only its own namespace, `refs/engsys/memory/fleet/<fleet>/` (`events` from its maintain baton holder, plus `merge` and `maintain` tails; engsys#266), and a reader trusts a ref there only if that fleet signed it. There is no shared cross-fleet events ref.
 - **No key, no write.** memory-sync refuses `--publish` and `--tail` without a usable key (missing, a symlink, not
   owned by the fleet user, readable by group or other, or not Ed25519). The heartbeat carries on, and the reason is
   latched in `<state_dir>/memory-sync.warn` (and printed on the heartbeat's stderr when it changes) until it is fixed.

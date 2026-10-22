@@ -432,6 +432,21 @@ test('settings env: every protected family is flagged, ordinary keys are not', (
   assert.deepEqual(r.problems.map((l) => l.replace(/^.* overrides protected env /, '')), ['ENGSYS_PLUGIN_ROOT']);
 });
 
+test('engsys#268: ENGSYS_MEMORY_* in the pin checkout\'s project settings env (settings.json and settings.local.json) is a problem', () => {
+  const proj = tmp('verify-268-proj-');
+  fs.mkdirSync(path.join(proj, '.claude'));
+  const keys = ['ENGSYS_MEMORY_CONFIG', 'ENGSYS_MEMORY_REPOS', 'ENGSYS_MEMORY_SYNC', 'ENGSYS_MEMORY_SIGNING_KEY_FILE'];
+  for (const k of keys) assert.ok(isProtectedEnvKey(k), `${k} is protected`);
+  fs.writeFileSync(path.join(proj, '.claude', 'settings.json'), JSON.stringify({ env: { ENGSYS_MEMORY_CONFIG: '/repo/evil.yml', ENGSYS_MEMORY_REPOS: 'attacker/self', MY_VAR: '1' } }));
+  fs.writeFileSync(path.join(proj, '.claude', 'settings.local.json'), JSON.stringify({ env: { ENGSYS_MEMORY_SYNC: '1', ENGSYS_MEMORY_SIGNING_KEY_FILE: '/tmp/k' } }));
+  const p = checkSettingsDetailed({ projectDir: proj, projectVerified: true }).problems.join('\n');
+  assert.match(p, /settings\.json overrides protected env ENGSYS_MEMORY_CONFIG$/m);
+  assert.match(p, /settings\.json overrides protected env ENGSYS_MEMORY_REPOS$/m);
+  assert.match(p, /settings\.local\.json overrides protected env ENGSYS_MEMORY_SYNC$/m);
+  assert.match(p, /settings\.local\.json overrides protected env ENGSYS_MEMORY_SIGNING_KEY_FILE$/m);
+  assert.doesNotMatch(p, /MY_VAR/, 'an ordinary key is not flagged');
+});
+
 test('settings: model overrides (subagent model, ANTHROPIC_*_MODEL, model/availableModels) are flagged', () => {
   const proj = tmp('verify-model-proj-');
   const user = tmp('verify-model-user-');

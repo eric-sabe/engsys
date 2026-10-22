@@ -287,6 +287,54 @@ describe('scope project Class A to an allowlisted repo (#145)', () => {
 		assert.equal(resolveMemoryConfigPath({ ENGSYS_MEMORY_CONFIG: '', CLAUDE_CONFIG_DIR: '/c', HOME: '/h' }), join('/c', 'memory.yml'), 'an empty value is unset');
 	});
 
+	test('engsys#268: an ENGSYS_MEMORY_CONFIG inside the repo checkout or any of its worktrees is refused, logged and never read', () => {
+		const repo = makeRepo({});
+		const wt = mkdtempSync(join(tmpdir(), 'memory-idx-268-wt-'));
+		rmSync(wt, { recursive: true, force: true });
+		const outside = mkdtempSync(join(tmpdir(), 'memory-idx-268-out-'));
+		const cfgDir = mkdtempSync(join(tmpdir(), 'memory-idx-268-cfg-'));
+		const elsewhere = mkdtempSync(join(tmpdir(), 'memory-idx-268-cwd-'));
+		try {
+			hermeticGit(repo, [...GIT_OPTS, 'worktree', 'add', '-q', '-b', 'side', wt], { isolateConfig: true });
+			mkdirSync(join(repo, 'cfg'));
+			writeFileSync(join(repo, 'cfg', 'memory.yml'), 'repos: [attacker/repo]\nbrief_bytes: 9999\n');
+			writeFileSync(join(wt, 'memory.yml'), 'repos: [attacker/repo]\n');
+			writeFileSync(join(outside, 'memory.yml'), 'repos: [acme/app]\n');
+			writeFileSync(join(cfgDir, 'memory.yml'), 'repos: [fleet/own]\n');
+			symlinkSync(join(repo, 'cfg', 'memory.yml'), join(outside, 'link.yml')); // outside path, inside target
+			symlinkSync(join(repo, 'cfg'), join(outside, 'linkdir')); // a symlinked dir into the repo
+			const logs = [];
+			const opts = { repoRoot: repo, cwd: elsewhere, log: (m) => logs.push(m) };
+			const env = (p) => ({ ENGSYS_MEMORY_CONFIG: p, CLAUDE_CONFIG_DIR: cfgDir, HOME: '/h' });
+			for (const p of [join(repo, 'cfg', 'memory.yml'), join(wt, 'memory.yml'), join(outside, 'link.yml'), join(outside, 'linkdir', 'memory.yml'), join(outside, 'linkdir', 'not-yet.yml'), join(repo, '.git', 'memory.yml')]) {
+				assert.equal(resolveMemoryConfigPath(env(p), opts), join(cfgDir, 'memory.yml'), `${p} falls through to the next source`);
+				assert.deepEqual(readOperatorMemoryConfig(env(p), opts), { repos: ['fleet/own'] }, `${p} is never read`);
+			}
+			assert.ok(logs.length > 0 && logs.every((m) => /refusing ENGSYS_MEMORY_CONFIG=.*inside the repo checkout/.test(m)), logs.join('\n'));
+			assert.equal(resolveMemoryConfigPath(env(join(outside, 'memory.yml')), opts), join(outside, 'memory.yml'), 'positive control: a path outside every checkout is used');
+			// with no repoRoot, the repo holding the cwd counts
+			assert.equal(resolveMemoryConfigPath(env(join(repo, 'cfg', 'memory.yml')), { cwd: wt, log: () => {} }), join(cfgDir, 'memory.yml'), 'the cwd\'s repo (here: a linked worktree of it) counts too');
+			assert.equal(resolveMemoryConfigPath({ ENGSYS_MEMORY_CONFIG: join(repo, 'cfg', 'memory.yml'), HOME: elsewhere }, opts), join(elsewhere, '.claude', 'memory.yml'), 'falls through to ~/.claude when CLAUDE_CONFIG_DIR is unset');
+		} finally {
+			for (const d of [wt, repo, outside, cfgDir, elsewhere]) rmSync(d, { recursive: true, force: true });
+		}
+	});
+
+	test('engsys#268: the allowlist ignores an in-repo ENGSYS_MEMORY_CONFIG — a repo can\'t allowlist itself through it', () => {
+		const repo = makeRepo({ remoteUrl: 'https://github.com/attacker/self.git' });
+		const prev = { ENGSYS_MEMORY_CONFIG: process.env.ENGSYS_MEMORY_CONFIG, CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR };
+		try {
+			writeFileSync(join(repo, 'evil.yml'), 'repos: [attacker/self]\n');
+			delete process.env.CLAUDE_CONFIG_DIR;
+			process.env.ENGSYS_MEMORY_CONFIG = join(repo, 'evil.yml');
+			assert.equal(isRepoAllowlisted(repo), false);
+			assert.ok(!loadClassADocs(resolveClassARoots(repo), {}, { repoRoot: repo }).docs.some((d) => d.key === 'lesson:one'), 'no project Class A');
+		} finally {
+			for (const [k, v] of Object.entries(prev)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+			rmSync(repo, { recursive: true, force: true });
+		}
+	});
+
 	test('readOperatorMemoryConfig: a YAML mapping or null (engsys#262)', () => {
 		const dir = mkdtempSync(join(tmpdir(), 'memory-idx-opcfg-'));
 		try {

@@ -9,6 +9,7 @@ import {
   EVENTS_REF,
   MEMORY_FETCH_REFSPEC,
   tailRef,
+  fleetEventsRef,
   fetchMemoryRefs,
   scanTextForSecrets,
   scanEventForSecrets,
@@ -21,9 +22,14 @@ import { publicKeyB64, resolveFleetPubkeys, signTip } from './signing.mjs';
 
 describe('ref-store (#130)', () => {
   it('validates tailRef segments and rejects refs outside refs/engsys/memory/*', async () => {
-    assert.equal(tailRef('dev', 'fleet-a'), 'refs/engsys/memory/dev/fleet-a');
+    assert.equal(tailRef('merge', 'fleet-a'), 'refs/engsys/memory/fleet/fleet-a/merge');
+    assert.equal(tailRef('maintain', 'fleet-a'), 'refs/engsys/memory/fleet/fleet-a/maintain');
+    assert.equal(fleetEventsRef('fleet-a'), 'refs/engsys/memory/fleet/fleet-a/events');
     assert.throws(() => tailRef('../heads', 'main'), /invalid role/);
-    assert.throws(() => tailRef('dev', 'a/b'), /invalid fleetId/);
+    assert.throws(() => tailRef('dev', 'fleet-a'), /invalid role/, 'only the baton roles have tails');
+    assert.throws(() => tailRef('events', 'fleet-a'), /invalid role/, 'a role can never shadow the fleet\'s events ref');
+    assert.throws(() => tailRef('merge', 'a/b'), /invalid fleetId/);
+    assert.throws(() => fleetEventsRef('../x'), /invalid fleetId/);
 
     const fake = fakeGitApi({ repo: 'owner/repo' });
     const store = createMemoryRefStore({
@@ -43,7 +49,7 @@ describe('ref-store (#130)', () => {
   });
 
   it('tailRef refuses dot segments (Nyx LOW 1): no leading dot, no "..", no ".lock" suffix', () => {
-    assert.equal(tailRef('merge', 'eric'), 'refs/engsys/memory/merge/eric');
+    assert.equal(tailRef('merge', 'eric'), 'refs/engsys/memory/fleet/eric/merge');
     for (const [role, fleet] of [['merge', '.'], ['merge', '..'], ['merge', '.git'], ['.merge', 'eric'], ['merge', 'a..b'], ['merge', 'x.lock']]) {
       assert.throws(() => tailRef(role, fleet), /invalid/, `${role}/${fleet}`);
     }
@@ -367,7 +373,7 @@ describe('ref-store (#130)', () => {
 
     it('the writer stores events.sig next to events.jsonl, and a tip signed by its own fleet verifies end to end', async () => {
       const { tip } = await writeAndRead({ signer: signerFor(ericKey, 'eric'), events: [ev('a', { path: 'src/a.ts', author_kind: 'operator', author_id: 1 })] });
-      assert.match(tip.sigText, /^engsys-memory-sig v1 fleet=eric ref=refs\/engsys\/memory\/merge\/eric parent=none /);
+      assert.match(tip.sigText, /^engsys-memory-sig v1 fleet=eric ref=refs\/engsys\/memory\/fleet\/eric\/merge parent=none /);
       const res = await verifyMemoryRefTip('/repo', { ref: TAIL, parent: tip.parents[0] ?? null, content: tip.content, sigText: tip.sigText, pubkeys, resolveSha: reviewed, exec: okExec });
       assert.equal(res.ok, true);
       assert.equal(res.fleet, 'eric');
@@ -391,10 +397,24 @@ describe('ref-store (#130)', () => {
       const unsigned = await writeAndRead({ events: [ev('a')] });
       assert.equal(unsigned.tip.sigText, null);
       assert.equal((await verifyMemoryRefTip('/repo', { ref: TAIL, parent: null, content: unsigned.tip.content, sigText: unsigned.tip.sigText, pubkeys, resolveSha: reviewed, exec: okExec })).reason, 'missing_or_malformed_signature');
-      const byMark = await writeAndRead({ signer: signerFor(markKey, 'mark-fleet'), events: [ev('a')] });
+      // a forger with mark-fleet's key: it signs its own ref (it can't sign eric's) and relabels the line onto eric's
+      const MARK_TAIL = tailRef('merge', 'mark-fleet');
+      const forger = ({ parent, content }) => signTip({ privateKey: markKey, fleet: 'mark-fleet', ref: MARK_TAIL, parent, content }).replace(`ref=${MARK_TAIL}`, `ref=${TAIL}`);
+      const byMark = await writeAndRead({ signer: forger, events: [ev('a')] });
       assert.equal((await verifyMemoryRefTip('/repo', { ref: TAIL, parent: null, content: byMark.tip.content, sigText: byMark.tip.sigText, pubkeys, resolveSha: reviewed, exec: okExec })).reason, 'fleet_mismatch');
       const signed = await writeAndRead({ signer: signerFor(ericKey, 'eric'), events: [ev('a')] });
       assert.equal((await verifyMemoryRefTip('/repo', { ref: EVENTS_REF, parent: null, content: signed.tip.content, sigText: signed.tip.sigText, pubkeys, resolveSha: reviewed, exec: okExec })).reason, 'ref_mismatch');
+    });
+
+    it('per-fleet events (engsys#266): signed by the fleet it names verifies; another fleet\'s events ref does not take it', async () => {
+      const ERIC_EVENTS = fleetEventsRef('eric');
+      const own = await writeAndRead({ ref: ERIC_EVENTS, signer: signerFor(ericKey, 'eric'), events: [ev('a')] });
+      assert.deepEqual((await verifyMemoryRefTip('/repo', { ref: ERIC_EVENTS, parent: null, content: own.tip.content, sigText: own.tip.sigText, pubkeys, resolveSha: reviewed, exec: okExec })).fleet, 'eric');
+      const MARK_EVENTS = fleetEventsRef('mark-fleet');
+      assert.equal((await verifyMemoryRefTip('/repo', { ref: MARK_EVENTS, parent: null, content: own.tip.content, sigText: own.tip.sigText, pubkeys, resolveSha: reviewed, exec: okExec })).ok, false, 'replay onto another fleet\'s events ref');
+      const s = createMemoryRefStore({ repo: 'owner/repo', client: fakeGitApi({ repo: 'owner/repo' }), sleep: async () => {} });
+      const w = await s.writeEvents({ ref: MARK_EVENTS, events: [ev('a')], signer: signerFor(ericKey, 'eric') });
+      assert.equal(w.error?.code, 'sign_failed', 'a fleet\'s signer refuses another fleet\'s ref outright');
     });
 
     it('the commit\'s GitHub identity is not an input at all (web-flow commits every API-made commit)', async () => {
@@ -443,7 +463,7 @@ describe('ref-store (#130)', () => {
       const rotated = await s.writeEvents({ ref: TAIL, events: [ev('a')], signer: signerFor(rotatedKey, 'eric'), beforeCas, replace: true });
       assert.equal(rotated.noop, false, 'after a key rotation the unchanged tip is re-signed with the new key, not skipped');
       const rewrite = await s.writeEvents({ ref: TAIL, events: [ev('a')], signer: signerFor(markKey, 'mark-fleet'), beforeCas, replace: true });
-      assert.equal(rewrite.noop, false, 'content another fleet signed is re-signed, not skipped');
+      assert.equal(rewrite.error?.code, 'sign_failed', 'another fleet can\'t sign this fleet\'s tail at all (engsys#266), so it is never skipped as current either');
       const changed = await s.writeEvents({ ref: TAIL, events: [ev('b', { updated_at: '2026-07-02T00:00:00Z' })], signer, beforeCas, replace: true });
       assert.equal(changed.noop, false);
       const tip = await s.readEvents({ ref: TAIL });
