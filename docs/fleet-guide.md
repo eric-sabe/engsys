@@ -525,6 +525,17 @@ fleet's public key in the operator's memory.yml.
   `fleet_memory_pubkeys:\n  eric: [<base64>]`. Add it to the fleet's list in its reviewed `memory.yml` (a fleet with
   several hosts lists one key per host; a single string is accepted too) in a fleet PR, together with that file's
   `VERIFY_ALLOWED_USER_FILES` hash (#230 pins the file). A fleet with no valid key is untrusted. Each fleet writes only its own namespace, `refs/engsys/memory/fleet/<fleet>/` (`events` from its maintain baton holder, plus `merge` and `maintain` tails; engsys#266), and a reader trusts a ref there only if that fleet signed it. There is no shared cross-fleet events ref.
+- **Reading other fleets' refs** (engsys#266). The maintain baton holder's heartbeat runs a staged fetch
+  (`memory-sync --consume`): a tip reaches the local refs only if it verifies and descends from the last verified tip, so
+  a force-push back to an older signed tip (a rollback) is rejected and logged (`memory-sync: consume: … rejected`, in
+  `<state_dir>/memory-sync.warn`). The last verified tips are kept in the local refs and in
+  `<state_dir>/memory-ref-tips.json`; a host with neither trusts the first verified tip it sees (logged). To weight
+  another fleet's history down, set `peer_fleet_weight` (0–1, default 0.5) in `memory.yml`, which changes its hash.
+- **Blast radius of one fleet key.** A stolen key (any process running as that fleet's user) can sign only that fleet's
+  own namespace, `refs/engsys/memory/fleet/<fleet>/`. Other fleets read it as that fleet's history, weighted by
+  `peer_fleet_weight`, as structured Class B pointers only (no free text reaches a brief). It cannot sign another
+  fleet's refs, and it cannot roll a ref back past what readers already verified. To cut it off, remove the fleet's key
+  from every `memory.yml` (a reviewed PR): its stream drops at the next brief.
 - **No key, no write.** memory-sync refuses `--publish` and `--tail` without a usable key (missing, a symlink, not
   owned by the fleet user, readable by group or other, or not Ed25519). The heartbeat carries on, and the reason is
   latched in `<state_dir>/memory-sync.warn` (and printed on the heartbeat's stderr when it changes) until it is fixed.

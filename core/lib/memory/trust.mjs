@@ -16,6 +16,11 @@
 //     body/evidence text; #192: single-line text only — see that fallback's own comment) — exactly the same path a benign
 //     subject-only pointer always used, carrying no body/rationale for the gate to need to
 //     protect.
+//   - fleet_signed (engsys#266): stamped ONLY by the verified ref path (ref-consumer.mjs loadVerifiedRefEvents,
+//     after verifyMemoryRefTip); loadClassBEvents strips the label from any other source. Trusted only while
+//     `signed_fleet` still has a valid key in the CURRENT config's fleet_memory_pubkeys (the operator memory.yml),
+//     so dropping a fleet's key drops its stream on the next brief, index rebuilt or not. Checked before the
+//     journal early return: tail events are journal events.
 //   - a ref-sourced event that hasn't been through verifyMemoryRefTip is marked
 //     `author_kind: 'untrusted_ref'` by loadClassBEvents and is rejected UNCONDITIONALLY — it
 //     matches no known kind and is NOT the legacy/unlabeled shape (no kind at all), so the
@@ -26,6 +31,25 @@
 // Removing an ID from trusted_bot_user_ids/operator_user_ids/trusted_member_user_ids immediately
 // drops any previously-synced event whose trust depended on it — this function re-evaluates
 // against the CURRENT config every time it's called, never caching a past verdict.
+
+import { resolveFleetPubkeys } from './signing.mjs';
+
+// The fleets with a usable key: parsed once per distinct fleet_memory_pubkeys value, not once per event. Keyed by
+// the value's JSON, so an edited mapping (even the same object, mutated) is always parsed afresh.
+const keyedFleetsCache = new Map();
+function keyedFleets(config) {
+	const raw = config?.fleet_memory_pubkeys;
+	if (!raw || typeof raw !== 'object') return new Set();
+	let id;
+	try { id = JSON.stringify(raw); } catch { return new Set(); }
+	let set = keyedFleetsCache.get(id);
+	if (!set) {
+		set = new Set([...resolveFleetPubkeys(config)].map(([fleet]) => fleet));
+		if (keyedFleetsCache.size > 16) keyedFleetsCache.clear();
+		keyedFleetsCache.set(id, set);
+	}
+	return set;
+}
 
 /**
  * Evaluate brief-time trust of a Class B event against `config` (docs/memory-spec.md §7.3).
@@ -39,6 +63,10 @@ export function isEventTrusted(event, config) {
 	// early return just below — a ref-sourced event that hasn't passed verifyMemoryRefTip must
 	// never slip through as a journal entry.
 	if (event.author_kind === 'untrusted_ref') return false;
+	if (event.author_kind === 'fleet_signed') {
+		const fleet = typeof event.signed_fleet === 'string' ? event.signed_fleet : '';
+		return Boolean(fleet) && keyedFleets(config).has(fleet);
+	}
 	if (event.kind === 'journal') return true;
 
 	const trustedBots = new Set((config.trusted_bot_user_ids ?? []).map(Number));

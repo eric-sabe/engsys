@@ -734,12 +734,15 @@ no_line() { case "$LOG" in *"$1"*) bad "$2" "$LOG" ;; *) ok "$2" ;; esac; }
 has_line "--delta --repo acme/app" "  merge: the local delta still runs"
 has_line "--tail --repo acme/app --role merge --fleet alice --state-dir $T/mstate --session sess-1" "  merge: mirrors its own journal tail, fenced on its session"
 no_line "--publish" "  merge: never publishes the shared events ref"
+no_line "--consume" "  merge: never runs the staged fetch (engsys#266: it reads the verified local refs)"
 writes maintain FLEET_ID=alice
 has_line "--tail --repo acme/app --role maintain --fleet alice --state-dir $T/mstate --session sess-1" "  maintain: mirrors its own journal tail"
 has_line "--publish --repo acme/app --role maintain --fleet alice --state-dir $T/mstate --session sess-1" "  maintain: publishes the events ref (memory-sync fences it on the maintain baton)"
+has_line "--consume --repo acme/app --role maintain --fleet alice --state-dir $T/mstate --session sess-1" "  maintain: runs the staged fetch of the signed refs (engsys#266, fenced on the maintain baton)"
 writes maintain FLEET_ID=
 no_line "--tail" "  no FLEET_ID: no tail write"
 no_line "--publish" "  …and no publish"
+no_line "--consume" "  …and no staged fetch"
 writes maintain FLEET_ID=alice STUB_NODE_RC=1
 [ "$RC" = 0 ] && ok "  a refused or failed write never fails the heartbeat" || bad "  heartbeat failed on a refused write" "rc=$RC"
 writes maintain FLEET_ID=alice ENGSYS_MEMORY_SYNC=0
@@ -750,6 +753,7 @@ cat >"$T/nodebin/node" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
   *--tail*|*--publish*) [ -z "${STUB_WRITE_ERR:-}" ] || echo "$STUB_WRITE_ERR" >&2; exit "${STUB_WRITE_RC:-0}" ;;
+  *--consume*) [ -z "${STUB_CONSUME_ERR:-}" ] || echo "$STUB_CONSUME_ERR" >&2; exit 0 ;;
 esac
 exit 0
 SH
@@ -769,6 +773,12 @@ wsync STUB_WRITE_RC=1
 wsync STUB_WRITE_ERR="memory-sync: refused: --tail needs --fleet <id>" STUB_WRITE_RC=2
 has_line_out() { case "$OUT" in *"$1"*) ok "$2" ;; *) bad "$2" "$OUT" ;; esac; }
 has_line_out "memory-sync: refused" "  a refused target is surfaced the same way"
+rm -f "$T/mstate/memory-sync.warn"
+ROLLBACK="memory-sync: consume: refs/engsys/memory/fleet/bob/maintain rejected (not_a_descendant_of_last_verified 0123456789ab); kept the last verified tip"
+wsync STUB_CONSUME_ERR="$ROLLBACK"
+[ "$RC" = 0 ] && ok "  engsys#266: a rejected staged tip never fails the heartbeat" || bad "  heartbeat failed on a consume rejection" "rc=$RC"
+has_line_out "rejected (not_a_descendant_of_last_verified" "  …the rejection reaches the heartbeat's stderr"
+[ "$(cat "$T/mstate/memory-sync.warn" 2>/dev/null)" = "$ROLLBACK" ] && ok "  …and is latched in <state>/memory-sync.warn" || bad "  …not latched" "$(cat "$T/mstate/memory-sync.warn" 2>/dev/null)"
 rm -f "$T/mstate/memory-sync.warn"
 
 echo "monster-bus.test: $pass passed, $fail failed"

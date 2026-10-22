@@ -68,26 +68,44 @@ refused, and readers never trust them.
   re-read, merge by key and retry. Factor the CAS into a shared helper; `ref-store.mjs` allows a
   non-empty tree, while batons keep requiring the empty tree.
 - **Each repo's events live in that repo**, so read access follows that repo's access control.
-- **Reads:** `git fetch origin 'refs/engsys/memory/*:refs/engsys/memory/*'` (engsys v2.0.1 M4: NOT
-  forced — a forced (`+`) refspec lets `git fetch` silently clobber a local ref tip with whatever
-  the remote currently has, defeating any after-the-fact trust check on it; a non-fast-forward
-  fetch now fails closed instead), then `git show <ref>:events.jsonl`. Clones and worktrees never
-  fetch these refs by default, and any event read back this way is untrusted (`author_kind`/
-  `author_id` stripped) until `verifyMemoryRefTip` is wired into the reader.
-- **Wiring a consumer of these refs requires a security review.** The fetch (`fetchMemoryRefs`) is
-  deliberately unwired. Any code that fetches or reads `refs/engsys/memory/*` as trusted input must
-  go through `verifyMemoryRefTip` (`ref-store.mjs`) and must not re-implement tip trust. This is
-  enforced by `core/lib/memory/ref-consumer-guard.test.mjs`: a file that names the memory refs and
-  is not on its short non-consumer list fails the suite, and a listed consumer must call
-  `verifyMemoryRefTip(` in code. The only current reader of ref content (`loadClassBEvents`) strips
-  every embedded trust label (`author_kind: 'untrusted_ref'`). Adding a consumer means a Nyx
-  review, then updating that guard's `CONSUMERS` set and this section in the same PR. A non-forced
-  fetch also rejects every fetch after the first compaction (parentless commit); a consumer needs
-  the staged-fetch design noted in `ref-store.mjs`, not a forced refspec.
+- **Reads (engsys#266, `core/lib/memory/ref-consumer.mjs`):** a staged fetch, run only by the maintain
+  baton holder (`memory-sync --consume`, from the maintain heartbeat). It force-fetches into a staging
+  namespace (`+refs/engsys/memory/fleet/*:refs/engsys/memory-incoming/fleet/*`), never into
+  `refs/engsys/memory/*` itself. A staged tip moves the local ref only when (1) its signature verifies (`verifyMemoryRefTip`,
+  §9) and (2) it descends from the last verified tip (`git merge-base --is-ancestor`). The move is a
+  compare-and-swap `git update-ref`. The local `refs/engsys/memory/*` therefore hold only verified
+  tips and are themselves the record of the last verified tip. Content is never assumed append-only
+  (tails are replaced, §9); only commit ancestry is checked, and a stale signed tip can't be
+  re-parented because the signature binds its parent. Every write is a child of the tip it read
+  (merge, tail replace and compaction alike), so an honest history always fast-forwards.
+  - **Rollback state:** the last verified tip per ref is also written to
+    `<state dir>/memory-ref-tips.json` (outside `.git`) and consulted when the local ref is missing
+    (a wiped or fresh git dir). With neither, the first staged tip that verifies is **trusted on
+    first use**, with a logged warning: a fresh host can be handed a stale (but validly signed) tip
+    once. The R3 drill checks a fresh host's first fetch against the live tips.
+  - **Brief-time reads:** `loadClassBEvents` reads the consumed local refs only through
+    `loadVerifiedRefEvents`, which re-verifies each tip (verdicts cached per ref, tip, reviewed SHA
+    and pubkeys in `<cache>/ref-verify-cache.json`, so a warm brief re-verifies nothing) and stamps
+    its events `author_kind: 'fleet_signed'`, `signed_fleet: <fleet>`. Any other ref under
+    `refs/engsys/memory/` (the retired paths, an unknown leaf) is still read label-stripped as
+    `untrusted_ref`, and a `delta.jsonl` line claiming `fleet_signed` is too.
+  - **Skip, never block:** a failed fetch, a bad signature, a rollback or a git error keeps the last
+    verified state, is logged (`memory-sync: consume: …`, latched like the write warnings) and never
+    fails the heartbeat or a brief.
+  - `fetchMemoryRefs` (non-forced, `MEMORY_FETCH_REFSPEC`) stays for any other caller.
+- **Wiring a consumer of these refs requires a security review.** Any code that fetches or reads
+  `refs/engsys/memory/*` as trusted input must go through `verifyMemoryRefTip` (`ref-store.mjs`) and
+  must not re-implement tip trust. This is enforced by `core/lib/memory/ref-consumer-guard.test.mjs`:
+  a file that names the memory refs and is not on its short non-consumer list fails the suite, and a
+  listed consumer must call `verifyMemoryRefTip(` (or its synchronous core) in code. The one
+  consumer is `core/lib/memory/ref-consumer.mjs` (engsys#266, Nyx-reviewed); `index-db.mjs` and
+  `memory-sync.mjs` may call its API, and nothing else may. Adding a consumer means a Nyx review,
+  then updating that guard's `CONSUMERS` set and this section in the same PR.
 - **Secret scan before every write.** Branch-filtered CI scanners don't cover custom refs. Any match
   rejects the record and logs it.
 - **Compaction:** when the blob passes `max_events` (default 20000), the writer keeps the latest
-  version of each key, drops tombstones older than 180 days, and writes a parentless commit.
+  version of each key, drops tombstones older than 180 days, and writes the result as a child of the
+  tip it read, like every other write (so consumers can check ancestry).
 - These refs are not covered by branch rulesets, and anyone with `contents: write` can force-push
   them. Readers therefore treat every event as Class B, and trust a tip only through its fleet
   signature (§9), never its committer (`web-flow` for every API-made commit).
@@ -237,6 +255,10 @@ Fold the text with `normalizeUntrusted()` first; the strip uses `\p{Default_Igno
 - `--tail --role merge|maintain --fleet ID --state-dir DIR [--session NAME]`: replace this session's
   `refs/engsys/memory/fleet/<fleet>/<role>` with its current journal tail (§9). No GitHub fetch; the delta
   and cursors are left alone.
+- `--consume --role maintain --repo OWNER/NAME --state-dir DIR [--session NAME]` (engsys#266): the
+  staged fetch of §3.1, from the maintain heartbeat, fenced on the maintain baton (one consumer per
+  repo per tick; merge and every brief read the verified local refs it leaves). Refused for any
+  other role; skipped, silently, without the baton.
 - A write whose content the tip already holds, signed with this same key over this ref and the
   tip's own parent (Ed25519 is deterministic, so re-signing must reproduce `events.sig` exactly), is
   a no-op: no commit, no fence read, no API write. After a key rotation the tip is re-signed.
@@ -299,10 +321,17 @@ Fold the text with `normalizeUntrusted()` first; the strip uses `\p{Default_Igno
   namespace (the retired shared `events`, the old `<role>/<fleet>` tails), no entry,
   a malformed key, a missing or malformed line, or a bad signature = untrusted. The commit's
   committer/author is not a trust input at all.
-- **Still open:** the consumer wiring (staged fetch, so compaction doesn't break non-forced fetches)
-  is a separate, Nyx-reviewed item, and `trust.mjs` does not yet accept `author_kind: 'fleet_signed'`.
-  Until then no reader trusts these refs (§3.1).
-- **Readers:** every fleet fetches every ref.
+- **Per-fleet streams (operator decision on #266).** Every ref a reader consumes is in one fleet's
+  namespace and signed by that fleet, so one compromised fleet key can only speak for that fleet.
+  Readers merge the streams by key; on a collision their own fleet's copy wins (`FLEET_ID`), and
+  another fleet's pointers score at `peer_fleet_weight` (§10, default 0.5). Dropping a fleet's key
+  from memory.yml drops its stream at the next brief: `trust.mjs` accepts `fleet_signed` only while
+  `signed_fleet` still has a valid key in the current config.
+- **What reaches a brief:** tail and stream events are Class B and carry only structured fields.
+  They go through `validatePointerEvent` and `renderPointerLine` like every pointer; their `text`
+  (and any other field) never reaches `additionalContext` (ref-consumer.test.mjs asserts it).
+- **Readers:** only the maintain baton holder fetches (§3.1); every session reads the verified local
+  refs.
 - **Trust map:** for ref authorship, the operator memory.yml's `fleet_memory_pubkeys` (above; not
   federation.yml, which holds App ids and slugs). For GitHub-sourced events inside a ref, authors stay
   matched by numeric **user** id (§7.2): bot user ids in `trusted_bot_user_ids`, operators in
@@ -358,7 +387,11 @@ brief_bytes: 2048
 max_events: 20000
 publish_role: maintain                  # must stay maintain: any other value refuses --publish (§9)
 fleet_memory_pubkeys: {}                # {<fleet>: <key> | [<key>, …]}, base64 raw 32-byte Ed25519; operator memory.yml ONLY (§9)
+peer_fleet_weight: 0.5                  # pointer-score factor for another fleet's signed events, clamped to [0, 1] (§9)
 ```
+
+`peer_fleet_weight` (engsys#266) is optional. Setting it in a fleet's `memory.yml` changes that file's
+hash like any edit, so its `VERIFY_ALLOWED_USER_FILES` entry has to change with it (engsys#230).
 
 `fleet_memory_pubkeys` (F5) is read only from the operator's `memory.yml` (source 1 above,
 `readOperatorMemoryConfig`: `ENGSYS_MEMORY_CONFIG`, else `$CLAUDE_CONFIG_DIR/memory.yml`, else

@@ -26,21 +26,17 @@ import { FLEET_ID_RE, REF_SEGMENT_RE, verifyTipSignature } from './signing.mjs';
 // reader trusts it: each fleet publishes its own `fleetEventsRef(fleet)`.
 export const EVENTS_REF = 'refs/engsys/memory/events';
 export const MEMORY_REF_PREFIX = 'refs/engsys/memory/';
-// engsys v2.0.1 (M4): NO forced (`+`) refspec. A forced refspec makes `git fetch` silently
-// clobber a local ref tip with whatever the remote currently has, which defeats any after-the-fact
-// trust check on the tip (the local record of "what we last verified" is gone by the time we'd
-// check it). A non-forced fetch fails closed with "not a fast-forward" instead.
+// engsys v2.0.1 (M4): NO forced (`+`) refspec here. A forced refspec makes `git fetch` silently clobber a local
+// ref tip with whatever the remote currently has, which defeats any after-the-fact trust check on the tip (the
+// local record of "what we last verified" is gone by the time we'd check it). A non-forced fetch fails closed
+// with "not a fast-forward" instead.
 //
-// cr review (round 2): this non-forced refspec is NOT, by itself, enough for a future consumer —
-// compaction (docs/memory-spec.md §3.1) writes a parentless commit, which is a non-fast-forward
-// rewrite of the ref by design. `fetchMemoryRefs` with this refspec will reject every fetch after
-// the FIRST compaction, permanently, until an operator manually deletes the local ref. A consumer
-// built on this must NOT just swap in a forced fetch to "fix" that (that's the exact M4 problem
-// again) — it needs a staged fetch: force-fetch into a separate staging namespace (e.g.
-// `+refs/engsys/memory/*:refs/engsys/memory-incoming/*`), run `verifyMemoryRefTip` against the
-// staged tip, and only then fast-forward `refs/engsys/memory/*` itself to the verified commit.
-// `fetchMemoryRefs` has zero production callers today, so this is a design note for that future
-// consumer, not a live bug.
+// Every write — a merge, a `replace: true` tail, a compaction — is a CHILD of the previous tip (`writeEvents`
+// below), so an honest history only ever fast-forwards; only a force-push (a rollback, or a rewrite) does not.
+// The consumer (core/lib/memory/ref-consumer.mjs, engsys#266) does not use this refspec: it force-fetches into a
+// separate staging namespace (`refs/engsys/memory-incoming/*`), verifies each staged tip's signature
+// (`verifyMemoryRefTip`) and that it descends from the last verified tip, and only then moves
+// `refs/engsys/memory/*` itself. `fetchMemoryRefs` keeps this non-forced default for any other caller.
 export const MEMORY_FETCH_REFSPEC = 'refs/engsys/memory/*:refs/engsys/memory/*';
 export const DEFAULT_MAX_EVENTS = 20_000;
 export const DEFAULT_TOMBSTONE_TTL_DAYS = 180;
@@ -592,12 +588,38 @@ export function createMemoryRefStore({
 // engsys v2.0.1 (M4): verified consumption of refs/engsys/memory/* tips
 // ---------------------------------------------------------------------------
 //
-// NOT WIRED INTO ANY CONSUMER. `fetchMemoryRefs` above has zero production callers in this repo
-// (verified by grep at the time of this fix); nothing currently reads a peer's
-// `refs/engsys/memory/*` tip back into Class A/B trust. This export exists so that if/when a
-// consumer is built, it starts from a verified primitive rather than trusting the ref blindly.
-// Per the engsys#140/v2.0.1 review, the memory ref fetch stays unwired until a consumer uses this
-// (or an equivalent) check.
+// The one consumer is core/lib/memory/ref-consumer.mjs (engsys#266): its staged fetch and its read path both go
+// through this check, and core/lib/memory/ref-consumer-guard.test.mjs keeps it that way.
+
+/**
+ * Which of `relPaths` exist in the tree at `reviewedSha`: ONE `git cat-file --batch-check` for all of them (one
+ * process per path took ~8 ms each and blew the brief's 2 s budget at a few hundred events, engsys#266). Falls back
+ * to one check per path when the batch answer can't be matched line for line (an injected exec in tests).
+ */
+function pathsInReviewedTree(repoRoot, reviewedSha, relPaths, exec) {
+  const unique = [...new Set(relPaths)].filter((p) => typeof p === 'string' && p && !/[\n\r]/.test(p));
+  const present = new Set();
+  if (!unique.length) return present;
+  let lines = null;
+  try {
+    const out = exec('git', ['-C', repoRoot, 'cat-file', '--batch-check=%(objecttype)'], {
+      encoding: 'utf8',
+      input: unique.map((p) => `${reviewedSha}:${p}`).join('\n') + '\n',
+      stdio: ['pipe', 'pipe', 'ignore'],
+      timeout: 5000,
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    lines = String(out ?? '').split('\n').filter((l) => l !== '');
+  } catch {
+    lines = null;
+  }
+  if (lines && lines.length === unique.length) {
+    unique.forEach((p, i) => { if (!/ missing$/.test(lines[i]) && /^(blob|tree|commit)$/.test(lines[i].trim())) present.add(p); });
+    return present;
+  }
+  for (const p of unique) if (pathExistsInReviewedTree(repoRoot, reviewedSha, p, exec)) present.add(p);
+  return present;
+}
 
 function pathExistsInReviewedTree(repoRoot, reviewedSha, relPath, exec) {
   try {
@@ -633,12 +655,17 @@ function pathExistsInReviewedTree(repoRoot, reviewedSha, relPath, exec) {
  *
  * `author_kind` / `author_id` embedded in the event JSON are NEVER read for trust — they're stripped from every
  * event and, only once the signature passes, replaced with `author_kind: 'fleet_signed'`, `signed_fleet: <fleet>`,
- * `author_id: null`. (trust.mjs does not yet accept `fleet_signed`: wiring a consumer is its own reviewed change,
- * §3.1.)
+ * `author_id: null`. trust.mjs accepts `fleet_signed` only while `signed_fleet` still has a key in the operator's
+ * memory.yml (engsys#266).
  *
  * Fails closed (`{ ok: false, events: [] }`) on any missing input or verification failure.
  */
-export async function verifyMemoryRefTip(
+export async function verifyMemoryRefTip(repoRoot, opts = {}) {
+  return verifyMemoryRefTipSync(repoRoot, opts);
+}
+
+/** `verifyMemoryRefTip` without the promise, for the brief's synchronous read path (index-db `loadClassBEvents`). */
+export function verifyMemoryRefTipSync(
   repoRoot,
   {
     ref,
@@ -664,12 +691,14 @@ export async function verifyMemoryRefTip(
   }
 
   const trusted = [];
-  for (const raw of parseEventsJsonl(content).events) {
-    if (!raw || typeof raw !== 'object') continue;
+  const parsed = parseEventsJsonl(content).events.filter((raw) => raw && typeof raw === 'object');
+  const pathsOf = (e) => [e.path, ...(Array.isArray(e.paths) ? e.paths : [])].filter(Boolean);
+  const present = pathsInReviewedTree(repoRoot, reviewedSha, parsed.flatMap(pathsOf), exec);
+  for (const raw of parsed) {
     // Deliberately discard any author_kind/author_id the event JSON carries — never a trust input.
     const { author_kind: _ignoredKind, author_id: _ignoredId, signed_fleet: _ignoredFleet, ...rest } = raw;
-    const paths = [rest.path, ...(Array.isArray(rest.paths) ? rest.paths : [])].filter(Boolean);
-    if (paths.length > 0 && !paths.every((p) => pathExistsInReviewedTree(repoRoot, reviewedSha, p, exec))) {
+    const paths = pathsOf(rest);
+    if (paths.length > 0 && !paths.every((p) => present.has(p))) {
       continue;
     }
     trusted.push({ ...rest, author_kind: 'fleet_signed', author_id: null, signed_fleet: sig.fleet });

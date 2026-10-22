@@ -24,6 +24,7 @@ import {
   tailRef,
 } from '../lib/memory/ref-store.mjs';
 import { FLEET_ID_RE, readSigningKeyFile, signTip } from '../lib/memory/signing.mjs';
+import { consumeMemoryRefs, loadVerifiedRefEvents } from '../lib/memory/ref-consumer.mjs';
 import { ensureIndex, resolveCacheDir, resolveReviewedSha } from '../lib/memory/index-db.mjs';
 import { isEventTrusted as sharedIsEventTrusted } from '../lib/memory/trust.mjs';
 import { loadConfig } from './memory-brief.mjs';
@@ -1147,6 +1148,10 @@ export function writeDeltaEvents(cacheDir, incomingEvents) {
 // maintain baton holder writes the shared `events` ref: merge never does (docs/memory-spec.md §9).
 export const WRITER_ROLES = Object.freeze(['merge', 'maintain']);
 export const EVENTS_WRITER_ROLE = 'maintain';
+// engsys#266: one consumer per repo per tick — the maintain baton holder runs the staged fetch; merge (and every
+// brief) reads the local verified refs it leaves. The consumer's update-ref is a compare-and-swap as well, so a
+// second consumer could only fail, never clobber.
+export const CONSUMER_ROLE = 'maintain';
 // A fleet id becomes a ref path segment and part of every tail event key (index-db's KEY_RE caps keys
 // at 80 characters), so it is length-capped as well as charset-checked (FLEET_ID_RE, signing.mjs).
 const REPO_NAME_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -1563,8 +1568,25 @@ export async function runMemorySync({
   // injected KeyObject for tests. No usable key = no write (skipped, never blocking).
   signingKeyFile = process.env.ENGSYS_MEMORY_SIGNING_KEY_FILE || '',
   signingKey = null,
+  // engsys#266 --consume: injectable consumer (default ref-consumer.mjs consumeMemoryRefs) and remote.
+  consume = consumeMemoryRefs,
+  remote = 'origin',
 } = {}) {
   const cfg = config || loadConfig(repoRoot);
+  if (mode === 'consume') {
+    if (!REPO_NAME_RE.test(String(repo || ''))) return { ok: false, mode, refused: true, reason: '--consume needs --repo owner/name' };
+    if (role !== CONSUMER_ROLE) return { ok: false, mode, refused: true, reason: `only the ${CONSUMER_ROLE} baton holder runs --consume (got --role ${role || 'none'})` };
+    if (!stateDir) return { ok: false, mode, refused: true, reason: '--consume needs --state-dir (the baton fence and the verified-tips file live there)' };
+    const gate = await (fence || createBatonFence({ role, repo, stateDir, session }))();
+    if (!gate?.held) return { ok: true, mode, skipped: 'baton_not_held', reason: gate?.reason || '' };
+    const warnings = [];
+    const res = consume(repoRoot, { remote, repo, stateDir, config: cfg, log: (l) => warnings.push(l) });
+    // Warm the brief's verification cache for what just moved, so the first brief after a fetch re-verifies nothing.
+    if (res.ok && cacheDir && (res.results || []).some((r) => r.status === 'accepted')) {
+      try { loadVerifiedRefEvents(repoRoot, { config: cfg, cacheDir, resolveSha: resolveReviewedSha }); } catch { /* an optimisation only */ }
+    }
+    return { ok: Boolean(res.ok), mode, ...res, warnings };
+  }
   // Who may write what is decided before anything is collected or fetched: a refused run writes nothing.
   const target = resolveWriteTarget({ mode, role, fleet, ref, stateDir, repo, config: cfg });
   if (!target.ok) {
@@ -1780,6 +1802,7 @@ export async function main(argv = process.argv.slice(2), { out = process.stdout,
       role: { type: 'string', default: '' },
       fleet: { type: 'string', default: '' },
       tail: { type: 'boolean', default: false },
+      consume: { type: 'boolean', default: false },
       'state-dir': { type: 'string', default: '' },
       session: { type: 'string', default: '' },
       'signing-key-file': { type: 'string', default: '' },
@@ -1787,9 +1810,9 @@ export async function main(argv = process.argv.slice(2), { out = process.stdout,
     strict: false,
   });
 
-  const modes = ['init', 'delta', 'publish', 'tail'].filter((m) => values[m]);
+  const modes = ['init', 'delta', 'publish', 'tail', 'consume'].filter((m) => values[m]);
   if (modes.length > 1) {
-    err.write(`memory-sync: pick one of --init, --delta, --publish, --tail (got ${modes.map((m) => `--${m}`).join(' ')})\n`);
+    err.write(`memory-sync: pick one of --init, --delta, --publish, --tail, --consume (got ${modes.map((m) => `--${m}`).join(' ')})\n`);
     return 2;
   }
   const mode = modes[0] || 'delta';
@@ -1818,6 +1841,11 @@ export async function main(argv = process.argv.slice(2), { out = process.stdout,
       return 2;
     }
     if (res.skipped === 'no_signing_key') err.write(`memory-sync: not written, no usable signing key: ${res.reason}\n`);
+    if (mode === 'consume') {
+      // one stderr line per problem, for the heartbeat's latch (monster.sh); a skipped (not held) run says nothing
+      if (res.fetched === false) err.write(`memory-sync: consume: fetch failed: ${res.error}\n`);
+      for (const w of res.warnings || []) err.write(`memory-sync: consume: ${w.replace(/^memory-consume: /, '')}\n`);
+    }
     const warning = cappedWarning(res, String(values.repo || ''));
     if (warning) err.write(warning);
     return res.ok ? 0 : 1;

@@ -14,7 +14,7 @@
 //                                                bundled-lessons lookup; see `core/.claude-plugin/`)
 //   loadClassADocs(roots)                      -> Doc[] parsed from those roots (never throws; a
 //                                                missing root or a malformed file is skipped, not fatal)
-//   loadClassBEvents(cacheDir)                 -> Event[] from `<cacheDir>/delta.jsonl`, if present
+//   loadClassBEvents(cacheDir, opts)           -> Event[]: verified ref events (ref-consumer.mjs) + `<cacheDir>/delta.jsonl`
 //                                                (memory-sync, which populates it, ships in a later
 //                                                phase; an absent/empty file is simply zero events)
 //   computeWatermark(docs, events, version)    -> { version, files: {path: sha1}, eventCount } — the
@@ -40,6 +40,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { splitFrontmatter } from '../../scripts/validate-lessons.mjs';
+import { isConsumedRef, loadVerifiedRefEvents, pubkeysFingerprint } from './ref-consumer.mjs';
+import { FLEET_ID_RE } from './signing.mjs';
 import { parseYaml } from '../yaml.js';
 
 const require = createRequire(import.meta.url);
@@ -110,6 +112,7 @@ export function validatePointerEvent(event, { allowedMarkers } = {}) {
 	if (event.path != null && !PATHISH_RE.test(event.path)) return null;
 	if (event.symbol != null && !PATHISH_RE.test(event.symbol)) return null;
 	if (event.number != null && !isSafePositiveInt(event.number)) return null;
+	if (event.signed_fleet != null && !FLEET_ID_RE.test(String(event.signed_fleet))) return null;
 	const line = event.line != null && isSafePositiveInt(event.line) ? event.line : null;
 	return { ...event, key, line };
 }
@@ -949,7 +952,7 @@ function applyJsonlLinesToMap(text, byKey) {
  * (docs/memory-spec.md §3.2, #132) into Event[], merging by `k` (last-writer-wins by `updated_at`)
  * and dropping tombstones (`deleted: true`). Never throws.
  */
-export function loadClassBEvents(cacheDir, { repoRoot = null, refShas = null, pluginRoot = undefined, allowedRepos = undefined } = {}) {
+export function loadClassBEvents(cacheDir, { repoRoot = null, refShas = null, pluginRoot = undefined, allowedRepos = undefined, operatorConfig = undefined } = {}) {
 	const byKey = new Map();
 	if (repoRoot) {
 		const refs = Array.isArray(refShas)
@@ -957,17 +960,28 @@ export function loadClassBEvents(cacheDir, { repoRoot = null, refShas = null, pl
 			: isRepoAllowlisted(repoRoot, { pluginRoot, allowedRepos })
 				? listMemoryRefShas(repoRoot)
 				: [];
+		// engsys#266: the consumed refs (refs/engsys/memory/fleet/<fleet>/{events,merge,maintain}) are read only through the
+		// consumer's verified path — their tips were moved there by the staged fetch and are re-verified here
+		// (cached per tip) — and come back stamped `fleet_signed`, which trust.mjs re-checks against the current keys.
+		const consumed = refs.filter((r) => isConsumedRef(r.ref));
+		if (consumed.length) {
+			const op = operatorConfig !== undefined ? operatorConfig : readOperatorMemoryConfig(process.env, { repoRoot });
+			for (const e of loadVerifiedRefEvents(repoRoot, { config: { fleet_memory_pubkeys: op?.fleet_memory_pubkeys }, cacheDir: cacheDir || '', resolveSha: resolveReviewedSha, refs: consumed })) {
+				applyEventToMap(e, byKey);
+			}
+		}
 		for (const r of refs) {
+			if (isConsumedRef(r.ref)) continue;
 			try {
 				const blobText = execFileSync(
 					'git',
 					['-C', repoRoot, 'show', `${r.sha}:events.jsonl`],
 					{ encoding: 'utf8', timeout: 2000, maxBuffer: 32 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] },
 				);
-				// engsys v2.0.1 round 2 (F3): events read from a `refs/engsys/memory/*` tip NEVER
-				// keep their embedded trust label, until `verifyMemoryRefTip` is wired into this path
-				// (it is not yet — see ref-store.mjs). Stamped `author_kind: 'untrusted_ref'`, which
-				// the shared trust gate (core/lib/memory/trust.mjs) rejects unconditionally.
+				// engsys v2.0.1 round 2 (F3): any OTHER ref under refs/engsys/memory/ (the legacy shared `events`
+				// ref, or anything a consumer does not read) NEVER keeps its embedded trust label: stamped
+				// `author_kind: 'untrusted_ref'`, which the shared trust gate (core/lib/memory/trust.mjs) rejects
+				// unconditionally.
 				applyJsonlLinesToMap(stripRefEventTrustLabels(blobText), byKey);
 			} catch {
 				/* ref without events.jsonl or unreadable */
@@ -978,7 +992,9 @@ export function loadClassBEvents(cacheDir, { repoRoot = null, refShas = null, pl
 		const file = path.join(cacheDir, 'delta.jsonl');
 		try {
 			const text = fs.readFileSync(file, 'utf8');
-			applyJsonlLinesToMap(text, byKey);
+			// engsys#266: `fleet_signed` is only ever stamped by the verified ref path above; a local file claiming it
+			// (or a `signed_fleet`) is rejected like an unverified ref event.
+			applyJsonlLinesToMap(stripClaimedFleetSignature(text), byKey);
 		} catch {
 			/* missing or unreadable delta.jsonl */
 		}
@@ -989,6 +1005,30 @@ export function loadClassBEvents(cacheDir, { repoRoot = null, refShas = null, pl
 		out.push(e);
 	}
 	return out;
+}
+
+function applyEventToMap(e, byKey) {
+	if (!e || typeof e.k !== 'string') return;
+	const prev = byKey.get(e.k);
+	if (!prev || eventUpdatedMs(e) >= eventUpdatedMs(prev)) byKey.set(e.k, e);
+}
+
+function stripClaimedFleetSignature(text) {
+	if (!text || !/fleet_signed|signed_fleet/.test(text)) return text;
+	return String(text)
+		.split('\n')
+		.map((line) => {
+			if (!line.trim()) return line;
+			try {
+				const e = JSON.parse(line);
+				if (!e || typeof e !== 'object' || (e.author_kind !== 'fleet_signed' && e.signed_fleet == null)) return line;
+				const { signed_fleet: _sf, author_kind: _ak, author_id: _aid, ...rest } = e;
+				return JSON.stringify({ ...rest, author_kind: 'untrusted_ref', author_id: null });
+			} catch {
+				return line;
+			}
+		})
+		.join('\n');
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1003,7 +1043,7 @@ export function loadClassBEvents(cacheDir, { repoRoot = null, refShas = null, pl
 // passes as `version` — bump it whenever trust-relevant extraction/gating logic changes
 // (core/lib/memory/trust.mjs, extractEventFromCommit, loadClassBEvents' ref-stripping, …) so a
 // stale index is detected and rebuilt on the very next read, not left silently out of date.
-export const TRUST_SCHEMA = 3;
+export const TRUST_SCHEMA = 4; // 4: engsys#266 fleet_signed events + the signed_fleet column
 
 /** The staleness manifest: engsys version + TRUST_SCHEMA + a path->sha1 map for every Class A
  * source + the Class B event count (events themselves aren't content-hashed here; delta.jsonl's
@@ -1028,7 +1068,7 @@ function stableStringify(obj) {
 const DDL = [
 	"CREATE VIRTUAL TABLE docs USING fts5(key, class, kind, path, symbol, roles, globs, keywords, body, tokenize = 'porter unicode61')",
 	'CREATE TABLE frontmatter (key TEXT PRIMARY KEY, globs TEXT, stacks TEXT, roles TEXT, keywords TEXT, security INTEGER, supersedes TEXT, path TEXT, title TEXT)',
-	'CREATE TABLE events (key TEXT PRIMARY KEY, kind TEXT, repo TEXT, number INTEGER, path TEXT, line INTEGER, symbol TEXT, marker TEXT, outcome TEXT, author_id INTEGER, author_kind TEXT, editor_id INTEGER, updated_at TEXT, url TEXT, flags TEXT, text TEXT)',
+	'CREATE TABLE events (key TEXT PRIMARY KEY, kind TEXT, repo TEXT, number INTEGER, path TEXT, line INTEGER, symbol TEXT, marker TEXT, outcome TEXT, author_id INTEGER, author_kind TEXT, editor_id INTEGER, updated_at TEXT, url TEXT, flags TEXT, text TEXT, signed_fleet TEXT)',
 	'CREATE TABLE watermark (id INTEGER PRIMARY KEY CHECK (id = 0), manifest TEXT)',
 ];
 
@@ -1060,7 +1100,7 @@ function buildInto(dbPath, { sqlite, docs, events, manifest }) {
 			insDoc.run(d.key, d.class, d.kind, d.path, d.symbol, (d.roles || []).join(' '), (d.globs || []).join(' '), (d.keywords || []).join(' '), `${d.title}\n\n${d.body}`);
 			insFm.run(d.key, JSON.stringify(d.globs || []), JSON.stringify(d.stacks || []), JSON.stringify(d.roles || []), JSON.stringify(d.keywords || []), d.security ? 1 : 0, JSON.stringify(d.supersedes || []), d.path, d.title);
 		}
-		const insEv = db.prepare('INSERT INTO events (key, kind, repo, number, path, line, symbol, marker, outcome, author_id, author_kind, editor_id, updated_at, url, flags, text) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+		const insEv = db.prepare('INSERT INTO events (key, kind, repo, number, path, line, symbol, marker, outcome, author_id, author_kind, editor_id, updated_at, url, flags, text, signed_fleet) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
 		const insDocEv = db.prepare('INSERT INTO docs (key, class, kind, path, symbol, roles, globs, keywords, body) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
 		for (const raw of events) {
 			// engsys#140 H2: validate at insert too, not just at render — a malformed/forged
@@ -1069,7 +1109,7 @@ function buildInto(dbPath, { sqlite, docs, events, manifest }) {
 			// configured-marker-membership check happens again, with config, at render time.
 			const e = validatePointerEvent(raw);
 			if (!e) continue;
-			insEv.run(e.k, e.kind ?? null, e.repo ?? null, e.number ?? null, e.path ?? null, e.line ?? null, e.symbol ?? null, e.marker ?? null, e.outcome ?? null, e.author_id ?? null, e.author_kind ?? null, e.editor_id ?? null, e.updated_at ?? null, e.url ?? null, JSON.stringify(e.flags ?? []), e.text ?? '');
+			insEv.run(e.k, e.kind ?? null, e.repo ?? null, e.number ?? null, e.path ?? null, e.line ?? null, e.symbol ?? null, e.marker ?? null, e.outcome ?? null, e.author_id ?? null, e.author_kind ?? null, e.editor_id ?? null, e.updated_at ?? null, e.url ?? null, JSON.stringify(e.flags ?? []), e.text ?? '', e.signed_fleet ?? null);
 			insDocEv.run(e.k, 'B', SOURCE_KIND.EVENT, e.path ?? null, e.symbol ?? null, '', '', '', e.text ?? '');
 		}
 		db.prepare('INSERT INTO watermark (id, manifest) VALUES (0, ?)').run(stableStringify(manifest));
@@ -1114,7 +1154,8 @@ export function ensureIndex(opts = {}) {
 	const allowlisted = isRepoAllowlisted(repoRoot, { pluginRoot: opts.pluginRoot, allowedRepos: opts.allowedRepos });
 	const { docs } = loadClassADocs(roots, manifest, { repoRoot, allowlisted, pluginRoot: opts.pluginRoot, allowedRepos: opts.allowedRepos, defaultBranch: opts.defaultBranch, reviewedSha: opts.reviewedSha });
 	const refShas = allowlisted ? listMemoryRefShas(repoRoot) : [];
-	const events = loadClassBEvents(cacheDir, { repoRoot, refShas });
+	const operatorConfig = refShas.length ? readOperatorMemoryConfig(process.env, { repoRoot }) : null;
+	const events = loadClassBEvents(cacheDir, { repoRoot, refShas, operatorConfig });
 	let eventsFingerprint = 0;
 	try {
 		const st = fs.statSync(path.join(cacheDir, 'delta.jsonl'));
@@ -1123,7 +1164,8 @@ export function ensureIndex(opts = {}) {
 		eventsFingerprint = 0;
 	}
 	if (refShas.length > 0) {
-		eventsFingerprint = `${eventsFingerprint}|refs:${refShas.map((r) => `${r.ref}=${r.sha}`).join(',')}`;
+		// engsys#266: the configured fleet keys decide which ref events exist at all, so a key change rebuilds
+		eventsFingerprint = `${eventsFingerprint}|refs:${refShas.map((r) => `${r.ref}=${r.sha}`).join(',')}|keys:${pubkeysFingerprint({ fleet_memory_pubkeys: operatorConfig?.fleet_memory_pubkeys })}`;
 	}
 	const watermark = computeWatermark(manifest, eventsFingerprint, opts.version ?? 'dev');
 	const watermarkJson = stableStringify(watermark);

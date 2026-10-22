@@ -370,7 +370,7 @@ describe('ref-store (#130)', () => {
     assert.equal(scanEventForSecrets({ k: 'a', summary: 'xoxb-1234567890-abcdef' }).matched, true);
   });
 
-  describe('verifyMemoryRefTip (F5: fleet signatures) — NOT wired into any consumer; unit-tested in isolation', () => {
+  describe('verifyMemoryRefTip (F5: fleet signatures; the consumer, ref-consumer.mjs, has its own tests)', () => {
     const { privateKey: ericKey } = crypto.generateKeyPairSync('ed25519');
     const { privateKey: markKey } = crypto.generateKeyPairSync('ed25519');
     const pubkeys = resolveFleetPubkeys({ fleet_memory_pubkeys: { eric: publicKeyB64(ericKey), 'mark-fleet': publicKeyB64(markKey) } });

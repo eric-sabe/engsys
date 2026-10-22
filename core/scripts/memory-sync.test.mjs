@@ -1182,6 +1182,29 @@ describe('memory-sync writers: role split and the baton fence (F5)', () => {
   const run = (dir, over) => runMemorySync({ repo: 'owner/repo', repoRoot: dir, cacheDir: dir, config: {}, exec: () => '', rebuildIndex: false, now: () => Date.parse('2026-07-20T00:00:00Z'), fleet: 'eric', signingKey: TEST_SIGNING_KEY, ...over });
   const delta = [{ k: 'owner/repo:issue:1', kind: 'issue', repo: 'owner/repo', number: 1, updated_at: '2026-07-19T00:00:00Z', text: 'x' }];
 
+  it('engsys#266 --consume: maintain only, fenced on the baton, and hands the consumer the repo, state dir and config', async () => {
+    const calls = [];
+    const consume = (root, o) => { calls.push({ root, ...o }); o.log('memory-consume: refs/engsys/memory/fleet/bob/maintain rejected (bad_signature); kept the last verified tip'); return { ok: true, fetched: true, results: [] }; };
+    let fenceAsked = 0;
+    const held = async () => { fenceAsked++; return { held: true }; };
+    const base2 = { mode: 'consume', repo: 'owner/repo', repoRoot: '/r', config: { fleet_memory_pubkeys: {} }, stateDir: '/state', consume, fence: held };
+    let r = await runMemorySync({ ...base2, role: 'merge' });
+    assert.equal(r.refused, true);
+    assert.match(r.reason, /only the maintain baton holder runs --consume/);
+    assert.equal(fenceAsked, 0, 'refused before the fence is asked');
+    for (const over of [{ repo: 'nope' }, { stateDir: '' }]) {
+      assert.equal((await runMemorySync({ ...base2, role: 'maintain', ...over })).refused, true, JSON.stringify(over));
+    }
+    r = await runMemorySync({ ...base2, role: 'maintain', fence: async () => ({ held: false, reason: 'standby' }) });
+    assert.deepEqual([r.ok, r.skipped, calls.length], [true, 'baton_not_held', 0], 'no baton: nothing fetched');
+    r = await runMemorySync({ ...base2, role: 'maintain' });
+    assert.equal(r.ok, true);
+    assert.equal(calls.length, 1);
+    assert.deepEqual([calls[0].root, calls[0].repo, calls[0].stateDir, calls[0].remote], ['/r', 'owner/repo', '/state', 'origin']);
+    assert.deepEqual(calls[0].config, base2.config);
+    assert.deepEqual(r.warnings, ['memory-consume: refs/engsys/memory/fleet/bob/maintain rejected (bad_signature); kept the last verified tip']);
+  });
+
   it('merge can never publish the events ref: refused before anything is collected, the fence is never asked', async () => {
     const dir = tmp('memory-sync-merge-pub-');
     try {
