@@ -912,6 +912,45 @@ describe('renderBrief — byte cap + Class B boundary', () => {
 		assert.equal((text.match(/```/g) || []).length, 0);
 	});
 
+	const fenceLessons = () => Array.from({ length: 20 }, (_, i) => ({ key: `lesson:l${i}`, title: `Lesson ${i}`, body: `**Trigger:** ${'x'.repeat(100)}` }));
+	const cmds = (n) => Array.from({ length: n }, (_, i) => `cmd ${i} ${'z'.repeat(40)}`);
+
+	test('an overlay whose first line alone is over its share still says it was cut: the marker, not silence (engsys#191 review)', () => {
+		const overlay = `# ${'h'.repeat(3000)}\nsecond line`;
+		const { text, lessonKeys } = renderBrief({ overlay, lessons: fenceLessons() }, 2048);
+		assert.ok(text.startsWith(`${OVERLAY_TRUNCATED_MARKER}\n[lesson lesson:l0]`), text.slice(0, 120));
+		assert.ok(!text.includes('hhhh'));
+		assert.ok(lessonKeys.length > 0);
+		assert.ok(Buffer.byteLength(text, 'utf8') <= 2048);
+		// and with no lessons at all, the overlay may use the whole budget but still never a half line
+		const solo = renderBrief({ overlay }, 2048).text;
+		assert.equal(solo, OVERLAY_TRUNCATED_MARKER);
+	});
+
+	test('~~~ fences are tracked like ``` ones (engsys#191 review)', () => {
+		const overlay = ['# Overlay', 'intro', '~~~sh', ...cmds(40), '~~~'].join('\n');
+		const { text } = renderBrief({ overlay, lessons: fenceLessons() }, 2048);
+		assert.ok(text.startsWith(`# Overlay\nintro\n${OVERLAY_TRUNCATED_MARKER}\n`), text.slice(0, 80));
+		assert.ok(!text.includes('~~~'));
+	});
+
+	test('fence closing follows CommonMark: same character, at least as long as the opener (engsys#191 review)', () => {
+		// a ~~~ line does not close a ``` block, and a shorter ``` does not close a ```` block: both are still open at the cut
+		for (const [open, notClose] of [['```sh', '~~~'], ['````', '```'], ['~~~~', '~~~']]) {
+			const overlay = ['# Overlay', 'intro', open, 'a', notClose, ...cmds(40), open.replace(/[a-z]+$/, '')].join('\n');
+			const { text } = renderBrief({ overlay, lessons: fenceLessons() }, 2048);
+			assert.ok(text.startsWith(`# Overlay\nintro\n${OVERLAY_TRUNCATED_MARKER}\n`), `${open} / ${notClose}: ${text.slice(0, 80)}`);
+		}
+		// a closed block before the cut is kept whole: a longer closer of the same character closes it
+		const overlay = ['# Overlay', '~~~', 'x', '~~~~~', 'after', ...cmds(40)].join('\n');
+		const { text } = renderBrief({ overlay, lessons: fenceLessons() }, 2048);
+		assert.ok(text.startsWith('# Overlay\n~~~\nx\n~~~~~\nafter\ncmd 0 '), text.slice(0, 80));
+		assert.ok(text.includes(`\n${OVERLAY_TRUNCATED_MARKER}\n[lesson`));
+		// a backtick line with a backtick in its info string is inline code, not a fence
+		const inline = ['# Overlay', '``` `x` ```', 'after', ...cmds(40)].join('\n');
+		assert.ok(renderBrief({ overlay: inline, lessons: fenceLessons() }, 2048).text.startsWith('# Overlay\n``` `x` ```\nafter\n'));
+	});
+
 	test('the seeded overlay template fits under half the default brief_bytes, untrimmed (engsys#191)', () => {
 		const template = readFileSync(join(REPO_ROOT, 'core', 'templates', 'project-brief-overlay.md'), 'utf8');
 		assert.ok(Buffer.byteLength(template, 'utf8') <= 1024, 'keep the seeded template at most ~1 KB');

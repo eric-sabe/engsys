@@ -612,11 +612,31 @@ export const OVERLAY_RESERVE_SHARE = 0.5;
 export const OVERLAY_TRUNCATED_MARKER = '[overlay truncated to fit brief_bytes]';
 
 /**
+ * Index of the opening line of a fenced code block still open after `lines`, or -1. CommonMark fences: up to three
+ * spaces of indent, then 3+ backticks or 3+ tildes (a backtick opener's info string has no backtick); a block closes
+ * only on a line of the SAME character, at least as long as the opener, followed by nothing but spaces.
+ */
+function openFenceAt(lines) {
+	let open = null;
+	for (let i = 0; i < lines.length; i++) {
+		const m = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(lines[i]);
+		if (!m) continue;
+		if (open === null) {
+			if (m[1][0] === '`' && m[2].includes('`')) continue; // not a fence: inline code
+			open = { at: i, char: m[1][0], len: m[1].length };
+		} else if (m[1][0] === open.char && m[1].length >= open.len && m[2].trim() === '') open = null;
+	}
+	return open === null ? -1 : open.at;
+}
+
+/**
  * Cut `overlay` to whole lines within `maxBytes`, ending with OVERLAY_TRUNCATED_MARKER when
- * anything was dropped. Returns '' when not even one line plus the marker fits.
+ * anything was dropped — the marker alone when not even the first line fits. Returns '' only when
+ * the marker itself does not fit.
  */
 function fitOverlay(overlay, maxBytes) {
 	if (byteLen(overlay) <= maxBytes) return overlay;
+	if (byteLen(OVERLAY_TRUNCATED_MARKER) > maxBytes) return '';
 	const room = maxBytes - byteLen(OVERLAY_TRUNCATED_MARKER) - 1;
 	const kept = [];
 	let used = 0;
@@ -628,11 +648,10 @@ function fitOverlay(overlay, maxBytes) {
 	}
 	// A cut inside a fenced block would leave it open and swallow the lessons after it — back up to
 	// before the unclosed fence.
-	if (kept.filter((l) => /^\s*```/.test(l)).length % 2 === 1) {
-		while (kept.length > 0 && !/^\s*```/.test(kept.pop()));
-	}
+	const fence = openFenceAt(kept);
+	if (fence >= 0) kept.length = fence;
 	while (kept.length > 0 && kept[kept.length - 1].trim() === '') kept.pop();
-	return kept.length > 0 ? `${kept.join('\n')}\n${OVERLAY_TRUNCATED_MARKER}` : '';
+	return kept.length > 0 ? `${kept.join('\n')}\n${OVERLAY_TRUNCATED_MARKER}` : OVERLAY_TRUNCATED_MARKER;
 }
 
 /**
