@@ -123,6 +123,37 @@ const EXTRA_LOGINS = (process.env.DASHBOARD_EXTRA_LOGINS ?? '')
   .split(',').map(s => s.trim()).filter(Boolean);
 CONFIG.allLogins = new Set([CONFIG.login, ...EXTRA_LOGINS]);
 
+// GitHub reports an App's bot as "slug" (PR authors, event actors) in some
+// places and "slug[bot]" (commit authors, issue createdBy) in others — so
+// agent identities are stored and compared as the bare slug.
+const botSlug = login => (login ?? '').replace(/\[bot\]$/, '');
+
+// Agent (bot) logins whose activity is tracked separately from yours
+// (DASHBOARD_AGENT_LOGINS, CSV; "slug" or "slug[bot]" both accepted).
+CONFIG.agentLogins = new Set((process.env.DASHBOARD_AGENT_LOGINS ?? '')
+  .split(',').map(s => botSlug(s.trim())).filter(Boolean));
+
+/** Classifies a GitHub login as 'me', 'agent', or null (someone else). */
+function actorOf(login) {
+  if (!login) return null;
+  if (CONFIG.allLogins.has(login)) return 'me';
+  if (CONFIG.agentLogins.has(botSlug(login))) return 'agent';
+  return null;
+}
+
+// Bot commits carry "<id>+slug[bot]@users.noreply.github.com" as the author email.
+const BOT_EMAIL_RE = /^\d+\+(.+)\[bot\]@users\.noreply\.github\.com$/;
+
+/** Classifies a commit author ({ email, user: { login } }) as 'me', 'agent', or null. */
+function commitActorOf(author) {
+  const byLogin = actorOf(author?.user?.login);
+  if (byLogin) return byLogin;
+  const email = author?.email ?? '';
+  if (CONFIG.emails.has(email)) return 'me';
+  const m = email.match(BOT_EMAIL_RE);
+  return m && CONFIG.agentLogins.has(m[1]) ? 'agent' : null;
+}
+
 const GQL_URL = 'https://api.github.com/graphql';
 const REST_URL = 'https://api.github.com';
 const BASE_HEADERS = {
@@ -269,7 +300,27 @@ function emptyBucket() {
     locRemoved:     0,
     locAddedViaPR:  0,   // LOC from merged PRs (no direct-push LOC)
     locAddedDirect: 0,   // LOC from direct-to-main commits only
+    // Agent (bot) activity — kept apart from yours so the fields above stay human-only
+    agentIssuesOpened:     0,
+    agentIssuesClosed:     0,
+    agentCommits:          0,
+    agentPrsMerged:        0,
+    agentPrsMergedByYou:   0,   // agent PRs whose merger was you
+    agentPrsReviewedByYou: 0,   // agent PRs with at least one review from you
+    agentLocAdded:         0,   // via merged agent PRs only
+    agentLocRemoved:       0,
   };
+}
+
+/** Agent totals shape — the agent* bucket fields with the prefix dropped. */
+const AGENT_KEYS = Object.keys(emptyBucket()).filter(k => k.startsWith('agent'));
+function agentTotalsOf(buckets) {
+  const t = {};
+  for (const k of AGENT_KEYS) {
+    const name = k[5].toLowerCase() + k.slice(6);
+    t[name] = buckets.reduce((s, b) => s + (b[k] ?? 0), 0);
+  }
+  return t;
 }
 
 /** Aggregate totals shape (omits locAddedViaPR / locAddedDirect split). */
@@ -316,11 +367,12 @@ async function getRepos({ name, type }) {
 // ── Issues ───────────────────────────────────────────────────────────────────
 
 /**
- * Returns issues opened by CONFIG.login within the window.
+ * Returns issues opened by any of `authors` within the window.
  * Uses filterBy.createdBy server-side; double-checks createdAt client-side
  * because filterBy.since applies to updatedAt, not createdAt.
+ * Bot authors must be passed as "slug[bot]" — createdBy matches nothing otherwise.
  */
-async function fetchOpenedIssues(owner, name, fromISO) {
+async function fetchOpenedIssues(owner, name, fromISO, authors) {
   const Q = `
     query($owner: String!, $name: String!, $author: String!, $since: DateTime!, $after: String) {
       repository(owner: $owner, name: $name) {
@@ -334,7 +386,7 @@ async function fetchOpenedIssues(owner, name, fromISO) {
 
   // Run once per login — issues have a single author, so no dedup needed.
   const all = [];
-  for (const author of CONFIG.allLogins) {
+  for (const author of authors) {
     const nodes = await paginate(
       (after) => gql(Q, { owner, name, author, since: fromISO, after }),
       (data)  => data.repository.issues,
@@ -345,13 +397,13 @@ async function fetchOpenedIssues(owner, name, fromISO) {
 }
 
 /**
- * Returns an array of ISO date strings for ClosedEvents within the window
- * where the closing actor was CONFIG.login.
+ * Returns [{ date, actor }] for ClosedEvents within the window whose closing
+ * actor was you (actor 'me') or one of your agents (actor 'agent').
  *
  * Spec §10: issuesClosed counts close-events whose actor is the configured
  * login (via timelineItems ClosedEvent.actor — not just issue state).
  */
-async function fetchClosedByMe(owner, name, fromISO) {
+async function fetchCloseEvents(owner, name, fromISO) {
   // Only page through CLOSED issues updated since the window start —
   // if an issue was closed inside the window, its updatedAt >= fromISO.
   const Q = `
@@ -380,30 +432,32 @@ async function fetchClosedByMe(owner, name, fromISO) {
     (data)  => data.repository.issues,
   );
 
-  const closedDates = [];
+  const events = [];
   for (const issue of nodes) {
     for (const event of issue.timelineItems.nodes) {
-      if (CONFIG.allLogins.has(event?.actor?.login) && event.createdAt >= fromISO) {
-        closedDates.push(event.createdAt);
+      const actor = actorOf(event?.actor?.login);
+      if (actor && event.createdAt >= fromISO) {
+        events.push({ date: event.createdAt, actor });
       }
     }
   }
-  return closedDates;
+  return events;
 }
 
 // ── Pull requests ─────────────────────────────────────────────────────────────
 
 /**
- * Returns merged PRs authored by CONFIG.login within the window.
- * Includes additions/deletions for LOC (Phase 2) and all commit SHAs
- * needed for direct-push detection (spec §5).
+ * Returns merged PRs authored by you or your agents within the window, each
+ * tagged with `actor` ('me' | 'agent'). Includes additions/deletions for LOC
+ * (Phase 2) and all commit SHAs needed for direct-push detection (spec §5).
  *
  * mergeCommit.oid is included so squash-merged PRs don't appear as
  * direct pushes (the squash SHA differs from any commit in the branch).
+ * mergedBy and your review count feed the agent-oversight metrics.
  */
 async function fetchMergedPRs(owner, name, fromISO) {
   const Q = `
-    query($owner: String!, $name: String!, $after: String) {
+    query($owner: String!, $name: String!, $me: String!, $after: String) {
       repository(owner: $owner, name: $name) {
         pullRequests(first: 50, after: $after, states: [MERGED],
             orderBy: { field: UPDATED_AT, direction: DESC }) {
@@ -411,6 +465,8 @@ async function fetchMergedPRs(owner, name, fromISO) {
           nodes {
             mergedAt
             author { login }
+            mergedBy { login }
+            reviews(author: $me) { totalCount }
             additions
             deletions
             # Merge/squash commit SHA — different from branch commits for squash merges
@@ -430,13 +486,14 @@ async function fetchMergedPRs(owner, name, fromISO) {
 
   // Early-terminate once PRs are older than the window (ordered by UPDATED_AT DESC)
   while (true) {
-    const data = await gql(Q, { owner, name, after: cursor });
+    const data = await gql(Q, { owner, name, me: CONFIG.login, after: cursor });
     const conn = data.repository.pullRequests;
 
     let hitFloor = false;
     for (const pr of conn.nodes) {
       if (!pr.mergedAt || pr.mergedAt < fromISO) { hitFloor = true; break; }
-      if (CONFIG.allLogins.has(pr.author?.login)) allPRs.push(pr);
+      const actor = actorOf(pr.author?.login);
+      if (actor) allPRs.push({ ...pr, actor });
     }
 
     if (hitFloor || !conn.pageInfo.hasNextPage || ++page >= 100) break;
@@ -449,8 +506,9 @@ async function fetchMergedPRs(owner, name, fromISO) {
 // ── Commits on the default branch ────────────────────────────────────────────
 
 /**
- * Returns commits on `branch` authored by CONFIG.login within the window.
- * Matching is by email (CONFIG.emails) OR GitHub login (CONFIG.login).
+ * Returns commits on `branch` authored by you or your agents within the
+ * window, each tagged with `actor` ('me' | 'agent'). Matching is by GitHub
+ * login, your emails (CONFIG.emails), or an agent's bot noreply email.
  */
 async function fetchMainCommits(owner, name, branch, fromISO) {
   const Q = `
@@ -482,12 +540,10 @@ async function fetchMainCommits(owner, name, branch, fromISO) {
     (data)  => data.repository.ref.target.history,
   );
 
-  // Filter to commits authored by this user
-  return nodes.filter(c => {
-    const login = c.author?.user?.login;
-    const email = c.author?.email;
-    return CONFIG.allLogins.has(login) || CONFIG.emails.has(email);
-  });
+  // Keep commits authored by you or your agents
+  return nodes
+    .map(c => ({ ...c, actor: commitActorOf(c.author) }))
+    .filter(c => c.actor);
 }
 
 // ── Per-commit stats (direct pushes only — Phase 2) ──────────────────────────
@@ -635,14 +691,8 @@ function assignAliases(nameWithOwners) {
 // ── Summation helpers ─────────────────────────────────────────────────────────
 
 function addBucket(target, src) {
-  target.issuesOpened   += src.issuesOpened;
-  target.issuesClosed   += src.issuesClosed;
-  target.commits        += src.commits;
-  target.prsMerged      += src.prsMerged;
-  target.locAdded       += src.locAdded;
-  target.locRemoved     += src.locRemoved;
-  target.locAddedViaPR  += src.locAddedViaPR;
-  target.locAddedDirect += src.locAddedDirect;
+  // `?? 0`: series weeks written before a field existed (e.g. agent*) lack it
+  for (const k of Object.keys(target)) target[k] += src[k] ?? 0;
 }
 
 function bucketsToTotals(weekMap) {
@@ -718,7 +768,8 @@ async function main() {
   console.log(`Window : ${fromDate} → ${toDate}  (${weeks.length} weeks)${existing ? `  (last run: ${existing.generatedAt.slice(0,10)})` : ''}`);
   const aliasNote = EXTRA_LOGINS.length ? `  (+ ${EXTRA_LOGINS.join(', ')})` : '';
   console.log(`Login  : ${CONFIG.login}${aliasNote}`);
-  console.log(`Owners : ${CONFIG.owners.map(o => o.name).join(', ')}\n`);
+  console.log(`Owners : ${CONFIG.owners.map(o => o.name).join(', ')}`);
+  console.log(`Agents : ${CONFIG.agentLogins.size ? [...CONFIG.agentLogins].join(', ') : '(none)'}\n`);
 
   // ── 1. Enumerate repos ─────────────────────────────────────────────────────
   console.log('Enumerating repos…');
@@ -752,18 +803,25 @@ async function main() {
     // Per-repo week map (keyed by 'YYYY-MM-DD' Monday dates)
     const weekMap = new Map(weeks.map(w => [w, emptyBucket()]));
 
-    // ── issues opened in window by CONFIG.login ──
-    const opened = await fetchOpenedIssues(owner, name, fromISO);
+    // ── issues opened in window by you, then by your agents ──
+    const opened = await fetchOpenedIssues(owner, name, fromISO, CONFIG.allLogins);
     for (const issue of opened) {
       const b = weekMap.get(weekOf(issue.createdAt));
       if (b) b.issuesOpened++;
     }
+    if (CONFIG.agentLogins.size) {
+      const agentAuthors = [...CONFIG.agentLogins].map(slug => `${slug}[bot]`);
+      for (const issue of await fetchOpenedIssues(owner, name, fromISO, agentAuthors)) {
+        const b = weekMap.get(weekOf(issue.createdAt));
+        if (b) b.agentIssuesOpened++;
+      }
+    }
 
-    // ── issues closed in window by CONFIG.login ──
-    const closedDates = await fetchClosedByMe(owner, name, fromISO);
-    for (const date of closedDates) {
+    // ── issues closed in window by you or your agents ──
+    const closeEvents = await fetchCloseEvents(owner, name, fromISO);
+    for (const { date, actor } of closeEvents) {
       const b = weekMap.get(weekOf(date));
-      if (b) b.issuesClosed++;
+      if (b) b[actor === 'me' ? 'issuesClosed' : 'agentIssuesClosed']++;
     }
 
     // ── merged PRs: counts + LOC + PR commit SHA collection ──
@@ -772,13 +830,20 @@ async function main() {
 
     for (const pr of mergedPRs) {
       const b = weekMap.get(weekOf(pr.mergedAt));
-      if (b) {
+      if (b && pr.actor === 'me') {
         b.prsMerged++;
         b.locAdded      += pr.additions;
         b.locRemoved    += pr.deletions;
         b.locAddedViaPR += pr.additions;
+      } else if (b) {
+        b.agentPrsMerged++;
+        b.agentLocAdded   += pr.additions;
+        b.agentLocRemoved += pr.deletions;
+        if (actorOf(pr.mergedBy?.login) === 'me') b.agentPrsMergedByYou++;
+        if (pr.reviews.totalCount > 0)            b.agentPrsReviewedByYou++;
       }
       // Collect all SHAs associated with this PR to exclude from direct-push set
+      // (agent PRs too — your commits pushed onto an agent's branch aren't direct pushes)
       if (pr.mergeCommit?.oid) prShaSet.add(pr.mergeCommit.oid); // squash/merge SHA on main
       for (const node of pr.commits.nodes) prShaSet.add(node.commit.oid); // branch commits
     }
@@ -786,17 +851,19 @@ async function main() {
     // ── commits on default branch ──
     const mainCommits   = await fetchMainCommits(owner, name, branch, fromISO);
 
-    // Direct pushes = on-main commits NOT associated with any merged PR (spec §5)
-    const directCommits = mainCommits.filter(c => !prShaSet.has(c.oid));
+    // Direct pushes = your on-main commits NOT associated with any merged PR (spec §5)
+    const directCommits = mainCommits.filter(c => c.actor === 'me' && !prShaSet.has(c.oid));
 
-    // Daily commit counts (for the contribution heatmap) — keyed YYYY-MM-DD.
+    // Daily commit counts (for the contribution and agent heatmaps) — keyed YYYY-MM-DD.
     // authoredDate reflects when the work was done (committedDate can shift on rebase).
-    const dayCounts = {};
+    const dayCounts = {}, agentDayCounts = {};
     for (const commit of mainCommits) {
+      const mine = commit.actor === 'me';
       const b = weekMap.get(weekOf(commit.committedDate));
-      if (b) b.commits++;
+      if (b) b[mine ? 'commits' : 'agentCommits']++;
       const day = (commit.authoredDate ?? commit.committedDate).slice(0, 10);
-      dayCounts[day] = (dayCounts[day] ?? 0) + 1;
+      const counts = mine ? dayCounts : agentDayCounts;
+      counts[day] = (counts[day] ?? 0) + 1;
     }
 
     // ── LOC for direct pushes (REST per-commit stats) ──
@@ -814,16 +881,20 @@ async function main() {
     }
 
     // ── record if any activity found ──
-    const totals     = bucketsToTotals(weekMap);
-    const hasActivity = Object.values(totals).some(v => v > 0);
+    const totals      = bucketsToTotals(weekMap);
+    const agentTotals = agentTotalsOf([...weekMap.values()]);
+    const hasActivity = [...Object.values(totals), ...Object.values(agentTotals)].some(v => v > 0);
+    const agentNote   = agentTotals.commits || agentTotals.prsMerged
+      ? ` · agents ${agentTotals.commits}c ${agentTotals.prsMerged}pr` : '';
     process.stdout.write(` ${hasActivity
-      ? `${totals.commits}c ${totals.prsMerged}pr ${totals.locAdded}+`
+      ? `${totals.commits}c ${totals.prsMerged}pr ${totals.locAdded}+${agentNote}`
       : 'quiet'}\n`);
 
     if (hasActivity) {
       // Language bytes — only fetched for repos with activity (keeps REST calls down).
       const languages = await fetchLanguages(owner, name);
-      activeRepos.push({ nameWithOwner: repo.nameWithOwner, totals, weekMap, daily: dayCounts, languages });
+      activeRepos.push({ nameWithOwner: repo.nameWithOwner, totals, weekMap,
+        daily: dayCounts, agentDaily: agentDayCounts, languages });
     }
   }
 
@@ -853,6 +924,7 @@ async function main() {
     totals: r.totals,
     series: weeks.map(w => ({ weekStart: w, ...r.weekMap.get(w) })),
     daily:  r.daily,                   // { 'YYYY-MM-DD': commitCount } — heatmap source
+    agentDaily: r.agentDaily,          // same, for agent-authored commits — agent heatmap source
     languages: r.languages,            // { language: bytes } — donut source
   }));
 
@@ -878,13 +950,14 @@ async function main() {
           const keptOld = (ex.series ?? []).filter(w => w.weekStart < deltaWeekStart);
           // Daily: keep old days before the delta window; the freshly-collected
           // days (all ≥ deltaWeekStart) replace anything in the current window.
-          const keptDays = Object.fromEntries(
-            Object.entries(ex.daily ?? {}).filter(([d]) => d < deltaWeekStart)
+          const keptBefore = days => Object.fromEntries(
+            Object.entries(days ?? {}).filter(([d]) => d < deltaWeekStart)
           );
           repoMap.set(key, {
             ...rr,
             series: [...keptOld, ...rr.series],
-            daily:  { ...keptDays, ...rr.daily },
+            daily:  { ...keptBefore(ex.daily), ...rr.daily },
+            agentDaily: { ...keptBefore(ex.agentDaily), ...rr.agentDaily },
           });
         } else {
           repoMap.set(key, rr);
@@ -943,17 +1016,23 @@ async function main() {
   // by summing across per-repo entries — same model as totals/series, so
   // delta/targeted merges stay consistent. Neither leaks a repo name.
   const globalDaily = {};
+  const globalAgentDaily = {};
   const globalLanguages = {};
   for (const r of finalPerRepo) {
     for (const [day, n] of Object.entries(r.daily ?? {})) {
       globalDaily[day] = (globalDaily[day] ?? 0) + n;
+    }
+    for (const [day, n] of Object.entries(r.agentDaily ?? {})) {
+      globalAgentDaily[day] = (globalAgentDaily[day] ?? 0) + n;
     }
     for (const [lang, bytes] of Object.entries(r.languages ?? {})) {
       globalLanguages[lang] = (globalLanguages[lang] ?? 0) + bytes;
     }
   }
   // Sort daily by date and languages by descending bytes for stable, readable output.
-  const daily = Object.fromEntries(Object.entries(globalDaily).sort(([a], [b]) => a < b ? -1 : 1));
+  const byDate = obj => Object.fromEntries(Object.entries(obj).sort(([a], [b]) => a < b ? -1 : 1));
+  const daily = byDate(globalDaily);
+  const agentDaily = byDate(globalAgentDaily);
   const languages = Object.fromEntries(Object.entries(globalLanguages).sort(([, a], [, b]) => b - a));
 
   const output = {
@@ -962,8 +1041,12 @@ async function main() {
     // NOTE: no owner/repo names appear below this point (privacy, spec §3.1)
     repoCount: finalPerRepo.length,
     totals: finalTotals,
+    // Agent activity — a count only; agent logins never reach the output (privacy, §3.1)
+    agentCount: CONFIG.agentLogins.size,
+    agentTotals: agentTotalsOf(finalSeries),
     series: finalSeries,
     daily,        // { 'YYYY-MM-DD': commits } across all repos — contribution heatmap
+    agentDaily,   // { 'YYYY-MM-DD': commits } by your agents — agent heatmap
     languages,    // { language: bytes } across all repos — language donut
     // Strip internal _nwo field before serializing — never write repo names to output.
     perRepo: finalPerRepo.map(({ _nwo: _, ...rest }) => rest),
@@ -975,6 +1058,10 @@ async function main() {
   console.log(`\nWrote ${outPath}`);
   console.log('Global totals:');
   for (const [k, v] of Object.entries(finalTotals)) console.log(`  ${k}: ${v}`);
+  if (CONFIG.agentLogins.size) {
+    console.log('Agent totals:');
+    for (const [k, v] of Object.entries(output.agentTotals)) console.log(`  ${k}: ${v}`);
+  }
 }
 
 main().catch(err => {

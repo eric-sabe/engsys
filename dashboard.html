@@ -228,11 +228,31 @@
     </div>
   </div></section>
 
+  <!-- Agent heatmap (shown only when agent logins are configured) -->
+  <section class="sec" id="agentSection" hidden><div class="wrap">
+    <div class="sec-head">
+      <h2>Agent heatmap</h2>
+      <span class="hint" id="agentHint">commits per day by your agents · trailing year</span>
+    </div>
+    <div class="panel">
+      <div class="heatmap-wrap" id="agentHeatmap"></div>
+      <div class="hm-legend">
+        <span>Less</span>
+        <i style="background:rgba(255,255,255,.05)"></i>
+        <i style="background:rgba(157,140,255,.25)"></i>
+        <i style="background:rgba(157,140,255,.45)"></i>
+        <i style="background:rgba(157,140,255,.70)"></i>
+        <i style="background:rgba(157,140,255,1)"></i>
+        <span>More</span>
+      </div>
+    </div>
+  </div></section>
+
   <!-- Commits & PRs -->
   <section class="sec"><div class="wrap">
     <div class="sec-head">
       <h2>Commits &amp; PRs</h2>
-      <span class="hint">commits on default branch + merged PRs · weekly</span>
+      <span class="hint" id="activityHint">commits on default branch + merged PRs · weekly</span>
     </div>
     <div class="panel"><div class="chart-wrap"><canvas id="activityChart"></canvas></div></div>
   </div></section>
@@ -343,6 +363,8 @@ function fmtDate(iso) {
 }
 function cumsum(arr) { let s = 0; return arr.map(v => (s += (v || 0))); }
 function sumSeries(key) { return DATA.series.reduce((s, w) => s + (w[key] ?? 0), 0); }
+function pctOf(n, d) { return d ? Math.round(100 * n / d) : 0; }
+const hasAgents = () => (DATA.agentCount ?? 0) > 0;
 
 // ── Chart.js dark defaults ─────────────────────────────────────────────────────
 function applyChartDefaults() {
@@ -394,6 +416,12 @@ function renderCards() {
     { label: 'Active Repos',  val: String(DATA.repoCount), sub: 'with activity',             c: 'var(--cyan)' },
     { label: 'Active Days',   val: String(ad.count),       sub: `longest streak ${ad.streak}d`, c: 'var(--green)' },
   ];
+  if (hasAgents()) {
+    const a = DATA.agentTotals;
+    cards.push({ label: 'Agent PRs', val: fmtNum(a.prsMerged),
+      sub: `${pctOf(a.prsMergedByYou, a.prsMerged)}% merged by you · ${pctOf(a.prsReviewedByYou, a.prsMerged)}% reviewed`,
+      c: 'var(--violet)' });
+  }
   document.getElementById('statCards').innerHTML = cards.map(c => `
     <div class="stat-card" style="--c:${c.c}">
       <div class="sc-label">${c.label}</div>
@@ -402,16 +430,19 @@ function renderCards() {
     </div>`).join('');
 }
 
-// ── Contribution heatmap (SVG) ──────────────────────────────────────────────────
-function heatColor(n) {
+// ── Contribution + agent heatmaps (SVG) ─────────────────────────────────────────
+// Both share one geometry so their week columns line up when stacked.
+const HEAT_GREEN  = '70,211,154';   // --green  — your commits
+const HEAT_VIOLET = '157,140,255';  // --violet — agent commits
+function heatColor(n, rgb) {
   if (n <= 0)  return 'rgba(255,255,255,.05)';
-  if (n <= 2)  return 'rgba(70,211,154,.25)';
-  if (n <= 5)  return 'rgba(70,211,154,.45)';
-  if (n <= 9)  return 'rgba(70,211,154,.70)';
-  return 'rgba(70,211,154,1)';
+  if (n <= 2)  return `rgba(${rgb},.25)`;
+  if (n <= 5)  return `rgba(${rgb},.45)`;
+  if (n <= 9)  return `rgba(${rgb},.70)`;
+  return `rgba(${rgb},1)`;
 }
-function renderHeatmap() {
-  const daily = DATA.daily || {};
+function renderHeatmap(elId, daily, rgb, who) {
+  daily = daily || {};
   const C = 11, G = 3, P = C + G, padL = 30, padT = 16;
 
   const end = new Date(DATA.window.to + 'T00:00:00Z');
@@ -429,8 +460,8 @@ function renderHeatmap() {
     const key = d.toISOString().slice(0, 10);
     const n   = daily[key] || 0;
     const x   = padL + week * P, y = padT + dow * P;
-    const label = `${n} commit${n === 1 ? '' : 's'} · ${DOW[dow]}, ${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`;
-    cells.push(`<rect class="hm-cell" x="${x}" y="${y}" width="${C}" height="${C}" rx="2" fill="${heatColor(n)}"><title>${label}</title></rect>`);
+    const label = `${n} ${who}commit${n === 1 ? '' : 's'} · ${DOW[dow]}, ${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`;
+    cells.push(`<rect class="hm-cell" x="${x}" y="${y}" width="${C}" height="${C}" rx="2" fill="${heatColor(n, rgb)}"><title>${label}</title></rect>`);
     const mo = d.getUTCMonth();
     if (mo !== lastMonth) { monthCands.push({ x, mo }); lastMonth = mo; }
   }
@@ -446,22 +477,45 @@ function renderHeatmap() {
   const dayTicks = [1, 3, 5].map(i =>
     `<text x="0" y="${padT + i * P + C - 1}" fill="#5c6a7a" font-size="10" font-family="ui-monospace,monospace">${DOW[i]}</text>`).join('');
 
-  document.getElementById('heatmap').innerHTML =
+  document.getElementById(elId).innerHTML =
     `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${monthLabels.join('')}${dayTicks}${cells.join('')}</svg>`;
+}
+function renderAgentSection() {
+  if (!hasAgents()) return;
+  const a = DATA.agentTotals;
+  const days = Object.keys(DATA.agentDaily || {}).filter(d => DATA.agentDaily[d] > 0).sort();
+  const since = days.length ? ` · first seen ${fmtDate(days[0])}` : '';
+  document.getElementById('agentHint').textContent =
+    `commits per day by ${DATA.agentCount} agent${DATA.agentCount === 1 ? '' : 's'} · ` +
+    `${fmtNum(a.commits)} commits · ${fmtNum(a.issuesOpened)} issues opened${since}`;
+  renderHeatmap('agentHeatmap', DATA.agentDaily, HEAT_VIOLET, 'agent ');
+  document.getElementById('agentSection').hidden = false;
 }
 
 // ── Commits & PRs ────────────────────────────────────────────────────────────────
 function createActivityChart(labels) {
+  const datasets = [
+    { label: 'Commits', data: DATA.series.map(w => w.commits), yAxisID: 'y',
+      borderColor: '#34e0d2', backgroundColor: 'rgba(52,224,210,.08)', tension: .3, pointRadius: 0, borderWidth: 2, fill: true },
+    { label: 'PRs Merged', data: DATA.series.map(w => w.prsMerged), yAxisID: 'y',
+      borderColor: '#f5b13d', backgroundColor: 'rgba(245,177,61,.06)', tension: .3, pointRadius: 0, borderWidth: 2, fill: true },
+    { label: 'Cumulative Commits', data: cumsum(DATA.series.map(w => w.commits)), yAxisID: 'y2',
+      borderColor: 'rgba(52,224,210,.40)', borderDash: [5, 4], fill: false, tension: .35, pointRadius: 0, borderWidth: 1.5 },
+  ];
+  // Agent series sit beside yours (not stacked) so each stays readable on its own.
+  if (hasAgents()) {
+    datasets.push(
+      { label: 'Agent Commits', data: DATA.series.map(w => w.agentCommits ?? 0), yAxisID: 'y',
+        borderColor: '#9d8cff', backgroundColor: 'rgba(157,140,255,.08)', tension: .3, pointRadius: 0, borderWidth: 2, fill: true },
+      { label: 'Agent PRs', data: DATA.series.map(w => w.agentPrsMerged ?? 0), yAxisID: 'y',
+        borderColor: 'rgba(157,140,255,.6)', borderDash: [2, 3], tension: .3, pointRadius: 0, borderWidth: 2, fill: false },
+    );
+    document.getElementById('activityHint').textContent =
+      'commits on default branch + merged PRs · you vs agents · weekly';
+  }
   activityChart = new Chart(document.getElementById('activityChart'), {
     type: 'line',
-    data: { labels, datasets: [
-      { label: 'Commits', data: DATA.series.map(w => w.commits), yAxisID: 'y',
-        borderColor: '#34e0d2', backgroundColor: 'rgba(52,224,210,.08)', tension: .3, pointRadius: 0, borderWidth: 2, fill: true },
-      { label: 'PRs Merged', data: DATA.series.map(w => w.prsMerged), yAxisID: 'y',
-        borderColor: '#f5b13d', backgroundColor: 'rgba(245,177,61,.06)', tension: .3, pointRadius: 0, borderWidth: 2, fill: true },
-      { label: 'Cumulative Commits', data: cumsum(DATA.series.map(w => w.commits)), yAxisID: 'y2',
-        borderColor: 'rgba(52,224,210,.40)', borderDash: [5, 4], fill: false, tension: .35, pointRadius: 0, borderWidth: 1.5 },
-    ]},
+    data: { labels, datasets },
     options: { responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false },
       plugins: { legend: { position: 'top', align: 'end' } },
       scales: { x: sd(), y: { ...sd(), beginAtZero: true }, y2: y2() } },
@@ -669,7 +723,8 @@ function renderAll() {
   if (DATA.sample) document.getElementById('sampleBadge').hidden = false;
 
   renderCards();
-  renderHeatmap();
+  renderHeatmap('heatmap', DATA.daily, HEAT_GREEN, '');
+  renderAgentSection();
   createActivityChart(labels);
   createDisciplineChart(labels);
   createLocChart(labels);

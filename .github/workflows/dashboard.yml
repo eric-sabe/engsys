@@ -10,6 +10,8 @@
 #   DASHBOARD_EMAILS       commit-author emails, CSV
 # Optional:
 #   DASHBOARD_EXTRA_LOGINS legacy/renamed logins to fold in, CSV
+#   DASHBOARD_AGENT_LOGINS GitHub App bots acting for you, CSV (e.g. my-bot[bot]);
+#                          shown separately as the Agent heatmap
 #
 # Identity lives in secrets (not the public source). See the README
 # "Activity dashboard" section and .env.example.
@@ -54,6 +56,7 @@ jobs:
           DASHBOARD_EMAILS:        ${{ secrets.DASHBOARD_EMAILS }}
           DASHBOARD_OWNERS:        ${{ secrets.DASHBOARD_OWNERS }}
           DASHBOARD_EXTRA_LOGINS:  ${{ secrets.DASHBOARD_EXTRA_LOGINS }}
+          DASHBOARD_AGENT_LOGINS:  ${{ secrets.DASHBOARD_AGENT_LOGINS }}
         run: |
           # Daily schedule always runs delta. Manual dispatch can opt into full.
           if [ "${{ github.event.inputs.full }}" = "true" ]; then

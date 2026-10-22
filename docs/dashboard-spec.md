@@ -35,6 +35,14 @@ The login, owner list, and email set come from the environment
 (`DASHBOARD_LOGIN` / `DASHBOARD_OWNERS` / `DASHBOARD_EMAILS`) — `.env` locally,
 Actions secrets in CI — so no personal details live in the public source.
 
+**Agents.** GitHub App bots that work on your behalf are listed in
+`DASHBOARD_AGENT_LOGINS` (CSV, `slug` or `slug[bot]`). Their activity is attributed
+to a separate *agent* actor and never folded into your own numbers: commits match
+on the bot login or its `<id>+slug[bot]@users.noreply.github.com` email, PRs and
+close events on the bot's login, and opened issues via `createdBy: "slug[bot]"`
+(the bare slug matches nothing there). For agent PRs the collector also records
+whether you merged it and whether you left a review — the oversight signal.
+
 ## 3. Key decisions to lock before building
 
 1. **Data privacy / where it lives.** ✅ **RESOLVED:** stays in the public `engsys`
@@ -117,9 +125,18 @@ which PR discipline keeps small → rate-limit friendly.
       "issuesOpened": 0, "issuesClosed": 0,
       "commits": 0, "prsMerged": 0,
       "locAdded": 0, "locRemoved": 0,
-      "locAddedViaPR": 0, "locAddedDirect": 0 }
+      "locAddedViaPR": 0, "locAddedDirect": 0,
+      // agent activity — same week, kept apart from yours
+      "agentIssuesOpened": 0, "agentIssuesClosed": 0,
+      "agentCommits": 0, "agentPrsMerged": 0,
+      "agentPrsMergedByYou": 0, "agentPrsReviewedByYou": 0,
+      "agentLocAdded": 0, "agentLocRemoved": 0 }
     // ...one per week
   ],
+  "daily": { "2026-06-01": 3 },        // your commits per day — contribution heatmap
+  "agentCount": 1,                     // how many agents are configured (never their logins)
+  "agentTotals": { /* agent* fields above, prefix dropped */ },
+  "agentDaily": { "2026-06-01": 7 },   // agent commits per day — agent heatmap
   "perRepo": [
     { "alias": "Repo A",            // opaque label only — NEVER nameWithOwner (§3.1)
       "totals": { /* same shape as top-level totals */ } }
