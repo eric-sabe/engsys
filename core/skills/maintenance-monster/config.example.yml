@@ -1,7 +1,7 @@
 # Maintenance Monster per-repo config — copy to .claude/maintenance-monster.yml
 # (or to maintenance-monster.yml in a fleet config dir outside the repo — see
 # SKILL.md § Prerequisites) and edit. Read by the model at session start; scripts take flags. The
-# exceptions: the fp_policies block, which the mnt-fp-* scripts read, and pulse_max / heartbeat_minutes /
+# exceptions: the fp_policies block, which the mnt-fp-* scripts read, the findings_harvest block (mnt-harvest.sh), and pulse_max / heartbeat_minutes /
 # stale_lock_minutes / rotate_context_tokens, which mnt-watch.sh and mnt-tick.sh read when given --config.
 # Design spec: docs/maintenance-monster.md.
 
@@ -148,6 +148,24 @@ messaging:
 #   respawn_max: 2                # generations per unit before escalate
 #   probe_retry_minutes: 5        # failed probe ≠ death: bounded retries…
 #   probe_retries_max: 2          # …then classify only on independent evidence
+
+# Optional: the weekly findings harvest (SKILL.md § Findings harvest). Off unless enabled. Mines recurring review-finding
+# families out of the merged PRs of the last lookback_days (scripts/harvest-findings.mjs; the trust lists come from
+# memory.yml only) once per cadence_days window. Without apply it only writes the proposal under state_dir/harvest/; with
+# apply: true it opens ONE draft docs PR per window (docs/agent-lessons/ files only, through mnt-act.sh), hands it to
+# Merge Monster with mm:ready and an operator_gate, so a human approves every promoted lesson. mnt-tick.sh and
+# mnt-harvest.sh read this block when given --config.
+# findings_harvest:
+#   enabled: false
+#   cadence_days: 7
+#   lookback_days: 7 # default: cadence_days
+#   apply: false # true: open the draft docs PR (the one PR this monster opens in phase: read_only)
+#   repo: owner/name # default: the top-level repo
+#   markers: ["<!-- cr-cli-findings -->"] # on top of the default <!-- *-findings --> / <!-- *-review --> markers
+#   min_recurrence: 2
+# Whose findings count comes only from memory.yml (trusted_bot_user_ids, operator_user_ids); a trust list set here is a
+# config error. With the default family key (file + the title's first tokens, in 2+ PRs) it usually proposes nothing:
+# tuning that is a separate operator decision.
 
 # Optional: path to the repo's Dependabot triage playbook (phase model the
 # triage step follows). Empty/absent -> classify from first principles using

@@ -177,7 +177,28 @@ rc_is "mnt-tick.sh, held → exit 0" 0
 has "  …first tick reports the surface" '+ {"k":"codeql_alerts","available":true,"count":0}'
 run env FLEET_ID=alice "${MTICK[@]}"
 [ "$OUT" = NOOP ] && ok "  …then NOOP" || bad "  …then NOOP" "$OUT"
-rm -rf "$T/state"/baton-* "$T/state/.watch" "$T/resp"/*
+# the weekly findings harvest: a due window is a delta; off, or latched, stays NOOP
+printf 'repo: acme/app\nfindings_harvest:\n  cadence_days: 7\n' >"$T/hv-off.yml"
+run env FLEET_ID=alice "${MTICK[@]}" --config "$T/hv-off.yml"
+[ "$OUT" = NOOP ] && ok "mnt-tick.sh: a findings_harvest block that is not enabled stays NOOP" || bad "mnt-tick.sh: a findings_harvest block that is not enabled stays NOOP" "$OUT"
+printf 'repo: acme/app\nfindings_harvest:\n  enabled: true\n  cadence_days: 7\n' >"$T/hv-on.yml"
+run env FLEET_ID=alice "${MTICK[@]}" --config "$T/hv-on.yml"
+has "  …enabled and never run: HARVEST_DUE" "HARVEST_DUE window="
+run env FLEET_ID=alice "${MTICK[@]}" --config "$T/hv-on.yml"
+has "  …and again on the next tick until it runs" "HARVEST_DUE window="
+mkdir -p "$T/state/harvest"; printf '{"window":"x","ranAt":"%s","result":"none"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$T/state/harvest/last.json"
+run env FLEET_ID=alice "${MTICK[@]}" --config "$T/hv-on.yml"
+[ "$OUT" = NOOP ] && ok "  …latched for the window: NOOP" || bad "  …latched for the window: NOOP" "$OUT"
+printf 'repo: acme/app\nfindings_harvest:\n  enabled: true\n  cadence_days: 0\n' >"$T/hv-bad.yml"
+run env FLEET_ID=alice "${MTICK[@]}" --config "$T/hv-bad.yml"
+has "  …an invalid block is HARVEST_CONFIG_ERROR" "HARVEST_CONFIG_ERROR"
+run env FLEET_ID=alice "${MTICK[@]}" --config "$T/hv-bad.yml"
+hasnt "  …said once" "HARVEST_CONFIG_ERROR"
+rm -f "$T/state/.watch/harvest-config.said"
+printf 'repo: acme/app\nfindings_harvest:\n  enabled: true\n  trusted_bot_ids: [42]\n' >"$T/hv-trust.yml"
+run env FLEET_ID=alice "${MTICK[@]}" --config "$T/hv-trust.yml"
+has "  …a trust list in the monster config is HARVEST_CONFIG_ERROR naming the key (trust comes only from memory.yml)" "HARVEST_CONFIG_ERROR mnt-harvest: findings_harvest.trusted_bot_ids is not supported"
+rm -rf "$T/state"/baton-* "$T/state/.watch" "$T/state/harvest" "$T/resp"/*
 
 echo "the maintenance monster sees security-review requests (engsys#231)"
 held maintain; mkdir -p "$T/state/.watch"; date +%s >"$T/state/.watch/last-heartbeat"

@@ -8,11 +8,15 @@
 #      dead bus;
 #   3b. when the --config has fp_policies:, run mnt-fp-candidates.sh with its seen-latch (--state-dir), so
 #      only a CANDIDATE / TRIPWIRE_FAILED / OUT_OF_SCOPE line not printed before (and any ERROR) is a delta;
+#   3d. when the --config has an enabled findings_harvest: block and its window is due (mnt-harvest.sh due: read-only,
+#       no network), print HARVEST_DUE: run § Findings harvest on this wake;
 #   4. write the ledger heartbeat only when one is due (none in the last 0.75 x heartbeat_minutes);
 #   5. print `NOOP` when nothing changed, else the delta, one line each:
 #        + <item> / - <item>          a finding appeared in / left the snapshot, or changed (one of each)
 #        AGENT_OVERDUE … / AGENT_STALE …   from the watchdog scan
 #        HANDBACK_INCOMPLETE …             a subagent handed back unfinished work: resume it or take it over
+#        HARVEST_DUE window=<d> since=<d>  the weekly findings harvest is due (§ Findings harvest)
+#        HARVEST_CONFIG_ERROR <why>        the findings_harvest: block is invalid (once; escalate the config)
 #        BATON_HANDOVER maintain <fleet>   federation.yml moved the role's home (§ Handover)
 #        SNAPSHOT_ERROR <why>              the snapshot failed: GitHub state is unknown this tick
 #        HEARTBEAT_ERROR <why>             the heartbeat was due and failed
@@ -107,6 +111,17 @@ fi
 if [ -n "$CONFIG" ] && [ -f "$CONFIG" ] && grep -q '^fp_policies:' "$CONFIG"; then
   while IFS= read -r l; do case "$l" in '' | SEEN\ *) ;; *) DELTA+=("$l") ;; esac; done < <(bash "$here/mnt-fp-candidates.sh" \
     --repo "$REPO" --config "$CONFIG" --state-dir "$DIR" --default-branch "$DEFBRANCH" ${REPO_DIR:+--repo-dir "$REPO_DIR"} 2>&1 || true)
+fi
+
+# 3d. the weekly findings harvest, when its window is due ----------
+if [ -n "$CONFIG" ] && [ -f "$CONFIG" ] && grep -q '^findings_harvest:' "$CONFIG"; then
+  HRC=0; HOUT=$(bash "$here/mnt-harvest.sh" due --config "$CONFIG" --state-dir "$DIR" 2>&1) || HRC=$?
+  if [ "$HRC" = 0 ]; then
+    rm -f "$W/harvest-config.said"
+    while IFS= read -r l; do case "$l" in HARVEST_DUE\ *) DELTA+=("$l") ;; esac; done <<<"$HOUT"
+  elif [ ! -f "$W/harvest-config.said" ]; then
+    DELTA+=("HARVEST_CONFIG_ERROR $(printf '%s' "$HOUT" | tr '\n' ' ' | head -c 200)"); : >"$W/harvest-config.said"
+  fi
 fi
 
 # 3c. INCOMPLETE hand-backs the bus has not relayed (engsys#126 review) ----------------------------
