@@ -136,6 +136,11 @@ directory is shared by every worktree, is never committed, and survives `git wor
      against `agent_type`, `stacks`) blended with BM25 over the prompt.
   3. Up to 3 **Class B pointers**, one line each:
      `[#412 review_thread src/api/tenant.ts:88 local-review-findings fixed 2026-10-12] key=<k>`.
+- **Budget split:** lessons and pointers are guaranteed up to half of `brief_bytes`. The overlay
+  gets the rest, plus any part of that half they don't use. An overlay that would cut into their
+  half is trimmed to whole lines and ends with `[overlay truncated to fit brief_bytes]` (a cut never
+  leaves a code fence open). Past that, sections drop from the end: pointers first, then lessons.
+  The seeded overlay template is under 1 KB, so a fresh install's brief always has room for lessons.
 - **Pointer score** = `anchor × idf(file) × recency × outcome`:
   - **anchor:** 1.0 for the same path and an overlapping line, 0.5 for the same file, 0.2 for the
     same directory.

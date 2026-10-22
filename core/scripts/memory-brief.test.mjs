@@ -4,10 +4,10 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { cpSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { hermeticGit } from '../lib/git-env.mjs';
 import { resolveReviewedSha } from '../lib/memory/index-db.mjs';
@@ -19,6 +19,9 @@ let SQLITE_AVAILABLE = true;
 try { require('node:sqlite'); } catch { SQLITE_AVAILABLE = false; }
 import {
 	bareAgentType,
+	DEFAULTS,
+	OVERLAY_RESERVE_SHARE,
+	OVERLAY_TRUNCATED_MARKER,
 	bm25Terms,
 	buildBrief,
 	isClassBExcluded,
@@ -38,6 +41,8 @@ import {
 	evidenceText,
 	isEventTrusted,
 } from './memory-brief.mjs';
+
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 // hermeticGit scrubs GIT_DIR etc. so these calls can never target the real repo if this suite runs
 // under a pre-push hook (core/lessons-library/git-core-bare-flip-breaks-all-worktrees.md); identity
@@ -867,6 +872,92 @@ describe('renderBrief — byte cap + Class B boundary', () => {
 		assert.ok(Buffer.byteLength(text, 'utf8') <= 40);
 		assert.deepEqual(lessonKeys, [], 'even the first lesson does not fit within this tight a budget, so it must not be reported as rendered');
 		assert.deepEqual(pointerKeys, []);
+	});
+
+	test('an overlay bigger than the budget is capped so lessons still render (engsys#191)', () => {
+		const overlay = ['# Overlay', ...Array.from({ length: 60 }, (_, i) => `overlay line ${i} ${'y'.repeat(40)}`)].join('\n');
+		const lessons = [{ key: 'lesson:a', title: 'Alpha', body: '**Trigger:** short' }, { key: 'lesson:b', title: 'Beta', body: '**Trigger:** short' }];
+		const { text, lessonKeys } = renderBrief({ overlay, lessons }, 2048);
+		assert.ok(Buffer.byteLength(text, 'utf8') <= 2048);
+		assert.deepEqual(lessonKeys, ['lesson:a', 'lesson:b']);
+		assert.ok(text.startsWith('# Overlay\noverlay line 0 '), 'the overlay keeps its leading whole lines');
+		assert.ok(text.includes(`\n${OVERLAY_TRUNCATED_MARKER}\n[lesson lesson:a]`), 'the cut is marked, right before the lessons');
+		assert.ok(!/overlay line \d+ y*\n\[lesson/.test(text) && !text.includes('overlay line 59'), 'never a half-kept overlay line');
+	});
+
+	test('lessons crowding the reserve only push the overlay down to OVERLAY_RESERVE_SHARE of the budget, never further (engsys#191)', () => {
+		const overlay = Array.from({ length: 40 }, (_, i) => `overlay line ${i} ${'y'.repeat(40)}`).join('\n');
+		const lessons = Array.from({ length: 40 }, (_, i) => ({ key: `lesson:l${i}`, title: `Lesson ${i}`, body: `**Trigger:** ${'x'.repeat(100)}` }));
+		const { text, lessonKeys } = renderBrief({ overlay, lessons }, 2048);
+		const overlayPart = text.slice(0, text.indexOf(OVERLAY_TRUNCATED_MARKER) + OVERLAY_TRUNCATED_MARKER.length);
+		assert.ok(Buffer.byteLength(overlayPart, 'utf8') <= 2048 - Math.floor(2048 * OVERLAY_RESERVE_SHARE));
+		assert.ok(Buffer.byteLength(overlayPart, 'utf8') > 2048 * OVERLAY_RESERVE_SHARE - 100, 'the overlay keeps (nearly) its full half');
+		assert.ok(lessonKeys.length > 0 && lessonKeys.length < 40, 'lessons fill the reserve, the rest drop from the end');
+		assert.ok(Buffer.byteLength(text, 'utf8') <= 2048);
+	});
+
+	test('an overlay that fits beside short lessons is never trimmed — it keeps the slack the lessons do not use (engsys#191)', () => {
+		const overlay = Array.from({ length: 30 }, (_, i) => `overlay line ${i} ${'y'.repeat(40)}`).join('\n'); // ~1.6 KB, over half
+		const lessons = [{ key: 'lesson:a', title: 'Alpha', body: '**Trigger:** short' }];
+		const { text, lessonKeys } = renderBrief({ overlay, lessons }, 2048);
+		assert.equal(text, `${overlay}\n[lesson lesson:a] **Alpha** — short`);
+		assert.deepEqual(lessonKeys, ['lesson:a']);
+	});
+
+	test('a cut overlay never leaves a code fence open (engsys#191)', () => {
+		const overlay = ['# Overlay', 'intro', '## Verify commands', '```sh', ...Array.from({ length: 40 }, (_, i) => `cmd ${i} ${'z'.repeat(40)}`), '```'].join('\n');
+		const lessons = Array.from({ length: 20 }, (_, i) => ({ key: `lesson:l${i}`, title: `Lesson ${i}`, body: `**Trigger:** ${'x'.repeat(100)}` }));
+		const { text } = renderBrief({ overlay, lessons }, 2048);
+		assert.ok(text.startsWith(`# Overlay\nintro\n## Verify commands\n${OVERLAY_TRUNCATED_MARKER}\n`), 'backs up to before the unclosed fence');
+		assert.equal((text.match(/```/g) || []).length, 0);
+	});
+
+	const fenceLessons = () => Array.from({ length: 20 }, (_, i) => ({ key: `lesson:l${i}`, title: `Lesson ${i}`, body: `**Trigger:** ${'x'.repeat(100)}` }));
+	const cmds = (n) => Array.from({ length: n }, (_, i) => `cmd ${i} ${'z'.repeat(40)}`);
+
+	test('an overlay whose first line alone is over its share still says it was cut: the marker, not silence (engsys#191 review)', () => {
+		const overlay = `# ${'h'.repeat(3000)}\nsecond line`;
+		const { text, lessonKeys } = renderBrief({ overlay, lessons: fenceLessons() }, 2048);
+		assert.ok(text.startsWith(`${OVERLAY_TRUNCATED_MARKER}\n[lesson lesson:l0]`), text.slice(0, 120));
+		assert.ok(!text.includes('hhhh'));
+		assert.ok(lessonKeys.length > 0);
+		assert.ok(Buffer.byteLength(text, 'utf8') <= 2048);
+		// and with no lessons at all, the overlay may use the whole budget but still never a half line
+		const solo = renderBrief({ overlay }, 2048).text;
+		assert.equal(solo, OVERLAY_TRUNCATED_MARKER);
+	});
+
+	test('~~~ fences are tracked like ``` ones (engsys#191 review)', () => {
+		const overlay = ['# Overlay', 'intro', '~~~sh', ...cmds(40), '~~~'].join('\n');
+		const { text } = renderBrief({ overlay, lessons: fenceLessons() }, 2048);
+		assert.ok(text.startsWith(`# Overlay\nintro\n${OVERLAY_TRUNCATED_MARKER}\n`), text.slice(0, 80));
+		assert.ok(!text.includes('~~~'));
+	});
+
+	test('fence closing follows CommonMark: same character, at least as long as the opener (engsys#191 review)', () => {
+		// a ~~~ line does not close a ``` block, and a shorter ``` does not close a ```` block: both are still open at the cut
+		for (const [open, notClose] of [['```sh', '~~~'], ['````', '```'], ['~~~~', '~~~']]) {
+			const overlay = ['# Overlay', 'intro', open, 'a', notClose, ...cmds(40), open.replace(/[a-z]+$/, '')].join('\n');
+			const { text } = renderBrief({ overlay, lessons: fenceLessons() }, 2048);
+			assert.ok(text.startsWith(`# Overlay\nintro\n${OVERLAY_TRUNCATED_MARKER}\n`), `${open} / ${notClose}: ${text.slice(0, 80)}`);
+		}
+		// a closed block before the cut is kept whole: a longer closer of the same character closes it
+		const overlay = ['# Overlay', '~~~', 'x', '~~~~~', 'after', ...cmds(40)].join('\n');
+		const { text } = renderBrief({ overlay, lessons: fenceLessons() }, 2048);
+		assert.ok(text.startsWith('# Overlay\n~~~\nx\n~~~~~\nafter\ncmd 0 '), text.slice(0, 80));
+		assert.ok(text.includes(`\n${OVERLAY_TRUNCATED_MARKER}\n[lesson`));
+		// a backtick line with a backtick in its info string is inline code, not a fence
+		const inline = ['# Overlay', '``` `x` ```', 'after', ...cmds(40)].join('\n');
+		assert.ok(renderBrief({ overlay: inline, lessons: fenceLessons() }, 2048).text.startsWith('# Overlay\n``` `x` ```\nafter\n'));
+	});
+
+	test('the seeded overlay template fits under half the default brief_bytes, untrimmed (engsys#191)', () => {
+		const template = readFileSync(join(REPO_ROOT, 'core', 'templates', 'project-brief-overlay.md'), 'utf8');
+		assert.ok(Buffer.byteLength(template, 'utf8') <= 1024, 'keep the seeded template at most ~1 KB');
+		const lessons = Array.from({ length: 5 }, (_, i) => ({ key: `lesson:l${i}`, title: `Lesson ${i}`, body: `**Trigger:** ${'x'.repeat(150)}` }));
+		const { text, lessonKeys } = renderBrief({ overlay: template, lessons }, DEFAULTS.brief_bytes);
+		assert.ok(text.startsWith(template.trim()), 'the template is not trimmed');
+		assert.ok(lessonKeys.length >= 1);
 	});
 
 	test('lessonKeys/pointerKeys DO include everything when the budget comfortably fits all of it (positive control)', () => {

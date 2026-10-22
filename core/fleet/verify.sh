@@ -22,9 +22,13 @@
 # unless VERIFY_ALLOWED_USER_HOOKS (fleet.conf, space-separated sha256 content hashes, printed in the
 # mismatch line) lists it; listed ones are reported as `allowed`. The pin checkout's auto-loaded files
 # (.claude/, CLAUDE.md files, .mcp.json, settings-command targets) must also be identical at the tip.
-# User-scope agents, commands, skills, rules, CLAUDE.md and MCP server definitions in that config dir (and
-# its .claude.json) are a mismatch unless VERIFY_ALLOWED_USER_FILES (fleet.conf, sha256 per item, printed
-# in the mismatch line) lists them, and so is any CLAUDE.md / CLAUDE.local.md above PIN_DIR up to $HOME.
+# User-scope agents, commands, skills, rules, CLAUDE.md, memory.yml (the memory brief's trust lists, engsys#230)
+# and MCP server definitions in that config dir (and its .claude.json) are a mismatch unless
+# VERIFY_ALLOWED_USER_FILES (fleet.conf, sha256 per item, printed in the mismatch line) lists them, and so is
+# any CLAUDE.md / CLAUDE.local.md above PIN_DIR up to $HOME. When the federation file (FEDERATION_FILE) declares
+# operators_team, a memory.yml in that config dir must list exactly the team's members in operator_user_ids; a team
+# that can't be read is "not verified" (engsys#230). With one login per session, the fleet dir's memory.yml (the copy
+# the sessions load, engsys#262) gets both checks too, with every session.
 #
 #   --alert          post `fleet notify --level alert` once per incident, and resolve it on the next pass:
 #                      wrapper-integrity             a mismatch (latch: .fleet/verify-wrappers.alerted, holding
@@ -103,6 +107,7 @@ mkdir -p "$FLEET_STATE" && chmod 700 "$FLEET_STATE"
 # shellcheck source=lib/session-dirs.sh
 . "$FLEET_KIT_DIR/lib/session-dirs.sh"
 SFX="" INC=""   # per-session mode: a suffix for this session's latches and cache, and for its incident keys
+base_memory=""  # per-session mode: the fleet dir's memory.yml, which the session loads (engsys#262)
 if [ "$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION" = on ]; then
   fleet_roster_prepare
   if [ -z "$session" ]; then
@@ -130,6 +135,9 @@ if [ "$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION" = on ]; then
   if [ "$auto_sync" = 1 ] && ! fleet_sync_deferred_run "$session"; then
     echo "fleet verify: could not sync $sdir, which fleet sync deferred while $session ran (above); checking it as it is"
   fi
+  # engsys#230/#262: the session's monster reads the fleet dir's memory.yml (ENGSYS_MEMORY_CONFIG on its launch line),
+  # not one in its own dir, so that copy is checked with this session too
+  base_memory="$FLEET_CLAUDE_CONFIG_DIR/memory.yml"
   FLEET_CLAUDE_CONFIG_DIR="$sdir" CLAUDE_CONFIG_DIR="$sdir"; export FLEET_CLAUDE_CONFIG_DIR CLAUDE_CONFIG_DIR
   SFX=".$session" INC="-$session"
 elif [ -n "$session" ]; then
@@ -344,6 +352,19 @@ else
     args+=(--check-user-config --claude-json "${FLEET_CLAUDE_CONFIG_DIR:+$FLEET_CLAUDE_CONFIG_DIR/.claude.json}")
     [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] || args[${#args[@]}-1]="$HOME/.claude.json"
     [ -z "${VERIFY_ALLOWED_USER_FILES:-}" ] || args+=(--allowed-user-files "$VERIFY_ALLOWED_USER_FILES")
+    # engsys#230: a memory.yml in that dir must list exactly the federation's operators_team in operator_user_ids.
+    # verify-wrappers reads the team with PIN_DIR as the cwd (the gh shim picks its App installation from the cwd's
+    # origin, eric-sabe/engsys#257). A federation file that can't be read is "not verified", never a skipped check.
+    [ -z "$base_memory" ] || args+=(--memory-config "$base_memory")
+    fed_err=""
+    if [ -f "$FEDERATION_FILE" ]; then
+      ot_rc=0; ot="$(node "$FLEET_KIT_DIR/lib/federation.mjs" get operators_team --file "$FEDERATION_FILE" 2>&1)" || ot_rc=$?
+      case "$ot_rc" in
+        0) [ -z "$ot" ] || [ "$ot" = null ] || args+=(--operators-team "$ot") ;;
+        3) ;;   # no operators_team declared
+        *) fed_err="$(tail -n 1 <<<"$ot")" ;;
+      esac
+    fi
     # a dir of the fleet's own: its claude.ai sync must be off (engsys#201). Never ~/.claude itself, which sync and config-dir
     # init leave alone (engsys#204): the warning's fix would not work there
     if [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] \
@@ -364,7 +385,8 @@ else
       echo "fleet verify: WARNING PIN_DIR ($PIN_DIR) is not a git checkout, so its .claude/ can't be checked against $PIN_REPO; any settings hook there is a mismatch"
     fi
     [ -z "$max_age" ] || args+=(--cache "$FLEET_STATE/verify-wrappers$SFX.json" --max-age-min "$max_age")
-    out="$(node "$FLEET_KIT_DIR/lib/verify-wrappers.mjs" "${args[@]}" 2>&1)" || rc=$?
+    if [ -n "$fed_err" ]; then out="fleet verify: not verified: can't read operators_team from $FEDERATION_FILE ($fed_err)"; rc=3
+    else out="$(node "$FLEET_KIT_DIR/lib/verify-wrappers.mjs" "${args[@]}" 2>&1)" || rc=$?; fi
     # node exits 1 on its own crash (a missing module, a syntax error): only the verifier's MISMATCH line counts.
     if [ "$rc" = 1 ] && ! grep -q '^verify: MISMATCH' <<<"$out"; then
       out="$out"$'\n'"fleet verify: not verified: the verifier failed (exit 1, above)"; rc=3

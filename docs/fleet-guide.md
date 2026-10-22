@@ -1581,13 +1581,42 @@ it to hold only the keys the launcher sets (`crossSessionInbound`); any other ke
 `statusLine`, …) is a mismatch.
 
 **User-scope configuration besides settings.** Every file under `<config dir>/agents`, `commands`,
-`skills` and `rules`, a `<config dir>/CLAUDE.md`, and every MCP server definition (`mcpServers` in the user
+`skills` and `rules`, a `<config dir>/CLAUDE.md`, `CLAUDE.local.md` or `memory.yml`, and every MCP server definition (`mcpServers` in the user
 state file, which is `<config dir>/.claude.json` with `FLEET_CLAUDE_CONFIG_DIR` and `~/.claude.json`
 without it, the `projects[<PIN_DIR>]` entry there, and `settings*.json`) is a mismatch unless
 `VERIFY_ALLOWED_USER_FILES` lists its sha256 (printed in the mismatch line). The plugin caches under
 `<config dir>/plugins/` are pinned by the checks above instead. A `CLAUDE.md` or `CLAUDE.local.md` in any
 directory above `PIN_DIR`, up to `$HOME`, is always a mismatch. On a host shared with a person this trips
-on their own agents, skills and MCP servers: that is what a separate `FLEET_CLAUDE_CONFIG_DIR` avoids. Also a mismatch, at every scope: `disableAllHooks`, or an
+on their own agents, skills and MCP servers: that is what a separate `FLEET_CLAUDE_CONFIG_DIR` avoids.
+
+`memory.yml` (engsys#230) holds the memory brief's trust lists (`operator_user_ids`, `trusted_member_user_ids`,
+signing keys), which are unioned with the repo's, so an edited or planted copy adds trust. Allowlist the hash of
+the **reviewed** copy (the one in your instance repo at its pinned tag), never a hash read off the host:
+
+```sh
+{ printf 'engsys-user-file-v1\0memory.yml\0'; git -C <instance repo> show <tag>:<path to memory.yml>; } | shasum -a 256
+```
+
+An absent `memory.yml` passes: no copy adds no trust. With one login per session, each
+`<FLEET_CLAUDE_CONFIG_DIR>.sessions/<name>` is checked the same way, so a copy there passes only if it is the
+reviewed one. The sessions load the fleet dir's `memory.yml` (`ENGSYS_MEMORY_CONFIG` on their launch line, engsys#262), so
+every `fleet verify --session <name>` also checks `<FLEET_CLAUDE_CONFIG_DIR>/memory.yml`, with the same rules: a
+drifted copy holds every session.
+
+When the federation file declares `operators_team`, the `operator_user_ids` in that `memory.yml` must be exactly
+the team's members (numeric user ids). Keep the team closed with no child teams: GitHub counts a child team's
+members as members. A listed id that is not a member, or a member who is not listed, is a mismatch. A team that
+can't be read (network, token scope, the wrong App installation) is "not verified", never a pass. The team is
+read with `PIN_DIR` as the working directory, because the fleet's `gh` shim picks the App installation from the
+working directory's `origin` for org-scoped calls (eric-sabe/engsys#257). So the team must be in an org the App
+installation for `PIN_REPO`'s owner can read; `fleet verify` warns when the team's org is not `PIN_REPO`'s owner.
+Like the release check, a pass is reused within `--max-age` while the local files are unchanged, so a membership
+change shows on the next full check.
+
+Only the config dirs `fleet verify` covers are checked: with `FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised`, a
+`~/.claude/memory.yml` the interactive roles load is not, so keep any host-side check of that copy until it is.
+
+Also a mismatch, at every scope: `disableAllHooks`, or an
 `env` key in a protected family (`ENGSYS_*`, `FLEET_*`, `HARNESS*`, `COPILOT_*`, `AGY_*`, `NODE_*`,
 `CLAUDE_PLUGIN_ROOT`, `CLAUDE_CONFIG_DIR`, `PATH`, `GH_*`, `GITHUB_*`) in any settings file, and the
 endpoint, credential and provider keys (`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`,
@@ -1845,7 +1874,7 @@ format) overrides it per machine. Environment values for `ENGSYS_REF` / `INSTANC
 | `FLEET_CLAUDE_CONFIG_DIR_PER_SESSION` | no | `on`: every session that uses `FLEET_CLAUDE_CONFIG_DIR` gets its own dir, `<FLEET_CLAUDE_CONFIG_DIR>.sessions/<name>`, with its own login, so no two long-lived sessions share a refresh token (anthropics/claude-code#88583; § 6.1). `off` (default) or unset: one shared dir. Needs `FLEET_CLAUDE_CONFIG_DIR`. Never inherited from the caller's environment |
 | `FLEET_CLAUDE_CONFIG_DIR_SCOPE` | no | `all` (default): every launched session runs on `FLEET_CLAUDE_CONFIG_DIR`. `supervised`: only the lines positively classified as interactive keep `~/.claude`; everything else (monsters, supervised and security-tier lines, anything unclassified) runs on the fleet dir. `fleet sync` keeps the pinned plugins in both, and `fleet verify` also checks the engsys install in `~/.claude` (§ 6.1). Never inherited from the caller's environment |
 | `VERIFY_ALLOWED_USER_PLUGINS` | no | Space-separated `name@marketplace` user-scope plugins `fleet verify` reports as `allowed` instead of a mismatch (§ 6.1). Never inherited from the caller's environment |
-| `VERIFY_ALLOWED_USER_FILES` | no | Space-separated sha256 hashes of user-scope agents, commands, skills, rules, memory files and MCP server definitions that `fleet verify` accepts (§ 7, "User-scope configuration besides settings"). Never inherited from the caller's environment |
+| `VERIFY_ALLOWED_USER_FILES` | no | Space-separated sha256 hashes of user-scope agents, commands, skills, rules, memory files, `memory.yml` and MCP server definitions that `fleet verify` accepts (§ 7, "User-scope configuration besides settings"). Never inherited from the caller's environment |
 | `SYNC_DEFER_ALERT_HOURS` | no | Hours a session may run on a config dir `fleet sync` left behind the pins (per-session mode) before the supervisor posts one `fleet notify --level action` asking for its restart (§ 7, What sync does). Default 24 |
 | `VERIFY_ALLOWED_USER_HOOKS` | no | Space-separated sha256 content hashes of user-scope hooks and settings commands (`statusLine`, `apiKeyHelper`, any `*Helper` / `*Command`, …) that `fleet verify` accepts (§ 7, "User-scope settings"). The hash covers the command and every file it runs, and is printed in the mismatch line. Never inherited from the caller's environment |
 | `REVIEW_CMD` | no | Review run in the pin PR's worktree (for example `<your-review-cli> review --base origin/main`). Empty means no review; the label only |

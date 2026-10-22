@@ -38,7 +38,7 @@
 //                       [--fleet-config-dir]
 //                       [--allowed-user-plugins "<name@mkt> ..."] [--allowed-user-hooks "<sha256> ..."]
 //                       [--check-user-config --claude-json <file> --allowed-user-files "<sha256> ..."]
-//                       [--pin-repo <owner/repo>]
+//                       [--pin-repo <owner/repo>] [--operators-team <org/team>] [--memory-config <file> ...]
 //                       [--market-plugin "<plugin>@<marketplace>|<owner/repo>|<ref>" ...]
 //                       [--cache <file> --max-age-min <n>]
 //
@@ -54,6 +54,13 @@
 // --pin-repo: PIN_DIR's .claude/ tree and every settings-hook target against that repo's default branch
 //   on GitHub (projectLocalState + verifyProjectTrust, below). A pin checkout behind the tip passes with a
 //   WARNING line only while every auto-loaded file is identical at the tip.
+// --operators-team (engsys#230): with --user-settings-dir, a memory.yml there must list exactly the team's members
+//   (numeric user ids) in operator_user_ids. The team is read with the pin checkout as the cwd (eric-sabe/engsys#257);
+//   a team that can't be read is "not verified". Like the release, a pass is reused from --cache while local files
+//   are unchanged, so a membership change shows within --max-age-min.
+// --memory-config (repeatable, engsys#230/#262): another memory.yml the sessions load (the fleet dir's, in per-session
+//   mode), held to the same rules as the one in --user-settings-dir: absent passes, present must be on
+//   --allowed-user-files (hashed as a config-dir memory.yml) and, with --operators-team, list exactly the team.
 // --fleet-config-dir (engsys#201): --user-settings-dir is a fleet config dir (not ~/.claude): warn when its settings.json
 //   doesn't switch the claude.ai skill/plugin sync off. Synced skills are never trusted by source (see userConfigItems).
 //
@@ -77,6 +84,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { hermeticGit } from '../../lib/git-env.mjs';
 import { exitAfterFlush } from '../../lib/exit-after-flush.mjs';
+import { parseYaml } from '../../lib/yaml.js';
 
 /** The repo directory the engsys core plugin is built from (its marketplace `source`). */
 export const PLUGIN_SUBDIR = 'core';
@@ -150,6 +158,7 @@ export const IN_USE = '.in_use';
 export const TAG_RE = /^v\d+\.\d+\.\d+$/;
 const REPO_RE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
 const ID_RE = /^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+$/;
+const TEAM_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/; // gate-check's OPERATORS_TEAM_RE
 
 /** The SHA `git hash-object` gives this content. */
 export function blobSha(buf) {
@@ -611,10 +620,74 @@ const canonicalJson = (v) => (Array.isArray(v) ? `[${v.map(canonicalJson).join('
     : JSON.stringify(v));
 
 /**
+ * Files at the top of a config dir that sessions load: Claude Code's memory files, and the engsys memory
+ * brief's memory.yml (engsys#230), whose operator and member id lists are UNION fields, so an edit or a planted
+ * copy adds trust. Absent is fine: no copy adds no trust.
+ */
+export const USER_CONFIG_FILES = ['CLAUDE.md', 'CLAUDE.local.md', 'memory.yml'];
+
+/** The hash VERIFY_ALLOWED_USER_FILES lists for a config-dir file: sha256 over its path relative to the dir and its content. */
+export const userFileHash = (rel, buf) => crypto.createHash('sha256').update(`engsys-user-file-v1\0${rel}\0`).update(buf).digest('hex');
+
+/** Why a memory.yml line matters, and which hash to allowlist (engsys#230). */
+const MEMORY_YML_HINT = 'it holds the memory brief\'s trust lists: allowlist the hash of the reviewed copy, never one read off the host';
+
+/**
+ * operator_user_ids of a memory.yml, as the memory brief reads it (a scalar is a one-item list).
+ * → { ids: [sorted unique digit strings], problem: '' | why the list can't be compared }
+ */
+export function memoryOperatorIds(text) {
+  let doc;
+  try { doc = parseYaml(String(text)); } catch (e) { return { ids: [], problem: `is not valid YAML (${e.message})` }; }
+  let v = doc && typeof doc === 'object' ? doc.operator_user_ids : undefined;
+  if (v === undefined || v === null || v === '') return { ids: [], problem: 'has no operator_user_ids' };
+  if (!Array.isArray(v)) v = [v];
+  const bad = v.filter((x) => !/^[1-9][0-9]*$/.test(String(x).trim()));
+  if (bad.length) return { ids: [], problem: `has operator_user_ids that are not numeric user ids: ${bad.map((x) => JSON.stringify(x)).join(', ')}` };
+  return { ids: [...new Set(v.map((x) => String(x).trim()))].sort(), problem: '' };
+}
+
+/**
+ * The numeric user ids of an operators team's members (engsys#230). The team is meant to be closed with no child
+ * teams: GitHub counts child-team members as members, so one would show up as "member but not listed".
+ * Run from `cwd` (the pin checkout): the fleet's gh shim picks the App installation from the cwd's origin for
+ * org-scoped paths (eric-sabe/engsys#257), so from an engsys checkout it would ask the wrong installation.
+ * Throws Unverified when the team can't be read or reads empty: that is never a pass.
+ */
+export async function fetchTeamMemberIds({ team, cwd, gh = 'gh', timeoutMs = 30_000 }) {
+  const [org, slug] = team.split('/');
+  const ids = new Set();
+  for (let page = 1; ; page++) {
+    if (page > 50) throw new Unverified(`${team} has more than 5000 members`);
+    const got = await ghJson(gh, `orgs/${org}/teams/${slug}/members?per_page=100&page=${page}`, timeoutMs, cwd);
+    if (!Array.isArray(got)) throw new Unverified(`reading the members of ${team} returned something that is not a list`);
+    for (const m of got) {
+      if (!Number.isSafeInteger(m?.id) || m.id <= 0) throw new Unverified(`a member of ${team} has no numeric id`);
+      ids.add(String(m.id));
+    }
+    if (got.length < 100) break;
+  }
+  if (!ids.size) throw new Unverified(`${team} has no members (or the token can't see them)`);
+  return [...ids].sort();
+}
+
+/** operator_user_ids vs the team: → problem lines (empty when they are the same set). */
+export function compareOperatorIds({ file, team, listed, members }) {
+  const m = new Set(members);
+  const l = new Set(listed);
+  const extra = listed.filter((x) => !m.has(x));
+  const missing = members.filter((x) => !l.has(x));
+  if (!extra.length && !missing.length) return [];
+  return [`operators  ${file} operator_user_ids differ from the members of ${team}: listed but not a member: [${extra.join(', ')}]; member but not listed: [${missing.join(', ')}]`];
+}
+
+/**
  * The user-scope configuration a fleet session loads besides settings, with the hash an operator
  * allowlists for each (VERIFY_ALLOWED_USER_FILES). → { items: [{ what, hash }], problems }
- *   - every file under <configDir>/{agents,commands,skills,rules} and <configDir>/CLAUDE.md: sha256 over
- *     its path relative to the config dir and its content (symlinks followed once, loops refused);
+ *   - every file under <configDir>/{agents,commands,skills,rules} and each of USER_CONFIG_FILES:
+ *     userFileHash over its path relative to the config dir and its content (symlinks followed once, loops
+ *     refused). A per-session dir (<dir>.sessions/<name>) is a config dir too, so a memory.yml there must also be
+ *     the reviewed copy (the rule ff-engsys-fleet's scripts/memory-config-check.sh applied);
  *   - every MCP server definition: `mcpServers` in the user state file (claudeJson: <configDir>/.claude.json
  *     with a fleet config dir, else ~/.claude.json), its `projects[<projectDir>].mcpServers`, and
  *     `mcpServers` in <configDir>/settings*.json: sha256 over the server name and its canonical JSON.
@@ -623,7 +696,6 @@ const canonicalJson = (v) => (Array.isArray(v) ? `[${v.map(canonicalJson).join('
 export function userConfigItems({ configDir, claudeJson = '', projectDir = '' }) {
   const items = [];
   const problems = [];
-  const fileHash = (rel, buf) => crypto.createHash('sha256').update(`engsys-user-file-v1\0${rel}\0`).update(buf).digest('hex');
   const seen = new Set();
   const walk = (abs, rel, depth) => {
     let st;
@@ -634,7 +706,7 @@ export function userConfigItems({ configDir, claudeJson = '', projectDir = '' })
       if (seen.has(real) || depth > 12) { problems.push(`user-cfg   ${abs} is a directory loop`); return; }
       seen.add(real);
       for (const e of fs.readdirSync(abs).sort()) { if (e !== '.DS_Store') walk(path.join(abs, e), `${rel}/${e}`, depth + 1); }
-    } else if (st.isFile()) items.push({ what: `${path.join(configDir, rel)}`, hash: fileHash(rel, fs.readFileSync(abs)) });
+    } else if (st.isFile()) items.push({ what: `${path.join(configDir, rel)}`, hash: userFileHash(rel, fs.readFileSync(abs)) });
     else problems.push(`user-cfg   ${abs} is not a regular file`);
   };
   for (const d of USER_CONFIG_DIRS) {
@@ -642,7 +714,7 @@ export function userConfigItems({ configDir, claudeJson = '', projectDir = '' })
     try { fs.lstatSync(abs); } catch { continue; }
     walk(abs, d, 0);
   }
-  for (const name of ['CLAUDE.md', 'CLAUDE.local.md']) {
+  for (const name of USER_CONFIG_FILES) {
     const abs = path.join(configDir, name);
     try { fs.lstatSync(abs); } catch { continue; }
     walk(abs, name, 0);
@@ -716,7 +788,7 @@ export function parentMemoryFiles(projectDir, home = os.homedir()) {
 export function checkSettingsDetailed({
   projectDir, userSettingsDir = '', pinSettingsSha = '', projectVerified = false,
   allowedUserPlugins = new Set(), allowedUserHooks = new Set(), home = os.homedir(),
-  claudeJson = '', allowedUserFiles = null, fleetConfigDir = false,
+  claudeJson = '', allowedUserFiles = null, fleetConfigDir = false, memoryConfigs = [],
 }) {
   const problems = [];
   const info = [];
@@ -849,8 +921,8 @@ export function checkSettingsDetailed({
       warnings.push(`${path.join(userSettingsDir, 'settings.json')} does not set ${on.join(' and ')} to false, so Claude Code may sync claude.ai skills or plugins into this fleet config dir; run: fleet config-dir init (it retrofits an existing dir), or fleet sync`);
     }
   }
-  // User-scope configuration loaded besides settings (agents, commands, skills, rules, memory, MCP
-  // servers): each must be on VERIFY_ALLOWED_USER_FILES. Checked when allowedUserFiles is passed.
+  // User-scope configuration loaded besides settings (agents, commands, skills, rules, memory files,
+  // memory.yml, MCP servers): each must be on VERIFY_ALLOWED_USER_FILES. Checked when allowedUserFiles is passed.
   if (userSettingsDir && allowedUserFiles) {
     const allowedF = allowedUserFiles instanceof Set ? allowedUserFiles : parseAllowedFiles(allowedUserFiles);
     const uc = userConfigItems({ configDir: userSettingsDir, claudeJson, projectDir });
@@ -866,7 +938,7 @@ export function checkSettingsDetailed({
       // <bucket>/..., or the .bucket-<bucket> marker beside it; any other loose file under synced/ keeps its own line
       const b = rel === null ? null : rel.includes(path.sep) ? rel.split(path.sep)[0] : /^\.bucket-[^.].*$/.test(rel) ? rel.slice('.bucket-'.length) : null;
       if (b !== null) buckets.set(b, (buckets.get(b) || 0) + 1);
-      else problems.push(`user-cfg   ${it.what} is not on VERIFY_ALLOWED_USER_FILES (sha256 ${it.hash})`);
+      else problems.push(`user-cfg   ${it.what} is not on VERIFY_ALLOWED_USER_FILES (sha256 ${it.hash})${it.what === path.join(userSettingsDir, 'memory.yml') ? `; ${MEMORY_YML_HINT}` : ''}`);
     }
     for (const [b, n] of [...buckets].sort()) {
       problems.push(`user-cfg   ${path.join(syncedRoot, b)} holds ${n} synced claude.ai skill file(s) not on VERIFY_ALLOWED_USER_FILES (${SYNCED_HINT})`);
@@ -874,6 +946,28 @@ export function checkSettingsDetailed({
   }
   if (allowedUserFiles) {
     for (const f of parentMemoryFiles(projectDir, home)) problems.push(`memory     ${f} is loaded into every session above the pin checkout; remove it`);
+    // engsys#230/#262: a memory.yml the sessions load from outside their own dir (the fleet dir's, in per-session mode)
+    const allowedF = allowedUserFiles instanceof Set ? allowedUserFiles : parseAllowedFiles(allowedUserFiles);
+    for (const f of memoryConfigs) {
+      if (userSettingsDir && path.resolve(f) === path.join(path.resolve(userSettingsDir), 'memory.yml')) continue; // checked above
+      let buf;
+      try {
+        if (!fs.statSync(f).isFile()) { problems.push(`user-cfg   ${f} is not a regular file`); continue; }
+        buf = fs.readFileSync(f);
+      } catch (e) {
+        if (e && e.code === 'ENOENT') {
+          let link = false;
+          try { link = fs.lstatSync(f).isSymbolicLink(); } catch { /* absent */ }
+          if (link) problems.push(`user-cfg   ${f} is a dangling link or unreadable`);
+          continue; // absent: no copy adds no trust
+        }
+        problems.push(`user-cfg   ${f} is a dangling link or unreadable`);
+        continue;
+      }
+      const hash = userFileHash('memory.yml', buf);
+      if (allowedF.has(hash)) info.push(`allowed    ${f} ${hash} (VERIFY_ALLOWED_USER_FILES)`);
+      else problems.push(`user-cfg   ${f} is not on VERIFY_ALLOWED_USER_FILES (sha256 ${hash}); ${MEMORY_YML_HINT}`);
+    }
   }
   return { problems: [...new Set(problems)], info: [...new Set(info)], warnings: [...new Set(warnings)] };
 }
@@ -1382,9 +1476,9 @@ export function selectInstalls(list, { pluginId, projectDir, version, harness = 
 
 export class Unverified extends Error {}
 
-function ghJson(gh, endpoint, timeoutMs) {
+function ghJson(gh, endpoint, timeoutMs, cwd = undefined) {
   return new Promise((resolve, reject) => {
-    execFile(gh, ['api', endpoint], { timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024 }, (err, stdout, stderr) => {
+    execFile(gh, ['api', endpoint], { timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024, cwd }, (err, stdout, stderr) => {
       if (err) {
         const why = String(stderr || err.message || err).trim().split('\n').pop().slice(0, 200);
         const u = new Unverified(`gh api ${endpoint} failed: ${why}`);
@@ -1450,6 +1544,8 @@ export function parseArgs(argv) {
     allowedUserPlugins: '',
     allowedUserHooks: '',
     allowedUserFiles: '',
+    operatorsTeam: '',
+    memoryConfigs: [],
     messagingSettings: '',
     claudeJson: '',
     checkUserConfig: false,
@@ -1477,6 +1573,13 @@ export function parseArgs(argv) {
       case '--allowed-user-plugins': a.allowedUserPlugins = v(); break;
       case '--allowed-user-hooks': a.allowedUserHooks = v(); break;
       case '--allowed-user-files': a.allowedUserFiles = v(); break;
+      case '--operators-team': a.operatorsTeam = v(); break;
+      case '--memory-config': {
+        const f = v();
+        if (!path.isAbsolute(f) || path.basename(f) !== 'memory.yml') throw new Error('--memory-config must be an absolute path to a memory.yml');
+        a.memoryConfigs.push(f);
+        break;
+      }
       case '--claude-json': a.claudeJson = v(); break;
       case '--messaging-settings': a.messagingSettings = v(); break;
       case '--check-user-config': a.checkUserConfig = true; break;
@@ -1495,6 +1598,7 @@ export function parseArgs(argv) {
   if (!ID_RE.test(a.pluginId)) throw new Error('--plugin-id must be <plugin>@<marketplace>');
   if (!a.projectDir) throw new Error('--project-dir is needed');
   if (a.pinRepo && !REPO_RE.test(a.pinRepo)) throw new Error('--pin-repo must be owner/repo');
+  if (a.operatorsTeam && !TEAM_RE.test(a.operatorsTeam)) throw new Error('--operators-team must be org/team-slug');
   if (!a.plugins) throw new Error('--plugins is needed (the output of `claude plugin list --json`, run in the project dir)');
   if (a.maxAgeMin !== null && !(Number.isFinite(a.maxAgeMin) && a.maxAgeMin >= 0)) throw new Error('--max-age-min must be a number of minutes');
   if ((a.maxAgeMin !== null) !== Boolean(a.cache)) throw new Error('--cache and --max-age-min go together');
@@ -1511,6 +1615,7 @@ const PROBLEM_GROUPS = [
   { key: 'commands', label: 'user-scope hooks and commands', userScope: true },
   { key: 'settings', label: 'settings' },
   { key: 'memory', label: 'memory files above the pin checkout' },
+  { key: 'operators', label: 'memory.yml operator list' },
 ];
 function problemGroup(l) {
   if (/^user-cfg\s+MCP server /.test(l)) return 'mcp';
@@ -1519,6 +1624,7 @@ function problemGroup(l) {
   if (/^settings .* (a hook|\S+) runs a command/.test(l)) return 'commands';
   if (/^settings /.test(l)) return 'settings';
   if (/^memory /.test(l)) return 'memory';
+  if (/^operators /.test(l)) return 'operators';
   if (/^(release|version|no-path|two-paths|disabled|shadowed) /.test(l)) return 'plugin';
   if (/^\S+\s+\//.test(l)) return 'plugin'; // an absolute path: the plugin cache or the host kit
   return 'pin';
@@ -1549,6 +1655,7 @@ export async function run(argv, {
   fetch = fetchRelease,
   blob = fetchBlob,
   projectApi = (endpoint) => ghJson('gh', endpoint, 30_000),
+  teamMembers = fetchTeamMemberIds,
   projectLocal = projectLocalState,
   now = Date.now,
   out = (s) => process.stdout.write(s + '\n'),
@@ -1577,7 +1684,7 @@ export async function run(argv, {
   const isPack = (mp) => mp.id.split('@')[1] === a.pluginId.split('@')[1];
   const componentOf = (l) => {
     // the label comes first: settings, user-cfg and memory lines also carry an absolute path or a plugin id, which say nothing about which install failed
-    if (/^(settings|user-cfg|memory|sched) /.test(l)) return 'settings or user-scope config';
+    if (/^(settings|user-cfg|memory|sched|operators) /.test(l)) return 'settings or user-scope config';
     for (const mp of market) {
       if (l.includes(mp.id) || (mp.roots || []).some((r) => l.includes(r))) {
         if (isPack(mp)) return `engsys stack pack ${mp.id}`;
@@ -1635,6 +1742,7 @@ export async function run(argv, {
       claudeJson: a.claudeJson,
       allowedUserFiles: a.checkUserConfig ? parseAllowedFiles(a.allowedUserFiles) : null,
       fleetConfigDir: a.fleetConfigDir,
+      memoryConfigs: a.memoryConfigs,
     });
     preProblems.push(...r.problems);
     info = r.info;
@@ -1642,6 +1750,30 @@ export async function run(argv, {
     if (a.messagingSettings) preProblems.push(...checkMessagingSettings(a.messagingSettings));
   }
   infoLines(info);
+  // engsys#230: the memory.yml in the config dir lists the operators; the team is read after the cache, like the release
+  // (the one in the config dir, and in per-session mode the fleet dir's: --memory-config)
+  let operators = null;
+  if (a.operatorsTeam) {
+    const files = [...new Set([...(a.userSettingsDir ? [path.join(path.resolve(a.userSettingsDir), 'memory.yml')] : []), ...a.memoryConfigs.map((f) => path.resolve(f))])];
+    const lists = [];
+    for (const file of files) {
+      let text = null;
+      try { text = fs.readFileSync(file, 'utf8'); } catch (e) {
+        if (!e || (e.code !== 'ENOENT' && e.code !== 'EISDIR')) preProblems.push(`operators  ${file} can't be read (${e && e.code})`);
+      }
+      if (text === null) continue;
+      const { ids, problem } = memoryOperatorIds(text);
+      if (problem) preProblems.push(`operators  ${file} ${problem}, so it can't be compared with ${a.operatorsTeam}`);
+      else lists.push({ file, ids });
+    }
+    if (lists.length) {
+      operators = { team: a.operatorsTeam, lists };
+      const owner = (a.pinRepo || '').split('/')[0].toLowerCase();
+      if (owner && owner !== a.operatorsTeam.split('/')[0].toLowerCase()) {
+        warnLines([`the operators team ${a.operatorsTeam} is not in ${a.pinRepo}'s org; the gh shim may read it with the wrong App installation (eric-sabe/engsys#257)`]);
+      }
+    }
+  }
   if (preProblems.length) return mismatch(preProblems);
 
   let local;
@@ -1661,10 +1793,12 @@ export async function run(argv, {
     const c = readCache(a.cache);
     const ageMin = c ? (now() - Number(c.verifiedAt)) / 60_000 : Infinity;
     if (c && c.result === 'ok' && c.repo === a.repo && c.tag === a.tag && sameJson(c.local, local) && sameJson(c.market ?? {}, marketLocal) && sameJson(c.host ?? null, host)
+      && sameJson(c.operators ?? null, operators)
       // a pass cached while an off-main instance tag was only a warning (before engsys#227) is never served
       && Array.isArray(c.warnings) && !c.warnings.some((w) => /^instance release /.test(w)) && sameJson(c.project ?? null, projectKey) && sameJson(c.info ?? [], info) && ageMin >= 0 && ageMin < a.maxAgeMin) {
       warnLines(Array.isArray(c.warnings) ? c.warnings : []);
       for (const mp of market) out(`verify: ok, ${countFiles(marketLocal[mp.id].local)} files of ${mp.id} in ${mp.roots.join(', ')} match ${mp.repo}@${mp.tag} (unchanged)`);
+      if (operators) for (const l of operators.lists) out(`verify: ok, operator_user_ids in ${l.file} match the members of ${operators.team} (unchanged since the check ${Math.floor(ageMin)}m ago)`);
       out(`verify: ok, ${countFiles(local)} protected files in ${where} match ${target} (unchanged since the check ${Math.floor(ageMin)}m ago)`);
       return 0;
     }
@@ -1725,15 +1859,24 @@ export async function run(argv, {
       else problems.push(`sched      ${st.rel} holds scheduled prompts, not on VERIFY_ALLOWED_USER_FILES (sha256 ${st.hash})`);
     }
   }
+  if (operators) {
+    let members;
+    try { members = await teamMembers({ team: operators.team, cwd: a.projectDir }); } catch (e) {
+      out(`verify: not verified: can't read the members of ${operators.team} to compare with operator_user_ids in ${operators.lists.map((l) => l.file).join(' and ')}: ${e instanceof Unverified ? e.message : String(e && e.message || e)}`);
+      return 3;
+    }
+    for (const l of operators.lists) problems.push(...compareOperatorIds({ file: l.file, team: operators.team, listed: l.ids, members }));
+  }
   warnLines(warnings);
   if (problems.length) return mismatch(problems);
 
   if (a.cache) {
-    try { writeCache(a.cache, { repo: a.repo, tag: a.tag, local, market: marketLocal, host, project: projectKey, info, warnings, result: 'ok', verifiedAt: now() }); } catch (e) {
+    try { writeCache(a.cache, { repo: a.repo, tag: a.tag, local, market: marketLocal, host, project: projectKey, operators, info, warnings, result: 'ok', verifiedAt: now() }); } catch (e) {
       out(`verify: WARNING can't write ${a.cache} (${e.message}); the next run asks GitHub again`);
     }
   }
   for (const mp of market) out(`verify: ok, ${countFiles(marketLocal[mp.id].local)} files of ${mp.id} in ${mp.roots.join(', ')} match ${mp.repo}@${mp.tag} (${mp.subdir}/)`);
+  if (operators) for (const l of operators.lists) out(`verify: ok, operator_user_ids in ${l.file} match the ${l.ids.length} member(s) of ${operators.team}`);
   out(`verify: ok, ${countFiles(local)} protected files in ${where} match ${target} (commit ${rel.commit.slice(0, 12)}, on ${rel.defaultBranch})${project ? `; ${a.pinRepo} checkout ${project.head.slice(0, 12)} and its auto-loaded files (.claude/, CLAUDE.md, .mcp.json, command targets) match GitHub` : ''}`);
   return 0;
 }

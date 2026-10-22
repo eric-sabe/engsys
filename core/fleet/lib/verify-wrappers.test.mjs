@@ -1309,6 +1309,219 @@ test('user-scope config: agents, commands, skills, rules, memory and MCP servers
     .filter((l) => /user-cfg/.test(l)), []);
 });
 
+test('memory.yml in a config dir is hash-pinned like CLAUDE.md; a per-session dir may have none, or the reviewed copy (engsys#230)', async () => {
+  const { userConfigItems, userFileHash } = await import('./verify-wrappers.mjs');
+  const { execFileSync } = await import('node:child_process');
+  const home = tmp('verify-memyml-home-');
+  const cfg = path.join(home, 'fleet-claude');
+  const sess = path.join(`${cfg}.sessions`, 'acme-mm');
+  const proj = path.join(home, 'git', 'app');
+  fs.mkdirSync(path.join(proj, '.claude'), { recursive: true });
+  fs.mkdirSync(cfg, { recursive: true }); fs.mkdirSync(sess, { recursive: true });
+  const reviewed = 'repos: [acme/app]\noperator_user_ids: [1001]\n';
+  // the operator's recipe (docs/fleet-guide.md): hash the REVIEWED copy, never the installed one
+  const reviewedHash = execFileSync('sh', ['-c', 'printf "engsys-user-file-v1\\0memory.yml\\0"; cat', '--'], { input: reviewed })
+    .toString('latin1');
+  const recipe = (await import('node:crypto')).createHash('sha256').update(Buffer.from(reviewedHash, 'latin1')).digest('hex');
+  assert.equal(recipe, userFileHash('memory.yml', Buffer.from(reviewed)), 'the documented printf recipe gives the hash verify compares');
+  const check = (dir, allowed = '') => checkSettingsDetailed({ projectDir: proj, userSettingsDir: dir, projectVerified: true, home,
+    claudeJson: path.join(dir, '.claude.json'), allowedUserFiles: parseAllowedFiles(allowed) });
+
+  assert.deepEqual(check(cfg).problems, [], 'positive control: no memory.yml passes (absent adds no trust)');
+  fs.writeFileSync(path.join(cfg, 'memory.yml'), reviewed);
+  let p = check(cfg).problems;
+  assert.equal(p.length, 1);
+  assert.match(p[0], /^user-cfg\s+\S+\/fleet-claude\/memory\.yml is not on VERIFY_ALLOWED_USER_FILES \(sha256 [0-9a-f]{64}\); it holds the memory brief's trust lists: allowlist the hash of the reviewed copy/);
+  assert.equal(groupProblems(p)[0].label, 'user-scope skills/agents/files');
+  assert.deepEqual(check(cfg, recipe).problems, [], 'the reviewed copy, allowlisted: passes');
+  assert.ok(check(cfg, recipe).info.some((l) => /fleet-claude\/memory\.yml .* \(VERIFY_ALLOWED_USER_FILES\)/.test(l)));
+  fs.writeFileSync(path.join(cfg, 'memory.yml'), reviewed.replace('[1001]', '[1001, 6666]'));
+  assert.match(check(cfg, recipe).problems.join('\n'), /fleet-claude\/memory\.yml is not on VERIFY_ALLOWED_USER_FILES/, 'an added operator id is drift');
+  fs.writeFileSync(path.join(cfg, 'memory.yml'), reviewed);
+  // the hash binds the name: the same bytes as a CLAUDE.md are a different item
+  assert.notEqual(userFileHash('CLAUDE.md', Buffer.from(reviewed)), recipe);
+
+  // per-session dir (<dir>.sessions/<name>): absent is fine; present must be the reviewed copy
+  assert.deepEqual(check(sess, recipe).problems, [], 'a per-session dir without memory.yml passes');
+  fs.writeFileSync(path.join(sess, 'memory.yml'), 'operator_user_ids: [6666]\n');
+  assert.match(check(sess, recipe).problems.join('\n'), /acme-mm\/memory\.yml is not on VERIFY_ALLOWED_USER_FILES/, 'a planted copy in a session dir is drift');
+  fs.writeFileSync(path.join(sess, 'memory.yml'), reviewed);
+  assert.deepEqual(check(sess, recipe).problems, [], 'a copy identical to the reviewed one passes, as memory-config-check.sh allowed');
+  // a symlink to the reviewed copy is read through (like the brief does); a dangling one is a problem
+  fs.rmSync(path.join(sess, 'memory.yml')); fs.symlinkSync(path.join(cfg, 'memory.yml'), path.join(sess, 'memory.yml'));
+  assert.deepEqual(check(sess, recipe).problems, []);
+  fs.rmSync(path.join(sess, 'memory.yml')); fs.symlinkSync(path.join(home, 'nowhere.yml'), path.join(sess, 'memory.yml'));
+  assert.match(check(sess, recipe).problems.join('\n'), /acme-mm\/memory\.yml is a dangling link or unreadable/);
+  assert.ok(userConfigItems({ configDir: cfg }).items.some((i) => i.what === path.join(cfg, 'memory.yml') && i.hash === recipe));
+});
+
+test('--operators-team: memory.yml operator_user_ids must equal the team members; an unreadable team is not verified (engsys#230)', async () => {
+  const { memoryOperatorIds, compareOperatorIds, fetchTeamMemberIds } = await import('./verify-wrappers.mjs');
+  const root = makeCache();
+  const proj = tmp('verify-ops-proj-');
+  const userDir = tmp('verify-ops-user-');
+  fs.mkdirSync(path.join(proj, '.claude'));
+  fs.writeFileSync(path.join(proj, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { 'engsys@engsys': true } }));
+  const plugins = pluginList([userEntry(root)]);
+  const mem = path.join(userDir, 'memory.yml');
+  let calls = [];
+  let members = ['116529267', '158602644'];
+  const teamMembers = async ({ team, cwd }) => {
+    calls.push({ team, cwd });
+    if (members instanceof Error) throw members;
+    return members;
+  };
+  const cache = path.join(tmp('verify-ops-cache-'), 'c.json');
+  let clock = 1_000_000;
+  const runWith = async (extra = ['--operators-team', 'FeedFrwd/fleet-operators']) => {
+    const c = capture();
+    const code = await run(['--repo', 'eric-sabe/engsys', '--tag', 'v9.9.9', '--plugin-id', 'engsys@engsys', '--project-dir', proj,
+      '--plugins', plugins, '--check-settings', '--user-settings-dir', userDir, ...extra],
+    { fetch: async () => release, teamMembers, projectLocal: () => null, now: () => clock, out: c.out });
+    return { code, text: c.text() };
+  };
+
+  let r = await runWith();
+  assert.equal(r.code, 0, `no memory.yml: nothing to compare\n${r.text}`);
+  assert.equal(calls.length, 0, 'and the team is not read');
+
+  fs.writeFileSync(mem, '# eric-sabe, mdbardsley\noperator_user_ids: [158602644, 116529267]\n');
+  r = await runWith();
+  assert.equal(r.code, 0, r.text);
+  assert.match(r.text, /operator_user_ids in .*memory\.yml match the 2 member\(s\) of FeedFrwd\/fleet-operators/);
+  assert.deepEqual(calls, [{ team: 'FeedFrwd/fleet-operators', cwd: proj }], 'read once, from the pin checkout (eric-sabe/engsys#257)');
+
+  fs.writeFileSync(mem, 'operator_user_ids: [116529267, 158602644, 6666]\n');
+  r = await runWith();
+  assert.equal(r.code, 1, 'an extra listed id is drift');
+  assert.match(r.text, /^ {2}operators {2}\S+memory\.yml operator_user_ids differ from the members of FeedFrwd\/fleet-operators: listed but not a member: \[6666\]; member but not listed: \[\]$/m);
+  assert.match(r.text, /^summary: 1 problems: memory\.yml operator list \(1\)$/m);
+  assert.match(r.text, /^components: settings or user-scope config$/m);
+  assert.doesNotMatch(r.text, /^hint: set up a separate fleet config dir/m, 'not a user-scope sharing problem');
+
+  fs.writeFileSync(mem, 'operator_user_ids: [116529267]\n');
+  r = await runWith();
+  assert.equal(r.code, 1, 'a member who is not listed is drift too');
+  assert.match(r.text, /listed but not a member: \[\]; member but not listed: \[158602644\]/);
+
+  members = new Unverified('gh api orgs/FeedFrwd/teams/fleet-operators/members?per_page=100&page=1 failed: HTTP 404');
+  fs.writeFileSync(mem, 'operator_user_ids: [116529267, 158602644]\n');
+  r = await runWith();
+  assert.equal(r.code, 3, 'an unreadable team is never a pass');
+  assert.match(r.text, /^verify: not verified: can't read the members of FeedFrwd\/fleet-operators to compare with operator_user_ids in \S+memory\.yml: gh api .* HTTP 404$/m);
+  members = ['116529267', '158602644'];
+
+  for (const [body, why] of [['repos: [a/b]\n', /has no operator_user_ids/], ['operator_user_ids: [eric-sabe]\n', /not numeric user ids: "eric-sabe"/]]) {
+    fs.writeFileSync(mem, body);
+    r = await runWith();
+    assert.equal(r.code, 1, body);
+    assert.match(r.text, why);
+  }
+  fs.writeFileSync(mem, 'operator_user_ids: [116529267, 158602644]\n');
+
+  // the team in another org than the pin repo: the #257 warning
+  r = await runWith(['--operators-team', 'Other/ops', '--pin-repo', 'acme/app']);
+  assert.match(r.text, /WARNING the operators team Other\/ops is not in acme\/app's org; .*eric-sabe\/engsys#257/);
+  // without the flag nothing is compared
+  calls = [];
+  assert.equal((await runWith([])).code, 0);
+  assert.equal(calls.length, 0);
+  assert.equal((await runWith(['--operators-team', 'not a team'])).code, 2);
+
+  // the cache: an unchanged memory.yml reuses the pass; a changed one asks the team again
+  calls = [];
+  const cached = ['--operators-team', 'FeedFrwd/fleet-operators', '--cache', cache, '--max-age-min', '15'];
+  assert.equal((await runWith(cached)).code, 0);
+  clock += 60_000;
+  r = await runWith(cached);
+  assert.equal(r.code, 0);
+  assert.match(r.text, /operator_user_ids in .* match the members of FeedFrwd\/fleet-operators \(unchanged/);
+  assert.equal(calls.length, 1, 'served from the cache');
+  fs.writeFileSync(mem, 'operator_user_ids: [116529267, 158602644, 6666]\n');
+  assert.equal((await runWith(cached)).code, 1, 'a changed list is checked again at once');
+  assert.equal(calls.length, 2);
+
+  // the pieces
+  assert.deepEqual(memoryOperatorIds('operator_user_ids: 5\n').ids, ['5'], 'a scalar is a one-item list, as the brief reads it');
+  assert.deepEqual(memoryOperatorIds('operator_user_ids:\n  - 8\n  - "7"\n').ids, ['7', '8']);
+  assert.deepEqual(compareOperatorIds({ file: 'f', team: 't', listed: ['1'], members: ['1'] }), []);
+  // fetchTeamMemberIds through a stub gh: paginated, run in cwd, empty or non-numeric is Unverified
+  const bin = tmp('verify-ops-gh-');
+  const ghStub = path.join(bin, 'gh');
+  fs.writeFileSync(ghStub, `#!/bin/sh\npwd -P >>"${bin}/cwd"\ncase "$2" in\n  *page=1) node -e 'console.log(JSON.stringify(Array.from({length:100},(_, i)=>({id:i+1}))))' ;;\n  *page=2) echo '[{"id":101}]' ;;\nesac\n`);
+  fs.chmodSync(ghStub, 0o755);
+  const ids = await fetchTeamMemberIds({ team: 'Acme/ops', cwd: proj, gh: ghStub });
+  assert.equal(ids.length, 101);
+  assert.deepEqual(fs.readFileSync(path.join(bin, 'cwd'), 'utf8').trim().split('\n'), [fs.realpathSync(proj), fs.realpathSync(proj)]);
+  fs.writeFileSync(ghStub, '#!/bin/sh\necho "[]"\n');
+  await assert.rejects(fetchTeamMemberIds({ team: 'Acme/ops', cwd: proj, gh: ghStub }), (e) => e instanceof Unverified && /no members/.test(e.message));
+  fs.writeFileSync(ghStub, '#!/bin/sh\necho \'[{"login":"x"}]\'\n');
+  await assert.rejects(fetchTeamMemberIds({ team: 'Acme/ops', cwd: proj, gh: ghStub }), (e) => e instanceof Unverified && /no numeric id/.test(e.message));
+  fs.writeFileSync(ghStub, '#!/bin/sh\necho "gh: Not Found (HTTP 404)" >&2; exit 1\n');
+  await assert.rejects(fetchTeamMemberIds({ team: 'Acme/ops', cwd: proj, gh: ghStub }), (e) => e instanceof Unverified && e.httpStatus === 404);
+});
+
+test('--memory-config: the fleet dir\'s memory.yml a per-session monster loads gets the same pin and team check (engsys#230/#262)', async () => {
+  const { userFileHash } = await import('./verify-wrappers.mjs');
+  const root = makeCache();
+  const proj = tmp('verify-basemem-proj-');
+  const base = tmp('verify-basemem-fleet-');
+  const sess = path.join(`${base}.sessions`, 'acme-mm');
+  fs.mkdirSync(sess, { recursive: true });
+  fs.mkdirSync(path.join(proj, '.claude'));
+  fs.writeFileSync(path.join(proj, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { 'engsys@engsys': true } }));
+  const plugins = pluginList([userEntry(root)]);
+  const baseMem = path.join(base, 'memory.yml');
+  const reviewed = 'operator_user_ids: [1001, 1002]\n';
+  const pinHash = userFileHash('memory.yml', Buffer.from(reviewed));
+  let calls = 0;
+  const teamMembers = async () => { calls++; return ['1001', '1002']; };
+  const runWith = async (extra = []) => {
+    const c = capture();
+    const code = await run(['--repo', 'eric-sabe/engsys', '--tag', 'v9.9.9', '--plugin-id', 'engsys@engsys', '--project-dir', proj,
+      '--plugins', plugins, '--check-settings', '--user-settings-dir', sess, '--check-user-config', '--allowed-user-files', pinHash,
+      '--memory-config', baseMem, '--operators-team', 'acme/ops', ...extra], { fetch: async () => release, teamMembers, out: c.out });
+    return { code, text: c.text() };
+  };
+  let r = await runWith();
+  assert.equal(r.code, 0, `absent base copy and none in the session dir: passes\n${r.text}`);
+  assert.equal(calls, 0);
+
+  fs.writeFileSync(baseMem, reviewed);
+  r = await runWith();
+  assert.equal(r.code, 0, r.text);
+  assert.match(r.text, /^verify: info allowed {4}\S+verify-basemem-fleet-\w+\/memory\.yml [0-9a-f]{64} \(VERIFY_ALLOWED_USER_FILES\)$/m);
+  assert.match(r.text, /operator_user_ids in \S+verify-basemem-fleet-\w+\/memory\.yml match the 2 member\(s\) of acme\/ops/);
+  assert.equal(calls, 1);
+
+  fs.writeFileSync(baseMem, 'operator_user_ids: [1001, 1002, 6666]\n');
+  r = await runWith();
+  assert.equal(r.code, 1, 'a drifted base copy is drift for the session');
+  assert.match(r.text, /user-cfg {3}\S+verify-basemem-fleet-\w+\/memory\.yml is not on VERIFY_ALLOWED_USER_FILES \(sha256 [0-9a-f]{64}\); it holds the memory brief's trust lists/);
+  // allowlisted anyway (an operator listed the wrong hash): the team check still catches the added id
+  r = await runWith(['--allowed-user-files', `${pinHash} ${userFileHash('memory.yml', fs.readFileSync(baseMem))}`]);
+  assert.equal(r.code, 1);
+  assert.match(r.text, /operators  \S+verify-basemem-fleet-\w+\/memory\.yml operator_user_ids differ from the members of acme\/ops: listed but not a member: \[6666\]/);
+
+  // both copies present: both compared, one team read
+  fs.writeFileSync(baseMem, reviewed); fs.writeFileSync(path.join(sess, 'memory.yml'), reviewed);
+  calls = 0;
+  r = await runWith();
+  assert.equal(r.code, 0, r.text);
+  assert.equal((r.text.match(/operator_user_ids in .* match/g) || []).length, 2);
+  assert.equal(calls, 1);
+  fs.rmSync(path.join(sess, 'memory.yml'));
+
+  // a dangling link or a directory at the base name is not silently absent
+  fs.rmSync(baseMem); fs.symlinkSync(path.join(base, 'nowhere'), baseMem);
+  assert.match((await runWith()).text, /memory\.yml is a dangling link or unreadable/);
+  fs.rmSync(baseMem); fs.mkdirSync(baseMem);
+  assert.match((await runWith()).text, /memory\.yml is not a regular file/);
+  fs.rmSync(baseMem, { recursive: true });
+  // only an absolute path to a memory.yml
+  for (const bad of ['memory.yml', '/x/other.yml']) assert.equal((await runWith(['--memory-config', bad])).code, 2, bad);
+});
+
 test('synced claude.ai skills: grouped per bucket, never trusted by source, and the sync switch is checked (engsys#201)', async () => {
   const home = tmp('verify-synced-home-');
   const cfg = path.join(home, 'fleet-claude');

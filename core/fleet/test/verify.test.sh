@@ -103,6 +103,9 @@ case "${1:-} ${2:-}" in
       | jq -R -s '{truncated: false, tree: [split("\n")[] | select(length > 0) | split("\t") | {type: "blob", sha: .[0], path: .[1]}]}' ;;
   "api repos/acme/fleet/git/blobs/"*) IR="$(cat "$FAKE/instrepo")"
     printf '{"encoding":"base64","content":"%s"}\n' "$(git -C "$IR" cat-file blob "${2##*/}" | base64 | tr -d '\n')" ;;
+  "api orgs/acme/teams/fleet-operators/members?per_page=100&page="*) pwd -P >"$FAKE/gh-team.cwd"   # engsys#230: the operators team, and where it was asked from
+    [ -f "$FAKE/team.json" ] || { echo '{"message":"Not Found"}'; echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+    case "$2" in *page=1) cat "$FAKE/team.json" ;; *) echo '[]' ;; esac ;;
   "api "*) echo '{"message":"Not Found"}'; echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
   "issue comment"*) [ ! -f "$FAKE/comment-fail" ] || { echo "gh: HTTP 502" >&2; exit 1; } ;;
   *) echo "stub gh: unexpected: $*" >&2; exit 1 ;;
@@ -584,6 +587,54 @@ rm -f "$HOME/git/CLAUDE.md" "$HOME/.claude.json"; rm -rf "$HOME/.claude/agents";
 run fleet verify
 rc_is "cleaned up: passes" 0
 
+echo "== engsys#230: memory.yml in the config dir is pinned by VERIFY_ALLOWED_USER_FILES (the hash of the reviewed copy)"
+REVIEWED_MEM="$T/reviewed-memory.yml"; printf 'repos: [acme/app]\noperator_user_ids: [1001]\n' >"$REVIEWED_MEM"
+cp "$REVIEWED_MEM" "$HOME/.claude/memory.yml"
+run fleet verify
+rc_is "an unlisted memory.yml is a mismatch" 1
+has "…named, with the hint" "$OUT" "$HOME/.claude/memory.yml is not on VERIFY_ALLOWED_USER_FILES"
+has "…to allowlist the reviewed copy" "$OUT" "allowlist the hash of the reviewed copy"
+MH="$({ printf 'engsys-user-file-v1\0memory.yml\0'; cat "$REVIEWED_MEM"; } | shasum -a 256 | cut -d' ' -f1)"
+has "…and the documented recipe gives the hash verify printed" "$OUT" "(sha256 $MH)"
+printf '%s\nVERIFY_ALLOWED_USER_FILES=%s\n' "$CONF0" "$MH" >"$I/fleet/fleet.conf"
+run fleet verify
+rc_is "the reviewed copy, allowlisted: passes" 0
+printf 'operator_user_ids: [6666]\n' >>"$HOME/.claude/memory.yml"
+run fleet verify
+rc_is "an edit (an added operator id) is a mismatch again" 1
+
+echo "…and with the federation's operators_team, its operator_user_ids must be the team's members"
+cp "$REVIEWED_MEM" "$HOME/.claude/memory.yml"
+printf 'version: 1\noperators_team: acme/fleet-operators\nfleets:\n  one:\n    operator: alice\n    host: h1\n    github_app: acme-fleet\n    status_issue: 5\n    enabled: true\n' >"$I/federation.yml"
+echo '[{"login":"alice","id":1001}]' >"$FAKE/team.json"; rm -f "$FAKE/gh-team.cwd"
+run fleet verify
+rc_is "the list matches the team: passes" 0
+has "…and says so" "$OUT" "operator_user_ids in $HOME/.claude/memory.yml match the 1 member(s) of acme/fleet-operators"
+eq "…the team was read from the pin checkout (eric-sabe/engsys#257)" "$(cat "$FAKE/gh-team.cwd" 2>/dev/null)" "$(cd "$APP" && pwd -P)"
+echo '[{"login":"alice","id":1001},{"login":"bob","id":1002}]' >"$FAKE/team.json"
+run fleet verify
+rc_is "a member who is not listed is a mismatch" 1
+has "…named" "$OUT" "listed but not a member: []; member but not listed: [1002]"
+rm -f "$FAKE/team.json"
+run fleet verify
+rc_is "a team that can't be read is not verified, never a pass" 3
+has "…saying why" "$OUT" "can't read the members of acme/fleet-operators"
+echo '[{"login":"alice","id":1001}]' >"$FAKE/team.json"
+printf 'version: 1\noperators_team: [\n' >"$I/federation.yml"
+run fleet verify
+rc_is "a federation file that can't be read is not verified" 3
+has "…saying so" "$OUT" "can't read operators_team from $I/federation.yml"
+printf 'version: 1\nfleets:\n  one:\n    operator: alice\n    host: h1\n    github_app: acme-fleet\n    status_issue: 5\n    enabled: true\n' >"$I/federation.yml"
+rm -f "$FAKE/gh-team.cwd"
+run fleet verify
+rc_is "no operators_team declared: nothing to compare" 0
+eq "…and the team is not read" "$(cat "$FAKE/gh-team.cwd" 2>/dev/null || echo none)" none
+rm -f "$I/federation.yml" "$FAKE/team.json"
+rm -f "$HOME/.claude/memory.yml"
+run fleet verify
+rc_is "absent passes (no copy adds no trust)" 0
+printf '%s\n' "$CONF0" >"$I/fleet/fleet.conf"
+
 echo "== fleet config-dir init: a fresh fleet config dir with only the settings unattended sessions need"
 mkdir -p "$HOME/.claude"
 jq -n '{skipDangerousModePermissionPrompt: true, skipAutoPermissionPrompt: true, autoMode: {allow: ["$defaults"]}, effortLevel: "high",
@@ -918,6 +969,45 @@ run fleet verify --max-age 0 --session acme-mm
 rc_is "--max-age 0 (no cache) passes too" 0
 eq "…still no claude process" "$(calls)" 0
 eq "…and none is logged in the invocation log" "$(cat "$I/.fleet/claude-invocations.log" 2>/dev/null || echo none)" "none"
+
+echo "…engsys#230: a memory.yml in a session's own dir: absent is fine, present must be the reviewed copy"
+printf 'operator_user_ids: [6666]\n' >"$PS/memory.yml"
+run fleet verify --max-age 0 --session acme-mm
+rc_is "a planted memory.yml in the session dir is a mismatch" 1
+has "…named" "$OUT" "$PS/memory.yml is not on VERIFY_ALLOWED_USER_FILES"
+cp "$REVIEWED_MEM" "$PS/memory.yml"
+printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\nFLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on\nVERIFY_ALLOWED_USER_FILES=%s\n' "$CONF0" "$PCFG" "$MH" >"$I/fleet/fleet.conf"
+run fleet verify --max-age 0 --session acme-mm
+rc_is "the reviewed copy, allowlisted: passes" 0
+rm -f "$PS/memory.yml"
+printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\nFLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on\n' "$CONF0" "$PCFG" >"$I/fleet/fleet.conf"
+run fleet verify --max-age 0 --session acme-mm
+rc_is "removed: passes" 0
+
+echo "…engsys#230/#262: the fleet dir's memory.yml (which the session loads) is checked with every session"
+printf 'operator_user_ids: [6666]\n' >"$PCFG/memory.yml"
+run fleet verify --max-age 0 --session acme-mm
+rc_is "a drifted base copy is drift for the session" 1
+has "…named" "$OUT" "$PCFG/memory.yml is not on VERIFY_ALLOWED_USER_FILES"
+cp "$REVIEWED_MEM" "$PCFG/memory.yml"
+printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\nFLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on\nVERIFY_ALLOWED_USER_FILES=%s\n' "$CONF0" "$PCFG" "$MH" >"$I/fleet/fleet.conf"
+run fleet verify --max-age 0 --session acme-mm
+rc_is "the reviewed base copy, allowlisted: passes" 0
+has "…reported as allowed" "$OUT" "allowed    $PCFG/memory.yml"
+printf 'version: 1\noperators_team: acme/fleet-operators\nfleets:\n  one:\n    operator: alice\n    host: h1\n    github_app: acme-fleet\n    status_issue: 5\n    enabled: true\n' >"$I/federation.yml"
+echo '[{"login":"alice","id":1001}]' >"$FAKE/team.json"; rm -f "$FAKE/gh-team.cwd"
+run fleet verify --max-age 0 --session acme-mm
+rc_is "its operator_user_ids match the team: passes" 0
+has "…compared" "$OUT" "operator_user_ids in $PCFG/memory.yml match the 1 member(s) of acme/fleet-operators"
+eq "…the team read from the pin checkout" "$(cat "$FAKE/gh-team.cwd" 2>/dev/null)" "$(cd "$APP" && pwd -P)"
+echo '[{"login":"alice","id":1001},{"login":"bob","id":1002}]' >"$FAKE/team.json"
+run fleet verify --max-age 0 --session acme-mm
+rc_is "a member missing from the base copy is drift for the session" 1
+has "…named" "$OUT" "$PCFG/memory.yml operator_user_ids differ from the members of acme/fleet-operators"
+rm -f "$PCFG/memory.yml" "$I/federation.yml" "$FAKE/team.json"
+printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\nFLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on\n' "$CONF0" "$PCFG" >"$I/fleet/fleet.conf"
+run fleet verify --max-age 0 --session acme-mm
+rc_is "no base copy: passes" 0
 
 echo "…the launch gate (no --max-age) still uses the CLI, though the session is running"
 : >"$FAKE/claude.calls"
