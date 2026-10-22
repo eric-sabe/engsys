@@ -598,22 +598,39 @@ function defaultConfigLog(msg) {
 }
 
 const checkoutRootsCache = new Map();
-/** Realpaths of every worktree of the git repo holding `dir` (main checkout included), or [] outside a repo. */
-export function repoCheckoutRoots(dir) {
+/**
+ * Realpaths of the directories a memory config may not live under, for the git repo holding `dir` (engsys#268):
+ * always that checkout's top level and its git common dir (`git rev-parse`, cheap), plus every worktree of the repo
+ * (`git worktree list`, the full check). If the worktree list is unavailable (timeout, error) the cheap pair still
+ * holds and only the OTHER linked worktrees go unchecked; that is logged. [] outside a repo. `opts` is for tests.
+ */
+export function repoCheckoutRoots(dir, { exec = execFileSync, log = defaultConfigLog, listTimeoutMs = 3000 } = {}) {
 	if (!dir) return [];
-	if (checkoutRootsCache.has(dir)) return checkoutRootsCache.get(dir);
-	let roots = [];
+	if (checkoutRootsCache.has(dir) && exec === execFileSync) return checkoutRootsCache.get(dir);
+	const roots = new Set();
+	const add = (p) => {
+		if (!p) return;
+		try { roots.add(fs.realpathSync(p)); } catch { /* gone */ }
+	};
+	let inRepo = false;
 	try {
-		const out = execFileSync('git', ['-C', dir, 'worktree', 'list', '--porcelain'], { encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] });
-		for (const line of out.split('\n')) {
-			if (!line.startsWith('worktree ')) continue;
-			try { roots.push(fs.realpathSync(line.slice('worktree '.length).trim())); } catch { /* a pruned worktree */ }
+		const out = exec('git', ['-C', dir, 'rev-parse', '--path-format=absolute', '--show-toplevel', '--git-common-dir'], { encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] });
+		for (const line of String(out).split('\n')) add(line.trim());
+		inRepo = roots.size > 0;
+	} catch { /* not a repo (or git unavailable): nothing to refuse under */ }
+	if (inRepo) {
+		try {
+			const out = exec('git', ['-C', dir, 'worktree', 'list', '--porcelain'], { encoding: 'utf8', timeout: listTimeoutMs, stdio: ['ignore', 'pipe', 'ignore'] });
+			for (const line of String(out).split('\n')) {
+				if (line.startsWith('worktree ')) add(line.slice('worktree '.length).trim());
+			}
+		} catch (e) {
+			log(`memory config: couldn't list the git worktrees of ${dir} (${e?.code || e?.message || 'error'}); only its checkout and git dir are checked for ENGSYS_MEMORY_CONFIG, not its other worktrees (engsys#268)`);
 		}
-	} catch {
-		roots = [];
 	}
-	checkoutRootsCache.set(dir, roots);
-	return roots;
+	const result = [...roots];
+	if (exec === execFileSync) checkoutRootsCache.set(dir, result);
+	return result;
 }
 
 /** The realpath of `file` with symlinks followed — the file itself if it exists, else its nearest existing
@@ -847,7 +864,8 @@ export function loadClassADocs(roots, manifest = {}, opts = {}) {
 
 // ---------------------------------------------------------------------------------------------
 // Class B loading (local delta only in this phase — memory-sync, which populates
-// `<cacheDir>/delta.jsonl` and `refs/engsys/memory/events`, is a later phase; see docs/memory-spec.md §7)
+// `<cacheDir>/delta.jsonl` and each fleet's `refs/engsys/memory/fleet/<fleet>/…` refs, is a later phase; see
+// docs/memory-spec.md §7, §9)
 // ---------------------------------------------------------------------------------------------
 
 /**

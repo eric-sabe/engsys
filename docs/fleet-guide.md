@@ -1632,6 +1632,13 @@ reviewed one. The sessions load the fleet dir's `memory.yml` (`ENGSYS_MEMORY_CON
 every `fleet verify --session <name>` also checks `<FLEET_CLAUDE_CONFIG_DIR>/memory.yml`, with the same rules: a
 drifted copy holds every session.
 
+An `ENGSYS_MEMORY_CONFIG` that resolves inside a repo checkout (the session's repo, any of its git worktrees, or its
+git dir; symlinks followed) is repo-controlled, so the memory brief refuses it and falls back to
+`$CLAUDE_CONFIG_DIR/memory.yml`, then `~/.claude/memory.yml` (engsys#268). That fallback is silent apart from one
+line on the brief's stderr, which the hook discards, so a fleet whose config dir sits inside a checkout would run on
+the wrong `memory.yml` without saying so. Keep `FLEET_CLAUDE_CONFIG_DIR` outside every repo (the default
+`~/.config/<org>/claude` is). Settings `env` can't set it either: `fleet verify` flags every `ENGSYS_*` key there.
+
 When the federation file declares `operators_team`, the `operator_user_ids` in that `memory.yml` must be exactly
 the team's members (numeric user ids). Keep the team closed with no child teams: GitHub counts a child team's
 members as members. A listed id that is not a member, or a member who is not listed, is a mismatch. A team that

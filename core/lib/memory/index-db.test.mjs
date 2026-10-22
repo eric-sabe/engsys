@@ -3,8 +3,8 @@
 // consistent index; the index fails open when node:sqlite is missing.
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
-import fs, { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { execFile, execFileSync } from 'node:child_process';
+import fs, { realpathSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path, { join } from 'node:path';
@@ -39,6 +39,7 @@ import {
 	resolveReviewedSha,
 	resolveAllowedRepos,
 	resolveMemoryConfigPath,
+	repoCheckoutRoots,
 	readOperatorMemoryConfig,
 } from './index-db.mjs';
 
@@ -317,6 +318,36 @@ describe('scope project Class A to an allowlisted repo (#145)', () => {
 			assert.equal(resolveMemoryConfigPath({ ENGSYS_MEMORY_CONFIG: join(repo, 'cfg', 'memory.yml'), HOME: elsewhere }, opts), join(elsewhere, '.claude', 'memory.yml'), 'falls through to ~/.claude when CLAUDE_CONFIG_DIR is unset');
 		} finally {
 			for (const d of [wt, repo, outside, cfgDir, elsewhere]) rmSync(d, { recursive: true, force: true });
+		}
+	});
+
+	test('engsys#268: if `git worktree list` fails, the checkout\'s top level and git common dir are still refused (and it is logged)', () => {
+		const repo = makeRepo({});
+		const wt = mkdtempSync(join(tmpdir(), 'memory-idx-268-wtl-'));
+		rmSync(wt, { recursive: true, force: true });
+		try {
+			hermeticGit(repo, [...GIT_OPTS, 'worktree', 'add', '-q', '-b', 'side2', wt], { isolateConfig: true });
+			const calls = [];
+			const exec = (cmd, args, o) => {
+				calls.push(args.slice(2).join(' '));
+				if (args.includes('worktree')) { const e = new Error('timed out'); e.code = 'ETIMEDOUT'; throw e; }
+				return execFileSync(cmd, args, o);
+			};
+			const logs = [];
+			const roots = repoCheckoutRoots(wt, { exec, log: (m) => logs.push(m) });
+			const real = (p) => realpathSync(p);
+			assert.ok(roots.includes(real(wt)), 'the cwd\'s own checkout (here a linked worktree) is a root');
+			assert.ok(roots.includes(real(join(repo, '.git'))), 'and the shared git dir');
+			assert.ok(!roots.includes(real(repo)), 'the main checkout is the one left unchecked without the list (documented)');
+			assert.match(logs.join('\n'), /couldn't list the git worktrees .*ETIMEDOUT.*only its checkout and git dir are checked/);
+			assert.deepEqual(calls.map((c) => c.split(' ')[0]), ['rev-parse', 'worktree']);
+			// positive control: with the list, every worktree is a root
+			const full = repoCheckoutRoots(wt, { exec: (cmd, args, o) => execFileSync(cmd, args, o), log: () => {} });
+			assert.ok(full.includes(real(repo)) && full.includes(real(wt)));
+			assert.deepEqual(repoCheckoutRoots(tmpdir(), { exec: (cmd, args, o) => execFileSync(cmd, args, o), log: () => {} }), [], 'outside a repo: nothing');
+		} finally {
+			rmSync(wt, { recursive: true, force: true });
+			rmSync(repo, { recursive: true, force: true });
 		}
 	});
 

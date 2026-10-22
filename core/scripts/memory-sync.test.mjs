@@ -1131,8 +1131,8 @@ describe('memory-sync (#131)', () => {
   });
 });
 
-// F5 (docs/memory-spec.md §9): only the maintain baton holder publishes the shared events ref, each role
-// writes only its own <role>/<fleet> tail, and every write is fenced on the baton right before the ref moves.
+// F5 (docs/memory-spec.md §9): only the maintain baton holder publishes its fleet's events ref, each role writes
+// only its own fleet/<fleet>/<role> tail (engsys#266), and every write is fenced on the baton right before the ref moves.
 describe('memory-sync writers: role split and the baton fence (F5)', () => {
   const base = { repo: 'owner/repo', stateDir: '/state', config: {} };
 
@@ -1349,6 +1349,24 @@ describe('memory-sync writers: role split and the baton fence (F5)', () => {
       for (const ref of [ERIC_EVENTS, ERIC_MERGE]) {
         const tip = await refStore.readEvents({ ref });
         assert.deepEqual(verifyTipSignature({ ref, parent: tip.parents[0] ?? null, content: tip.content, sigText: tip.sigText, pubkeys }), { ok: true, fleet: 'eric' }, ref);
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('the CLI accepts --ref naming exactly the fleet\'s own ref, for --publish and --tail (it then stops only at the missing key)', async () => {
+    const dir = tmp('memory-sync-cli-ownref-');
+    try {
+      for (const [mode, role, ref] of [['--publish', 'maintain', ERIC_EVENTS], ['--tail', 'merge', ERIC_MERGE]]) {
+        const out = [];
+        const err = [];
+        const io = { out: { write: (x) => out.push(x) }, err: { write: (x) => err.push(x) } };
+        const code = await memorySyncMain([mode, '--repo', 'owner/repo', '--role', role, '--fleet', 'eric', '--state-dir', dir, '--cache-dir', dir, '--ref', ref, '--signing-key-file', path.join(dir, 'absent.key')], io);
+        assert.notEqual(code, 2, `${mode} with its own --ref is not refused`);
+        assert.doesNotMatch(err.join(''), /refused/, mode);
+        assert.match(err.join(''), /not written, no usable signing key/, `${mode} got past the target check`);
+        assert.equal(JSON.parse(out.join('')).skipped, 'no_signing_key');
       }
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });

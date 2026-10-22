@@ -1230,7 +1230,7 @@ function readFileTail(file, maxBytes) {
 }
 
 /**
- * The journal tail for `<role>/<fleet>`: the newest `max` lines of the state dir's journal files, as
+ * The journal tail for `refs/engsys/memory/fleet/<fleet>/<role>`: the newest `max` lines of the state dir's journal files, as
  * STRUCTURED `kind: journal` events only. A journal line is model-written text, so nothing free-form is
  * carried: the event name (a short token, else the line is skipped), its timestamp, and a PR/issue
  * number when the line names one. Symlinked or non-regular journal files are skipped. Never throws.

@@ -67,8 +67,8 @@ export function fleetEventsRef(fleetId) {
 }
 
 /**
- * Build the per-worker tail ref `refs/engsys/memory/fleet/<fleet-id>/<role>` (engsys#266; before it,
- * `<role>/<fleet-id>`). `role` is one of TAIL_ROLES (so never `events`).
+ * Build the per-worker tail ref `refs/engsys/memory/fleet/<fleet-id>/<role>` (engsys#266). `role` is one of
+ * TAIL_ROLES (so never `events`).
  */
 export function tailRef(role, fleetId) {
   if (typeof role !== 'string' || !SAFE_SEGMENT_RE.test(role) || !TAIL_ROLES.includes(role)) {
@@ -347,7 +347,9 @@ export function createMemoryRefStore({
     env,
   });
 
-  async function readEvents({ ref = EVENTS_REF } = {}) {
+  // `ref` is required (no default): the old default was the retired shared EVENTS_REF (engsys#266).
+  async function readEvents({ ref } = {}) {
+    if (!ref) throw new Error('readEvents: ref is required');
     const fullRef = validateMemoryRef(ref);
     const refRes = await gitData.readRef(fullRef);
     if (refRes.status === 404) {
@@ -406,7 +408,7 @@ export function createMemoryRefStore({
   }
 
   async function writeEvents({
-    ref = EVENTS_REF,
+    ref,
     events = [],
     message = 'memory-sync',
     forceCompact = false,
@@ -423,6 +425,7 @@ export function createMemoryRefStore({
     // F5: `true` writes exactly `events` (a mirror, e.g. a journal tail) instead of merging them into the tip's.
     replace = false,
   } = {}) {
+    if (!ref) throw new Error('writeEvents: ref is required');
     const fullRef = validateMemoryRef(ref);
     if (!Array.isArray(events)) {
       throw new Error('writeEvents: events must be an array');
