@@ -59,6 +59,7 @@ import {
 	validatePointerEvent,
 } from '../lib/memory/index-db.mjs';
 import { isEventTrusted } from '../lib/memory/trust.mjs';
+import { peerFleetWeight } from '../lib/memory/ref-consumer.mjs';
 import { parseYaml } from '../lib/yaml.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -89,6 +90,10 @@ export const DEFAULTS = {
 	// ~/.claude/memory.yml; in a fleet, the reviewed, hash-pinned copy) — never the plugin or repo config. A fleet with
 	// no valid key is untrusted.
 	fleet_memory_pubkeys: {},
+	// engsys#266: the pointer-score factor for another fleet's signed events (own fleet = 1). Optional, clamped to
+	// [0, 1]; 0 drops peers' pointers entirely. Like any memory.yml edit, setting it changes the file's hash
+	// (fleet verify pins it, engsys#230).
+	peer_fleet_weight: 0.5,
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -163,6 +168,7 @@ export function loadConfig(repoRoot, { sha, pluginRoot, allowedRepos, log = null
 	// fleet_memory_pubkeys (F5): the operator file's mapping only; anything else there, or a value from any other
 	// source (plugin, repo at the reviewed SHA), is ignored (resolveFleetPubkeys then validates each entry).
 	merged.fleet_memory_pubkeys = isPlainObject(fleetConfig?.fleet_memory_pubkeys) ? { ...fleetConfig.fleet_memory_pubkeys } : {};
+	merged.peer_fleet_weight = peerFleetWeight(merged);
 	// `repos` comes ONLY from fleet/plugin config (never repoConfig, so an unlisted repo cannot allowlist itself, #145).
 	merged.repos = [...new Set([
 		...coerceListField(pluginConfig?.repos, { field: 'repos', log }),
@@ -584,8 +590,12 @@ export function selectPointers(events, opts = {}, limit = 3) {
 		prCountsByFile: hasExplicitFanout ? opts.prCountsByFile : (derivedFanout?.prCountsByFile ?? {}),
 		totalPrs: hasExplicitFanout ? (opts.totalPrs ?? 1) : (derivedFanout?.totalPrs ?? 1),
 	};
+	// engsys#266: another fleet's signed events count at peer_fleet_weight; our own fleet's (and non-ref events) at 1.
+	const ownFleet = opts.fleet ?? process.env.FLEET_ID ?? '';
+	const peerWeight = peerFleetWeight(opts.config);
+	const fleetWeight = (e) => (e.author_kind === 'fleet_signed' && e.signed_fleet !== ownFleet ? peerWeight : 1);
 	return valid
-		.map((e) => ({ e, score: pointerScore(e, scoreOpts) }))
+		.map((e) => ({ e, score: pointerScore(e, scoreOpts) * fleetWeight(e) }))
 		.filter((x) => x.score > 0)
 		.sort((a, b) => b.score - a.score || String(a.e.key).localeCompare(String(b.e.key)))
 		.slice(0, limit)

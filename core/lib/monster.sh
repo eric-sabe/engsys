@@ -539,7 +539,8 @@ monster_baton_rotate() {
 # monster_memory_tail_sync ROLE REPO STATE_DIR [SESSION]: best-effort memory sync on heartbeat (docs/memory-spec.md §9).
 # Always the local --delta. Then, with a state dir and a FLEET_ID, the writes (F5): this role's own journal tail to
 # refs/engsys/memory/fleet/<fleet>/<role> (--tail), and, for maintain only, this fleet's own events ref (--publish,
-# refs/engsys/memory/fleet/<fleet>/events; engsys#266). Each write is
+# refs/engsys/memory/fleet/<fleet>/events; engsys#266) and the staged fetch of every fleet's signed refs (--consume:
+# verified tips only, rollbacks rejected). Each write is
 # fenced on this session's baton right before the ref moves, so a session that lost its baton writes nothing, and
 # signed with the fleet key the launcher hands merge/maintain lines (ENGSYS_MEMORY_SIGNING_KEY_FILE; none = no write). Every
 # step is skip-never-block: a refusal or failure is ignored here, and ENGSYS_MEMORY_SYNC=0 turns all of it off.
@@ -572,8 +573,11 @@ monster_memory_tail_sync() {
     if [ "$role" = maintain ]; then
       werr+=$'\n'"$(node "$mem_script" --publish --repo "$repo" --role maintain --fleet "$FLEET_ID" --state-dir "$state_dir" \
         ${session:+--session "$session"} 2>&1 >/dev/null || true)"
+      # engsys#266: the staged fetch of the other fleets' signed refs (and our own), maintain baton holder only
+      werr+=$'\n'"$(node "$mem_script" --consume --repo "$repo" --role maintain --fleet "$FLEET_ID" --state-dir "$state_dir" \
+        ${session:+--session "$session"} 2>&1 >/dev/null || true)"
     fi
-    wwarn="$(printf '%s\n' "$werr" | grep -E '^memory-sync: (refused|not written)' | tail -n 1 || true)"
+    wwarn="$(printf '%s\n' "$werr" | grep -E '^memory-sync: (refused|not written|consume:)' | tail -n 1 || true)"
     if [ -n "$wwarn" ]; then
       if [ "$(cat "$wfile" 2>/dev/null || true)" != "$wwarn" ]; then
         printf '%s\n' "$wwarn" >&2
