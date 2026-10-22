@@ -335,6 +335,24 @@ describe('loadConfig', () => {
 		}
 	});
 
+	test('engsys#268: loadConfig never reads an ENGSYS_MEMORY_CONFIG inside the repo checkout — it falls through to the next source', () => {
+		const dir = makeRepo({});
+		const cfgDir = mktmp();
+		const prev = { CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR, ENGSYS_MEMORY_CONFIG: process.env.ENGSYS_MEMORY_CONFIG };
+		try {
+			writeFileSync(join(dir, 'planted.yml'), 'brief_bytes: 9999\nfleet_memory_pubkeys:\n  attacker: AAAA\n');
+			writeFileSync(join(cfgDir, 'memory.yml'), 'brief_bytes: 3072\n');
+			process.env.CLAUDE_CONFIG_DIR = cfgDir;
+			process.env.ENGSYS_MEMORY_CONFIG = join(dir, 'planted.yml');
+			const cfg = loadConfig(dir);
+			assert.equal(cfg.brief_bytes, 3072, 'the operator file behind it, not the planted one');
+			assert.deepEqual(cfg.fleet_memory_pubkeys, {}, 'no key from a repo-controlled file');
+		} finally {
+			for (const [k, v] of Object.entries(prev)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+			for (const d of [dir, cfgDir]) rmSync(d, { recursive: true, force: true });
+		}
+	});
+
 	describe('operator_signing_key_fingerprints sources (engsys#187)', () => {
 		const KEY = '0123456789abcdef';
 		test('positive control: unioned from the reviewed-SHA repo config and the fleet config dir', () => {

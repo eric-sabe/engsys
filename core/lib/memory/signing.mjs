@@ -38,7 +38,11 @@ export const SIG_FILE = 'events.sig';
 const SEGMENT_SRC = '(?!\\.)(?![A-Za-z0-9._-]*\\.\\.)(?![A-Za-z0-9._-]*\\.lock(?![A-Za-z0-9._-]))[A-Za-z0-9._-]';
 export const FLEET_ID_RE = new RegExp(`^${SEGMENT_SRC}{1,40}$`);
 export const REF_SEGMENT_RE = new RegExp(`^${SEGMENT_SRC}+$`);
-const REF_RE = new RegExp(`^refs/engsys/memory/${SEGMENT_SRC}+(?:/${SEGMENT_SRC}+)?$`);
+// engsys#266: every signed ref lives in its fleet's own namespace, refs/engsys/memory/fleet/<fleet>/<leaf>:
+// `events` (the maintain baton holder's publish) or a role's journal tail (`merge`, `maintain`). The fleet a ref
+// names is the fleet that must have signed it.
+export const FLEET_REF_LEAVES = Object.freeze(['events', 'merge', 'maintain']);
+const REF_RE = new RegExp(`^refs/engsys/memory/fleet/(${SEGMENT_SRC}{1,40})/(${FLEET_REF_LEAVES.join('|')})$`);
 const PARENT_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64}|none)$/;
 const CONTENT_RE = /^[0-9a-f]{64}$/;
 const PUBKEY_RE = /^[A-Za-z0-9+/]{43}=$/;
@@ -55,6 +59,7 @@ export function contentDigest(content) {
 export function signingPayload({ fleet, ref, parent, content }) {
   if (!FLEET_ID_RE.test(String(fleet ?? ''))) throw new Error(`signingPayload: invalid fleet ${JSON.stringify(fleet)}`);
   if (!REF_RE.test(String(ref ?? ''))) throw new Error(`signingPayload: invalid ref ${JSON.stringify(ref)}`);
+  if (refFleet(ref) !== fleet) throw new Error(`signingPayload: ${ref} is not fleet ${fleet}'s ref`);
   const p = parent || 'none';
   if (!PARENT_RE.test(p)) throw new Error(`signingPayload: invalid parent ${JSON.stringify(parent)}`);
   if (!CONTENT_RE.test(String(content ?? ''))) throw new Error('signingPayload: content must be a sha256 hex digest');
@@ -179,18 +184,18 @@ export function parseSigLine(text) {
   return { fleet, ref, parent, content, sig };
 }
 
-/** The fleet a tail ref names (`refs/engsys/memory/<role>/<fleet>`), or null for `events` / anything else. */
-export function tailRefFleet(ref) {
-  const r = String(ref ?? '');
-  if (!REF_RE.test(r)) return null;
-  const parts = r.slice('refs/engsys/memory/'.length).split('/');
-  return parts.length === 2 ? parts[1] : null;
+/** The fleet a memory ref's namespace names (`refs/engsys/memory/fleet/<fleet>/<leaf>`), or null for anything else
+ * (including the retired shared `refs/engsys/memory/events` and the pre-#266 `<role>/<fleet>` tails). */
+export function refFleet(ref) {
+  const m = REF_RE.exec(String(ref ?? ''));
+  return m ? m[1] : null;
 }
 
 /**
  * Verify a tip's signature. `ref` is the ref that was read, `parent` the commit's own parent (null/'' for a
  * parentless compaction commit), `content` the events.jsonl blob, `sigText` the events.sig blob, `pubkeys` a Map
- * from `resolveFleetPubkeys`. A tail ref must be signed by the fleet it names; `events` by any listed fleet.
+ * from `resolveFleetPubkeys`. Every ref must be signed by the fleet whose namespace it is in (engsys#266: a fleet's
+ * events and its tails alike); a ref outside a fleet namespace is never trusted.
  * Returns `{ ok: true, fleet }` or `{ ok: false, reason }`. Never throws.
  */
 export function verifyTipSignature({ ref, parent, content, sigText, pubkeys }) {
@@ -202,8 +207,9 @@ export function verifyTipSignature({ ref, parent, content, sigText, pubkeys }) {
     if (line.ref !== ref) return { ok: false, reason: 'ref_mismatch' };
     if (line.parent !== wantParent) return { ok: false, reason: 'parent_mismatch' };
     if (line.content !== digest) return { ok: false, reason: 'content_mismatch' };
-    const namedFleet = tailRefFleet(ref);
-    if (namedFleet !== null && namedFleet !== line.fleet) return { ok: false, reason: 'fleet_mismatch' };
+    const namedFleet = refFleet(ref);
+    if (namedFleet === null) return { ok: false, reason: 'not_a_fleet_ref' };
+    if (namedFleet !== line.fleet) return { ok: false, reason: 'fleet_mismatch' };
     const entry = pubkeys instanceof Map ? pubkeys.get(line.fleet) : null;
     const keys = Array.isArray(entry) ? entry : entry ? [entry] : [];
     if (!keys.length) return { ok: false, reason: 'unknown_fleet' };

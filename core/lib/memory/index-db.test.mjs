@@ -3,8 +3,8 @@
 // consistent index; the index fails open when node:sqlite is missing.
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
-import fs, { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { execFile, execFileSync } from 'node:child_process';
+import fs, { realpathSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path, { join } from 'node:path';
@@ -39,6 +39,7 @@ import {
 	resolveReviewedSha,
 	resolveAllowedRepos,
 	resolveMemoryConfigPath,
+	repoCheckoutRoots,
 	readOperatorMemoryConfig,
 } from './index-db.mjs';
 
@@ -285,6 +286,110 @@ describe('scope project Class A to an allowlisted repo (#145)', () => {
 		assert.equal(resolveMemoryConfigPath({ HOME: '/h' }), join('/h', '.claude', 'memory.yml'), 'CLAUDE_CONFIG_DIR unset: Claude Code\'s default dir');
 		assert.equal(resolveMemoryConfigPath({ ENGSYS_MEMORY_CONFIG: 'memory.yml', HOME: '/h' }), null, 'a relative explicit path is refused, never resolved against the (repo) cwd');
 		assert.equal(resolveMemoryConfigPath({ ENGSYS_MEMORY_CONFIG: '', CLAUDE_CONFIG_DIR: '/c', HOME: '/h' }), join('/c', 'memory.yml'), 'an empty value is unset');
+	});
+
+	test('engsys#268: an ENGSYS_MEMORY_CONFIG inside the repo checkout or any of its worktrees is refused, logged and never read', () => {
+		const repo = makeRepo({});
+		const wt = mkdtempSync(join(tmpdir(), 'memory-idx-268-wt-'));
+		rmSync(wt, { recursive: true, force: true });
+		const outside = mkdtempSync(join(tmpdir(), 'memory-idx-268-out-'));
+		const cfgDir = mkdtempSync(join(tmpdir(), 'memory-idx-268-cfg-'));
+		const elsewhere = mkdtempSync(join(tmpdir(), 'memory-idx-268-cwd-'));
+		try {
+			hermeticGit(repo, [...GIT_OPTS, 'worktree', 'add', '-q', '-b', 'side', wt], { isolateConfig: true });
+			mkdirSync(join(repo, 'cfg'));
+			writeFileSync(join(repo, 'cfg', 'memory.yml'), 'repos: [attacker/repo]\nbrief_bytes: 9999\n');
+			writeFileSync(join(wt, 'memory.yml'), 'repos: [attacker/repo]\n');
+			writeFileSync(join(outside, 'memory.yml'), 'repos: [acme/app]\n');
+			writeFileSync(join(cfgDir, 'memory.yml'), 'repos: [fleet/own]\n');
+			symlinkSync(join(repo, 'cfg', 'memory.yml'), join(outside, 'link.yml')); // outside path, inside target
+			symlinkSync(join(repo, 'cfg'), join(outside, 'linkdir')); // a symlinked dir into the repo
+			const logs = [];
+			const opts = { repoRoot: repo, cwd: elsewhere, log: (m) => logs.push(m) };
+			const env = (p) => ({ ENGSYS_MEMORY_CONFIG: p, CLAUDE_CONFIG_DIR: cfgDir, HOME: '/h' });
+			for (const p of [join(repo, 'cfg', 'memory.yml'), join(wt, 'memory.yml'), join(outside, 'link.yml'), join(outside, 'linkdir', 'memory.yml'), join(outside, 'linkdir', 'not-yet.yml'), join(repo, '.git', 'memory.yml')]) {
+				assert.equal(resolveMemoryConfigPath(env(p), opts), join(cfgDir, 'memory.yml'), `${p} falls through to the next source`);
+				assert.deepEqual(readOperatorMemoryConfig(env(p), opts), { repos: ['fleet/own'] }, `${p} is never read`);
+			}
+			assert.ok(logs.length > 0 && logs.every((m) => /refusing ENGSYS_MEMORY_CONFIG=.*inside the repo checkout/.test(m)), logs.join('\n'));
+			assert.equal(resolveMemoryConfigPath(env(join(outside, 'memory.yml')), opts), join(outside, 'memory.yml'), 'positive control: a path outside every checkout is used');
+			// with no repoRoot, the repo holding the cwd counts
+			assert.equal(resolveMemoryConfigPath(env(join(repo, 'cfg', 'memory.yml')), { cwd: wt, log: () => {} }), join(cfgDir, 'memory.yml'), 'the cwd\'s repo (here: a linked worktree of it) counts too');
+			assert.equal(resolveMemoryConfigPath({ ENGSYS_MEMORY_CONFIG: join(repo, 'cfg', 'memory.yml'), HOME: elsewhere }, opts), join(elsewhere, '.claude', 'memory.yml'), 'falls through to ~/.claude when CLAUDE_CONFIG_DIR is unset');
+		} finally {
+			for (const d of [wt, repo, outside, cfgDir, elsewhere]) rmSync(d, { recursive: true, force: true });
+		}
+	});
+
+	test('engsys#268: if `git worktree list` fails, the checkout\'s top level and git common dir are still refused (and it is logged)', () => {
+		const repo = makeRepo({});
+		const wt = mkdtempSync(join(tmpdir(), 'memory-idx-268-wtl-'));
+		rmSync(wt, { recursive: true, force: true });
+		try {
+			hermeticGit(repo, [...GIT_OPTS, 'worktree', 'add', '-q', '-b', 'side2', wt], { isolateConfig: true });
+			const calls = [];
+			const exec = (cmd, args, o) => {
+				calls.push(args.slice(2).join(' '));
+				if (args.includes('worktree')) { const e = new Error('timed out'); e.code = 'ETIMEDOUT'; throw e; }
+				return execFileSync(cmd, args, o);
+			};
+			const logs = [];
+			const roots = repoCheckoutRoots(wt, { exec, log: (m) => logs.push(m) });
+			const real = (p) => realpathSync(p);
+			assert.ok(roots.includes(real(wt)), 'the cwd\'s own checkout (here a linked worktree) is a root');
+			assert.ok(roots.includes(real(join(repo, '.git'))), 'and the shared git dir');
+			assert.ok(!roots.includes(real(repo)), 'the main checkout is the one left unchecked without the list (documented)');
+			assert.match(logs.join('\n'), /couldn't list the git worktrees .*ETIMEDOUT.*only its checkout and git dir are checked/);
+			assert.deepEqual(calls.map((c) => c.split(' ')[0]), ['rev-parse', 'worktree']);
+			// positive control: with the list, every worktree is a root
+			const full = repoCheckoutRoots(wt, { exec: (cmd, args, o) => execFileSync(cmd, args, o), log: () => {} });
+			assert.ok(full.includes(real(repo)) && full.includes(real(wt)));
+			assert.deepEqual(repoCheckoutRoots(tmpdir(), { exec: (cmd, args, o) => execFileSync(cmd, args, o), log: () => {} }), [], 'outside a repo: nothing');
+		} finally {
+			rmSync(wt, { recursive: true, force: true });
+			rmSync(repo, { recursive: true, force: true });
+		}
+	});
+
+	test('engsys#268 (Nyx LOW): the read uses the validated realpath — a symlink swapped in after the check is not followed', () => {
+		const repo = makeRepo({});
+		const outside = mkdtempSync(join(tmpdir(), 'memory-idx-268-toctou-'));
+		const elsewhere = mkdtempSync(join(tmpdir(), 'memory-idx-268-cwd2-'));
+		try {
+			writeFileSync(join(repo, 'evil.yml'), 'repos: [attacker/repo]\n');
+			writeFileSync(join(outside, 'good.yml'), 'repos: [fleet/own]\n');
+			const link = join(outside, 'link.yml');
+			symlinkSync(join(outside, 'good.yml'), link);
+			const opts = { repoRoot: repo, cwd: elsewhere, log: () => {} };
+			// the raw path is a symlink that passes the check; it is repointed into the repo before the read
+			const swapped = readOperatorMemoryConfig({ ENGSYS_MEMORY_CONFIG: link, HOME: elsewhere }, {
+				...opts, afterCheck: () => { rmSync(link); symlinkSync(join(repo, 'evil.yml'), link); },
+			});
+			assert.deepEqual(swapped, { repos: ['fleet/own'] }, 'the validated realpath (good.yml) is read, not the repointed link');
+			// the validated file itself is replaced by a symlink into the repo: O_NOFOLLOW refuses it (nothing read)
+			const real = join(outside, 'good.yml');
+			const refused = readOperatorMemoryConfig({ ENGSYS_MEMORY_CONFIG: real, HOME: elsewhere }, {
+				...opts, afterCheck: () => { rmSync(real); symlinkSync(join(repo, 'evil.yml'), real); },
+			});
+			assert.equal(refused, null, 'never the repo file');
+		} finally {
+			for (const d of [repo, outside, elsewhere]) rmSync(d, { recursive: true, force: true });
+		}
+	});
+
+	test('engsys#268: the allowlist ignores an in-repo ENGSYS_MEMORY_CONFIG — a repo can\'t allowlist itself through it', () => {
+		const repo = makeRepo({ remoteUrl: 'https://github.com/attacker/self.git' });
+		const prev = { ENGSYS_MEMORY_CONFIG: process.env.ENGSYS_MEMORY_CONFIG, CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR };
+		try {
+			writeFileSync(join(repo, 'evil.yml'), 'repos: [attacker/self]\n');
+			delete process.env.CLAUDE_CONFIG_DIR;
+			process.env.ENGSYS_MEMORY_CONFIG = join(repo, 'evil.yml');
+			assert.equal(isRepoAllowlisted(repo), false);
+			assert.ok(!loadClassADocs(resolveClassARoots(repo), {}, { repoRoot: repo }).docs.some((d) => d.key === 'lesson:one'), 'no project Class A');
+		} finally {
+			for (const [k, v] of Object.entries(prev)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+			rmSync(repo, { recursive: true, force: true });
+		}
 	});
 
 	test('readOperatorMemoryConfig: a YAML mapping or null (engsys#262)', () => {

@@ -16,6 +16,7 @@ import { isMainEntry } from '../lib/is-main.mjs';
 import { createMarkerRe, MARKER_RE, normalizeUntrusted } from '../lib/untrusted.mjs';
 import {
   EVENTS_REF,
+  fleetEventsRef,
   createMemoryRefStore,
   mergeEvents,
   parseEventsJsonl,
@@ -1152,10 +1153,11 @@ const REPO_NAME_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
 /**
  * Which ref a write run targets, or why it may not write at all. Pure; checked before any collection
- * or network call. `publish` always targets `refs/engsys/memory/events` and only for the maintain role
- * (and only while config `publish_role` is still `maintain`); an explicit `--ref` naming anything else
- * is refused, never honoured. `tail` targets the role's own `<role>/<fleet>` ref. Both need a state dir
- * (the baton fence reads it) and an `owner/repo`.
+ * or network call. Every write goes to this fleet's own namespace (engsys#266): `publish` targets
+ * `refs/engsys/memory/fleet/<fleet>/events`, only for the maintain role (and only while config `publish_role`
+ * is still `maintain`); `tail` targets the role's own `refs/engsys/memory/fleet/<fleet>/<role>`. An explicit
+ * `--ref` naming anything else — the retired shared `refs/engsys/memory/events` included — is refused, never
+ * honoured. Both need a state dir (the baton fence reads it), a fleet id and an `owner/repo`.
  */
 export function resolveWriteTarget({ mode, role = '', fleet = '', ref = '', stateDir = '', repo = '', config = {} } = {}) {
   if (mode !== 'publish' && mode !== 'tail') return { ok: true, ref: null };
@@ -1164,15 +1166,20 @@ export function resolveWriteTarget({ mode, role = '', fleet = '', ref = '', stat
   if (!stateDir) return { ok: false, reason: `--${mode} needs --state-dir (the baton fence reads it)` };
   // Every write is signed as its fleet (signing.mjs), so both modes need the fleet id.
   if (!FLEET_ID_RE.test(String(fleet || ''))) return { ok: false, reason: `--${mode} needs --fleet <id> (1-40 of A-Z a-z 0-9 . _ -, no leading dot, no .., no .lock suffix)` };
+  // engsys#266: every write goes to this fleet's own namespace. The retired shared events ref is refused by name,
+  // and an explicit --ref is accepted only when it names exactly the ref this run would write anyway.
+  if (ref === EVENTS_REF) return { ok: false, reason: `${EVENTS_REF} is retired (engsys#266): each fleet publishes its own ${fleetEventsRef(fleet)}` };
   if (mode === 'publish') {
-    if (ref && ref !== EVENTS_REF) return { ok: false, reason: `--publish writes only ${EVENTS_REF}; a tail ref is written by --tail` };
-    if (role !== EVENTS_WRITER_ROLE) return { ok: false, reason: `only the ${EVENTS_WRITER_ROLE} baton holder publishes ${EVENTS_REF} (got --role ${role})` };
+    const own = fleetEventsRef(fleet);
+    if (ref && ref !== own) return { ok: false, reason: `--publish writes only this fleet's ${own}; a tail ref is written by --tail` };
+    if (role !== EVENTS_WRITER_ROLE) return { ok: false, reason: `only the ${EVENTS_WRITER_ROLE} baton holder publishes ${own} (got --role ${role})` };
     const configured = config?.publish_role ?? EVENTS_WRITER_ROLE;
     if (configured !== EVENTS_WRITER_ROLE) return { ok: false, reason: `publish_role ${JSON.stringify(configured)} is not supported: only ${EVENTS_WRITER_ROLE} publishes` };
-    return { ok: true, ref: EVENTS_REF };
+    return { ok: true, ref: own };
   }
-  if (ref && ref !== EVENTS_REF) return { ok: false, reason: '--tail takes no --ref: it writes the role\'s own <role>/<fleet> ref' };
-  return { ok: true, ref: tailRef(role, fleet) };
+  const own = tailRef(role, fleet);
+  if (ref && ref !== own) return { ok: false, reason: `--tail writes only the role's own ${own}` };
+  return { ok: true, ref: own };
 }
 
 /**
@@ -1223,7 +1230,7 @@ function readFileTail(file, maxBytes) {
 }
 
 /**
- * The journal tail for `<role>/<fleet>`: the newest `max` lines of the state dir's journal files, as
+ * The journal tail for `refs/engsys/memory/fleet/<fleet>/<role>`: the newest `max` lines of the state dir's journal files, as
  * STRUCTURED `kind: journal` events only. A journal line is model-written text, so nothing free-form is
  * carried: the event name (a short token, else the line is skipped), its timestamp, and a PR/issue
  * number when the line names one. Symlinked or non-regular journal files are skipped. Never throws.
@@ -1539,7 +1546,7 @@ export async function runMemorySync({
   gh = null,
   exec = execFileSync,
   refStore = null,
-  ref = EVENTS_REF,
+  ref = '',
   prNodes = null,
   issueNodes = null,
   deletedKeys = [],
@@ -1769,7 +1776,7 @@ export async function main(argv = process.argv.slice(2), { out = process.stdout,
       repo: { type: 'string', default: '' },
       'repo-root': { type: 'string', default: process.cwd() },
       'cache-dir': { type: 'string', default: '' },
-      ref: { type: 'string', default: EVENTS_REF },
+      ref: { type: 'string', default: '' },
       role: { type: 'string', default: '' },
       fleet: { type: 'string', default: '' },
       tail: { type: 'boolean', default: false },
@@ -1798,7 +1805,7 @@ export async function main(argv = process.argv.slice(2), { out = process.stdout,
       repo: String(values.repo || ''),
       repoRoot,
       cacheDir,
-      ref: String(values.ref || EVENTS_REF),
+      ref: String(values.ref || ''),
       role: String(values.role || ''),
       fleet: String(values.fleet || ''),
       stateDir,

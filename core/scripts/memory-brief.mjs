@@ -126,7 +126,7 @@ export function loadConfig(repoRoot, { sha, pluginRoot, allowedRepos, log = null
 	}
 	// The operator's memory.yml (engsys#262): ENGSYS_MEMORY_CONFIG, else CLAUDE_CONFIG_DIR/memory.yml,
 	// else ~/.claude/memory.yml — the same single file resolveAllowedRepos reads.
-	const fleetConfig = readOperatorMemoryConfig();
+	const fleetConfig = readOperatorMemoryConfig(process.env, { repoRoot });
 	const allowlisted = repoRoot ? isRepoAllowlisted(repoRoot, { pluginRoot: pRoot, allowedRepos }) : false;
 	const reviewedSha = allowlisted ? (sha ?? resolveReviewedSha(repoRoot)) : null;
 	let repoConfig = null;

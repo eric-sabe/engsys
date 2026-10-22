@@ -9,6 +9,7 @@ import {
   EVENTS_REF,
   MEMORY_FETCH_REFSPEC,
   tailRef,
+  fleetEventsRef,
   fetchMemoryRefs,
   scanTextForSecrets,
   scanEventForSecrets,
@@ -19,11 +20,19 @@ import {
 } from './ref-store.mjs';
 import { publicKeyB64, resolveFleetPubkeys, signTip } from './signing.mjs';
 
+// Every store call names its ref (engsys#266: no default); these generic store tests use one fleet's events ref.
+const R = 'refs/engsys/memory/fleet/eric/events';
+
 describe('ref-store (#130)', () => {
   it('validates tailRef segments and rejects refs outside refs/engsys/memory/*', async () => {
-    assert.equal(tailRef('dev', 'fleet-a'), 'refs/engsys/memory/dev/fleet-a');
+    assert.equal(tailRef('merge', 'fleet-a'), 'refs/engsys/memory/fleet/fleet-a/merge');
+    assert.equal(tailRef('maintain', 'fleet-a'), 'refs/engsys/memory/fleet/fleet-a/maintain');
+    assert.equal(fleetEventsRef('fleet-a'), 'refs/engsys/memory/fleet/fleet-a/events');
     assert.throws(() => tailRef('../heads', 'main'), /invalid role/);
-    assert.throws(() => tailRef('dev', 'a/b'), /invalid fleetId/);
+    assert.throws(() => tailRef('dev', 'fleet-a'), /invalid role/, 'only the baton roles have tails');
+    assert.throws(() => tailRef('events', 'fleet-a'), /invalid role/, 'a role can never shadow the fleet\'s events ref');
+    assert.throws(() => tailRef('merge', 'a/b'), /invalid fleetId/);
+    assert.throws(() => fleetEventsRef('../x'), /invalid fleetId/);
 
     const fake = fakeGitApi({ repo: 'owner/repo' });
     const store = createMemoryRefStore({
@@ -43,13 +52,21 @@ describe('ref-store (#130)', () => {
   });
 
   it('tailRef refuses dot segments (Nyx LOW 1): no leading dot, no "..", no ".lock" suffix', () => {
-    assert.equal(tailRef('merge', 'eric'), 'refs/engsys/memory/merge/eric');
+    assert.equal(tailRef('merge', 'eric'), 'refs/engsys/memory/fleet/eric/merge');
     for (const [role, fleet] of [['merge', '.'], ['merge', '..'], ['merge', '.git'], ['.merge', 'eric'], ['merge', 'a..b'], ['merge', 'x.lock']]) {
       assert.throws(() => tailRef(role, fleet), /invalid/, `${role}/${fleet}`);
     }
   });
 
-  it('creates, reads, and updates refs/engsys/memory/events round-trip', async () => {
+  it('readEvents and writeEvents require a ref (no default to the retired shared events ref)', async () => {
+    const store = createMemoryRefStore({ repo: 'owner/repo', client: fakeGitApi({ repo: 'owner/repo' }), sleep: async () => {} });
+    await assert.rejects(() => store.readEvents(), /ref is required/);
+    await assert.rejects(() => store.readEvents({}), /ref is required/);
+    await assert.rejects(() => store.writeEvents({ events: [{ k: 'a', updated_at: '2026-07-01T00:00:00Z' }] }), /ref is required/);
+    assert.equal((await store.readEvents({ ref: EVENTS_REF })).sha, null, 'naming it explicitly is a plain read');
+  });
+
+  it('creates, reads, and updates a memory ref round-trip', async () => {
     const fake = fakeGitApi({ repo: 'owner/repo' });
     const store = createMemoryRefStore({
       repo: 'owner/repo',
@@ -58,7 +75,7 @@ describe('ref-store (#130)', () => {
     });
 
     // Empty ref before first write
-    const initial = await store.readEvents();
+    const initial = await store.readEvents({ ref: R });
     assert.equal(initial.ok, true);
     assert.equal(initial.sha, null);
     assert.deepEqual(initial.events, []);
@@ -70,13 +87,13 @@ describe('ref-store (#130)', () => {
       summary: 'initial PR summary',
       updated_at: '2026-04-01T10:00:00Z',
     };
-    const w1 = await store.writeEvents({ events: [ev1] });
+    const w1 = await store.writeEvents({ ref: R, events: [ev1] });
     assert.equal(w1.ok, true);
     assert.equal(w1.count, 1);
     assert.equal(w1.compacted, false);
     assert.ok(w1.sha);
 
-    const r1 = await store.readEvents();
+    const r1 = await store.readEvents({ ref: R });
     assert.equal(r1.ok, true);
     assert.equal(r1.sha, w1.sha);
     assert.equal(r1.events.length, 1);
@@ -95,12 +112,12 @@ describe('ref-store (#130)', () => {
       summary: 'issue summary',
       updated_at: '2026-04-01T12:00:00Z',
     };
-    const w2 = await store.writeEvents({ events: [ev1Updated, ev2] });
+    const w2 = await store.writeEvents({ ref: R, events: [ev1Updated, ev2] });
     assert.equal(w2.ok, true);
     assert.equal(w2.count, 2);
     assert.notEqual(w2.sha, w1.sha);
 
-    const r2 = await store.readEvents();
+    const r2 = await store.readEvents({ ref: R });
     assert.equal(r2.ok, true);
     assert.equal(r2.events.length, 2);
     const byK = new Map(r2.events.map((e) => [e.k, e]));
@@ -114,19 +131,19 @@ describe('ref-store (#130)', () => {
     const store = createMemoryRefStore({ repo: 'owner/repo', client: fake, sleep: async () => {} });
     const ev = { k: 'pr:owner/repo#1', kind: 'pr', updated_at: '2026-07-01T00:00:00Z' };
     const seen = [];
-    const refused = await store.writeEvents({ events: [ev], beforeCas: async (ctx) => { seen.push(ctx); return { held: false, reason: 'lost' }; } });
+    const refused = await store.writeEvents({ ref: R, events: [ev], beforeCas: async (ctx) => { seen.push(ctx); return { held: false, reason: 'lost' }; } });
     assert.equal(refused.ok, false);
     assert.deepEqual(refused.error, { code: 'fence_refused', detail: 'lost' });
-    assert.deepEqual(seen, [{ ref: EVENTS_REF, round: 0 }]);
-    assert.equal((await store.readEvents()).sha, null);
-    const threw = await store.writeEvents({ events: [ev], beforeCas: async () => { throw new Error('fence crashed'); } });
+    assert.deepEqual(seen, [{ ref: R, round: 0 }]);
+    assert.equal((await store.readEvents({ ref: R })).sha, null);
+    const threw = await store.writeEvents({ ref: R, events: [ev], beforeCas: async () => { throw new Error('fence crashed'); } });
     assert.equal(threw.error.code, 'fence_refused');
-    assert.equal((await store.readEvents()).sha, null, 'a crashing gate fails closed');
-    const falsy = await store.writeEvents({ events: [ev], beforeCas: async () => undefined });
+    assert.equal((await store.readEvents({ ref: R })).sha, null, 'a crashing gate fails closed');
+    const falsy = await store.writeEvents({ ref: R, events: [ev], beforeCas: async () => undefined });
     assert.equal(falsy.error.code, 'fence_refused', 'a gate that returns nothing is a refusal');
-    const ok = await store.writeEvents({ events: [ev], beforeCas: async () => ({ held: true }) });
+    const ok = await store.writeEvents({ ref: R, events: [ev], beforeCas: async () => ({ held: true }) });
     assert.equal(ok.ok, true);
-    assert.equal((await store.readEvents()).events.length, 1);
+    assert.equal((await store.readEvents({ ref: R })).events.length, 1);
   });
 
   it('retries on 422 CAS contention and merges both concurrent writers without losing events', async () => {
@@ -139,6 +156,7 @@ describe('ref-store (#130)', () => {
       sleep: async () => {},
     });
     await seeder.writeEvents({
+      ref: R,
       events: [{ k: 'seed:1', summary: 'seed', updated_at: '2026-04-01T00:00:00Z' }],
     });
 
@@ -154,6 +172,7 @@ describe('ref-store (#130)', () => {
             sleep: async () => {},
           });
           const wb = await writerB.writeEvents({
+            ref: R,
             events: [
               { k: 'worker:b', summary: 'from writer B', updated_at: '2026-04-01T02:00:00Z' },
             ],
@@ -170,13 +189,14 @@ describe('ref-store (#130)', () => {
       sleep: async () => {},
     });
     const wa = await writerA.writeEvents({
+      ref: R,
       events: [{ k: 'worker:a', summary: 'from writer A', updated_at: '2026-04-01T01:00:00Z' }],
     });
 
     assert.equal(wa.ok, true);
     assert.equal(wa.rounds, 2, 'writer A should win on round 2 after re-reading and re-merging');
 
-    const finalState = await seeder.readEvents();
+    const finalState = await seeder.readEvents({ ref: R });
     assert.equal(finalState.ok, true);
     assert.deepEqual(
       finalState.events.map((e) => e.k),
@@ -198,6 +218,7 @@ describe('ref-store (#130)', () => {
 
     // First write: 2 events (under maxEvents=3)
     const w1 = await store.writeEvents({
+      ref: R,
       events: [
         {
           k: 'tombstone:old',
@@ -216,6 +237,7 @@ describe('ref-store (#130)', () => {
 
     // Second write adds 3 more events -> total 5 > maxEvents(3) -> triggers compaction
     const w2 = await store.writeEvents({
+      ref: R,
       events: [
         { k: 'ev:1', summary: 'one', updated_at: '2026-08-01T00:00:00Z' },
         { k: 'ev:2', summary: 'two', updated_at: '2026-09-15T00:00:00Z' },
@@ -226,7 +248,7 @@ describe('ref-store (#130)', () => {
     assert.equal(w2.compacted, true);
     assert.equal(w2.count, 3);
 
-    const r2 = await store.readEvents();
+    const r2 = await store.readEvents({ ref: R });
     assert.equal(r2.ok, true);
     assert.deepEqual(r2.parents, [w1.sha], 'compaction commit retains tip as parent so CAS stays fast-forward');
     // Old tombstone dropped; oldest remaining ('ev:1') trimmed to cap at 3 newest
@@ -253,6 +275,7 @@ describe('ref-store (#130)', () => {
 
       const logs = [];
       const res = await store.writeEvents({
+        ref: R,
         cacheDir: tmpDir,
         log: (m) => logs.push(m),
         events: [
@@ -289,7 +312,7 @@ describe('ref-store (#130)', () => {
       assert.equal(res.rejected.length, 4);
       assert.equal(logs.length, 4);
 
-      const stored = await store.readEvents();
+      const stored = await store.readEvents({ ref: R });
       assert.deepEqual(
         stored.events.map((e) => e.k),
         ['clean:1'],
@@ -367,7 +390,7 @@ describe('ref-store (#130)', () => {
 
     it('the writer stores events.sig next to events.jsonl, and a tip signed by its own fleet verifies end to end', async () => {
       const { tip } = await writeAndRead({ signer: signerFor(ericKey, 'eric'), events: [ev('a', { path: 'src/a.ts', author_kind: 'operator', author_id: 1 })] });
-      assert.match(tip.sigText, /^engsys-memory-sig v1 fleet=eric ref=refs\/engsys\/memory\/merge\/eric parent=none /);
+      assert.match(tip.sigText, /^engsys-memory-sig v1 fleet=eric ref=refs\/engsys\/memory\/fleet\/eric\/merge parent=none /);
       const res = await verifyMemoryRefTip('/repo', { ref: TAIL, parent: tip.parents[0] ?? null, content: tip.content, sigText: tip.sigText, pubkeys, resolveSha: reviewed, exec: okExec });
       assert.equal(res.ok, true);
       assert.equal(res.fleet, 'eric');
@@ -391,10 +414,24 @@ describe('ref-store (#130)', () => {
       const unsigned = await writeAndRead({ events: [ev('a')] });
       assert.equal(unsigned.tip.sigText, null);
       assert.equal((await verifyMemoryRefTip('/repo', { ref: TAIL, parent: null, content: unsigned.tip.content, sigText: unsigned.tip.sigText, pubkeys, resolveSha: reviewed, exec: okExec })).reason, 'missing_or_malformed_signature');
-      const byMark = await writeAndRead({ signer: signerFor(markKey, 'mark-fleet'), events: [ev('a')] });
+      // a forger with mark-fleet's key: it signs its own ref (it can't sign eric's) and relabels the line onto eric's
+      const MARK_TAIL = tailRef('merge', 'mark-fleet');
+      const forger = ({ parent, content }) => signTip({ privateKey: markKey, fleet: 'mark-fleet', ref: MARK_TAIL, parent, content }).replace(`ref=${MARK_TAIL}`, `ref=${TAIL}`);
+      const byMark = await writeAndRead({ signer: forger, events: [ev('a')] });
       assert.equal((await verifyMemoryRefTip('/repo', { ref: TAIL, parent: null, content: byMark.tip.content, sigText: byMark.tip.sigText, pubkeys, resolveSha: reviewed, exec: okExec })).reason, 'fleet_mismatch');
       const signed = await writeAndRead({ signer: signerFor(ericKey, 'eric'), events: [ev('a')] });
       assert.equal((await verifyMemoryRefTip('/repo', { ref: EVENTS_REF, parent: null, content: signed.tip.content, sigText: signed.tip.sigText, pubkeys, resolveSha: reviewed, exec: okExec })).reason, 'ref_mismatch');
+    });
+
+    it('per-fleet events (engsys#266): signed by the fleet it names verifies; another fleet\'s events ref does not take it', async () => {
+      const ERIC_EVENTS = fleetEventsRef('eric');
+      const own = await writeAndRead({ ref: ERIC_EVENTS, signer: signerFor(ericKey, 'eric'), events: [ev('a')] });
+      assert.deepEqual((await verifyMemoryRefTip('/repo', { ref: ERIC_EVENTS, parent: null, content: own.tip.content, sigText: own.tip.sigText, pubkeys, resolveSha: reviewed, exec: okExec })).fleet, 'eric');
+      const MARK_EVENTS = fleetEventsRef('mark-fleet');
+      assert.equal((await verifyMemoryRefTip('/repo', { ref: MARK_EVENTS, parent: null, content: own.tip.content, sigText: own.tip.sigText, pubkeys, resolveSha: reviewed, exec: okExec })).ok, false, 'replay onto another fleet\'s events ref');
+      const s = createMemoryRefStore({ repo: 'owner/repo', client: fakeGitApi({ repo: 'owner/repo' }), sleep: async () => {} });
+      const w = await s.writeEvents({ ref: MARK_EVENTS, events: [ev('a')], signer: signerFor(ericKey, 'eric') });
+      assert.equal(w.error?.code, 'sign_failed', 'a fleet\'s signer refuses another fleet\'s ref outright');
     });
 
     it('the commit\'s GitHub identity is not an input at all (web-flow commits every API-made commit)', async () => {
@@ -443,7 +480,7 @@ describe('ref-store (#130)', () => {
       const rotated = await s.writeEvents({ ref: TAIL, events: [ev('a')], signer: signerFor(rotatedKey, 'eric'), beforeCas, replace: true });
       assert.equal(rotated.noop, false, 'after a key rotation the unchanged tip is re-signed with the new key, not skipped');
       const rewrite = await s.writeEvents({ ref: TAIL, events: [ev('a')], signer: signerFor(markKey, 'mark-fleet'), beforeCas, replace: true });
-      assert.equal(rewrite.noop, false, 'content another fleet signed is re-signed, not skipped');
+      assert.equal(rewrite.error?.code, 'sign_failed', 'another fleet can\'t sign this fleet\'s tail at all (engsys#266), so it is never skipped as current either');
       const changed = await s.writeEvents({ ref: TAIL, events: [ev('b', { updated_at: '2026-07-02T00:00:00Z' })], signer, beforeCas, replace: true });
       assert.equal(changed.noop, false);
       const tip = await s.readEvents({ ref: TAIL });

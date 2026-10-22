@@ -9,7 +9,7 @@ import path from 'node:path';
 import {
   contentDigest,
   FLEET_ID_RE,
-  tailRefFleet,
+  refFleet,
   generateSigningKeyFile,
   main,
   parsePublicKeyB64,
@@ -41,8 +41,11 @@ const MARK = keyPair();
 const PUBKEYS = resolveFleetPubkeys({ fleet_memory_pubkeys: { eric: ERIC.pub, 'mark-fleet': MARK.pub } });
 const PARENT = 'a'.repeat(40);
 const CONTENT = '{"k":"x","updated_at":"2026-07-01T00:00:00Z"}\n';
-const TAIL = 'refs/engsys/memory/merge/eric';
-const EVENTS = 'refs/engsys/memory/events';
+const TAIL = 'refs/engsys/memory/fleet/eric/merge';
+const EVENTS = 'refs/engsys/memory/fleet/eric/events';
+const MARK_EVENTS = 'refs/engsys/memory/fleet/mark-fleet/events';
+const SHARED_EVENTS = 'refs/engsys/memory/events';
+const OTHER_TAIL = 'refs/engsys/memory/fleet/eric/maintain';
 
 describe('sign / verify', () => {
   it('round trip: a tail signed by its own fleet verifies', () => {
@@ -57,14 +60,37 @@ describe('sign / verify', () => {
     assert.equal(verifyTipSignature({ ref: TAIL, parent: PARENT, content: CONTENT, sigText, pubkeys: PUBKEYS }).reason, 'parent_mismatch');
   });
 
-  it('events: signed by any listed fleet verifies', () => {
-    const sigText = signTip({ privateKey: MARK.privateKey, fleet: 'mark-fleet', ref: EVENTS, parent: PARENT, content: CONTENT });
-    assert.deepEqual(verifyTipSignature({ ref: EVENTS, parent: PARENT, content: CONTENT, sigText, pubkeys: PUBKEYS }), { ok: true, fleet: 'mark-fleet' });
+  it('a fleet\'s own events ref, signed by that fleet, verifies (engsys#266)', () => {
+    const sigText = signTip({ privateKey: MARK.privateKey, fleet: 'mark-fleet', ref: MARK_EVENTS, parent: PARENT, content: CONTENT });
+    assert.deepEqual(verifyTipSignature({ ref: MARK_EVENTS, parent: PARENT, content: CONTENT, sigText, pubkeys: PUBKEYS }), { ok: true, fleet: 'mark-fleet' });
+  });
+
+  it('a per-fleet events ref signed by ANOTHER listed fleet is rejected: events follow the tail rule now (engsys#266)', () => {
+    const markOwn = signTip({ privateKey: MARK.privateKey, fleet: 'mark-fleet', ref: MARK_EVENTS, parent: PARENT, content: CONTENT });
+    const ontoEric = markOwn.replace(`ref=${MARK_EVENTS}`, `ref=${EVENTS}`);
+    assert.equal(verifyTipSignature({ ref: EVENTS, parent: PARENT, content: CONTENT, sigText: ontoEric, pubkeys: PUBKEYS }).reason, 'fleet_mismatch');
+    assert.equal(verifyTipSignature({ ref: EVENTS, parent: PARENT, content: CONTENT, sigText: markOwn, pubkeys: PUBKEYS }).reason, 'ref_mismatch');
+  });
+
+  it('the retired shared events ref and the pre-#266 tail layout are never trusted and can\'t be signed', () => {
+    for (const ref of [SHARED_EVENTS, 'refs/engsys/memory/merge/eric', 'refs/engsys/memory/fleet/eric/other', 'refs/engsys/memory/fleet/eric']) {
+      assert.equal(refFleet(ref), null, ref);
+      assert.throws(() => signTip({ privateKey: ERIC.privateKey, fleet: 'eric', ref, parent: PARENT, content: CONTENT }), /invalid ref/, ref);
+    }
+    const good = signTip({ privateKey: ERIC.privateKey, fleet: 'eric', ref: EVENTS, parent: PARENT, content: CONTENT });
+    const moved = good.replace(`ref=${EVENTS}`, `ref=${SHARED_EVENTS}`);
+    assert.equal(verifyTipSignature({ ref: SHARED_EVENTS, parent: PARENT, content: CONTENT, sigText: moved, pubkeys: PUBKEYS }).ok, false);
+    assert.equal(refFleet(EVENTS), 'eric');
+    assert.equal(refFleet(TAIL), 'eric');
+  });
+
+  it('signingPayload binds the fleet to the ref\'s namespace: a fleet can\'t sign another fleet\'s ref', () => {
+    assert.throws(() => signTip({ privateKey: MARK.privateKey, fleet: 'mark-fleet', ref: TAIL, parent: PARENT, content: CONTENT }), /not fleet mark-fleet's ref/);
   });
 
   it('replay onto another ref, another parent or other content is rejected', () => {
     const sigText = signTip({ privateKey: ERIC.privateKey, fleet: 'eric', ref: TAIL, parent: PARENT, content: CONTENT });
-    assert.equal(verifyTipSignature({ ref: 'refs/engsys/memory/maintain/eric', parent: PARENT, content: CONTENT, sigText, pubkeys: PUBKEYS }).reason, 'ref_mismatch');
+    assert.equal(verifyTipSignature({ ref: OTHER_TAIL, parent: PARENT, content: CONTENT, sigText, pubkeys: PUBKEYS }).reason, 'ref_mismatch');
     assert.equal(verifyTipSignature({ ref: EVENTS, parent: PARENT, content: CONTENT, sigText, pubkeys: PUBKEYS }).reason, 'ref_mismatch');
     assert.equal(verifyTipSignature({ ref: TAIL, parent: 'b'.repeat(40), content: CONTENT, sigText, pubkeys: PUBKEYS }).reason, 'parent_mismatch');
     assert.equal(verifyTipSignature({ ref: TAIL, parent: PARENT, content: `${CONTENT}{"k":"y"}\n`, sigText, pubkeys: PUBKEYS }).reason, 'content_mismatch');
@@ -75,12 +101,13 @@ describe('sign / verify', () => {
     const other = `${CONTENT}{"k":"y"}\n`;
     const forged = sigText.replace(`content=${contentDigest(CONTENT)}`, `content=${contentDigest(other)}`);
     assert.equal(verifyTipSignature({ ref: TAIL, parent: PARENT, content: other, sigText: forged, pubkeys: PUBKEYS }).reason, 'bad_signature');
-    const forgedRef = sigText.replace(`ref=${TAIL}`, 'ref=refs/engsys/memory/maintain/eric');
-    assert.equal(verifyTipSignature({ ref: 'refs/engsys/memory/maintain/eric', parent: PARENT, content: CONTENT, sigText: forgedRef, pubkeys: PUBKEYS }).reason, 'bad_signature');
+    const forgedRef = sigText.replace(`ref=${TAIL}`, `ref=${OTHER_TAIL}`);
+    assert.equal(verifyTipSignature({ ref: OTHER_TAIL, parent: PARENT, content: CONTENT, sigText: forgedRef, pubkeys: PUBKEYS }).reason, 'bad_signature');
   });
 
   it('wrong fleet key: a tail signed by another fleet, or a claimed fleet whose key did not sign, is rejected', () => {
-    const markOnEricTail = signTip({ privateKey: MARK.privateKey, fleet: 'mark-fleet', ref: TAIL, parent: PARENT, content: CONTENT });
+    const markOwnTail = signTip({ privateKey: MARK.privateKey, fleet: 'mark-fleet', ref: 'refs/engsys/memory/fleet/mark-fleet/merge', parent: PARENT, content: CONTENT });
+    const markOnEricTail = markOwnTail.replace('ref=refs/engsys/memory/fleet/mark-fleet/merge', `ref=${TAIL}`);
     assert.equal(verifyTipSignature({ ref: TAIL, parent: PARENT, content: CONTENT, sigText: markOnEricTail, pubkeys: PUBKEYS }).reason, 'fleet_mismatch');
     const markClaimsEric = signTip({ privateKey: MARK.privateKey, fleet: 'eric', ref: TAIL, parent: PARENT, content: CONTENT });
     assert.equal(verifyTipSignature({ ref: TAIL, parent: PARENT, content: CONTENT, sigText: markClaimsEric, pubkeys: PUBKEYS }).reason, 'bad_signature');
@@ -88,10 +115,11 @@ describe('sign / verify', () => {
 
   it('a fleet with no key entry is untrusted', () => {
     const stranger = keyPair();
-    const sigText = signTip({ privateKey: stranger.privateKey, fleet: 'stranger', ref: EVENTS, parent: PARENT, content: CONTENT });
-    assert.equal(verifyTipSignature({ ref: EVENTS, parent: PARENT, content: CONTENT, sigText, pubkeys: PUBKEYS }).reason, 'unknown_fleet');
-    assert.equal(verifyTipSignature({ ref: EVENTS, parent: PARENT, content: CONTENT, sigText, pubkeys: new Map() }).reason, 'unknown_fleet');
-    assert.equal(verifyTipSignature({ ref: EVENTS, parent: PARENT, content: CONTENT, sigText, pubkeys: undefined }).reason, 'unknown_fleet');
+    const STRANGER = 'refs/engsys/memory/fleet/stranger/events';
+    const sigText = signTip({ privateKey: stranger.privateKey, fleet: 'stranger', ref: STRANGER, parent: PARENT, content: CONTENT });
+    assert.equal(verifyTipSignature({ ref: STRANGER, parent: PARENT, content: CONTENT, sigText, pubkeys: PUBKEYS }).reason, 'unknown_fleet');
+    assert.equal(verifyTipSignature({ ref: STRANGER, parent: PARENT, content: CONTENT, sigText, pubkeys: new Map() }).reason, 'unknown_fleet');
+    assert.equal(verifyTipSignature({ ref: STRANGER, parent: PARENT, content: CONTENT, sigText, pubkeys: undefined }).reason, 'unknown_fleet');
   });
 
   it('the signature line is parsed strictly', () => {
@@ -122,17 +150,17 @@ describe('fleet ids and ref segments (Nyx LOW 1)', () => {
     for (const bad of ['', '.', '..', '.git', '.hidden', 'a..b', 'x.lock', 'a/b', 'a b', 'a'.repeat(41)]) assert.ok(!FLEET_ID_RE.test(bad), bad);
   });
 
-  it('signingPayload, the signature line and tailRefFleet refuse dot segments in the ref and the fleet', () => {
+  it('signingPayload, the signature line and refFleet refuse dot segments in the ref and the fleet', () => {
     const digest = contentDigest(CONTENT);
-    for (const ref of ['refs/engsys/memory/merge/..', 'refs/engsys/memory/./eric', 'refs/engsys/memory/merge/.git', 'refs/engsys/memory/merge/x.lock', 'refs/engsys/memory/a..b']) {
+    for (const ref of ['refs/engsys/memory/fleet/../merge', 'refs/engsys/memory/fleet/./merge', 'refs/engsys/memory/fleet/.git/merge', 'refs/engsys/memory/fleet/x.lock/merge', 'refs/engsys/memory/fleet/a..b/events']) {
       assert.throws(() => signingPayload({ fleet: 'eric', ref, parent: PARENT, content: digest }), /invalid ref/, ref);
-      assert.equal(tailRefFleet(ref), null, ref);
+      assert.equal(refFleet(ref), null, ref);
     }
     for (const fleet of ['.', '..', '.git', 'x.lock']) assert.throws(() => signingPayload({ fleet, ref: TAIL, parent: PARENT, content: digest }), /invalid fleet/, fleet);
     const good = signTip({ privateKey: ERIC.privateKey, fleet: 'eric', ref: TAIL, parent: PARENT, content: CONTENT });
     assert.equal(parseSigLine(good.replace('fleet=eric', 'fleet=..')), null);
     assert.equal(parseSigLine(good.replace('fleet=eric', 'fleet=.git')), null);
-    assert.equal(parseSigLine(good.replace(`ref=${TAIL}`, 'ref=refs/engsys/memory/merge/..')), null);
+    assert.equal(parseSigLine(good.replace(`ref=${TAIL}`, 'ref=refs/engsys/memory/fleet/../merge')), null);
     assert.equal(resolveFleetPubkeys({ fleet_memory_pubkeys: { '.git': ERIC.pub, '..': ERIC.pub } }).size, 0);
   });
 });

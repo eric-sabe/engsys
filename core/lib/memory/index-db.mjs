@@ -25,7 +25,7 @@
 //                                                under concurrent callers (temp-file-then-rename).
 //   queryIndex(db, { text, roles, globs, stacks, limit })  -> ranked Doc[] (BM25 + frontmatter boost)
 //   closeIndex(db)                             -> best-effort close; never throws
-//   resolveMemoryConfigPath(env?)              -> the ONE operator memory.yml path (engsys#262), or null
+//   resolveMemoryConfigPath(env?, opts?)       -> the ONE operator memory.yml path (engsys#262, #268), or null
 //   readOperatorMemoryConfig(env?)             -> that file parsed to a plain object, or null
 //
 // `opts.sqlite` (ensureIndex) and `opts.now`/`opts.fs` are injection points for tests — notably to
@@ -589,12 +589,91 @@ export function resolveOriginRepo(repoRoot) {
 	}
 }
 
+const loggedConfigRefusals = new Set();
+/** stderr, once per message per process (the resolver runs several times per brief). */
+function defaultConfigLog(msg) {
+	if (loggedConfigRefusals.has(msg)) return;
+	loggedConfigRefusals.add(msg);
+	try { process.stderr.write(`${msg}\n`); } catch { /* logging never matters more than the brief */ }
+}
+
+const checkoutRootsCache = new Map();
+/**
+ * Realpaths of the directories a memory config may not live under, for the git repo holding `dir` (engsys#268):
+ * always that checkout's top level and its git common dir (`git rev-parse`, cheap), plus every worktree of the repo
+ * (`git worktree list`, the full check). If the worktree list is unavailable (timeout, error) the cheap pair still
+ * holds and only the OTHER linked worktrees go unchecked; that is logged. [] outside a repo. `opts` is for tests.
+ */
+export function repoCheckoutRoots(dir, { exec = execFileSync, log = defaultConfigLog, listTimeoutMs = 3000 } = {}) {
+	if (!dir) return [];
+	if (checkoutRootsCache.has(dir) && exec === execFileSync) return checkoutRootsCache.get(dir);
+	const roots = new Set();
+	const add = (p) => {
+		if (!p) return;
+		try { roots.add(fs.realpathSync(p)); } catch { /* gone */ }
+	};
+	let inRepo = false;
+	try {
+		const out = exec('git', ['-C', dir, 'rev-parse', '--path-format=absolute', '--show-toplevel', '--git-common-dir'], { encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] });
+		for (const line of String(out).split('\n')) add(line.trim());
+		inRepo = roots.size > 0;
+	} catch { /* not a repo (or git unavailable): nothing to refuse under */ }
+	if (inRepo) {
+		try {
+			const out = exec('git', ['-C', dir, 'worktree', 'list', '--porcelain'], { encoding: 'utf8', timeout: listTimeoutMs, stdio: ['ignore', 'pipe', 'ignore'] });
+			for (const line of String(out).split('\n')) {
+				if (line.startsWith('worktree ')) add(line.slice('worktree '.length).trim());
+			}
+		} catch (e) {
+			log(`memory config: couldn't list the git worktrees of ${dir} (${e?.code || e?.message || 'error'}); only its checkout and git dir are checked for ENGSYS_MEMORY_CONFIG, not its other worktrees (engsys#268)`);
+		}
+	}
+	const result = [...roots];
+	if (exec === execFileSync) checkoutRootsCache.set(dir, result);
+	return result;
+}
+
+/** The realpath of `file` with symlinks followed — the file itself if it exists, else its nearest existing
+ * ancestor with the rest appended (so a not-yet-created path under a symlinked dir still resolves). */
+function realpathLoose(file) {
+	let cur = path.resolve(file);
+	const rest = [];
+	for (;;) {
+		try {
+			return path.join(fs.realpathSync(cur), ...rest.reverse());
+		} catch {
+			const parent = path.dirname(cur);
+			if (parent === cur) return path.resolve(file);
+			rest.push(path.basename(cur));
+			cur = parent;
+		}
+	}
+}
+
+/** The repo checkout root (any worktree of the repos holding `dirs`) that `file` resolves inside, or null. */
+export function checkoutContaining(file, dirs) {
+	return checkoutContainingReal(realpathLoose(file), dirs);
+}
+
+function checkoutContainingReal(real, dirs) {
+	for (const dir of dirs) {
+		for (const root of repoCheckoutRoots(dir)) {
+			if (real === root || real.startsWith(root + path.sep)) return root;
+		}
+	}
+	return null;
+}
+
 /**
  * The operator's `memory.yml` (engsys#262): ONE file, picked by the first source that is SET —
  *   1. `$ENGSYS_MEMORY_CONFIG`: an explicit absolute path. The fleet kit exports
  *      `<fleet config dir>/memory.yml` here for a session it launches on a per-session login dir
  *      (`<fleet dir>.sessions/<name>`, engsys#205), which by design carries no memory.yml of its own.
  *      A relative value is refused (null), never resolved against the cwd — which is a repo checkout.
+ *      A value inside the current repo checkout or any of its git worktrees (engsys#268: realpath-resolved,
+ *      symlinks followed; "current" = the repo holding `opts.repoRoot` and the one holding the cwd) is a
+ *      repo-controlled file: it is refused, logged and NEVER read — the resolver falls through as if it
+ *      were unset.
  *   2. `$CLAUDE_CONFIG_DIR/memory.yml`: the session's Claude Code config dir.
  *   3. `~/.claude/memory.yml`: Claude Code's default config dir, when CLAUDE_CONFIG_DIR is unset (an
  *      interactive session). Before engsys#262 this case read nothing at all, so every interactive
@@ -603,24 +682,56 @@ export function resolveOriginRepo(repoRoot) {
  * `ENGSYS_MEMORY_REPOS` are separate sources, layered by each caller as before. Returns the path (it
  * may not exist) or null. Never throws.
  */
-export function resolveMemoryConfigPath(env = process.env) {
-	if (env.ENGSYS_MEMORY_CONFIG) return path.isAbsolute(env.ENGSYS_MEMORY_CONFIG) ? env.ENGSYS_MEMORY_CONFIG : null;
-	if (env.CLAUDE_CONFIG_DIR) return path.join(env.CLAUDE_CONFIG_DIR, 'memory.yml');
-	let home = env.HOME;
-	if (!home) {
-		try { home = os.homedir(); } catch { home = ''; }
+export function resolveMemoryConfigPath(env = process.env, opts = {}) {
+	return resolveMemoryConfig(env, opts).path;
+}
+
+/** `resolveMemoryConfigPath` plus the path to READ: for an accepted ENGSYS_MEMORY_CONFIG, the realpath that the
+ * in-repo check validated (engsys#268, Nyx LOW: reading the raw path again would let a symlink swapped in between
+ * the check and the read point it into a checkout); for the config-dir sources, the path itself. */
+function resolveMemoryConfig(env, { repoRoot = null, cwd = process.cwd(), log = defaultConfigLog } = {}) {
+	if (env.ENGSYS_MEMORY_CONFIG) {
+		if (!path.isAbsolute(env.ENGSYS_MEMORY_CONFIG)) return { path: null, readPath: null };
+		const real = realpathLoose(env.ENGSYS_MEMORY_CONFIG);
+		const root = checkoutContainingReal(real, [repoRoot, cwd]);
+		if (!root) return { path: env.ENGSYS_MEMORY_CONFIG, readPath: real, validated: true };
+		log(`memory config: refusing ENGSYS_MEMORY_CONFIG=${env.ENGSYS_MEMORY_CONFIG}: it is inside the repo checkout ${root}, which is repo-controlled; using the next source instead (engsys#268)`);
 	}
-	return home ? path.join(home, '.claude', 'memory.yml') : null;
+	let file = null;
+	if (env.CLAUDE_CONFIG_DIR) file = path.join(env.CLAUDE_CONFIG_DIR, 'memory.yml');
+	else {
+		let home = env.HOME;
+		if (!home) {
+			try { home = os.homedir(); } catch { home = ''; }
+		}
+		file = home ? path.join(home, '.claude', 'memory.yml') : null;
+	}
+	return { path: file, readPath: file };
 }
 
 /** `resolveMemoryConfigPath(env)` read and parsed: a plain object, or null when there is no such
  * file or it is not a YAML mapping. The single reader behind both `resolveAllowedRepos` here and
- * memory-brief.mjs's `loadConfig`, so the two can never disagree on which file is the operator's. */
-export function readOperatorMemoryConfig(env = process.env) {
-	const file = resolveMemoryConfigPath(env);
-	if (!file) return null;
+ * memory-brief.mjs's `loadConfig`, so the two can never disagree on which file is the operator's.
+ * An accepted ENGSYS_MEMORY_CONFIG is read at its validated realpath, opened with O_NOFOLLOW (that path holds no
+ * symlink, so one appearing there afterwards is refused rather than followed). */
+export function readOperatorMemoryConfig(env = process.env, opts = {}) {
+	const { readPath, validated } = resolveMemoryConfig(env, opts);
+	if (!readPath) return null;
+	opts.afterCheck?.(); // test hook: the window between the in-repo check and the read
 	try {
-		const parsed = parseYaml(fs.readFileSync(file, 'utf8'));
+		let text;
+		if (validated) {
+			const fd = fs.openSync(readPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+			try {
+				if (!fs.fstatSync(fd).isFile()) return null;
+				text = fs.readFileSync(fd, 'utf8');
+			} finally {
+				fs.closeSync(fd);
+			}
+		} else {
+			text = fs.readFileSync(readPath, 'utf8');
+		}
+		const parsed = parseYaml(text);
 		return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
 	} catch {
 		return null;
@@ -633,6 +744,11 @@ export function readOperatorMemoryConfig(env = process.env) {
  * `~/.claude/memory.yml`; engsys#262), plugin config (`<pluginRoot>/memory.yml`), explicit
  * `opts.allowedRepos`, and `ENGSYS_MEMORY_REPOS`. NEVER reads `repoRoot/.claude/memory.yml` — a
  * third-party clone or submodule must not be able to allowlist itself.
+ *
+ * `ENGSYS_MEMORY_REPOS` (engsys#268) is a bare env value with no file behind it, so where it came from can't be
+ * told apart here. It can only ADD `repos` entries. The fleet launcher never sets it, and `fleet verify` flags any
+ * `ENGSYS_*` key in a settings `env` (the pin checkout's .claude/settings.json and settings.local.json, and the
+ * fleet's user settings), so a repo can't inject it through Claude Code's settings.
  */
 export function resolveAllowedRepos(opts = {}) {
 	const raw = [];
@@ -640,7 +756,7 @@ export function resolveAllowedRepos(opts = {}) {
 	if (process.env.ENGSYS_MEMORY_REPOS) {
 		raw.push(...process.env.ENGSYS_MEMORY_REPOS.split(',').map((s) => s.trim()).filter(Boolean));
 	}
-	raw.push(...coerceListField(readOperatorMemoryConfig()?.repos));
+	raw.push(...coerceListField(readOperatorMemoryConfig(process.env, { repoRoot: opts.repoRoot ?? null })?.repos));
 	const pluginRoot = opts.pluginRoot ?? process.env.CLAUDE_PLUGIN_ROOT ?? null;
 	if (pluginRoot) {
 		try {
@@ -661,7 +777,7 @@ export function resolveAllowedRepos(opts = {}) {
  * `owner/repo` in the trusted `repos` allowlist (#145).
  */
 export function isRepoAllowlisted(repoRoot, opts = {}) {
-	const allowed = opts.allowed instanceof Set ? opts.allowed : resolveAllowedRepos(opts);
+	const allowed = opts.allowed instanceof Set ? opts.allowed : resolveAllowedRepos({ ...opts, repoRoot });
 	if (allowed.size === 0) return false;
 	const originRepo = resolveOriginRepo(repoRoot);
 	return originRepo !== null && allowed.has(originRepo);
@@ -748,7 +864,8 @@ export function loadClassADocs(roots, manifest = {}, opts = {}) {
 
 // ---------------------------------------------------------------------------------------------
 // Class B loading (local delta only in this phase — memory-sync, which populates
-// `<cacheDir>/delta.jsonl` and `refs/engsys/memory/events`, is a later phase; see docs/memory-spec.md §7)
+// `<cacheDir>/delta.jsonl` and each fleet's `refs/engsys/memory/fleet/<fleet>/…` refs, is a later phase; see
+// docs/memory-spec.md §7, §9)
 // ---------------------------------------------------------------------------------------------
 
 /**

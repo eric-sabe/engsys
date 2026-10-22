@@ -30,6 +30,10 @@ import {
   TAIL_MAX_EVENTS,
 } from './memory-sync.mjs';
 import { EVENTS_REF } from '../lib/memory/ref-store.mjs';
+
+// engsys#266: each fleet writes its own namespace.
+const ERIC_EVENTS = 'refs/engsys/memory/fleet/eric/events';
+const ERIC_MERGE = 'refs/engsys/memory/fleet/eric/merge';
 import crypto from 'node:crypto';
 import { publicKeyB64, resolveFleetPubkeys, verifyTipSignature } from '../lib/memory/signing.mjs';
 
@@ -838,7 +842,7 @@ describe('memory-sync (#131)', () => {
     }
   });
 
-  it('runs --init, --delta (with 48h cursor overlap and deduplication), and --publish to refs/engsys/memory/events', async () => {
+  it('runs --init, --delta (with 48h cursor overlap and deduplication), and --publish to its own fleet refs/engsys/memory/fleet/<fleet>/events', async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-sync-modes-'));
     try {
       const fake = fakeGitApi({ repo: 'owner/repo' });
@@ -921,7 +925,7 @@ describe('memory-sync (#131)', () => {
       assert.equal(pubRes.ok, true);
       assert.equal(pubRes.publishResult.ok, true);
 
-      const stored = await refStore.readEvents();
+      const stored = await refStore.readEvents({ ref: ERIC_EVENTS });
       assert.equal(stored.ok, true);
       assert.equal(stored.events.length, 2);
       const byK = new Map(stored.events.map((e) => [e.k, e]));
@@ -1127,22 +1131,27 @@ describe('memory-sync (#131)', () => {
   });
 });
 
-// F5 (docs/memory-spec.md §9): only the maintain baton holder publishes the shared events ref, each role
-// writes only its own <role>/<fleet> tail, and every write is fenced on the baton right before the ref moves.
+// F5 (docs/memory-spec.md §9): only the maintain baton holder publishes its fleet's events ref, each role writes
+// only its own fleet/<fleet>/<role> tail (engsys#266), and every write is fenced on the baton right before the ref moves.
 describe('memory-sync writers: role split and the baton fence (F5)', () => {
   const base = { repo: 'owner/repo', stateDir: '/state', config: {} };
 
   it('resolveWriteTarget: the refusal matrix', () => {
-    assert.deepEqual(resolveWriteTarget({ ...base, mode: 'publish', role: 'maintain', fleet: 'eric' }), { ok: true, ref: EVENTS_REF });
-    assert.deepEqual(resolveWriteTarget({ ...base, mode: 'tail', role: 'merge', fleet: 'eric' }), { ok: true, ref: 'refs/engsys/memory/merge/eric' });
-    assert.deepEqual(resolveWriteTarget({ ...base, mode: 'tail', role: 'maintain', fleet: 'mark-fleet' }), { ok: true, ref: 'refs/engsys/memory/maintain/mark-fleet' });
+    assert.deepEqual(resolveWriteTarget({ ...base, mode: 'publish', role: 'maintain', fleet: 'eric' }), { ok: true, ref: ERIC_EVENTS });
+    assert.deepEqual(resolveWriteTarget({ ...base, mode: 'publish', role: 'maintain', fleet: 'mark-fleet' }), { ok: true, ref: 'refs/engsys/memory/fleet/mark-fleet/events' });
+    assert.deepEqual(resolveWriteTarget({ ...base, mode: 'publish', role: 'maintain', fleet: 'eric', ref: ERIC_EVENTS }), { ok: true, ref: ERIC_EVENTS }, 'an explicit --ref naming exactly the own ref is fine');
+    assert.deepEqual(resolveWriteTarget({ ...base, mode: 'tail', role: 'merge', fleet: 'eric' }), { ok: true, ref: ERIC_MERGE });
+    assert.deepEqual(resolveWriteTarget({ ...base, mode: 'tail', role: 'maintain', fleet: 'mark-fleet' }), { ok: true, ref: 'refs/engsys/memory/fleet/mark-fleet/maintain' });
     assert.deepEqual(resolveWriteTarget({ mode: 'delta' }), { ok: true, ref: null }, 'delta writes no ref and needs none of it');
     const refused = [
       [{ mode: 'publish', role: 'merge', fleet: 'eric' }, /only the maintain baton holder/],
       [{ mode: 'publish', role: 'maintain' }, /needs --fleet/],
       [{ mode: 'publish', role: '' }, /needs --role/],
       [{ mode: 'publish', role: 'nyx' }, /needs --role/],
-      [{ mode: 'publish', role: 'maintain', fleet: 'eric', ref: 'refs/engsys/memory/maintain/eric' }, /writes only refs\/engsys\/memory\/events/],
+      [{ mode: 'publish', role: 'maintain', fleet: 'eric', ref: 'refs/engsys/memory/fleet/eric/maintain' }, /writes only this fleet's refs\/engsys\/memory\/fleet\/eric\/events/],
+      [{ mode: 'publish', role: 'maintain', fleet: 'eric', ref: 'refs/engsys/memory/fleet/mark-fleet/events' }, /writes only this fleet's/],
+      [{ mode: 'publish', role: 'maintain', fleet: 'eric', ref: EVENTS_REF }, /is retired \(engsys#266\)/],
+      [{ mode: 'tail', role: 'merge', fleet: 'eric', ref: EVENTS_REF }, /is retired \(engsys#266\)/],
       [{ mode: 'publish', role: 'maintain', stateDir: '' }, /needs --state-dir/],
       [{ mode: 'publish', role: 'maintain', repo: 'nope' }, /needs --repo/],
       [{ mode: 'publish', role: 'maintain', fleet: 'eric', config: { publish_role: 'merge' } }, /publish_role "merge" is not supported/],
@@ -1154,7 +1163,8 @@ describe('memory-sync writers: role split and the baton fence (F5)', () => {
       [{ mode: 'tail', role: 'merge', fleet: '.git' }, /needs --fleet/],
       [{ mode: 'tail', role: 'merge', fleet: 'x.lock' }, /needs --fleet/],
       [{ mode: 'publish', role: 'maintain', fleet: '..' }, /needs --fleet/],
-      [{ mode: 'tail', role: 'merge', fleet: 'eric', ref: 'refs/engsys/memory/maintain/eric' }, /takes no --ref/],
+      [{ mode: 'tail', role: 'merge', fleet: 'eric', ref: 'refs/engsys/memory/fleet/eric/maintain' }, /writes only the role's own/],
+      [{ mode: 'tail', role: 'merge', fleet: 'eric', ref: 'refs/engsys/memory/merge/eric' }, /writes only the role's own/],
       [{ mode: 'tail', role: 'ops', fleet: 'eric' }, /needs --role/],
     ];
     for (const [over, re] of refused) {
@@ -1182,7 +1192,7 @@ describe('memory-sync writers: role split and the baton fence (F5)', () => {
       assert.equal(res.ok, false);
       assert.equal(res.refused, true);
       assert.equal(fenced, 0);
-      assert.equal((await refStore.readEvents()).sha, null, 'the events ref was never created');
+      assert.equal((await refStore.readEvents({ ref: ERIC_EVENTS })).sha, null, 'the events ref was never created');
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -1197,7 +1207,7 @@ describe('memory-sync writers: role split and the baton fence (F5)', () => {
       assert.equal(res.ok, false);
       assert.equal(res.skipped, 'baton_not_held');
       assert.equal(res.publishResult.error.code, 'fence_refused');
-      assert.equal((await refStore.readEvents()).sha, null, 'nothing was written');
+      assert.equal((await refStore.readEvents({ ref: ERIC_EVENTS })).sha, null, 'nothing was written');
       assert.ok(fs.readFileSync(path.join(dir, 'delta.jsonl'), 'utf8').includes('owner/repo:issue:1'), 'the delta waits for the next holder');
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
@@ -1218,7 +1228,7 @@ describe('memory-sync writers: role split and the baton fence (F5)', () => {
       const res = await run(dir, { mode: 'publish', role: 'maintain', stateDir: dir, refStore, fence: async () => { calls.push('fence'); return { held: true }; } });
       assert.equal(res.ok, true);
       assert.deepEqual(calls, ['commit', 'fence', 'cas']);
-      assert.equal((await refStore.readEvents()).events.length, 1);
+      assert.equal((await refStore.readEvents({ ref: ERIC_EVENTS })).events.length, 1);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -1253,9 +1263,9 @@ describe('memory-sync writers: role split and the baton fence (F5)', () => {
       const refStore = store();
       const res = await run(dir, { mode: 'tail', role: 'merge', fleet: 'eric', stateDir: dir, refStore, fence: async () => ({ held: true }) });
       assert.equal(res.ok, true);
-      assert.equal(res.ref, 'refs/engsys/memory/merge/eric');
-      assert.equal((await refStore.readEvents({ ref: 'refs/engsys/memory/merge/eric' })).events.length, 3);
-      assert.equal((await refStore.readEvents()).sha, null, 'the events ref is untouched');
+      assert.equal(res.ref, ERIC_MERGE);
+      assert.equal((await refStore.readEvents({ ref: ERIC_MERGE })).events.length, 3);
+      assert.equal((await refStore.readEvents({ ref: ERIC_EVENTS })).sha, null, 'the events ref is untouched');
       assert.ok(!fs.existsSync(path.join(dir, 'delta.jsonl')), 'no delta written');
       assert.ok(!fs.existsSync(path.join(dir, 'cursors.json')), 'no cursors written');
       fs.rmSync(outside, { recursive: true, force: true });
@@ -1280,7 +1290,7 @@ describe('memory-sync writers: role split and the baton fence (F5)', () => {
       // the tail ref mirrors the journal tail: a rotated journal replaces it rather than growing it
       fs.writeFileSync(path.join(dir, 'journal-2026-07.jsonl'), JSON.stringify({ ts: '2026-07-02T10:00:00Z', event: 'bounced', pr: 9 }) + '\n');
       await run(dir, { mode: 'tail', role: 'merge', stateDir: dir, refStore, fence });
-      assert.deepEqual((await refStore.readEvents({ ref: 'refs/engsys/memory/merge/eric' })).events.map((e) => e.text), ['bounced']);
+      assert.deepEqual((await refStore.readEvents({ ref: ERIC_MERGE })).events.map((e) => e.text), ['bounced']);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -1320,7 +1330,7 @@ describe('memory-sync writers: role split and the baton fence (F5)', () => {
       assert.equal(res.skipped, 'no_signing_key');
       assert.match(res.reason, /group or other/);
       assert.equal(fenced, 0);
-      assert.equal((await refStore.readEvents()).sha, null);
+      assert.equal((await refStore.readEvents({ ref: ERIC_EVENTS })).sha, null);
       assert.ok(!fs.existsSync(path.join(dir, 'cursors.json')), 'refused before collection: no cursor moved');
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
@@ -1336,9 +1346,27 @@ describe('memory-sync writers: role split and the baton fence (F5)', () => {
       const pubkeys = resolveFleetPubkeys({ fleet_memory_pubkeys: { eric: publicKeyB64(TEST_SIGNING_KEY) } });
       assert.equal((await run(dir, { mode: 'publish', role: 'maintain', stateDir: dir, refStore, fence: async () => ({ held: true }) })).ok, true);
       assert.equal((await run(dir, { mode: 'tail', role: 'merge', stateDir: dir, refStore, fence: async () => ({ held: true }) })).ok, true);
-      for (const ref of [EVENTS_REF, 'refs/engsys/memory/merge/eric']) {
+      for (const ref of [ERIC_EVENTS, ERIC_MERGE]) {
         const tip = await refStore.readEvents({ ref });
         assert.deepEqual(verifyTipSignature({ ref, parent: tip.parents[0] ?? null, content: tip.content, sigText: tip.sigText, pubkeys }), { ok: true, fleet: 'eric' }, ref);
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('the CLI accepts --ref naming exactly the fleet\'s own ref, for --publish and --tail (it then stops only at the missing key)', async () => {
+    const dir = tmp('memory-sync-cli-ownref-');
+    try {
+      for (const [mode, role, ref] of [['--publish', 'maintain', ERIC_EVENTS], ['--tail', 'merge', ERIC_MERGE]]) {
+        const out = [];
+        const err = [];
+        const io = { out: { write: (x) => out.push(x) }, err: { write: (x) => err.push(x) } };
+        const code = await memorySyncMain([mode, '--repo', 'owner/repo', '--role', role, '--fleet', 'eric', '--state-dir', dir, '--cache-dir', dir, '--ref', ref, '--signing-key-file', path.join(dir, 'absent.key')], io);
+        assert.notEqual(code, 2, `${mode} with its own --ref is not refused`);
+        assert.doesNotMatch(err.join(''), /refused/, mode);
+        assert.match(err.join(''), /not written, no usable signing key/, `${mode} got past the target check`);
+        assert.equal(JSON.parse(out.join('')).skipped, 'no_signing_key');
       }
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
@@ -1366,7 +1394,9 @@ describe('memory-sync writers: role split and the baton fence (F5)', () => {
     try {
       assert.equal(await memorySyncMain(['--publish', '--repo', 'owner/repo', '--role', 'merge', '--fleet', 'eric', '--state-dir', dir, '--cache-dir', dir], io), 2);
       assert.match(errBuf.join(''), /refused: only the maintain baton holder/);
-      assert.equal(await memorySyncMain(['--publish', '--repo', 'owner/repo', '--role', 'maintain', '--fleet', 'eric', '--state-dir', dir, '--cache-dir', dir, '--ref', 'refs/engsys/memory/merge/eric'], io), 2);
+      assert.equal(await memorySyncMain(['--publish', '--repo', 'owner/repo', '--role', 'maintain', '--fleet', 'eric', '--state-dir', dir, '--cache-dir', dir, '--ref', ERIC_MERGE], io), 2);
+      assert.equal(await memorySyncMain(['--publish', '--repo', 'owner/repo', '--role', 'maintain', '--fleet', 'eric', '--state-dir', dir, '--cache-dir', dir, '--ref', EVENTS_REF], io), 2);
+      assert.match(errBuf.join(''), /refs\/engsys\/memory\/events is retired/);
       assert.equal(await memorySyncMain(['--publish', '--tail', '--repo', 'owner/repo'], io), 2);
       assert.match(errBuf.join(''), /pick one of/);
     } finally {

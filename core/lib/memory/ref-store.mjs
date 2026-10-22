@@ -20,8 +20,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createGitDataClient } from '../lease/github-backend.mjs';
 import { resolveReviewedSha } from './index-db.mjs';
-import { REF_SEGMENT_RE, verifyTipSignature } from './signing.mjs';
+import { FLEET_ID_RE, REF_SEGMENT_RE, verifyTipSignature } from './signing.mjs';
 
+// The retired single shared events ref (engsys#266). Nothing writes it any more (memory-sync refuses it) and no
+// reader trusts it: each fleet publishes its own `fleetEventsRef(fleet)`.
 export const EVENTS_REF = 'refs/engsys/memory/events';
 export const MEMORY_REF_PREFIX = 'refs/engsys/memory/';
 // engsys v2.0.1 (M4): NO forced (`+`) refspec. A forced refspec makes `git fetch` silently
@@ -46,17 +48,33 @@ export const DEFAULT_TOMBSTONE_TTL_DAYS = 180;
 // One ref path segment: the same rule signing.mjs signs over (no leading dot, no `..`, no `.lock` suffix).
 const SAFE_SEGMENT_RE = REF_SEGMENT_RE;
 
+// engsys#266: one namespace per fleet, so a fleet's refs are one tree to fetch and verify, and the fleet a ref names
+// is the fleet that must have signed it. `fleet` is a fixed directory: never a ref itself (no D/F conflict with
+// the retired `refs/engsys/memory/events` or the pre-#266 `<role>/<fleet>` tails, which no live repo holds).
+export const FLEET_REF_PREFIX = `${MEMORY_REF_PREFIX}fleet/`;
+export const TAIL_ROLES = Object.freeze(['merge', 'maintain']);
+
+function fleetSegment(fleetId, fn) {
+  if (typeof fleetId !== 'string' || !FLEET_ID_RE.test(fleetId)) {
+    throw new Error(`${fn}: invalid fleetId ${JSON.stringify(fleetId)}`);
+  }
+  return fleetId;
+}
+
+/** This fleet's own events ref, `refs/engsys/memory/fleet/<fleet>/events` (the maintain baton holder's publish). */
+export function fleetEventsRef(fleetId) {
+  return `${FLEET_REF_PREFIX}${fleetSegment(fleetId, 'fleetEventsRef')}/events`;
+}
+
 /**
- * Build the per-worker tail ref `refs/engsys/memory/<role>/<fleet-id>`.
+ * Build the per-worker tail ref `refs/engsys/memory/fleet/<fleet-id>/<role>` (engsys#266). `role` is one of
+ * TAIL_ROLES (so never `events`).
  */
 export function tailRef(role, fleetId) {
-  if (typeof role !== 'string' || !SAFE_SEGMENT_RE.test(role)) {
+  if (typeof role !== 'string' || !SAFE_SEGMENT_RE.test(role) || !TAIL_ROLES.includes(role)) {
     throw new Error(`tailRef: invalid role ${JSON.stringify(role)}`);
   }
-  if (typeof fleetId !== 'string' || !SAFE_SEGMENT_RE.test(fleetId)) {
-    throw new Error(`tailRef: invalid fleetId ${JSON.stringify(fleetId)}`);
-  }
-  return `${MEMORY_REF_PREFIX}${role}/${fleetId}`;
+  return `${FLEET_REF_PREFIX}${fleetSegment(fleetId, 'tailRef')}/${role}`;
 }
 
 function validateMemoryRef(ref) {
@@ -329,7 +347,9 @@ export function createMemoryRefStore({
     env,
   });
 
-  async function readEvents({ ref = EVENTS_REF } = {}) {
+  // `ref` is required (no default): the old default was the retired shared EVENTS_REF (engsys#266).
+  async function readEvents({ ref } = {}) {
+    if (!ref) throw new Error('readEvents: ref is required');
     const fullRef = validateMemoryRef(ref);
     const refRes = await gitData.readRef(fullRef);
     if (refRes.status === 404) {
@@ -388,7 +408,7 @@ export function createMemoryRefStore({
   }
 
   async function writeEvents({
-    ref = EVENTS_REF,
+    ref,
     events = [],
     message = 'memory-sync',
     forceCompact = false,
@@ -405,6 +425,7 @@ export function createMemoryRefStore({
     // F5: `true` writes exactly `events` (a mirror, e.g. a journal tail) instead of merging them into the tip's.
     replace = false,
   } = {}) {
+    if (!ref) throw new Error('writeEvents: ref is required');
     const fullRef = validateMemoryRef(ref);
     if (!Array.isArray(events)) {
       throw new Error('writeEvents: events must be an array');
@@ -598,8 +619,9 @@ function pathExistsInReviewedTree(repoRoot, reviewedSha, relPath, exec) {
  * Trust comes ONLY from:
  *   - the tip's `events.sig` verifying (core/lib/memory/signing.mjs `verifyTipSignature`) over THIS ref, THIS
  *     commit's parent and THIS events.jsonl, against `pubkeys` (the operator memory.yml's
- *     `fleet_memory_pubkeys`, via `resolveFleetPubkeys`): a `<role>/<fleet>` tail must be signed by the fleet it
- *     names, `events` by any listed fleet. No entry, a malformed key or a bad signature = untrusted;
+ *     `fleet_memory_pubkeys`, via `resolveFleetPubkeys`): every ref must be signed by the fleet whose namespace it is
+ *     in (`refs/engsys/memory/fleet/<fleet>/{events,merge,maintain}`, engsys#266). A ref outside a fleet namespace
+ *     (the retired shared `events`), no entry, a malformed key or a bad signature = untrusted;
  *   - each event's own `path` / `paths` existing in the tree at the independently
  *     `resolveReviewedSha`-resolved SHA (so a tip can't vouch for a file it alone claims exists).
  *
