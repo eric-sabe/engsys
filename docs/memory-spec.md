@@ -336,11 +336,13 @@ high_fanout_globs: []                   # files keyed by symbol instead of path
 brief_bytes: 2048
 max_events: 20000
 publish_role: maintain                  # must stay maintain: any other value refuses --publish (§9)
-fleet_memory_pubkeys: {}                # {<fleet>: <key> | [<key>, …]}, base64 raw 32-byte Ed25519; fleet config dir ONLY (§9)
+fleet_memory_pubkeys: {}                # {<fleet>: <key> | [<key>, …]}, base64 raw 32-byte Ed25519; operator memory.yml ONLY (§9)
 ```
 
-`fleet_memory_pubkeys` (F5) is read only from the fleet config dir's `memory.yml`, the operator's
-reviewed, hash-pinned copy, never from the plugin or repo config. A fleet's value is one key or a list
+`fleet_memory_pubkeys` (F5) is read only from the operator's `memory.yml` (source 1 above,
+`readOperatorMemoryConfig`: `ENGSYS_MEMORY_CONFIG`, else `$CLAUDE_CONFIG_DIR/memory.yml`, else
+`~/.claude/memory.yml`; in a fleet, the reviewed, hash-pinned copy in the fleet config dir), never
+from the plugin or repo config. A fleet's value is one key or a list
 of keys (`eric: [k1, k2]`: one per host, and an overlap while a key rotates); a ref verifies against
 any of its fleet's keys. Each key must be exactly 32 bytes of standard base64 (what
 `fleet memory-pubkey` prints, as a one-key list); a malformed key is dropped and logged, and a fleet
