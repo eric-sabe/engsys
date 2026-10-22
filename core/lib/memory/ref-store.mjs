@@ -369,6 +369,10 @@ export function createMemoryRefStore({
     forceCompact = false,
     cacheDir = null,
     log = () => {},
+    // F5 (single writer): awaited immediately before EVERY ref update (each CAS round), after the blob,
+    // tree and commit are built. A falsy return, or `{ held: false }`, aborts the write with nothing
+    // moved — memory-sync passes the baton fence here, so the writer's hold is checked as late as possible.
+    beforeCas = null,
   } = {}) {
     const fullRef = validateMemoryRef(ref);
     if (!Array.isArray(events)) {
@@ -457,6 +461,21 @@ export function createMemoryRefStore({
         return { ok: false, error: commitRes.failure, rejected };
       }
 
+      if (beforeCas) {
+        let gate;
+        try {
+          gate = await beforeCas({ ref: fullRef, round });
+        } catch (e) {
+          gate = { held: false, reason: String(e?.message || e) };
+        }
+        if (!gate || gate.held === false) {
+          return {
+            ok: false,
+            error: { code: 'fence_refused', detail: gate?.reason || 'the pre-write check refused' },
+            rejected,
+          };
+        }
+      }
       const casRes = await gitData.cas(fullRef, tip.sha, commitRes.sha);
       if (casRes.outcome === 'won') {
         return {

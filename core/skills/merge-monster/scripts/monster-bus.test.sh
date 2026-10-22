@@ -714,6 +714,37 @@ tail_sync noise
 [ -z "$OUT" ] && ok "  …other stderr stays silent" || bad "  …unrelated stderr leaked" "$OUT"
 [ ! -e "$T/mstate/memory-sync-capped.warn" ] && ok "  …and a run without the warning clears the file" || bad "  …stale warning file kept"
 
+echo "memory heartbeat writes: role-split, fenced, skip-never-block (F5, docs/memory-spec.md §9)"
+cat >"$T/nodebin/node" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$T_NODE_LOG"
+exit "${STUB_NODE_RC:-0}"
+SH
+chmod +x "$T/nodebin/node"
+writes() { # writes <role> [env assignments…]: run the heartbeat sync with the logging stub; $LOG is what it ran
+  local role="$1"; shift
+  : >"$T/node.log"; RC=0
+  env PATH="$T/nodebin:$PATH" T_NODE_LOG="$T/node.log" ENGSYS_MEMORY_SYNC=1 "$@" \
+    bash -c '. "$1"; monster_memory_tail_sync "$2" acme/app "$3" "$4"' _ "$HERE/../../../lib/monster.sh" "$role" "$T/mstate" sess-1 >/dev/null 2>&1 || RC=$?
+  LOG="$(cat "$T/node.log")"
+}
+writes merge FLEET_ID=alice
+has_line() { case "$LOG" in *"$1"*) ok "$2" ;; *) bad "$2" "$LOG" ;; esac; }
+no_line() { case "$LOG" in *"$1"*) bad "$2" "$LOG" ;; *) ok "$2" ;; esac; }
+has_line "--delta --repo acme/app" "  merge: the local delta still runs"
+has_line "--tail --repo acme/app --role merge --fleet alice --state-dir $T/mstate --session sess-1" "  merge: mirrors its own journal tail, fenced on its session"
+no_line "--publish" "  merge: never publishes the shared events ref"
+writes maintain FLEET_ID=alice
+has_line "--tail --repo acme/app --role maintain --fleet alice --state-dir $T/mstate --session sess-1" "  maintain: mirrors its own journal tail"
+has_line "--publish --repo acme/app --role maintain --state-dir $T/mstate --session sess-1" "  maintain: publishes the events ref (memory-sync fences it on the maintain baton)"
+writes maintain FLEET_ID=
+no_line "--tail" "  no FLEET_ID: no tail write"
+no_line "--publish" "  …and no publish"
+writes maintain FLEET_ID=alice STUB_NODE_RC=1
+[ "$RC" = 0 ] && ok "  a refused or failed write never fails the heartbeat" || bad "  heartbeat failed on a refused write" "rc=$RC"
+writes maintain FLEET_ID=alice ENGSYS_MEMORY_SYNC=0
+[ -z "$LOG" ] && ok "  ENGSYS_MEMORY_SYNC=0: nothing runs at all" || bad "  kill switch ignored" "$LOG"
+
 echo "monster-bus.test: $pass passed, $fail failed"
 [ "$fail" = 0 ]
 

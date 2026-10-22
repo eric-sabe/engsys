@@ -536,9 +536,13 @@ monster_baton_rotate() {
   return 0
 }
 
-# monster_memory_tail_sync ROLE REPO STATE_DIR: best-effort memory delta sync on heartbeat (docs/memory-spec.md §9).
+# monster_memory_tail_sync ROLE REPO STATE_DIR [SESSION]: best-effort memory sync on heartbeat (docs/memory-spec.md §9).
+# Always the local --delta. Then, with a state dir and a FLEET_ID, the writes (F5): this role's own journal tail to
+# refs/engsys/memory/<role>/<fleet> (--tail), and, for maintain only, the shared events ref (--publish). Each write is
+# fenced on this session's baton right before the ref moves, so a session that lost its baton writes nothing. Every
+# step is skip-never-block: a refusal or failure is ignored here, and ENGSYS_MEMORY_SYNC=0 turns all of it off.
 monster_memory_tail_sync() {
-  local role="$1" repo="$2" state_dir="${3:-}" mem_script
+  local role="$1" repo="$2" state_dir="${3:-}" session="${4:-}" mem_script
   [ "${ENGSYS_MEMORY_SYNC:-}" != "0" ] || return 0
   [ "${ENGSYS_MEMORY_SYNC:-0}" = 1 ] || [ -f "${CLAUDE_PROJECT_DIR:-.}/.claude/memory.yml" ] || return 0
   mem_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../scripts/memory-sync.mjs"
@@ -554,6 +558,14 @@ monster_memory_tail_sync() {
     [ -z "$state_dir" ] || [ ! -d "$state_dir" ] || printf '%s\n' "$warn" >"$state_dir/memory-sync-capped.warn" 2>/dev/null || true
   elif [ "$nrc" = 0 ] && [ -n "$state_dir" ]; then   # a failed run proves nothing: keep an earlier warning
     rm -f "$state_dir/memory-sync-capped.warn" 2>/dev/null || true
+  fi
+  if [ -n "$state_dir" ] && [ -n "${FLEET_ID:-}" ]; then
+    node "$mem_script" --tail --repo "$repo" --role "$role" --fleet "$FLEET_ID" --state-dir "$state_dir" \
+      ${session:+--session "$session"} >/dev/null 2>&1 || true
+    if [ "$role" = maintain ]; then
+      node "$mem_script" --publish --repo "$repo" --role maintain --state-dir "$state_dir" \
+        ${session:+--session "$session"} >/dev/null 2>&1 || true
+    fi
   fi
   return 0
 }

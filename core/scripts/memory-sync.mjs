@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // memory-sync.mjs — historical ingestion, author/editor eligibility filter, boundary-spoofing
-// quarantine, anomaly flagging, incremental cursors + tombstones, and delta/publish modes.
-// Design: docs/memory-spec.md §7 (#131).
+// quarantine, anomaly flagging, incremental cursors + tombstones, and delta/publish/tail modes.
+// Design: docs/memory-spec.md §7 (#131); who may write which ref: §9 (F5).
 //
 // Zero-dependency ESM, Node >= 20. External calls (`gh`, `git`, `refStore`) are injectable for
 // deterministic unit tests.
@@ -10,6 +10,7 @@ import { execFile, execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseArgs, promisify } from 'node:util';
 import { isMainEntry } from '../lib/is-main.mjs';
 import { createMarkerRe, MARKER_RE, normalizeUntrusted } from '../lib/untrusted.mjs';
@@ -1137,6 +1138,136 @@ export function writeDeltaEvents(cacheDir, incomingEvents) {
 }
 
 // ---------------------------------------------------------------------------
+// §9 Writers (F5): who may write which ref, the baton fence, and the journal tail
+// ---------------------------------------------------------------------------
+
+// The baton roles (core/lib/lease/baton.mjs ROLES). Only these may write a memory ref, and only the
+// maintain baton holder writes the shared `events` ref: merge never does (docs/memory-spec.md §9).
+export const WRITER_ROLES = Object.freeze(['merge', 'maintain']);
+export const EVENTS_WRITER_ROLE = 'maintain';
+// A fleet id becomes a ref path segment and part of every tail event key (index-db's KEY_RE caps keys
+// at 80 characters), so it is length-capped as well as charset-checked.
+const FLEET_ID_RE = /^[A-Za-z0-9._-]{1,40}$/;
+const REPO_NAME_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+
+/**
+ * Which ref a write run targets, or why it may not write at all. Pure; checked before any collection
+ * or network call. `publish` always targets `refs/engsys/memory/events` and only for the maintain role
+ * (and only while config `publish_role` is still `maintain`); an explicit `--ref` naming anything else
+ * is refused, never honoured. `tail` targets the role's own `<role>/<fleet>` ref. Both need a state dir
+ * (the baton fence reads it) and an `owner/repo`.
+ */
+export function resolveWriteTarget({ mode, role = '', fleet = '', ref = '', stateDir = '', repo = '', config = {} } = {}) {
+  if (mode !== 'publish' && mode !== 'tail') return { ok: true, ref: null };
+  if (!REPO_NAME_RE.test(String(repo || ''))) return { ok: false, reason: `--${mode} needs --repo owner/name` };
+  if (!WRITER_ROLES.includes(role)) return { ok: false, reason: `--${mode} needs --role ${WRITER_ROLES.join('|')}` };
+  if (!stateDir) return { ok: false, reason: `--${mode} needs --state-dir (the baton fence reads it)` };
+  if (mode === 'publish') {
+    if (ref && ref !== EVENTS_REF) return { ok: false, reason: `--publish writes only ${EVENTS_REF}; a tail ref is written by --tail` };
+    if (role !== EVENTS_WRITER_ROLE) return { ok: false, reason: `only the ${EVENTS_WRITER_ROLE} baton holder publishes ${EVENTS_REF} (got --role ${role})` };
+    const configured = config?.publish_role ?? EVENTS_WRITER_ROLE;
+    if (configured !== EVENTS_WRITER_ROLE) return { ok: false, reason: `publish_role ${JSON.stringify(configured)} is not supported: only ${EVENTS_WRITER_ROLE} publishes` };
+    return { ok: true, ref: EVENTS_REF };
+  }
+  if (ref && ref !== EVENTS_REF) return { ok: false, reason: '--tail takes no --ref: it writes the role\'s own <role>/<fleet> ref' };
+  if (!FLEET_ID_RE.test(String(fleet || ''))) return { ok: false, reason: '--tail needs --fleet <id> (1-40 of A-Z a-z 0-9 . _ -)' };
+  return { ok: true, ref: tailRef(role, fleet) };
+}
+
+/**
+ * The default baton fence: `baton.mjs fence` for this role and state dir (exit 0 only while this session
+ * holds the baton with at least 60 s left, FENCE_MIN_REMAINING_MS). Resolves `{ held, reason }`, never
+ * throws; anything but exit 0 is "not held".
+ */
+export function createBatonFence({ role, repo, stateDir, session = '', execFileFn = execFileP, env = process.env } = {}) {
+  const batonScript = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'lib', 'lease', 'baton.mjs');
+  return async () => {
+    const args = [batonScript, 'fence', '--role', role, '--repo', repo, '--state-dir', stateDir];
+    if (session) args.push('--session', session);
+    try {
+      await execFileFn(process.execPath, args, { encoding: 'utf8', timeout: 30_000, env });
+      return { held: true };
+    } catch (e) {
+      const detail = String(e?.stdout || e?.message || e).trim().slice(0, 300);
+      return { held: false, reason: `baton fence refused (exit ${e?.code ?? '?'}): ${detail}` };
+    }
+  };
+}
+
+// The journal files a tail mirrors: the monsters' own `journal-YYYY-MM.jsonl` decision logs in their
+// state dir (merge-monster/maintenance-monster SKILL.md, "Write the ledger"). Nothing else in the state
+// dir is read.
+const JOURNAL_FILE_RE = /^journal-\d{4}-\d{2}\.jsonl$/;
+export const TAIL_MAX_EVENTS = 200;
+const TAIL_READ_BYTES = 256 * 1024;
+const JOURNAL_EVENT_RE = /^[a-z][a-z0-9_.:-]{0,39}$/;
+
+function readFileTail(file, maxBytes) {
+  const fd = fs.openSync(file, 'r');
+  try {
+    const { size } = fs.fstatSync(fd);
+    const len = Math.min(size, maxBytes);
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, size - len);
+    const text = buf.toString('utf8');
+    // A read that started mid-file drops its first (partial) line.
+    return size > maxBytes ? text.slice(text.indexOf('\n') + 1) : text;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/**
+ * The journal tail for `<role>/<fleet>`: the newest `max` lines of the state dir's journal files, as
+ * STRUCTURED `kind: journal` events only. A journal line is model-written text, so nothing free-form is
+ * carried: the event name (a short token, else the line is skipped), its timestamp, and a PR/issue
+ * number when the line names one. Symlinked or non-regular journal files are skipped. Never throws.
+ */
+export function journalTailEvents(stateDir, { role, fleet, repo, max = TAIL_MAX_EVENTS } = {}) {
+  let names;
+  try {
+    names = fs.readdirSync(stateDir).filter((n) => JOURNAL_FILE_RE.test(n)).sort().reverse();
+  } catch {
+    return [];
+  }
+  const events = [];
+  for (const name of names) {
+    if (events.length >= max) break;
+    const file = path.join(stateDir, name);
+    let lines;
+    try {
+      const st = fs.lstatSync(file);
+      if (!st.isFile()) continue; // a symlink (or anything else) is never followed
+      lines = readFileTail(file, TAIL_READ_BYTES).split('\n').filter((l) => l.trim());
+    } catch {
+      continue;
+    }
+    for (let i = lines.length - 1; i >= 0 && events.length < max; i--) {
+      const line = lines[i];
+      let rec;
+      try { rec = JSON.parse(line); } catch { continue; }
+      if (!rec || typeof rec !== 'object' || Array.isArray(rec)) continue;
+      const event = typeof rec.event === 'string' ? rec.event : '';
+      const tsMs = typeof rec.ts === 'string' ? Date.parse(rec.ts) : NaN;
+      if (!JOURNAL_EVENT_RE.test(event) || Number.isNaN(tsMs)) continue;
+      const num = [rec.pr, rec.number, rec.issue].find((n) => Number.isSafeInteger(n) && n > 0);
+      const digest = crypto.createHash('sha256').update(line).digest('hex').slice(0, 16);
+      events.push({
+        k: `journal:${role}/${fleet}:${digest}`,
+        kind: 'journal',
+        repo,
+        ...(num ? { number: num } : {}),
+        updated_at: new Date(tsMs).toISOString(),
+        outcome: 'none',
+        flags: [],
+        text: event,
+      });
+    }
+  }
+  return events.reverse();
+}
+
+// ---------------------------------------------------------------------------
 // §7.6 Sync Modes: --init, --delta, --publish
 // ---------------------------------------------------------------------------
 
@@ -1392,7 +1523,8 @@ export async function fetchRepoPrsAndIssues(
 }
 
 /**
- * Run a sync pass (`init`, `delta`, or `publish`).
+ * Run a sync pass (`init`, `delta`, `publish` or `tail`). `publish` and `tail` write a memory ref and are
+ * gated by `resolveWriteTarget` (who may write which ref) and, right before each ref update, the baton fence.
  */
 export async function runMemorySync({
   mode = 'delta',
@@ -1409,8 +1541,42 @@ export async function runMemorySync({
   deletedKeys = [],
   now = () => Date.now(),
   rebuildIndex = true,
+  // F5 writers (§9): the baton role and fleet this run writes as, the monster state dir and session the
+  // baton fence checks, and an injectable fence (default: `baton.mjs fence`). Read only by publish/tail.
+  role = '',
+  fleet = '',
+  stateDir = '',
+  session = '',
+  fence = null,
 } = {}) {
   const cfg = config || loadConfig(repoRoot);
+  // Who may write what is decided before anything is collected or fetched: a refused run writes nothing.
+  const target = resolveWriteTarget({ mode, role, fleet, ref, stateDir, repo, config: cfg });
+  if (!target.ok) {
+    return { ok: false, mode, refused: true, reason: target.reason, publishResult: null };
+  }
+  const writeGate = target.ref ? (fence || createBatonFence({ role, repo, stateDir, session })) : null;
+  const openStore = () => refStore || createMemoryRefStore({ repo, maxEvents: cfg.max_events || 20_000, now });
+  if (mode === 'tail') {
+    // A tail is this session's own journal, mirrored to its own ref: no GitHub fetch, and the shared
+    // delta.jsonl and cursors are left alone.
+    const tailEvents = journalTailEvents(stateDir, { role, fleet, repo });
+    const tailResult = await openStore().writeEvents({
+      ref: target.ref,
+      events: tailEvents,
+      message: `memory-sync: ${role}/${fleet} journal tail (${tailEvents.length})`,
+      cacheDir,
+      beforeCas: writeGate,
+    });
+    return {
+      ok: Boolean(tailResult.ok),
+      mode,
+      ref: target.ref,
+      tailCount: tailEvents.length,
+      ...(tailResult.error?.code === 'fence_refused' ? { skipped: 'baton_not_held' } : {}),
+      publishResult: tailResult,
+    };
+  }
   const cursors = readCursors(cacheDir);
   const repoCursor = cursors[repo || '_local'] || {};
   const isInit = mode === 'init';
@@ -1535,24 +1701,19 @@ export async function runMemorySync({
   // 6. Publish to refs/engsys/memory/* if mode === 'publish'
   let publishResult = null;
   if (mode === 'publish') {
-    const store =
-      refStore ||
-      createMemoryRefStore({
-        repo,
-        maxEvents: cfg.max_events || 20_000,
-        now,
-      });
-    publishResult = await store.writeEvents({
-      ref,
+    publishResult = await openStore().writeEvents({
+      ref: target.ref,
       events: mergedDelta,
       message: `memory-sync: publish ${mergedDelta.length} events`,
       cacheDir,
+      beforeCas: writeGate,
     });
   }
 
   return {
     ok: publishResult ? Boolean(publishResult.ok) : true,
     mode,
+    ...(publishResult?.error?.code === 'fence_refused' ? { skipped: 'baton_not_held' } : {}),
     collectedCount: collected.length,
     deltaCount: mergedDelta.length,
     sinceIso: hasGhRepo ? ghSinceIso : commitSinceIso,
@@ -1587,17 +1748,24 @@ export async function main(argv = process.argv.slice(2), { out = process.stdout,
       ref: { type: 'string', default: EVENTS_REF },
       role: { type: 'string', default: '' },
       fleet: { type: 'string', default: '' },
+      tail: { type: 'boolean', default: false },
+      'state-dir': { type: 'string', default: '' },
+      session: { type: 'string', default: '' },
     },
     strict: false,
   });
 
-  const mode = values.publish ? 'publish' : values.init ? 'init' : 'delta';
+  const modes = ['init', 'delta', 'publish', 'tail'].filter((m) => values[m]);
+  if (modes.length > 1) {
+    err.write(`memory-sync: pick one of --init, --delta, --publish, --tail (got ${modes.map((m) => `--${m}`).join(' ')})\n`);
+    return 2;
+  }
+  const mode = modes[0] || 'delta';
   const repoRoot = path.resolve(String(values['repo-root'] || process.cwd()));
   const cacheDir = values['cache-dir']
     ? path.resolve(String(values['cache-dir']))
     : resolveCacheDir(repoRoot);
-  const targetRef =
-    values.role && values.fleet ? tailRef(String(values.role), String(values.fleet)) : String(values.ref || EVENTS_REF);
+  const stateDir = values['state-dir'] ? path.resolve(String(values['state-dir'])) : '';
 
   try {
     const res = await runMemorySync({
@@ -1605,9 +1773,17 @@ export async function main(argv = process.argv.slice(2), { out = process.stdout,
       repo: String(values.repo || ''),
       repoRoot,
       cacheDir,
-      ref: targetRef,
+      ref: String(values.ref || EVENTS_REF),
+      role: String(values.role || ''),
+      fleet: String(values.fleet || ''),
+      stateDir,
+      session: String(values.session || ''),
     });
     out.write(JSON.stringify(res) + '\n');
+    if (res.refused) {
+      err.write(`memory-sync: refused: ${res.reason}\n`);
+      return 2;
+    }
     const warning = cappedWarning(res, String(values.repo || ''));
     if (warning) err.write(warning);
     return res.ok ? 0 : 1;

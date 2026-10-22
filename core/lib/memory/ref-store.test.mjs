@@ -100,6 +100,26 @@ describe('ref-store (#130)', () => {
     assert.deepEqual(r2.parents, [w1.sha]);
   });
 
+  it('beforeCas (F5): awaited before every ref update; a refusal or a throw moves nothing', async () => {
+    const fake = fakeGitApi({ repo: 'owner/repo' });
+    const store = createMemoryRefStore({ repo: 'owner/repo', client: fake, sleep: async () => {} });
+    const ev = { k: 'pr:owner/repo#1', kind: 'pr', updated_at: '2026-07-01T00:00:00Z' };
+    const seen = [];
+    const refused = await store.writeEvents({ events: [ev], beforeCas: async (ctx) => { seen.push(ctx); return { held: false, reason: 'lost' }; } });
+    assert.equal(refused.ok, false);
+    assert.deepEqual(refused.error, { code: 'fence_refused', detail: 'lost' });
+    assert.deepEqual(seen, [{ ref: EVENTS_REF, round: 0 }]);
+    assert.equal((await store.readEvents()).sha, null);
+    const threw = await store.writeEvents({ events: [ev], beforeCas: async () => { throw new Error('fence crashed'); } });
+    assert.equal(threw.error.code, 'fence_refused');
+    assert.equal((await store.readEvents()).sha, null, 'a crashing gate fails closed');
+    const falsy = await store.writeEvents({ events: [ev], beforeCas: async () => undefined });
+    assert.equal(falsy.error.code, 'fence_refused', 'a gate that returns nothing is a refusal');
+    const ok = await store.writeEvents({ events: [ev], beforeCas: async () => ({ held: true }) });
+    assert.equal(ok.ok, true);
+    assert.equal((await store.readEvents()).events.length, 1);
+  });
+
   it('retries on 422 CAS contention and merges both concurrent writers without losing events', async () => {
     const fake = fakeGitApi({ repo: 'owner/repo' });
 

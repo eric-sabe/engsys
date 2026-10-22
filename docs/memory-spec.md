@@ -220,8 +220,11 @@ Fold the text with `normalizeUntrusted()` first; the strip uses `\p{Default_Igno
 - `--init`: walk back by recency until any cap is reached: 500 commits, 250 merged PRs, 250 issues
   (plus their comments and threads, about 3–4k events in a busy repo).
 - `--delta`: since the cursors, into the local `delta.jsonl`. Needs no write access.
-- `--publish`: merge the delta into `refs/engsys/memory/events` via CAS. Run only by the single
-  writer (§9).
+- `--publish --role maintain --state-dir DIR [--session NAME]`: merge the delta into
+  `refs/engsys/memory/events` via CAS. Run only by the single writer (§9); refused for any other role.
+- `--tail --role merge|maintain --fleet ID --state-dir DIR [--session NAME]`: mirror this session's
+  journal tail to its own `refs/engsys/memory/<role>/<fleet>` (§9). No GitHub fetch; the delta and
+  cursors are left alone.
 
 ## 8. Harvest: `core/scripts/harvest-findings.mjs`
 
@@ -235,10 +238,33 @@ Fold the text with `normalizeUntrusted()` first; the strip uses `\p{Default_Igno
 
 ## 9. Multi-fleet
 
-- **Writers:** exactly one writer per ref.
-  - `refs/engsys/memory/events` is written by the holder of the `maintain` baton (or a configured
-    role).
-  - Each `<role>/<fleet>` tail is written only by that fleet's session for that role.
+- **Writers:** exactly one writer per ref (F5).
+  - `refs/engsys/memory/events` is written only by the holder of the `maintain` baton
+    (`memory-sync --publish --role maintain`, from `mnt-heartbeat.sh`). Merge never writes it:
+    `--publish` is refused for any other role, for an explicit `--ref` naming another ref, and while
+    config `publish_role` is anything but `maintain`.
+  - Each `<role>/<fleet>` tail is written only by that fleet's session for that role
+    (`memory-sync --tail`, from both heartbeats, with `FLEET_ID` as the fleet: 1–40 of
+    `A-Z a-z 0-9 . _ -`).
+  - **The baton fence gates every write.** `ref-store` `writeEvents({ beforeCas })` awaits
+    `baton.mjs fence` for the writer's role and session right before each ref update (each CAS
+    round, after the commit is built): the baton must still be held with ≥ 60 s left. A refusal moves
+    nothing (`fence_refused`, reported as `skipped: "baton_not_held"`); the delta waits for the next
+    holder. The window between fence and update is seconds, and a takeover needs the 10-minute TTL to
+    lapse; a write that still overlaps a new holder's is a CAS merge by key, never a clobber.
+  - Single-writer is a writer-side discipline, not a GitHub control: anyone with `contents: write`
+    can force-push these refs, so the boundary is what readers verify (below).
+- **Tail content:** only the state dir's `journal-YYYY-MM.jsonl` files (regular files; a symlink is
+  never followed), the newest 200 lines, as structured `kind: journal` events: the event token
+  (`^[a-z][a-z0-9_.:-]{0,39}$`, else the line is skipped), its timestamp and a PR/issue number. No
+  other journal field (actor, notes, free text) is carried.
+- **Heartbeats are skip-never-block:** a refused or failed write never fails a heartbeat, and
+  `ENGSYS_MEMORY_SYNC=0` turns every sync step off, writes included.
+- **Reader binding: open.** API-made commits are committed by `web-flow` (GitHub signs them), with
+  the bot only as the email-derived author, so `verifyMemoryRefTip`'s committer check can't bind a
+  tip to a fleet. How a reader binds `events` and `<role>/<fleet>` to a fleet is pending (F5,
+  ff-engsys-fleet#60); so is the consumer wiring (staged fetch). Until both land, no reader trusts
+  these refs (§3.1).
 - **Readers:** every fleet fetches every ref.
 - **Trust map:** derived from `federation.yml`. Each enabled fleet's `github_app` is resolved to its
   bot **user** ID; operators are resolved to numeric user IDs.
@@ -281,7 +307,7 @@ exclude_class_b_agents: []              # agent types that get Class A only (sec
 high_fanout_globs: []                   # files keyed by symbol instead of path
 brief_bytes: 2048
 max_events: 20000
-publish_role: maintain                  # which singleton publishes refs/engsys/memory/events
+publish_role: maintain                  # must stay maintain: any other value refuses --publish (§9)
 ```
 
 ### Commit operator trust, and the real boundary it rests on
