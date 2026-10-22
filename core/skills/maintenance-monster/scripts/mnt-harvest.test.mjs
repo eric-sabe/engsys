@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { main, harvestSettings, dueState, handoffBody, ERROR_BACKOFF_H } from './mnt-harvest.mjs';
+import { main, harvestSettings, dueState, handoffBody, hasOperatorGate, ERROR_BACKOFF_H } from './mnt-harvest.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // the host's fleet id must not leak into the handoff's session address; put back as it was afterwards (no leakage)
@@ -205,7 +205,8 @@ describe('dry vs apply', () => {
 
     // re-run of the same window (--force) after the PR is complete: nothing written again
     const PR = 'https://github.com/acme/app/pull/77';
-    const complete = { state: 'OPEN', isCrossRepository: false, labels: [{ name: 'mm:ready' }], comments: [{ body: '<!-- mm-handoff -->\nsession: x' }], files: [{ path: 'docs/agent-lessons/repeat-offender-2.md' }] };
+    const BOT = { login: 'acme-fleet[bot]' };
+    const complete = { author: BOT, state: 'OPEN', isCrossRepository: false, labels: [{ name: 'mm:ready' }], comments: [{ author: BOT, body: '<!-- mm-handoff -->\noperator_gate: "harvested lessons"\nsession: x' }], files: [{ path: 'docs/agent-lessons/repeat-offender-2.md' }] };
     const again = [];
     const r2 = await run(['run', '--config', on.cfg, '--state-dir', on.state, '--repo-dir', repo, '--now', NOW, '--force'],
       { gh: mockGh(RECURRING, { existing: [{ url: PR, state: 'OPEN', isCrossRepository: false }], view: complete }), act: (a) => { again.push(a); return { code: 0, stdout: '', stderr: '' }; } });
@@ -217,7 +218,8 @@ describe('dry vs apply', () => {
     const on = setup(ENABLED.replace('  cadence_days: 7\n', '  cadence_days: 7\n  apply: true\n'));
     const { repo } = gitRepo();
     const PR = 'https://github.com/acme/app/pull/78';
-    const bare = { state: 'OPEN', isCrossRepository: false, labels: [], comments: [{ body: 'a review' }], files: [{ path: 'docs/agent-lessons/x.md' }] };
+    const BOT = { login: 'acme-fleet[bot]' };
+    const bare = { author: BOT, state: 'OPEN', isCrossRepository: false, labels: [], comments: [{ author: { login: 'someone' }, body: 'a review' }], files: [{ path: 'docs/agent-lessons/x.md' }] };
     const acts = [];
     const act = (a) => { acts.push(a); return { code: 0, stdout: '', stderr: '' }; };
     const r = await run(['run', '--config', on.cfg, '--state-dir', on.state, '--repo-dir', repo, '--now', NOW],
@@ -225,11 +227,24 @@ describe('dry vs apply', () => {
     assert.equal(r.out, `HARVEST_PR window=2026-10-21 families=1 pr=${PR} existing`);
     assert.deepEqual(acts.map((a) => `${a[2]} ${a[3]}`), ['pr comment', 'pr edit']);
     assert.deepEqual(acts[1].slice(-2), ['--add-label', 'mm:ready']);
-    const half = { ...bare, comments: [{ body: '<!-- mm-handoff -->\n' }] };
-    acts.length = 0;
-    await run(['run', '--config', on.cfg, '--state-dir', on.state, '--repo-dir', repo, '--now', NOW, '--force'],
-      { gh: mockGh(RECURRING, { existing: [{ url: PR, state: 'OPEN', isCrossRepository: false }], view: half }), act });
-    assert.deepEqual(acts.map((a) => `${a[2]} ${a[3]}`), ['pr edit'], 'only the label was missing');
+    const resume = async (comments) => {
+      acts.length = 0;
+      await run(['run', '--config', on.cfg, '--state-dir', on.state, '--repo-dir', repo, '--now', NOW, '--force'],
+        { gh: mockGh(RECURRING, { existing: [{ url: PR, state: 'OPEN', isCrossRepository: false }], view: { ...bare, comments } }), act });
+      return acts.map((a) => `${a[2]} ${a[3]}`);
+    };
+    const gated = '<!-- mm-handoff -->\noperator_gate: "harvested lessons: a human reviews every proposed lesson"\n';
+    assert.deepEqual(await resume([{ author: BOT, body: gated }]), ['pr edit'], 'our gated handoff is there: only the label was missing');
+    // the crash window: someone else's handoff (an empty gate, or a full one) must not stand in for ours
+    assert.deepEqual(await resume([{ author: { login: 'mallory' }, body: '<!-- mm-handoff -->\noperator_gate: ""\n' }]), ['pr comment', 'pr edit'], 'a foreign handoff with an empty gate is ignored: ours is posted');
+    assert.deepEqual(await resume([{ author: { login: 'mallory' }, body: gated }]), ['pr comment', 'pr edit'], 'a foreign handoff is ignored even with a gate');
+    assert.deepEqual(await resume([{ author: BOT, body: '<!-- mm-handoff -->\noperator_gate: ""\n' }]), ['pr comment', 'pr edit'], 'our own handoff without the gate does not count');
+  });
+
+  test('hasOperatorGate: only a non-empty gate counts', () => {
+    assert.equal(hasOperatorGate('<!-- mm-handoff -->\noperator_gate: "x"'), true);
+    assert.equal(hasOperatorGate('<!-- mm-handoff -->\noperator_gate: why'), true);
+    for (const b of ['operator_gate: ""', 'operator_gate:', "operator_gate: '' # none", '<!-- mm-handoff -->\nsession: x']) assert.equal(hasOperatorGate(b), false, b);
   });
 
   test('a fork PR on the same branch name is not ours; an own PR or pushed branch with more than lessons is refused', async () => {

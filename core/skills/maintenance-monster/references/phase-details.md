@@ -562,7 +562,9 @@ decision, not something this session tunes.
 A refused fence stops the run there (`HARVEST_ERROR`), and nothing after it is attempted. A re-run in the same window
 looks the PR up by its branch, counting only a PR from this repo's own branch (a fork's PR with the same branch name is
 ignored), and checks that it changes nothing but `docs/agent-lessons/*.md`. It then completes only what is missing: the
-handoff comment when no `<!-- mm-handoff -->` comment is there, the `mm:ready` label when it is absent. A run that
+handoff comment unless the PR's author (this fleet's identity, which opened it) already posted an `<!-- mm-handoff -->`
+with a non-empty `operator_gate` (anyone else's handoff, or one without the gate, does not count), and the `mm:ready`
+label when it is absent. A run that
 stopped after the push reuses the pushed branch under the same check, and refuses one that changes anything else.
 Merge Monster takes it like any `mm:ready` hand-off: it pilots it to ready, and because the handoff's `operator_gate`
 is set, its gate check holds the merge until an operator approves the PR on GitHub. This session never merges it,

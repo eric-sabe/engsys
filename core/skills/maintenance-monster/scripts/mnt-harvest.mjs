@@ -116,6 +116,12 @@ export function docsOnly(files) {
   return files.length > 0 && files.every((f) => new RegExp(`^${LESSONS_DIR}/[^/]+\\.md$`).test(f));
 }
 
+/** true when an mm-handoff body sets a non-empty operator_gate */
+export function hasOperatorGate(body) {
+  const m = /^operator_gate:[ \t]*(.*)$/m.exec(String(body ?? ''));
+  return Boolean(m) && m[1].replace(/[ \t]#.*$/, '').trim().replace(/^(["'])(.*)\1$/, '$2').trim() !== '';
+}
+
 /** The handoff block Merge Monster reads (core/workflows/merge-monster-protocol.md § How to enqueue). */
 export function handoffBody({ session, window, files, fleetId = process.env.FLEET_ID ?? '' }) {
   const addr = session ? (fleetId && !session.includes(':') ? `${fleetId}:${session}` : session) : '';
@@ -148,11 +154,15 @@ export async function openHarvestPr(families, { repo, defaultBranch, session, wi
   const own = listed.filter((p) => p && p.isCrossRepository === false && /^https:\/\/\S+\/pull\/\d+$/.test(String(p.url)));
   if (own.length) {
     const prUrl = own[0].url;
-    const v = JSON.parse(await gh(['pr', 'view', prUrl, '-R', repo, '--json', 'state,isCrossRepository,labels,comments,files']));
+    const v = JSON.parse(await gh(['pr', 'view', prUrl, '-R', repo, '--json', 'author,state,isCrossRepository,labels,comments,files']));
     const files = (v.files ?? []).map((f) => f.path);
     if (v.isCrossRepository !== false || !docsOnly(files)) throw new Error(`${prUrl} is on ${branch} but is not this harvest's docs-only PR (files: ${files.slice(0, 5).join(', ') || 'none'}); not touching it`);
     if (v.state === 'OPEN') {
-      if (!(v.comments ?? []).some((c) => String(c.body ?? '').trimStart().startsWith('<!-- mm-handoff -->'))) {
+      // ours only: posted by the PR's author (this fleet's identity opened it) and still carrying the operator gate. A
+      // handoff anyone else posted in the window between the create and ours, or one without the gate, does not count.
+      const me = v.author?.login;
+      const ours = (c) => me && c?.author?.login === me && String(c.body ?? '').trimStart().startsWith('<!-- mm-handoff -->') && hasOperatorGate(c.body);
+      if (!(v.comments ?? []).some(ours)) {
         fs.writeFileSync(handoffFile, handoffBody({ session, window, files: files.length }));
         fenced(['--', 'gh', 'pr', 'comment', prUrl, '-R', repo, '--body-file', handoffFile], 'the handoff comment');
       }
