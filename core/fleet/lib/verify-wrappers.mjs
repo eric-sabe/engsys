@@ -38,7 +38,7 @@
 //                       [--fleet-config-dir]
 //                       [--allowed-user-plugins "<name@mkt> ..."] [--allowed-user-hooks "<sha256> ..."]
 //                       [--check-user-config --claude-json <file> --allowed-user-files "<sha256> ..."]
-//                       [--pin-repo <owner/repo>] [--operators-team <org/team>]
+//                       [--pin-repo <owner/repo>] [--operators-team <org/team>] [--memory-config <file> ...]
 //                       [--market-plugin "<plugin>@<marketplace>|<owner/repo>|<ref>" ...]
 //                       [--cache <file> --max-age-min <n>]
 //
@@ -58,6 +58,9 @@
 //   (numeric user ids) in operator_user_ids. The team is read with the pin checkout as the cwd (eric-sabe/engsys#257);
 //   a team that can't be read is "not verified". Like the release, a pass is reused from --cache while local files
 //   are unchanged, so a membership change shows within --max-age-min.
+// --memory-config (repeatable, engsys#230/#262): another memory.yml the sessions load (the fleet dir's, in per-session
+//   mode), held to the same rules as the one in --user-settings-dir: absent passes, present must be on
+//   --allowed-user-files (hashed as a config-dir memory.yml) and, with --operators-team, list exactly the team.
 // --fleet-config-dir (engsys#201): --user-settings-dir is a fleet config dir (not ~/.claude): warn when its settings.json
 //   doesn't switch the claude.ai skill/plugin sync off. Synced skills are never trusted by source (see userConfigItems).
 //
@@ -785,7 +788,7 @@ export function parentMemoryFiles(projectDir, home = os.homedir()) {
 export function checkSettingsDetailed({
   projectDir, userSettingsDir = '', pinSettingsSha = '', projectVerified = false,
   allowedUserPlugins = new Set(), allowedUserHooks = new Set(), home = os.homedir(),
-  claudeJson = '', allowedUserFiles = null, fleetConfigDir = false,
+  claudeJson = '', allowedUserFiles = null, fleetConfigDir = false, memoryConfigs = [],
 }) {
   const problems = [];
   const info = [];
@@ -943,6 +946,28 @@ export function checkSettingsDetailed({
   }
   if (allowedUserFiles) {
     for (const f of parentMemoryFiles(projectDir, home)) problems.push(`memory     ${f} is loaded into every session above the pin checkout; remove it`);
+    // engsys#230/#262: a memory.yml the sessions load from outside their own dir (the fleet dir's, in per-session mode)
+    const allowedF = allowedUserFiles instanceof Set ? allowedUserFiles : parseAllowedFiles(allowedUserFiles);
+    for (const f of memoryConfigs) {
+      if (userSettingsDir && path.resolve(f) === path.join(path.resolve(userSettingsDir), 'memory.yml')) continue; // checked above
+      let buf;
+      try {
+        if (!fs.statSync(f).isFile()) { problems.push(`user-cfg   ${f} is not a regular file`); continue; }
+        buf = fs.readFileSync(f);
+      } catch (e) {
+        if (e && e.code === 'ENOENT') {
+          let link = false;
+          try { link = fs.lstatSync(f).isSymbolicLink(); } catch { /* absent */ }
+          if (link) problems.push(`user-cfg   ${f} is a dangling link or unreadable`);
+          continue; // absent: no copy adds no trust
+        }
+        problems.push(`user-cfg   ${f} is a dangling link or unreadable`);
+        continue;
+      }
+      const hash = userFileHash('memory.yml', buf);
+      if (allowedF.has(hash)) info.push(`allowed    ${f} ${hash} (VERIFY_ALLOWED_USER_FILES)`);
+      else problems.push(`user-cfg   ${f} is not on VERIFY_ALLOWED_USER_FILES (sha256 ${hash}); ${MEMORY_YML_HINT}`);
+    }
   }
   return { problems: [...new Set(problems)], info: [...new Set(info)], warnings: [...new Set(warnings)] };
 }
@@ -1520,6 +1545,7 @@ export function parseArgs(argv) {
     allowedUserHooks: '',
     allowedUserFiles: '',
     operatorsTeam: '',
+    memoryConfigs: [],
     messagingSettings: '',
     claudeJson: '',
     checkUserConfig: false,
@@ -1548,6 +1574,12 @@ export function parseArgs(argv) {
       case '--allowed-user-hooks': a.allowedUserHooks = v(); break;
       case '--allowed-user-files': a.allowedUserFiles = v(); break;
       case '--operators-team': a.operatorsTeam = v(); break;
+      case '--memory-config': {
+        const f = v();
+        if (!path.isAbsolute(f) || path.basename(f) !== 'memory.yml') throw new Error('--memory-config must be an absolute path to a memory.yml');
+        a.memoryConfigs.push(f);
+        break;
+      }
       case '--claude-json': a.claudeJson = v(); break;
       case '--messaging-settings': a.messagingSettings = v(); break;
       case '--check-user-config': a.checkUserConfig = true; break;
@@ -1710,6 +1742,7 @@ export async function run(argv, {
       claudeJson: a.claudeJson,
       allowedUserFiles: a.checkUserConfig ? parseAllowedFiles(a.allowedUserFiles) : null,
       fleetConfigDir: a.fleetConfigDir,
+      memoryConfigs: a.memoryConfigs,
     });
     preProblems.push(...r.problems);
     info = r.info;
@@ -1718,17 +1751,23 @@ export async function run(argv, {
   }
   infoLines(info);
   // engsys#230: the memory.yml in the config dir lists the operators; the team is read after the cache, like the release
+  // (the one in the config dir, and in per-session mode the fleet dir's: --memory-config)
   let operators = null;
-  if (a.operatorsTeam && a.userSettingsDir) {
-    const file = path.join(a.userSettingsDir, 'memory.yml');
-    let text = null;
-    try { text = fs.readFileSync(file, 'utf8'); } catch (e) {
-      if (!e || (e.code !== 'ENOENT' && e.code !== 'EISDIR')) preProblems.push(`operators  ${file} can't be read (${e && e.code})`);
-    }
-    if (text !== null) {
+  if (a.operatorsTeam) {
+    const files = [...new Set([...(a.userSettingsDir ? [path.join(path.resolve(a.userSettingsDir), 'memory.yml')] : []), ...a.memoryConfigs.map((f) => path.resolve(f))])];
+    const lists = [];
+    for (const file of files) {
+      let text = null;
+      try { text = fs.readFileSync(file, 'utf8'); } catch (e) {
+        if (!e || (e.code !== 'ENOENT' && e.code !== 'EISDIR')) preProblems.push(`operators  ${file} can't be read (${e && e.code})`);
+      }
+      if (text === null) continue;
       const { ids, problem } = memoryOperatorIds(text);
       if (problem) preProblems.push(`operators  ${file} ${problem}, so it can't be compared with ${a.operatorsTeam}`);
-      else operators = { team: a.operatorsTeam, file, ids };
+      else lists.push({ file, ids });
+    }
+    if (lists.length) {
+      operators = { team: a.operatorsTeam, lists };
       const owner = (a.pinRepo || '').split('/')[0].toLowerCase();
       if (owner && owner !== a.operatorsTeam.split('/')[0].toLowerCase()) {
         warnLines([`the operators team ${a.operatorsTeam} is not in ${a.pinRepo}'s org; the gh shim may read it with the wrong App installation (eric-sabe/engsys#257)`]);
@@ -1759,7 +1798,7 @@ export async function run(argv, {
       && Array.isArray(c.warnings) && !c.warnings.some((w) => /^instance release /.test(w)) && sameJson(c.project ?? null, projectKey) && sameJson(c.info ?? [], info) && ageMin >= 0 && ageMin < a.maxAgeMin) {
       warnLines(Array.isArray(c.warnings) ? c.warnings : []);
       for (const mp of market) out(`verify: ok, ${countFiles(marketLocal[mp.id].local)} files of ${mp.id} in ${mp.roots.join(', ')} match ${mp.repo}@${mp.tag} (unchanged)`);
-      if (operators) out(`verify: ok, operator_user_ids in ${operators.file} match the members of ${operators.team} (unchanged since the check ${Math.floor(ageMin)}m ago)`);
+      if (operators) for (const l of operators.lists) out(`verify: ok, operator_user_ids in ${l.file} match the members of ${operators.team} (unchanged since the check ${Math.floor(ageMin)}m ago)`);
       out(`verify: ok, ${countFiles(local)} protected files in ${where} match ${target} (unchanged since the check ${Math.floor(ageMin)}m ago)`);
       return 0;
     }
@@ -1823,10 +1862,10 @@ export async function run(argv, {
   if (operators) {
     let members;
     try { members = await teamMembers({ team: operators.team, cwd: a.projectDir }); } catch (e) {
-      out(`verify: not verified: can't read the members of ${operators.team} to compare with operator_user_ids in ${operators.file}: ${e instanceof Unverified ? e.message : String(e && e.message || e)}`);
+      out(`verify: not verified: can't read the members of ${operators.team} to compare with operator_user_ids in ${operators.lists.map((l) => l.file).join(' and ')}: ${e instanceof Unverified ? e.message : String(e && e.message || e)}`);
       return 3;
     }
-    problems.push(...compareOperatorIds({ ...operators, listed: operators.ids, members }));
+    for (const l of operators.lists) problems.push(...compareOperatorIds({ file: l.file, team: operators.team, listed: l.ids, members }));
   }
   warnLines(warnings);
   if (problems.length) return mismatch(problems);
@@ -1837,7 +1876,7 @@ export async function run(argv, {
     }
   }
   for (const mp of market) out(`verify: ok, ${countFiles(marketLocal[mp.id].local)} files of ${mp.id} in ${mp.roots.join(', ')} match ${mp.repo}@${mp.tag} (${mp.subdir}/)`);
-  if (operators) out(`verify: ok, operator_user_ids in ${operators.file} match the ${operators.ids.length} member(s) of ${operators.team}`);
+  if (operators) for (const l of operators.lists) out(`verify: ok, operator_user_ids in ${l.file} match the ${l.ids.length} member(s) of ${operators.team}`);
   out(`verify: ok, ${countFiles(local)} protected files in ${where} match ${target} (commit ${rel.commit.slice(0, 12)}, on ${rel.defaultBranch})${project ? `; ${a.pinRepo} checkout ${project.head.slice(0, 12)} and its auto-loaded files (.claude/, CLAUDE.md, .mcp.json, command targets) match GitHub` : ''}`);
   return 0;
 }

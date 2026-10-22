@@ -984,6 +984,31 @@ printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\nFLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on\n
 run fleet verify --max-age 0 --session acme-mm
 rc_is "removed: passes" 0
 
+echo "…engsys#230/#262: the fleet dir's memory.yml (which the session loads) is checked with every session"
+printf 'operator_user_ids: [6666]\n' >"$PCFG/memory.yml"
+run fleet verify --max-age 0 --session acme-mm
+rc_is "a drifted base copy is drift for the session" 1
+has "…named" "$OUT" "$PCFG/memory.yml is not on VERIFY_ALLOWED_USER_FILES"
+cp "$REVIEWED_MEM" "$PCFG/memory.yml"
+printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\nFLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on\nVERIFY_ALLOWED_USER_FILES=%s\n' "$CONF0" "$PCFG" "$MH" >"$I/fleet/fleet.conf"
+run fleet verify --max-age 0 --session acme-mm
+rc_is "the reviewed base copy, allowlisted: passes" 0
+has "…reported as allowed" "$OUT" "allowed    $PCFG/memory.yml"
+printf 'version: 1\noperators_team: acme/fleet-operators\nfleets:\n  one:\n    operator: alice\n    host: h1\n    github_app: acme-fleet\n    status_issue: 5\n    enabled: true\n' >"$I/federation.yml"
+echo '[{"login":"alice","id":1001}]' >"$FAKE/team.json"; rm -f "$FAKE/gh-team.cwd"
+run fleet verify --max-age 0 --session acme-mm
+rc_is "its operator_user_ids match the team: passes" 0
+has "…compared" "$OUT" "operator_user_ids in $PCFG/memory.yml match the 1 member(s) of acme/fleet-operators"
+eq "…the team read from the pin checkout" "$(cat "$FAKE/gh-team.cwd" 2>/dev/null)" "$(cd "$APP" && pwd -P)"
+echo '[{"login":"alice","id":1001},{"login":"bob","id":1002}]' >"$FAKE/team.json"
+run fleet verify --max-age 0 --session acme-mm
+rc_is "a member missing from the base copy is drift for the session" 1
+has "…named" "$OUT" "$PCFG/memory.yml operator_user_ids differ from the members of acme/fleet-operators"
+rm -f "$PCFG/memory.yml" "$I/federation.yml" "$FAKE/team.json"
+printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\nFLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on\n' "$CONF0" "$PCFG" >"$I/fleet/fleet.conf"
+run fleet verify --max-age 0 --session acme-mm
+rc_is "no base copy: passes" 0
+
 echo "…the launch gate (no --max-age) still uses the CLI, though the session is running"
 : >"$FAKE/claude.calls"
 run fleet verify --session acme-mm

@@ -1599,7 +1599,9 @@ the **reviewed** copy (the one in your instance repo at its pinned tag), never a
 
 An absent `memory.yml` passes: no copy adds no trust. With one login per session, each
 `<FLEET_CLAUDE_CONFIG_DIR>.sessions/<name>` is checked the same way, so a copy there passes only if it is the
-reviewed one.
+reviewed one. The sessions load the fleet dir's `memory.yml` (`ENGSYS_MEMORY_CONFIG` on their launch line, engsys#262), so
+every `fleet verify --session <name>` also checks `<FLEET_CLAUDE_CONFIG_DIR>/memory.yml`, with the same rules: a
+drifted copy holds every session.
 
 When the federation file declares `operators_team`, the `operator_user_ids` in that `memory.yml` must be exactly
 the team's members (numeric user ids). Keep the team closed with no child teams: GitHub counts a child team's

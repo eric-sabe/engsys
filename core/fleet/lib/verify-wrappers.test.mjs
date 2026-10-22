@@ -1461,6 +1461,67 @@ test('--operators-team: memory.yml operator_user_ids must equal the team members
   await assert.rejects(fetchTeamMemberIds({ team: 'Acme/ops', cwd: proj, gh: ghStub }), (e) => e instanceof Unverified && e.httpStatus === 404);
 });
 
+test('--memory-config: the fleet dir\'s memory.yml a per-session monster loads gets the same pin and team check (engsys#230/#262)', async () => {
+  const { userFileHash } = await import('./verify-wrappers.mjs');
+  const root = makeCache();
+  const proj = tmp('verify-basemem-proj-');
+  const base = tmp('verify-basemem-fleet-');
+  const sess = path.join(`${base}.sessions`, 'acme-mm');
+  fs.mkdirSync(sess, { recursive: true });
+  fs.mkdirSync(path.join(proj, '.claude'));
+  fs.writeFileSync(path.join(proj, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { 'engsys@engsys': true } }));
+  const plugins = pluginList([userEntry(root)]);
+  const baseMem = path.join(base, 'memory.yml');
+  const reviewed = 'operator_user_ids: [1001, 1002]\n';
+  const pinHash = userFileHash('memory.yml', Buffer.from(reviewed));
+  let calls = 0;
+  const teamMembers = async () => { calls++; return ['1001', '1002']; };
+  const runWith = async (extra = []) => {
+    const c = capture();
+    const code = await run(['--repo', 'eric-sabe/engsys', '--tag', 'v9.9.9', '--plugin-id', 'engsys@engsys', '--project-dir', proj,
+      '--plugins', plugins, '--check-settings', '--user-settings-dir', sess, '--check-user-config', '--allowed-user-files', pinHash,
+      '--memory-config', baseMem, '--operators-team', 'acme/ops', ...extra], { fetch: async () => release, teamMembers, out: c.out });
+    return { code, text: c.text() };
+  };
+  let r = await runWith();
+  assert.equal(r.code, 0, `absent base copy and none in the session dir: passes\n${r.text}`);
+  assert.equal(calls, 0);
+
+  fs.writeFileSync(baseMem, reviewed);
+  r = await runWith();
+  assert.equal(r.code, 0, r.text);
+  assert.match(r.text, /^verify: info allowed {4}\S+verify-basemem-fleet-\w+\/memory\.yml [0-9a-f]{64} \(VERIFY_ALLOWED_USER_FILES\)$/m);
+  assert.match(r.text, /operator_user_ids in \S+verify-basemem-fleet-\w+\/memory\.yml match the 2 member\(s\) of acme\/ops/);
+  assert.equal(calls, 1);
+
+  fs.writeFileSync(baseMem, 'operator_user_ids: [1001, 1002, 6666]\n');
+  r = await runWith();
+  assert.equal(r.code, 1, 'a drifted base copy is drift for the session');
+  assert.match(r.text, /user-cfg {3}\S+verify-basemem-fleet-\w+\/memory\.yml is not on VERIFY_ALLOWED_USER_FILES \(sha256 [0-9a-f]{64}\); it holds the memory brief's trust lists/);
+  // allowlisted anyway (an operator listed the wrong hash): the team check still catches the added id
+  r = await runWith(['--allowed-user-files', `${pinHash} ${userFileHash('memory.yml', fs.readFileSync(baseMem))}`]);
+  assert.equal(r.code, 1);
+  assert.match(r.text, /operators  \S+verify-basemem-fleet-\w+\/memory\.yml operator_user_ids differ from the members of acme\/ops: listed but not a member: \[6666\]/);
+
+  // both copies present: both compared, one team read
+  fs.writeFileSync(baseMem, reviewed); fs.writeFileSync(path.join(sess, 'memory.yml'), reviewed);
+  calls = 0;
+  r = await runWith();
+  assert.equal(r.code, 0, r.text);
+  assert.equal((r.text.match(/operator_user_ids in .* match/g) || []).length, 2);
+  assert.equal(calls, 1);
+  fs.rmSync(path.join(sess, 'memory.yml'));
+
+  // a dangling link or a directory at the base name is not silently absent
+  fs.rmSync(baseMem); fs.symlinkSync(path.join(base, 'nowhere'), baseMem);
+  assert.match((await runWith()).text, /memory\.yml is a dangling link or unreadable/);
+  fs.rmSync(baseMem); fs.mkdirSync(baseMem);
+  assert.match((await runWith()).text, /memory\.yml is not a regular file/);
+  fs.rmSync(baseMem, { recursive: true });
+  // only an absolute path to a memory.yml
+  for (const bad of ['memory.yml', '/x/other.yml']) assert.equal((await runWith(['--memory-config', bad])).code, 2, bad);
+});
+
 test('synced claude.ai skills: grouped per bucket, never trusted by source, and the sync switch is checked (engsys#201)', async () => {
   const home = tmp('verify-synced-home-');
   const cfg = path.join(home, 'fleet-claude');
