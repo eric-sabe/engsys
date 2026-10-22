@@ -1163,7 +1163,7 @@ export function resolveWriteTarget({ mode, role = '', fleet = '', ref = '', stat
   if (!WRITER_ROLES.includes(role)) return { ok: false, reason: `--${mode} needs --role ${WRITER_ROLES.join('|')}` };
   if (!stateDir) return { ok: false, reason: `--${mode} needs --state-dir (the baton fence reads it)` };
   // Every write is signed as its fleet (signing.mjs), so both modes need the fleet id.
-  if (!FLEET_ID_RE.test(String(fleet || ''))) return { ok: false, reason: `--${mode} needs --fleet <id> (1-40 of A-Z a-z 0-9 . _ -)` };
+  if (!FLEET_ID_RE.test(String(fleet || ''))) return { ok: false, reason: `--${mode} needs --fleet <id> (1-40 of A-Z a-z 0-9 . _ -, no leading dot, no .., no .lock suffix)` };
   if (mode === 'publish') {
     if (ref && ref !== EVENTS_REF) return { ok: false, reason: `--publish writes only ${EVENTS_REF}; a tail ref is written by --tail` };
     if (role !== EVENTS_WRITER_ROLE) return { ok: false, reason: `only the ${EVENTS_WRITER_ROLE} baton holder publishes ${EVENTS_REF} (got --role ${role})` };
@@ -1203,10 +1203,14 @@ export const TAIL_MAX_EVENTS = 200;
 const TAIL_READ_BYTES = 256 * 1024;
 const JOURNAL_EVENT_RE = /^[a-z][a-z0-9_.:-]{0,39}$/;
 
+// Opened with O_NOFOLLOW and checked with fstat on the descriptor read from (as signing.mjs reads its key), so a
+// journal swapped for a symlink between the directory listing and the read can't redirect it. Throws otherwise.
 function readFileTail(file, maxBytes) {
-  const fd = fs.openSync(file, 'r');
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   try {
-    const { size } = fs.fstatSync(fd);
+    const st = fs.fstatSync(fd);
+    if (!st.isFile()) throw new Error(`${file} is not a regular file`);
+    const { size } = st;
     const len = Math.min(size, maxBytes);
     const buf = Buffer.alloc(len);
     fs.readSync(fd, buf, 0, len, size - len);
@@ -1237,8 +1241,7 @@ export function journalTailEvents(stateDir, { role, fleet, repo, max = TAIL_MAX_
     const file = path.join(stateDir, name);
     let lines;
     try {
-      const st = fs.lstatSync(file);
-      if (!st.isFile()) continue; // a symlink (or anything else) is never followed
+      // a symlink (or anything else) is never followed: readFileTail refuses it on the descriptor itself
       lines = readFileTail(file, TAIL_READ_BYTES).split('\n').filter((l) => l.trim());
     } catch {
       continue;

@@ -33,8 +33,12 @@ import { isMainEntry } from '../is-main.mjs';
 export const SIG_DOMAIN = 'engsys-memory-ref-sig';
 export const SIG_VERSION = 'v1';
 export const SIG_FILE = 'events.sig';
-export const FLEET_ID_RE = /^[A-Za-z0-9._-]{1,40}$/;
-const REF_RE = /^refs\/engsys\/memory\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)?$/;
+// A ref path segment (git check-ref-format rules, as validateMemoryRef applies them): no leading dot (so never `.`,
+// `..` or `.git`), no `..` anywhere, no `.lock` suffix. FLEET_ID_RE is one such segment, 1-40 characters.
+const SEGMENT_SRC = '(?!\\.)(?![A-Za-z0-9._-]*\\.\\.)(?![A-Za-z0-9._-]*\\.lock(?![A-Za-z0-9._-]))[A-Za-z0-9._-]';
+export const FLEET_ID_RE = new RegExp(`^${SEGMENT_SRC}{1,40}$`);
+export const REF_SEGMENT_RE = new RegExp(`^${SEGMENT_SRC}+$`);
+const REF_RE = new RegExp(`^refs/engsys/memory/${SEGMENT_SRC}+(?:/${SEGMENT_SRC}+)?$`);
 const PARENT_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64}|none)$/;
 const CONTENT_RE = /^[0-9a-f]{64}$/;
 const PUBKEY_RE = /^[A-Za-z0-9+/]{43}=$/;
@@ -165,14 +169,16 @@ export function parseSigLine(text) {
   const m = SIG_LINE_RE.exec(body);
   if (!m) return null;
   const [, fleet, ref, parent, content, sig] = m;
-  if (!REF_RE.test(ref) || !SIG_B64_RE.test(sig)) return null;
+  if (!FLEET_ID_RE.test(fleet) || !REF_RE.test(ref) || !SIG_B64_RE.test(sig)) return null;
   return { fleet, ref, parent, content, sig };
 }
 
 /** The fleet a tail ref names (`refs/engsys/memory/<role>/<fleet>`), or null for `events` / anything else. */
 export function tailRefFleet(ref) {
-  const m = /^refs\/engsys\/memory\/([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)$/.exec(String(ref ?? ''));
-  return m ? m[2] : null;
+  const r = String(ref ?? '');
+  if (!REF_RE.test(r)) return null;
+  const parts = r.slice('refs/engsys/memory/'.length).split('/');
+  return parts.length === 2 ? parts[1] : null;
 }
 
 /**

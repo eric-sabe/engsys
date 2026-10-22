@@ -42,6 +42,13 @@ describe('ref-store (#130)', () => {
     );
   });
 
+  it('tailRef refuses dot segments (Nyx LOW 1): no leading dot, no "..", no ".lock" suffix', () => {
+    assert.equal(tailRef('merge', 'eric'), 'refs/engsys/memory/merge/eric');
+    for (const [role, fleet] of [['merge', '.'], ['merge', '..'], ['merge', '.git'], ['.merge', 'eric'], ['merge', 'a..b'], ['merge', 'x.lock']]) {
+      assert.throws(() => tailRef(role, fleet), /invalid/, `${role}/${fleet}`);
+    }
+  });
+
   it('creates, reads, and updates refs/engsys/memory/events round-trip', async () => {
     const fake = fakeGitApi({ repo: 'owner/repo' });
     const store = createMemoryRefStore({

@@ -47,6 +47,9 @@ const NON_CONSUMER_RULES = {
 	'core/lib/lease/github-backend.mjs': {},
 	// `git show-ref` existence probe only; reads no content.
 	'core/fleet/lib/xray.mjs': {},
+	// F5 fleet signatures: names the ref shape only to validate the ref a signature covers (signingPayload,
+	// parseSigLine, tailRefFleet). It reads no ref; callers hand it content, and verifyMemoryRefTip is its consumer.
+	'core/lib/memory/signing.mjs': {},
 };
 
 // Files that consume ref CONTENT as trusted input. EMPTY today. A real entry needs a security

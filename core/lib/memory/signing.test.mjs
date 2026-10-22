@@ -8,6 +8,8 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   contentDigest,
+  FLEET_ID_RE,
+  tailRefFleet,
   generateSigningKeyFile,
   main,
   parsePublicKeyB64,
@@ -110,6 +112,27 @@ describe('sign / verify', () => {
     assert.throws(() => signingPayload({ fleet: 'eric', ref: TAIL, parent: 'HEAD', content: digest }));
     assert.throws(() => signingPayload({ fleet: 'eric', ref: TAIL, parent: PARENT, content: 'x' }));
     assert.match(signingPayload({ fleet: 'eric', ref: TAIL, parent: PARENT, content: digest }).toString(), /^engsys-memory-ref-sig\nv1\nfleet=eric\n/);
+  });
+});
+
+describe('fleet ids and ref segments (Nyx LOW 1)', () => {
+  it('a fleet id is one safe ref segment: no leading dot, no "..", no ".lock" suffix, 1-40 characters', () => {
+    for (const ok of ['eric', 'mark-fleet', 'a.b', 'x.lockfile', '_x', 'a'.repeat(40)]) assert.ok(FLEET_ID_RE.test(ok), ok);
+    for (const bad of ['', '.', '..', '.git', '.hidden', 'a..b', 'x.lock', 'a/b', 'a b', 'a'.repeat(41)]) assert.ok(!FLEET_ID_RE.test(bad), bad);
+  });
+
+  it('signingPayload, the signature line and tailRefFleet refuse dot segments in the ref and the fleet', () => {
+    const digest = contentDigest(CONTENT);
+    for (const ref of ['refs/engsys/memory/merge/..', 'refs/engsys/memory/./eric', 'refs/engsys/memory/merge/.git', 'refs/engsys/memory/merge/x.lock', 'refs/engsys/memory/a..b']) {
+      assert.throws(() => signingPayload({ fleet: 'eric', ref, parent: PARENT, content: digest }), /invalid ref/, ref);
+      assert.equal(tailRefFleet(ref), null, ref);
+    }
+    for (const fleet of ['.', '..', '.git', 'x.lock']) assert.throws(() => signingPayload({ fleet, ref: TAIL, parent: PARENT, content: digest }), /invalid fleet/, fleet);
+    const good = signTip({ privateKey: ERIC.privateKey, fleet: 'eric', ref: TAIL, parent: PARENT, content: CONTENT });
+    assert.equal(parseSigLine(good.replace('fleet=eric', 'fleet=..')), null);
+    assert.equal(parseSigLine(good.replace('fleet=eric', 'fleet=.git')), null);
+    assert.equal(parseSigLine(good.replace(`ref=${TAIL}`, 'ref=refs/engsys/memory/merge/..')), null);
+    assert.equal(resolveFleetPubkeys({ fleet_memory_pubkeys: { '.git': ERIC.pub, '..': ERIC.pub } }).size, 0);
   });
 });
 

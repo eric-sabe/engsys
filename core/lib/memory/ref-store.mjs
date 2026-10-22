@@ -20,7 +20,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createGitDataClient } from '../lease/github-backend.mjs';
 import { resolveReviewedSha } from './index-db.mjs';
-import { verifyTipSignature } from './signing.mjs';
+import { REF_SEGMENT_RE, verifyTipSignature } from './signing.mjs';
 
 export const EVENTS_REF = 'refs/engsys/memory/events';
 export const MEMORY_REF_PREFIX = 'refs/engsys/memory/';
@@ -43,7 +43,8 @@ export const MEMORY_FETCH_REFSPEC = 'refs/engsys/memory/*:refs/engsys/memory/*';
 export const DEFAULT_MAX_EVENTS = 20_000;
 export const DEFAULT_TOMBSTONE_TTL_DAYS = 180;
 
-const SAFE_SEGMENT_RE = /^[A-Za-z0-9._-]+$/;
+// One ref path segment: the same rule signing.mjs signs over (no leading dot, no `..`, no `.lock` suffix).
+const SAFE_SEGMENT_RE = REF_SEGMENT_RE;
 
 /**
  * Build the per-worker tail ref `refs/engsys/memory/<role>/<fleet-id>`.

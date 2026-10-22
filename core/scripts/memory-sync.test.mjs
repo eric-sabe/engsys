@@ -1149,6 +1149,11 @@ describe('memory-sync writers: role split and the baton fence (F5)', () => {
       [{ mode: 'tail', role: 'merge', fleet: '' }, /needs --fleet/],
       [{ mode: 'tail', role: 'merge', fleet: '../x' }, /needs --fleet/],
       [{ mode: 'tail', role: 'merge', fleet: 'x'.repeat(41) }, /needs --fleet/],
+      [{ mode: 'tail', role: 'merge', fleet: '.' }, /needs --fleet/],
+      [{ mode: 'tail', role: 'merge', fleet: '..' }, /needs --fleet/],
+      [{ mode: 'tail', role: 'merge', fleet: '.git' }, /needs --fleet/],
+      [{ mode: 'tail', role: 'merge', fleet: 'x.lock' }, /needs --fleet/],
+      [{ mode: 'publish', role: 'maintain', fleet: '..' }, /needs --fleet/],
       [{ mode: 'tail', role: 'merge', fleet: 'eric', ref: 'refs/engsys/memory/maintain/eric' }, /takes no --ref/],
       [{ mode: 'tail', role: 'ops', fleet: 'eric' }, /needs --role/],
     ];
@@ -1235,8 +1240,9 @@ describe('memory-sync writers: role split and the baton fence (F5)', () => {
       fs.writeFileSync(path.join(outside, 'secret.jsonl'), JSON.stringify({ ts: '2026-07-02T00:00:00Z', event: 'via_symlink' }) + '\n');
       fs.symlinkSync(path.join(outside, 'secret.jsonl'), path.join(dir, 'journal-2026-08.jsonl'));
 
+      fs.mkdirSync(path.join(dir, 'journal-2026-05.jsonl')); // a directory named like a journal: fstat refuses it
       const evs = journalTailEvents(dir, { role: 'merge', fleet: 'eric', repo: 'owner/repo' });
-      assert.deepEqual(evs.map((e) => e.text), ['gate_approved', 'merged', 'bounced'], 'oldest first; invalid lines, other files and the symlink skipped');
+      assert.deepEqual(evs.map((e) => e.text), ['gate_approved', 'merged', 'bounced'], 'oldest first; invalid lines, other files, the directory and the symlink (refused at open, O_NOFOLLOW) skipped');
       assert.deepEqual(evs.map((e) => e.number ?? null), [7, 8, 9]);
       for (const e of evs) {
         assert.deepEqual(Object.keys(e).sort(), ['flags', 'k', 'kind', 'number', 'outcome', 'repo', 'text', 'updated_at'], 'structured fields only: no actor, note or other free text');
