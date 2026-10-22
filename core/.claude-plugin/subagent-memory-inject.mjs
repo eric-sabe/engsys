@@ -212,7 +212,11 @@ export function consumePendingDispatch(input, { cwd, now = () => Date.now() } = 
 			return live(parsed) ? { ...parsed, matchedBy } : null;
 		};
 
-		const startName = startAgent ? safeIdToken(startAgent) : null;
+		// A teammate start reports its bare teammate name; a real typed start reports a namespaced type
+		// (`engsys:nyx`). Only a bare start may match by name: otherwise a teammate named `engsys:nyx` (or
+		// `engsys_nyx`, which safeIdToken produces from it) would capture the real Nyx start, which would then
+		// adopt that teammate's dispatched type and lose Nyx's Class B exclusion (#262 re-review).
+		const startName = startAgent && !startAgent.includes(':') ? safeIdToken(startAgent) : null;
 		if (startName) {
 			const byName = sessionFiles
 				.map((f) => ({ f, parsed: read(f) }))

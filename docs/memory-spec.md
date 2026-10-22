@@ -350,7 +350,9 @@ is just the fleet config (if any) over the defaults.
   as `agent_type` (e.g. `bert-p2`), not the dispatched `subagent_type`. The PreToolUse record keeps
   both. SubagentStart matches by teammate name first (adopting the recorded `subagent_type` for
   lesson roles and the Class B exclusion), then by type; a start that matches neither gets no
-  record, never another parallel dispatch's (engsys#262).
+  record, never another parallel dispatch's (engsys#262). Only a bare (un-namespaced) start matches by
+  name: a real typed start such as `engsys:nyx` never does, so a teammate named `engsys:nyx` can't make the
+  real Nyx adopt its type and lose the Class B exclusion.
 - `node:sqlite` with FTS5 and `bm25()` works on Node 22.22.3 (SQLite 3.51.3).
 - A naive in-place SQLite rebuild by concurrent processes fails (`database is locked`) and duplicates
   rows. Temp file + rename is safe.

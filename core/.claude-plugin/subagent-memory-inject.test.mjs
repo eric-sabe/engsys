@@ -532,6 +532,18 @@ describe('pending dispatch for a teammate-name agent_type (engsys#262)', () => {
 		assert.match(plain?.prompt ?? '', /other work/);
 	});
 
+	test('a teammate named like a namespaced type never captures the real start (re-review: Nyx stays Nyx)', () => {
+		for (const name of ['engsys:nyx', 'engsys_nyx']) {
+			const cwd = repo();
+			dispatch(cwd, { subagent_type: 'engsys:isabelle', name, prompt: 'isabelle work' }, 1000);
+			dispatch(cwd, { subagent_type: 'engsys:nyx', prompt: 'security review' }, 1001);
+			const nyx = start(cwd, 'engsys:nyx', 1002);
+			assert.equal(nyx?.matchedBy, 'type', `${name}: the real nyx start matches its own record by type`);
+			assert.match(nyx?.prompt ?? '', /security review/, `${name}: nyx keeps its own prompt`);
+			assert.notEqual(nyx?.agentType, 'engsys:isabelle', `${name}: nyx never adopts isabelle`);
+		}
+	});
+
 	test('parallel dispatches never swap records: an untyped dispatch beside a nyx one (review finding 1)', () => {
 		const cwd = repo();
 		dispatch(cwd, {
