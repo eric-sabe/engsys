@@ -279,7 +279,7 @@ prompt for it.
 
 The monster can run the review-finding harvester (`core/scripts/harvest-findings.mjs`, [memory-spec.md](memory-spec.md)
 §8) on a cadence: the `findings_harvest:` config block (`enabled`, `cadence_days`, `lookback_days`, `apply`, `repo`,
-`markers`, `min_recurrence`, `trusted_bot_ids`, `operator_ids`). `mnt-tick.sh` raises `HARVEST_DUE` once a window is
+`markers`, `min_recurrence`). `mnt-tick.sh` raises `HARVEST_DUE` once a window is
 due (read-only, no network); `mnt-harvest.sh run` mines the window, latches it in `<state_dir>/harvest/last.json`, and:
 
 - without `apply`, keeps the proposal in the state dir;
@@ -289,8 +289,10 @@ due (read-only, no network); `mnt-harvest.sh run` mines the window, latches it i
   reviewing every lesson.
 
 It is the one PR the monster may open in `phase: read_only`, authorized by `apply: true` alone, and it is never tied to
-a finding of the watch surface. The trust lists come from `memory.yml` plus the block's own ids; the harvester refuses
-to run without one. Harvested titles stay untrusted text. Details: the skill's references § Findings harvest.
+a finding of the watch surface. The trust lists come only from `memory.yml` (a trust key in the block is a config
+error); the harvester refuses to run without one. Harvested titles stay untrusted text. A family is the file plus the
+title's first tokens in 2+ PRs, which review findings rarely repeat, so with the default settings it usually proposes
+nothing; tuning that is a later operator decision. Details: the skill's references § Findings harvest.
 
 ## Expert routing
 

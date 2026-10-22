@@ -529,7 +529,8 @@ function slugify(s) {
  * disk/branch (e.g. a previous harvest's proposal that hasn't merged yet).
  */
 export function uniqueSlugs(families, existingSlugs = new Set()) {
-	const used = new Set(existingSlugs);
+	// case-insensitive: on a case-insensitive filesystem (APFS, NTFS) `Foo.md` and `foo.md` are one file
+	const used = new Set([...existingSlugs].map((x) => String(x).toLowerCase()));
 	const bySlug = new Map();
 	for (const fam of families) {
 		const base = slugify(fam.title || fam.key);
@@ -542,9 +543,23 @@ export function uniqueSlugs(families, existingSlugs = new Set()) {
 	return bySlug;
 }
 
+/**
+ * Harvested text going into a lesson file or the PR body, on one line: control and format characters and newlines out
+ * (sanitizeTitle), and every @mention broken with a zero-width space so a proposal never pings anyone.
+ */
+export function inlineSafe(text) {
+	return sanitizeTitle(text).replace(/@(?=[A-Za-z0-9_-])/g, '@\u200b');
+}
+
+/** A code fence longer than any backtick run in `content`, so the content can never close it early. */
+export function fenceFor(content) {
+	const longest = Math.max(0, ...[...String(content).matchAll(/`+/g)].map((m) => m[0].length));
+	return '`'.repeat(Math.max(3, longest + 1));
+}
+
 /** Render ONE proposed lesson file's content, schema-conformant with E10's frontmatter (docs/memory-spec.md §2). */
 export function renderLessonProposal(family) {
-	const title = family.title || family.key;
+	const title = inlineSafe(family.title || family.key);
 	const keywords = titleTokens(title).slice(0, 6);
 	const fm = [
 		'---',
@@ -557,7 +572,7 @@ export function renderLessonProposal(family) {
 		'---',
 		'',
 	].join('\n');
-	const examples = family.examples.map((e) => `- ${e.finding.file}${e.finding.line ? `:${e.finding.line}` : ''} (PR ${e.prNumber ?? e.source}${e.url ? `, ${e.url}` : ''})`).join('\n');
+	const examples = family.examples.map((e) => `- ${inlineSafe(e.finding.file)}${e.finding.line ? `:${inlineSafe(e.finding.line)}` : ''} (PR ${inlineSafe(e.prNumber ?? e.source)}${e.url ? `, ${inlineSafe(e.url)}` : ''})`).join('\n');
 	return [
 		fm,
 		`# ${title}`,
@@ -586,10 +601,12 @@ export function renderProposal(families, { repo = null, slugs = null } = {}) {
 	const slugOf = slugs ?? uniqueSlugs(families);
 	const lines = [`# Review-finding harvest${repo ? ` — ${repo}` : ''}`, '', `${families.length} recurring famil${families.length === 1 ? 'y' : 'ies'} found.`, ''];
 	for (const fam of families) {
-		lines.push(`## ${fam.title || fam.key} (${fam.distinctSources}x, ${fam.unresolvedCount} unresolved)`);
+		lines.push(`## ${inlineSafe(fam.title || fam.key)} (${fam.distinctSources}x, ${fam.unresolvedCount} unresolved)`);
 		lines.push('', '_(heading above is untrusted harvested text from PR/review comments — verify before trusting)_', '');
 		lines.push('', `Proposed: \`docs/agent-lessons/${slugOf.get(fam)}.md\` (or promote to the engsys lessons-library if it generalizes).`, '');
-		lines.push('<details><summary>Proposed lesson file</summary>', '', '```markdown', renderLessonProposal(fam).trimEnd(), '```', '</details>', '');
+		const lesson = renderLessonProposal(fam).trimEnd();
+		const fence = fenceFor(lesson);
+		lines.push('<details><summary>Proposed lesson file</summary>', '', `${fence}markdown`, lesson, fence, '</details>', '');
 	}
 	return lines.join('\n');
 }

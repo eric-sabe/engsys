@@ -2,7 +2,7 @@
 // cadence + window latch + error back-off, dry vs apply, and the shape of the draft PR hand-off. No network: gh is a mock,
 // every fenced write goes to a recording `act`, and git runs against a local bare "origin".
 // Run: node --test core/skills/maintenance-monster/scripts/mnt-harvest.test.mjs
-import { test, describe } from 'node:test';
+import { test, describe, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -12,7 +12,10 @@ import { fileURLToPath } from 'node:url';
 import { main, harvestSettings, dueState, handoffBody, ERROR_BACKOFF_H } from './mnt-harvest.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-delete process.env.FLEET_ID; // the host's fleet id must not leak into the handoff's session address
+// the host's fleet id must not leak into the handoff's session address; put back as it was afterwards (no leakage)
+const SAVED_FLEET_ID = process.env.FLEET_ID;
+delete process.env.FLEET_ID;
+after(() => { if (SAVED_FLEET_ID === undefined) delete process.env.FLEET_ID; else process.env.FLEET_ID = SAVED_FLEET_ID; });
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'mnt-harvest-'));
 const NOW = '2026-10-21T12:00:00Z';
 const at = (days, hours = 0) => new Date(Date.parse(NOW) + days * 86_400_000 + hours * 3_600_000).toISOString();
@@ -23,15 +26,16 @@ function setup(block = '') {
   fs.writeFileSync(path.join(d, 'cfg.yml'), BASE + block);
   return { dir: d, cfg: path.join(d, 'cfg.yml'), state: path.join(d, 'state') };
 }
-const ENABLED = 'findings_harvest:\n  enabled: true\n  cadence_days: 7\n  markers: ["<!-- cr-cli-findings -->"]\n  trusted_bot_ids: [42]\n';
+const ENABLED = 'findings_harvest:\n  enabled: true\n  cadence_days: 7\n  markers: ["<!-- cr-cli-findings -->"]\n';
 
 const MARKER = '<!-- cr-cli-findings -->';
 const finding = (title) => ({ login: 'trusted-bot', id: 42, body: `${MARKER}\n\`\`\`json\n${JSON.stringify({ findings: [{ file: 'a.ts', title, severity: 'warning', line: 3 }] })}\n\`\`\`\n` });
 /** gh mock: the harvester's read shape (pr list/view, REST comments) plus the existing-PR lookup by --head. */
-function mockGh(prs, { existing = [], calls = [] } = {}) {
+function mockGh(prs, { existing = [], view = null, calls = [] } = {}) {
   return async (args) => {
     calls.push(args);
     if (args[0] === 'pr' && args[1] === 'list' && args.includes('--head')) return JSON.stringify(existing);
+    if (args[0] === 'pr' && args[1] === 'view' && String(args[2]).startsWith('https://')) return JSON.stringify(view);
     if (args[0] === 'pr' && args[1] === 'list') return JSON.stringify(Object.keys(prs).map((n) => ({ number: Number(n) })));
     if (args[0] === 'pr' && args[1] === 'view') return JSON.stringify({ number: Number(args[2]), title: 't', url: 'u' });
     if (args[0] === 'api') {
@@ -42,12 +46,14 @@ function mockGh(prs, { existing = [], calls = [] } = {}) {
   };
 }
 const RECURRING = { 1: { comments: [finding('repeat offender')] }, 2: { comments: [finding('repeat offender')] } };
+// trust comes only from memory.yml: the loader is mocked with the trusted bot
+const memory = () => ({ trusted_bot_user_ids: [42] });
 const noMemory = () => ({});
 
 async function run(argv, deps = {}) {
   const lines = [];
   const errs = [];
-  const code = await main(argv, { out: (s) => lines.push(s), err: (s) => errs.push(s), loadConfig: noMemory, ...deps });
+  const code = await main(argv, { out: (s) => lines.push(s), err: (s) => errs.push(s), loadConfig: memory, ...deps });
   return { code, out: lines.join('\n'), err: errs.join('\n') };
 }
 
@@ -60,7 +66,15 @@ describe('settings', () => {
     const s = harvestSettings(BASE + ENABLED);
     assert.deepEqual([s.cadenceDays, s.lookbackDays, s.apply, s.repo, s.session, s.minRecurrence], [7, 7, false, 'acme/app', 'acme-maintain', 2]);
     assert.deepEqual(s.markers, [MARKER]);
-    assert.deepEqual(s.trustedBotIds, [42]);
+  });
+  test('trust lists in the monster config are refused, naming the key: trust comes only from memory.yml', async () => {
+    for (const k of ['trusted_bot_ids', 'operator_ids']) {
+      assert.throws(() => harvestSettings(`${BASE}findings_harvest:\n  enabled: true\n  ${k}: [42]\n`), new RegExp(`findings_harvest.${k} is not supported`));
+      const c = setup(`findings_harvest:\n  enabled: true\n  ${k}: [42]\n`);
+      const r = await run(['due', '--config', c.cfg, '--state-dir', c.state, '--now', NOW]);
+      assert.equal(r.code, 2);
+      assert.match(r.err, new RegExp(k));
+    }
   });
   test('malformed values and unknown keys are config errors, never guesses', () => {
     for (const bad of ['  cadence_days: 0\n', '  cadence_days: "weekly"\n', '  min_recurrence: 1\n', '  enabled: true\n  aply: true\n']) {
@@ -108,7 +122,7 @@ describe('cadence and the window latch', () => {
 
   test('no trust allowlist anywhere: the harvester refuses, reported as HARVEST_ERROR', async () => {
     const on = setup('findings_harvest:\n  enabled: true\n');
-    const r = await run(['run', '--config', on.cfg, '--state-dir', on.state, '--now', NOW], { gh: mockGh(RECURRING) });
+    const r = await run(['run', '--config', on.cfg, '--state-dir', on.state, '--now', NOW], { gh: mockGh(RECURRING), loadConfig: noMemory });
     assert.equal(r.code, 3);
     assert.match(r.out, /no trust allowlist/);
   });
@@ -132,16 +146,23 @@ describe('dry vs apply', () => {
     assert.equal(JSON.parse(fs.readFileSync(path.join(on.state, 'harvest', 'last.json'), 'utf8')).result, 'dry');
   });
 
+  // A local bare origin and a clone, set up like a husky repo: core.hooksPath=.husky and a pre-commit that fails (its
+  // untracked .husky/_ setup is missing, as in a throwaway worktree). The identity is repo config, not process.env.
+  // The existing lesson is Repeat-Offender.md: a new repeat-offender.md would be the same file on APFS.
   function gitRepo() {
     const d = tmp();
     const origin = path.join(d, 'origin.git');
     const repo = path.join(d, 'repo');
-    const g = (cwd, ...a) => execFileSync('git', a, { cwd, stdio: 'pipe', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@x', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@x' } }).toString();
+    const g = (cwd, ...a) => execFileSync('git', a, { cwd, stdio: 'pipe' }).toString();
     g(d, 'init', '-q', '--bare', '-b', 'main', origin);
     g(d, 'clone', '-q', origin, repo);
+    g(repo, 'config', 'user.name', 't'); g(repo, 'config', 'user.email', 't@x');
     fs.mkdirSync(path.join(repo, 'docs', 'agent-lessons'), { recursive: true });
-    fs.writeFileSync(path.join(repo, 'docs', 'agent-lessons', 'repeat-offender.md'), 'existing\n');
+    fs.writeFileSync(path.join(repo, 'docs', 'agent-lessons', 'Repeat-Offender.md'), 'existing\n');
     g(repo, 'add', '-A'); g(repo, 'commit', '-q', '-m', 'init'); g(repo, 'push', '-q', 'origin', 'HEAD:main');
+    fs.mkdirSync(path.join(repo, '.husky'));
+    fs.writeFileSync(path.join(repo, '.husky', 'pre-commit'), '#!/bin/sh\n. "$(dirname "$0")/_/husky.sh"\n', { mode: 0o755 });
+    g(repo, 'config', 'core.hooksPath', '.husky');
     return { origin, repo, g };
   }
 
@@ -157,8 +178,7 @@ describe('dry vs apply', () => {
       if (a[2] === 'pr' && a[3] === 'create') acts.body = fs.readFileSync(a[a.indexOf('--body-file') + 1], 'utf8');
       return { code: 0, stdout: '', stderr: '' };
     };
-    const env = { GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@x', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@x' };
-    Object.assign(process.env, env);
+    assert.throws(() => g(repo, 'commit', '--allow-empty', '-q', '-m', 'probe'), 'positive control: the repo\'s pre-commit hook fails a normal commit');
     const r = await run(['run', '--config', on.cfg, '--state-dir', on.state, '--repo-dir', repo, '--now', NOW], { gh: mockGh(RECURRING), act });
     assert.equal(r.code, 0, r.out + r.err);
     assert.equal(r.out, 'HARVEST_PR window=2026-10-21 families=1 pr=https://github.com/acme/app/pull/77');
@@ -175,20 +195,77 @@ describe('dry vs apply', () => {
     assert.match(acts.handoff, /migration: false/);
     // docs only, on the pushed branch, beside (never over) an existing lesson; the default branch untouched
     const files = g(repo, 'ls-tree', '-r', '--name-only', 'origin/main').split('\n').filter(Boolean);
-    assert.deepEqual(files, ['docs/agent-lessons/repeat-offender.md']);
+    assert.deepEqual(files, ['docs/agent-lessons/Repeat-Offender.md']);
     const changed = execFileSync('git', ['--git-dir', origin, 'diff', '--name-only', 'main', 'agent/memory-harvest-2026-10-21']).toString().trim().split('\n');
-    assert.deepEqual(changed, ['docs/agent-lessons/repeat-offender-2.md']);
-    assert.equal(execFileSync('git', ['--git-dir', origin, 'show', 'main:docs/agent-lessons/repeat-offender.md']).toString(), 'existing\n');
+    assert.deepEqual(changed, ['docs/agent-lessons/repeat-offender-2.md'], 'case-insensitive slug check: never the existing file under another case');
+    assert.equal(execFileSync('git', ['--git-dir', origin, 'show', 'main:docs/agent-lessons/Repeat-Offender.md']).toString(), 'existing\n');
     assert.equal(g(repo, 'worktree', 'list').trim().split('\n').length, 1, 'the worktree is removed');
     assert.equal(JSON.parse(fs.readFileSync(path.join(on.state, 'harvest', 'last.json'), 'utf8')).pr, 'https://github.com/acme/app/pull/77');
     assert.equal((await run(['due', '--config', on.cfg, '--state-dir', on.state, '--now', at(1)])).out, '', 'one PR per window');
 
-    // re-run of the same window (--force) after the PR exists: nothing written again
+    // re-run of the same window (--force) after the PR is complete: nothing written again
+    const PR = 'https://github.com/acme/app/pull/77';
+    const complete = { state: 'OPEN', isCrossRepository: false, labels: [{ name: 'mm:ready' }], comments: [{ body: '<!-- mm-handoff -->\nsession: x' }], files: [{ path: 'docs/agent-lessons/repeat-offender-2.md' }] };
     const again = [];
     const r2 = await run(['run', '--config', on.cfg, '--state-dir', on.state, '--repo-dir', repo, '--now', NOW, '--force'],
-      { gh: mockGh(RECURRING, { existing: [{ url: 'https://github.com/acme/app/pull/77', state: 'OPEN' }] }), act: (a) => { again.push(a); return { code: 0, stdout: '', stderr: '' }; } });
-    assert.equal(r2.out, 'HARVEST_PR window=2026-10-21 families=1 pr=https://github.com/acme/app/pull/77 existing');
+      { gh: mockGh(RECURRING, { existing: [{ url: PR, state: 'OPEN', isCrossRepository: false }], view: complete }), act: (a) => { again.push(a); return { code: 0, stdout: '', stderr: '' }; } });
+    assert.equal(r2.out, `HARVEST_PR window=2026-10-21 families=1 pr=${PR} existing`);
     assert.equal(again.length, 0);
+  });
+
+  test('resume after gh pr create: the missing handoff and label are completed, each once', async () => {
+    const on = setup(ENABLED.replace('  cadence_days: 7\n', '  cadence_days: 7\n  apply: true\n'));
+    const { repo } = gitRepo();
+    const PR = 'https://github.com/acme/app/pull/78';
+    const bare = { state: 'OPEN', isCrossRepository: false, labels: [], comments: [{ body: 'a review' }], files: [{ path: 'docs/agent-lessons/x.md' }] };
+    const acts = [];
+    const act = (a) => { acts.push(a); return { code: 0, stdout: '', stderr: '' }; };
+    const r = await run(['run', '--config', on.cfg, '--state-dir', on.state, '--repo-dir', repo, '--now', NOW],
+      { gh: mockGh(RECURRING, { existing: [{ url: PR, state: 'OPEN', isCrossRepository: false }], view: bare }), act });
+    assert.equal(r.out, `HARVEST_PR window=2026-10-21 families=1 pr=${PR} existing`);
+    assert.deepEqual(acts.map((a) => `${a[2]} ${a[3]}`), ['pr comment', 'pr edit']);
+    assert.deepEqual(acts[1].slice(-2), ['--add-label', 'mm:ready']);
+    const half = { ...bare, comments: [{ body: '<!-- mm-handoff -->\n' }] };
+    acts.length = 0;
+    await run(['run', '--config', on.cfg, '--state-dir', on.state, '--repo-dir', repo, '--now', NOW, '--force'],
+      { gh: mockGh(RECURRING, { existing: [{ url: PR, state: 'OPEN', isCrossRepository: false }], view: half }), act });
+    assert.deepEqual(acts.map((a) => `${a[2]} ${a[3]}`), ['pr edit'], 'only the label was missing');
+  });
+
+  test('a fork PR on the same branch name is not ours; an own PR or pushed branch with more than lessons is refused', async () => {
+    const conf = ENABLED.replace('  cadence_days: 7\n', '  cadence_days: 7\n  apply: true\n');
+    const okAct = (acts) => (a) => {
+      acts.push(a);
+      if (a[2] === 'pr' && a[3] === 'create') return { code: 0, stdout: 'https://github.com/acme/app/pull/90\n', stderr: '' };
+      return { code: 0, stdout: '', stderr: '' };
+    };
+    // a fork's PR named like ours is ignored: a fresh PR is opened
+    let on = setup(conf); let { repo } = gitRepo(); let acts = [];
+    let r = await run(['run', '--config', on.cfg, '--state-dir', on.state, '--repo-dir', repo, '--now', NOW],
+      { gh: mockGh(RECURRING, { existing: [{ url: 'https://github.com/evil/app/pull/5', state: 'OPEN', isCrossRepository: true }] }), act: okAct(acts) });
+    assert.equal(r.out, 'HARVEST_PR window=2026-10-21 families=1 pr=https://github.com/acme/app/pull/90');
+    assert.ok(!acts.some((a) => a.includes('https://github.com/evil/app/pull/5')), 'the fork PR is never touched');
+    // an own PR on the branch that touches more than docs/agent-lessons/ is refused
+    on = setup(conf); ({ repo } = gitRepo()); acts = [];
+    r = await run(['run', '--config', on.cfg, '--state-dir', on.state, '--repo-dir', repo, '--now', NOW],
+      { gh: mockGh(RECURRING, { existing: [{ url: 'https://github.com/acme/app/pull/6', state: 'OPEN', isCrossRepository: false }], view: { state: 'OPEN', isCrossRepository: false, labels: [], comments: [], files: [{ path: '.github/workflows/x.yml' }] } }), act: okAct(acts) });
+    assert.equal(r.code, 3);
+    assert.match(r.out, /is not this harvest's docs-only PR/);
+    assert.equal(acts.length, 0);
+    // a stopped run's pushed branch is reused only while it holds lesson files alone
+    on = setup(conf); let g; ({ repo, g } = gitRepo()); acts = [];
+    g(repo, 'checkout', '-q', '-b', 'side'); fs.writeFileSync(path.join(repo, 'evil.sh'), 'x\n');
+    g(repo, 'add', 'evil.sh'); g(repo, '-c', 'core.hooksPath=/dev/null', 'commit', '-q', '-m', 'x'); g(repo, 'push', '-q', 'origin', 'HEAD:refs/heads/agent/memory-harvest-2026-10-21');
+    r = await run(['run', '--config', on.cfg, '--state-dir', on.state, '--repo-dir', repo, '--now', NOW], { gh: mockGh(RECURRING), act: okAct(acts) });
+    assert.equal(r.code, 3);
+    assert.match(r.out, /changes more than docs\/agent-lessons\//);
+    assert.equal(acts.length, 0);
+    on = setup(conf); ({ repo, g } = gitRepo()); acts = [];
+    g(repo, 'checkout', '-q', '-b', 'side'); fs.writeFileSync(path.join(repo, 'docs', 'agent-lessons', 'prior.md'), 'x\n');
+    g(repo, 'add', 'docs/agent-lessons/prior.md'); g(repo, '-c', 'core.hooksPath=/dev/null', 'commit', '-q', '-m', 'x'); g(repo, 'push', '-q', 'origin', 'HEAD:refs/heads/agent/memory-harvest-2026-10-21');
+    r = await run(['run', '--config', on.cfg, '--state-dir', on.state, '--repo-dir', repo, '--now', NOW], { gh: mockGh(RECURRING), act: okAct(acts) });
+    assert.equal(r.out, 'HARVEST_PR window=2026-10-21 families=1 pr=https://github.com/acme/app/pull/90');
+    assert.deepEqual(acts.map((a) => (a[0] === '--new-branch' ? 'push' : `${a[2]} ${a[3]}`)), ['pr create', 'pr comment', 'pr edit'], 'the pushed branch is reused, not pushed again');
   });
 
   test('a refused fence stops the run: HARVEST_ERROR, no PR, retried after the back-off', async () => {

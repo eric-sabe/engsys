@@ -40,10 +40,6 @@ class UsageError extends Error {}
 const isIntIn = (v, lo, hi) => Number.isInteger(v) && v >= lo && v <= hi;
 // the config reader (mnt-fp.mjs readTopLevel) keeps scalars as strings: a whole number is digits only, nothing else
 const int = (v, dflt) => (v === undefined || v === null ? dflt : /^[0-9]{1,6}$/.test(String(v)) ? Number(v) : NaN);
-const idList = (v, key) => (Array.isArray(v) ? v : v == null || v === '' ? [] : [v]).map((x) => {
-  if (!/^[1-9][0-9]{0,11}$/.test(String(x))) throw new UsageError(`findings_harvest.${key}: ${JSON.stringify(x)} is not a numeric GitHub account id`);
-  return Number(x);
-});
 
 /** The `findings_harvest:` block, validated, with defaults. Anything malformed is a config error, never a guess. */
 export function harvestSettings(configText) {
@@ -51,7 +47,12 @@ export function harvestSettings(configText) {
   if (errors.findings_harvest) throw new UsageError(`findings_harvest: ${errors.findings_harvest}`);
   const b = values.findings_harvest ?? {};
   if (b === null || typeof b !== 'object' || Array.isArray(b)) throw new UsageError('findings_harvest must be a mapping');
-  const known = ['enabled', 'cadence_days', 'lookback_days', 'apply', 'repo', 'markers', 'min_recurrence', 'trusted_bot_ids', 'operator_ids'];
+  // Trust comes ONLY from memory.yml (its committed, reviewed copy and the fleet config dir's): a monster's own config is
+  // not where an allowlist of whose findings become lessons may be widened.
+  for (const k of ['trusted_bot_ids', 'operator_ids', 'trusted_bot_user_ids', 'operator_user_ids']) {
+    if (k in b) throw new UsageError(`findings_harvest.${k} is not supported: the trust lists come only from memory.yml (trusted_bot_user_ids, operator_user_ids)`);
+  }
+  const known = ['enabled', 'cadence_days', 'lookback_days', 'apply', 'repo', 'markers', 'min_recurrence'];
   const unknown = Object.keys(b).filter((k) => !known.includes(k));
   if (unknown.length) throw new UsageError(`findings_harvest: unknown key(s) ${unknown.join(', ')}`);
   const s = {
@@ -63,8 +64,6 @@ export function harvestSettings(configText) {
     session: values.session_name ?? '',
     markers: Array.isArray(b.markers) ? b.markers.map(String) : b.markers ? [String(b.markers)] : [],
     minRecurrence: int(b.min_recurrence, 2),
-    trustedBotIds: idList(b.trusted_bot_ids, 'trusted_bot_ids'),
-    operatorIds: idList(b.operator_ids, 'operator_ids'),
   };
   s.lookbackDays = int(b.lookback_days, s.cadenceDays);
   if (!isIntIn(s.cadenceDays, 1, 366)) throw new UsageError('findings_harvest.cadence_days must be a whole number of days, 1-366');
@@ -111,6 +110,12 @@ async function defaultGit(args, { cwd } = {}) {
   return stdout;
 }
 
+const LESSONS_DIR = 'docs/agent-lessons';
+/** true when `files` is non-empty and every one is a .md directly under docs/agent-lessons/ */
+export function docsOnly(files) {
+  return files.length > 0 && files.every((f) => new RegExp(`^${LESSONS_DIR}/[^/]+\\.md$`).test(f));
+}
+
 /** The handoff block Merge Monster reads (core/workflows/merge-monster-protocol.md § How to enqueue). */
 export function handoffBody({ session, window, files, fleetId = process.env.FLEET_ID ?? '' }) {
   const addr = session ? (fleetId && !session.includes(':') ? `${fleetId}:${session}` : session) : '';
@@ -136,9 +141,25 @@ export async function openHarvestPr(families, { repo, defaultBranch, session, wi
     if (r.code !== 0) throw new Error(`${what} refused or failed (exit ${r.code}): ${String(r.stderr || r.stdout).trim().split('\n').pop()}`);
     return r.stdout.trim();
   };
-  // A run that died after opening the PR, or after the push: pick up where it stopped.
-  const open = JSON.parse((await gh(['pr', 'list', '-R', repo, '--head', branch, '--state', 'all', '--json', 'url,state', '--limit', '1'])) || '[]');
-  if (open.length) return { branch, prUrl: open[0].url, files: null, existing: true };
+  const handoffFile = path.join(workDir, 'handoff.md');
+  // A run that died after opening the PR: complete what is missing (the handoff, the label), nothing twice. Only a PR
+  // from this repo's own branch counts: a fork's PR with the same head branch name is someone else's.
+  const listed = JSON.parse((await gh(['pr', 'list', '-R', repo, '--head', branch, '--state', 'all', '--json', 'url,state,isCrossRepository', '--limit', '20'])) || '[]');
+  const own = listed.filter((p) => p && p.isCrossRepository === false && /^https:\/\/\S+\/pull\/\d+$/.test(String(p.url)));
+  if (own.length) {
+    const prUrl = own[0].url;
+    const v = JSON.parse(await gh(['pr', 'view', prUrl, '-R', repo, '--json', 'state,isCrossRepository,labels,comments,files']));
+    const files = (v.files ?? []).map((f) => f.path);
+    if (v.isCrossRepository !== false || !docsOnly(files)) throw new Error(`${prUrl} is on ${branch} but is not this harvest's docs-only PR (files: ${files.slice(0, 5).join(', ') || 'none'}); not touching it`);
+    if (v.state === 'OPEN') {
+      if (!(v.comments ?? []).some((c) => String(c.body ?? '').trimStart().startsWith('<!-- mm-handoff -->'))) {
+        fs.writeFileSync(handoffFile, handoffBody({ session, window, files: files.length }));
+        fenced(['--', 'gh', 'pr', 'comment', prUrl, '-R', repo, '--body-file', handoffFile], 'the handoff comment');
+      }
+      if (!(v.labels ?? []).some((l) => l.name === 'mm:ready')) fenced(['--', 'gh', 'pr', 'edit', prUrl, '-R', repo, '--add-label', 'mm:ready'], 'the mm:ready label');
+    }
+    return { branch, prUrl, files, existing: true };
+  }
   const wt = path.join(workDir, 'wt');
   fs.rmSync(wt, { recursive: true, force: true });
   await git(['fetch', 'origin', defaultBranch], { cwd: repoDir });
@@ -162,17 +183,20 @@ export async function openHarvestPr(families, { repo, defaultBranch, session, wi
         files.push(path.relative(wt, f));
       }
       await git(['add', '--', ...files], { cwd: wt });
-      await git(['commit', '-q', '-m', `docs(memory): propose ${files.length} harvested lesson(s) (findings harvest ${window})`], { cwd: wt });
+      // the repo's own hooks (husky and the like) are not run here: a throwaway worktree lacks their untracked setup,
+      // and nothing in it but the generated lesson files is committed (the guarded push runs with hooks off too)
+      await git(['-c', 'core.hooksPath=/dev/null', 'commit', '-q', '--no-verify', '-m', `docs(memory): propose ${files.length} harvested lesson(s) (findings harvest ${window})`], { cwd: wt });
       fenced(['--new-branch', '--', 'git', '-C', wt, 'push', 'origin', `HEAD:refs/heads/${branch}`], 'the push');
     } else {
       files = (await git(['diff', '--name-only', `origin/${defaultBranch}...HEAD`], { cwd: wt })).split('\n').filter(Boolean);
+      // reuse a branch a stopped run pushed only when it is still nothing but lesson files
+      if (!docsOnly(files)) throw new Error(`origin has ${branch}, but it changes more than ${LESSONS_DIR}/ (${files.slice(0, 5).join(', ') || 'nothing'}); not opening a PR from it`);
     }
     const bodyFile = path.join(workDir, 'pr-body.md');
     fs.writeFileSync(bodyFile, `${renderProposal(families, { repo })}\n---\nOpened by the maintenance monster's weekly findings harvest (window ${window}). Draft and docs-only: Merge Monster pilots it, and its operator gate needs a human to approve the merge after reviewing every lesson.\n`);
     const prUrl = fenced(['--', 'gh', 'pr', 'create', '-R', repo, '--draft', '--base', defaultBranch, '--head', branch,
       '--title', `docs: propose ${files.length} harvested lesson(s) (findings harvest ${window})`, '--body-file', bodyFile], 'gh pr create').split('\n').pop();
     if (!/^https:\/\/\S+\/pull\/\d+$/.test(prUrl)) throw new Error(`gh pr create printed no PR URL: ${prUrl.slice(0, 200)}`);
-    const handoffFile = path.join(workDir, 'handoff.md');
     fs.writeFileSync(handoffFile, handoffBody({ session, window, files: files.length }));
     fenced(['--', 'gh', 'pr', 'comment', prUrl, '-R', repo, '--body-file', handoffFile], 'the handoff comment');
     fenced(['--', 'gh', 'pr', 'edit', prUrl, '-R', repo, '--add-label', 'mm:ready'], 'the mm:ready label');
@@ -236,8 +260,6 @@ export async function main(argv, deps = {}) {
   try {
     const config = (deps.loadConfig ?? loadConfig)(repoDir);
     if (s.markers.length) config.review_markers = [...(config.review_markers ?? []), ...s.markers];
-    config.trusted_bot_user_ids = [...(config.trusted_bot_user_ids ?? []), ...s.trustedBotIds];
-    config.operator_user_ids = [...(config.operator_user_ids ?? []), ...s.operatorIds];
     const { records } = await harvest({ repo: s.repo, since: st.since, config, journalPaths: [] }, { gh, log: deps.log ?? (() => {}) });
     families = aggregateFamilies(records, { minRecurrence: s.minRecurrence });
   } catch (e) {

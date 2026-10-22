@@ -15,6 +15,8 @@ import {
 	extractFromJournalText,
 	extractFromPr,
 	familyKey,
+	fenceFor,
+	inlineSafe,
 	uniqueSlugs,
 	fetchPr,
 	harvest,
@@ -695,5 +697,45 @@ describe('CLI', () => {
 		assert.equal(threw.status, 1);
 		assert.ok(!/at .*\(.*:\d+:\d+\)/.test(threw.stderr), 'stderr should be a clean error line, not a raw stack trace');
 		void stdout;
+	});
+});
+
+describe('harvested text is inert in the lesson files and the PR body', () => {
+	const hostileFamily = () => {
+		const finding = { file: 'src/a.ts\n## injected heading\u0007', title: 'hi @octocat ```\n</details>\n# boom', severity: 'warning', line: 3 };
+		const recs = [1, 2].map((n) => ({ finding, prNumber: n, outcome: null, url: `https://github.com/o/r/pull/${n}` }));
+		return aggregateFamilies(recs, { minRecurrence: 2 });
+	};
+
+	test('inlineSafe: one line, no control characters, @mentions broken', () => {
+		assert.equal(inlineSafe('a\nb\u0000c @alice and me@x and @@'), 'a bc @\u200balice and me@\u200bx and @@');
+	});
+
+	test('fenceFor: always longer than the longest backtick run in the content', () => {
+		assert.equal(fenceFor('plain'), '```');
+		assert.equal(fenceFor('has ```` four'), '`````');
+	});
+
+	test('a file path or title with newlines, a fence and a mention cannot break out of the lesson or the PR body', () => {
+		const fams = hostileFamily();
+		const lesson = renderLessonProposal(fams[0]);
+		assert.ok(!/^## injected heading/m.test(lesson), 'the file path stays on its line');
+		assert.ok(!/^# boom/m.test(lesson), 'the title stays on its heading line');
+		assert.ok(!lesson.includes('\u0007'));
+		assert.ok(!/@octocat/.test(lesson), 'no live mention');
+		const body = renderProposal(fams, { repo: 'o/r' });
+		const open = body.match(/^(`{3,})markdown$/m);
+		assert.ok(open, 'the lesson is fenced');
+		assert.ok(open[1].length > 3, 'the fence is longer than the ``` inside the title');
+		const inside = body.slice(body.indexOf(open[0]) + open[0].length);
+		const closeAt = inside.indexOf(`\n${open[1]}\n`);
+		assert.ok(closeAt > 0 && !inside.slice(0, closeAt).includes(`\n${open[1]}\n`), 'nothing inside closes it early');
+		assert.ok(!/@octocat/.test(body));
+		assert.ok(!/^<\/details>\n# boom/m.test(body));
+	});
+
+	test('uniqueSlugs avoids an existing file case-insensitively (APFS)', () => {
+		const fams = [{ title: 'Repeat Offender', key: 'k' }];
+		assert.equal(uniqueSlugs(fams, new Set(['Repeat-Offender'])).get(fams[0]), 'repeat-offender-2');
 	});
 });

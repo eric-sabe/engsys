@@ -527,7 +527,6 @@ Off by default. The config's `findings_harvest:` block (config.example.yml) turn
 | `repo` | top-level `repo:` | the repo whose PRs are mined and where the PR opens |
 | `markers` | none | review-findings markers on top of the harvester's default `<!-- *-findings -->` / `<!-- *-review -->` |
 | `min_recurrence` | `2` | how many distinct PRs a finding family needs before it is proposed |
-| `trusted_bot_ids`, `operator_ids` | none | numeric GitHub account ids added to the trust lists from `memory.yml` |
 
 **Cadence and latch.** `mnt-tick.sh` (with `--config`) asks `mnt-harvest.sh due` every tick: read-only, no network.
 While the window is due it prints `HARVEST_DUE window=<date> since=<date>`. `mnt-harvest.sh run` latches the window in
@@ -536,13 +535,23 @@ run (`HARVEST_ERROR`) is not latched as done: it is offered again after a six-ho
 
 **Trust.** The harvester refuses to run without a trust allowlist (docs/memory-spec.md §10): `trusted_bot_user_ids`
 and `operator_user_ids` from `memory.yml` (the repo's committed copy at a reviewed sha, the fleet config dir's copy
-through `CLAUDE_CONFIG_DIR`), plus the block's own `trusted_bot_ids` / `operator_ids`. Findings from anyone else are
-not mined. Every title it proposes is still untrusted text: the proposed lesson files say so, and so does the PR.
+through `CLAUDE_CONFIG_DIR`), and nowhere else: a `trusted_bot_ids` / `operator_ids` key in the monster's config is a
+config error (`HARVEST_CONFIG_ERROR`), so its own config can't widen whose findings become lessons. Findings from anyone
+else are not mined. Every title it proposes is still untrusted text: the proposed lesson files say so, and so does the
+PR. The renderer keeps it inert there: harvested text stays on one line, control characters are dropped, @mentions are
+broken with a zero-width space, and the lesson shown in the PR body sits in a fence longer than any backtick run in it.
+
+**What to expect.** A family is the file plus the first tokens of the finding's title, seen in at least
+`min_recurrence` distinct PRs. Review findings rarely repeat that exactly, so with the default settings a run usually
+finds no family and proposes nothing (`HARVEST_DONE … families=0`). Loosening the family key is a later operator
+decision, not something this session tunes.
 
 **The write.** With `apply: true` and at least one family, `mnt-harvest.sh run`:
 
 1. creates a throwaway worktree at `origin/<default_branch>` under `<state_dir>/harvest/<window>/` and writes one
-   `docs/agent-lessons/<slug>.md` per family (a slug that exists gets a `-2` suffix: nothing is overwritten), commits;
+   `docs/agent-lessons/<slug>.md` per family (a slug that exists, in any letter case, gets a `-2` suffix: nothing is
+   overwritten), and commits with the repo's hooks off (`core.hooksPath=/dev/null`: a throwaway worktree lacks their
+   untracked setup, and only the generated files are in the commit);
 2. pushes it, fenced: `mnt-act.sh guard --new-branch -- git -C <worktree> push origin HEAD:refs/heads/agent/memory-harvest-<window>`;
 3. opens the PR, fenced: `gh pr create --draft`, base the default branch, body = the proposal;
 4. posts the handoff, fenced, as a comment: `<!-- mm-handoff -->` with `migration: false`, a non-empty
@@ -551,9 +560,13 @@ not mined. Every title it proposes is still untrusted text: the proposed lesson 
 5. labels it `mm:ready`, fenced; then removes the worktree.
 
 A refused fence stops the run there (`HARVEST_ERROR`), and nothing after it is attempted. A re-run in the same window
-finds the PR by its branch and writes nothing; a run that stopped after the push reuses the pushed branch. The PR is
-docs-only, so Merge Monster's docs lane carries it, and the operator gate keeps a human in front of the merge. This
-session never merges it, pushes to it again, edits its handoff, or opens a second one for the window.
+looks the PR up by its branch, counting only a PR from this repo's own branch (a fork's PR with the same branch name is
+ignored), and checks that it changes nothing but `docs/agent-lessons/*.md`. It then completes only what is missing: the
+handoff comment when no `<!-- mm-handoff -->` comment is there, the `mm:ready` label when it is absent. A run that
+stopped after the push reuses the pushed branch under the same check, and refuses one that changes anything else.
+Merge Monster takes it like any `mm:ready` hand-off: it pilots it to ready, and because the handoff's `operator_gate`
+is set, its gate check holds the merge until an operator approves the PR on GitHub. This session never merges it,
+pushes to it again, edits its handoff, or opens a second one for the window.
 
 **Dry.** Without `apply`, the proposal (`proposal.md`) and the raw families (`families.json`) stay in
 `<state_dir>/harvest/<window>/`; the ledger gets one comment with the count and the path. An operator who wants it
