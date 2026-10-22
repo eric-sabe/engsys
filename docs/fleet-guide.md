@@ -507,6 +507,29 @@ reaches a session only on its own launch line, never the launcher's or the tmux 
 boundary is a separate GitHub identity for the security lane (eric-sabe/engsys#220); the keystone-side gate that reads these
 verdicts is wired separately.
 
+**Signed memory refs: `FLEET_MEMORY_SIGNING_KEY=on` (F5, FeedFrwd/ff-engsys-fleet#60).** Monsters publish history to
+`refs/engsys/memory/*` (docs/memory-spec.md §9), and a reader has to know which fleet wrote a ref. GitHub's own metadata
+can't say: commits made through the API are committed by `web-flow`, with the App's bot only as the email-derived author.
+So each fleet signs what it writes with its own Ed25519 key, and readers trust a ref only if it verifies against that
+fleet's public key in the operator's memory.yml.
+
+- **Per-host setup.** Set `FLEET_MEMORY_SIGNING_KEY=on` in `fleet.conf` (default off). The next `fleet launch` creates
+  `<fleet state>/memory-signing.key` (Ed25519, PKCS#8 PEM, mode 0600, never replaced). Only merge and maintain lines are
+  told where it is (`ENGSYS_MEMORY_SIGNING_KEY_FILE`, set by the session launcher after the env file and unset on every
+  other line). If the key can't be created, launch warns and continues; memory-sync then writes nothing.
+- **Publish the public key.** `fleet memory-pubkey` prints this host's entry, for example
+  `fleet_memory_pubkeys:\n  eric: <base64>`. Add it to the fleet's reviewed `memory.yml` in a fleet PR, together with
+  that file's `VERIFY_ALLOWED_USER_FILES` hash (#230 pins the file). A fleet with no entry, or a malformed one, is
+  untrusted. A tail `refs/engsys/memory/<role>/<fleet>` must be signed by the fleet it names; `events` by any listed fleet.
+- **No key, no write.** memory-sync refuses `--publish` and `--tail` without a usable key (missing, a symlink, not
+  owned by the fleet user, readable by group or other, or not Ed25519) and logs why. The heartbeat carries on.
+- **Rotation** is a new key plus a memory.yml PR. Stop the monsters, move the old key aside, `fleet launch` (it creates a
+  new one), `fleet memory-pubkey`, then replace the fleet's entry in the PR. Refs signed with the old key stop verifying
+  once the entry changes; the next write re-signs the tip.
+- **What it does not do.** The key is readable by every process running as the fleet's macOS user, the same caveat as
+  the verdict key: an attended session with a shell can read it and sign. It stops anyone holding only repo
+  `contents: write` (or the bot's token on another host) from writing a ref readers trust; it is not an OS boundary.
+
 **Which PRs need a verdict is decided by `mm-preflight.sh`, not by the merge session** (engsys#229). Run with any of `ENGSYS_MM_CONFIG` (the
 fleet's launch context should export it), `.claude/merge-monster.yml` in the cwd and `--config <merge-monster.yml>`
 (every one that exists counts and the strictest wins, so `--config` can add requirements but never replace the others) plus the **fleet-config-dir copy**: the instance plugin's `repos/<owner>/<repo>/merge-monster.yml`, which `core/lib/mm-config.mjs` finds through the Claude config dirs it can see (`$CLAUDE_CONFIG_DIR`, `$FLEET_CLAUDE_CONFIG_DIR`, the per-session dirs beside it, `$ENGSYS_CONFIG_DIR_SESSIONS/*` and `~/.claude`, all searched, so repointing one variable hides nothing): every `installPath` in `plugins/installed_plugins.json`, else the `plugins/cache/*/*/*/` roots; directory names match case-insensitively. If `ENGSYS_MM_CONFIG` is unreadable (its version directory was pruned) but a readable copy is discovered, the copy is used with a warning. `mm-preflight.sh --capabilities` prints `security-verdict` and `security-sensitive-globs` and exits 0 without touching GitHub (an older kit exits 2 on the unknown flag): that is the probe. A repo with such a `repos/<owner>/<repo>/` directory is fleet-managed: with no readable `merge-monster.yml` there and none in the repo it fails closed (`security_config_unreadable`), even when `--config` is passed. For a `merge`-role line the launcher also exports `ENGSYS_MM_CONFIG` pointing at that copy (looked up in the session's own config dir, then the launcher's) and unsets it on every other line. It reads `security_sensitive_globs`

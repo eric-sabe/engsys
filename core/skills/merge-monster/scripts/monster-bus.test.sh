@@ -736,7 +736,7 @@ has_line "--tail --repo acme/app --role merge --fleet alice --state-dir $T/mstat
 no_line "--publish" "  merge: never publishes the shared events ref"
 writes maintain FLEET_ID=alice
 has_line "--tail --repo acme/app --role maintain --fleet alice --state-dir $T/mstate --session sess-1" "  maintain: mirrors its own journal tail"
-has_line "--publish --repo acme/app --role maintain --state-dir $T/mstate --session sess-1" "  maintain: publishes the events ref (memory-sync fences it on the maintain baton)"
+has_line "--publish --repo acme/app --role maintain --fleet alice --state-dir $T/mstate --session sess-1" "  maintain: publishes the events ref (memory-sync fences it on the maintain baton)"
 writes maintain FLEET_ID=
 no_line "--tail" "  no FLEET_ID: no tail write"
 no_line "--publish" "  …and no publish"

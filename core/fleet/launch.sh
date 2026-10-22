@@ -161,6 +161,18 @@ if [ "${FLEET_SECURITY_VERDICT_KEY:-off}" = on ]; then
   fi
   VERDICT_KEY_ARGS=(--verdict-key-file "$FLEET_SECURITY_VERDICT_KEY_FILE")
 fi
+# Memory ref signing (F5): the same pattern, for the merge and maintain lines. A key that can't be created is a
+# warning, not a refusal: the monsters still launch, and memory-sync writes nothing without a usable key.
+unset ENGSYS_MEMORY_SIGNING_KEY_FILE
+if [ "${FLEET_MEMORY_SIGNING_KEY:-off}" = on ]; then
+  if [ ! -e "$FLEET_MEMORY_SIGNING_KEY_FILE" ] && command -v node >/dev/null; then
+    (umask 077; node "$ENGSYS_DIR/core/lib/memory/signing.mjs" keygen --key-file "$FLEET_MEMORY_SIGNING_KEY_FILE" >/dev/null) \
+      || echo "fleet launch: warning: can't create the memory signing key $FLEET_MEMORY_SIGNING_KEY_FILE; memory refs won't be written" >&2
+  fi
+  if [ -f "$FLEET_MEMORY_SIGNING_KEY_FILE" ]; then
+    VERDICT_KEY_ARGS+=(--memory-key-file "$FLEET_MEMORY_SIGNING_KEY_FILE")
+  fi
+fi
 
 mkdir -p "$ENV_DIR" && chmod 700 "$ENV_DIR"
 shopt -s nullglob

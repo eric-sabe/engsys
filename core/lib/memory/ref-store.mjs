@@ -20,6 +20,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createGitDataClient } from '../lease/github-backend.mjs';
 import { resolveReviewedSha } from './index-db.mjs';
+import { verifyTipSignature } from './signing.mjs';
 
 export const EVENTS_REF = 'refs/engsys/memory/events';
 export const MEMORY_REF_PREFIX = 'refs/engsys/memory/';
@@ -353,12 +354,21 @@ export function createMemoryRefStore({
     }
 
     const { events, rawLineCount } = parseEventsJsonl(blobRes.content);
+    // The raw events.jsonl and events.sig (F5) are returned as read, for verifyMemoryRefTip — never trusted here.
+    let sigText = null;
+    const sigEntry = treeRes.tree.find((e) => e.path === 'events.sig');
+    if (sigEntry?.sha) {
+      const sigRes = await gitData.readBlob(sigEntry.sha);
+      if (!sigRes.failure) sigText = sigRes.content;
+    }
     return {
       ok: true,
       sha: refRes.sha,
       events,
       rawLineCount,
       parents: commitRes.parents || [],
+      content: blobRes.content,
+      sigText,
     };
   }
 
@@ -373,6 +383,10 @@ export function createMemoryRefStore({
     // tree and commit are built. A falsy return, or `{ held: false }`, aborts the write with nothing
     // moved — memory-sync passes the baton fence here, so the writer's hold is checked as late as possible.
     beforeCas = null,
+    // F5 (fleet signing, docs/memory-spec.md §9): `({ ref, parent, content }) => string`, called once per CAS
+    // round with the exact events.jsonl about to be written and the parent it will sit on; its return is stored
+    // next to it as `events.sig` (core/lib/memory/signing.mjs signTip). Throwing aborts the write.
+    signer = null,
   } = {}) {
     const fullRef = validateMemoryRef(ref);
     if (!Array.isArray(events)) {
@@ -441,21 +455,35 @@ export function createMemoryRefStore({
         return { ok: false, error: blobRes.failure, rejected };
       }
 
-      const treeRes = await gitData.createTree([
+      const parents = tip.sha ? [tip.sha] : [];
+      const treeEntries = [
         {
           path: 'events.jsonl',
           mode: '100644',
           type: 'blob',
           sha: blobRes.sha,
         },
-      ]);
+      ];
+      if (signer) {
+        let sigText;
+        try {
+          sigText = await signer({ ref: fullRef, parent: parents[0] ?? null, content: jsonl });
+        } catch (e) {
+          return { ok: false, error: { code: 'sign_failed', detail: String(e?.message || e) }, rejected };
+        }
+        const sigBlob = await gitData.createBlob(String(sigText));
+        if (sigBlob.failure) {
+          return { ok: false, error: sigBlob.failure, rejected };
+        }
+        treeEntries.push({ path: 'events.sig', mode: '100644', type: 'blob', sha: sigBlob.sha });
+      }
+      const treeRes = await gitData.createTree(treeEntries);
       if (treeRes.failure) {
         return { ok: false, error: treeRes.failure, rejected };
       }
 
-      // Keep tip.sha as parent so ref updates remain fast-forward CAS checks and never
+      // Keep tip.sha as parent (`parents`, above) so ref updates remain fast-forward CAS checks and never
       // clobber a concurrent writer's commit via a forced PATCH.
-      const parents = tip.sha ? [tip.sha] : [];
       const commitRes = await gitData.createCommit(message, parents, treeRes.sha);
       if (commitRes.failure) {
         return { ok: false, error: commitRes.failure, rejected };
@@ -524,34 +552,6 @@ export function createMemoryRefStore({
 // Per the engsys#140/v2.0.1 review, the memory ref fetch stays unwired until a consumer uses this
 // (or an equivalent) check.
 
-// engsys v2.0.1 round 2 (F3): the COMMITTER only — never the author. GitHub derives `.author.id`
-// by mapping the commit's author EMAIL to an account, which the publisher sets locally; checking
-// it alongside (or instead of) the committer gave a second, equally-forgeable path to the same
-// "verified publisher" verdict.
-async function defaultFetchCommitIdentity(repo, sha, { exec = execFileSync } = {}) {
-  const normRepo = typeof repo === 'string' && /^[^/\s]+\/[^/\s]+$/.test(repo) ? repo : null;
-  if (!normRepo || !sha) return null;
-  try {
-    const out = exec(
-      'gh',
-      [
-        'api',
-        `repos/${normRepo}/commits/${sha}`,
-        '--jq',
-        '{committerId: .committer.id, verified: .commit.verification.verified}',
-      ],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 },
-    );
-    const parsed = JSON.parse(String(out || '{}'));
-    return {
-      committerId: parsed.committerId != null ? Number(parsed.committerId) : null,
-      verified: parsed.verified === true,
-    };
-  } catch {
-    return null;
-  }
-}
-
 function pathExistsInReviewedTree(repoRoot, reviewedSha, relPath, exec) {
   try {
     exec('git', ['-C', repoRoot, 'cat-file', '-e', `${reviewedSha}:${relPath}`], {
@@ -566,52 +566,48 @@ function pathExistsInReviewedTree(repoRoot, reviewedSha, relPath, exec) {
 }
 
 /**
- * Verify a fetched `refs/engsys/memory/*` tip before trusting any event inside it.
+ * Verify a fetched `refs/engsys/memory/*` tip before trusting any event inside it (F5,
+ * docs/memory-spec.md §9).
  *
  * Trust comes ONLY from:
- *   - the commit at `sha` having `commit.verification.verified === true` (a cryptographically
- *     verified GPG/SSH signature, per GitHub's own check) AND the COMMITTER's `.committer.id`
- *     (resolved via the GitHub REST API for this exact SHA) equal to `publisherUserId`. Round 2
- *     (F3) dropped `.author.id` as an alternate match entirely — never just the author, and never
- *     the author at all: GitHub derives `.author.id` by mapping the commit's author EMAIL to an
- *     account, which the publisher sets locally (`git -c user.email=…`), same as the name/email
- *     trust this whole v2.0.1 pass (M3, M4) is removing elsewhere. The verified-signature
- *     requirement is what actually ties the commit to a key only the real publisher holds.
+ *   - the tip's `events.sig` verifying (core/lib/memory/signing.mjs `verifyTipSignature`) over THIS ref, THIS
+ *     commit's parent and THIS events.jsonl, against `pubkeys` (the operator memory.yml's
+ *     `fleet_memory_pubkeys`, via `resolveFleetPubkeys`): a `<role>/<fleet>` tail must be signed by the fleet it
+ *     names, `events` by any listed fleet. No entry, a malformed key or a bad signature = untrusted;
  *   - each event's own `path` / `paths` existing in the tree at the independently
  *     `resolveReviewedSha`-resolved SHA (so a tip can't vouch for a file it alone claims exists).
  *
- * `author_kind` / `author_id` embedded in the event JSON are NEVER read for trust — they're
- * stripped from every event and, only once the commit-level check above passes, replaced with a
- * fixed `author_kind: 'bot'`, `author_id: publisherUserId`.
+ * The commit's GitHub identity is deliberately NOT a trust input. Commits made through the Git Data API are
+ * COMMITTED by `web-flow` (GitHub signs them, `verification.verified: true`), with the App's bot only as the
+ * AUTHOR, which GitHub derives from the author email the caller chooses — so neither field says which fleet wrote
+ * the tip (checked on the live baton refs, F5). The earlier committer == publisher check could never pass for a
+ * real publisher and was removed.
  *
- * `publisherUserId` is a GitHub USER account's numeric id (the bot account's id, e.g. as returned
- * for `app-slug[bot]` by `/users/<slug>%5Bbot%5D`) — NOT a GitHub App's own `id` field, which is a
- * different number and would never match `.committer.id`.
+ * `author_kind` / `author_id` embedded in the event JSON are NEVER read for trust — they're stripped from every
+ * event and, only once the signature passes, replaced with `author_kind: 'fleet_signed'`, `signed_fleet: <fleet>`,
+ * `author_id: null`. (trust.mjs does not yet accept `fleet_signed`: wiring a consumer is its own reviewed change,
+ * §3.1.)
  *
  * Fails closed (`{ ok: false, events: [] }`) on any missing input or verification failure.
  */
 export async function verifyMemoryRefTip(
   repoRoot,
   {
-    sha,
-    events = [],
-    repo,
-    publisherUserId,
-    fetchCommitIdentity = defaultFetchCommitIdentity,
+    ref,
+    parent = null,
+    content,
+    sigText,
+    pubkeys,
     resolveSha = resolveReviewedSha,
     exec = execFileSync,
   } = {},
 ) {
-  if (!sha || !repoRoot || publisherUserId == null) {
-    return { ok: false, events: [], reason: 'missing_sha_or_publisher' };
+  if (!repoRoot || typeof ref !== 'string' || typeof content !== 'string') {
+    return { ok: false, events: [], reason: 'missing_input' };
   }
-  const identity = await fetchCommitIdentity(repo, sha, { exec });
-  const wantId = Number(publisherUserId);
-  // engsys v2.0.1 round 2 (F3): committer only.
-  const idMatches = identity?.committerId != null && Number(identity.committerId) === wantId;
-  const verifiedPublisher = idMatches && identity?.verified === true;
-  if (!verifiedPublisher) {
-    return { ok: false, events: [], reason: 'untrusted_publisher' };
+  const sig = verifyTipSignature({ ref, parent, content, sigText, pubkeys });
+  if (!sig.ok) {
+    return { ok: false, events: [], reason: sig.reason };
   }
 
   const reviewedSha = resolveSha(repoRoot);
@@ -620,15 +616,15 @@ export async function verifyMemoryRefTip(
   }
 
   const trusted = [];
-  for (const raw of Array.isArray(events) ? events : []) {
+  for (const raw of parseEventsJsonl(content).events) {
     if (!raw || typeof raw !== 'object') continue;
     // Deliberately discard any author_kind/author_id the event JSON carries — never a trust input.
-    const { author_kind: _ignoredKind, author_id: _ignoredId, ...rest } = raw;
+    const { author_kind: _ignoredKind, author_id: _ignoredId, signed_fleet: _ignoredFleet, ...rest } = raw;
     const paths = [rest.path, ...(Array.isArray(rest.paths) ? rest.paths : [])].filter(Boolean);
     if (paths.length > 0 && !paths.every((p) => pathExistsInReviewedTree(repoRoot, reviewedSha, p, exec))) {
       continue;
     }
-    trusted.push({ ...rest, author_kind: 'bot', author_id: wantId });
+    trusted.push({ ...rest, author_kind: 'fleet_signed', author_id: null, signed_fleet: sig.fleet });
   }
-  return { ok: true, events: trusted, reviewedSha };
+  return { ok: true, events: trusted, fleet: sig.fleet, reviewedSha };
 }

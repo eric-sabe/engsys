@@ -387,5 +387,29 @@ case "$script" in *". $W/memory.env && set +a && "*"export ENGSYS_MEMORY_CONFIG=
 lacks "…neither the env file's value nor an inherited one" "$script" "$T/inherited.yml"
 lacks "…" "$script" "export ENGSYS_MEMORY_CONFIG=$T/evil-memory.yml"
 
+# F5: the memory signing key PATH reaches merge and maintain lines only, decided after the env file, and only when
+# the fleet passes one (--memory-key-file, from FLEET_MEMORY_SIGNING_KEY=on).
+MKEY="$T/memory-signing.key"
+printf 'ENGSYS_MEMORY_SIGNING_KEY_FILE=%s\n' "$T/evil.key" >"$T/w/memkey.env"
+LAUNCH_EXTRA="--memory-key-file $MKEY" run claude "acme-mm|$W|/engsys:merge-monster|--model opus|$W/memkey.env"
+script="$(cat "$T/launch-file.copy")"
+case "$script" in *"unset ENGSYS_MEMORY_SIGNING_KEY_FILE && "*". $W/memkey.env && set +a && "*"export ENGSYS_MEMORY_SIGNING_KEY_FILE=$MKEY && "*) ok "memory key: a merge line gets the path, after the env file" ;; *) no "memory key: merge export after the env file" "$script" ;; esac
+lacks "…the env file's value never survives" "$script" "export ENGSYS_MEMORY_SIGNING_KEY_FILE=$T/evil.key"
+lacks "…the path is never typed into the window (it rides in the launch file)" "$(cat "$T/typed")" "$MKEY"
+LAUNCH_EXTRA="--memory-key-file $MKEY" run claude "$MAINT"
+script="$(cat "$T/launch-file.copy")"
+has "memory key: a maintain line gets it too" "$script" "export ENGSYS_MEMORY_SIGNING_KEY_FILE=$MKEY && "
+LAUNCH_EXTRA="--memory-key-file $MKEY" run claude "acme-build|$W||--model opus|$W/memkey.env"
+script="$(cat "$T/launch-file.copy")"
+case "$script" in *". $W/memkey.env && set +a && "*"unset ENGSYS_MEMORY_SIGNING_KEY_FILE && "*) ok "memory key: any other line has it unset after the env file" ;; *) no "memory key: unset after the env file on a non-monster line" "$script" ;; esac
+lacks "…never the key path" "$script" "export ENGSYS_MEMORY_SIGNING_KEY_FILE"
+LAUNCH_EXTRA="--memory-key-file $MKEY" run claude "$SEC_ENV"
+lacks "memory key: not even the security lane" "$(cat "$T/launch-file.copy")" "export ENGSYS_MEMORY_SIGNING_KEY_FILE"
+LAUNCH_EXTRA=""
+run claude "acme-mm|$W|/engsys:merge-monster|--model opus"
+script="$(cat "$T/launch-file.copy")"
+has "memory key: none configured, still cleared before anything else" "$script" "unset ENGSYS_MEMORY_SIGNING_KEY_FILE && "
+lacks "…and never exported" "$script" "export ENGSYS_MEMORY_SIGNING_KEY_FILE"
+
 echo "$pass passed, $fail failed."
 [ "$fail" = 0 ]

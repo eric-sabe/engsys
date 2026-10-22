@@ -30,6 +30,10 @@ import {
   TAIL_MAX_EVENTS,
 } from './memory-sync.mjs';
 import { EVENTS_REF } from '../lib/memory/ref-store.mjs';
+import crypto from 'node:crypto';
+import { publicKeyB64, resolveFleetPubkeys, verifyTipSignature } from '../lib/memory/signing.mjs';
+
+const TEST_SIGNING_KEY = crypto.generateKeyPairSync('ed25519').privateKey;
 
 // engsys#262: the operator's memory.yml is ENGSYS_MEMORY_CONFIG, else $CLAUDE_CONFIG_DIR/memory.yml, else
 // ~/.claude/memory.yml — so the developer's (or a fleet session's) own file would leak into every test here that
@@ -907,8 +911,10 @@ describe('memory-sync (#131)', () => {
         exec: () => '',
         refStore,
         role: 'maintain',
+        fleet: 'eric',
         stateDir: tmpDir,
         fence: async () => ({ held: true }),
+        signingKey: TEST_SIGNING_KEY,
         now: () => Date.parse('2026-07-10T21:00:00Z'),
         rebuildIndex: false,
       });
@@ -1104,7 +1110,7 @@ describe('memory-sync (#131)', () => {
         assert.equal(r1.ghCappedStreak, 1);
         const fake = fakeGitApi({ repo: 'owner/repo' });
         const refStore = createMemoryRefStore({ repo: 'owner/repo', client: fake, sleep: async () => {} });
-        const pub = await runMemorySync({ mode: 'publish', repo: 'owner/repo', repoRoot: dir, cacheDir: dir, config, exec: () => '', refStore, role: 'maintain', stateDir: dir, fence: async () => ({ held: true }), now: () => Date.parse('2026-07-20T00:00:00Z'), rebuildIndex: false });
+        const pub = await runMemorySync({ mode: 'publish', repo: 'owner/repo', repoRoot: dir, cacheDir: dir, config, exec: () => '', refStore, role: 'maintain', fleet: 'eric', stateDir: dir, fence: async () => ({ held: true }), signingKey: TEST_SIGNING_KEY, now: () => Date.parse('2026-07-20T00:00:00Z'), rebuildIndex: false });
         assert.equal(pub.ghCappedStreak, 1, 'publish ran no GitHub fetch, so the streak is untouched');
         const r2 = await delta(dir, ghWith(250, '2026-07-19T20:00:00.000Z'));
         assert.equal(r2.ghCappedStreak, 2);
@@ -1127,18 +1133,19 @@ describe('memory-sync writers: role split and the baton fence (F5)', () => {
   const base = { repo: 'owner/repo', stateDir: '/state', config: {} };
 
   it('resolveWriteTarget: the refusal matrix', () => {
-    assert.deepEqual(resolveWriteTarget({ ...base, mode: 'publish', role: 'maintain' }), { ok: true, ref: EVENTS_REF });
+    assert.deepEqual(resolveWriteTarget({ ...base, mode: 'publish', role: 'maintain', fleet: 'eric' }), { ok: true, ref: EVENTS_REF });
     assert.deepEqual(resolveWriteTarget({ ...base, mode: 'tail', role: 'merge', fleet: 'eric' }), { ok: true, ref: 'refs/engsys/memory/merge/eric' });
     assert.deepEqual(resolveWriteTarget({ ...base, mode: 'tail', role: 'maintain', fleet: 'mark-fleet' }), { ok: true, ref: 'refs/engsys/memory/maintain/mark-fleet' });
     assert.deepEqual(resolveWriteTarget({ mode: 'delta' }), { ok: true, ref: null }, 'delta writes no ref and needs none of it');
     const refused = [
-      [{ mode: 'publish', role: 'merge' }, /only the maintain baton holder/],
+      [{ mode: 'publish', role: 'merge', fleet: 'eric' }, /only the maintain baton holder/],
+      [{ mode: 'publish', role: 'maintain' }, /needs --fleet/],
       [{ mode: 'publish', role: '' }, /needs --role/],
       [{ mode: 'publish', role: 'nyx' }, /needs --role/],
-      [{ mode: 'publish', role: 'maintain', ref: 'refs/engsys/memory/maintain/eric' }, /writes only refs\/engsys\/memory\/events/],
+      [{ mode: 'publish', role: 'maintain', fleet: 'eric', ref: 'refs/engsys/memory/maintain/eric' }, /writes only refs\/engsys\/memory\/events/],
       [{ mode: 'publish', role: 'maintain', stateDir: '' }, /needs --state-dir/],
       [{ mode: 'publish', role: 'maintain', repo: 'nope' }, /needs --repo/],
-      [{ mode: 'publish', role: 'maintain', config: { publish_role: 'merge' } }, /publish_role "merge" is not supported/],
+      [{ mode: 'publish', role: 'maintain', fleet: 'eric', config: { publish_role: 'merge' } }, /publish_role "merge" is not supported/],
       [{ mode: 'tail', role: 'merge', fleet: '' }, /needs --fleet/],
       [{ mode: 'tail', role: 'merge', fleet: '../x' }, /needs --fleet/],
       [{ mode: 'tail', role: 'merge', fleet: 'x'.repeat(41) }, /needs --fleet/],
@@ -1157,7 +1164,7 @@ describe('memory-sync writers: role split and the baton fence (F5)', () => {
     const fake = fakeGitApi({ repo: 'owner/repo' });
     return createMemoryRefStore({ repo: 'owner/repo', client: fake, sleep: async () => {} });
   }
-  const run = (dir, over) => runMemorySync({ repo: 'owner/repo', repoRoot: dir, cacheDir: dir, config: {}, exec: () => '', rebuildIndex: false, now: () => Date.parse('2026-07-20T00:00:00Z'), ...over });
+  const run = (dir, over) => runMemorySync({ repo: 'owner/repo', repoRoot: dir, cacheDir: dir, config: {}, exec: () => '', rebuildIndex: false, now: () => Date.parse('2026-07-20T00:00:00Z'), fleet: 'eric', signingKey: TEST_SIGNING_KEY, ...over });
   const delta = [{ k: 'owner/repo:issue:1', kind: 'issue', repo: 'owner/repo', number: 1, updated_at: '2026-07-19T00:00:00Z', text: 'x' }];
 
   it('merge can never publish the events ref: refused before anything is collected, the fence is never asked', async () => {
@@ -1265,6 +1272,51 @@ describe('memory-sync writers: role split and the baton fence (F5)', () => {
     }
   });
 
+  it('no usable signing key: nothing is written, nothing is collected, the fence is never asked (skip, never block)', async () => {
+    const dir = tmp('memory-sync-nokey-');
+    try {
+      fs.writeFileSync(path.join(dir, 'delta.jsonl'), delta.map((e) => JSON.stringify(e)).join('\n') + '\n');
+      const refStore = store();
+      let fenced = 0;
+      for (const signingKeyFile of ['', path.join(dir, 'absent.key')]) {
+        const res = await run(dir, { mode: 'publish', role: 'maintain', stateDir: dir, refStore, signingKey: null, signingKeyFile, fence: async () => { fenced++; return { held: true }; } });
+        assert.equal(res.ok, false);
+        assert.equal(res.skipped, 'no_signing_key');
+        const tail = await run(dir, { mode: 'tail', role: 'merge', stateDir: dir, refStore, signingKey: null, signingKeyFile, fence: async () => { fenced++; return { held: true }; } });
+        assert.equal(tail.skipped, 'no_signing_key');
+      }
+      const loose = path.join(dir, 'loose.key');
+      fs.writeFileSync(loose, TEST_SIGNING_KEY.export({ format: 'pem', type: 'pkcs8' }), { mode: 0o644 });
+      fs.chmodSync(loose, 0o644);
+      const res = await run(dir, { mode: 'publish', role: 'maintain', stateDir: dir, refStore, signingKey: null, signingKeyFile: loose, fence: async () => ({ held: true }) });
+      assert.equal(res.skipped, 'no_signing_key');
+      assert.match(res.reason, /group or other/);
+      assert.equal(fenced, 0);
+      assert.equal((await refStore.readEvents()).sha, null);
+      assert.ok(!fs.existsSync(path.join(dir, 'cursors.json')), 'refused before collection: no cursor moved');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('what --publish and --tail write is signed as the fleet, over that ref, and verifies with the fleet\'s public key', async () => {
+    const dir = tmp('memory-sync-signed-');
+    try {
+      fs.writeFileSync(path.join(dir, 'delta.jsonl'), delta.map((e) => JSON.stringify(e)).join('\n') + '\n');
+      fs.writeFileSync(path.join(dir, 'journal-2026-07.jsonl'), JSON.stringify({ ts: '2026-07-01T10:00:00Z', event: 'merged', pr: 8 }) + '\n');
+      const refStore = store();
+      const pubkeys = resolveFleetPubkeys({ fleet_memory_pubkeys: { eric: publicKeyB64(TEST_SIGNING_KEY) } });
+      assert.equal((await run(dir, { mode: 'publish', role: 'maintain', stateDir: dir, refStore, fence: async () => ({ held: true }) })).ok, true);
+      assert.equal((await run(dir, { mode: 'tail', role: 'merge', stateDir: dir, refStore, fence: async () => ({ held: true }) })).ok, true);
+      for (const ref of [EVENTS_REF, 'refs/engsys/memory/merge/eric']) {
+        const tip = await refStore.readEvents({ ref });
+        assert.deepEqual(verifyTipSignature({ ref, parent: tip.parents[0] ?? null, content: tip.content, sigText: tip.sigText, pubkeys }), { ok: true, fleet: 'eric' }, ref);
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('createBatonFence runs `baton.mjs fence` for the role, repo, state dir and session; any failure is "not held"', async () => {
     const calls = [];
     const held = createBatonFence({ role: 'maintain', repo: 'owner/repo', stateDir: '/s', session: 'keystone-maintain', execFileFn: async (bin, args) => { calls.push([bin, args]); return { stdout: '{}' }; } });
@@ -1284,9 +1336,9 @@ describe('memory-sync writers: role split and the baton fence (F5)', () => {
     const io = { out: { write: (x) => outBuf.push(x) }, err: { write: (x) => errBuf.push(x) } };
     const dir = tmp('memory-sync-cli-');
     try {
-      assert.equal(await memorySyncMain(['--publish', '--repo', 'owner/repo', '--role', 'merge', '--state-dir', dir, '--cache-dir', dir], io), 2);
+      assert.equal(await memorySyncMain(['--publish', '--repo', 'owner/repo', '--role', 'merge', '--fleet', 'eric', '--state-dir', dir, '--cache-dir', dir], io), 2);
       assert.match(errBuf.join(''), /refused: only the maintain baton holder/);
-      assert.equal(await memorySyncMain(['--publish', '--repo', 'owner/repo', '--role', 'maintain', '--state-dir', dir, '--cache-dir', dir, '--ref', 'refs/engsys/memory/merge/eric'], io), 2);
+      assert.equal(await memorySyncMain(['--publish', '--repo', 'owner/repo', '--role', 'maintain', '--fleet', 'eric', '--state-dir', dir, '--cache-dir', dir, '--ref', 'refs/engsys/memory/merge/eric'], io), 2);
       assert.equal(await memorySyncMain(['--publish', '--tail', '--repo', 'owner/repo'], io), 2);
       assert.match(errBuf.join(''), /pick one of/);
     } finally {

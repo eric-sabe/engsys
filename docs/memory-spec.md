@@ -79,7 +79,8 @@ refs/engsys/memory/<role>/<fleet-id>   a monster's journal tail (one writer per 
 - **Compaction:** when the blob passes `max_events` (default 20000), the writer keeps the latest
   version of each key, drops tombstones older than 180 days, and writes a parentless commit.
 - These refs are not covered by branch rulesets, and anyone with `contents: write` can force-push
-  them. Readers therefore treat every event as Class B, and record each tip's committer.
+  them. Readers therefore treat every event as Class B, and trust a tip only through its fleet
+  signature (§9), never its committer (`web-flow` for every API-made commit).
 
 ### 3.2 Event record
 
@@ -260,14 +261,28 @@ Fold the text with `normalizeUntrusted()` first; the strip uses `\p{Default_Igno
   other journal field (actor, notes, free text) is carried.
 - **Heartbeats are skip-never-block:** a refused or failed write never fails a heartbeat, and
   `ENGSYS_MEMORY_SYNC=0` turns every sync step off, writes included.
-- **Reader binding: open.** API-made commits are committed by `web-flow` (GitHub signs them), with
-  the bot only as the email-derived author, so `verifyMemoryRefTip`'s committer check can't bind a
-  tip to a fleet. How a reader binds `events` and `<role>/<fleet>` to a fleet is pending (F5,
-  ff-engsys-fleet#60); so is the consumer wiring (staged fetch). Until both land, no reader trusts
-  these refs (§3.1).
+- **Fleet signatures bind a ref to a fleet** (F5, operator decision: option A). GitHub's metadata
+  can't: commits made through the Git Data API are committed by `web-flow` (GitHub signs them),
+  with the App's bot only as the email-derived author (checked on the live baton refs). So every
+  write carries an `events.sig` blob next to `events.jsonl` (`core/lib/memory/signing.mjs`): one
+  strictly parsed line holding an Ed25519 signature, made with the writer fleet's key
+  (`ENGSYS_MEMORY_SIGNING_KEY_FILE`, fleet-guide § 6.1), over
+  `engsys-memory-ref-sig\nv1\nfleet=<fleet>\nref=<full ref>\nparent=<sha|none>\ncontent=<sha256 of events.jsonl>\n`.
+  A signature can't be replayed onto another ref, parent or content. `memory-sync` writes nothing
+  without a usable key (skipped `no_signing_key`, logged).
+- **Readers verify the signature** (`verifyMemoryRefTip`): ref, parent and content digest are
+  recomputed from what was read, and the signature is checked against `fleet_memory_pubkeys` (§10). A
+  `<role>/<fleet>` tail must be signed by the fleet it names, `events` by any listed fleet. No entry,
+  a malformed key, a missing or malformed line, or a bad signature = untrusted. The commit's
+  committer/author is not a trust input at all.
+- **Still open:** the consumer wiring (staged fetch, so compaction doesn't break non-forced fetches)
+  is a separate, Nyx-reviewed item, and `trust.mjs` does not yet accept `author_kind: 'fleet_signed'`.
+  Until then no reader trusts these refs (§3.1).
 - **Readers:** every fleet fetches every ref.
-- **Trust map:** derived from `federation.yml`. Each enabled fleet's `github_app` is resolved to its
-  bot **user** ID; operators are resolved to numeric user IDs.
+- **Trust map:** for ref authorship, the operator memory.yml's `fleet_memory_pubkeys` (above; not
+  federation.yml, which holds App ids and slugs). For GitHub-sourced events inside a ref, authors stay
+  matched by numeric **user** id (§7.2): bot user ids in `trusted_bot_user_ids`, operators in
+  `operator_user_ids`.
 - **Handoffs:** the tail mirror runs from each monster heartbeat, so a baton handoff strands at most
   one heartbeat interval of journal.
 
@@ -308,7 +323,13 @@ high_fanout_globs: []                   # files keyed by symbol instead of path
 brief_bytes: 2048
 max_events: 20000
 publish_role: maintain                  # must stay maintain: any other value refuses --publish (§9)
+fleet_memory_pubkeys: {}                # {<fleet>: <base64 raw 32-byte Ed25519 public key>}; fleet config dir ONLY (§9)
 ```
+
+`fleet_memory_pubkeys` (F5) is read only from the fleet config dir's `memory.yml`, the operator's
+reviewed, hash-pinned copy, never from the plugin or repo config. Each value must be exactly 32 bytes
+of standard base64 (what `fleet memory-pubkey` prints); a malformed entry is dropped and logged, and a
+fleet with no entry is untrusted.
 
 ### Commit operator trust, and the real boundary it rests on
 

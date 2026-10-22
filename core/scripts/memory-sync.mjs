@@ -22,6 +22,7 @@ import {
   formatEventsJsonl,
   tailRef,
 } from '../lib/memory/ref-store.mjs';
+import { FLEET_ID_RE, readSigningKeyFile, signTip } from '../lib/memory/signing.mjs';
 import { ensureIndex, resolveCacheDir, resolveReviewedSha } from '../lib/memory/index-db.mjs';
 import { isEventTrusted as sharedIsEventTrusted } from '../lib/memory/trust.mjs';
 import { loadConfig } from './memory-brief.mjs';
@@ -1146,8 +1147,7 @@ export function writeDeltaEvents(cacheDir, incomingEvents) {
 export const WRITER_ROLES = Object.freeze(['merge', 'maintain']);
 export const EVENTS_WRITER_ROLE = 'maintain';
 // A fleet id becomes a ref path segment and part of every tail event key (index-db's KEY_RE caps keys
-// at 80 characters), so it is length-capped as well as charset-checked.
-const FLEET_ID_RE = /^[A-Za-z0-9._-]{1,40}$/;
+// at 80 characters), so it is length-capped as well as charset-checked (FLEET_ID_RE, signing.mjs).
 const REPO_NAME_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
 /**
@@ -1162,6 +1162,8 @@ export function resolveWriteTarget({ mode, role = '', fleet = '', ref = '', stat
   if (!REPO_NAME_RE.test(String(repo || ''))) return { ok: false, reason: `--${mode} needs --repo owner/name` };
   if (!WRITER_ROLES.includes(role)) return { ok: false, reason: `--${mode} needs --role ${WRITER_ROLES.join('|')}` };
   if (!stateDir) return { ok: false, reason: `--${mode} needs --state-dir (the baton fence reads it)` };
+  // Every write is signed as its fleet (signing.mjs), so both modes need the fleet id.
+  if (!FLEET_ID_RE.test(String(fleet || ''))) return { ok: false, reason: `--${mode} needs --fleet <id> (1-40 of A-Z a-z 0-9 . _ -)` };
   if (mode === 'publish') {
     if (ref && ref !== EVENTS_REF) return { ok: false, reason: `--publish writes only ${EVENTS_REF}; a tail ref is written by --tail` };
     if (role !== EVENTS_WRITER_ROLE) return { ok: false, reason: `only the ${EVENTS_WRITER_ROLE} baton holder publishes ${EVENTS_REF} (got --role ${role})` };
@@ -1170,7 +1172,6 @@ export function resolveWriteTarget({ mode, role = '', fleet = '', ref = '', stat
     return { ok: true, ref: EVENTS_REF };
   }
   if (ref && ref !== EVENTS_REF) return { ok: false, reason: '--tail takes no --ref: it writes the role\'s own <role>/<fleet> ref' };
-  if (!FLEET_ID_RE.test(String(fleet || ''))) return { ok: false, reason: '--tail needs --fleet <id> (1-40 of A-Z a-z 0-9 . _ -)' };
   return { ok: true, ref: tailRef(role, fleet) };
 }
 
@@ -1548,12 +1549,28 @@ export async function runMemorySync({
   stateDir = '',
   session = '',
   fence = null,
+  // F5 fleet signing: the private key file (default: the launcher's ENGSYS_MEMORY_SIGNING_KEY_FILE), or an
+  // injected KeyObject for tests. No usable key = no write (skipped, never blocking).
+  signingKeyFile = process.env.ENGSYS_MEMORY_SIGNING_KEY_FILE || '',
+  signingKey = null,
 } = {}) {
   const cfg = config || loadConfig(repoRoot);
   // Who may write what is decided before anything is collected or fetched: a refused run writes nothing.
   const target = resolveWriteTarget({ mode, role, fleet, ref, stateDir, repo, config: cfg });
   if (!target.ok) {
     return { ok: false, mode, refused: true, reason: target.reason, publishResult: null };
+  }
+  let signer = null;
+  if (target.ref) {
+    let privateKey = signingKey;
+    if (!privateKey) {
+      try {
+        privateKey = readSigningKeyFile(signingKeyFile);
+      } catch (e) {
+        return { ok: false, mode, skipped: 'no_signing_key', reason: String(e?.message || e), publishResult: null };
+      }
+    }
+    signer = ({ ref: signRef, parent, content }) => signTip({ privateKey, fleet, ref: signRef, parent, content });
   }
   const writeGate = target.ref ? (fence || createBatonFence({ role, repo, stateDir, session })) : null;
   const openStore = () => refStore || createMemoryRefStore({ repo, maxEvents: cfg.max_events || 20_000, now });
@@ -1567,6 +1584,7 @@ export async function runMemorySync({
       message: `memory-sync: ${role}/${fleet} journal tail (${tailEvents.length})`,
       cacheDir,
       beforeCas: writeGate,
+      signer,
     });
     return {
       ok: Boolean(tailResult.ok),
@@ -1707,6 +1725,7 @@ export async function runMemorySync({
       message: `memory-sync: publish ${mergedDelta.length} events`,
       cacheDir,
       beforeCas: writeGate,
+      signer,
     });
   }
 
@@ -1751,6 +1770,7 @@ export async function main(argv = process.argv.slice(2), { out = process.stdout,
       tail: { type: 'boolean', default: false },
       'state-dir': { type: 'string', default: '' },
       session: { type: 'string', default: '' },
+      'signing-key-file': { type: 'string', default: '' },
     },
     strict: false,
   });
@@ -1778,12 +1798,14 @@ export async function main(argv = process.argv.slice(2), { out = process.stdout,
       fleet: String(values.fleet || ''),
       stateDir,
       session: String(values.session || ''),
+      ...(values['signing-key-file'] ? { signingKeyFile: path.resolve(String(values['signing-key-file'])) } : {}),
     });
     out.write(JSON.stringify(res) + '\n');
     if (res.refused) {
       err.write(`memory-sync: refused: ${res.reason}\n`);
       return 2;
     }
+    if (res.skipped === 'no_signing_key') err.write(`memory-sync: not written, no usable signing key: ${res.reason}\n`);
     const warning = cappedWarning(res, String(values.repo || ''));
     if (warning) err.write(warning);
     return res.ok ? 0 : 1;

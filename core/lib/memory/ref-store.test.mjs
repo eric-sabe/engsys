@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { fakeGitApi } from '../lease/fixtures/fake-github.mjs';
 import {
   EVENTS_REF,
@@ -16,6 +17,7 @@ import {
   createMemoryRefStore,
   verifyMemoryRefTip,
 } from './ref-store.mjs';
+import { publicKeyB64, resolveFleetPubkeys, signTip } from './signing.mjs';
 
 describe('ref-store (#130)', () => {
   it('validates tailRef segments and rejects refs outside refs/engsys/memory/*', async () => {
@@ -338,101 +340,81 @@ describe('ref-store (#130)', () => {
     assert.equal(scanEventForSecrets({ k: 'a', summary: 'xoxb-1234567890-abcdef' }).matched, true);
   });
 
-  describe('verifyMemoryRefTip (engsys v2.0.1 M4) — NOT wired into any consumer; unit-tested in isolation', () => {
-    it('rejects a tip whose committer numeric ID does not match the publisher user ID', async () => {
-      const res = await verifyMemoryRefTip('/repo', {
-        sha: 'cafed00dcafed00dcafed00dcafed00dcafed00d',
-        repo: 'owner/repo',
-        publisherUserId: 999,
-        events: [{ k: 'x', path: 'docs/agent-lessons/a.md' }],
-        fetchCommitIdentity: async () => ({ committerId: 123, verified: true }),
-        resolveSha: () => 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
-        exec: () => { throw new Error('should not be called'); },
-      });
-      assert.equal(res.ok, false);
-      assert.equal(res.reason, 'untrusted_publisher');
-      assert.deepEqual(res.events, []);
-    });
+  describe('verifyMemoryRefTip (F5: fleet signatures) — NOT wired into any consumer; unit-tested in isolation', () => {
+    const { privateKey: ericKey } = crypto.generateKeyPairSync('ed25519');
+    const { privateKey: markKey } = crypto.generateKeyPairSync('ed25519');
+    const pubkeys = resolveFleetPubkeys({ fleet_memory_pubkeys: { eric: publicKeyB64(ericKey), 'mark-fleet': publicKeyB64(markKey) } });
+    const TAIL = tailRef('merge', 'eric');
+    const signerFor = (privateKey, fleet) => ({ ref, parent, content }) => signTip({ privateKey, fleet, ref, parent, content });
+    const okExec = () => ''; // cat-file -e succeeds -> every path exists
+    const reviewed = () => 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef';
 
-    it('v2.0.1 round 2 (F3): rejects a tip whose AUTHOR id matches the publisher but the COMMITTER id does not — author.id is never an alternate match', async () => {
-      const res = await verifyMemoryRefTip('/repo', {
-        sha: 'cafed00dcafed00dcafed00dcafed00dcafed00d',
-        repo: 'owner/repo',
-        publisherUserId: 999,
-        events: [{ k: 'x', path: 'docs/agent-lessons/a.md' }],
-        fetchCommitIdentity: async () => ({ authorId: 999, committerId: 1, verified: true }),
-        resolveSha: () => 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
-        exec: () => { throw new Error('should not be called'); },
-      });
-      assert.equal(res.ok, false);
-      assert.equal(res.reason, 'untrusted_publisher');
-    });
+    async function writeAndRead({ ref = TAIL, signer, events, store } = {}) {
+      const s = store || createMemoryRefStore({ repo: 'owner/repo', client: fakeGitApi({ repo: 'owner/repo' }), sleep: async () => {} });
+      const w = await s.writeEvents({ ref, events, signer });
+      assert.equal(w.ok, true, JSON.stringify(w));
+      const tip = await s.readEvents({ ref });
+      return { store: s, tip };
+    }
+    const ev = (k, extra = {}) => ({ k, kind: 'journal', updated_at: '2026-07-01T00:00:00Z', ...extra });
 
-    it('cr review (round 1): rejects a tip whose committer/author ID MATCHES but the commit has no verified signature — author.id/committer.id alone are derived from the (self-settable) commit email, not proof of the publisher', async () => {
-      const res = await verifyMemoryRefTip('/repo', {
-        sha: 'cafed00dcafed00dcafed00dcafed00dcafed00d',
-        repo: 'owner/repo',
-        publisherUserId: 999,
-        events: [{ k: 'x', path: 'docs/agent-lessons/a.md' }],
-        fetchCommitIdentity: async () => ({ authorId: null, committerId: 999, verified: false }),
-        resolveSha: () => 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
-        exec: () => { throw new Error('should not be called'); },
-      });
-      assert.equal(res.ok, false);
-      assert.equal(res.reason, 'untrusted_publisher');
-      assert.deepEqual(res.events, []);
-    });
-
-    it('accepts a tip whose committer ID matches the publisher user ID AND carries a verified signature AND every event path exists in the reviewed tree, stripping any embedded author_kind/author_id (positive control)', async () => {
-      const execCalls = [];
-      const res = await verifyMemoryRefTip('/repo', {
-        sha: 'cafed00dcafed00dcafed00dcafed00dcafed00d',
-        repo: 'owner/repo',
-        publisherUserId: 999,
-        events: [
-          { k: 'x', path: 'docs/agent-lessons/a.md', author_kind: 'operator', author_id: 1 },
-        ],
-        fetchCommitIdentity: async () => ({ authorId: null, committerId: 999, verified: true }),
-        resolveSha: () => 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
-        exec: (cmd, args) => {
-          execCalls.push({ cmd, args });
-          return ''; // cat-file -e succeeds (no throw) -> path exists
-        },
-      });
+    it('the writer stores events.sig next to events.jsonl, and a tip signed by its own fleet verifies end to end', async () => {
+      const { tip } = await writeAndRead({ signer: signerFor(ericKey, 'eric'), events: [ev('a', { path: 'src/a.ts', author_kind: 'operator', author_id: 1 })] });
+      assert.match(tip.sigText, /^engsys-memory-sig v1 fleet=eric ref=refs\/engsys\/memory\/merge\/eric parent=none /);
+      const res = await verifyMemoryRefTip('/repo', { ref: TAIL, parent: tip.parents[0] ?? null, content: tip.content, sigText: tip.sigText, pubkeys, resolveSha: reviewed, exec: okExec });
       assert.equal(res.ok, true);
+      assert.equal(res.fleet, 'eric');
       assert.equal(res.events.length, 1);
-      // Never trusts the embedded author_kind/author_id — always overwritten post-verification.
-      assert.equal(res.events[0].author_kind, 'bot');
-      assert.equal(res.events[0].author_id, 999);
-      assert.ok(execCalls.some((c) => c.args.includes('cat-file')));
+      assert.equal(res.events[0].author_kind, 'fleet_signed', 'embedded author_kind is never trusted');
+      assert.equal(res.events[0].author_id, null);
+      assert.equal(res.events[0].signed_fleet, 'eric');
     });
 
-    it('drops an event whose path does NOT exist in the independently reviewed tree, even from a trusted publisher', async () => {
-      const res = await verifyMemoryRefTip('/repo', {
-        sha: 'cafed00dcafed00dcafed00dcafed00dcafed00d',
-        repo: 'owner/repo',
-        publisherUserId: 999,
-        events: [{ k: 'x', path: 'docs/agent-lessons/does-not-exist.md' }],
-        fetchCommitIdentity: async () => ({ authorId: null, committerId: 999, verified: true }),
-        resolveSha: () => 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
-        exec: () => { throw new Error('cat-file: path not found'); },
-      });
+    it('a second write signs over its parent; the first tip\'s signature does not carry over', async () => {
+      const first = await writeAndRead({ signer: signerFor(ericKey, 'eric'), events: [ev('a')] });
+      const w = await first.store.writeEvents({ ref: TAIL, events: [ev('b', { updated_at: '2026-07-02T00:00:00Z' })], signer: signerFor(ericKey, 'eric') });
+      assert.equal(w.ok, true);
+      const tip = await first.store.readEvents({ ref: TAIL });
+      assert.equal(tip.parents.length, 1);
+      assert.equal((await verifyMemoryRefTip('/repo', { ref: TAIL, parent: tip.parents[0], content: tip.content, sigText: tip.sigText, pubkeys, resolveSha: reviewed, exec: okExec })).ok, true);
+      assert.equal((await verifyMemoryRefTip('/repo', { ref: TAIL, parent: tip.parents[0], content: tip.content, sigText: first.tip.sigText, pubkeys, resolveSha: reviewed, exec: okExec })).ok, false, 'the old signature does not verify the new tip');
+    });
+
+    it('an unsigned tip, a tip signed by another fleet, and replay onto another ref are all untrusted', async () => {
+      const unsigned = await writeAndRead({ events: [ev('a')] });
+      assert.equal(unsigned.tip.sigText, null);
+      assert.equal((await verifyMemoryRefTip('/repo', { ref: TAIL, parent: null, content: unsigned.tip.content, sigText: unsigned.tip.sigText, pubkeys, resolveSha: reviewed, exec: okExec })).reason, 'missing_or_malformed_signature');
+      const byMark = await writeAndRead({ signer: signerFor(markKey, 'mark-fleet'), events: [ev('a')] });
+      assert.equal((await verifyMemoryRefTip('/repo', { ref: TAIL, parent: null, content: byMark.tip.content, sigText: byMark.tip.sigText, pubkeys, resolveSha: reviewed, exec: okExec })).reason, 'fleet_mismatch');
+      const signed = await writeAndRead({ signer: signerFor(ericKey, 'eric'), events: [ev('a')] });
+      assert.equal((await verifyMemoryRefTip('/repo', { ref: EVENTS_REF, parent: null, content: signed.tip.content, sigText: signed.tip.sigText, pubkeys, resolveSha: reviewed, exec: okExec })).reason, 'ref_mismatch');
+    });
+
+    it('the commit\'s GitHub identity is not an input at all (web-flow commits every API-made commit)', async () => {
+      const signed = await writeAndRead({ signer: signerFor(ericKey, 'eric'), events: [ev('a')] });
+      const res = await verifyMemoryRefTip('/repo', { ref: TAIL, parent: null, content: signed.tip.content, sigText: signed.tip.sigText, pubkeys, resolveSha: reviewed, exec: okExec, publisherUserId: 1, fetchCommitIdentity: async () => { throw new Error('must not be called'); } });
+      assert.equal(res.ok, true);
+    });
+
+    it('drops an event whose path does NOT exist in the independently reviewed tree, even from a verified tip', async () => {
+      const signed = await writeAndRead({ signer: signerFor(ericKey, 'eric'), events: [ev('a', { path: 'docs/agent-lessons/does-not-exist.md' })] });
+      const res = await verifyMemoryRefTip('/repo', { ref: TAIL, parent: null, content: signed.tip.content, sigText: signed.tip.sigText, pubkeys, resolveSha: reviewed, exec: () => { throw new Error('cat-file: path not found'); } });
       assert.equal(res.ok, true);
       assert.deepEqual(res.events, []);
     });
 
-    it('fails closed (ok: false) when no reviewed SHA can be resolved, even with a verified publisher', async () => {
-      const res = await verifyMemoryRefTip('/repo', {
-        sha: 'cafed00dcafed00dcafed00dcafed00dcafed00d',
-        repo: 'owner/repo',
-        publisherUserId: 999,
-        events: [{ k: 'x' }],
-        fetchCommitIdentity: async () => ({ authorId: 999, committerId: 999, verified: true }),
-        resolveSha: () => null,
-        exec: () => '',
-      });
-      assert.equal(res.ok, false);
-      assert.equal(res.reason, 'no_reviewed_sha');
+    it('fails closed when no reviewed SHA can be resolved, or an input is missing', async () => {
+      const signed = await writeAndRead({ signer: signerFor(ericKey, 'eric'), events: [ev('a')] });
+      assert.equal((await verifyMemoryRefTip('/repo', { ref: TAIL, parent: null, content: signed.tip.content, sigText: signed.tip.sigText, pubkeys, resolveSha: () => null, exec: okExec })).reason, 'no_reviewed_sha');
+      assert.equal((await verifyMemoryRefTip('/repo', { ref: TAIL, parent: null, sigText: signed.tip.sigText, pubkeys })).reason, 'missing_input');
+    });
+
+    it('a signer that throws aborts the write with nothing moved', async () => {
+      const s = createMemoryRefStore({ repo: 'owner/repo', client: fakeGitApi({ repo: 'owner/repo' }), sleep: async () => {} });
+      const w = await s.writeEvents({ ref: TAIL, events: [ev('a')], signer: () => { throw new Error('no key'); } });
+      assert.equal(w.ok, false);
+      assert.equal(w.error.code, 'sign_failed');
+      assert.equal((await s.readEvents({ ref: TAIL })).sha, null);
     });
   });
 });
