@@ -133,13 +133,24 @@ const BASE_HEADERS = {
 
 // ── API helpers ──────────────────────────────────────────────────────────────
 
-async function gql(query, variables = {}) {
-  const res = await fetch(GQL_URL, {
-    method: 'POST',
-    headers: BASE_HEADERS,
-    body: JSON.stringify({ query, variables }),
-  });
-  if (!res.ok) {
+async function gql(query, variables = {}, { retries = 3 } = {}) {
+  let res;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    res = await fetch(GQL_URL, {
+      method: 'POST',
+      headers: BASE_HEADERS,
+      body: JSON.stringify({ query, variables }),
+    });
+    if (res.ok) break;
+
+    // Transient server errors (502/503/504 are common on heavy queries): back off and retry
+    if (res.status >= 500 && attempt < retries) {
+      const waitMs = 5000 * 2 ** attempt;
+      console.warn(`  WARN: GraphQL HTTP ${res.status} — retrying in ${waitMs / 1000}s`);
+      await sleep(waitMs);
+      continue;
+    }
+
     const body = await res.text();
     throw new Error(`GraphQL HTTP ${res.status}: ${body.slice(0, 300)}`);
   }

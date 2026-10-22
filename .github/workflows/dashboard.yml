@@ -34,7 +34,7 @@ jobs:
   collect:
     name: Collect GitHub stats
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 90   # delta runs take minutes; a full backfill of ~50 repos needs ~60
 
     steps:
       - name: Checkout repo
