@@ -222,6 +222,10 @@ translate_copilot_flags() {
           esac
           shift
         fi ;;
+      --*=~ | --*=~/*)
+        out+=("${tok/=\~/=$HOME}") ;;
+      \~ | \~/*)
+        out+=("${tok/#\~/$HOME}") ;;
       *)
         out+=("$tok") ;;
     esac
@@ -236,8 +240,10 @@ translate_copilot_flags() {
 }
 
 # Translate Claude-style roster flags into shell-escaped Antigravity CLI (agy) flags when HARNESS=antigravity.
+# When a 2nd argument (<session-name>) is supplied and --remote-control (or AGY_REMOTE_CONTROL=1) is active,
+# appends `--remote-control-name <session-name>` unless `--remote-control-name` was already passed explicitly (#283).
 translate_antigravity_flags() {
-  local raw="$1" out=() tok q=()
+  local raw="$1" session_name="${2:-}" out=() tok q=() has_rc=0 has_rc_name=0
   set -f
   # shellcheck disable=SC2086
   set -- $raw
@@ -248,7 +254,13 @@ translate_antigravity_flags() {
       --dangerously-skip-permissions)
         out+=(--dangerously-skip-permissions) ;;
       --remote-control)
-        out+=(--remote-control) ;;
+        out+=(--remote-control); has_rc=1 ;;
+      --remote-control-name)
+        has_rc_name=1
+        if [ $# -gt 0 ]; then out+=(--remote-control-name "$1"); shift; fi ;;
+      --remote-control-name=*)
+        has_rc_name=1
+        out+=("$tok") ;;
       --permission-mode)
         if [ "${1:-}" = "bypassPermissions" ]; then out+=(--dangerously-skip-permissions); fi
         [ $# -eq 0 ] || shift ;;
@@ -268,10 +280,20 @@ translate_antigravity_flags() {
           esac
           shift
         fi ;;
+      --*=~ | --*=~/*)
+        out+=("${tok/=\~/=$HOME}") ;;
+      \~ | \~/*)
+        out+=("${tok/#\~/$HOME}") ;;
       *)
         out+=("$tok") ;;
     esac
   done
+  if [ "${AGY_REMOTE_CONTROL:-0}" = 1 ] && [ "$has_rc" = 0 ]; then
+    out+=(--remote-control); has_rc=1
+  fi
+  if [ "$has_rc" = 1 ] && [ "$has_rc_name" = 0 ] && [ -n "$session_name" ]; then
+    out+=(--remote-control-name "$session_name")
+  fi
   if [ "${#out[@]}" -gt 0 ]; then
     local item
     for item in "${out[@]}"; do
@@ -281,11 +303,11 @@ translate_antigravity_flags() {
   fi
 }
 
-# Antigravity Remote Control is opt-in. Unlike Claude Code (where --remote-control is self-contained per
-# session), Antigravity needs a host-level background daemon (`agy remote-control start`), which exposes
-# the host's sessions for remote driving. The launcher never starts it on its own: set
-# AGY_REMOTE_CONTROL_AUTOSTART=1 to start it when HARNESS=antigravity and a roster session uses
-# --remote-control (or AGY_REMOTE_CONTROL=1). Default off.
+# Antigravity per-session `--remote-control --remote-control-name <name>` is self-contained per tmux TUI
+# process (#283). The standalone host background daemon (`agy remote-control start`, which serves saved
+# `~/.gemini/antigravity-cli/conversations/*.pb` files from disk in a separate headless process) is
+# strictly opt-in via AGY_REMOTE_CONTROL_AUTOSTART=1 and defaults to off (0) so it does not compete with
+# or cold-load `.pb` files away from live tmux sessions.
 if [ "$HARNESS" = "antigravity" ] && [ "${AGY_REMOTE_CONTROL_AUTOSTART:-0}" = 1 ]; then
   agy_needs_rc=0
   if [ "${AGY_REMOTE_CONTROL:-0}" = 1 ]; then
@@ -296,7 +318,7 @@ if [ "$HARNESS" = "antigravity" ] && [ "${AGY_REMOTE_CONTROL_AUTOSTART:-0}" = 1 
     done
   fi
   if [ "$agy_needs_rc" = 1 ]; then
-    if ! agy remote-control status 2>/dev/null | grep -qi 'Daemon status:[[:space:]]*running'; then
+    if ! agy remote-control status 2>/dev/null | grep -Eqi 'Daemon status:[[:space:]]*(running|active)'; then
       agy_rc_name="${FLEET_ID:-$NAMESPACE}-$(hostname -s 2>/dev/null || echo host)"
       if agy remote-control start --name "$agy_rc_name" >/dev/null 2>&1; then
         echo "started Antigravity remote-control daemon: $agy_rc_name"
@@ -615,10 +637,10 @@ launch_one() {
     copilot_flags="$(translate_copilot_flags "${MODEL:+$MODEL }${extra:-}")"
     [ -n "$copilot_flags" ] && run_cmd+=" $copilot_flags"
   elif [ "$HARNESS" = "antigravity" ]; then
-    run_cmd+="agy $(printf %q "$workdir")"
+    run_cmd+="agy"
     [ -n "$prompt" ] && run_cmd+=" -i $(printf %q "$prompt")"
     local agy_flags
-    agy_flags="$(translate_antigravity_flags "${MODEL:+$MODEL }${extra:-}")" || { echo "error: refusing to launch '$name' on HARNESS=antigravity" >&2; return 1; }
+    agy_flags="$(translate_antigravity_flags "${MODEL:+$MODEL }${extra:-}" "$name")" || { echo "error: refusing to launch '$name' on HARNESS=antigravity" >&2; return 1; }
     [ -n "$agy_flags" ] && run_cmd+=" $agy_flags"
   else
     run_cmd+="command claude --name $(printf %q "$name") --settings $(printf %q "$SETTINGS_FILE")"

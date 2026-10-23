@@ -22,7 +22,7 @@ A **primary conductor harness** (`harness: <name>` in `engsys.config.yaml` and `
 | **8** | **Agentic Memory Engine** | Class A lesson + Class B (per-fleet `refs/engsys/memory/fleet/<fleet>/…`) SQLite FTS5 `< 2 KB` subagent brief injection & `nyx` Class A isolation | `core/.claude-plugin/subagent-memory-inject.mjs`, `core/scripts/memory-brief.mjs`, `core/scripts/memory-sync.mjs` |
 | **9** | **Adaptive SDD & Multi-Provider Dispatch** | `/design-change` (`TW-1..TW-6`), `spec-slice.mjs`, `contract-check.mjs`, cross-family worker routing | `core/lib/sdd-validator.mjs`, `core/scripts/worker-run.mjs` |
 | **10** | **Autonomous Fleet & Deterministic Supervisor** | `tmux` session launching, `pane_busy` detection, expired-auth hold & `auth_probe`, context-pressure rotation, CAS batons | `core/skills/agent-sessions/scripts/launch-agent-sessions.sh`, `fleet-supervisor.sh`, `core/lib/monster.sh` |
-| **11** | **Remote Control & Desktop / Web Visibility** | Per-session `--remote-control` / `--remote` vs. host daemon (`remote-control start`) + workspace grouping | `launch-agent-sessions.sh` |
+| **11** | **Remote Control & Desktop / Web Visibility** | Per-session `--remote-control` / `--remote` / `--remote-control-name <name>` vs. standalone host daemon (`remote-control start`) | `launch-agent-sessions.sh` |
 | **12** | **Messaging & Closed-Loop Installer Rollback** | Same-host peer nudges vs. GitHub App-signed `fleet msg` / `fleet relay` / `fleet-inbox.mjs`; lockfile & byte-for-byte uninstall (`CT-10`/`CT-11`) | `core/fleet/lib/route.mjs`, `core/.claude-plugin/fleet-inbox.mjs`, `lib/commands.js`, `lib/selftest.js` |
 
 ---
@@ -60,7 +60,7 @@ Never rely on training-data assumptions about a CLI or IDE harness; flags and ho
      - **Block a tool call or stop event** (e.g., `permissionDecision: "deny"`, `decision: "block"`, or `exit 2` with stderr)
      - **Inject context into the turn** (`hookSpecificOutput.additionalContext`, top-level `additionalContext`, or plain-text stdout).
 6. **Fleet & `tmux` Runtime Signals:**
-   - **Interactive start with initial prompt:** How does `launch-agent-sessions.sh` start an interactive TUI session and feed the first turn (e.g. `claude "<prompt>"`, `copilot -i "<prompt>"`, `agy <dir> -i "<prompt>"`, `codex -C <dir> "<prompt>"`)?
+   - **Interactive start with initial prompt:** How does `launch-agent-sessions.sh` start an interactive TUI session and feed the first turn (e.g. `claude "<prompt>"`, `copilot -i "<prompt>"`, `agy -i "<prompt>"`, `codex -C <dir> "<prompt>"`)?
    - **Headless one-shot probe (`auth_probe`):** How does `fleet-supervisor.sh` run a zero-plugin, fast 1-word health check (`claude -p`, `copilot -p`, `agy -p`, `codex exec`)?
    - **Pane busy indicator (`pane_busy`):** What string appears in `tmux capture-pane` while the harness is mid-turn (`esc to interrupt` in Claude/Copilot/Codex)?
    - **Auth error lines (`CLAUDE_AUTH_ERRORS`):** What exact line does the TUI print when OAuth/API credentials expire?

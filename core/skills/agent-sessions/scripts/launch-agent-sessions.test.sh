@@ -48,7 +48,10 @@ printf '#!/usr/bin/env bash\necho "ran $*" >>"$FAKE/ran"\nexit 0\n' >"$T/bin/cla
 printf '#!/usr/bin/env bash\nexit 0\n' >"$T/bin/copilot"
 cat >"$T/bin/agy" <<'SH'
 #!/usr/bin/env bash
-[ "${1:-}" = remote-control ] && echo "agy-rc $*" >>"$FAKE/actions"
+if [ "${1:-}" = remote-control ]; then
+  echo "agy-rc $*" >>"$FAKE/actions"
+  [ "${2:-}" = status ] && [ -n "${FAKE_AGY_RC_STATUS:-}" ] && printf 'Daemon status: %s\n' "$FAKE_AGY_RC_STATUS"
+fi
 exit 0
 SH
 chmod +x "$T/bin/"*
@@ -183,6 +186,9 @@ has "copilot: sonnet → claude-sonnet-5.5" "$acts" "--model claude-sonnet-5.5"
 has "copilot: haiku → claude-haiku-5.5" "$acts" "--model claude-haiku-5.5"
 has "copilot: bypassPermissions → --yolo" "$acts" "--yolo"
 has "copilot: --dangerously-skip-permissions → --yolo --mode autopilot --no-ask-user" "$acts" "--yolo --mode autopilot --no-ask-user"
+run copilot "acme-tilde|$W||--add-dir ~/src/worktrees --add-dir=~/src/more ~otheruser/keep"
+has "copilot: expands ~/... and --flag=~/... to \$HOME (#284)" "$acts" "--add-dir $HOME/src/worktrees --add-dir=$HOME/src/more"
+has "copilot: does not corrupt ~otheruser (#284)" "$acts" "~otheruser/keep"
 
 SEC_ENV_OK="acme-sec|$W||--model claude-opus-4-8|$W/security.env"
 echo "engsys#197/#229: the verdict key path goes only to security-ENV lines (defence in depth, not a boundary)"
@@ -237,15 +243,28 @@ lacks "claude: an inherited ENGSYS_MM_CONFIG is never forwarded" "$acts" "/inher
 echo "antigravity flag translation and the remote-control daemon"
 run antigravity "$BUILD"
 [ "$rc" -eq 0 ] && ok "antigravity: interactive line launches" || no "antigravity: interactive line launches" "$err"
+lacks "antigravity: positional workdir is not passed to agy (#279)" "$acts" "agy $W"
 has "antigravity: --model opus → gemini-4-argon, --effort and --remote-control forwarded" "$acts" "--model gemini-4-argon --effort medium --remote-control"
+has "antigravity: --remote-control-name sets session display name (#283)" "$acts" "--remote-control-name acme-build"
 lacks "antigravity: daemon is not started by default" "$acts" "agy-rc"
 run antigravity "$BUILD" AGY_REMOTE_CONTROL_AUTOSTART=0
 lacks "antigravity: daemon stays off with AGY_REMOTE_CONTROL_AUTOSTART=0" "$acts" "agy-rc"
 run antigravity "$BUILD" AGY_REMOTE_CONTROL_AUTOSTART=1
 has "antigravity: AGY_REMOTE_CONTROL_AUTOSTART=1 starts the daemon (opt-in)" "$acts" "agy-rc remote-control start --name acme-"
+run antigravity "$BUILD" AGY_REMOTE_CONTROL_AUTOSTART=1 FAKE_AGY_RC_STATUS=active
+lacks "antigravity: Daemon status: active does not restart the daemon (#279)" "$acts" "agy-rc remote-control start"
 run antigravity "acme-build|$W||--model haiku" AGY_REMOTE_CONTROL_AUTOSTART=1
 lacks "antigravity: opt-in alone, with no --remote-control session, starts nothing" "$acts" "agy-rc remote-control start"
 has "antigravity: haiku → gemini-3.8-flash" "$acts" "--model gemini-3.8-flash"
+lacks "antigravity: --remote-control-name is omitted when --remote-control is not active (#283)" "$acts" "--remote-control-name"
+run antigravity "acme-build|$W||--model haiku" AGY_REMOTE_CONTROL=1
+has "antigravity: AGY_REMOTE_CONTROL=1 enables --remote-control and --remote-control-name (#283)" "$acts" "--remote-control --remote-control-name acme-build"
+run antigravity "acme-build|$W||--remote-control --remote-control-name custom-inst"
+has "antigravity: explicit --remote-control-name is preserved (#283)" "$acts" "--remote-control --remote-control-name custom-inst"
+lacks "antigravity: explicit --remote-control-name is not duplicated (#283)" "$acts" "--remote-control-name acme-build"
+run antigravity "acme-tilde|$W||--add-dir ~/src/worktrees --add-dir=~/src/more ~otheruser/keep"
+has "antigravity: expands ~/... and --flag=~/... to \$HOME (#284)" "$acts" "--add-dir $HOME/src/worktrees --add-dir=$HOME/src/more"
+has "antigravity: does not corrupt ~otheruser (#284)" "$acts" "~otheruser/keep"
 
 echo "engsys#236: only a short '. <launch file>' line is typed; the full command lives in the file"
 LAUNCH_EXTRA=""
