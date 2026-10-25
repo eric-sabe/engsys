@@ -82,6 +82,8 @@ unset ENGSYS_MEMORY_CONFIG   # engsys#262: set below for a line on its own per-s
 # engsys#287: the fleet's Claude config dir as the fleet kit gave it to this launcher (fleet-env.sh exports it); a line
 # gets this value or none, never what its window inherited
 LAUNCHER_FLEET_CFG="${FLEET_CLAUDE_CONFIG_DIR:-}"
+# and the per-session dirs' parent (the fleet kit passes it; core/lib/mm-config.mjs searches it inside a session)
+LAUNCHER_CFG_SESSIONS="${ENGSYS_CONFIG_DIR_SESSIONS:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --roster) ROSTER="$2"; shift 2 ;;
@@ -539,7 +541,8 @@ launch_one() {
   #   identity: ENGSYS_SESSION, ENGSYS_SESSION_RUN, ENGSYS_SESSION_ROOT, ENGSYS_SINGLETON_ROLE (the baton holder, its
   #     fencing token, and the switch for the singleton-write and hand-back guards);
   #   keys: ENGSYS_SECURITY_VERDICT_KEY_FILE, ENGSYS_MEMORY_SIGNING_KEY_FILE;
-  #   config: ENGSYS_MEMORY_CONFIG, ENGSYS_MM_CONFIG, CLAUDE_CONFIG_DIR, FLEET_CLAUDE_CONFIG_DIR, FLEET_CLAUDE_CONFIG_DIR_SCOPE.
+  #   config: ENGSYS_MEMORY_CONFIG, ENGSYS_MM_CONFIG, CLAUDE_CONFIG_DIR, FLEET_CLAUDE_CONFIG_DIR, FLEET_CLAUDE_CONFIG_DIR_SCOPE,
+  #     ENGSYS_CONFIG_DIR_SESSIONS.
   # 1. set or cleared before the env file, 2. the env file is sourced, 3. re-decided after it from launcher state only:
   # exported when this line is granted it, otherwise unset. None is ever left over from the env file or from the
   # window's inherited environment (a tmux server's global environment can hold anything). The golden launch lines
@@ -574,6 +577,11 @@ launch_one() {
     # the session's identity again (engsys#287): an env file can't rename the baton holder, swap its run id, or
     # arm or disarm the singleton guard
     cmd+="$identity"
+  fi
+  # engsys#287: the per-session dirs' parent from this launcher's own environment, or none; never the env file's or the
+  # window's (core/lib/mm-config.mjs searches every dir under it for a session's plugins)
+  if [ -n "$LAUNCHER_CFG_SESSIONS" ]; then cmd+="export ENGSYS_CONFIG_DIR_SESSIONS=$(printf %q "$LAUNCHER_CFG_SESSIONS") && "; else cmd+="unset ENGSYS_CONFIG_DIR_SESSIONS && "; fi
+  if [ -n "$session_env" ]; then
     # and again after it, always (engsys#287): an env file can neither add the key path to a non-security session,
     # nor set one when no key is configured, nor drop it from a security one
     if [ -n "$verdict_key_file" ] && [ "$HARNESS" = claude ] && [ "$role" != merge ] && is_security_env "${session_env:-}"; then

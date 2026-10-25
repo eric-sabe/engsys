@@ -414,8 +414,9 @@ printf 'GH_APP_ID=1\nGH_APP_INSTALLATION_ID=2\nGH_APP_PEM=%s/none.pem\nGH_BOT_AU
 printf 'AZURE_CLIENT_ID=00000000-0000-0000-0000-000000000000\n' >"$HOME/.config/acme/azure-sp.env"
 
 # the launch command line for a window: the launch file's line (engsys#236), minus its own removal step before the harness
-# the identity re-assert after the env file (engsys#287) is dropped here; launch-golden.test.sh pins it
-launched() { grep -F "tmux [script] [acme:$1] " "$FAKE/tmux.log" | head -1 | sed -E -e 's/command rm -f -- [^ ]+ && //' -e 's/set \+a && export ENGSYS_SESSION=[^ ]+ ENGSYS_SESSION_RUN=[^ ]+ ENGSYS_SESSION_ROOT=[^ ]+( ENGSYS_SINGLETON_ROLE=[a-z]+)? && (unset ENGSYS_SINGLETON_ROLE && )?/set +a \&\& /' || true; }
+# the identity re-assert after the env file and the ENGSYS_CONFIG_DIR_SESSIONS decision (engsys#287) are dropped here;
+# launch-golden.test.sh pins them
+launched() { grep -F "tmux [script] [acme:$1] " "$FAKE/tmux.log" | head -1 | sed -E -e 's/command rm -f -- [^ ]+ && //' -e 's/set \+a && export ENGSYS_SESSION=[^ ]+ ENGSYS_SESSION_RUN=[^ ]+ ENGSYS_SESSION_ROOT=[^ ]+( ENGSYS_SINGLETON_ROLE=[a-z]+)? && (unset ENGSYS_SINGLETON_ROLE && )?/set +a \&\& /' -e 's/(export ENGSYS_CONFIG_DIR_SESSIONS=[^ ]+|unset ENGSYS_CONFIG_DIR_SESSIONS) \&\& //' || true; }
 unrendered() { grep -REn '__[A-Z][A-Z0-9_]*__' "$@" 2>/dev/null || true; }
 
 echo "-- full scaffold: launch through the shim"

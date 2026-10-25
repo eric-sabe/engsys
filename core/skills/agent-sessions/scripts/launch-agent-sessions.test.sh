@@ -222,9 +222,9 @@ lacks "claude: …nor does the launcher's own env leak into the line when a key 
 if [ ! -s "$T/leak" ]; then ok "no tmux call ever saw the key path in its environment (the server's global env stays clean)"; else no "tmux saw the key path" "$(cat "$T/leak")"; fi
 echo "export-before-claude ordering: the key decision is repeated after the env file"
 run claude "$SEC_ENV_OK" 
-case "$acts" in *"set +a && export ENGSYS_SESSION=acme-sec "*" && unset ENGSYS_SINGLETON_ROLE && export ENGSYS_SECURITY_VERDICT_KEY_FILE"*) ok "claude: the key decision is re-applied after the env file is sourced" ;; *) no "claude: re-applied after the env file" "$acts" ;; esac
+case "$acts" in *"set +a && export ENGSYS_SESSION=acme-sec "*" && unset ENGSYS_SINGLETON_ROLE && "*"ENGSYS_CONFIG_DIR_SESSIONS && export ENGSYS_SECURITY_VERDICT_KEY_FILE"*) ok "claude: the key decision is re-applied after the env file is sourced" ;; *) no "claude: re-applied after the env file" "$acts" ;; esac
 run claude "acme-build|$W||--model opus|$W/ordinary.env" 
-case "$acts" in *"set +a && export ENGSYS_SESSION=acme-build "*" && unset ENGSYS_SINGLETON_ROLE && unset ENGSYS_SECURITY_VERDICT_KEY_FILE"*) ok "claude: an env file cannot add the key path to an ordinary session (unset after sourcing)" ;; *) no "claude: unset after the env file" "$acts" ;; esac
+case "$acts" in *"set +a && export ENGSYS_SESSION=acme-build "*" && unset ENGSYS_SINGLETON_ROLE && "*"ENGSYS_CONFIG_DIR_SESSIONS && unset ENGSYS_SECURITY_VERDICT_KEY_FILE"*) ok "claude: an env file cannot add the key path to an ordinary session (unset after sourcing)" ;; *) no "claude: unset after the env file" "$acts" ;; esac
 echo "engsys#229: a merge-role line is told where its repo's fleet merge config is (ENGSYS_MM_CONFIG), nothing else is"
 git -C "$T/w" init -q 2>/dev/null; git -C "$T/w" remote add origin https://github.com/acme/app.git 2>/dev/null || true
 MMCFG="$T/mmcfg"; MMPLUG="$MMCFG/plugins/cache/acme-fleet/acme/1.0.0"
@@ -296,7 +296,7 @@ typed="$(cat "$T/typed")"; script="$(cat "$T/launch-file.copy")"
 [ "$rc" -eq 0 ] && ok "long security line: launches" || no "long security line: launches" "$err"
 [ "$(bytes "$typed")" -lt 1024 ] && ok "long security line: the typed line is under 1024 bytes ($(bytes "$typed"))" || no "security typed under 1024" "$typed"
 lacks "long security line: the key path is not typed" "$typed" "$LONGKEY"
-case "$script" in *"&& unset ENGSYS_MM_CONFIG && cd "*" && set -a && . $W/security.env && set +a && export ENGSYS_SESSION=acme-sec "*" && unset ENGSYS_SINGLETON_ROLE && export ENGSYS_SECURITY_VERDICT_KEY_FILE=$LONGKEY && "*"export CLAUDE_CONFIG_DIR=$LMMCFG && unset ENGSYS_MM_CONFIG && command rm -f -- "*" && command claude --name acme-sec "*)
+case "$script" in *"&& unset ENGSYS_MM_CONFIG && cd "*" && set -a && . $W/security.env && set +a && export ENGSYS_SESSION=acme-sec "*" && unset ENGSYS_SINGLETON_ROLE && "*"ENGSYS_CONFIG_DIR_SESSIONS && export ENGSYS_SECURITY_VERDICT_KEY_FILE=$LONGKEY && "*"export CLAUDE_CONFIG_DIR=$LMMCFG && unset ENGSYS_MM_CONFIG && command rm -f -- "*" && command claude --name acme-sec "*)
   ok "long security line: the file sources the env file, then sets the key path and the config dir, unsets ENGSYS_MM_CONFIG (engsys#287), then claude" ;;
   *) no "security ordering in the launch file" "$script" ;; esac
 case "$script" in *"export ENGSYS_SECURITY_VERDICT_KEY_FILE=$LONGKEY && unset ENGSYS_MEMORY_CONFIG && unset ENGSYS_MM_CONFIG"*) ok "long security line: the key path is also set before the env file (overwritten after it either way)" ;; *) no "key before env file" "$script" ;; esac
