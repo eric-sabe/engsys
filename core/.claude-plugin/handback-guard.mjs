@@ -136,9 +136,10 @@ const bareType = (t) => { const parts = String(t || '').split(':'); return parts
 export function noteDispatch(input, { now = Date.now } = {}) {
   try {
     const ti = input?.tool_input ?? input?.toolInput ?? {};
-    const type = bareType(ti.subagent_type || ti.agent_type || '');
+    // An untyped dispatch starts as `general-purpose` (the Agent tool's default); recording nothing for it would
+    // leave its hand-backs unguarded once any typed dispatch had been tracked (review W2).
+    const type = bareType(ti.subagent_type || ti.agent_type || '') || 'general-purpose';
     const name = typeof ti.name === 'string' && ti.name ? token(ti.name) : '';
-    if (!type && !name) return null;
     const dir = path.join(stateDir(input.session_id ?? input.sessionId), 'dispatches');
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     const ts = now();
@@ -174,7 +175,9 @@ export function claimDispatch(input, { now = Date.now } = {}) {
       live.push({ f, r });
     }
     live.sort((a, b) => a.r.ts - b.r.ts);
-    const hit = live.find(({ r }) => r.name && r.name === token(agentType)) || live.find(({ r }) => r.type && r.type === bareType(agentType));
+    // A teammate's record (it carries a `name`) is claimed only by that name: a plain `engsys:bert` start must not take
+    // the `bert-p2` teammate's dispatch by type (review L1).
+    const hit = live.find(({ r }) => r.name && r.name === token(agentType)) || live.find(({ r }) => !r.name && r.type && r.type === bareType(agentType));
     if (!hit) return false;
     fs.rmSync(hit.f, { force: true });
     const marks = path.join(base, 'dispatched');

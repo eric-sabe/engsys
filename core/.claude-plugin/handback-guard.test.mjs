@@ -264,3 +264,20 @@ test('286 end to end: memory-inject\'s PreToolUse + SubagentStart hooks mark the
   assert.equal(internal.status, 0);
   assert.deepEqual(relayed(sdir).map((l) => l.agent_id), ['abert-p3-1234'], 'the internal agent added nothing');
 });
+
+test('286 review W2: an untyped dispatch is recorded as general-purpose, so its agent stays guarded', () => {
+  noteDispatch({ session_id: 'sess-286w2', tool_input: { subagent_type: 'engsys:isabelle' } }); // a typed one is tracked too
+  noteDispatch({ session_id: 'sess-286w2', tool_input: { description: 'look around', prompt: 'x' } });
+  assert.equal(claimDispatch({ session_id: 'sess-286w2', agent_id: 'a-gp', agent_type: 'general-purpose' }), true);
+  assert.equal(wasDispatched({ session_id: 'sess-286w2', agent_id: 'a-gp', agent_type: 'general-purpose' }), true);
+  const sdir = fs.mkdtempSync(path.join(os.tmpdir(), 'engsys-hb-286w2-'));
+  const inc = fleetRun('subagent', { session_id: 'sess-286w2', agent_id: 'a-gp', agent_type: 'general-purpose', last_assistant_message: 'STATUS: INCOMPLETE — tests still to run' }, sdir);
+  assert.equal(inc.status, 0);
+  assert.deepEqual(relayed(sdir).map((l) => l.agent_id), ['a-gp'], 'its INCOMPLETE is relayed');
+});
+
+test('286 review L1: a plain typed start never claims a teammate\'s record by type', () => {
+  noteDispatch({ session_id: 'sess-286l1', tool_input: { subagent_type: 'engsys:bert', name: 'bert-p2' } });
+  assert.equal(claimDispatch({ session_id: 'sess-286l1', agent_id: 'a-plain-bert', agent_type: 'engsys:bert' }), false, 'not by type');
+  assert.equal(claimDispatch({ session_id: 'sess-286l1', agent_id: 'abert-p2-1', agent_type: 'bert-p2' }), true, 'the teammate still claims it by name');
+});

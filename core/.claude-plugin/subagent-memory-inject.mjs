@@ -451,9 +451,6 @@ export async function main({ argv = process.argv.slice(2), stdin = process.stdin
 		return 0;
 	}
 
-	// engsys#286: mark this agent as dispatched by this session (or not), before any brief work that could time out.
-	if (!isPreAgent && input) claimDispatch(input, { now });
-
 	let briefText = '';
 	let logKeys = { lesson_keys: [], pointer_keys: [], bytes: 0 };
 	// Diagnostics for "the brief disappeared with no clear reason" (resolveTouchedPaths' own git
@@ -507,6 +504,9 @@ export async function main({ argv = process.argv.slice(2), stdin = process.stdin
 	}
 
 	const elapsedMs = now() - t0;
+	// engsys#286: mark this agent as dispatched by this session (or not). After the brief, so the bookkeeping never
+	// counts against its wall-clock budget (review); SubagentStop, which reads the mark, comes much later.
+	if (!isPreAgent && input) claimDispatch(input, { now });
 	logInjection(cwd, { ts: new Date(now()).toISOString(), agent_type: agentType, ...logKeys, ms: elapsedMs, skipped_budget: skippedBudget, spawn_failed: spawnFailed });
 	recordHookTelemetry({
 		hook: 'subagent-memory-inject',
