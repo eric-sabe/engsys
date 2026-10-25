@@ -77,8 +77,10 @@ case "${1:-} ${2:-}" in
         fi ;;
     esac ;;
   "pr comment")
+    body="$(cat)"
+    if [ -f "$FAKE/handoff.fail" ] && printf '%s' "$body" | grep -qx '<!-- mm-handoff -->'; then echo "stub gh: HTTP 502" >&2; exit 1; fi
     f="$G/comments/$(printf '%03d' $(( $(ls "$G/comments" | wc -l) + 1 )))"
-    cat >"$f"; echo "$url/$3#issuecomment-1" ;;
+    printf '%s\n' "$body" >"$f"; echo "$url/$3#issuecomment-1" ;;
   "pr edit")
     l="$(arg --add-label "$@")"
     if [ -n "$l" ]; then jq --arg l "$l" '.labels += [$l] | .labels |= unique' "$pj" >"$G/pr.new" && mv "$G/pr.new" "$pj"; fi
@@ -290,7 +292,8 @@ has "the label goes to the clean PR number" "$(cat "$FAKE/gh.log")" "gh pr edit 
 eq "one review comment" "$(ncomments)" 1
 # engsys#271: the pin hands off with an operator gate, before the label, so Merge Monster asks for the gate at READY
 eq "one mm-handoff comment" "$(nhandoffs)" 1
-has "…with a non-empty operator_gate naming the reason" "$(handoff)" 'operator_gate: "pin bump changes .claude/settings.json; the main ruleset requires a fleet-operators review"'
+hasnt "…with no operator_gate by default (Merge Monster's rulesetGate gates a pin where a ruleset requires it)" "$(handoff)" 'operator_gate'
+has "…naming the change" "$(handoff)" 'notes: pin-only change opened by fleet pin'
 matches "…posted before the label" "$(grep -n -e 'pr comment' -e 'add-label' "$FAKE/gh.log" | head -n1)" 'pr comment'
 eq "it opens with the marker" "$(last_comment | head -n1)" "<!-- local-review-findings -->"
 has "…then the summary with the exit code" "$(last_comment)" "exit 0"
@@ -382,11 +385,14 @@ run fleet pin --engsys v1.1.0 --release v0.1.0 --no-wait
 rc_is "PIN_OPERATOR_GATE set: exits 0" 0
 has "…the handoff carries that reason (quotes dropped, so the YAML stays one string)" "$(handoff)" 'operator_gate: "needs ops review of the pin"'
 reset
-conf 'REVIEW_CMD=' 'PREPUSH_SETUP_CMD=' 'PIN_OPERATOR_GATE='
+conf 'REVIEW_CMD=' 'PREPUSH_SETUP_CMD='
+touch "$FAKE/handoff.fail"
 run fleet pin --engsys v1.1.0 --release v0.1.0 --no-wait
-rc_is "PIN_OPERATOR_GATE empty: exits 0" 0
+rc_is "a failed handoff post does not stop the pin: exits 0" 0
+has "…it warns" "$OUT" "WARNING couldn't post the mm-handoff"
 eq "…no handoff" "$(nhandoffs)" 0
-eq "…still labeled" "$(pr_field '.labels | join(",")')" "mm:ready"
+eq "…and still labels the PR" "$(pr_field '.labels | join(",")')" "mm:ready"
+rm -f "$FAKE/handoff.fail"
 
 echo "== F. a new instance release: a release PR first, then the tag on main"
 reset

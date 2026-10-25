@@ -26,10 +26,10 @@
 #      and its output posted as a comment opening with REVIEW_MARKER. READY_LABEL is added when the
 #      review exited 0 and its output doesn't match REVIEW_BLOCK_REGEX (no REVIEW_CMD: label directly).
 #      Re-running is safe: an open, labeled PR for the same pins is reused as is; an open, unlabeled one
-#      just gets its review re-run. Before the review, the PR gets an `<!-- mm-handoff -->` comment whose
-#      operator_gate is PIN_OPERATOR_GATE (default: the pin changes .claude/settings.json, which a ruleset
-#      path rule such as keystone's puts behind a fleet-operators review; empty = no handoff), once per PR,
-#      so Merge Monster requests the operator gate at READY instead of discovering it at BLOCKED (engsys#271).
+#      just gets its review re-run. Before the review, the PR gets one `<!-- mm-handoff -->` comment (engsys#271).
+#      Its operator_gate is PIN_OPERATOR_GATE when set; by default there is none, because Merge Monster's
+#      preflight already gates a pin PR up front when a branch ruleset's path rule covers .claude/settings.json
+#      (rulesetGate), and a repo without such a rule needs no gate. A failed handoff post is a warning only.
 #   4. waits for the merge (polls every 60 s, up to PIN_WAIT_MAX_MIN), then runs `fleet sync` (host
 #      checkouts + plugin reinstall). Sessions are NOT restarted — that's `fleet restart`.
 #
@@ -391,20 +391,24 @@ Opened by \`fleet pin\` on the fleet host. After merge the host runs \`fleet syn
   emit "$pr"
 }
 
-# The operator gate the pin needs (engsys#271): .claude/settings.json is behind a ruleset path rule (keystone's main
-# ruleset: a FeedFrwd/fleet-operators review). Posted once per PR, before READY_LABEL, so Merge Monster asks for the gate
-# at READY. PIN_OPERATOR_GATE overrides the reason; set it empty for no handoff.
-PIN_GATE_DEFAULT="pin bump changes .claude/settings.json; the main ruleset requires a fleet-operators review"
+# The pin's handoff (engsys#271), posted once per PR before READY_LABEL. No operator_gate by default: Merge Monster's
+# preflight gates the PR itself when a branch ruleset puts .claude/settings.json behind a team review (rulesetGate), and
+# a repo without such a rule needs none. PIN_OPERATOR_GATE adds one (for a gate no ruleset expresses). A failed post
+# only warns: the label still goes on, and the ruleset gate, where there is one, still applies.
 post_pin_handoff() { # post_pin_handoff <pr>
-  local pr="$1" gate="${PIN_OPERATOR_GATE-$PIN_GATE_DEFAULT}" n
-  [ -n "$gate" ] || return 0
+  local pr="$1" gate="${PIN_OPERATOR_GATE:-}" n gate_line=""
   gate="$(printf '%s' "$gate" | tr -d '"\n\r')"
+  [ -z "$gate" ] || gate_line="operator_gate: \"$gate\"
+"
   n="$(gh pr view "$pr" -R "$PIN_REPO" --json body,comments \
     --jq '[(.body // ""), (.comments[]?.body // "")] | map(select(split("\n") | any(test("^ {0,3}<!-- mm-handoff -->\\s*$")))) | length' 2>/dev/null || true)"
   if [[ "$n" =~ ^[1-9] ]]; then say "$PIN_REPO#$pr already carries an mm-handoff"; return 0; fi
-  printf '<!-- mm-handoff -->\ndepends_on: []\nmigration: false\noperator_gate: "%s"\nnotes: pin-only change opened by fleet pin (.claude/settings.json marketplace refs)\n' "$gate" \
-    | gh pr comment "$pr" -R "$PIN_REPO" --body-file - || fleet_die "couldn't post the mm-handoff on $PIN_REPO#$pr"
-  say "$PIN_REPO#$pr: mm-handoff posted (operator_gate: $gate)"
+  if printf '<!-- mm-handoff -->\ndepends_on: []\nmigration: false\n%snotes: pin-only change opened by fleet pin (.claude/settings.json marketplace refs)\n' "$gate_line" \
+    | gh pr comment "$pr" -R "$PIN_REPO" --body-file -; then
+    say "$PIN_REPO#$pr: mm-handoff posted${gate:+ (operator_gate: $gate)}"
+  else
+    say "WARNING couldn't post the mm-handoff on $PIN_REPO#$pr — labeling it anyway"
+  fi
 }
 
 review_and_queue() { # review_and_queue <pr> <worktree> <branch> — handoff → review → marker comment → READY_LABEL (exit 1 if it needs a look)

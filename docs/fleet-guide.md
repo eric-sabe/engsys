@@ -1345,9 +1345,10 @@ checked to exist first, so the instance CI moves with the release instead of in 
 
 Then the pin PR: only the marketplace refs change (verified with a `jq` strip-diff), `PREPUSH_SETUP_CMD`
 runs first if set, it is pushed normally and an open PR for the same pins is reused. Before any label, the PR
-gets one `<!-- mm-handoff -->` comment whose `operator_gate` is `PIN_OPERATOR_GATE` (default: the pin changes
-`.claude/settings.json`, which a ruleset path rule puts behind an operators review), so the merge monster asks
-for the operator gate at READY (engsys#271). `REVIEW_CMD`, if set,
+gets one `<!-- mm-handoff -->` comment (engsys#271). It carries an `operator_gate` only when `PIN_OPERATOR_GATE`
+is set: where a branch ruleset puts `.claude/settings.json` behind a team review, the merge monster's preflight
+already gates the PR at READY (`rulesetGate`). A failed handoff post is a warning; the PR is still labeled.
+`REVIEW_CMD`, if set,
 runs in the PR's worktree and its output is posted as a comment opening with `REVIEW_MARKER`; if the run
 is clean, `READY_LABEL` (default `mm:ready`) is added so the merge monster merges the PR. A non-zero exit
 or a match for `REVIEW_BLOCK_REGEX` (default `critical|warning`, case-insensitive) stops the auto-labeling:
@@ -1943,7 +1944,7 @@ format) overrides it per machine. Environment values for `ENGSYS_REF` / `INSTANC
 | `READY_LABEL` | no | Default `mm:ready` |
 | `PREPUSH_SETUP_CMD` | no | Run in the pin worktree before commit and push (for example an install with a frozen lockfile) |
 | `PIN_WAIT_MAX_MIN` | no | Default 240 |
-| `PIN_OPERATOR_GATE` | no | The `operator_gate` reason of the mm-handoff `fleet pin` posts on each pin PR (engsys#271). Default: the pin changes `.claude/settings.json`, which the main ruleset puts behind a fleet-operators review. Empty means no handoff |
+| `PIN_OPERATOR_GATE` | no | An `operator_gate` reason for the mm-handoff `fleet pin` posts on each pin PR (engsys#271). Default: none (a ruleset path rule on `.claude/settings.json` is caught by the merge monster's preflight). Set it for a gate no ruleset expresses |
 | `RELEASE_CI_REF_FILE` / `RELEASE_CI_REF_KEY` | no | `fleet pin --release` also sets `<KEY>: <engsys tag>` in this instance-repo file in the release PR (engsys#271). Key default `ENGSYS_REF`. Unset means the file is left alone |
 | `SLACK_ENV` | no | Path to the `fleet notify` bot env file (§ 6.9). Empty means Slack is unconfigured: escalations fall back to a GitHub comment |
 | `NOTIFY_FALLBACK_ISSUE` | no | `owner/repo#N` for `fleet notify`'s fallback comment when Slack is unconfigured or unreachable. Empty means the message is only printed as a warning |
