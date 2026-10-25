@@ -56,6 +56,22 @@ check "--owner beats a URL argument (#55)"     tok_feedfrwd "$(run "$T/norepo" p
 check "--owner beats -R/--repo"                tok_feedfrwd "$(run "$T/norepo" pr list -R pat-person/tools --owner FeedFrwd)"
 check "--owner beats origin of current repo"   tok_feedfrwd "$(run "$T/repo-pat" project item-list 11 --owner FeedFrwd)"
 check "GH_APP_OWNER beats --owner"              tok_pat      "$(cd "$T/norepo" && env PATH="$HERE/bin:$T/realbin:$PATH" GH_APP_ENV_FILE="$T/gh-app.env" GH_APP_OWNER=pat-person "$SHIM" project item-list 11 --owner FeedFrwd)"
+# engsys#257: org/user endpoints name their owner; owner-less endpoints (App lookups, /user, GraphQL) take the instance
+# installation, never the cwd's origin (repo-pat's origin is pat-person, a listed non-default installation).
+check "257: gh api orgs/<org>/... names the org"              tok_feedfrwd "$(run "$T/repo-pat" api orgs/FeedFrwd/teams/fleet-operators/members)"
+check "257: gh api /orgs/<org> (leading slash)"               tok_feedfrwd "$(run "$T/repo-pat" api /orgs/FeedFrwd)"
+check "257: gh api users/<user>/... names the user"           tok_pat      "$(run "$T/repo-acme" api users/pat-person/repos)"
+check "257: flags before the endpoint are skipped (-X, --jq)" tok_feedfrwd "$(run "$T/repo-pat" api -X GET --jq .login orgs/FeedFrwd/members)"
+check "257: a query string is ignored"                        tok_feedfrwd "$(run "$T/repo-pat" api 'orgs/FeedFrwd/members?per_page=100')"
+check "257: /apps/<slug> is owner-less: the instance installation, not origin" tok_default "$(run "$T/repo-pat" api /apps/feedfrwd-fleet-mark)"
+check "257: /user is owner-less"                              tok_default  "$(run "$T/repo-pat" api /user)"
+check "257: graphql is owner-less"                            tok_default  "$(run "$T/repo-pat" api graphql -f 'query=query{organization(login:"FeedFrwd"){id}}')"
+check "257: a -f value that looks like a path is not the endpoint" tok_default "$(run "$T/repo-pat" api -f path=repos/pat-person/tools graphql)"
+check "257: --owner still beats an owner-less endpoint"       tok_feedfrwd "$(run "$T/repo-pat" api graphql --owner FeedFrwd)"
+check "257: GH_APP_OWNER beats an owner-less endpoint"        tok_pat      "$(cd "$T/repo-acme" && env PATH="$HERE/bin:$T/realbin:$PATH" GH_APP_ENV_FILE="$T/gh-app.env" GH_APP_OWNER=pat-person "$SHIM" api graphql)"
+check "257: a non-api command still uses origin"              tok_pat      "$(run "$T/repo-pat" issue list)"
+check "257: an unclassified api endpoint still uses origin"   tok_pat      "$(run "$T/repo-pat" api enterprises/x/teams)"
+
 mkdir -p "$T/copilotps"
 cat >"$T/copilotps/ps" <<'SH'
 #!/usr/bin/env bash

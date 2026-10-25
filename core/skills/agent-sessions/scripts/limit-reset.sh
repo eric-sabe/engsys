@@ -4,18 +4,21 @@
 
 limit_now() { printf '%s' "${SUPERVISOR_NOW_EPOCH:-$(date +%s)}"; }
 
+# Every date call runs with LC_ALL=C (engsys#257): %b and %p are locale-dependent, and limit_tz_day formats a month
+# name with limit_tz_fmt that limit_tz_epoch parses back, so both sides must agree on English names (restart.sh does
+# the same).
 # limit_tz_fmt <zone|LOCAL> <epoch> <date format> → that instant formatted in the zone (BSD date first, GNU fallback)
 limit_tz_fmt() {
-  if [ "$1" = LOCAL ]; then date -r "$2" "$3" 2>/dev/null || date -d "@$2" "$3"
-  else TZ="$1" date -r "$2" "$3" 2>/dev/null || TZ="$1" date -d "@$2" "$3"; fi
+  if [ "$1" = LOCAL ]; then LC_ALL=C date -r "$2" "$3" 2>/dev/null || LC_ALL=C date -d "@$2" "$3"
+  else TZ="$1" LC_ALL=C date -r "$2" "$3" 2>/dev/null || TZ="$1" LC_ALL=C date -d "@$2" "$3"; fi
 }
 # limit_tz_epoch <zone|LOCAL> <year> <Mon> <day> <H:MM:SS AM> → the epoch of that wall-clock time in the zone. The seconds are
 # always given: BSD date -j -f takes any missing field from the real clock, which made the result move with wall-clock seconds.
 limit_tz_epoch() {
   if [ "$1" = LOCAL ]; then
-    date -j -f '%Y %b %d %I:%M:%S %p' "$2 $3 $4 $5" +%s 2>/dev/null || date -d "$3 $4 $2 $5" +%s 2>/dev/null
+    LC_ALL=C date -j -f '%Y %b %d %I:%M:%S %p' "$2 $3 $4 $5" +%s 2>/dev/null || LC_ALL=C date -d "$3 $4 $2 $5" +%s 2>/dev/null
   else
-    TZ="$1" date -j -f '%Y %b %d %I:%M:%S %p' "$2 $3 $4 $5" +%s 2>/dev/null || TZ="$1" date -d "$3 $4 $2 $5" +%s 2>/dev/null
+    TZ="$1" LC_ALL=C date -j -f '%Y %b %d %I:%M:%S %p' "$2 $3 $4 $5" +%s 2>/dev/null || TZ="$1" LC_ALL=C date -d "$3 $4 $2 $5" +%s 2>/dev/null
   fi
 }
 # limit_tz_day <zone|LOCAL> <epoch> <offset days> → "YYYY Mon D" of the calendar day offset from the one containing <epoch>.
