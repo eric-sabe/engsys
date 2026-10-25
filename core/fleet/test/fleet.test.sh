@@ -669,10 +669,11 @@ has "roster: ENV_FILE points at the rendered lane env" "$ROSTER_OUT" "ENV_FILE=$
 has "roster: 5th field rendered" "$ROSTER_OUT" "acme-security|$HOME/git/app|/maintenance-monster|--model claude-opus-4-8|$STATE/env/security.env"
 has "roster: monster line" "$ROSTER_OUT" "acme-mm|$HOME/git/app|/merge-monster|--model model-m --dangerously-skip-permissions"
 # the launch command line for a window: the launch file's line (engsys#236), minus its own removal step before the harness
-tl() { grep -F "tmux [script] [acme:$1] " "$FAKE/tmux.log" | head -1 | sed -E 's/command rm -f -- [^ ]+ && //'; }
-has "mm: default env (roster ENV_FILE)" "$(tl acme-mm)" "cd $HOME/git/app && set -a && . $STATE/env/session.env && set +a && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && { unset -f claude 2>/dev/null || true; } && unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && unset ENGSYS_MEMORY_CONFIG && unset CLAUDE_CONFIG_DIR && unset ENGSYS_MM_CONFIG && command claude --name acme-mm"
+# the identity re-assert after the env file (engsys#287) is dropped here; launch-golden.test.sh pins it
+tl() { grep -F "tmux [script] [acme:$1] " "$FAKE/tmux.log" | head -1 | sed -E -e 's/command rm -f -- [^ ]+ && //' -e 's/set \+a && export ENGSYS_SESSION=[^ ]+ ENGSYS_SESSION_RUN=[^ ]+ ENGSYS_SESSION_ROOT=[^ ]+( ENGSYS_SINGLETON_ROLE=[a-z]+)? && (unset ENGSYS_SINGLETON_ROLE && )?/set +a \&\& /'; }
+has "mm: default env (roster ENV_FILE)" "$(tl acme-mm)" "cd $HOME/git/app && set -a && . $STATE/env/session.env && set +a && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && { unset -f claude 2>/dev/null || true; } && unset FLEET_CLAUDE_CONFIG_DIR FLEET_CLAUDE_CONFIG_DIR_SCOPE && unset ENGSYS_MEMORY_CONFIG && unset CLAUDE_CONFIG_DIR && unset ENGSYS_MM_CONFIG && command claude --name acme-mm"
 has "mm: prompt before the extra flags" "$(tl acme-mm)" "/merge-monster --model model-m --dangerously-skip-permissions"
-has "security: the 5th field replaces ENV_FILE" "$(tl acme-security)" "set -a && . $STATE/env/security.env && set +a && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && { unset -f claude 2>/dev/null || true; } && unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && unset ENGSYS_MEMORY_CONFIG && unset CLAUDE_CONFIG_DIR && unset ENGSYS_MM_CONFIG && command claude --name acme-security"
+has "security: the 5th field replaces ENV_FILE" "$(tl acme-security)" "set -a && . $STATE/env/security.env && set +a && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && { unset -f claude 2>/dev/null || true; } && unset FLEET_CLAUDE_CONFIG_DIR FLEET_CLAUDE_CONFIG_DIR_SCOPE && unset ENGSYS_MEMORY_CONFIG && unset CLAUDE_CONFIG_DIR && unset ENGSYS_MM_CONFIG && command claude --name acme-security"
 hasnt "security: the roster-level env is NOT used" "$(tl acme-security)" "session.env"
 has "security: prompt before the extra flags" "$(tl acme-security)" "/maintenance-monster --model claude-opus-4-8"
 has "rel: a relative 5th field resolves against the roster's directory" "$(tl acme-rel)" "set -a && . $STATE/env/rel.env && set +a"
@@ -746,7 +747,8 @@ done
 has "the rendered session env carries it too" "$(cat "$STATE/env/session.env")" "CLAUDE_CONFIG_DIR=$FCFG"
 has "…and the security env" "$(cat "$STATE/env/security.env")" "CLAUDE_CONFIG_DIR=$FCFG"
 for w in acme-mm acme-security acme-build; do
-  has "$w (scope all): the dir is set after the env file, so no env-file variable can move it" "$(tl "$w")" "set +a && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && { unset -f claude 2>/dev/null || true; } && unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && unset ENGSYS_MEMORY_CONFIG && export CLAUDE_CONFIG_DIR=$FCFG && unset ENGSYS_MM_CONFIG && command claude"
+  has "$w (scope all): the dir is set after the env file, so no env-file variable can move it" "$(tl "$w")" "set +a && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && { unset -f claude 2>/dev/null || true; } && export FLEET_CLAUDE_CONFIG_DIR=$FCFG && unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && unset ENGSYS_MEMORY_CONFIG && export CLAUDE_CONFIG_DIR=$FCFG && unset ENGSYS_MM_CONFIG && command claude"
+  case "$(grep -F "tmux [script] [acme:$w] " "$FAKE/tmux.log" | head -1)" in *"set +a && export ENGSYS_SESSION=$w ENGSYS_SESSION_RUN="*) ok "$w: its identity is exported again after the env file (engsys#287)" ;; *) bad "$w: its identity is exported again after the env file (engsys#287)" ;; esac
 done
 # FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised: monsters and the security lane keep the fleet dir; the
 # interactive roles run on ~/.claude (unset on the launch line and in their env file).

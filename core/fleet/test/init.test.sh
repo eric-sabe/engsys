@@ -414,7 +414,8 @@ printf 'GH_APP_ID=1\nGH_APP_INSTALLATION_ID=2\nGH_APP_PEM=%s/none.pem\nGH_BOT_AU
 printf 'AZURE_CLIENT_ID=00000000-0000-0000-0000-000000000000\n' >"$HOME/.config/acme/azure-sp.env"
 
 # the launch command line for a window: the launch file's line (engsys#236), minus its own removal step before the harness
-launched() { grep -F "tmux [script] [acme:$1] " "$FAKE/tmux.log" | head -1 | sed -E 's/command rm -f -- [^ ]+ && //' || true; }
+# the identity re-assert after the env file (engsys#287) is dropped here; launch-golden.test.sh pins it
+launched() { grep -F "tmux [script] [acme:$1] " "$FAKE/tmux.log" | head -1 | sed -E -e 's/command rm -f -- [^ ]+ && //' -e 's/set \+a && export ENGSYS_SESSION=[^ ]+ ENGSYS_SESSION_RUN=[^ ]+ ENGSYS_SESSION_ROOT=[^ ]+( ENGSYS_SINGLETON_ROLE=[a-z]+)? && (unset ENGSYS_SINGLETON_ROLE && )?/set +a \&\& /' || true; }
 unrendered() { grep -REn '__[A-Z][A-Z0-9_]*__' "$@" 2>/dev/null || true; }
 
 echo "-- full scaffold: launch through the shim"
@@ -437,14 +438,14 @@ has "roster: build" "$R" "acme-build|$P||--add-dir $HOME/git/worktrees --model c
 has "roster: investigate" "$R" "acme-investigate|$P||--add-dir $HOME/git/worktrees --model claude-opus-5-5 --effort medium --remote-control --permission-mode auto"
 has "roster: design" "$R" "acme-design|$P||--add-dir $HOME/git/worktrees --model claude-opus-5-5 --effort medium --remote-control --permission-mode auto"
 eq "five windows launched" "$(grep -c . "$FAKE/tmux/windows")" 5
-has "mm runs in the session env" "$(launched acme-mm)" "set -a && . $STATE/env/session.env && set +a && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && { unset -f claude 2>/dev/null || true; } && unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && unset ENGSYS_MEMORY_CONFIG && unset CLAUDE_CONFIG_DIR && unset ENGSYS_MM_CONFIG && command claude --name acme-mm"
+has "mm runs in the session env" "$(launched acme-mm)" "set -a && . $STATE/env/session.env && set +a && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && { unset -f claude 2>/dev/null || true; } && unset FLEET_CLAUDE_CONFIG_DIR FLEET_CLAUDE_CONFIG_DIR_SCOPE && unset ENGSYS_MEMORY_CONFIG && unset CLAUDE_CONFIG_DIR && unset ENGSYS_MM_CONFIG && command claude --name acme-mm"
 has "mm gets its session name and a launch id (the baton's holder, engsys#62)" "$(launched acme-mm)" "export ENGSYS_SESSION=acme-mm ENGSYS_SESSION_RUN="
 has "mm records its launch directory for the guarded body file (engsys#108)" "$(launched acme-mm)" "ENGSYS_SESSION_ROOT=$(cd "$P" && pwd -P) ENGSYS_SINGLETON_ROLE=merge && "
 has "a non-monster records it too" "$(launched acme-build)" "ENGSYS_SESSION_ROOT=$(cd "$P" && pwd -P) && unset ENGSYS_SINGLETON_ROLE"
 has "mm arms the singleton-write guard" "$(launched acme-mm)" "ENGSYS_SINGLETON_ROLE=merge && "
 has "maintain arms it for its role" "$(launched acme-maintain)" "ENGSYS_SINGLETON_ROLE=maintain && "
 has "the prompt precedes the flags" "$(launched acme-mm)" "/engsys:merge-monster --model claude-opus-5-5"
-has "maintain: the 5th field replaces the session env" "$(launched acme-maintain)" "set -a && . $STATE/env/security.env && set +a && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && { unset -f claude 2>/dev/null || true; } && unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && unset ENGSYS_MEMORY_CONFIG && unset CLAUDE_CONFIG_DIR && unset ENGSYS_MM_CONFIG && command claude --name acme-maintain"
+has "maintain: the 5th field replaces the session env" "$(launched acme-maintain)" "set -a && . $STATE/env/security.env && set +a && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && { unset -f claude 2>/dev/null || true; } && unset FLEET_CLAUDE_CONFIG_DIR FLEET_CLAUDE_CONFIG_DIR_SCOPE && unset ENGSYS_MEMORY_CONFIG && unset CLAUDE_CONFIG_DIR && unset ENGSYS_MM_CONFIG && command claude --name acme-maintain"
 S="$(cat "$STATE/env/session.env")"
 X="$(cat "$STATE/env/security.env")"
 has "session env: alias pins rendered (opus)" "$S" 'ANTHROPIC_DEFAULT_OPUS_MODEL="claude-opus-5-5"'
@@ -541,7 +542,7 @@ R="$(cat "$STATE/roster")"
 CFG="$INST/fleet/repos/acme/app"
 has "roster: the broker line, rendered" "$R" "acme-broker|$P|/engsys:resource-broker fleet config dir: $CFG|--model claude-opus-5-5 --effort low --remote-control --dangerously-skip-permissions"
 eq "six windows launched" "$(grep -c . "$FAKE/tmux/windows")" 6
-has "the broker runs in the session env with its prompt before the flags" "$(launched acme-broker)" "set -a && . $STATE/env/session.env && set +a && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && { unset -f claude 2>/dev/null || true; } && unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && unset ENGSYS_MEMORY_CONFIG && unset CLAUDE_CONFIG_DIR && unset ENGSYS_MM_CONFIG && command claude --name acme-broker"
+has "the broker runs in the session env with its prompt before the flags" "$(launched acme-broker)" "set -a && . $STATE/env/session.env && set +a && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && { unset -f claude 2>/dev/null || true; } && unset FLEET_CLAUDE_CONFIG_DIR FLEET_CLAUDE_CONFIG_DIR_SCOPE && unset ENGSYS_MEMORY_CONFIG && unset CLAUDE_CONFIG_DIR && unset ENGSYS_MM_CONFIG && command claude --name acme-broker"
 has "…and the command file's prompt" "$(launched acme-broker)" "/engsys:resource-broker"
 has "the broker does not arm the singleton-write guard" "$(launched acme-broker)" "&& unset ENGSYS_SINGLETON_ROLE && "
 if [ -f "$CFG/resource-broker.yml" ] && [ -f "$CFG/acme-pool.json" ]; then ok "the config dir the prompt names holds the broker config and its pool file"; else bad "the config dir the prompt names holds the broker config and its pool file"; fi

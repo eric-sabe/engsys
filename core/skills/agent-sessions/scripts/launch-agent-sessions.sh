@@ -79,6 +79,9 @@ MEMORY_KEY_FILE=""
 unset ENGSYS_MEMORY_SIGNING_KEY_FILE
 unset ENGSYS_MM_CONFIG   # engsys#229: set per merge-role line below, never inherited (nor seen by the tmux server)
 unset ENGSYS_MEMORY_CONFIG   # engsys#262: set below for a line on its own per-session login dir, never inherited
+# engsys#287: the fleet's Claude config dir as the fleet kit gave it to this launcher (fleet-env.sh exports it); a line
+# gets this value or none, never what its window inherited
+LAUNCHER_FLEET_CFG="${FLEET_CLAUDE_CONFIG_DIR:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --roster) ROSTER="$2"; shift 2 ;;
@@ -532,17 +535,23 @@ launch_one() {
       return 1
     fi
   fi
-  # The trust environment (engsys#287): every trust variable (ENGSYS_SECURITY_VERDICT_KEY_FILE,
-  # ENGSYS_MEMORY_SIGNING_KEY_FILE, ENGSYS_MEMORY_CONFIG, ENGSYS_MM_CONFIG, CLAUDE_CONFIG_DIR and the
-  # FLEET_CLAUDE_CONFIG_DIR_SCOPE pair) is 1. cleared before the env file, 2. the env file is sourced, 3. re-decided after
-  # it from launcher state only: exported when this line is granted it, otherwise unset. Never left over from the env
-  # file or the window's inherited environment. The golden launch lines (launch-golden.test.sh) pin this.
+  # The trust environment (engsys#287). Every trust variable is decided by this launcher alone:
+  #   identity: ENGSYS_SESSION, ENGSYS_SESSION_RUN, ENGSYS_SESSION_ROOT, ENGSYS_SINGLETON_ROLE (the baton holder, its
+  #     fencing token, and the switch for the singleton-write and hand-back guards);
+  #   keys: ENGSYS_SECURITY_VERDICT_KEY_FILE, ENGSYS_MEMORY_SIGNING_KEY_FILE;
+  #   config: ENGSYS_MEMORY_CONFIG, ENGSYS_MM_CONFIG, CLAUDE_CONFIG_DIR, FLEET_CLAUDE_CONFIG_DIR, FLEET_CLAUDE_CONFIG_DIR_SCOPE.
+  # 1. set or cleared before the env file, 2. the env file is sourced, 3. re-decided after it from launcher state only:
+  # exported when this line is granted it, otherwise unset. None is ever left over from the env file or from the
+  # window's inherited environment (a tmux server's global environment can hold anything). The golden launch lines
+  # (launch-golden.test.sh) pin this.
   # ENGSYS_SESSION_ROOT is the directory the session was launched in: a guarded `fleet msg send`
   # takes its --body-file only from <root>/tmp, wherever the session cd's later (engsys#108).
   local root
   root="$(cd "$workdir" && pwd -P)" || { echo "error: cannot resolve workdir for '$name': $workdir" >&2; return 1; }
-  cmd="export ENGSYS_SESSION=$(printf %q "$name") ENGSYS_SESSION_RUN=$(printf %q "$run") ENGSYS_SESSION_ROOT=$(printf %q "$root")"
-  if [ -n "$role" ]; then cmd+=" ENGSYS_SINGLETON_ROLE=$role && "; else cmd+=" && unset ENGSYS_SINGLETON_ROLE && "; fi
+  local identity
+  identity="export ENGSYS_SESSION=$(printf %q "$name") ENGSYS_SESSION_RUN=$(printf %q "$run") ENGSYS_SESSION_ROOT=$(printf %q "$root")"
+  if [ -n "$role" ]; then identity+=" ENGSYS_SINGLETON_ROLE=$role && "; else identity+=" && unset ENGSYS_SINGLETON_ROLE && "; fi
+  cmd="$identity"
   cmd+="unset ENGSYS_MEMORY_SIGNING_KEY_FILE && "   # F5: never inherited; set below, after the env file, for merge/maintain
   # engsys#197 (option B), narrowed by engsys#229: only a security-ENV session (security.env / nyx.env, the
   # security lane) on Claude is handed the PATH of the fleet's verdict key (ENGSYS_SECURITY_VERDICT_KEY_FILE, passed
@@ -562,6 +571,9 @@ launch_one() {
   cmd+="cd $(printf %q "$workdir") && "
   if [ -n "$session_env" ]; then
     cmd+="set -a && . $(printf %q "$session_env") && set +a && "
+    # the session's identity again (engsys#287): an env file can't rename the baton holder, swap its run id, or
+    # arm or disarm the singleton guard
+    cmd+="$identity"
     # and again after it, always (engsys#287): an env file can neither add the key path to a non-security session,
     # nor set one when no key is configured, nor drop it from a security one
     if [ -n "$verdict_key_file" ] && [ "$HARNESS" = claude ] && [ "$role" != merge ] && is_security_env "${session_env:-}"; then
@@ -618,8 +630,12 @@ launch_one() {
   # session that isn't on it (lib/lease/baton.mjs launchedSessionGate).
   if [ -n "${FLEET_CLAUDE_CONFIG_DIR_INTERACTIVE+x}" ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
     cmd+="export FLEET_CLAUDE_CONFIG_DIR=$(printf %q "$gate_dir") FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised && "
+  elif [ -n "$LAUNCHER_FLEET_CFG" ]; then
+    # engsys#287: the fleet's own dir, from this launcher's environment (the fleet kit exports it), never the window's:
+    # core/lib/mm-config.mjs searches it (and its per-session siblings) for a session's plugins
+    cmd+="export FLEET_CLAUDE_CONFIG_DIR=$(printf %q "$LAUNCHER_FLEET_CFG") && unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && "
   else
-    cmd+="unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && "
+    cmd+="unset FLEET_CLAUDE_CONFIG_DIR FLEET_CLAUDE_CONFIG_DIR_SCOPE && "
   fi
   # engsys#262: decided after the env file, like the config dir itself, so an env file can neither move it nor set
   # one on a line that gets none (it would outrank the reviewed memory.yml).

@@ -44,6 +44,7 @@ case "$1" in
     ( cd "$FAKE" && env ENGSYS_SECURITY_VERDICT_KEY_FILE=INHERITED ENGSYS_MEMORY_SIGNING_KEY_FILE=INHERITED \
         ENGSYS_MEMORY_CONFIG=INHERITED ENGSYS_MM_CONFIG=INHERITED CLAUDE_CONFIG_DIR=INHERITED \
         FLEET_CLAUDE_CONFIG_DIR=INHERITED FLEET_CLAUDE_CONFIG_DIR_SCOPE=INHERITED ENGSYS_SINGLETON_ROLE=INHERITED \
+        ENGSYS_SESSION=INHERITED ENGSYS_SESSION_RUN=INHERITED ENGSYS_SESSION_ROOT=INHERITED \
         FAKE_WIN="$win" "$TEST_BASH" -c '. "$1"' _ "$f" ) >"$FAKE/out/$win.shell" 2>&1 </dev/null || true ;;
 esac
 exit 0
@@ -55,7 +56,7 @@ me="$(basename "$0")"
 if [ "$me" = agy ] && [ "${1:-}" = remote-control ]; then echo "agy $*" >>"$FAKE/agy-rc"; exit 0; fi
 {
   printf 'argv: %s' "$me"; [ "$#" = 0 ] || printf ' %q' "$@"; printf '\n'
-  for v in ENGSYS_SESSION ENGSYS_SINGLETON_ROLE ENGSYS_SECURITY_VERDICT_KEY_FILE ENGSYS_MEMORY_SIGNING_KEY_FILE \
+  for v in ENGSYS_SESSION ENGSYS_SESSION_RUN ENGSYS_SESSION_ROOT ENGSYS_SINGLETON_ROLE ENGSYS_SECURITY_VERDICT_KEY_FILE ENGSYS_MEMORY_SIGNING_KEY_FILE \
     ENGSYS_MEMORY_CONFIG ENGSYS_MM_CONFIG CLAUDE_CONFIG_DIR FLEET_CLAUDE_CONFIG_DIR FLEET_CLAUDE_CONFIG_DIR_SCOPE ENV_FILE_SOURCED; do
     if [ -n "${!v+x}" ]; then printf 'env: %s=%s\n' "$v" "${!v}"; else printf 'env: %s <unset>\n' "$v"; fi
   done
@@ -70,6 +71,11 @@ printf '#!/bin/sh\necho testhost\n' >"$T/bin/hostname"; chmod +x "$T/bin/hostnam
 W="$T/w"
 # both env files try to set every trust variable and to stand in for the harness binary
 HOSTILE='ENV_FILE_SOURCED=1
+ENGSYS_SESSION=acme-hostile
+ENGSYS_SESSION_RUN=hostile-run
+ENGSYS_SESSION_ROOT=/hostile/root
+ENGSYS_SINGLETON_ROLE=merge
+FLEET_CLAUDE_CONFIG_DIR=/hostile/fleet
 ENGSYS_MEMORY_CONFIG=/hostile/memory.yml
 ENGSYS_MEMORY_SIGNING_KEY_FILE=/hostile/memory.key
 ENGSYS_SECURITY_VERDICT_KEY_FILE=/hostile/verdict.key
@@ -88,8 +94,9 @@ acme-broker|$W|/engsys:resource-broker|--model sonnet --remote-control --dangero
 acme-build|$W||--model opus --effort medium --remote-control --permission-mode auto
 acme-nyx|$W||--model claude-opus-4-8 --effort high --remote-control|$W/security.env
 acme-plain|$W||
+acme-dirs|$W||--model opus --add-dir ~/worktrees --add-dir=~/other
 EOF
-NAMES="acme-mm acme-maintain acme-broker acme-build acme-nyx acme-plain"
+NAMES="acme-mm acme-maintain acme-broker acme-build acme-nyx acme-plain acme-dirs"
 # the workdir is a clone of acme/app, so a merge line can find its repo's fleet merge config (engsys#229)
 git -C "$W" init -q && git -C "$W" remote add origin https://github.com/acme/app.git
 # the fleet config dir carries an instance plugin with repos/acme/app/merge-monster.yml
@@ -115,10 +122,11 @@ render() {
     LAUNCH_START_TIMEOUT_SEC=0 ENGSYS_SUPERVISED_SESSIONS="$SUPERVISED")
   case "$mode" in
     unset) ;;
-    shared) envs+=(CLAUDE_CONFIG_DIR="$FC") ;;
-    per-session) envs+=(CLAUDE_CONFIG_DIR="$FC" ENGSYS_CONFIG_DIR_SESSIONS="$FC.sessions") ;;
-    supervised) envs+=(CLAUDE_CONFIG_DIR="$FC" FLEET_CLAUDE_CONFIG_DIR_INTERACTIVE=" acme-build acme-plain ") ;;
-    per-session-supervised) envs+=(CLAUDE_CONFIG_DIR="$FC" ENGSYS_CONFIG_DIR_SESSIONS="$FC.sessions" FLEET_CLAUDE_CONFIG_DIR_INTERACTIVE=" acme-build acme-plain ") ;;
+    # the fleet kit exports FLEET_CLAUDE_CONFIG_DIR beside CLAUDE_CONFIG_DIR (fleet-env.sh)
+    shared) envs+=(CLAUDE_CONFIG_DIR="$FC" FLEET_CLAUDE_CONFIG_DIR="$FC") ;;
+    per-session) envs+=(CLAUDE_CONFIG_DIR="$FC" FLEET_CLAUDE_CONFIG_DIR="$FC" ENGSYS_CONFIG_DIR_SESSIONS="$FC.sessions") ;;
+    supervised) envs+=(CLAUDE_CONFIG_DIR="$FC" FLEET_CLAUDE_CONFIG_DIR="$FC" FLEET_CLAUDE_CONFIG_DIR_INTERACTIVE=" acme-build acme-plain ") ;;
+    per-session-supervised) envs+=(CLAUDE_CONFIG_DIR="$FC" FLEET_CLAUDE_CONFIG_DIR="$FC" ENGSYS_CONFIG_DIR_SESSIONS="$FC.sessions" FLEET_CLAUDE_CONFIG_DIR_INTERACTIVE=" acme-build acme-plain ") ;;
   esac
   local args=(--roster "$W/roster" --launch-dir "$T/launch")
   [ "$vk" = off ] || args+=(--verdict-key-file "$KEYS/verdict.key")
@@ -148,6 +156,10 @@ check() { # check <harness dir> <case name> <render args...>
   local hdir="$1" case="$2"; shift 2
   local want="$GOLDEN/$hdir/$case.txt" got
   got="$(render "$@")"
+  # Claude's own --remote-control needs no name flag: --remote-control-name is Antigravity's (#283), never on a Claude line
+  if [ "$hdir" = claude ]; then
+    case "$got" in *--remote-control-name*) no "$hdir/$case: a Claude line carries --remote-control-name" ;; *) ok "$hdir/$case: no --remote-control-name on a Claude line" ;; esac
+  fi
   if [ "${UPDATE_GOLDEN:-0}" = 1 ]; then
     mkdir -p "$GOLDEN/$hdir"; printf '%s\n' "$got" >"$want"; ok "$hdir/$case (written)"; return
   fi

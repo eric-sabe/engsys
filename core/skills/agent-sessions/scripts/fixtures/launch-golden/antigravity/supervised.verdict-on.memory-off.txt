@@ -10,9 +10,11 @@ not launched
 not launched
 
 == acme-build
-launch: export ENGSYS_SESSION=acme-build ENGSYS_SESSION_RUN=<RUN> ENGSYS_SESSION_ROOT=<T>/w && unset ENGSYS_SINGLETON_ROLE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_CONFIG && unset ENGSYS_MM_CONFIG && cd <T>/w && set -a && . <T>/w/session.env && set +a && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && { unset -f claude 2>/dev/null || true; } && export FLEET_CLAUDE_CONFIG_DIR=<T>/fleetcfg FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised && unset ENGSYS_MEMORY_CONFIG && unset CLAUDE_CONFIG_DIR && unset ENGSYS_MM_CONFIG && command rm -f -- <LAUNCH_FILE> && agy --model gemini-4-argon --effort medium --remote-control --remote-control-name acme-build
+launch: export ENGSYS_SESSION=acme-build ENGSYS_SESSION_RUN=<RUN> ENGSYS_SESSION_ROOT=<T>/w && unset ENGSYS_SINGLETON_ROLE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_CONFIG && unset ENGSYS_MM_CONFIG && cd <T>/w && set -a && . <T>/w/session.env && set +a && export ENGSYS_SESSION=acme-build ENGSYS_SESSION_RUN=<RUN> ENGSYS_SESSION_ROOT=<T>/w && unset ENGSYS_SINGLETON_ROLE && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && { unset -f claude 2>/dev/null || true; } && export FLEET_CLAUDE_CONFIG_DIR=<T>/fleetcfg FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised && unset ENGSYS_MEMORY_CONFIG && unset CLAUDE_CONFIG_DIR && unset ENGSYS_MM_CONFIG && command rm -f -- <LAUNCH_FILE> && agy --model gemini-4-argon --effort medium --remote-control --remote-control-name acme-build
 argv: agy --model gemini-4-argon --effort medium --remote-control --remote-control-name acme-build
 env: ENGSYS_SESSION=acme-build
+env: ENGSYS_SESSION_RUN=<RUN>
+env: ENGSYS_SESSION_ROOT=<T>/w
 env: ENGSYS_SINGLETON_ROLE <unset>
 env: ENGSYS_SECURITY_VERDICT_KEY_FILE <unset>
 env: ENGSYS_MEMORY_SIGNING_KEY_FILE <unset>
@@ -27,15 +29,33 @@ env: ENV_FILE_SOURCED=1
 not launched
 
 == acme-plain
-launch: export ENGSYS_SESSION=acme-plain ENGSYS_SESSION_RUN=<RUN> ENGSYS_SESSION_ROOT=<T>/w && unset ENGSYS_SINGLETON_ROLE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_CONFIG && unset ENGSYS_MM_CONFIG && cd <T>/w && set -a && . <T>/w/session.env && set +a && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && { unset -f claude 2>/dev/null || true; } && export FLEET_CLAUDE_CONFIG_DIR=<T>/fleetcfg FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised && unset ENGSYS_MEMORY_CONFIG && unset CLAUDE_CONFIG_DIR && unset ENGSYS_MM_CONFIG && command rm -f -- <LAUNCH_FILE> && agy
+launch: export ENGSYS_SESSION=acme-plain ENGSYS_SESSION_RUN=<RUN> ENGSYS_SESSION_ROOT=<T>/w && unset ENGSYS_SINGLETON_ROLE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_CONFIG && unset ENGSYS_MM_CONFIG && cd <T>/w && set -a && . <T>/w/session.env && set +a && export ENGSYS_SESSION=acme-plain ENGSYS_SESSION_RUN=<RUN> ENGSYS_SESSION_ROOT=<T>/w && unset ENGSYS_SINGLETON_ROLE && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && { unset -f claude 2>/dev/null || true; } && export FLEET_CLAUDE_CONFIG_DIR=<T>/fleetcfg FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised && unset ENGSYS_MEMORY_CONFIG && unset CLAUDE_CONFIG_DIR && unset ENGSYS_MM_CONFIG && command rm -f -- <LAUNCH_FILE> && agy
 argv: agy
 env: ENGSYS_SESSION=acme-plain
+env: ENGSYS_SESSION_RUN=<RUN>
+env: ENGSYS_SESSION_ROOT=<T>/w
 env: ENGSYS_SINGLETON_ROLE <unset>
 env: ENGSYS_SECURITY_VERDICT_KEY_FILE <unset>
 env: ENGSYS_MEMORY_SIGNING_KEY_FILE <unset>
 env: ENGSYS_MEMORY_CONFIG <unset>
 env: ENGSYS_MM_CONFIG <unset>
 env: CLAUDE_CONFIG_DIR <unset>
+env: FLEET_CLAUDE_CONFIG_DIR=<T>/fleetcfg
+env: FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised
+env: ENV_FILE_SOURCED=1
+
+== acme-dirs
+launch: export ENGSYS_SESSION=acme-dirs ENGSYS_SESSION_RUN=<RUN> ENGSYS_SESSION_ROOT=<T>/w && unset ENGSYS_SINGLETON_ROLE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_CONFIG && unset ENGSYS_MM_CONFIG && cd <T>/w && set -a && . <T>/w/session.env && set +a && export ENGSYS_SESSION=acme-dirs ENGSYS_SESSION_RUN=<RUN> ENGSYS_SESSION_ROOT=<T>/w && unset ENGSYS_SINGLETON_ROLE && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && { unset -f claude 2>/dev/null || true; } && export FLEET_CLAUDE_CONFIG_DIR=<T>/fleetcfg FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised && unset ENGSYS_MEMORY_CONFIG && export CLAUDE_CONFIG_DIR=<T>/fleetcfg && unset ENGSYS_MM_CONFIG && command rm -f -- <LAUNCH_FILE> && agy --model gemini-4-argon --add-dir <T>/home/worktrees --add-dir=<T>/home/other
+argv: agy --model gemini-4-argon --add-dir <T>/home/worktrees --add-dir=<T>/home/other
+env: ENGSYS_SESSION=acme-dirs
+env: ENGSYS_SESSION_RUN=<RUN>
+env: ENGSYS_SESSION_ROOT=<T>/w
+env: ENGSYS_SINGLETON_ROLE <unset>
+env: ENGSYS_SECURITY_VERDICT_KEY_FILE <unset>
+env: ENGSYS_MEMORY_SIGNING_KEY_FILE <unset>
+env: ENGSYS_MEMORY_CONFIG <unset>
+env: ENGSYS_MM_CONFIG <unset>
+env: CLAUDE_CONFIG_DIR=<T>/fleetcfg
 env: FLEET_CLAUDE_CONFIG_DIR=<T>/fleetcfg
 env: FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised
 env: ENV_FILE_SOURCED=1
@@ -51,4 +71,5 @@ launched: acme-build  (<T>/w)
 error: refusing to launch 'acme-nyx' on HARNESS=antigravity: security-tier sessions run only on HARNESS=claude with claude-opus-4-8
 SKIPPED: acme-nyx (see the error above)
 launched: acme-plain  (<T>/w)
-error: 4 roster session(s) not launched; 2 launched
+launched: acme-dirs  (<T>/w)
+error: 4 roster session(s) not launched; 3 launched
