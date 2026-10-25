@@ -18,14 +18,17 @@
 // OS temp dir), so a tick's preflights cost one call. An unreadable answer infers nothing (gated false, `unreadable`
 // says why) and is never cached: the gate then shows up at BLOCKED as before. Exit 0 always, except usage (2).
 //
-// Patterns use core/lib/security-sensitive.mjs's glob dialect (`*` within a segment, `**` across, `**/x` also at the
-// root), which is how GitHub reads file_patterns (fnmatch with path names).
+// Patterns follow GitHub's fnmatch reading of file_patterns (File::FNM_PATHNAME | FNM_DOTMATCH | FNM_EXTGLOB): `*` and
+// `?` stay inside one path segment and match dotfiles; `**` as a whole segment crosses directories (`**/x` also at the
+// root, `x/**` everything under x); `**` inside a segment is just `*` (it never crosses `/`, so it never over-gates);
+// `[abc]`, `[a-z]`, `[!abc]` / `[^abc]` classes; `{a,b}` alternatives (not nested); `\x` escapes. Anything else (a
+// leading `!` negation, an unterminated class or brace, nested braces) is reported as `unknown` with the ruleset and
+// pattern, logged on stderr, and never pre-gates: the PR then meets that rule at BLOCKED as before.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
-import { compileGlob } from './security-sensitive.mjs';
 import { isMainEntry } from './is-main.mjs';
 
 const REPO_RE = /^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/;
@@ -50,16 +53,98 @@ export function reviewerRules(branchRules) {
   return out;
 }
 
-/** The rules a PR's changed files hit → { gated, rules: [{ rulesetId, reviewer, minimumApprovals, files }] }. */
+const MAX_EXPANSIONS = 64;
+
+/** `{a,b}` alternatives (EXTGLOB), not nested → [strings]; throws on nesting, an unterminated brace or too many. */
+function expandBraces(p) {
+  let out = [''];
+  for (let i = 0; i < p.length; i++) {
+    const c = p[i];
+    if (c === '\\') { out = out.map((o) => o + p.slice(i, i + 2)); i++; continue; }
+    if (c === '}') throw new Error('unbalanced }');
+    if (c !== '{') { out = out.map((o) => o + c); continue; }
+    const end = p.indexOf('}', i);
+    if (end < 0) throw new Error('unterminated {');
+    const body = p.slice(i + 1, end);
+    if (body.includes('{')) throw new Error('nested braces');
+    const alts = body.split(',');
+    out = out.flatMap((o) => alts.map((a) => o + a));
+    if (out.length > MAX_EXPANSIONS) throw new Error(`more than ${MAX_EXPANSIONS} brace alternatives`);
+    i = end;
+  }
+  return out;
+}
+
+const esc = (c) => c.replace(/[\\^$.*+?()[\]{}|/-]/g, '\\$&');
+
+/** One path segment (no `/`) → regex source; throws on an unterminated class. */
+function segmentSource(seg) {
+  let re = '';
+  for (let i = 0; i < seg.length; i++) {
+    const c = seg[i];
+    if (c === '\\') { if (i + 1 < seg.length) re += esc(seg[++i]); else re += esc('\\'); continue; }
+    if (c === '*') { while (seg[i + 1] === '*') i++; re += '[^/]*'; continue; } // `**` inside a segment is `*`
+    if (c === '?') { re += '[^/]'; continue; }
+    if (c === '[') {
+      let j = i + 1;
+      let neg = false;
+      if (seg[j] === '!' || seg[j] === '^') { neg = true; j++; }
+      let body = '';
+      if (seg[j] === ']') { body += '\\]'; j++; }
+      for (; j < seg.length && seg[j] !== ']'; j++) body += seg[j] === '\\' ? (j + 1 < seg.length ? esc(seg[++j]) : '\\\\') : seg[j] === '-' ? '-' : esc(seg[j]);
+      if (j >= seg.length) throw new Error('unterminated [');
+      re += neg ? `[^/${body}]` : `(?!/)[${body}]`;
+      i = j;
+      continue;
+    }
+    re += esc(c);
+  }
+  return re;
+}
+
+/**
+ * A ruleset file pattern → { re } or { unknown: why } (GitHub's fnmatch: FNM_PATHNAME | FNM_DOTMATCH | FNM_EXTGLOB; see
+ * the header). Unknown syntax never matches.
+ */
+export function compilePattern(pattern) {
+  const p = String(pattern ?? '').trim().replace(/^\/+/, '');
+  if (!p) return { unknown: 'empty pattern' };
+  if (p.startsWith('!')) return { unknown: 'negation (!) is not supported' };
+  try {
+    const alts = expandBraces(p).map((one) => {
+      const segs = one.split('/');
+      let src = '';
+      segs.forEach((seg, k) => {
+        const last = k === segs.length - 1;
+        if (seg === '**') src += last ? (k === 0 ? '.*' : '.+') : '(?:[^/]*/)*';
+        else src += segmentSource(seg) + (last ? '' : '/');
+      });
+      return src;
+    });
+    return { re: new RegExp(`^(?:${alts.join('|')})$`) };
+  } catch (e) {
+    return { unknown: e.message };
+  }
+}
+
+/**
+ * The rules a PR's changed files hit → { gated, rules: [{ rulesetId, reviewer, minimumApprovals, files }], unknown? }.
+ * `unknown` lists the patterns that were not understood ({ rulesetId, pattern, why }): they never gate.
+ */
 export function matchRules(rules, files) {
   const paths = [...new Set((files ?? []).filter((f) => typeof f === 'string' && f))];
   const hits = [];
+  const unknown = [];
   for (const rule of rules) {
-    const res = rule.patterns.map((p) => compileGlob(p.replace(/^\//, '')));
+    const res = [];
+    for (const p of rule.patterns) {
+      const c = compilePattern(p);
+      if (c.re) res.push(c.re); else unknown.push({ rulesetId: rule.rulesetId, pattern: p, why: c.unknown });
+    }
     const matched = paths.filter((f) => res.some((re) => re.test(f)));
     if (matched.length) hits.push({ rulesetId: rule.rulesetId, reviewer: rule.reviewer, minimumApprovals: rule.minimumApprovals, files: matched.slice(0, 10) });
   }
-  return { gated: hits.length > 0, rules: hits };
+  return { gated: hits.length > 0, rules: hits, ...(unknown.length ? { unknown } : {}) };
 }
 
 function cacheDir(flag, env) {
@@ -110,7 +195,8 @@ export function main(argv = process.argv.slice(2), { env = process.env, out = pr
     return 0;
   }
   const m = matchRules(rules, files);
-  out.write(`${JSON.stringify(m.gated ? m : { gated: false })}\n`);
+  for (const u of m.unknown ?? []) err.write(`ruleset-gates: ruleset ${u.rulesetId} pattern ${JSON.stringify(u.pattern)} not understood (${u.why}); not pre-gated on it\n`);
+  out.write(`${JSON.stringify(m.gated ? m : { gated: false, ...(m.unknown ? { unknown: m.unknown } : {}) })}\n`);
   return 0;
 }
 

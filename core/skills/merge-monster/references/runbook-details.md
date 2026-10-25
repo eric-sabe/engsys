@@ -413,7 +413,10 @@ discipline).
   path-based required-reviewers rule covering the PR's files, such as
   keystone's `.claude/**` → fleet-operators; engsys#271. Ask for the gate
   now; the PR would otherwise sit green but BLOCKED. `rulesetGate.unreadable`
-  infers nothing) · conflict-magnet? · security? · batch or single-commit? (picks merge
+  infers nothing, and a pattern outside GitHub's fnmatch subset is listed
+  under `rulesetGate.unknown` and never gates. The rules are cached per repo
+  and base branch for 600 s, about one tick, so a ruleset edit shows up within
+  ten minutes) · conflict-magnet? · security? · batch or single-commit? (picks merge
   method). Migration-bearing or operator-gated → § Operator gates before it
   can become `mm:active`.
 
