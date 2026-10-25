@@ -145,11 +145,13 @@ The hook reads only `<FLEET_STATE>/fhd/board-cache.json` (the desk mirrors every
 
 ### Watch Bus Events (`mm-watch.sh` & `mnt-watch.sh`)
 
-- `FHD_TRIP <service> <state> — <advice>`: Emitted by `mnt-watch.sh` when a non-suppressed service trips to `degraded` or `down` (or becomes unsuppressed while failing).
+Every line carries fixed words only (engsys#181): the service id, the state enum, a reason code and the gate words. Probe output (the first line of a command's or an API's response), advice and runbook text stay on the board and in the local state files; `fleet health status` shows them. The reason code is the probe's raw status when it is a plain token (`auth_local_failure`, `timeout`, `exit_<n>`, an HTTP code, a Statuspage indicator), else `probe`.
+
+- `FHD_TRIP <service> <state> reason=<code>[ — hold merges][, pause claims]`: Emitted by `mnt-watch.sh` when a non-suppressed service trips to `degraded` or `down` (or becomes unsuppressed while failing).
 - `FHD_RECOVER <service> healthy`: Emitted by `mnt-watch.sh` when a non-suppressed service recovers to `healthy`.
-- `FHD_CHANGE <service> <state>[ — hold merges, pause claims]`: Emitted once per non-suppressed state change. Lines from a fetched board carry only the id, state and those fixed gate words.
+- `FHD_CHANGE <service> <state>[ reason=<code>][ — hold merges][, pause claims]`: Emitted once per non-suppressed state change. The probe tick adds the reason code; lines from a fetched board carry only the id, state and the gate words.
 - `FHD_REPORT_CORRELATED <service> <incident-id> vendor-wide reports=<N> state=<state>`: Emitted when friction reports correlate into a confirmed vendor-wide incident.
-- `FHD_LOCAL_GUIDANCE <target-session> <service> — <guidance>`: Emitted when friction reports occur while live verification proves the vendor is healthy (or when local auth/context is missing).
+- `FHD_LOCAL_GUIDANCE <target-session> <service> reason=<auth_local_failure|session_local|per_session> — <fixed guidance>`: Emitted when friction reports occur while live verification proves the vendor is healthy (or when local auth/context is missing). The guidance is fixed text pointing at `fleet health status`.
 
 ---
 

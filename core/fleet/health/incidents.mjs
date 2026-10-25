@@ -200,18 +200,17 @@ export function ingestCrossFleetReport(registry, {
   });
 }
 
-function formatLocalGuidance(serviceSpec, svcState) {
-  const parts = [];
+// The guidance on the watch bus is fixed text (engsys#181): never the probe's detail (command or API output) or the
+// runbook; `fleet health status` shows both, from the board and the local state.
+export function formatLocalGuidance(serviceSpec, svcState) {
+  const id = serviceSpec.id;
   if (serviceSpec.observability === 'per-session') {
-    parts.push(`${serviceSpec.id} is a per-session local dependency (central probes cannot see your host)`);
-    parts.push('defer local-env authority to the resource broker (never use PUSH_OVERRIDE)');
-  } else if (svcState?.auth_local_failure) {
-    parts.push(svcState.detail || `central ${serviceSpec.id} is healthy; host/session auth or context is missing`);
-  } else {
-    parts.push(`central ${serviceSpec.id} probe is healthy; issue appears session-local (check local network, auth, or rate limits)`);
+    return `reason=per_session — ${id} is a per-session local dependency (central probes cannot see your host); defer local-env authority to the resource broker (never use PUSH_OVERRIDE)`;
   }
-  if (serviceSpec.runbook) parts.push(`runbook: ${serviceSpec.runbook}`);
-  return parts.join(' — ');
+  if (svcState?.auth_local_failure) {
+    return `reason=auth_local_failure — central ${id} is healthy; host/session auth or context is missing (details and runbook: fleet health status)`;
+  }
+  return `reason=session_local — central ${id} probe is healthy; issue appears session-local (check local network, auth, or rate limits; runbook: fleet health status)`;
 }
 
 /**
@@ -453,7 +452,7 @@ export async function correlateReports(registry, {
         const target = r.fleet && r.fleet !== 'local' ? `${r.fleet}:${r.session}` : r.session;
         if (!seenSessions.has(target)) {
           seenSessions.add(target);
-          events.push(`FHD_LOCAL_GUIDANCE ${target} ${serviceId} — ${guidance}`);
+          events.push(`FHD_LOCAL_GUIDANCE ${target} ${serviceId} ${guidance}`); // same shape as the engine's: <target> <service> reason=… — …
         }
       }
       const localRecord = {

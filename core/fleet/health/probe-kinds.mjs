@@ -13,8 +13,10 @@
 // Zero dependencies: node builtins only.
 
 const HOSTNAME_RE = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/i;
-const API_PATH_RE = /^\/[A-Za-z0-9_.\/-]{1,200}$/;
-const REPO_RE = /^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/;
+// a single leading '/': `//host/...` is refused, never passed on (engsys#181 hardening)
+const API_PATH_RE = /^\/(?!\/)[A-Za-z0-9_.\/-]{1,200}$/;
+// the owner never starts with '-' (it could read as a flag); GitHub logins and orgs never do
+const REPO_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._][A-Za-z0-9._-]{0,99}$/;
 
 /** Variables every kind gets (locale, paths, the user's home for CLI config files). */
 export const BASE_ENV = Object.freeze([
