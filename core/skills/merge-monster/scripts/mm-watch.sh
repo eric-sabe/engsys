@@ -13,7 +13,9 @@
 #   GATE_REVIEW #N review=<STATE> | merge_state=BLOCKED-><state>
 #                          engsys#272: on a PR parked mm:blocked (an operator gate), a review was submitted or the
 #                          mergeStateStatus left BLOCKED (an approval often does both): run gate-check for #N now.
-#                          Once per change (.watch/gate.tsv); a PR's first parked cycle only records.
+#                          Once per change (.watch/gate.tsv); a PR's first parked cycle only records, and a PR missing
+#                          from one poll keeps its record (two-poll rule). Both lists come from one GraphQL
+#                          repository.pullRequests(labels:) read, never the search-backed `gh pr list --label`.
 #   CHECK_FAIL #N <name>: <concl>  a check on the ACTIVE PR ended in a non-success (failure, cancelled,
 #                          timed out, …); once per (check, conclusion) per head. Successes are silent.
 #   CHECKS_READY #N head=<sha> state=<mergeStateStatus> pending=<n>
@@ -252,15 +254,23 @@ ready_diff() {
 # gate_events: GATE_REVIEW from .watch/gate.new (number, mergeStateStatus, review count, latest review state) against
 # .watch/gate.tsv (engsys#272). A PR parked on an operator gate gets its approval as a review, and the approval usually
 # moves mergeStateStatus off BLOCKED: either is an unambiguous trigger to run gate-check, which the 20-minute tick
-# would otherwise be left to catch. A PR's first parked cycle only records.
+# would otherwise be left to catch. A PR's first parked cycle only records. A row missing from one poll is kept
+# (.watch/gate.gone) and dropped only when it is missing from the next one too, the same two-poll rule as READY: a
+# transient miss must not reset a parked PR to "first cycle" and swallow an approval that lands meanwhile.
 gate_events() {
-  touch "$W/gate.tsv"
+  touch "$W/gate.tsv" "$W/gate.gone"
   awk -F'\t' 'NR==FNR {mss[$1]=$2; cnt[$1]=$3; next}
     ($1 in cnt) {
       if ($3 + 0 > cnt[$1] + 0) print "GATE_REVIEW #" $1 " review=" $4
       else if (mss[$1] == "BLOCKED" && $2 != "BLOCKED") print "GATE_REVIEW #" $1 " merge_state=BLOCKED->" $2
     }' "$W/gate.tsv" "$W/gate.new"
-  mv "$W/gate.new" "$W/gate.tsv"
+  cut -f1 "$W/gate.new" | LC_ALL=C sort -u >"$W/gate.new.k"
+  # missing for the first time: carried over; missing again (in gate.gone): dropped
+  awk -F'\t' 'FILENAME == ARGV[1] {seen[$1]=1; next} FILENAME == ARGV[2] {gone[$1]=1; next}
+    !($1 in seen) && !($1 in gone)' "$W/gate.new.k" "$W/gate.gone" "$W/gate.tsv" >"$W/gate.carry"
+  cut -f1 "$W/gate.carry" >"$W/gate.gone"
+  cat "$W/gate.new" "$W/gate.carry" | LC_ALL=C sort -n >"$W/gate.tsv"
+  rm -f "$W/gate.new" "$W/gate.new.k" "$W/gate.carry"
 }
 
 # --- cross-fleet inbox (engsys#77) ---------------------------------------------
@@ -353,19 +363,22 @@ while true; do
     if [ "$STATE" = "CLOSED" ]; then echo "STOP"; exit 0; fi
   fi
 
-  # --- new / withdrawn mm:ready PRs (engsys#272: no flapping) -----------------
-  if RAW=$("$FLEET_GH" pr list -R "$REPO" --label mm:ready --state open --limit 200 --json number,title,labels 2>/dev/null) \
-      && printf '%s' "$RAW" | jq -e 'type == "array"' >/dev/null 2>&1; then
-    printf '%s' "$RAW" | jq -r '.[] | select(any(.labels[]?; .name == "mm:ready")) | "#\(.number)\t\(.title // "" | gsub("[\t\r\n]"; " "))"' \
+  # --- new / withdrawn mm:ready PRs, and operator-gate wakes on parked PRs (engsys#272) ------
+  # One GraphQL read of both lists from repository.pullRequests(labels:, states: OPEN): the repository's own index,
+  # NOT `gh pr list --label`, which goes through the eventually consistent search API and can leave a PR out of a poll
+  # while search reindexes it (keystone#4694). An answer without data.repository is no answer. 100 per list.
+  if RAW=$("$FLEET_GH" api graphql -f owner="${REPO%%/*}" -f name="${REPO##*/}" -f query='
+      query mmLists($owner: String!, $name: String!) { repository(owner: $owner, name: $name) {
+        ready: pullRequests(labels: ["mm:ready"], states: OPEN, first: 100) { nodes { number title labels(first: 30) { nodes { name } } } }
+        blocked: pullRequests(labels: ["mm:blocked"], states: OPEN, first: 100) {
+          nodes { number mergeStateStatus labels(first: 30) { nodes { name } } reviews(last: 1) { totalCount nodes { state } } } } } }' 2>/dev/null) \
+      && printf '%s' "$RAW" | jq -e '(.data.repository.ready.nodes | type == "array") and (.data.repository.blocked.nodes | type == "array")' >/dev/null 2>&1; then
+    printf '%s' "$RAW" | jq -r '.data.repository.ready.nodes[] | select(any(.labels.nodes[]?; .name == "mm:ready"))
+        | "#\(.number)\t\(.title // "" | gsub("[\t\r\n]"; " "))"' \
       | LC_ALL=C sort -t "$(printf '\t')" -k1,1 -u > "$W/ready.new"
     ready_diff
-  fi
-
-  # --- operator-gate wakes on parked PRs (engsys#272) --------------------------
-  if RAW=$("$FLEET_GH" pr list -R "$REPO" --label mm:blocked --state open --limit 100 --json number,labels,mergeStateStatus,reviews 2>/dev/null) \
-      && printf '%s' "$RAW" | jq -e 'type == "array"' >/dev/null 2>&1; then
-    printf '%s' "$RAW" | jq -r '.[] | select(any(.labels[]?; .name == "mm:blocked"))
-        | [.number, (.mergeStateStatus // "UNKNOWN"), ((.reviews // []) | length), ((.reviews // []) | last | .state // "-")] | @tsv' \
+    printf '%s' "$RAW" | jq -r '.data.repository.blocked.nodes[] | select(any(.labels.nodes[]?; .name == "mm:blocked"))
+        | [.number, (.mergeStateStatus // "UNKNOWN"), (.reviews.totalCount // 0), (.reviews.nodes[-1].state // "-")] | @tsv' \
       | LC_ALL=C sort -n > "$W/gate.new"
     gate_events
   fi

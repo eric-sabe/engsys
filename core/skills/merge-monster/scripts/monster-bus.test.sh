@@ -26,6 +26,8 @@ cat >"$T/bin/gh" <<'SH'
 echo "gh $*" >>"$FAKE/gh.log"
 key="${1:-}-${2:-}" all="$*"
 case "$key" in api-rate_limit) echo 5000; exit 0 ;; esac
+# mm-watch's one read of the mm:ready / mm:blocked lists (engsys#272) answers from resp/api-graphql-lists
+case "$all" in *"query mmLists"*) key=api-graphql-lists ;; esac
 jq_expr="" body_file=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -36,11 +38,14 @@ while [ $# -gt 0 ]; do
 done
 [ -z "$body_file" ] || [ ! -f "$body_file" ] || cp "$body_file" "$FAKE/last-body"
 f="$FAKE/resp/$key"
-# $FAKE/resp/<key>.flap: every other mm:ready list call answers this instead (a flaky read, e.g. "[]"; engsys#272).
-# Only that call counts, so the alternation does not depend on how many other lists a cycle reads.
-if [ -f "$f.flap" ] && [[ "$all" == *"--label mm:ready"* ]]; then
+# $FAKE/resp/<key>.flap: every other call answers this instead (a flaky read; engsys#272).
+# $FAKE/resp/<key>.seq/1, 2, …: one answer per call, in order, the last one repeated (a recorded poll sequence).
+if [ -f "$f.flap" ]; then
   n=$(( $(cat "$f.flapn" 2>/dev/null || echo 0) + 1 )); echo "$n" >"$f.flapn"
   [ $((n % 2)) = 1 ] || f="$f.flap"
+elif [ -d "$f.seq" ]; then
+  n=$(( $(cat "$f.seqn" 2>/dev/null || echo 0) + 1 )); echo "$n" >"$f.seqn"
+  f="$f.seq/$n"; [ -f "$f" ] || f="$(ls "$FAKE/resp/$key.seq/"* | sort -t/ -k1,1 -V | tail -n1)"
 fi
 [ -f "$f" ] || exit 0
 if [ -n "$jq_expr" ]; then jq -r "$jq_expr" "$f"; else cat "$f"; fi
@@ -76,44 +81,58 @@ overdue_row() { # overdue_row <name> <task>: a running registry row whose deadli
 }
 
 echo "READY/UNREADY never flap on a parked gate; GATE_REVIEW wakes the gate-check (engsys#272)"
-parked() { # parked <number> <mergeStateStatus> <reviews JSON>: a PR labeled mm:ready + mm:blocked (an operator gate)
-  printf '{"number":%s,"title":"chore(fleet): pin engsys","labels":[{"name":"mm:ready"},{"name":"mm:blocked"}],"mergeStateStatus":"%s","reviews":%s}' "$1" "$2" "$3"
+LISTS="$T/resp/api-graphql-lists"
+# lists <ready nodes JSON> <blocked nodes JSON>: the mmLists GraphQL answer
+lists() { printf '{"data":{"repository":{"ready":{"nodes":[%s]},"blocked":{"nodes":[%s]}}}}\n' "$1" "$2"; }
+rnode() { printf '{"number":%s,"title":"chore(fleet): pin engsys","labels":{"nodes":[{"name":"mm:ready"},{"name":"mm:blocked"}]}}' "$1"; }
+bnode() { # bnode <number> <mergeStateStatus> <review count> <latest state>
+  printf '{"number":%s,"mergeStateStatus":"%s","labels":{"nodes":[{"name":"mm:ready"},{"name":"mm:blocked"}]},"reviews":{"totalCount":%s,"nodes":[%s]}}' \
+    "$1" "$2" "$3" "$( [ "$3" = 0 ] || printf '{"state":"%s"}' "$4")"
 }
+WATCH=(bash "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents --no-dependabot)
+wbus() { bus "$1" "${WATCH[@]:1}"; }
 rm -rf "$T/state/.watch"
-printf '[%s]\n' "$(parked 4694 BLOCKED '[]')" >"$T/resp/pr-list"
-bus 4 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents --no-dependabot
-[ "$(count_of 'READY #4694')" = 1 ] && ok "a stable mm:ready + mm:blocked PR: READY once across several polls" || bad "READY once across several polls" "$OUT"
+lists "$(rnode 4694)" "$(bnode 4694 BLOCKED 0 -)" >"$LISTS"
+wbus 4
+[ "$(count_of '^READY #4694')" = 1 ] && ok "a stable mm:ready + mm:blocked PR: READY once across several polls" || bad "READY once across several polls" "$OUT"
 hasnt "  …and never UNREADY" "UNREADY"
 hasnt "  …and no GATE_REVIEW on its first parked cycles" "GATE_REVIEW"
-bus 2 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents --no-dependabot
+grep -q "query mmLists" "$T/gh.log" && ok "  …read from repository.pullRequests(labels:), one GraphQL call for both lists" || bad "  …read through GraphQL" "$(cat "$T/gh.log")"
+grep -q "pr list .*--label mm:ready\|pr list .*--label mm:blocked" "$T/gh.log" && bad "  …never the search-backed gh pr list --label" "$(grep 'pr list' "$T/gh.log")" || ok "  …never the search-backed gh pr list --label"
+wbus 2
 hasnt "  …nor READY again from a new bus (the record is on disk)" "READY #4694"
-# the #4694 pattern: every other read comes back empty (as a short or failed list would)
-echo '[]' >"$T/resp/pr-list.flap"; rm -f "$T/resp/pr-list.flapn"
-bus 8 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents --no-dependabot
-[ "$(wc -l <"$T/resp/pr-list.flapn" 2>/dev/null || echo 0)" -ge 1 ] && [ "$(cat "$T/resp/pr-list.flapn")" -ge 3 ] && ok "  (the replay alternated full and empty reads $(cat "$T/resp/pr-list.flapn") times)" || bad "the replay alternated" "$(cat "$T/resp/pr-list.flapn" 2>/dev/null)"
-hasnt "flapping reads (full, empty, full, …): no UNREADY" "UNREADY"
+# case A, the #4694 pattern: every other read comes back empty
+lists "" "" >"$LISTS.flap"; rm -f "$LISTS.flapn"
+wbus 8
+[ "$(cat "$LISTS.flapn" 2>/dev/null || echo 0)" -ge 3 ] && ok "  (case A replay: full and empty reads alternated $(cat "$LISTS.flapn") times)" || bad "the replay alternated" "$(cat "$LISTS.flapn" 2>/dev/null)"
+hasnt "case A, alternating full and empty reads: no UNREADY" "UNREADY"
 hasnt "  …and no READY" "READY #4694"
-echo 'not json' >"$T/resp/pr-list.flap"; rm -f "$T/resp/pr-list.flapn"
-bus 3 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents --no-dependabot
-hasnt "a read that is not a JSON array is no answer: no UNREADY" "UNREADY"
-rm -f "$T/resp/pr-list.flap" "$T/resp/pr-list.flapn"
-echo '[]' >"$T/resp/pr-list"
-bus 4 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents --no-dependabot
-[ "$(count_of 'UNREADY #4694')" = 1 ] && ok "the label really goes (missing two polls in a row): UNREADY once" || bad "UNREADY once" "$OUT"
-printf '[%s]\n' "$(parked 4694 BLOCKED '[]')" >"$T/resp/pr-list"
-bus 3 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents --no-dependabot
-[ "$(count_of 'READY #4694')" = 1 ] && ok "  …and READY once when it is labeled again" || bad "READY once when relabeled" "$OUT"
-# an operator approves: a review lands and mergeStateStatus leaves BLOCKED
-printf '[%s]\n' "$(parked 4694 CLEAN '[{"state":"APPROVED"}]')" >"$T/resp/pr-list"
-bus 3 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents --no-dependabot
-[ "$(count_of 'GATE_REVIEW #4694 review=APPROVED')" = 1 ] && ok "an approval on a parked gate → one GATE_REVIEW" || bad "one GATE_REVIEW" "$OUT"
-hasnt "  …with no READY/UNREADY noise beside it" "READY #4694"
-printf '[%s]\n' "$(parked 4695 BLOCKED '[]')" >"$T/resp/pr-list"
-bus 2 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents --no-dependabot
-printf '[%s]\n' "$(parked 4695 CLEAN '[]')" >"$T/resp/pr-list"
-bus 3 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents --no-dependabot
+echo 'not json' >"$LISTS.flap"; rm -f "$LISTS.flapn"
+wbus 3
+hasnt "a read without data.repository is no answer: no UNREADY" "UNREADY"
+rm -f "$LISTS.flap" "$LISTS.flapn"
+# case B: two empty mm:ready reads in a row, then the PR is back
+mkdir -p "$LISTS.seq"; rm -f "$LISTS.seqn"
+lists "" "" >"$LISTS.seq/1"; lists "" "" >"$LISTS.seq/2"; lists "$(rnode 4694)" "$(bnode 4694 BLOCKED 0 -)" >"$LISTS.seq/3"
+wbus 5
+[ "$(count_of 'UNREADY #4694')" = 1 ] && ok "case B, two empty reads in a row: UNREADY once (the label is really gone for two polls)" || bad "case B: UNREADY once" "$OUT"
+[ "$(count_of '^READY #4694')" = 1 ] && ok "  …and READY once when it is back" || bad "case B: READY once" "$OUT"
+[ "$(count_of GATE_REVIEW)" = 0 ] && ok "  …and its gate record was not reset into a GATE_REVIEW" || bad "case B: no GATE_REVIEW" "$OUT"
+rm -rf "$LISTS.seq" "$LISTS.seqn"
+# case C: the approval lands while one mm:blocked poll misses the PR
+lists "$(rnode 4694)" "$(bnode 4694 BLOCKED 0 -)" >"$LISTS"; wbus 2
+mkdir -p "$LISTS.seq"; rm -f "$LISTS.seqn"
+lists "$(rnode 4694)" "" >"$LISTS.seq/1"; lists "$(rnode 4694)" "$(bnode 4694 CLEAN 1 APPROVED)" >"$LISTS.seq/2"
+wbus 4
+[ "$(count_of 'GATE_REVIEW #4694 review=APPROVED')" = 1 ] && ok "case C, an approval during a missed mm:blocked poll → exactly one GATE_REVIEW" || bad "case C: one GATE_REVIEW" "$OUT"
+hasnt "  …and no READY/UNREADY noise beside it" "READY #4694"
+rm -rf "$LISTS.seq" "$LISTS.seqn"
+lists "$(rnode 4695)" "$(bnode 4695 BLOCKED 0 -)" >"$LISTS"; wbus 2
+lists "$(rnode 4695)" "$(bnode 4695 CLEAN 0 -)" >"$LISTS"; wbus 3
 [ "$(count_of 'GATE_REVIEW #4695 merge_state=BLOCKED->CLEAN')" = 1 ] && ok "mergeStateStatus leaving BLOCKED alone → GATE_REVIEW once" || bad "GATE_REVIEW on merge state" "$OUT"
-rm -rf "$T/state/.watch" "$T/resp/pr-list"
+lists "" "" >"$LISTS"; wbus 4
+[ -s "$T/state/.watch/gate.tsv" ] && bad "a PR gone from two polls in a row is dropped from the gate record" "$(cat "$T/state/.watch/gate.tsv")" || ok "a PR gone from two polls in a row is dropped from the gate record"
+rm -rf "$T/state/.watch" "$LISTS"
 
 echo "one watcher per monster (engsys#122)"
 overdue_row rebase-12 "PR#12" >"$T/state/agents.tsv"
