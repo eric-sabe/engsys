@@ -58,6 +58,13 @@
 # strictest wins). A prompt injection only partially: a session runs as the same OS user, so it can still run this script with
 # a different environment or reach the key file; the boundary is a separate GitHub identity for the security lane (#220).
 #
+# Ruleset review gates (engsys#271): `rulesetGate` says whether a branch ruleset's path-based required_reviewers rule
+# covers this PR's changed files (core/lib/ruleset-gates.mjs: the base branch's rules read once per tick, cached), as
+# {gated: true, rules: [{rulesetId, reviewer: {type, id}, minimumApprovals, files}]} or {gated: false}. A gated PR is
+# operator-gated at READY, handoff or not. Unreadable rules infer nothing ({gated: false, unreadable: why}) and never
+# fail the preflight. The file list is the view's (gh caps it at 100; at the cap the full list is read over REST, with
+# renames' old paths).
+#
 # Usage: mm-preflight.sh --capabilities     (prints security-verdict, security-sensitive-globs and security-review-request,
 #                                           exit 0; unknown flag = old kit)
 #        mm-preflight.sh --repo owner/name --pr N [--full] [--config FILE]
@@ -65,7 +72,7 @@
 set -euo pipefail
 # --capabilities (engsys#229): one token per line, no GitHub, no config. An older kit has no such flag and exits 2
 # ("unknown arg"), which is how a caller tells the two apart without grepping source text.
-if [ "${1:-}" = --capabilities ] && [ $# -eq 1 ]; then printf 'security-verdict\nsecurity-sensitive-globs\nsecurity-review-request\n'; exit 0; fi
+if [ "${1:-}" = --capabilities ] && [ $# -eq 1 ]; then printf 'security-verdict\nsecurity-sensitive-globs\nsecurity-review-request\nruleset-review-gates\n'; exit 0; fi
 # shellcheck source=../../../lib/fleet-gh.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/fleet-gh.sh"
 fleet_gh_resolve
@@ -103,6 +110,22 @@ THREADS=$("$FLEET_GH" api graphql -f owner="$OWNER" -f name="$NAME" -F number="$
       }
     }
   }' --jq '.data.repository.pullRequest.reviewThreads')
+
+# Which ruleset review rules this PR's files hit (engsys#271). Never fails the preflight.
+RG_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../../lib/ruleset-gates.mjs"
+RULESET_JSON='{"gated":false,"unreadable":"node or ruleset-gates.mjs not found"}'
+if command -v node >/dev/null && [ -f "$RG_SCRIPT" ]; then
+  RG_FILES="$(jq -c '[.files[]?.path // empty]' <<<"$VIEW")"
+  if [ "$(jq 'length' <<<"$RG_FILES")" -ge 100 ]; then
+    RG_FILES="$("$FLEET_GH" api "repos/$REPO/pulls/$PR/files?per_page=100" --paginate 2>/dev/null | jq -s -c 'add // [] | [.[] | .filename, (.previous_filename // empty)]' 2>/dev/null)" || RG_FILES=""
+  fi
+  if [ -n "$RG_FILES" ]; then
+    RULESET_JSON="$(printf '%s' "$RG_FILES" | node "$RG_SCRIPT" gate --repo "$REPO" --base "$(jq -r '.baseRefName // "main"' <<<"$VIEW")" 2>/dev/null)" \
+      && jq -e 'type == "object"' <<<"$RULESET_JSON" >/dev/null 2>&1 || RULESET_JSON='{"gated":false,"unreadable":"ruleset-gates failed"}'
+  else
+    RULESET_JSON='{"gated":false,"unreadable":"the full file list could not be read"}'
+  fi
+fi
 
 CONTRACT_JSON="null"
 if [ "$CHECK_CONTRACT" -eq 1 ] || [ -n "$ISSUE_FILE" ]; then
@@ -243,7 +266,7 @@ if [ "$REVIEW_NEEDED" -eq 1 ]; then
   jq -c -n --argjson s "$SECURITY_JSON" --arg h "$(jq -r '.headRefOid // ""' <<<"$VIEW")" \
     '{ok: false, state: ($s.state // "missing"), reason: "security_review_required", verdictReason: ($s.reason // "no_valid_verdict"), reviewLabel: $s.reviewLabel, head: $h, requiredBy: ($s.requiredBy // [])}' >&2
 fi
-jq -n --argjson view "$VIEW" --argjson security "$SECURITY_JSON" --argjson threads "$THREADS" --argjson full "$FULL" --argjson contract "$CONTRACT_JSON" '
+jq -n --argjson view "$VIEW" --argjson security "$SECURITY_JSON" --argjson threads "$THREADS" --argjson full "$FULL" --argjson contract "$CONTRACT_JSON" --argjson rulesets "$RULESET_JSON" '
   def leading_markers: (capture("^(?<lead>(\\s*<!--[\\s\\S]*?-->)+)")? // {lead: ""}).lead
     | [scan("<!--[\\s\\S]*?-->") | gsub("\\s+"; " ") | .[0:200]];
   def project:
@@ -256,7 +279,7 @@ jq -n --argjson view "$VIEW" --argjson security "$SECURITY_JSON" --argjson threa
         markers: (reduce ($all[].markers[]) as $m ({}; .[$m] += 1)),
         findingAcks: ([$all[].findingAcks[]] | length),
         items: [ $all[] | select((.markers | length) > 0 or (.findingAcks | length) > 0) ] };
-  $view + {reviewThreads: $threads}
+  $view + {reviewThreads: $threads, rulesetGate: $rulesets}
   | if $contract != null then . + {contractCheck: $contract} else . end
   | if $security != null then . + {securityVerdict: $security} else . end
   | if $full == 1 then . else .comments |= ((. // []) | project) end'

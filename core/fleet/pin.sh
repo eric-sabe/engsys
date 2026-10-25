@@ -7,6 +7,10 @@
 #      instance repo's origin/main, and the tag goes on main itself (eric-sabe/engsys#227). The release
 #      version is stamped as metadata.version in .claude-plugin/marketplace.json and version in every
 #      plugin listed there, then `claude plugin validate` (scratch config dir).
+#      With RELEASE_CI_REF_FILE set (a path in the instance repo, e.g. .github/workflows/fleet-tests.yml), the
+#      stamp also sets the `RELEASE_CI_REF_KEY: <ref>` line there (default key ENGSYS_REF) to the engsys tag
+#      being pinned, so the instance CI runs against that engsys in the same release PR (engsys#271); unset =
+#      unchanged. The engsys tag is checked to exist first, so the CI never points at an unreleased tag.
 #        - main doesn't carry that version yet: the stamp is pushed to release/vX.Y.Z and opened as a PR
 #          `release: vX.Y.Z` on the instance repo, and the run STOPS (exit 3) — no tag, no pin PR. Merge
 #          it, then re-run the same command. A re-run while it is open reports the same PR; if it was
@@ -22,7 +26,10 @@
 #      and its output posted as a comment opening with REVIEW_MARKER. READY_LABEL is added when the
 #      review exited 0 and its output doesn't match REVIEW_BLOCK_REGEX (no REVIEW_CMD: label directly).
 #      Re-running is safe: an open, labeled PR for the same pins is reused as is; an open, unlabeled one
-#      just gets its review re-run.
+#      just gets its review re-run. Before the review, the PR gets an `<!-- mm-handoff -->` comment whose
+#      operator_gate is PIN_OPERATOR_GATE (default: the pin changes .claude/settings.json, which a ruleset
+#      path rule such as keystone's puts behind a fleet-operators review; empty = no handoff), once per PR,
+#      so Merge Monster requests the operator gate at READY instead of discovering it at BLOCKED (engsys#271).
 #   4. waits for the merge (polls every 60 s, up to PIN_WAIT_MAX_MIN), then runs `fleet sync` (host
 #      checkouts + plugin reinstall). Sessions are NOT restarted — that's `fleet restart`.
 #
@@ -82,7 +89,7 @@ main() {
   fi
 
   [ -z "$engsys" ] || check_engsys_tag "$engsys" "$engsys_repo"
-  [ -z "$release" ] || release="$(release_instance "$release" "$inst_repo")" || exit $?
+  [ -z "$release" ] || release="$(release_instance "$release" "$inst_repo" "${engsys:-$cur_engsys}")" || exit $?
 
   local new_engsys="${engsys:-$cur_engsys}" new_inst="${release:-$cur_inst}" pr="" already
   already="$PIN_REPO already pins $ENGSYS_MARKETPLACE $new_engsys"
@@ -168,9 +175,9 @@ ver_gt() { # ver_gt <X.Y.Z> <X.Y.Z> — the first is the higher version
 # version first. When it doesn't, the stamp goes out as a `release: vX.Y.Z` PR and the run stops (exit 3);
 # after that PR merges, the same command tags the merged main commit. Tags cut before #227 sit off main on
 # a `release: vX` stamp commit; `next` never reuses one, so the first run after #227 moves the fleet onto main.
-release_instance() { # release_instance <vX.Y.Z|next> <owner/repo> → echoes the tag to pin (exit 3: release PR open)
+release_instance() { # release_instance <vX.Y.Z|next> <owner/repo> <engsys tag> → echoes the tag to pin (exit 3: release PR open)
   exec 3>&1 1>&2
-  local want="$1" repo="$2" latest l base main_sha main_ver ver wt mf src dir manifest n_all n_src cfg branch pr_url on_main f closed
+  local want="$1" repo="$2" engsys_tag="${3:-}" ci_note="" latest l base main_sha main_ver ver wt mf src dir manifest n_all n_src cfg branch pr_url on_main f closed
   local plugin_dirs=()
   must git -C "$FLEET_REPO" fetch -q --tags origin
   main_sha="$(git -C "$FLEET_REPO" rev-parse refs/remotes/origin/main)" || fleet_die "$repo has no origin/main in $FLEET_REPO"
@@ -237,6 +244,10 @@ release_instance() { # release_instance <vX.Y.Z|next> <owner/repo> → echoes th
   done < <(jq -r '.plugins[]? | .source | strings' "$mf")
   [ "$n_src" = "$n_all" ] || say "WARNING $((n_all - n_src)) plugin(s) in the marketplace have a non-directory source — not stamped"
   [ "$(jq -r .metadata.version "$mf")" = "$ver" ] || fleet_die "version stamp failed in $mf"
+  if [ -n "${RELEASE_CI_REF_FILE:-}" ] && [ -n "$engsys_tag" ]; then
+    stamp_ci_ref "$wt" "$RELEASE_CI_REF_FILE" "${RELEASE_CI_REF_KEY:-ENGSYS_REF}" "$engsys_tag"
+    ci_note=" It also sets \`${RELEASE_CI_REF_KEY:-ENGSYS_REF}\` in \`$RELEASE_CI_REF_FILE\` to $ENGSYS_MARKETPLACE \`$engsys_tag\` (already released), so this repo's CI runs against the engsys being pinned."
+  fi
 
   # validate with a scratch config dir: the check reads the tree only and must not touch the host's Claude state
   cfg="$(mktemp -d "$FLEET_STATE/validate-cfg.XXXXXX")" || fleet_die "couldn't make a scratch config dir in $FLEET_STATE"
@@ -249,7 +260,10 @@ release_instance() { # release_instance <vX.Y.Z|next> <owner/repo> → echoes th
   # out differently from jq; that alone must not open another release PR)
   on_main=1
   while IFS= read -r f; do
-    [ "$(git -C "$wt" show "HEAD:$f" | jq -S . 2>/dev/null)" = "$(jq -S . "$wt/$f")" ] || { on_main=0; break; }
+    case "$f" in
+      *.json) [ "$(git -C "$wt" show "HEAD:$f" | jq -S . 2>/dev/null)" = "$(jq -S . "$wt/$f")" ] || { on_main=0; break; } ;;
+      *) on_main=0; break ;;   # the CI ref line (RELEASE_CI_REF_FILE): any change is a change
+    esac
   done < <(git -C "$wt" diff --name-only)
   if [ "$on_main" = 1 ]; then
     # main already carries the version (the release PR merged): tag main's commit itself
@@ -275,7 +289,7 @@ release_instance() { # release_instance <vX.Y.Z|next> <owner/repo> → echoes th
     must git -C "$wt" commit -q -am "release: $want"
     say "pushing $branch…"
     must git -C "$wt" push -q --force origin "HEAD:refs/heads/$branch"   # our own generated branch; --force covers a re-run after a half-finished push
-    must gh pr create -R "$repo" --head "$branch" --base main --title "release: $want" --body "Stamps version \`$ver\` into \`.claude-plugin/marketplace.json\` and every plugin it lists (nothing else).
+    must gh pr create -R "$repo" --head "$branch" --base main --title "release: $want" --body "Stamps version \`$ver\` into \`.claude-plugin/marketplace.json\` and every plugin it lists (nothing else).$ci_note
 
 Opened by \`fleet pin\` on the fleet host. A release is tagged on main itself (eric-sabe/engsys#227): after this merges, re-running the same \`fleet pin\` command tags the merged main commit $want, creates the GitHub release and opens the pin PR."
     pr_url="$(gh pr view "$branch" -R "$repo" --json url -q .url)" && [ -n "$pr_url" ] \
@@ -287,6 +301,21 @@ Opened by \`fleet pin\` on the fleet host. A release is tagged on main itself (e
   rm_worktree "$FLEET_REPO" "$wt"
   say "$want is not released yet (nothing tagged, no pin PR). Merge $pr_url, then re-run the same command."
   exit 3
+}
+
+# The instance CI's engsys ref (engsys#271): the `<key>: <ref>` line(s) in <file>, quotes kept, nothing else.
+stamp_ci_ref() { # stamp_ci_ref <worktree> <file> <key> <ref>
+  local wt="$1" file="$2" key="$3" ref="$4" ci
+  ci_die() { rm_worktree "$FLEET_REPO" "$wt"; fleet_die "$1"; }   # leave no scratch worktree behind
+  case "$file" in /* | ../* | */../* | */.. | ..) ci_die "RELEASE_CI_REF_FILE must be a path inside the instance repo (got '$file')" ;; esac
+  [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || ci_die "RELEASE_CI_REF_KEY must be a plain key name (got '$key')"
+  [[ "$ref" =~ ^[A-Za-z0-9._/-]+$ ]] || ci_die "the engsys ref has unexpected characters: $ref"
+  ci="$wt/$file"
+  [ -f "$ci" ] || ci_die "RELEASE_CI_REF_FILE $file is not in the instance repo's main"
+  grep -Eq "^[[:space:]]*$key[[:space:]]*:" "$ci" || ci_die "no '$key:' line in $file (RELEASE_CI_REF_KEY)"
+  KEY="$key" REF="$ref" perl -pi -e 's/^(\s*\Q$ENV{KEY}\E\s*:\s*)(["\x27]?)[^"\x27\s#]*\2/$1$2$ENV{REF}$2/' "$ci" \
+    || ci_die "couldn't edit $file"
+  grep -Eq "^[[:space:]]*$key[[:space:]]*:[[:space:]]*[\"']?$ref[\"']?([[:space:]]|#|\$)" "$ci" || ci_die "the $key stamp failed in $file"
 }
 
 # --- pin PR ------------------------------------------------------------------------------------
@@ -362,8 +391,25 @@ Opened by \`fleet pin\` on the fleet host. After merge the host runs \`fleet syn
   emit "$pr"
 }
 
-review_and_queue() { # review_and_queue <pr> <worktree> <branch> — review → marker comment → READY_LABEL (exit 1 if it needs a look)
+# The operator gate the pin needs (engsys#271): .claude/settings.json is behind a ruleset path rule (keystone's main
+# ruleset: a FeedFrwd/fleet-operators review). Posted once per PR, before READY_LABEL, so Merge Monster asks for the gate
+# at READY. PIN_OPERATOR_GATE overrides the reason; set it empty for no handoff.
+PIN_GATE_DEFAULT="pin bump changes .claude/settings.json; the main ruleset requires a fleet-operators review"
+post_pin_handoff() { # post_pin_handoff <pr>
+  local pr="$1" gate="${PIN_OPERATOR_GATE-$PIN_GATE_DEFAULT}" n
+  [ -n "$gate" ] || return 0
+  gate="$(printf '%s' "$gate" | tr -d '"\n\r')"
+  n="$(gh pr view "$pr" -R "$PIN_REPO" --json body,comments \
+    --jq '[(.body // ""), (.comments[]?.body // "")] | map(select(split("\n") | any(test("^ {0,3}<!-- mm-handoff -->\\s*$")))) | length' 2>/dev/null || true)"
+  if [[ "$n" =~ ^[1-9] ]]; then say "$PIN_REPO#$pr already carries an mm-handoff"; return 0; fi
+  printf '<!-- mm-handoff -->\ndepends_on: []\nmigration: false\noperator_gate: "%s"\nnotes: pin-only change opened by fleet pin (.claude/settings.json marketplace refs)\n' "$gate" \
+    | gh pr comment "$pr" -R "$PIN_REPO" --body-file - || fleet_die "couldn't post the mm-handoff on $PIN_REPO#$pr"
+  say "$PIN_REPO#$pr: mm-handoff posted (operator_gate: $gate)"
+}
+
+review_and_queue() { # review_and_queue <pr> <worktree> <branch> — handoff → review → marker comment → READY_LABEL (exit 1 if it needs a look)
   local pr="$1" wt="$2" branch="$3" review rc=0 summary
+  post_pin_handoff "$pr"
   review="$FLEET_STATE/pin-review.txt"
   if [ -z "${REVIEW_CMD:-}" ]; then
     rm_worktree "$PIN_DIR" "$wt"; git -C "$PIN_DIR" branch -q -D "$branch" 2>/dev/null || true

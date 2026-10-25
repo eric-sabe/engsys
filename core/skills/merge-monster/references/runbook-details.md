@@ -409,7 +409,11 @@ discipline).
 - base branch correct; no zombie required checks from a force-push
 - classify: migration-bearing? (`migration_globs` ∩ changed files, or
   handoff `migration: true`) · operator-gated? (handoff `operator_gate:`
-  set) · conflict-magnet? · security? · batch or single-commit? (picks merge
+  set, or preflight `rulesetGate.gated`: the base branch's ruleset has a
+  path-based required-reviewers rule covering the PR's files, such as
+  keystone's `.claude/**` → fleet-operators; engsys#271. Ask for the gate
+  now; the PR would otherwise sit green but BLOCKED. `rulesetGate.unreadable`
+  infers nothing) · conflict-magnet? · security? · batch or single-commit? (picks merge
   method). Migration-bearing or operator-gated → § Operator gates before it
   can become `mm:active`.
 
@@ -658,7 +662,7 @@ Gated here:
 | Act | `--kind` | Thread | Human does |
 |---|---|---|---|
 | merge a migration-bearing PR | `merge` | the PR | review **Approve** on the head |
-| merge an operator-gated PR (handoff `operator_gate:`) | `merge` | the PR | review **Approve** on the head |
+| merge an operator-gated PR (handoff `operator_gate:`, or preflight `rulesetGate.gated`) | `merge` | the PR | review **Approve** on the head |
 | merge a never-auto Dependabot PR | `merge` | the PR | review **Approve** on the head |
 | apply a migration / dispatch a deploy, where MM is configured to | `migration` / `deploy` | the PR | `/approve <gate-id>` |
 
