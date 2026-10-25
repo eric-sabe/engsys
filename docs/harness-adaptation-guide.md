@@ -142,5 +142,8 @@ When implementing support for `<harness>` after the assessment spec is approved,
    node lib/selftest.js
    node --test core/lib/harness-io.test.mjs core/fleet/lib/route.test.mjs core/skills/skill-layout.test.mjs tests/personas-and-skills.test.mjs
    bash core/skills/agent-sessions/scripts/fleet-supervisor.test.sh
+   bash core/skills/agent-sessions/scripts/launch-golden.test.sh
    bash core/fleet/test/init.test.sh
    ```
+   A new harness adds its own golden cases to `launch-golden.test.sh` (`UPDATE_GOLDEN=1` writes them). The Claude
+   goldens must not change; if they do, name each changed file in the PR body (agent-sessions SKILL § Golden launch lines).
