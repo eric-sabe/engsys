@@ -296,8 +296,8 @@ typed="$(cat "$T/typed")"; script="$(cat "$T/launch-file.copy")"
 [ "$rc" -eq 0 ] && ok "long security line: launches" || no "long security line: launches" "$err"
 [ "$(bytes "$typed")" -lt 1024 ] && ok "long security line: the typed line is under 1024 bytes ($(bytes "$typed"))" || no "security typed under 1024" "$typed"
 lacks "long security line: the key path is not typed" "$typed" "$LONGKEY"
-case "$script" in *"&& unset ENGSYS_MM_CONFIG && cd "*" && set -a && . $W/security.env && set +a && export ENGSYS_SECURITY_VERDICT_KEY_FILE=$LONGKEY && "*"export CLAUDE_CONFIG_DIR=$LMMCFG && command rm -f -- "*" && command claude --name acme-sec "*)
-  ok "long security line: the file sources the env file, then sets the key path and the config dir, then claude" ;;
+case "$script" in *"&& unset ENGSYS_MM_CONFIG && cd "*" && set -a && . $W/security.env && set +a && export ENGSYS_SECURITY_VERDICT_KEY_FILE=$LONGKEY && "*"export CLAUDE_CONFIG_DIR=$LMMCFG && unset ENGSYS_MM_CONFIG && command rm -f -- "*" && command claude --name acme-sec "*)
+  ok "long security line: the file sources the env file, then sets the key path and the config dir, unsets ENGSYS_MM_CONFIG (engsys#287), then claude" ;;
   *) no "security ordering in the launch file" "$script" ;; esac
 case "$script" in *"export ENGSYS_SECURITY_VERDICT_KEY_FILE=$LONGKEY && unset ENGSYS_MEMORY_CONFIG && unset ENGSYS_MM_CONFIG"*) ok "long security line: the key path is also set before the env file (overwritten after it either way)" ;; *) no "key before env file" "$script" ;; esac
 for h in copilot antigravity; do
