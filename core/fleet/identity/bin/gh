@@ -51,32 +51,41 @@ unset GH_TOKEN_COPILOT_CLI
 # Which account's installation to use (GH_APP_INSTALLATIONS in the env file). Precedence:
 # GH_APP_OWNER > --owner (names the account a command like `gh project`/`gh repo list`/
 # `gh search --owner` acts on) > -R/--repo > the owner a `gh api` endpoint names (`repos/<owner>/…`,
-# `orgs/<org>/…`, `users/<user>/…`) > a github.com URL argument > the current repo's origin. The token
-# helper falls back to GH_APP_INSTALLATION_ID (the fleet instance's own installation; a process-env
+# `orgs/<org>/…`, `users/<user>/…`) > an owner a `-f/-F` field names > a github.com URL argument > the current
+# repo's origin. The token helper falls back to GH_APP_INSTALLATION_ID (the fleet instance's own installation; a process-env
 # GH_APP_INSTALLATION_ID overrides the env file's) for an owner it doesn't list.
-# engsys#257: a `gh api` endpoint that names no owner (`/apps/<slug>`, `/app`, `/user`, `graphql`, …) is not
-# about the cwd's repo, so it never takes the cwd's origin: it gets the instance installation. Before, an
-# org-scoped read (`orgs/FeedFrwd/teams/…`), an App lookup or a ProjectV2 GraphQL call run from a checkout
-# of another installation's repo got that installation's token and failed with 403/404.
+# engsys#257: `gh api` endpoints that can't be about any repo (`/apps/<slug>`, `/app`, `/user`, `installation/*`,
+# `rate_limit`) take the instance installation, never the cwd's origin. GraphQL and `search/*` may well be about
+# the cwd's repo (mutations, private-repo search), so they keep the origin fallback, unless the call names an owner
+# in a field (`-f owner=X`, `-F owner=X`, or `repo=<owner>/<name>`), which then picks it. `repos/{owner}/{repo}/…`
+# placeholders are gh's own "the cwd's repo", so they too fall back to origin.
 owner_of() { # owner/repo, URL or api path -> owner, or nothing
   local s="${1#https://github.com/}"
   s="${s#/}"; s="${s#repos/}"
   case "$s" in */*) printf '%s' "${s%%/*}" ;; esac
 }
-# api_endpoint_owner <endpoint> -> "owner:<login>" | "ownerless" | "" (not an api path we classify)
+# api_endpoint_owner <endpoint> -> "owner:<login>" | "ownerless" | "" (not classified: the origin fallback applies)
 api_endpoint_owner() {
   local e="${1#/}" rest
   e="${e%%\?*}"
   case "$e" in
+    repos/\{owner\}/*) ;; # gh's placeholder for the cwd's repo
     repos/*/*) printf 'owner:%s' "$(owner_of "$e")" ;;
     orgs/*|users/*)
       rest="${e#*/}"; rest="${rest%%/*}"
       [ -n "$rest" ] && printf 'owner:%s' "$rest" ;;
-    graphql|user|user/*|app|app/*|apps/*|installation/*|rate_limit|meta|search/*|notifications|notifications/*|gists|gists/*|emojis|octocat|zen|versions|marketplace_listing/*)
+    user|user/*|app|app/*|apps/*|installation/*|rate_limit)
       printf 'ownerless' ;;
   esac
 }
-OWNER_OPT="" REPO_OPT="" API_OWNER="" URL_OWNER="" API_OWNERLESS=""
+# field_owner <field value> -> the owner a `-f/-F` field names (`owner=X`, or `repo=X/Y`), or nothing
+field_owner() {
+  case "$1" in
+    owner=*) printf '%s' "${1#owner=}" ;;
+    repo=*/*) printf '%s' "$(owner_of "${1#repo=}")" ;;
+  esac
+}
+OWNER_OPT="" REPO_OPT="" API_OWNER="" URL_OWNER="" API_OWNERLESS="" FIELD_OWNER=""
 # The `gh api` endpoint is the first positional argument after `api` that is not a flag's value.
 API_EP="" in_api="" skip_next=""
 prev=""
@@ -84,6 +93,10 @@ for a in "$@"; do
   case "$prev" in
     --owner) [ -n "$OWNER_OPT" ] || OWNER_OPT="$a" ;;
     -R|--repo) [ -n "$REPO_OPT" ] || REPO_OPT="$(owner_of "$a")" ;;
+    -f|-F|--raw-field|--field) [ -z "$in_api" ] || [ -n "$FIELD_OWNER" ] || FIELD_OWNER="$(field_owner "$a")" ;;
+  esac
+  case "$a" in
+    --raw-field=*|--field=*) [ -z "$in_api" ] || [ -n "$FIELD_OWNER" ] || FIELD_OWNER="$(field_owner "${a#*=}")" ;;
   esac
   case "$a" in
     --owner=*) [ -n "$OWNER_OPT" ] || OWNER_OPT="${a#--owner=}" ;;
@@ -115,6 +128,7 @@ OWNER="${GH_APP_OWNER:-}"
 [ -n "$OWNER" ] || OWNER="$OWNER_OPT"
 [ -n "$OWNER" ] || OWNER="$REPO_OPT"
 [ -n "$OWNER" ] || OWNER="$API_OWNER"
+[ -n "$OWNER" ] || OWNER="$FIELD_OWNER"
 [ -n "$OWNER" ] || OWNER="$URL_OWNER"
 if [ -z "$OWNER" ] && [ -z "$API_OWNERLESS" ] && url="$(git remote get-url origin 2>/dev/null)"; then
   case "$url" in
