@@ -781,6 +781,37 @@ has_line_out "rejected (not_a_descendant_of_last_verified" "  …the rejection r
 [ "$(cat "$T/mstate/memory-sync.warn" 2>/dev/null)" = "$ROLLBACK" ] && ok "  …and is latched in <state>/memory-sync.warn" || bad "  …not latched" "$(cat "$T/mstate/memory-sync.warn" 2>/dev/null)"
 rm -f "$T/mstate/memory-sync.warn"
 
+echo "mm-watch.sh resolves the Fleet Health Desk registry only from a trusted root (engsys#180)"
+REAL_NODE="$(command -v node)"; mkdir -p "$T/nodeshim" "$T/fhd-fs" "$T/fhdstate"
+# a node that records each Fleet Health Desk watch-board call, then runs the real node
+printf '#!/usr/bin/env bash\ncase " $* " in *" watch-board "*) printf "%%s\\n" "$*" >>"$FAKE/fhd-calls.log" ;; esac\nexec %q "$@"\n' "$REAL_NODE" >"$T/nodeshim/node"
+chmod +x "$T/nodeshim/node"
+MINI_FHD='version: 1
+services:
+  svc:
+    name: "svc"
+    kind: external
+    observability: central
+    probe:
+      adapter: fleet-report-only
+    poll_seconds: 60
+    thresholds:
+      trip_fails: 1
+      recover_clean: 1
+'
+printf '%s' "$MINI_FHD" >"$T/repo-fhd.yml"; printf '%s' "$MINI_FHD" >"$T/fhdstate/fleet-health.yml"; printf '%s' "$MINI_FHD" >"$T/fhd-fs/fleet-health.yml"
+printf 'fhd_config: %s\n' "$T/repo-fhd.yml" >"$T/mm-fhd.yml"
+: >"$T/fhd-calls.log"
+( unset FLEET_STATE FLEET_INSTANCE FLEET_HEALTH_FILE ENGSYS_FHD_REGISTRY ENGSYS_FHD_BOARD_ISSUE; PATH="$T/nodeshim:$PATH"
+  bus 2 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/fhdstate" --interval 1 --no-agents --no-dependabot --config "$T/mm-fhd.yml" )
+[ ! -s "$T/fhd-calls.log" ] && ok "  …a repo config fhd_config and <state>/fleet-health.yml are not registries: no board watch" || bad "  …the inert fallbacks were used" "$(cat "$T/fhd-calls.log")"
+: >"$T/fhd-calls.log"
+( unset FLEET_INSTANCE FLEET_HEALTH_FILE ENGSYS_FHD_REGISTRY ENGSYS_FHD_BOARD_ISSUE; export FLEET_STATE="$T/fhd-fs"; PATH="$T/nodeshim:$PATH"
+  bus 2 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/fhdstate" --interval 1 --no-agents --no-dependabot --config "$T/mm-fhd.yml" )
+case "$(cat "$T/fhd-calls.log")" in *"--file $(cd "$T/fhd-fs" && pwd -P)/fleet-health.yml"* | *"--file $T/fhd-fs/fleet-health.yml"*) ok "  …the FLEET_STATE registry (cli.mjs registry-path) is the one watched" ;;
+  *) bad "  …the FLEET_STATE registry was not used" "$(cat "$T/fhd-calls.log")" ;; esac
+case "$(cat "$T/fhd-calls.log")" in *repo-fhd.yml* | *fhdstate/fleet-health.yml*) bad "  …and never the repo's" "$(cat "$T/fhd-calls.log")" ;; *) ok "  …and never the repo's or the state dir's" ;; esac
+
 echo "monster-bus.test: $pass passed, $fail failed"
 [ "$fail" = 0 ]
 
