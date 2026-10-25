@@ -829,11 +829,6 @@
         "reason": "Reworded in SKILL.md § Operator gates (request/nudge/verify/record, exit codes 0/3/4/1, self_is_operator, no operators → no gate)."
       },
       {
-        "unit": "verify on every wake for that pr, including each tick delta that names it ({\"k\":\"gate\",\"pr\":n,…}; the tick reports any new comment or review on a pr parked mm:blocked), and once on the session's first tick (read-only, auto-approved)",
-        "section": "Operator gates (approval happens in GitHub)",
-        "reason": "Reworded in SKILL.md § Operator gates (request/nudge/verify/record, exit codes 0/3/4/1, self_is_operator, no operators → no gate)."
-      },
-      {
         "unit": "exit 0 approved → record it (below), clear mm:blocked, continue the pipeline",
         "section": "Operator gates (approval happens in GitHub)",
         "reason": "Reworded in SKILL.md § Operator gates (request/nudge/verify/record, exit codes 0/3/4/1, self_is_operator, no operators → no gate)."
@@ -1080,6 +1075,11 @@
       }
     ],
     "superseded_ok": [
+      {
+        "unit": "verify on every wake for that pr, including each tick delta that names it ({\"k\":\"gate\",\"pr\":n,…}; the tick reports any new comment or review on a pr parked mm:blocked), and once on the session's first tick (read-only, auto-approved)",
+        "section": "Operator gates (approval happens in GitHub)",
+        "reason": "engsys#272 widened it: runbook § Operator gates step 3 now runs gate-check on every bus event naming a parked PR (GATE_REVIEW, READY, UNREADY, CONFLICT, …) as well as each tick delta and the first tick, and never skips it as noise."
+      },
       {
         "unit": "mm:escalated label + diagnosis comment on the pr, then fleet notify --level action --re <pr-url> --incident mm-<pr-number> \"<what's blocked, what you tried, what decision is needed>\" (the fleet's own slack voice; falls back to a ledger-issue comment on its own if slack isn't configured or reachable, never anything you have to gate)",
         "section": "Escalation",

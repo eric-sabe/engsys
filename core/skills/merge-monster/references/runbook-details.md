@@ -693,10 +693,17 @@ Gated here:
    request. It merges once Nyx's signed PASS also lands." Never "also
    pending", "after the verdict" or anything else that reads as "wait":
    approvals held back until the verdict were the failure engsys#240 fixed.
-3. **Verify** on every wake for that PR, including each tick delta that
-   names it (`{"k":"gate","pr":N,…}`; the tick reports any new comment or
-   review on a PR parked `mm:blocked`), and once on the session's first
-   tick (read-only, auto-approved): `<skill-dir>/scripts/gate-check.sh --repo <repo> --pr N
+3. **Verify** on every wake for that PR: every bus event that names it
+   (`GATE_REVIEW #N`, which the bus emits when a review is submitted on a
+   PR parked `mm:blocked` or its merge state leaves BLOCKED, and READY,
+   UNREADY, CONFLICT or anything else), each tick delta that names it
+   (`{"k":"gate","pr":N,…}`; the tick reports any new comment or review on
+   a PR parked `mm:blocked`), and once on the session's first tick
+   (read-only, auto-approved). gate-check is cheap: never decide a parked
+   PR's events are noise and skip it. That is how an approval on
+   keystone#4694 waited 20 minutes for the tick (engsys#272); the bus no
+   longer re-emits READY/UNREADY for a stable parked PR, so an event there
+   means something changed: `<skill-dir>/scripts/gate-check.sh --repo <repo> --pr N
    --gate <id> <operator flag> --requester <author>
    --target <repo>#N@<sha> --kind <kind>`.
    - exit **0** approved → record it (below), clear `mm:blocked`, continue

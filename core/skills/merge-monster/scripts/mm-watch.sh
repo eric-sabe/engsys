@@ -6,6 +6,14 @@
 # Events:
 #   READY #N <title>       PR gained the mm:ready label
 #   UNREADY #N             PR lost the mm:ready label (before being queued)
+#                          Both from a persistent per-PR record of what was last emitted (.watch/ready.tsv, engsys#272):
+#                          a PR whose labels stay put (mm:ready + mm:blocked, the parked-gate state) never re-emits,
+#                          a list that is not a JSON array is no answer, and UNREADY needs the PR missing from two
+#                          successful polls in a row, so one short or failed read never flaps READY/UNREADY.
+#   GATE_REVIEW #N review=<STATE> | merge_state=BLOCKED-><state>
+#                          engsys#272: on a PR parked mm:blocked (an operator gate), a review was submitted or the
+#                          mergeStateStatus left BLOCKED (an approval often does both): run gate-check for #N now.
+#                          Once per change (.watch/gate.tsv); a PR's first parked cycle only records.
 #   CHECK_FAIL #N <name>: <concl>  a check on the ACTIVE PR ended in a non-success (failure, cancelled,
 #                          timed out, …); once per (check, conclusion) per head. Successes are silent.
 #   CHECKS_READY #N head=<sha> state=<mergeStateStatus> pending=<n>
@@ -218,6 +226,43 @@ emit_diff() {
   mv "$new" "$old"
 }
 
+# ready_diff: READY / UNREADY from .watch/ready.new against the persistent record (engsys#272). ready.tsv holds the
+# PRs last emitted READY (key #N, then the title); ready.gone the ones missing from the last successful poll but not
+# yet reported. READY only for a key not in the record; UNREADY only for a key missing from two polls in a row. A key
+# that comes back while it is pending is still on record: no READY again.
+ready_diff() {
+  local tab k
+  tab="$(printf '\t')"
+  touch "$W/ready.tsv" "$W/ready.gone"
+  cut -f1 "$W/ready.tsv" | LC_ALL=C sort -u >"$W/ready.old.k"
+  cut -f1 "$W/ready.new" | LC_ALL=C sort -u >"$W/ready.new.k"
+  LC_ALL=C sort -u -o "$W/ready.gone" "$W/ready.gone"
+  LC_ALL=C comm -13 "$W/ready.old.k" "$W/ready.new.k" | while IFS= read -r k; do
+    [ -n "$k" ] && echo "READY $(awk -F'\t' -v k="$k" '$1==k {print; exit}' "$W/ready.new")"
+  done
+  LC_ALL=C comm -23 "$W/ready.old.k" "$W/ready.new.k" >"$W/ready.absent"
+  LC_ALL=C comm -12 "$W/ready.gone" "$W/ready.absent" | while IFS= read -r k; do [ -n "$k" ] && echo "UNREADY $k"; done
+  LC_ALL=C comm -23 "$W/ready.absent" "$W/ready.gone" >"$W/ready.pending"   # missing for the first time: kept on record
+  { cat "$W/ready.new"; awk -F'\t' 'NR==FNR {p[$1]=1; next} ($1 in p)' "$W/ready.pending" "$W/ready.tsv"; } \
+    | LC_ALL=C sort -t "$tab" -k1,1 -u >"$W/ready.keep"
+  mv "$W/ready.keep" "$W/ready.tsv"; mv "$W/ready.pending" "$W/ready.gone"
+  rm -f "$W/ready.old.k" "$W/ready.new.k" "$W/ready.absent" "$W/ready.new"
+}
+
+# gate_events: GATE_REVIEW from .watch/gate.new (number, mergeStateStatus, review count, latest review state) against
+# .watch/gate.tsv (engsys#272). A PR parked on an operator gate gets its approval as a review, and the approval usually
+# moves mergeStateStatus off BLOCKED: either is an unambiguous trigger to run gate-check, which the 20-minute tick
+# would otherwise be left to catch. A PR's first parked cycle only records.
+gate_events() {
+  touch "$W/gate.tsv"
+  awk -F'\t' 'NR==FNR {mss[$1]=$2; cnt[$1]=$3; next}
+    ($1 in cnt) {
+      if ($3 + 0 > cnt[$1] + 0) print "GATE_REVIEW #" $1 " review=" $4
+      else if (mss[$1] == "BLOCKED" && $2 != "BLOCKED") print "GATE_REVIEW #" $1 " merge_state=BLOCKED->" $2
+    }' "$W/gate.tsv" "$W/gate.new"
+  mv "$W/gate.new" "$W/gate.tsv"
+}
+
 # --- cross-fleet inbox (engsys#77) ---------------------------------------------
 # The relay records messages for this session in $FLEET_INBOX_DIR/<session>.jsonl (fleet launch sets
 # FLEET_INBOX_DIR in multi-fleet mode). One fixed FLEET_MSG line per new undelivered entry, read with
@@ -308,11 +353,21 @@ while true; do
     if [ "$STATE" = "CLOSED" ]; then echo "STOP"; exit 0; fi
   fi
 
-  # --- new / withdrawn mm:ready PRs ---------------------------------------
-  if OUT=$("$FLEET_GH" pr list -R "$REPO" --label mm:ready --json number,title \
-      --jq '.[] | "#\(.number)\t\(.title)"' 2>/dev/null); then
-    printf '%s\n' "$OUT" | sed '/^$/d' | sort > "$W/ready.new"
-    emit_diff "$W/ready.tsv" "$W/ready.new" "READY" "UNREADY"
+  # --- new / withdrawn mm:ready PRs (engsys#272: no flapping) -----------------
+  if RAW=$("$FLEET_GH" pr list -R "$REPO" --label mm:ready --state open --limit 200 --json number,title,labels 2>/dev/null) \
+      && printf '%s' "$RAW" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    printf '%s' "$RAW" | jq -r '.[] | select(any(.labels[]?; .name == "mm:ready")) | "#\(.number)\t\(.title // "" | gsub("[\t\r\n]"; " "))"' \
+      | LC_ALL=C sort -t "$(printf '\t')" -k1,1 -u > "$W/ready.new"
+    ready_diff
+  fi
+
+  # --- operator-gate wakes on parked PRs (engsys#272) --------------------------
+  if RAW=$("$FLEET_GH" pr list -R "$REPO" --label mm:blocked --state open --limit 100 --json number,labels,mergeStateStatus,reviews 2>/dev/null) \
+      && printf '%s' "$RAW" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    printf '%s' "$RAW" | jq -r '.[] | select(any(.labels[]?; .name == "mm:blocked"))
+        | [.number, (.mergeStateStatus // "UNKNOWN"), ((.reviews // []) | length), ((.reviews // []) | last | .state // "-")] | @tsv' \
+      | LC_ALL=C sort -n > "$W/gate.new"
+    gate_events
   fi
 
   # --- new Dependabot PRs ---------------------------------------------------
