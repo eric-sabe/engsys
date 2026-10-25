@@ -101,6 +101,7 @@ const SUITES = [
   ["node --test tests/monster-skill-sentinel.test.mjs"],
   ["node --test tests/model-policy.test.mjs"],
   ["bash core/skills/agent-sessions/scripts/launch-agent-sessions.test.sh"],
+  ["bash core/skills/agent-sessions/scripts/launch-golden.test.sh"],
 ];
 
 // Variables the kit reads from a fleet session's environment.

@@ -669,10 +669,12 @@ has "roster: ENV_FILE points at the rendered lane env" "$ROSTER_OUT" "ENV_FILE=$
 has "roster: 5th field rendered" "$ROSTER_OUT" "acme-security|$HOME/git/app|/maintenance-monster|--model claude-opus-4-8|$STATE/env/security.env"
 has "roster: monster line" "$ROSTER_OUT" "acme-mm|$HOME/git/app|/merge-monster|--model model-m --dangerously-skip-permissions"
 # the launch command line for a window: the launch file's line (engsys#236), minus its own removal step before the harness
-tl() { grep -F "tmux [script] [acme:$1] " "$FAKE/tmux.log" | head -1 | sed -E 's/command rm -f -- [^ ]+ && //'; }
-has "mm: default env (roster ENV_FILE)" "$(tl acme-mm)" "cd $HOME/git/app && set -a && . $STATE/env/session.env && set +a && { unset -f claude 2>/dev/null || true; } && unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && unset ENGSYS_MEMORY_CONFIG && unset CLAUDE_CONFIG_DIR && command claude --name acme-mm"
+# the identity re-assert after the env file and the ENGSYS_CONFIG_DIR_SESSIONS decision (engsys#287) are dropped here;
+# launch-golden.test.sh pins them
+tl() { grep -F "tmux [script] [acme:$1] " "$FAKE/tmux.log" | head -1 | sed -E -e 's/command rm -f -- [^ ]+ && //' -e 's/set \+a && export ENGSYS_SESSION=[^ ]+ ENGSYS_SESSION_RUN=[^ ]+ ENGSYS_SESSION_ROOT=[^ ]+( ENGSYS_SINGLETON_ROLE=[a-z]+)? && (unset ENGSYS_SINGLETON_ROLE && )?/set +a \&\& /' -e 's/(export ENGSYS_CONFIG_DIR_SESSIONS=[^ ]+|unset ENGSYS_CONFIG_DIR_SESSIONS) \&\& //'; }
+has "mm: default env (roster ENV_FILE)" "$(tl acme-mm)" "cd $HOME/git/app && set -a && . $STATE/env/session.env && set +a && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && { unset -f claude 2>/dev/null || true; } && unset FLEET_CLAUDE_CONFIG_DIR FLEET_CLAUDE_CONFIG_DIR_SCOPE && unset ENGSYS_MEMORY_CONFIG && unset CLAUDE_CONFIG_DIR && unset ENGSYS_MM_CONFIG && command claude --name acme-mm"
 has "mm: prompt before the extra flags" "$(tl acme-mm)" "/merge-monster --model model-m --dangerously-skip-permissions"
-has "security: the 5th field replaces ENV_FILE" "$(tl acme-security)" "set -a && . $STATE/env/security.env && set +a && { unset -f claude 2>/dev/null || true; } && unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && unset ENGSYS_MEMORY_CONFIG && unset CLAUDE_CONFIG_DIR && command claude --name acme-security"
+has "security: the 5th field replaces ENV_FILE" "$(tl acme-security)" "set -a && . $STATE/env/security.env && set +a && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && { unset -f claude 2>/dev/null || true; } && unset FLEET_CLAUDE_CONFIG_DIR FLEET_CLAUDE_CONFIG_DIR_SCOPE && unset ENGSYS_MEMORY_CONFIG && unset CLAUDE_CONFIG_DIR && unset ENGSYS_MM_CONFIG && command claude --name acme-security"
 hasnt "security: the roster-level env is NOT used" "$(tl acme-security)" "session.env"
 has "security: prompt before the extra flags" "$(tl acme-security)" "/maintenance-monster --model claude-opus-4-8"
 has "rel: a relative 5th field resolves against the roster's directory" "$(tl acme-rel)" "set -a && . $STATE/env/rel.env && set +a"
@@ -746,7 +748,8 @@ done
 has "the rendered session env carries it too" "$(cat "$STATE/env/session.env")" "CLAUDE_CONFIG_DIR=$FCFG"
 has "…and the security env" "$(cat "$STATE/env/security.env")" "CLAUDE_CONFIG_DIR=$FCFG"
 for w in acme-mm acme-security acme-build; do
-  has "$w (scope all): the dir is set after the env file, so no env-file variable can move it" "$(tl "$w")" "set +a && { unset -f claude 2>/dev/null || true; } && unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && unset ENGSYS_MEMORY_CONFIG && export CLAUDE_CONFIG_DIR=$FCFG && command claude"
+  has "$w (scope all): the dir is set after the env file, so no env-file variable can move it" "$(tl "$w")" "set +a && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && { unset -f claude 2>/dev/null || true; } && export FLEET_CLAUDE_CONFIG_DIR=$FCFG && unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && unset ENGSYS_MEMORY_CONFIG && export CLAUDE_CONFIG_DIR=$FCFG && unset ENGSYS_MM_CONFIG && command claude"
+  case "$(grep -F "tmux [script] [acme:$w] " "$FAKE/tmux.log" | head -1)" in *"set +a && export ENGSYS_SESSION=$w ENGSYS_SESSION_RUN="*) ok "$w: its identity is exported again after the env file (engsys#287)" ;; *) bad "$w: its identity is exported again after the env file (engsys#287)" ;; esac
 done
 # FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised: monsters and the security lane keep the fleet dir; the
 # interactive roles run on ~/.claude (unset on the launch line and in their env file).
@@ -758,7 +761,7 @@ rc_is "launch with scope supervised exits 0" 0
 for w in acme-mm acme-security acme-audit; do
   has "$w (supervised / security lane): CLAUDE_CONFIG_DIR=<the fleet dir>" "$(tl "$w")" "export CLAUDE_CONFIG_DIR=$FCFG && "
 done
-has "acme-build (interactive): CLAUDE_CONFIG_DIR unset, ~/.claude" "$(tl acme-build)" "FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised && unset ENGSYS_MEMORY_CONFIG && unset CLAUDE_CONFIG_DIR && command claude"
+has "acme-build (interactive): CLAUDE_CONFIG_DIR unset, ~/.claude" "$(tl acme-build)" "FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised && unset ENGSYS_MEMORY_CONFIG && unset CLAUDE_CONFIG_DIR && unset ENGSYS_MM_CONFIG && command claude"
 hasnt "…never the fleet dir" "$(tl acme-build)" "export CLAUDE_CONFIG_DIR=$FCFG"
 has "a monster learns the fleet dir and the scope (the baton refuses a session off it)" "$(tl acme-mm)" "export FLEET_CLAUDE_CONFIG_DIR=$FCFG FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised && "
 has "…an interactive one too, so its baton calls are refused" "$(tl acme-build)" "FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised"
@@ -789,14 +792,14 @@ for w in acme-nl acme-us acme-Merge acme-nyx acme-o48; do
   has "$w: launched on the fleet dir" "$(tl "$w")" "export CLAUDE_CONFIG_DIR=$FCFG && "
 done
 has "acme-Merge is gated by fleet verify like any merge monster" "$OUT" "fleet verify: Claude config dir"
-has "positive control: acme-build still runs on ~/.claude" "$(tl acme-build)" "unset CLAUDE_CONFIG_DIR && command claude"
+has "positive control: acme-build still runs on ~/.claude" "$(tl acme-build)" "unset CLAUDE_CONFIG_DIR && unset ENGSYS_MM_CONFIG && command claude"
 # The launcher itself never puts a monster or security line on ~/.claude, even if told it's interactive.
 printf 'NAMESPACE=acme\nacme-nl|%s|Run the merge monster skill now|--x\nacme-o48|%s||--model claude-opus-4-8\nacme-plain|%s||--x\n' "$HOME/git/app" "$HOME/git/app" "$HOME/git/app" >"$T/f1.roster"
 : >"$FAKE/tmux.log"; rm -rf "$FAKE/tmux"
 CLAUDE_CONFIG_DIR="$FCFG" FLEET_CLAUDE_CONFIG_DIR_INTERACTIVE=" acme-nl acme-o48 acme-plain " run bash "$ENGSYS_HOST/core/skills/agent-sessions/scripts/launch-agent-sessions.sh" --roster "$T/f1.roster"
 has "launcher: a monster prompt keeps the fleet dir though listed interactive" "$(tl acme-nl)" "export CLAUDE_CONFIG_DIR=$FCFG && "
 has "launcher: an opus-4-8 line keeps it too" "$(tl acme-o48)" "export CLAUDE_CONFIG_DIR=$FCFG && "
-has "launcher: positive control, a plain listed line gets ~/.claude" "$(tl acme-plain)" "unset CLAUDE_CONFIG_DIR && command claude"
+has "launcher: positive control, a plain listed line gets ~/.claude" "$(tl acme-plain)" "unset CLAUDE_CONFIG_DIR && unset ENGSYS_MM_CONFIG && command claude"
 cp "$T/roster.pre-f1" "$INST/fleet/roster.tmpl"; rm -f "$INST/fleet/env/nyx.env.tmpl"
 cp "$T/roster.bak2" "$INST/fleet/roster.tmpl" 2>/dev/null || sed -i.x '/^acme-audit|/d' "$INST/fleet/roster.tmpl"; rm -f "$INST/fleet/roster.tmpl.x"
 cp "$T/flc.bak" "$LC"
@@ -829,9 +832,9 @@ login_all acme-mm acme-build acme-security acme-rel
 rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"; run fleet launch
 rc_is "per-session launch exits 0" 0
 for n in acme-mm acme-build acme-security acme-rel; do
-  has "$n: launched on its own dir" "$(tl "$n")" "export CLAUDE_CONFIG_DIR=$SESS/$n && command claude"
+  has "$n: launched on its own dir" "$(tl "$n")" "export CLAUDE_CONFIG_DIR=$SESS/$n && unset ENGSYS_MM_CONFIG && command claude"
   # engsys#262: its own dir has no memory.yml, so the memory brief reads the fleet dir's, decided after the env file
-  has "$n: …ENGSYS_MEMORY_CONFIG=<fleet dir>/memory.yml, just before its config dir" "$(tl "$n")" "export ENGSYS_MEMORY_CONFIG=$FCFG/memory.yml && export CLAUDE_CONFIG_DIR=$SESS/$n && command claude"
+  has "$n: …ENGSYS_MEMORY_CONFIG=<fleet dir>/memory.yml, just before its config dir" "$(tl "$n")" "export ENGSYS_MEMORY_CONFIG=$FCFG/memory.yml && export CLAUDE_CONFIG_DIR=$SESS/$n && unset ENGSYS_MM_CONFIG && command claude"
   has "$n: …and cleared before the env file, so no env-file value survives" "$(tl "$n")" "unset ENGSYS_MEMORY_CONFIG && unset ENGSYS_MM_CONFIG && cd "
 done
 eq "no two sessions share a config dir" "$(for n in acme-mm acme-build acme-security acme-rel; do tl "$n" | grep -o "export CLAUDE_CONFIG_DIR=[^ ]*"; done | sort | uniq -d | wc -l | tr -d ' ')" 0
@@ -841,12 +844,12 @@ hasnt "a shared env file carries no one session's dir" "$(cat "$STATE/env/sessio
 setconf "FLEET_CLAUDE_CONFIG_DIR=$FCFG" "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on" "FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised"
 rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"; run fleet launch
 rc_is "per-session + scope supervised: launch exits 0" 0
-has "acme-mm: its own dir" "$(tl acme-mm)" "export CLAUDE_CONFIG_DIR=$SESS/acme-mm && command claude"
+has "acme-mm: its own dir" "$(tl acme-mm)" "export CLAUDE_CONFIG_DIR=$SESS/acme-mm && unset ENGSYS_MM_CONFIG && command claude"
 has "…the baton gate sees the same dir as FLEET_CLAUDE_CONFIG_DIR" "$(tl acme-mm)" "export FLEET_CLAUDE_CONFIG_DIR=$SESS/acme-mm FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised"
-has "acme-security: its own dir" "$(tl acme-security)" "export CLAUDE_CONFIG_DIR=$SESS/acme-security && command claude"
-has "acme-build (interactive): ~/.claude" "$(tl acme-build)" "unset CLAUDE_CONFIG_DIR && command claude"
+has "acme-security: its own dir" "$(tl acme-security)" "export CLAUDE_CONFIG_DIR=$SESS/acme-security && unset ENGSYS_MM_CONFIG && command claude"
+has "acme-build (interactive): ~/.claude" "$(tl acme-build)" "unset CLAUDE_CONFIG_DIR && unset ENGSYS_MM_CONFIG && command claude"
 hasnt "acme-build (interactive): no ENGSYS_MEMORY_CONFIG, so its brief reads ~/.claude/memory.yml (engsys#262)" "$(tl acme-build)" "export ENGSYS_MEMORY_CONFIG"
-has "…unset after the env file (engsys#262)" "$(tl acme-build)" "unset ENGSYS_MEMORY_CONFIG && unset CLAUDE_CONFIG_DIR && command claude"
+has "…unset after the env file (engsys#262)" "$(tl acme-build)" "unset ENGSYS_MEMORY_CONFIG && unset CLAUDE_CONFIG_DIR && unset ENGSYS_MM_CONFIG && command claude"
 hasnt "…never a session dir" "$(tl acme-build)" "$SESS/acme-build"
 run fleet config-dir init
 hasnt "init under scope supervised: no dir for an interactive role" "$OUT" "session acme-build"
@@ -992,9 +995,9 @@ eq "…nothing reached tmux" "$(grep -c send-keys "$FAKE/tmux.log" || true)" 0
 # off again: the shared dir, as before
 setconf "FLEET_CLAUDE_CONFIG_DIR=$FCFG"
 rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"; run fleet launch
-has "per-session off: the shared base dir again" "$(tl acme-mm)" "export CLAUDE_CONFIG_DIR=$FCFG && command claude"
+has "per-session off: the shared base dir again" "$(tl acme-mm)" "export CLAUDE_CONFIG_DIR=$FCFG && unset ENGSYS_MM_CONFIG && command claude"
 hasnt "per-session off: no ENGSYS_MEMORY_CONFIG, the shared dir holds memory.yml itself (engsys#262)" "$(tl acme-mm)" "export ENGSYS_MEMORY_CONFIG"
-has "…unset after the env file (engsys#262)" "$(tl acme-mm)" "unset ENGSYS_MEMORY_CONFIG && export CLAUDE_CONFIG_DIR=$FCFG && command claude"
+has "…unset after the env file (engsys#262)" "$(tl acme-mm)" "unset ENGSYS_MEMORY_CONFIG && export CLAUDE_CONFIG_DIR=$FCFG && unset ENGSYS_MM_CONFIG && command claude"
 setconf "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on"
 run fleet verify
 rc_is "per-session on without FLEET_CLAUDE_CONFIG_DIR is a config error" 3
@@ -1070,7 +1073,7 @@ m="$(mark)"; run fleet launch acme-mm
 rc_is "the relaunch of a deferred session succeeds" 0
 has "…its dir was synced first" "$(on_dir "$m" acme-mm)" "plugin install engsys@engsys"
 has "…saying so" "$OUT" "session acme-mm is down and fleet sync left its config dir behind"
-has "…then it was verified and launched" "$(tl acme-mm)" "export CLAUDE_CONFIG_DIR=$SESS/acme-mm && command claude"
+has "…then it was verified and launched" "$(tl acme-mm)" "export CLAUDE_CONFIG_DIR=$SESS/acme-mm && unset ENGSYS_MM_CONFIG && command claude"
 if [ -e "$STATE/sync-deferred" ]; then bad "…and it is no longer deferred"; else ok "…and it is no longer deferred"; fi
 m="$(mark)"; : >"$FAKE/tmux/windows"; run fleet launch acme-mm
 eq "a launch with nothing deferred installs nothing" "$(on_dir "$m" acme-mm | grep -c 'plugin install' || true)" 0

@@ -109,6 +109,23 @@ relaunches, and are fail-open (warn, launch anyway). For identities that
 expire between launches, add a sibling launchd/cron job running the same
 login script every few hours.
 
+## Golden launch lines (engsys#287)
+
+`scripts/launch-golden.test.sh` renders one fixture roster (merge and maintain monsters, the resource broker, an
+interactive role, a security-lane line, a plain session and a line with `--add-dir ~/…` flags) with the real launcher across harness (claude, copilot,
+antigravity) × config-dir mode (unset, shared, per-session, scope supervised, both) × verdict key × memory signing key,
+plus the Antigravity remote-control variants. Each case records the launch file and what the harness actually ran
+with: its argv and the trust environment after the env file (which tries to set every trust variable, the
+session identity and `FLEET_CLAUDE_CONFIG_DIR` included). No Claude line may carry `--remote-control-name` (Antigravity's). The goldens
+live in `scripts/fixtures/launch-golden/<harness>/<case>.txt`; any difference fails with the case name and a unified
+diff. `UPDATE_GOLDEN=1 bash scripts/launch-golden.test.sh` rewrites them.
+
+**Rule:** a change under `fixtures/launch-golden/claude/` changes what every Claude session starts with, the trust
+environment included. Name every such file in the PR body and say why it changed; a reviewer treats it as a
+trust-environment change. Checklist line for the PR body:
+
+- [ ] Claude goldens (`core/skills/agent-sessions/scripts/fixtures/launch-golden/claude/`): unchanged, or each changed file is named here with the reason.
+
 ## Running from a fleet repo
 
 The launcher and supervisor need not live in the repo they drive. A separate

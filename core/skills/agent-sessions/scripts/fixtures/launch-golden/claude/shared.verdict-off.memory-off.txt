@@ -1,0 +1,133 @@
+# harness=claude config-dir=shared verdict-key=off memory-key=off
+
+== acme-mm
+launch: export ENGSYS_SESSION=acme-mm ENGSYS_SESSION_RUN=<RUN> ENGSYS_SESSION_ROOT=<T>/w ENGSYS_SINGLETON_ROLE=merge && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_CONFIG && unset ENGSYS_MM_CONFIG && cd <T>/w && set -a && . <T>/w/session.env && set +a && export ENGSYS_SESSION=acme-mm ENGSYS_SESSION_RUN=<RUN> ENGSYS_SESSION_ROOT=<T>/w ENGSYS_SINGLETON_ROLE=merge && unset ENGSYS_CONFIG_DIR_SESSIONS && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && { unset -f claude 2>/dev/null || true; } && export FLEET_CLAUDE_CONFIG_DIR=<T>/fleetcfg && unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && unset ENGSYS_MEMORY_CONFIG && export CLAUDE_CONFIG_DIR=<T>/fleetcfg && export ENGSYS_MM_CONFIG=<T>/plugin/repos/acme/app/merge-monster.yml && command rm -f -- <LAUNCH_FILE> && command claude --name acme-mm --settings <T>/home/.claude/acme-messaging-settings.json /engsys:merge-monster --model opus --effort high --remote-control --dangerously-skip-permissions
+argv: claude --name acme-mm --settings <T>/home/.claude/acme-messaging-settings.json /engsys:merge-monster --model opus --effort high --remote-control --dangerously-skip-permissions
+env: ENGSYS_SESSION=acme-mm
+env: ENGSYS_SESSION_RUN=<RUN>
+env: ENGSYS_SESSION_ROOT=<T>/w
+env: ENGSYS_SINGLETON_ROLE=merge
+env: ENGSYS_SECURITY_VERDICT_KEY_FILE <unset>
+env: ENGSYS_MEMORY_SIGNING_KEY_FILE <unset>
+env: ENGSYS_MEMORY_CONFIG <unset>
+env: ENGSYS_MM_CONFIG=<T>/plugin/repos/acme/app/merge-monster.yml
+env: CLAUDE_CONFIG_DIR=<T>/fleetcfg
+env: FLEET_CLAUDE_CONFIG_DIR=<T>/fleetcfg
+env: FLEET_CLAUDE_CONFIG_DIR_SCOPE <unset>
+env: ENGSYS_CONFIG_DIR_SESSIONS <unset>
+env: ENV_FILE_SOURCED=1
+
+== acme-maintain
+launch: export ENGSYS_SESSION=acme-maintain ENGSYS_SESSION_RUN=<RUN> ENGSYS_SESSION_ROOT=<T>/w ENGSYS_SINGLETON_ROLE=maintain && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_CONFIG && unset ENGSYS_MM_CONFIG && cd <T>/w && set -a && . <T>/w/security.env && set +a && export ENGSYS_SESSION=acme-maintain ENGSYS_SESSION_RUN=<RUN> ENGSYS_SESSION_ROOT=<T>/w ENGSYS_SINGLETON_ROLE=maintain && unset ENGSYS_CONFIG_DIR_SESSIONS && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && { unset -f claude 2>/dev/null || true; } && export FLEET_CLAUDE_CONFIG_DIR=<T>/fleetcfg && unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && unset ENGSYS_MEMORY_CONFIG && export CLAUDE_CONFIG_DIR=<T>/fleetcfg && unset ENGSYS_MM_CONFIG && command rm -f -- <LAUNCH_FILE> && command claude --name acme-maintain --settings <T>/home/.claude/acme-messaging-settings.json /engsys:maintenance-monster --model claude-opus-4-8 --effort high --remote-control --dangerously-skip-permissions
+argv: claude --name acme-maintain --settings <T>/home/.claude/acme-messaging-settings.json /engsys:maintenance-monster --model claude-opus-4-8 --effort high --remote-control --dangerously-skip-permissions
+env: ENGSYS_SESSION=acme-maintain
+env: ENGSYS_SESSION_RUN=<RUN>
+env: ENGSYS_SESSION_ROOT=<T>/w
+env: ENGSYS_SINGLETON_ROLE=maintain
+env: ENGSYS_SECURITY_VERDICT_KEY_FILE <unset>
+env: ENGSYS_MEMORY_SIGNING_KEY_FILE <unset>
+env: ENGSYS_MEMORY_CONFIG <unset>
+env: ENGSYS_MM_CONFIG <unset>
+env: CLAUDE_CONFIG_DIR=<T>/fleetcfg
+env: FLEET_CLAUDE_CONFIG_DIR=<T>/fleetcfg
+env: FLEET_CLAUDE_CONFIG_DIR_SCOPE <unset>
+env: ENGSYS_CONFIG_DIR_SESSIONS <unset>
+env: ENV_FILE_SOURCED=1
+
+== acme-broker
+launch: export ENGSYS_SESSION=acme-broker ENGSYS_SESSION_RUN=<RUN> ENGSYS_SESSION_ROOT=<T>/w && unset ENGSYS_SINGLETON_ROLE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_CONFIG && unset ENGSYS_MM_CONFIG && cd <T>/w && set -a && . <T>/w/session.env && set +a && export ENGSYS_SESSION=acme-broker ENGSYS_SESSION_RUN=<RUN> ENGSYS_SESSION_ROOT=<T>/w && unset ENGSYS_SINGLETON_ROLE && unset ENGSYS_CONFIG_DIR_SESSIONS && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && { unset -f claude 2>/dev/null || true; } && export FLEET_CLAUDE_CONFIG_DIR=<T>/fleetcfg && unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && unset ENGSYS_MEMORY_CONFIG && export CLAUDE_CONFIG_DIR=<T>/fleetcfg && unset ENGSYS_MM_CONFIG && command rm -f -- <LAUNCH_FILE> && command claude --name acme-broker --settings <T>/home/.claude/acme-messaging-settings.json /engsys:resource-broker --model sonnet --remote-control --dangerously-skip-permissions
+argv: claude --name acme-broker --settings <T>/home/.claude/acme-messaging-settings.json /engsys:resource-broker --model sonnet --remote-control --dangerously-skip-permissions
+env: ENGSYS_SESSION=acme-broker
+env: ENGSYS_SESSION_RUN=<RUN>
+env: ENGSYS_SESSION_ROOT=<T>/w
+env: ENGSYS_SINGLETON_ROLE <unset>
+env: ENGSYS_SECURITY_VERDICT_KEY_FILE <unset>
+env: ENGSYS_MEMORY_SIGNING_KEY_FILE <unset>
+env: ENGSYS_MEMORY_CONFIG <unset>
+env: ENGSYS_MM_CONFIG <unset>
+env: CLAUDE_CONFIG_DIR=<T>/fleetcfg
+env: FLEET_CLAUDE_CONFIG_DIR=<T>/fleetcfg
+env: FLEET_CLAUDE_CONFIG_DIR_SCOPE <unset>
+env: ENGSYS_CONFIG_DIR_SESSIONS <unset>
+env: ENV_FILE_SOURCED=1
+
+== acme-build
+launch: export ENGSYS_SESSION=acme-build ENGSYS_SESSION_RUN=<RUN> ENGSYS_SESSION_ROOT=<T>/w && unset ENGSYS_SINGLETON_ROLE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_CONFIG && unset ENGSYS_MM_CONFIG && cd <T>/w && set -a && . <T>/w/session.env && set +a && export ENGSYS_SESSION=acme-build ENGSYS_SESSION_RUN=<RUN> ENGSYS_SESSION_ROOT=<T>/w && unset ENGSYS_SINGLETON_ROLE && unset ENGSYS_CONFIG_DIR_SESSIONS && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && { unset -f claude 2>/dev/null || true; } && export FLEET_CLAUDE_CONFIG_DIR=<T>/fleetcfg && unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && unset ENGSYS_MEMORY_CONFIG && export CLAUDE_CONFIG_DIR=<T>/fleetcfg && unset ENGSYS_MM_CONFIG && command rm -f -- <LAUNCH_FILE> && command claude --name acme-build --settings <T>/home/.claude/acme-messaging-settings.json --model opus --effort medium --remote-control --permission-mode auto
+argv: claude --name acme-build --settings <T>/home/.claude/acme-messaging-settings.json --model opus --effort medium --remote-control --permission-mode auto
+env: ENGSYS_SESSION=acme-build
+env: ENGSYS_SESSION_RUN=<RUN>
+env: ENGSYS_SESSION_ROOT=<T>/w
+env: ENGSYS_SINGLETON_ROLE <unset>
+env: ENGSYS_SECURITY_VERDICT_KEY_FILE <unset>
+env: ENGSYS_MEMORY_SIGNING_KEY_FILE <unset>
+env: ENGSYS_MEMORY_CONFIG <unset>
+env: ENGSYS_MM_CONFIG <unset>
+env: CLAUDE_CONFIG_DIR=<T>/fleetcfg
+env: FLEET_CLAUDE_CONFIG_DIR=<T>/fleetcfg
+env: FLEET_CLAUDE_CONFIG_DIR_SCOPE <unset>
+env: ENGSYS_CONFIG_DIR_SESSIONS <unset>
+env: ENV_FILE_SOURCED=1
+
+== acme-nyx
+launch: export ENGSYS_SESSION=acme-nyx ENGSYS_SESSION_RUN=<RUN> ENGSYS_SESSION_ROOT=<T>/w && unset ENGSYS_SINGLETON_ROLE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_CONFIG && unset ENGSYS_MM_CONFIG && cd <T>/w && set -a && . <T>/w/security.env && set +a && export ENGSYS_SESSION=acme-nyx ENGSYS_SESSION_RUN=<RUN> ENGSYS_SESSION_ROOT=<T>/w && unset ENGSYS_SINGLETON_ROLE && unset ENGSYS_CONFIG_DIR_SESSIONS && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && { unset -f claude 2>/dev/null || true; } && export FLEET_CLAUDE_CONFIG_DIR=<T>/fleetcfg && unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && unset ENGSYS_MEMORY_CONFIG && export CLAUDE_CONFIG_DIR=<T>/fleetcfg && unset ENGSYS_MM_CONFIG && command rm -f -- <LAUNCH_FILE> && command claude --name acme-nyx --settings <T>/home/.claude/acme-messaging-settings.json --model claude-opus-4-8 --effort high --remote-control
+argv: claude --name acme-nyx --settings <T>/home/.claude/acme-messaging-settings.json --model claude-opus-4-8 --effort high --remote-control
+env: ENGSYS_SESSION=acme-nyx
+env: ENGSYS_SESSION_RUN=<RUN>
+env: ENGSYS_SESSION_ROOT=<T>/w
+env: ENGSYS_SINGLETON_ROLE <unset>
+env: ENGSYS_SECURITY_VERDICT_KEY_FILE <unset>
+env: ENGSYS_MEMORY_SIGNING_KEY_FILE <unset>
+env: ENGSYS_MEMORY_CONFIG <unset>
+env: ENGSYS_MM_CONFIG <unset>
+env: CLAUDE_CONFIG_DIR=<T>/fleetcfg
+env: FLEET_CLAUDE_CONFIG_DIR=<T>/fleetcfg
+env: FLEET_CLAUDE_CONFIG_DIR_SCOPE <unset>
+env: ENGSYS_CONFIG_DIR_SESSIONS <unset>
+env: ENV_FILE_SOURCED=1
+
+== acme-plain
+launch: export ENGSYS_SESSION=acme-plain ENGSYS_SESSION_RUN=<RUN> ENGSYS_SESSION_ROOT=<T>/w && unset ENGSYS_SINGLETON_ROLE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_CONFIG && unset ENGSYS_MM_CONFIG && cd <T>/w && set -a && . <T>/w/session.env && set +a && export ENGSYS_SESSION=acme-plain ENGSYS_SESSION_RUN=<RUN> ENGSYS_SESSION_ROOT=<T>/w && unset ENGSYS_SINGLETON_ROLE && unset ENGSYS_CONFIG_DIR_SESSIONS && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && { unset -f claude 2>/dev/null || true; } && export FLEET_CLAUDE_CONFIG_DIR=<T>/fleetcfg && unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && unset ENGSYS_MEMORY_CONFIG && export CLAUDE_CONFIG_DIR=<T>/fleetcfg && unset ENGSYS_MM_CONFIG && command rm -f -- <LAUNCH_FILE> && command claude --name acme-plain --settings <T>/home/.claude/acme-messaging-settings.json
+argv: claude --name acme-plain --settings <T>/home/.claude/acme-messaging-settings.json
+env: ENGSYS_SESSION=acme-plain
+env: ENGSYS_SESSION_RUN=<RUN>
+env: ENGSYS_SESSION_ROOT=<T>/w
+env: ENGSYS_SINGLETON_ROLE <unset>
+env: ENGSYS_SECURITY_VERDICT_KEY_FILE <unset>
+env: ENGSYS_MEMORY_SIGNING_KEY_FILE <unset>
+env: ENGSYS_MEMORY_CONFIG <unset>
+env: ENGSYS_MM_CONFIG <unset>
+env: CLAUDE_CONFIG_DIR=<T>/fleetcfg
+env: FLEET_CLAUDE_CONFIG_DIR=<T>/fleetcfg
+env: FLEET_CLAUDE_CONFIG_DIR_SCOPE <unset>
+env: ENGSYS_CONFIG_DIR_SESSIONS <unset>
+env: ENV_FILE_SOURCED=1
+
+== acme-dirs
+launch: export ENGSYS_SESSION=acme-dirs ENGSYS_SESSION_RUN=<RUN> ENGSYS_SESSION_ROOT=<T>/w && unset ENGSYS_SINGLETON_ROLE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_CONFIG && unset ENGSYS_MM_CONFIG && cd <T>/w && set -a && . <T>/w/session.env && set +a && export ENGSYS_SESSION=acme-dirs ENGSYS_SESSION_RUN=<RUN> ENGSYS_SESSION_ROOT=<T>/w && unset ENGSYS_SINGLETON_ROLE && unset ENGSYS_CONFIG_DIR_SESSIONS && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && { unset -f claude 2>/dev/null || true; } && export FLEET_CLAUDE_CONFIG_DIR=<T>/fleetcfg && unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && unset ENGSYS_MEMORY_CONFIG && export CLAUDE_CONFIG_DIR=<T>/fleetcfg && unset ENGSYS_MM_CONFIG && command rm -f -- <LAUNCH_FILE> && command claude --name acme-dirs --settings <T>/home/.claude/acme-messaging-settings.json --model opus --add-dir ~/worktrees --add-dir=~/other
+argv: claude --name acme-dirs --settings <T>/home/.claude/acme-messaging-settings.json --model opus --add-dir <T>/home/worktrees --add-dir=\~/other
+env: ENGSYS_SESSION=acme-dirs
+env: ENGSYS_SESSION_RUN=<RUN>
+env: ENGSYS_SESSION_ROOT=<T>/w
+env: ENGSYS_SINGLETON_ROLE <unset>
+env: ENGSYS_SECURITY_VERDICT_KEY_FILE <unset>
+env: ENGSYS_MEMORY_SIGNING_KEY_FILE <unset>
+env: ENGSYS_MEMORY_CONFIG <unset>
+env: ENGSYS_MM_CONFIG <unset>
+env: CLAUDE_CONFIG_DIR=<T>/fleetcfg
+env: FLEET_CLAUDE_CONFIG_DIR=<T>/fleetcfg
+env: FLEET_CLAUDE_CONFIG_DIR_SCOPE <unset>
+env: ENGSYS_CONFIG_DIR_SESSIONS <unset>
+env: ENV_FILE_SOURCED=1
+
+-- launcher (exit 0)
+wrote messaging settings: <T>/home/.claude/acme-messaging-settings.json
+launched: acme-mm  (<T>/w)
+launched: acme-maintain  (<T>/w)
+launched: acme-broker  (<T>/w)
+launched: acme-build  (<T>/w)
+launched: acme-nyx  (<T>/w)
+launched: acme-plain  (<T>/w)
+launched: acme-dirs  (<T>/w)
+
+done. attach with:  tmux attach -t acme
+cross-session messaging is name-addressed under the 'acme-' namespace.

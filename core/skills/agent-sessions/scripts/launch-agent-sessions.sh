@@ -79,6 +79,11 @@ MEMORY_KEY_FILE=""
 unset ENGSYS_MEMORY_SIGNING_KEY_FILE
 unset ENGSYS_MM_CONFIG   # engsys#229: set per merge-role line below, never inherited (nor seen by the tmux server)
 unset ENGSYS_MEMORY_CONFIG   # engsys#262: set below for a line on its own per-session login dir, never inherited
+# engsys#287: the fleet's Claude config dir as the fleet kit gave it to this launcher (fleet-env.sh exports it); a line
+# gets this value or none, never what its window inherited
+LAUNCHER_FLEET_CFG="${FLEET_CLAUDE_CONFIG_DIR:-}"
+# and the per-session dirs' parent (the fleet kit passes it; core/lib/mm-config.mjs searches it inside a session)
+LAUNCHER_CFG_SESSIONS="${ENGSYS_CONFIG_DIR_SESSIONS:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --roster) ROSTER="$2"; shift 2 ;;
@@ -532,12 +537,24 @@ launch_one() {
       return 1
     fi
   fi
+  # The trust environment (engsys#287). Every trust variable is decided by this launcher alone:
+  #   identity: ENGSYS_SESSION, ENGSYS_SESSION_RUN, ENGSYS_SESSION_ROOT, ENGSYS_SINGLETON_ROLE (the baton holder, its
+  #     fencing token, and the switch for the singleton-write and hand-back guards);
+  #   keys: ENGSYS_SECURITY_VERDICT_KEY_FILE, ENGSYS_MEMORY_SIGNING_KEY_FILE;
+  #   config: ENGSYS_MEMORY_CONFIG, ENGSYS_MM_CONFIG, CLAUDE_CONFIG_DIR, FLEET_CLAUDE_CONFIG_DIR, FLEET_CLAUDE_CONFIG_DIR_SCOPE,
+  #     ENGSYS_CONFIG_DIR_SESSIONS.
+  # 1. set or cleared before the env file, 2. the env file is sourced, 3. re-decided after it from launcher state only:
+  # exported when this line is granted it, otherwise unset. None is ever left over from the env file or from the
+  # window's inherited environment (a tmux server's global environment can hold anything). The golden launch lines
+  # (launch-golden.test.sh) pin this.
   # ENGSYS_SESSION_ROOT is the directory the session was launched in: a guarded `fleet msg send`
   # takes its --body-file only from <root>/tmp, wherever the session cd's later (engsys#108).
   local root
   root="$(cd "$workdir" && pwd -P)" || { echo "error: cannot resolve workdir for '$name': $workdir" >&2; return 1; }
-  cmd="export ENGSYS_SESSION=$(printf %q "$name") ENGSYS_SESSION_RUN=$(printf %q "$run") ENGSYS_SESSION_ROOT=$(printf %q "$root")"
-  if [ -n "$role" ]; then cmd+=" ENGSYS_SINGLETON_ROLE=$role && "; else cmd+=" && unset ENGSYS_SINGLETON_ROLE && "; fi
+  local identity
+  identity="export ENGSYS_SESSION=$(printf %q "$name") ENGSYS_SESSION_RUN=$(printf %q "$run") ENGSYS_SESSION_ROOT=$(printf %q "$root")"
+  if [ -n "$role" ]; then identity+=" ENGSYS_SINGLETON_ROLE=$role && "; else identity+=" && unset ENGSYS_SINGLETON_ROLE && "; fi
+  cmd="$identity"
   cmd+="unset ENGSYS_MEMORY_SIGNING_KEY_FILE && "   # F5: never inherited; set below, after the env file, for merge/maintain
   # engsys#197 (option B), narrowed by engsys#229: only a security-ENV session (security.env / nyx.env, the
   # security lane) on Claude is handed the PATH of the fleet's verdict key (ENGSYS_SECURITY_VERDICT_KEY_FILE, passed
@@ -557,25 +574,30 @@ launch_one() {
   cmd+="cd $(printf %q "$workdir") && "
   if [ -n "$session_env" ]; then
     cmd+="set -a && . $(printf %q "$session_env") && set +a && "
-    # and again after it, when a key is configured: an env file can neither add the key path to a
-    # non-security session nor drop it from a security one
-    if [ -n "$verdict_key_file" ]; then
-      if [ "$HARNESS" = claude ] && [ "$role" != merge ] && is_security_env "${session_env:-}"; then
-        cmd+="export ENGSYS_SECURITY_VERDICT_KEY_FILE=$(printf %q "$verdict_key_file") && "
-      else
-        cmd+="unset ENGSYS_SECURITY_VERDICT_KEY_FILE && "
-      fi
+    # the session's identity again (engsys#287): an env file can't rename the baton holder, swap its run id, or
+    # arm or disarm the singleton guard
+    cmd+="$identity"
+  fi
+  # engsys#287: the per-session dirs' parent from this launcher's own environment, or none; never the env file's or the
+  # window's (core/lib/mm-config.mjs searches every dir under it for a session's plugins)
+  if [ -n "$LAUNCHER_CFG_SESSIONS" ]; then cmd+="export ENGSYS_CONFIG_DIR_SESSIONS=$(printf %q "$LAUNCHER_CFG_SESSIONS") && "; else cmd+="unset ENGSYS_CONFIG_DIR_SESSIONS && "; fi
+  if [ -n "$session_env" ]; then
+    # and again after it, always (engsys#287): an env file can neither add the key path to a non-security session,
+    # nor set one when no key is configured, nor drop it from a security one
+    if [ -n "$verdict_key_file" ] && [ "$HARNESS" = claude ] && [ "$role" != merge ] && is_security_env "${session_env:-}"; then
+      cmd+="export ENGSYS_SECURITY_VERDICT_KEY_FILE=$(printf %q "$verdict_key_file") && "
+    else
+      cmd+="unset ENGSYS_SECURITY_VERDICT_KEY_FILE && "
     fi
   fi
   # F5: a merge or maintain line on Claude gets the PATH of the fleet's memory signing key (memory-sync signs what
   # it writes to refs/engsys/memory/* with it); no other line does. Decided after the env file, so an env file can
-  # neither hand it to another line nor take it from a monster. Only when a key is configured (FLEET_MEMORY_SIGNING_KEY=on).
-  if [ -n "$MEMORY_KEY_FILE" ]; then
-    if [ "$HARNESS" = claude ] && { [ "$role" = merge ] || [ "$role" = maintain ]; }; then
-      cmd+="export ENGSYS_MEMORY_SIGNING_KEY_FILE=$(printf %q "$MEMORY_KEY_FILE") && "
-    else
-      cmd+="unset ENGSYS_MEMORY_SIGNING_KEY_FILE && "
-    fi
+  # neither hand it to another line nor take it from a monster. Set only when a key is configured
+  # (FLEET_MEMORY_SIGNING_KEY=on); otherwise unset on every line, so an env file can't supply one (engsys#287).
+  if [ -n "$MEMORY_KEY_FILE" ] && [ "$HARNESS" = claude ] && { [ "$role" = merge ] || [ "$role" = maintain ]; }; then
+    cmd+="export ENGSYS_MEMORY_SIGNING_KEY_FILE=$(printf %q "$MEMORY_KEY_FILE") && "
+  else
+    cmd+="unset ENGSYS_MEMORY_SIGNING_KEY_FILE && "
   fi
   # The Claude Code config dir comes from the launcher's own environment (the fleet kit sets it from
   # FLEET_CLAUDE_CONFIG_DIR), never from the tmux server's, which may predate it, and it is decided after
@@ -616,19 +638,23 @@ launch_one() {
   # session that isn't on it (lib/lease/baton.mjs launchedSessionGate).
   if [ -n "${FLEET_CLAUDE_CONFIG_DIR_INTERACTIVE+x}" ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
     cmd+="export FLEET_CLAUDE_CONFIG_DIR=$(printf %q "$gate_dir") FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised && "
+  elif [ -n "$LAUNCHER_FLEET_CFG" ]; then
+    # engsys#287: the fleet's own dir, from this launcher's environment (the fleet kit exports it), never the window's:
+    # core/lib/mm-config.mjs searches it (and its per-session siblings) for a session's plugins
+    cmd+="export FLEET_CLAUDE_CONFIG_DIR=$(printf %q "$LAUNCHER_FLEET_CFG") && unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && "
   else
-    cmd+="unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && "
+    cmd+="unset FLEET_CLAUDE_CONFIG_DIR FLEET_CLAUDE_CONFIG_DIR_SCOPE && "
   fi
   # engsys#262: decided after the env file, like the config dir itself, so an env file can neither move it nor set
   # one on a line that gets none (it would outrank the reviewed memory.yml).
   if [ -n "$memory_cfg" ]; then cmd+="export ENGSYS_MEMORY_CONFIG=$(printf %q "$memory_cfg") && "; else cmd+="unset ENGSYS_MEMORY_CONFIG && "; fi
   if [ -n "$cfg_dir" ]; then cmd+="export CLAUDE_CONFIG_DIR=$(printf %q "$cfg_dir") && "; else cmd+="unset CLAUDE_CONFIG_DIR && "; fi
   # engsys#229, belt and braces beside mm-preflight's own discovery: a merge-role line is told where its repo's fleet merge
-  # config is; every other line has it unset (above, before the env file). Decided after the env file, so an env file
-  # cannot move it.
+  # config is; every other line, and a merge line whose config isn't found, has it unset. Decided after the env file,
+  # so an env file can neither move it nor set one (engsys#287).
   local mm_cfg=""
   [ "$role" != merge ] || [ "$HARNESS" != claude ] || mm_cfg="$(resolve_mm_config "$workdir" "$cfg_dir")"
-  if [ -n "$mm_cfg" ]; then cmd+="export ENGSYS_MM_CONFIG=$(printf %q "$mm_cfg") && "; fi
+  if [ -n "$mm_cfg" ]; then cmd+="export ENGSYS_MM_CONFIG=$(printf %q "$mm_cfg") && "; else cmd+="unset ENGSYS_MM_CONFIG && "; fi
   # The harness itself (run_cmd) follows the launch file's self-removal (below).
   if [ "$HARNESS" = "copilot" ]; then
     run_cmd+="copilot --name $(printf %q "$name")"
