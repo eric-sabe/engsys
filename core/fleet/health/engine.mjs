@@ -7,21 +7,30 @@
 import path from 'node:path';
 import { ensureDir, readJson, withLock, writeFileAtomic } from '../lib/inbox.mjs';
 import { topologicalOrder } from './registry.mjs';
-import { probeStatuspage, runProbe, VALID_STATUSES } from './adapters.mjs';
+import { probeStatuspage, runProbe, VALID_STATUSES, STATUSPAGE_INDICATORS, STATUSPAGE_COMPONENT_MAP } from './adapters.mjs';
 
 // ---------------------------------------------------------------------------------------------
 // Watch-bus vocabulary (engsys#181). A bus line reaches a monster's context, so it carries only fixed words: the service
 // id (registry-validated), the state enum, a reason code and the gate words. Probe output (`detail`, the first line of a
 // command's or an API's response), the advice and the runbook stay on the board and in the local state files.
 // ---------------------------------------------------------------------------------------------
-const REASON_RE = /^[a-z0-9_]{1,40}$/;
+// An explicit allowlist, not just a character class (review Low): the adapters' own fixed status words, the Statuspage
+// indicator and component enums, and the numeric shapes the probes produce (HTTP code, `http_<code>`, `exit_<code>`).
+// Anything else, including a vendor string that happens to be a plain token, is reported as `probe`.
+const REASON_WORDS = new Set([
+  'auth_local_failure', 'timeout', 'network_error', 'fetch_error', 'config_error', 'parse_error', 'invalid_json',
+  'invalid_records', 'invalid_output', 'mismatch_output', 'missing_component', 'missing', 'empty',
+  'healthy', 'degraded', 'down', 'unknown',
+  ...Object.keys(STATUSPAGE_INDICATORS), ...Object.keys(STATUSPAGE_COMPONENT_MAP),
+]);
+const REASON_RE = /^(?:\d{3}|http_\d{3}|exit_\d{1,3})$/;
 const BUS_SESSION_RE = /^[A-Za-z0-9._:-]{1,80}$/;
 
 /** A short reason code for a service state: the probe's raw status when it is a plain token, else `probe`. */
 export function busReason(svc) {
   if (svc?.auth_local_failure) return 'auth_local_failure';
   const raw = String(svc?.last_probe_result?.rawStatus ?? svc?.raw_state ?? '').toLowerCase();
-  return REASON_RE.test(raw) ? raw : 'probe';
+  return REASON_WORDS.has(raw) || REASON_RE.test(raw) ? raw : 'probe';
 }
 
 /** `<id> <state> reason=<code>[ — hold merges][, pause claims]`, from fixed words only. */

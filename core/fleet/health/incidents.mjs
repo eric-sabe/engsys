@@ -452,7 +452,7 @@ export async function correlateReports(registry, {
         const target = r.fleet && r.fleet !== 'local' ? `${r.fleet}:${r.session}` : r.session;
         if (!seenSessions.has(target)) {
           seenSessions.add(target);
-          events.push(`FHD_LOCAL_GUIDANCE ${target} ${serviceId} — ${guidance}`);
+          events.push(`FHD_LOCAL_GUIDANCE ${target} ${serviceId} ${guidance}`); // same shape as the engine's: <target> <service> reason=… — …
         }
       }
       const localRecord = {
