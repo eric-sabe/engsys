@@ -27,6 +27,15 @@
 // Every block happens at most once per stop attempt (`stop_hook_active`) and per hand-back, so a
 // session is never trapped. Fail-open: any error → allow (exit 0, no output).
 //
+// Only agents THIS session dispatched are guarded (engsys#286). The harness also runs internal subagents that
+// inherit the session's context (forked or summarising agents; they reach SubagentStop with no agent_type) and whose
+// final text describes the session's own work ("the loop runs until…"). Treating those as dispatched workers put
+// spurious HANDBACK_INCOMPLETE events on monster buses. So a dispatch is tracked end to end: subagent-memory-inject's
+// PreToolUse (Agent|Task) hook calls noteDispatch, its SubagentStart hook calls claimDispatch (the agent's id is first
+// known there; matched by teammate name, then by agent type, as the memory brief matches), and SubagentStop acts only
+// on a claimed agent_id. Anything else is ignored (logged under ENGSYS_HANDBACK_DEBUG); where no dispatch was ever
+// tracked for the session, an agent with an agent_type still counts (see wasDispatched).
+//
 // Env: ENGSYS_HANDBACK_DIR (state dir; default <tmpdir>/engsys-handbacks), ENGSYS_HANDBACK_DEBUG=<file>
 // (opt-in: append each hook input, message truncated, for diagnosis).
 
@@ -113,6 +122,88 @@ function stateDir(sessionId) {
   const d = path.join(process.env.ENGSYS_HANDBACK_DIR || path.join(os.tmpdir(), 'engsys-handbacks'), String(sessionId || 'unknown').replace(/[^\w.-]/g, '_'));
   fs.mkdirSync(d, { recursive: true, mode: 0o700 });
   return d;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Dispatch tracking (engsys#286): which subagents this session dispatched
+// ---------------------------------------------------------------------------------------------
+
+const DISPATCH_TTL_MS = 120_000;
+const token = (v) => String(v ?? '').replace(/[^\w.-]/g, '_').slice(0, 128);
+const bareType = (t) => { const parts = String(t || '').split(':'); return parts[parts.length - 1].trim().toLowerCase(); };
+
+/** PreToolUse (Agent|Task): remember that this session is dispatching an agent of this type / teammate name. */
+export function noteDispatch(input, { now = Date.now } = {}) {
+  try {
+    const ti = input?.tool_input ?? input?.toolInput ?? {};
+    const type = bareType(ti.subagent_type || ti.agent_type || '');
+    const name = typeof ti.name === 'string' && ti.name ? token(ti.name) : '';
+    if (!type && !name) return null;
+    const dir = path.join(stateDir(input.session_id ?? input.sessionId), 'dispatches');
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const ts = now();
+    const f = path.join(dir, `${ts}-${process.pid}-${Math.random().toString(36).slice(2, 8)}.json`);
+    fs.writeFileSync(f, JSON.stringify({ ts, type, name }), { mode: 0o600 });
+    return f;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * SubagentStart: claim the dispatch this agent came from, and mark its agent_id as dispatched. Matched by the
+ * teammate name first (a teammate starts with its name as agent_type), then by agent type; the oldest unexpired
+ * record wins, and is consumed. An agent with no matching dispatch (a harness-internal agent) gets no mark.
+ */
+export function claimDispatch(input, { now = Date.now } = {}) {
+  try {
+    const agentId = input?.agent_id ?? input?.agentId;
+    const agentType = input?.agent_type ?? input?.agentType;
+    if (!agentId || !agentType) return false;
+    const base = stateDir(input.session_id ?? input.sessionId);
+    const dir = path.join(base, 'dispatches');
+    let names;
+    try { names = fs.readdirSync(dir).filter((n) => n.endsWith('.json')); } catch { return false; }
+    const t = now();
+    const live = [];
+    for (const n of names) {
+      const f = path.join(dir, n);
+      let r;
+      try { r = JSON.parse(fs.readFileSync(f, 'utf8')); } catch { r = null; }
+      if (!r || t - (r.ts ?? 0) > DISPATCH_TTL_MS) { fs.rmSync(f, { force: true }); continue; }
+      live.push({ f, r });
+    }
+    live.sort((a, b) => a.r.ts - b.r.ts);
+    const hit = live.find(({ r }) => r.name && r.name === token(agentType)) || live.find(({ r }) => r.type && r.type === bareType(agentType));
+    if (!hit) return false;
+    fs.rmSync(hit.f, { force: true });
+    const marks = path.join(base, 'dispatched');
+    fs.mkdirSync(marks, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(marks, token(agentId)), JSON.stringify({ agent_type: agentType, at: new Date(t).toISOString() }), { mode: 0o600 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * SubagentStop: did this session dispatch this agent?
+ *   - claimDispatch marked its agent_id → yes;
+ *   - this session has tracked dispatches (noteDispatch ran at least once) but not this agent → no;
+ *   - no tracking at all for the session (a harness or layout whose dispatch hooks didn't run, e.g. Copilot, which
+ *     has no SubagentStart) → fall back to "it has an agent_type": the harness-internal agents of engsys#286 arrive
+ *     with none, so they are still ignored, and a typed agent keeps the guard.
+ */
+export function wasDispatched(input) {
+  try {
+    const agentId = input?.agent_id;
+    const base = stateDir(input.session_id);
+    if (agentId && fs.existsSync(path.join(base, 'dispatched', token(agentId)))) return true;
+    if (fs.existsSync(path.join(base, 'dispatches')) || fs.existsSync(path.join(base, 'dispatched'))) return false;
+    return Boolean(input?.agent_type);
+  } catch {
+    return Boolean(input?.agent_type);
+  }
 }
 
 /** Record (INCOMPLETE) or clear (anything else) the hand-back of one subagent. */
@@ -262,6 +353,14 @@ async function main() {
   }
   let reason = null;
   if (mode === 'subagent') {
+    if (!wasDispatched(input)) {
+      // engsys#286: not an agent this session dispatched (a harness-internal agent): never blocked, recorded or relayed
+      if (process.env.ENGSYS_HANDBACK_DEBUG) {
+        fs.appendFileSync(process.env.ENGSYS_HANDBACK_DEBUG, `${JSON.stringify({ mode, ignored: 'not dispatched by this session', agent_id: input.agent_id ?? null, agent_type: input.agent_type ?? null })}\n`);
+      }
+      recordHookTelemetry({ hook: 'handback-guard', event: 'SubagentStop', decision: 'ignored', detail: `undispatched agent=${input.agent_type || '(none)'}` });
+      return;
+    }
     reason = subagentDecision(input);
     if (!reason) recordHandback(input); // only the final, allowed hand-back is recorded
   } else if (mode === 'stop') {

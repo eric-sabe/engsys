@@ -45,7 +45,8 @@ it names the individual **agent** inside this session's registry.
 > **Hand-backs are final.** A subagent that ends its turn is never woken again — not by its own
 > background work finishing. It must wait and finish, or hand back `STATUS: INCOMPLETE — <what remains>`;
 > you must act on an INCOMPLETE hand-back (resume via SendMessage, take over, or watch) before ending
-> your turn. The engsys plugin's `handback-guard` hooks enforce both sides.
+> your turn. The engsys plugin's `handback-guard` hooks enforce both sides, for the agents your session
+> dispatched (Agent/Task); the harness's own internal agents are ignored (engsys#286).
 
 ## On every long-running spawn
 

@@ -30,6 +30,7 @@ import { fileURLToPath } from 'node:url';
 import { parseHookInput, recordHookTelemetry } from '../lib/harness-io.mjs';
 import { isMainEntry } from '../lib/is-main.mjs';
 import { isValidPointerKey, resolveCacheDir } from '../lib/memory/index-db.mjs';
+import { claimDispatch, noteDispatch } from './handback-guard.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const MEMORY_BRIEF = path.resolve(HERE, '..', 'scripts', 'memory-brief.mjs');
@@ -418,6 +419,9 @@ export async function main({ argv = process.argv.slice(2), stdin = process.stdin
 	// SubagentStart hook can consume it. Always fails open with `{}`.
 	const isPreAgent = argv[0] === 'pre-agent' || input?.hook_event_name === 'PreToolUse' || input?.hookEventName === 'preToolUse';
 	if (isPreAgent) {
+		// engsys#286: the hand-back guard acts only on agents this session dispatched; tell it about this one first
+		// (no git needed), whatever happens to the memory brief's own record below.
+		if (input) noteDispatch(input, { now });
 		if (input) recordPendingDispatch(input, { cwd, now });
 		recordHookTelemetry({
 			hook: 'subagent-memory-inject',
@@ -446,6 +450,9 @@ export async function main({ argv = process.argv.slice(2), stdin = process.stdin
 		write('{}');
 		return 0;
 	}
+
+	// engsys#286: mark this agent as dispatched by this session (or not), before any brief work that could time out.
+	if (!isPreAgent && input) claimDispatch(input, { now });
 
 	let briefText = '';
 	let logKeys = { lesson_keys: [], pointer_keys: [], bytes: 0 };
