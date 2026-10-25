@@ -1040,7 +1040,9 @@ describe('queryIndex', () => {
 
 // engsys#288: since memory sync went live, every brief hit the SubagentStart hook's 2 s budget mid-rebuild (an
 // autocommit build of ~4k rows took 6-7 s), was killed before the rename, and so never persisted: every brief empty.
-describe('engsys#288: the brief never waits on a rebuild, and a rebuild is fast and shared', () => {
+// Serial, and asserted structurally (transactions, calls, files) rather than by wall-clock time, so a loaded host
+// can't flake it; the one real detached spawn polls against a generous deadline.
+describe('engsys#288: the brief never waits on a rebuild, and a rebuild is fast and shared', { concurrency: 1 }, () => {
 	const readWatermark = (dir) => {
 		const { DatabaseSync } = require('node:sqlite');
 		const db = new DatabaseSync(join(dir, '.git', 'engsys-memory', 'index.sqlite'), { readOnly: true });
@@ -1086,6 +1088,11 @@ describe('engsys#288: the brief never waits on a rebuild, and a rebuild is fast 
 	});
 
 	test('a full build of thousands of rows is one transaction (fast enough for the hook)', { skip: !SQLITE_AVAILABLE }, () => {
+		const { DatabaseSync } = require('node:sqlite');
+		const execs = [];
+		class CountingDb extends DatabaseSync {
+			exec(sql) { if (/^(BEGIN|COMMIT)$/.test(sql)) execs.push(sql); return super.exec(sql); }
+		}
 		const dir = makeRepo();
 		try {
 			const cache = join(dir, '.git', 'engsys-memory');
@@ -1093,13 +1100,11 @@ describe('engsys#288: the brief never waits on a rebuild, and a rebuild is fast 
 			const lines = [];
 			for (let i = 0; i < 3000; i++) lines.push(JSON.stringify({ k: `fixture/repo:issue:${i}`, kind: 'issue', repo: 'fixture/repo', number: i + 1, author_kind: 'bot', author_id: 1, updated_at: '2026-07-01T00:00:00Z', text: `event ${i}` }));
 			writeFileSync(join(cache, 'delta.jsonl'), `${lines.join('\n')}\n`);
-			const t0 = Date.now();
-			const h = ensureIndex({ repoRoot: dir });
-			const ms = Date.now() - t0;
+			const h = ensureIndex({ repoRoot: dir, sqlite: { DatabaseSync: CountingDb } });
 			assert.ok(h);
 			assert.equal(h.db.prepare('SELECT COUNT(*) AS n FROM events').get().n, 3000);
 			closeIndex(h);
-			assert.ok(ms < 1500, `3000 events built in ${ms} ms (autocommit took seconds)`);
+			assert.deepEqual(execs, ['BEGIN', 'COMMIT'], 'every row in one transaction (autocommit synced each row to disk: seconds)');
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
@@ -1116,18 +1121,17 @@ describe('engsys#288: the brief never waits on a rebuild, and a rebuild is fast 
 			commitAndPush(dir, 'add two');
 			// a build that would take 3 s (well past the hook's 2 s)
 			const { DatabaseSync } = require('node:sqlite');
+			let commits = 0;
 			class SlowDb extends DatabaseSync {
-				exec(sql) { if (sql === 'COMMIT') Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3000); return super.exec(sql); }
+				exec(sql) { if (sql === 'COMMIT') { commits++; Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3000); } return super.exec(sql); }
 			}
 			const spawned = [];
-			const t0 = Date.now();
 			const h = ensureIndex({ repoRoot: dir, sqlite: { DatabaseSync: SlowDb }, staleWhileRevalidate: true, spawnRebuild: (args) => spawned.push(args) });
-			const ms = Date.now() - t0;
 			assert.ok(h, 'served');
 			assert.equal(h.stale, true, 'marked stale, so a caller drops its Class B events');
 			assert.ok(h.docs.some((d) => d.key === 'lesson:two'), 'the docs returned are this run\'s fresh ones');
 			closeIndex(h);
-			assert.ok(ms < 1500, `returned in ${ms} ms, not after the 3 s build`);
+			assert.equal(commits, 0, 'the slow build never ran inline: the call returned without it');
 			assert.equal(spawned.length, 1, 'the rebuild was handed off');
 			assert.equal(spawned[0].repoRoot, dir);
 			assert.ok(spawned[0].cacheDir.endsWith(join('.git', 'engsys-memory')), spawned[0].cacheDir);
@@ -1157,7 +1161,7 @@ describe('engsys#288: the brief never waits on a rebuild, and a rebuild is fast 
 		}
 	});
 
-	test('spawnDetachedRebuild really runs detached, persists the index atomically, and one lock stops a second', { skip: !SQLITE_AVAILABLE }, async () => {
+	test('spawnDetachedRebuild really runs detached, persists the index atomically, and one lock stops a second', { skip: !SQLITE_AVAILABLE, timeout: 180_000 }, async () => {
 		const dir = makeRepo();
 		try {
 			const cacheDir = join(dir, '.git', 'engsys-memory');
@@ -1170,7 +1174,7 @@ describe('engsys#288: the brief never waits on a rebuild, and a rebuild is fast 
 			assert.equal(spawnDetachedRebuild({ repoRoot: dir, cacheDir }), false);
 			rmSync(join(cacheDir, 'index.rebuild.lock'), { recursive: true });
 			assert.equal(spawnDetachedRebuild({ repoRoot: dir, cacheDir }), true);
-			const deadline = Date.now() + 20_000;
+			const deadline = Date.now() + 120_000; // generous: a loaded host can be slow to start a node process
 			while (readWatermark(dir) === oldMark && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
 			assert.notEqual(readWatermark(dir), oldMark, 'the detached rebuild persisted the new index');
 			while (fs.existsSync(join(cacheDir, 'index.rebuild.lock')) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));

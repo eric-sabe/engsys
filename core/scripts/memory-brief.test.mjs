@@ -4,7 +4,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -1130,9 +1130,10 @@ describe('buildBrief — end to end, fail-open, and the agent exclusion boundary
 			// sync moves on (new delta): the index is now stale
 			writeFileSync(join(cacheDir, 'delta.jsonl'), ev('ev1') + ev('ev2'));
 			const spawned = [];
-			const t0 = Date.now();
+			const indexFile = join(cacheDir, 'index.sqlite');
+			const before = statSync(indexFile).mtimeMs;
 			const stale = buildBrief({ repoRoot: dir, agentType: 'isabelle', prompt: 'widget', touchedPaths: ['docs/agent-lessons/one.md'], spawnRebuild: (a) => spawned.push(a) });
-			assert.ok(Date.now() - t0 < 1500);
+			assert.equal(statSync(indexFile).mtimeMs, before, 'nothing rebuilt inline: the brief did not wait on a build');
 			assert.equal(spawned.length, 1, 'rebuild handed off');
 			assert.ok(stale.lessonKeys.includes('lesson:one'), 'Class A still renders');
 			assert.deepEqual(stale.pointerKeys, [], 'no Class B from a stale index (its trust inputs may have moved)');
