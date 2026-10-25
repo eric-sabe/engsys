@@ -63,6 +63,8 @@ case "${1:-} ${2:-}" in
       '{number: $n, head: $h, title: $t, state: "OPEN", labels: []}' >"$pj"
     echo "$url/$n" ;;
   "pr view")
+    jqx="$(arg --jq "$@")"
+    case "$jqx" in *mm-handoff*) cat "$G"/comments/* 2>/dev/null | grep -c '^<!-- mm-handoff -->$' || true; exit 0 ;; esac
     case "$q" in
       .number) jq -r .number "$pj" ;;
       .url) echo "$url/$(jq -r .number "$pj")" ;;
@@ -75,8 +77,10 @@ case "${1:-} ${2:-}" in
         fi ;;
     esac ;;
   "pr comment")
+    body="$(cat)"
+    if [ -f "$FAKE/handoff.fail" ] && printf '%s' "$body" | grep -qx '<!-- mm-handoff -->'; then echo "stub gh: HTTP 502" >&2; exit 1; fi
     f="$G/comments/$(printf '%03d' $(( $(ls "$G/comments" | wc -l) + 1 )))"
-    cat >"$f"; echo "$url/$3#issuecomment-1" ;;
+    printf '%s\n' "$body" >"$f"; echo "$url/$3#issuecomment-1" ;;
   "pr edit")
     l="$(arg --add-label "$@")"
     if [ -n "$l" ]; then jq --arg l "$l" '.labels += [$l] | .labels |= unique' "$pj" >"$G/pr.new" && mv "$G/pr.new" "$pj"; fi
@@ -191,7 +195,9 @@ conf() { printf '%s\n' "$@" >"$HOME/.config/acme/fleet.local.conf"; }
 conf_reset() { rm -f "$HOME/.config/acme/fleet.local.conf"; }
 gcount() { grep -cF -- "$1" "$FAKE/gh.log" || true; }
 rev_lines() { wc -l <"$FAKE/review.log" | tr -d ' '; }
-ncomments() { ls "$G/comments" | wc -l | tr -d ' '; }
+ncomments() { local f n=0; for f in "$G/comments"/*; do [ -f "$f" ] && ! grep -qx '<!-- mm-handoff -->' "$f" && n=$((n + 1)); done; echo "$n"; } # review comments
+nhandoffs() { cat "$G/comments"/* 2>/dev/null | grep -cx '<!-- mm-handoff -->' || true; }
+handoff() { local f; for f in "$G/comments"/*; do grep -qx '<!-- mm-handoff -->' "$f" && cat "$f"; done; return 0; }
 last_comment() { local f; f="$(ls "$G/comments"/* | tail -n1)"; cat "$f"; }
 pr_field() { jq -r "$1" "$G/pr.json"; }
 rem_diff() { git --git-dir="$PINREM" diff -U0 main "$1" | grep -E '^[-+][^-+]' || true; } # changed content lines only
@@ -284,6 +290,11 @@ has "the comment goes to the clean PR number" "$(cat "$FAKE/gh.log")" "gh pr com
 hasnt "no captured value is polluted (hooks)" "$(cat "$FAKE/gh.log")" "HOOK-NOISE"
 has "the label goes to the clean PR number" "$(cat "$FAKE/gh.log")" "gh pr edit $PRN -R acme/app --add-label mm:ready"
 eq "one review comment" "$(ncomments)" 1
+# engsys#271: the pin hands off with an operator gate, before the label, so Merge Monster asks for the gate at READY
+eq "one mm-handoff comment" "$(nhandoffs)" 1
+hasnt "…with no operator_gate by default (Merge Monster's rulesetGate gates a pin where a ruleset requires it)" "$(handoff)" 'operator_gate'
+has "…naming the change" "$(handoff)" 'notes: pin-only change opened by fleet pin'
+matches "…posted before the label" "$(grep -n -e 'pr comment' -e 'add-label' "$FAKE/gh.log" | head -n1)" 'pr comment'
 eq "it opens with the marker" "$(last_comment | head -n1)" "<!-- local-review-findings -->"
 has "…then the summary with the exit code" "$(last_comment)" "exit 0"
 has "…and the output in a details block" "$(last_comment)" "<details><summary>Output</summary>"
@@ -308,6 +319,7 @@ has "re-runs its review" "$OUT" "already open — re-running its review"
 eq "still one PR created" "$(gcount 'pr create')" 1
 eq "the review ran again" "$(rev_lines)" 2
 eq "…and commented again" "$(ncomments)" 2
+eq "…but the handoff is not posted twice" "$(nhandoffs)" 1
 eq "the second review ran in a worktree of the existing branch" "$(tail -n1 "$FAKE/review.log" | awk '{print $2}')" "$STATE/wt-pin"
 eq "the label is back" "$(pr_field '.labels | join(",")')" "mm:ready"
 eq "nothing new was pushed: still one file changed" "$(git --git-dir="$PINREM" diff --name-only main "$BR")" ".claude/settings.json"
@@ -362,9 +374,25 @@ run fleet pin --engsys v1.1.0 --release v0.1.0 --no-wait
 rc_is "an empty REVIEW_CMD exits 0" 0
 eq "no review ran" "$(rev_lines)" 0
 eq "no comment" "$(ncomments)" 0
+eq "…the handoff still goes out (no review is no reason to skip the gate)" "$(nhandoffs)" 1
 eq "labeled directly" "$(pr_field '.labels | join(",")')" "mm:ready"
 has "…and says why" "$OUT" "no REVIEW_CMD configured"
 [ ! -e "$FAKE/setup.cwd" ] && ok "an empty PREPUSH_SETUP_CMD runs nothing" || bad "an empty PREPUSH_SETUP_CMD runs nothing"
+
+reset
+conf 'REVIEW_CMD=' 'PREPUSH_SETUP_CMD=' 'PIN_OPERATOR_GATE=needs ops "review" of the pin'
+run fleet pin --engsys v1.1.0 --release v0.1.0 --no-wait
+rc_is "PIN_OPERATOR_GATE set: exits 0" 0
+has "…the handoff carries that reason (quotes dropped, so the YAML stays one string)" "$(handoff)" 'operator_gate: "needs ops review of the pin"'
+reset
+conf 'REVIEW_CMD=' 'PREPUSH_SETUP_CMD='
+touch "$FAKE/handoff.fail"
+run fleet pin --engsys v1.1.0 --release v0.1.0 --no-wait
+rc_is "a failed handoff post does not stop the pin: exits 0" 0
+has "…it warns" "$OUT" "WARNING couldn't post the mm-handoff"
+eq "…no handoff" "$(nhandoffs)" 0
+eq "…and still labels the PR" "$(pr_field '.labels | join(",")')" "mm:ready"
+rm -f "$FAKE/handoff.fail"
 
 echo "== F. a new instance release: a release PR first, then the tag on main"
 reset
@@ -543,5 +571,44 @@ eq "…no v0.1.2 bump" "$(git --git-dir="$INSTREM" tag -l v0.1.2)" ""
 eq "…on main's head" "$(git --git-dir="$INSTREM" rev-parse 'v0.2.0^{commit}')" "$(git --git-dir="$INSTREM" rev-parse main)"
 eq "…no second release PR" "$(gcount 'pr create -R acme/acme-fleet')" 1
 has "…and the pin PR moves acme to it" "$(pr_field .title)" "acme v0.2.0"
+
+echo "== K. RELEASE_CI_REF_FILE: the release PR also moves the instance CI's engsys ref (engsys#271)"
+mkdir -p "$I/.github/workflows"
+cat >"$I/.github/workflows/fleet-tests.yml" <<'YML'
+name: fleet tests
+env:
+  ENGSYS_REF: "v1.0.0"   # the engsys the fleet tests run against
+  OTHER_REF: v9.9.9
+jobs: {}
+YML
+commit_all "$I" "instance CI"; git -C "$I" push -q origin main
+CIMAIN="$(git -C "$I" rev-parse HEAD)"
+: >"$FAKE/gh.log"
+conf 'RELEASE_CI_REF_FILE=.github/workflows/fleet-tests.yml'
+run fleet pin --engsys v1.1.0 --release next --no-wait
+rc_is "a new release with RELEASE_CI_REF_FILE: release PR open (exit 3)" 3
+KV="$(printf '%s\n' "$OUT" | grep -o 'opened the release PR for acme v[0-9.]*' | awk '{print $NF}')"
+eq "the release branch sets ENGSYS_REF to the engsys being pinned (quotes and comment kept)" \
+  "$(git --git-dir="$INSTREM" diff -U0 "$CIMAIN" "release/$KV" -- .github/workflows/fleet-tests.yml | grep -E '^[-+][^-+]')" \
+  '-  ENGSYS_REF: "v1.0.0"   # the engsys the fleet tests run against
++  ENGSYS_REF: "v1.1.0"   # the engsys the fleet tests run against'
+has "…and the PR body says so" "$(cat "$FAKE/gh.log")" 'It also sets `ENGSYS_REF` in `.github/workflows/fleet-tests.yml` to engsys `v1.1.0`'
+eq "…still one stamp commit" "$(git --git-dir="$INSTREM" log -1 --format=%s "release/$KV")" "release: $KV"
+git -C "$I" fetch -q origin "release/$KV" && git -C "$I" merge -q --squash FETCH_HEAD >/dev/null
+git -C "$I" commit -q -m "release: $KV"; git -C "$I" push -q origin main
+jq '.state = "MERGED"' "$IPR" >"$IPR.new" && mv "$IPR.new" "$IPR"
+run fleet pin --engsys v1.1.0 --release next --no-wait
+rc_is "after it merges, main carries the version and the ref: tagged" 0
+has "…released" "$OUT" "released acme $KV"
+conf 'RELEASE_CI_REF_FILE=.github/workflows/fleet-tests.yml' 'RELEASE_CI_REF_KEY=MISSING_REF'
+echo "more" >>"$I/notes.txt"; commit_all "$I" "more work"; git -C "$I" push -q origin main
+run fleet pin --engsys v1.1.0 --release next --no-wait
+rc_is "a key that is not in the file stops the release" 1
+has "…saying which" "$OUT" "no 'MISSING_REF:' line in .github/workflows/fleet-tests.yml"
+conf 'RELEASE_CI_REF_FILE=../outside.yml'
+run fleet pin --engsys v1.1.0 --release next --no-wait
+rc_is "a path outside the repo is refused" 1
+noworktrees "instance repo" "$INST"
+conf_reset
 
 finish pin.test

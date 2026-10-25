@@ -1339,9 +1339,16 @@ otherwise, if the latest tag is the default branch's current commit (nothing new
 in any other case it is the latest tag's patch + 1. A tag cut before #227 sits on a `release: vX` stamp commit
 off the default branch and is never reused, even when nothing else changed: the first `next` after upgrading
 opens a release PR for the following patch, which moves the fleet onto a tag on the default branch.
+With `RELEASE_CI_REF_FILE` set (an instance-repo path such as `.github/workflows/fleet-tests.yml`), the release PR
+also sets that file's `RELEASE_CI_REF_KEY:` line (default `ENGSYS_REF`) to the engsys tag being pinned, which is
+checked to exist first, so the instance CI moves with the release instead of in a separate PR (engsys#271).
 
 Then the pin PR: only the marketplace refs change (verified with a `jq` strip-diff), `PREPUSH_SETUP_CMD`
-runs first if set, it is pushed normally and an open PR for the same pins is reused. `REVIEW_CMD`, if set,
+runs first if set, it is pushed normally and an open PR for the same pins is reused. Before any label, the PR
+gets one `<!-- mm-handoff -->` comment (engsys#271). It carries an `operator_gate` only when `PIN_OPERATOR_GATE`
+is set: where a branch ruleset puts `.claude/settings.json` behind a team review, the merge monster's preflight
+already gates the PR at READY (`rulesetGate`). A failed handoff post is a warning; the PR is still labeled.
+`REVIEW_CMD`, if set,
 runs in the PR's worktree and its output is posted as a comment opening with `REVIEW_MARKER`; if the run
 is clean, `READY_LABEL` (default `mm:ready`) is added so the merge monster merges the PR. A non-zero exit
 or a match for `REVIEW_BLOCK_REGEX` (default `critical|warning`, case-insensitive) stops the auto-labeling:
@@ -1937,6 +1944,8 @@ format) overrides it per machine. Environment values for `ENGSYS_REF` / `INSTANC
 | `READY_LABEL` | no | Default `mm:ready` |
 | `PREPUSH_SETUP_CMD` | no | Run in the pin worktree before commit and push (for example an install with a frozen lockfile) |
 | `PIN_WAIT_MAX_MIN` | no | Default 240 |
+| `PIN_OPERATOR_GATE` | no | An `operator_gate` reason for the mm-handoff `fleet pin` posts on each pin PR (engsys#271). Default: none (a ruleset path rule on `.claude/settings.json` is caught by the merge monster's preflight). Set it for a gate no ruleset expresses |
+| `RELEASE_CI_REF_FILE` / `RELEASE_CI_REF_KEY` | no | `fleet pin --release` also sets `<KEY>: <engsys tag>` in this instance-repo file in the release PR (engsys#271). Key default `ENGSYS_REF`. Unset means the file is left alone |
 | `SLACK_ENV` | no | Path to the `fleet notify` bot env file (§ 6.9). Empty means Slack is unconfigured: escalations fall back to a GitHub comment |
 | `NOTIFY_FALLBACK_ISSUE` | no | `owner/repo#N` for `fleet notify`'s fallback comment when Slack is unconfigured or unreachable. Empty means the message is only printed as a warning |
 | `FLEET_ID` | no | This fleet's id in a federation (§ 6.10): `^[a-z][a-z0-9-]{1,20}$`, rejected otherwise. Written into every session env. Never inherited from the caller's environment. Unset means single-fleet mode |
@@ -1949,7 +1958,7 @@ format) overrides it per machine. Environment values for `ENGSYS_REF` / `INSTANC
 | `ROSTER_EXCLUDE` | no | Set it in `fleet.local.conf`. A denylist with the same entries; it wins over `ROLES`. Never inherited from the caller's environment |
 | anything else | | Instance-defined template variables (model knobs, and so on) |
 
-`REVIEW_*`, `READY_LABEL`, `PREPUSH_SETUP_CMD` and `PIN_WAIT_MAX_MIN` are read by `fleet pin`.
+`REVIEW_*`, `READY_LABEL`, `PREPUSH_SETUP_CMD`, `PIN_WAIT_MAX_MIN`, `PIN_OPERATOR_GATE` and `RELEASE_CI_REF_*` are read by `fleet pin`.
 
 ### Template variables
 

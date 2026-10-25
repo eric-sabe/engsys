@@ -26,6 +26,10 @@ cat >"$T/bin/gh" <<'SH'
 #!/usr/bin/env bash
 case "$1 $2" in
   "pr view") cat "$FAKE/view.json" ;;
+  "api repos/acme/app/rules/branches/main")
+    echo "rules" >>"$FAKE/rules.calls"
+    [ -f "$FAKE/rules.json" ] && [ ! -f "$FAKE/rules-fail" ] || { echo "gh: HTTP 403 Resource not accessible" >&2; exit 1; }
+    jq -c '.[]' "$FAKE/rules.json" ;;
   "api graphql") echo '{"nodes":[]}' ;;
   "api repos/acme/app/pulls/7/files"*) [ ! -f "$FAKE/files-fail" ] || { echo "gh: HTTP 502" >&2; exit 1; }; cat "$FAKE/files.json" ;;
   "api repos/acme/app/pulls/7") [ ! -f "$FAKE/files-fail" ] || { echo "gh: HTTP 502" >&2; exit 1; }; echo "$(cat "$FAKE/changed") $(cat "$FAKE/headsha")" ;;
@@ -271,7 +275,7 @@ run --config "$CFG" --require-security-verdict --security-key-file "$KEY"
 rc_is "the flag still requires a verdict when nothing sensitive changed" 3
 # the capability the fleet probes for, and the signing grant
 RC=0; OUT="$(bash "$HERE/mm-preflight.sh" --capabilities 2>&1)" || RC=$?
-if [ "$RC" = 0 ] && [ "$OUT" = "$(printf 'security-verdict\nsecurity-sensitive-globs\nsecurity-review-request')" ]; then ok "--capabilities reports the tokens the fleet probes for"; else bad "capabilities tokens" "$OUT"; fi
+if [ "$RC" = 0 ] && [ "$OUT" = "$(printf 'security-verdict\nsecurity-sensitive-globs\nsecurity-review-request\nruleset-review-gates')" ]; then ok "--capabilities reports the tokens the fleet probes for"; else bad "capabilities tokens" "$OUT"; fi
 printf 'review\n' >"$T/body.md"
 RC=0; OUT="$(env -u ENGSYS_SECURITY_VERDICT_KEY_FILE node "$SV" post --repo acme/app --pr 7 --sha "$HEAD_SHA" --verdict PASS --body-file "$T/body.md" 2>&1)" || RC=$?
 rc_is "security-verdict post refuses without ENGSYS_SECURITY_VERDICT_KEY_FILE" 1
@@ -317,7 +321,7 @@ echo "engsys#229 review round: capabilities, pruned env config, repointed config
 RC=0; OUT="$(bash "$HERE/mm-preflight.sh" --capabilities 2>&1)" || RC=$?
 rc_is "--capabilities exits 0 without touching GitHub (no gh, no repo)" 0
 eq_out() { if [ "$OUT" = "$2" ]; then ok "$1"; else bad "$1" "$OUT"; fi; }
-eq_out "…and prints exactly the three tokens, one per line" "$(printf 'security-verdict\nsecurity-sensitive-globs\nsecurity-review-request')"
+eq_out "…and prints exactly the four tokens, one per line" "$(printf 'security-verdict\nsecurity-sensitive-globs\nsecurity-review-request\nruleset-review-gates')"
 RC=0; OUT="$(bash "$HERE/mm-preflight.sh" --capabilities --repo a/b 2>&1)" || RC=$?
 rc_is "…and only as the sole argument (anything else is the normal usage path)" 2
 # a pruned ENGSYS_MM_CONFIG falls back to the discovered copy, with a warning
@@ -425,6 +429,46 @@ run --config "$T/same.yml" --security-verdict --security-key-file "$KEY"
 rc_is "a review label equal to the sensitive label is refused (removing it would drop the requirement)" 1
 has "  …as an unreadable config" "security_config_unreadable"
 cd "$HERE"
+
+echo "engsys#271: a ruleset's path-based required reviewers mark the PR operator-gated up front"
+export MM_RULESET_CACHE_DIR="$T/rg-cache"
+# keystone's main ruleset (13606201), as GET rules/branches/main returns it
+cat >"$T/rules.json" <<'JSON'
+[{"type":"deletion","ruleset_id":13606201,"parameters":{}},
+ {"type":"pull_request","ruleset_id":13606201,"parameters":{"required_approving_review_count":0,"required_reviewers":[
+   {"file_patterns":["infrastructure/**",".github/workflows/**",".claude/**","CLAUDE.md","**/CLAUDE.md","docs/architecture/adr/**",".gitleaks.toml"],"minimum_approvals":1,"reviewer":{"id":19613410,"type":"Team"}}]}}]
+JSON
+files_view() { # files_view <path>...: a clean PR changing these files
+  view; jq --argjson f "$(printf '%s\n' "$@" | jq -R . | jq -s 'map({path: .})')" '.files = $f' "$T/view.json" >"$T/view.new" && mv "$T/view.new" "$T/view.json"
+}
+: >"$T/rules.calls"
+files_view .claude/settings.json
+run
+rc_is "a pin PR (.claude/settings.json) still passes preflight" 0
+has "  …marked gated by the ruleset" '"gated": true'
+has "  …naming the ruleset" '"rulesetId": 13606201'
+has "  …the reviewer team" '"id": 19613410'
+has "  …and the matching file" '".claude/settings.json"'
+files_view services/api/src/index.ts README.md
+run
+rc_is "a PR outside the rule's paths passes" 0
+has "  …not gated" '"rulesetGate": {
+    "gated": false
+  }'
+[ "$(wc -l <"$T/rules.calls" | tr -d ' ')" = 1 ] && ok "the rulesets were read once for both PRs (cached per repo and base)" || bad "the rulesets were read once" "$(cat "$T/rules.calls")"
+files_view docs/architecture/adr/031-x.md services/x/CLAUDE.md
+run
+has "nested patterns match (ADRs, **/CLAUDE.md)" '"docs/architecture/adr/031-x.md"'
+has "  …both files" '"services/x/CLAUDE.md"'
+rm -rf "$T/rg-cache"; touch "$T/rules-fail"
+files_view .claude/settings.json
+run
+rc_is "unreadable rulesets never fail the preflight" 0
+has "  …and infer nothing" '"gated": false'
+has "  …saying why" '"unreadable": "rulesets: gh: HTTP 403'
+run
+[ "$(grep -c rules "$T/rules.calls")" -ge 3 ] && ok "  …and a failure is not cached" || bad "  …and a failure is not cached" "$(cat "$T/rules.calls")"
+rm -f "$T/rules-fail"; unset MM_RULESET_CACHE_DIR
 
 echo "$pass passed, $fail failed."
 [ "$fail" = 0 ]

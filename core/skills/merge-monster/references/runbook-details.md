@@ -409,7 +409,14 @@ discipline).
 - base branch correct; no zombie required checks from a force-push
 - classify: migration-bearing? (`migration_globs` ∩ changed files, or
   handoff `migration: true`) · operator-gated? (handoff `operator_gate:`
-  set) · conflict-magnet? · security? · batch or single-commit? (picks merge
+  set, or preflight `rulesetGate.gated`: the base branch's ruleset has a
+  path-based required-reviewers rule covering the PR's files, such as
+  keystone's `.claude/**` → fleet-operators; engsys#271. Ask for the gate
+  now; the PR would otherwise sit green but BLOCKED. `rulesetGate.unreadable`
+  infers nothing, and a pattern outside GitHub's fnmatch subset is listed
+  under `rulesetGate.unknown` and never gates. The rules are cached per repo
+  and base branch for 600 s, about one tick, so a ruleset edit shows up within
+  ten minutes) · conflict-magnet? · security? · batch or single-commit? (picks merge
   method). Migration-bearing or operator-gated → § Operator gates before it
   can become `mm:active`.
 
@@ -658,7 +665,7 @@ Gated here:
 | Act | `--kind` | Thread | Human does |
 |---|---|---|---|
 | merge a migration-bearing PR | `merge` | the PR | review **Approve** on the head |
-| merge an operator-gated PR (handoff `operator_gate:`) | `merge` | the PR | review **Approve** on the head |
+| merge an operator-gated PR (handoff `operator_gate:`, or preflight `rulesetGate.gated`) | `merge` | the PR | review **Approve** on the head |
 | merge a never-auto Dependabot PR | `merge` | the PR | review **Approve** on the head |
 | apply a migration / dispatch a deploy, where MM is configured to | `migration` / `deploy` | the PR | `/approve <gate-id>` |
 
@@ -689,10 +696,17 @@ Gated here:
    request. It merges once Nyx's signed PASS also lands." Never "also
    pending", "after the verdict" or anything else that reads as "wait":
    approvals held back until the verdict were the failure engsys#240 fixed.
-3. **Verify** on every wake for that PR, including each tick delta that
-   names it (`{"k":"gate","pr":N,…}`; the tick reports any new comment or
-   review on a PR parked `mm:blocked`), and once on the session's first
-   tick (read-only, auto-approved): `<skill-dir>/scripts/gate-check.sh --repo <repo> --pr N
+3. **Verify** on every wake for that PR: every bus event that names it
+   (`GATE_REVIEW #N`, which the bus emits when a review is submitted on a
+   PR parked `mm:blocked` or its merge state leaves BLOCKED, and READY,
+   UNREADY, CONFLICT or anything else), each tick delta that names it
+   (`{"k":"gate","pr":N,…}`; the tick reports any new comment or review on
+   a PR parked `mm:blocked`), and once on the session's first tick
+   (read-only, auto-approved). gate-check is cheap: never decide a parked
+   PR's events are noise and skip it. That is how an approval on
+   keystone#4694 waited 20 minutes for the tick (engsys#272); the bus no
+   longer re-emits READY/UNREADY for a stable parked PR, so an event there
+   means something changed: `<skill-dir>/scripts/gate-check.sh --repo <repo> --pr N
    --gate <id> <operator flag> --requester <author>
    --target <repo>#N@<sha> --kind <kind>`.
    - exit **0** approved → record it (below), clear `mm:blocked`, continue

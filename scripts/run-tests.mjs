@@ -27,6 +27,7 @@ const SUITES = [
   ["node --test core/.claude-plugin/singleton-write-guard.test.mjs"],
   ["node --test core/fleet/identity/gh-app-token.test.mjs"],
   ["node --test core/fleet/notify.test.mjs"],
+  ["node --test core/lib/ruleset-gates.test.mjs"],
   ["node --test core/fleet/lib/federation.test.mjs"],
   ["node --test core/fleet/lib/verify-wrappers.test.mjs"],
   ["node --test core/fleet/lib/federation-status.test.mjs"],
