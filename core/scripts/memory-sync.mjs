@@ -25,7 +25,7 @@ import {
 } from '../lib/memory/ref-store.mjs';
 import { FLEET_ID_RE, readSigningKeyFile, signTip } from '../lib/memory/signing.mjs';
 import { consumeMemoryRefs, loadVerifiedRefEvents } from '../lib/memory/ref-consumer.mjs';
-import { ensureIndex, resolveCacheDir, resolveReviewedSha } from '../lib/memory/index-db.mjs';
+import { closeIndex, ensureIndex, resolveCacheDir, resolveReviewedSha } from '../lib/memory/index-db.mjs';
 import { isEventTrusted as sharedIsEventTrusted } from '../lib/memory/trust.mjs';
 import { loadConfig } from './memory-brief.mjs';
 import { buildMarkerMatchers, isMarkerBody, parseFindingAcks } from './harvest-findings.mjs';
@@ -1584,6 +1584,11 @@ export async function runMemorySync({
     // Warm the brief's verification cache for what just moved, so the first brief after a fetch re-verifies nothing.
     if (res.ok && cacheDir && (res.results || []).some((r) => r.status === 'accepted')) {
       try { loadVerifiedRefEvents(repoRoot, { config: cfg, cacheDir, resolveSha: resolveReviewedSha }); } catch { /* an optimisation only */ }
+      // engsys#288: and rebuild the index now, off the brief's clock, so the next brief finds it current instead of
+      // serving the stale one while a detached rebuild catches up.
+      if (rebuildIndex) {
+        try { closeIndex(ensureIndex({ repoRoot, cacheDir })); } catch { /* fail-open: the brief rebuilds it */ }
+      }
     }
     return { ok: Boolean(res.ok), mode, ...res, warnings };
   }
@@ -1744,7 +1749,7 @@ export async function runMemorySync({
   // 5. Rebuild local SQLite FTS index if requested
   if (rebuildIndex) {
     try {
-      ensureIndex({ repoRoot, cacheDir });
+      closeIndex(ensureIndex({ repoRoot, cacheDir }));
     } catch {
       // Fail-open
     }

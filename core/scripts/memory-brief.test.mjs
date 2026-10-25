@@ -4,7 +4,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -1110,6 +1110,33 @@ describe('buildBrief — end to end, fail-open, and the agent exclusion boundary
 			assert.ok(forIsabelle.pointerKeys.includes('ev1'), 'a non-excluded agent should actually receive the seeded pointer, not just an empty-or-not array');
 			assert.ok(!forNyx.text.includes('secret-ish free text'));
 			assert.ok(!forIsabelle.text.includes('secret-ish free text'), 'free text must never reach rendered output regardless of agent');
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('engsys#288: on a stale index the brief returns at once with Class A, no Class B, and hands the rebuild off', { skip: !SQLITE_AVAILABLE }, () => {
+		const dir = makeRepo({ lessons: [['one', { keywords: ['widget'] }]] });
+		try {
+			mkdirSync(join(dir, '.claude'), { recursive: true });
+			writeFileSync(join(dir, '.claude', 'memory.yml'), 'trusted_bot_user_ids: [500]\n');
+			commitAndPush(dir, 'add memory.yml');
+			const cacheDir = join(dir, '.git', 'engsys-memory');
+			mkdirSync(cacheDir, { recursive: true });
+			const ev = (k) => `${JSON.stringify({ k, kind: 'review_thread', path: 'docs/agent-lessons/one.md', line: 1, outcome: 'fixed', updated_at: new Date().toISOString(), author_kind: 'bot', author_id: 500, text: 't' })}\n`;
+			writeFileSync(join(cacheDir, 'delta.jsonl'), ev('ev1'));
+			const fresh = buildBrief({ repoRoot: dir, agentType: 'isabelle', prompt: 'widget', touchedPaths: ['docs/agent-lessons/one.md'], spawnRebuild: () => { throw new Error('no rebuild on a fresh index'); } });
+			assert.ok(fresh.pointerKeys.includes('ev1'), 'positive control: a fresh index serves the pointer');
+			// sync moves on (new delta): the index is now stale
+			writeFileSync(join(cacheDir, 'delta.jsonl'), ev('ev1') + ev('ev2'));
+			const spawned = [];
+			const indexFile = join(cacheDir, 'index.sqlite');
+			const before = statSync(indexFile).mtimeMs;
+			const stale = buildBrief({ repoRoot: dir, agentType: 'isabelle', prompt: 'widget', touchedPaths: ['docs/agent-lessons/one.md'], spawnRebuild: (a) => spawned.push(a) });
+			assert.equal(statSync(indexFile).mtimeMs, before, 'nothing rebuilt inline: the brief did not wait on a build');
+			assert.equal(spawned.length, 1, 'rebuild handed off');
+			assert.ok(stale.lessonKeys.includes('lesson:one'), 'Class A still renders');
+			assert.deepEqual(stale.pointerKeys, [], 'no Class B from a stale index (its trust inputs may have moved)');
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}

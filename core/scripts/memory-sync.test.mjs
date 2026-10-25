@@ -1205,6 +1205,26 @@ describe('memory-sync writers: role split and the baton fence (F5)', () => {
     assert.deepEqual(r.warnings, ['memory-consume: refs/engsys/memory/fleet/bob/maintain rejected (bad_signature); kept the last verified tip']);
   });
 
+  it('engsys#288 --consume rebuilds the index right after refs move, off the brief\'s clock', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-sync-consume-warm-'));
+    try {
+      const { execFileSync: ex } = await import('node:child_process');
+      ex('git', ['-C', dir, 'init', '-q']);
+      const cacheDir = path.join(dir, '.git', 'engsys-memory');
+      const consume = () => ({ ok: true, fetched: true, results: [{ ref: 'refs/engsys/memory/fleet/eric/events', status: 'accepted' }] });
+      const r = await runMemorySync({ mode: 'consume', repo: 'owner/repo', repoRoot: dir, cacheDir, config: {}, stateDir: dir, role: 'maintain', consume, fence: async () => ({ held: true }) });
+      assert.equal(r.ok, true);
+      assert.ok(fs.existsSync(path.join(cacheDir, 'index.sqlite')), 'the index was built by the consumer');
+      const none = path.join(dir, 'none');
+      fs.mkdirSync(none);
+      const r2 = await runMemorySync({ mode: 'consume', repo: 'owner/repo', repoRoot: dir, cacheDir: path.join(none, 'c'), config: {}, stateDir: dir, role: 'maintain', consume: () => ({ ok: true, fetched: true, results: [] }), fence: async () => ({ held: true }) });
+      assert.equal(r2.ok, true);
+      assert.ok(!fs.existsSync(path.join(none, 'c', 'index.sqlite')), 'nothing accepted: no rebuild');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('merge can never publish the events ref: refused before anything is collected, the fence is never asked', async () => {
     const dir = tmp('memory-sync-merge-pub-');
     try {
