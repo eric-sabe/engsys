@@ -30,6 +30,7 @@ import { fileURLToPath } from 'node:url';
 import { parseHookInput, recordHookTelemetry } from '../lib/harness-io.mjs';
 import { isMainEntry } from '../lib/is-main.mjs';
 import { isValidPointerKey, resolveCacheDir } from '../lib/memory/index-db.mjs';
+import { claimDispatch, noteDispatch } from './handback-guard.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const MEMORY_BRIEF = path.resolve(HERE, '..', 'scripts', 'memory-brief.mjs');
@@ -418,6 +419,9 @@ export async function main({ argv = process.argv.slice(2), stdin = process.stdin
 	// SubagentStart hook can consume it. Always fails open with `{}`.
 	const isPreAgent = argv[0] === 'pre-agent' || input?.hook_event_name === 'PreToolUse' || input?.hookEventName === 'preToolUse';
 	if (isPreAgent) {
+		// engsys#286: the hand-back guard acts only on agents this session dispatched; tell it about this one first
+		// (no git needed), whatever happens to the memory brief's own record below.
+		if (input) noteDispatch(input, { now });
 		if (input) recordPendingDispatch(input, { cwd, now });
 		recordHookTelemetry({
 			hook: 'subagent-memory-inject',
@@ -445,6 +449,17 @@ export async function main({ argv = process.argv.slice(2), stdin = process.stdin
 	if (isPreAgent && !agentType) {
 		write('{}');
 		return 0;
+	}
+
+	// engsys#286: mark this agent as dispatched by this session (or not) FIRST, so a brief that overran the hook's own
+	// timeout can't kill the hook before the mark is written (the guard would then skip a real agent). It is a cheap
+	// file write, and it is kept out of the brief's budget: the budget clock (budgetStart) is moved on by exactly the
+	// time the claim took.
+	let budgetStart = t0;
+	if (!isPreAgent && input) {
+		const c0 = now();
+		claimDispatch(input, { now });
+		budgetStart = t0 + (now() - c0);
 	}
 
 	let briefText = '';
@@ -483,7 +498,7 @@ export async function main({ argv = process.argv.slice(2), stdin = process.stdin
 		// node startup — not TIMEOUT_MS on top of whatever resolveTouchedPaths already spent. Below
 		// MIN_SPAWN_MS there isn't even enough budget left for node's own startup, so the spawn is
 		// SKIPPED outright (saves that startup cost too) rather than launched to a guaranteed timeout.
-		const remainingMs = TIMEOUT_MS - (now() - t0);
+		const remainingMs = TIMEOUT_MS - (now() - budgetStart);
 		skippedBudget = remainingMs < MIN_SPAWN_MS;
 		const result = skippedBudget ? null : runMemoryBrief({ agentType, prompt, touchedPaths, cwd: diffCwd, timeoutMs: remainingMs });
 		spawnFailed = !skippedBudget && !result;

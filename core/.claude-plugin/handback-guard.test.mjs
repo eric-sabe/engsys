@@ -187,3 +187,97 @@ test('CT-06: Copilot payload with pending promise exits 0 with JSON {"decision":
   assert.match(out.reason, /^engsys hand-back guard:/);
 });
 
+
+// ---------------------------------------------------------------------------------- engsys#286 --
+// Only agents this session dispatched are guarded: a harness-internal agent (no agent_type, never dispatched)
+// whose text sounds pending must not put a HANDBACK_INCOMPLETE on a monster's bus.
+
+const { noteDispatch, claimDispatch, wasDispatched } = await import('./handback-guard.mjs');
+const LOOP = 'merge-monster orchestrator is holding the merge baton for FeedFrwd/keystone; ledger #2792 is open, so the loop runs until it closes. Still running.';
+const MEMORY_INJECT = path.join(path.dirname(HOOK), 'subagent-memory-inject.mjs');
+
+function fleetRun(mode, input, sdir, extra = {}) {
+  return spawnSync(process.execPath, [HOOK, mode], {
+    input: JSON.stringify(input),
+    env: { ...process.env, FLEET_ID: '', ENGSYS_HANDBACK_DIR: DIR, ENGSYS_SESSION: 'acme-mm', ENGSYS_SESSION_RUN: 'r1', ENGSYS_SESSIONS_DIR: sdir, ...extra },
+    encoding: 'utf8',
+  });
+}
+const relayed = (sdir) => {
+  const f = path.join(sdir, 'acme-mm.handbacks.jsonl');
+  return fs.existsSync(f) ? fs.readFileSync(f, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
+};
+
+test('286: an undispatched agent with pending-sounding text is neither blocked, recorded nor relayed', () => {
+  const sdir = fs.mkdtempSync(path.join(os.tmpdir(), 'engsys-hb-286-'));
+  const dbg = path.join(sdir, 'debug.jsonl');
+  // the observed shape: no agent_type, a bare 17-hex agent id, in a session that dispatched something else
+  noteDispatch({ session_id: 'sess-286a', tool_input: { subagent_type: 'engsys:isabelle' } });
+  const r = fleetRun('subagent', { session_id: 'sess-286a', agent_id: 'a9be9a2dec73dbce7', last_assistant_message: LOOP }, sdir, { ENGSYS_HANDBACK_DEBUG: dbg });
+  assert.equal(r.status, 0, 'never blocked');
+  assert.equal(r.stderr, '');
+  assert.deepEqual(relayed(sdir), [], 'nothing on the bus');
+  assert.equal(stopDecision({ session_id: 'sess-286a' }, {}), null, 'nothing recorded for the Stop guard either');
+  assert.match(fs.readFileSync(dbg, 'utf8'), /"ignored":"not dispatched by this session"/, 'logged under ENGSYS_HANDBACK_DEBUG');
+  // …and in a session that never tracked a dispatch, the empty agent_type alone is enough
+  const r2 = fleetRun('subagent', { session_id: 'sess-286b', agent_id: 'a63689d9bd2137895', last_assistant_message: LOOP }, sdir);
+  assert.equal(r2.status, 0);
+  assert.deepEqual(relayed(sdir), []);
+});
+
+test('286: a dispatched agent\'s INCOMPLETE is still recorded and relayed, and a pending one still blocked', () => {
+  const sdir = fs.mkdtempSync(path.join(os.tmpdir(), 'engsys-hb-286c-'));
+  noteDispatch({ session_id: 'sess-286c', tool_input: { subagent_type: 'engsys:isabelle' } });
+  assert.equal(claimDispatch({ session_id: 'sess-286c', agent_id: 'a-real', agent_type: 'engsys:isabelle' }), true);
+  const blocked = fleetRun('subagent', { session_id: 'sess-286c', agent_id: 'a-real', agent_type: 'engsys:isabelle', last_assistant_message: STALL }, sdir);
+  assert.equal(blocked.status, 2, 'block A still applies to a dispatched agent');
+  const inc = fleetRun('subagent', { session_id: 'sess-286c', agent_id: 'a-real', agent_type: 'engsys:isabelle', last_assistant_message: 'Stopped.\nSTATUS: INCOMPLETE — push pending' }, sdir);
+  assert.equal(inc.status, 0);
+  assert.deepEqual(relayed(sdir).map((l) => [l.agent_id, l.remains]), [['a-real', 'push pending']]);
+  assert.match(stopDecision({ session_id: 'sess-286c' }, {}), /1 subagent\(s\) handed back INCOMPLETE/);
+});
+
+test('286: claimDispatch matches the teammate name first, then the type; consumes the record; ignores expired ones', () => {
+  noteDispatch({ session_id: 'sess-286d', tool_input: { subagent_type: 'engsys:isabelle' } });
+  noteDispatch({ session_id: 'sess-286d', tool_input: { subagent_type: 'engsys:nyx', name: 'isabelle' } });
+  assert.equal(claimDispatch({ session_id: 'sess-286d', agent_id: 'a-team', agent_type: 'isabelle' }), true, 'the teammate named isabelle');
+  assert.equal(claimDispatch({ session_id: 'sess-286d', agent_id: 'a-plain', agent_type: 'engsys:isabelle' }), true, 'the plain isabelle dispatch is still there');
+  assert.equal(claimDispatch({ session_id: 'sess-286d', agent_id: 'a-extra', agent_type: 'engsys:isabelle' }), false, 'each dispatch is claimed once');
+  assert.equal(claimDispatch({ session_id: 'sess-286d', agent_id: 'a-internal', agent_type: '' }), false, 'no agent_type: never claims');
+  noteDispatch({ session_id: 'sess-286e', tool_input: { subagent_type: 'general-purpose' } }, { now: () => Date.now() - 10 * 60_000 });
+  assert.equal(claimDispatch({ session_id: 'sess-286e', agent_id: 'a-late', agent_type: 'general-purpose' }), false, 'an expired dispatch is not claimed');
+  assert.equal(wasDispatched({ session_id: 'sess-286d', agent_id: 'a-team', agent_type: 'isabelle' }), true);
+  assert.equal(wasDispatched({ session_id: 'sess-286d', agent_id: 'a-extra', agent_type: 'engsys:isabelle' }), false, 'tracked session, unclaimed agent');
+  assert.equal(wasDispatched({ session_id: 'sess-286-none', agent_id: 'x', agent_type: 'engsys:aaron' }), true, 'no tracking at all (e.g. Copilot): a typed agent keeps the guard');
+});
+
+test('286 end to end: memory-inject\'s PreToolUse + SubagentStart hooks mark the dispatch the guard then honours', () => {
+  const sdir = fs.mkdtempSync(path.join(os.tmpdir(), 'engsys-hb-286f-'));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'engsys-hb-286-cwd-')); // not a repo: the brief fails open, the claim still happens
+  const env = { ...process.env, ENGSYS_HANDBACK_DIR: DIR, NODE_NO_WARNINGS: '1' };
+  spawnSync(process.execPath, [MEMORY_INJECT, 'pre-agent'], { cwd, env, encoding: 'utf8', input: JSON.stringify({ session_id: 'sess-286f', cwd, hook_event_name: 'PreToolUse', tool_name: 'Agent', tool_input: { subagent_type: 'engsys:bert', name: 'bert-p3', prompt: 'x' } }) });
+  spawnSync(process.execPath, [MEMORY_INJECT], { cwd, env, encoding: 'utf8', input: JSON.stringify({ session_id: 'sess-286f', cwd, hook_event_name: 'SubagentStart', agent_id: 'abert-p3-1234', agent_type: 'bert-p3' }) });
+  const inc = fleetRun('subagent', { session_id: 'sess-286f', agent_id: 'abert-p3-1234', agent_type: 'bert-p3', last_assistant_message: 'STATUS: INCOMPLETE — waiting for the lead' }, sdir);
+  assert.equal(inc.status, 0);
+  assert.deepEqual(relayed(sdir).map((l) => l.agent_id), ['abert-p3-1234']);
+  const internal = fleetRun('subagent', { session_id: 'sess-286f', agent_id: 'a0123456789abcdef', last_assistant_message: LOOP }, sdir);
+  assert.equal(internal.status, 0);
+  assert.deepEqual(relayed(sdir).map((l) => l.agent_id), ['abert-p3-1234'], 'the internal agent added nothing');
+});
+
+test('286 review W2: an untyped dispatch is recorded as general-purpose, so its agent stays guarded', () => {
+  noteDispatch({ session_id: 'sess-286w2', tool_input: { subagent_type: 'engsys:isabelle' } }); // a typed one is tracked too
+  noteDispatch({ session_id: 'sess-286w2', tool_input: { description: 'look around', prompt: 'x' } });
+  assert.equal(claimDispatch({ session_id: 'sess-286w2', agent_id: 'a-gp', agent_type: 'general-purpose' }), true);
+  assert.equal(wasDispatched({ session_id: 'sess-286w2', agent_id: 'a-gp', agent_type: 'general-purpose' }), true);
+  const sdir = fs.mkdtempSync(path.join(os.tmpdir(), 'engsys-hb-286w2-'));
+  const inc = fleetRun('subagent', { session_id: 'sess-286w2', agent_id: 'a-gp', agent_type: 'general-purpose', last_assistant_message: 'STATUS: INCOMPLETE — tests still to run' }, sdir);
+  assert.equal(inc.status, 0);
+  assert.deepEqual(relayed(sdir).map((l) => l.agent_id), ['a-gp'], 'its INCOMPLETE is relayed');
+});
+
+test('286 review L1: a plain typed start never claims a teammate\'s record by type', () => {
+  noteDispatch({ session_id: 'sess-286l1', tool_input: { subagent_type: 'engsys:bert', name: 'bert-p2' } });
+  assert.equal(claimDispatch({ session_id: 'sess-286l1', agent_id: 'a-plain-bert', agent_type: 'engsys:bert' }), false, 'not by type');
+  assert.equal(claimDispatch({ session_id: 'sess-286l1', agent_id: 'abert-p2-1', agent_type: 'bert-p2' }), true, 'the teammate still claims it by name');
+});

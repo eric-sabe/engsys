@@ -162,10 +162,11 @@ gh project item-list <PROJECT_NUM> --owner <owner> --format json \
         | map({num: .content.number, title: .content.title, phase: .phase, status: .status})
         | group_by(.phase)'
 
-# GraphQL equivalent (open items, their Phase field value):
+# GraphQL equivalent (open items, their Phase field value). Pass the board's owner as `-f owner=`: on a fleet host
+# the gh shim picks the GitHub App installation from that field (GraphQL otherwise uses the checkout's own).
 gh api graphql -f query='
-  query($org:String!, $num:Int!){
-    organization(login:$org){
+  query($owner:String!, $num:Int!){
+    organization(login:$owner){
       projectV2(number:$num){
         items(first:100){
           nodes{
@@ -177,7 +178,7 @@ gh api graphql -f query='
         }
       }
     }
-  }' -f org=<owner> -F num=<PROJECT_NUM>
+  }' -f owner=<owner> -F num=<PROJECT_NUM>
 ```
 
 To pick the lowest open phase: filter to open issues, take the minimum `Phase` value

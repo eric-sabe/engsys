@@ -50,36 +50,91 @@ unset GH_TOKEN_COPILOT_CLI
 
 # Which account's installation to use (GH_APP_INSTALLATIONS in the env file). Precedence:
 # GH_APP_OWNER > --owner (names the account a command like `gh project`/`gh repo list`/
-# `gh search --owner` acts on) > -R/--repo > a `gh api repos/<owner>/...` path > a github.com
-# URL argument > the current repo's origin. The token helper falls back to
-# GH_APP_INSTALLATION_ID for an owner it doesn't list.
+# `gh search --owner` acts on) > -R/--repo > the owner a `gh api` endpoint names (`repos/<owner>/…`,
+# `orgs/<org>/…`, `users/<user>/…`) > an owner a `-f/-F` field names > a github.com URL argument > the current
+# repo's origin. The token helper falls back to GH_APP_INSTALLATION_ID (the fleet instance's own installation; a process-env
+# GH_APP_INSTALLATION_ID overrides the env file's) for an owner it doesn't list.
+# engsys#257: `gh api` endpoints that can't be about any repo (`/apps/<slug>`, `/app`, `/user`, `installation/*`,
+# `rate_limit`) take the instance installation, never the cwd's origin. GraphQL and `search/*` may well be about
+# the cwd's repo (mutations, private-repo search), so they keep the origin fallback, unless the call names an owner
+# in a field (`-f owner=X`, `-F owner=X`, `org=`/`login=X`, or `repo=<owner>/<name>`), which then picks it. `repos/{owner}/{repo}/…`
+# placeholders are gh's own "the cwd's repo", so they too fall back to origin.
 owner_of() { # owner/repo, URL or api path -> owner, or nothing
   local s="${1#https://github.com/}"
   s="${s#/}"; s="${s#repos/}"
   case "$s" in */*) printf '%s' "${s%%/*}" ;; esac
 }
-OWNER_OPT="" REPO_OPT="" API_OWNER="" URL_OWNER=""
+# api_endpoint_owner <endpoint> -> "owner:<login>" | "ownerless" | "" (not classified: the origin fallback applies)
+api_endpoint_owner() {
+  local e="${1#/}" rest
+  e="${e%%\?*}"
+  case "$e" in
+    repos/\{owner\}/*) ;; # gh's placeholder for the cwd's repo
+    repos/*/*) printf 'owner:%s' "$(owner_of "$e")" ;;
+    orgs/*|users/*)
+      rest="${e#*/}"; rest="${rest%%/*}"
+      [ -n "$rest" ] && printf 'owner:%s' "$rest" ;;
+    user|user/*|app|app/*|apps/*|installation/*|rate_limit)
+      printf 'ownerless' ;;
+  esac
+}
+# field_owner <field value> -> the owner a `-f/-F` field names (`owner=`, `org=` or `login=X`, or `repo=X/Y`), or
+# nothing. A value starting with `@` is `-F`'s read-from-file form, not an owner: it counts as absent.
+field_owner() {
+  local v
+  case "$1" in
+    owner=*|org=*|login=*) v="${1#*=}" ;;
+    repo=*/*) v="$(owner_of "${1#repo=}")" ;;
+    *) return 0 ;;
+  esac
+  case "$v" in ''|@*) ;; *) printf '%s' "$v" ;; esac
+}
+OWNER_OPT="" REPO_OPT="" API_OWNER="" URL_OWNER="" API_OWNERLESS="" FIELD_OWNER=""
+# The `gh api` endpoint is the first positional argument after `api` that is not a flag's value.
+API_EP="" in_api="" skip_next=""
 prev=""
 for a in "$@"; do
   case "$prev" in
     --owner) [ -n "$OWNER_OPT" ] || OWNER_OPT="$a" ;;
     -R|--repo) [ -n "$REPO_OPT" ] || REPO_OPT="$(owner_of "$a")" ;;
+    -f|-F|--raw-field|--field) [ -z "$in_api" ] || [ -n "$FIELD_OWNER" ] || FIELD_OWNER="$(field_owner "$a")" ;;
+  esac
+  case "$a" in
+    --raw-field=*|--field=*) [ -z "$in_api" ] || [ -n "$FIELD_OWNER" ] || FIELD_OWNER="$(field_owner "${a#*=}")" ;;
   esac
   case "$a" in
     --owner=*) [ -n "$OWNER_OPT" ] || OWNER_OPT="${a#--owner=}" ;;
     --repo=*) [ -n "$REPO_OPT" ] || REPO_OPT="$(owner_of "${a#--repo=}")" ;;
     -R?*) [ -n "$REPO_OPT" ] || REPO_OPT="$(owner_of "${a#-R}")" ;;
-    repos/*/*|/repos/*/*) [ -n "$API_OWNER" ] || API_OWNER="$(owner_of "$a")" ;;
     https://github.com/*/*) [ -n "$URL_OWNER" ] || URL_OWNER="$(owner_of "$a")" ;;
   esac
+  if [ -z "$in_api" ]; then
+    [ "$a" = api ] && [ -z "$prev" ] && in_api=1
+  elif [ -z "$API_EP" ]; then
+    if [ -n "$skip_next" ]; then skip_next=""
+    else
+      case "$a" in
+        -X|--method|-H|--header|-f|--raw-field|-F|--field|--input|-q|--jq|-t|--template|--hostname|--cache|-p|--preview) skip_next=1 ;;
+        -*) ;;
+        *) API_EP="$a" ;;
+      esac
+    fi
+  fi
   prev="$a"
 done
+if [ -n "$API_EP" ]; then
+  case "$(api_endpoint_owner "$API_EP")" in
+    owner:*) cls="$(api_endpoint_owner "$API_EP")"; API_OWNER="${cls#owner:}" ;;
+    ownerless) API_OWNERLESS=1 ;;
+  esac
+fi
 OWNER="${GH_APP_OWNER:-}"
 [ -n "$OWNER" ] || OWNER="$OWNER_OPT"
 [ -n "$OWNER" ] || OWNER="$REPO_OPT"
 [ -n "$OWNER" ] || OWNER="$API_OWNER"
+[ -n "$OWNER" ] || OWNER="$FIELD_OWNER"
 [ -n "$OWNER" ] || OWNER="$URL_OWNER"
-if [ -z "$OWNER" ] && url="$(git remote get-url origin 2>/dev/null)"; then
+if [ -z "$OWNER" ] && [ -z "$API_OWNERLESS" ] && url="$(git remote get-url origin 2>/dev/null)"; then
   case "$url" in
     https://github.com/*) OWNER="$(owner_of "$url")" ;;
     git@github.com:*) OWNER="$(owner_of "${url#git@github.com:}")" ;;

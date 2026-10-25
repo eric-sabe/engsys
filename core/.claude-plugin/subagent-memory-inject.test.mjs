@@ -36,6 +36,8 @@ delete process.env.CLAUDE_CONFIG_DIR;
 process.env.HOME = mkdtempSync(join(tmpdir(), 'memory-test-home-'));
 
 const SCRIPT = fileURLToPath(new URL('./subagent-memory-inject.mjs', import.meta.url));
+// engsys#286: the hooks also note/claim dispatches for the hand-back guard; keep that state out of the shared tmpdir.
+process.env.ENGSYS_HANDBACK_DIR = mkdtempSync(join(tmpdir(), 'inject-handbacks-'));
 
 function stdinOf(text) {
 	return Readable.from([text]);

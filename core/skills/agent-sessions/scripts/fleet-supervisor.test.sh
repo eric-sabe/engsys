@@ -869,6 +869,12 @@ eq_ep "DST: 'resets 11:45pm' read at 00:30 on fall-back day passed 45 min ago (d
 eq_ep "no DST: 'resets 9pm' read at 20:00 is 21:00 today" "$(lre "$(ep_in $NY '2026-06-10 20:00')" "⏺ You've hit your limit · resets 9pm ($NY)")" "$(ep_in $NY '2026-06-10 21:00')"
 eq_ep "a clock-only time 13 h ahead is today's, not passed" "$(lre "$(ep_in $NY '2026-06-10 08:00')" "⏺ You've hit your limit · resets 9pm ($NY)")" "$(ep_in $NY '2026-06-10 21:00')"
 eq_ep "a dated reset in the zone" "$(lre "$(ep_in UTC '2026-10-18 12:00')" "⏺ You've hit your limit · resets Oct 20, 9:30pm (UTC)")" "$(ep_in UTC '2026-10-20 21:30')"
+# engsys#257: the parse is locale-independent (%b/%p need LC_ALL=C); a non-English locale reads the same instants.
+for loc in fr_FR.UTF-8 de_DE.UTF-8; do
+  locale -a 2>/dev/null | grep -x "$loc" >/dev/null || continue   # no -q: an early exit SIGPIPEs locale under pipefail
+  eq_ep "locale $loc: a dated reset reads the same" "$(LC_ALL="$loc" LANG="$loc" lre "$(ep_in UTC '2026-10-18 12:00')" "⏺ You've hit your limit · resets Oct 20, 9:30pm (UTC)")" "$(ep_in UTC '2026-10-20 21:30')"
+  eq_ep "locale $loc: a clock-only reset across DST reads the same" "$(LC_ALL="$loc" LANG="$loc" lre "$(ep_in $NY '2026-10-31 23:00')" "⏺ You've hit your limit · resets 3am ($NY)")" "$(ep_in $NY '2026-11-01 03:00')"
+done
 # the fixture wordings, at every hour of a day: always read as due (passed within the hour) or ahead (within a day), never
 # unreadable and never tomorrow's-by-mistake; a 24 h sweep, because a wall-clock fixture is "just passed" once a day
 sweep_bad=0
