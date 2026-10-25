@@ -32,7 +32,7 @@
 // simulate "node:sqlite is unavailable" without needing an actual Node build that lacks it (§13: "the
 // index fails open when node:sqlite is missing").
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn as spawnChild } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
@@ -1085,6 +1085,11 @@ function buildInto(dbPath, { sqlite, docs, events, manifest }) {
 		// need to create that sidecar itself on a filesystem that won't allow it. DELETE needs
 		// neither: every write before `close()` lands directly in the main file.
 		db.exec('PRAGMA journal_mode = DELETE');
+		// One transaction for the whole build, with no fsync per statement: the file is a private temp that is only
+		// renamed into place once complete (a crash leaves a temp, never a half index). In autocommit every INSERT was
+		// its own fsync'd transaction — ~4k of them for keystone's 292 docs + 1.7k events took 6–7 s, past the
+		// SubagentStart hook's 2 s budget, so the hook was killed mid-build every time (engsys#288).
+		db.exec('PRAGMA synchronous = OFF');
 		try {
 			db.exec(DDL[0]);
 		} catch (e) {
@@ -1094,6 +1099,7 @@ function buildInto(dbPath, { sqlite, docs, events, manifest }) {
 			db.exec(DDL_FALLBACK_DOCS);
 		}
 		for (const stmt of DDL.slice(1)) db.exec(stmt);
+		db.exec('BEGIN');
 		const insDoc = db.prepare('INSERT INTO docs (key, class, kind, path, symbol, roles, globs, keywords, body) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
 		const insFm = db.prepare('INSERT INTO frontmatter (key, globs, stacks, roles, keywords, security, supersedes, path, title) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
 		for (const d of docs) {
@@ -1113,6 +1119,7 @@ function buildInto(dbPath, { sqlite, docs, events, manifest }) {
 			insDocEv.run(e.k, 'B', SOURCE_KIND.EVENT, e.path ?? null, e.symbol ?? null, '', '', '', e.text ?? '');
 		}
 		db.prepare('INSERT INTO watermark (id, manifest) VALUES (0, ?)').run(stableStringify(manifest));
+		db.exec('COMMIT');
 	} finally {
 		db.close();
 	}
@@ -1167,11 +1174,12 @@ export function ensureIndex(opts = {}) {
 		// engsys#266: the configured fleet keys decide which ref events exist at all, so a key change rebuilds
 		eventsFingerprint = `${eventsFingerprint}|refs:${refShas.map((r) => `${r.ref}=${r.sha}`).join(',')}|keys:${pubkeysFingerprint({ fleet_memory_pubkeys: operatorConfig?.fleet_memory_pubkeys })}`;
 	}
-	const watermark = computeWatermark(manifest, eventsFingerprint, opts.version ?? 'dev');
+	const watermark = computeWatermark(normalizeManifest(manifest, { repoRoot, lessonsDir: roots.lessonsDir }), eventsFingerprint, opts.version ?? 'dev');
 	const watermarkJson = stableStringify(watermark);
 
 	const dbPath = path.join(cacheDir, 'index.sqlite');
 	let needsBuild = true;
+	let served = 'fresh';
 	try {
 		if (fs.existsSync(dbPath)) {
 			const ro = new sqlite.DatabaseSync(dbPath, { readOnly: true });
@@ -1184,6 +1192,17 @@ export function ensureIndex(opts = {}) {
 		}
 	} catch {
 		needsBuild = true; // a corrupt/partial index is rebuilt, not fatal
+	}
+
+	// Stale-while-revalidate (engsys#288): a caller on a wall-clock budget (the SubagentStart brief) serves the index
+	// it has and leaves the rebuild to a detached, lock-guarded process that persists it atomically. Only when there
+	// is no usable index at all does it build inline.
+	if (needsBuild && opts.staleWhileRevalidate && hasUsableIndex(sqlite, dbPath)) {
+		try {
+			(opts.spawnRebuild ?? spawnDetachedRebuild)({ repoRoot, cacheDir, pluginRoot: opts.pluginRoot, version: opts.version, allowedRepos: opts.allowedRepos });
+		} catch { /* the stale index is still served */ }
+		needsBuild = false;
+		served = 'stale';
 	}
 
 	if (needsBuild) {
@@ -1217,9 +1236,86 @@ export function ensureIndex(opts = {}) {
 
 	try {
 		const db = new sqlite.DatabaseSync(dbPath, { readOnly: true });
-		return { db, docs, cacheDir, dbPath };
+		// `stale`: the index predates the current sources (a rebuild is under way). Its ranking is still useful for
+		// the fresh Class A docs returned here, but its Class B events were verified against inputs that may since
+		// have changed (a removed fleet key, a moved ref), so a caller must not surface them (engsys#266 trust).
+		return { db, docs, cacheDir, dbPath, stale: served === 'stale' };
 	} catch {
 		return null;
+	}
+}
+
+/**
+ * The watermark's file manifest with paths made location-independent (engsys#288): bundled lessons keyed by their
+ * path inside the lessons library, project files by their path inside the repo. Every session shares one cache dir
+ * per repo, but each has its own plugin root (per-session config dirs) and may run from another worktree, so
+ * absolute keys made each session's watermark disagree with the last writer's and forced a rebuild every time. The
+ * content hashes still pin every file.
+ */
+export function normalizeManifest(manifest, { repoRoot, lessonsDir }) {
+	const out = {};
+	const rel = (base, p) => {
+		if (!base) return null;
+		const r = path.relative(base, p);
+		return r && !r.startsWith('..') && !path.isAbsolute(r) ? r.split(path.sep).join('/') : null;
+	};
+	for (const [p, sha] of Object.entries(manifest || {})) {
+		const b = rel(lessonsDir, p);
+		const r = b === null ? rel(repoRoot, p) : null;
+		out[b !== null ? `bundled:${b}` : r !== null ? `repo:${r}` : p] = sha;
+	}
+	return out;
+}
+
+function hasUsableIndex(sqlite, dbPath) {
+	try {
+		if (!fs.existsSync(dbPath)) return false;
+		const ro = new sqlite.DatabaseSync(dbPath, { readOnly: true });
+		try { return Boolean(ro.prepare('SELECT 1 FROM watermark WHERE id = 0').get()); } finally { ro.close(); }
+	} catch {
+		return false;
+	}
+}
+
+const REBUILD_LOCK = 'index.rebuild.lock';
+const REBUILD_LOCK_STALE_MS = 120_000;
+
+/** Is a rebuild already running for this cache dir (a lock younger than REBUILD_LOCK_STALE_MS)? */
+function rebuildLocked(cacheDir, now = Date.now()) {
+	try { return now - fs.statSync(path.join(cacheDir, REBUILD_LOCK)).mtimeMs < REBUILD_LOCK_STALE_MS; } catch { return false; }
+}
+
+/** Kick `node index-db.mjs --rebuild …` detached (no stdio, unref'd), unless one is already running. */
+export function spawnDetachedRebuild({ repoRoot, cacheDir, pluginRoot, version }, { spawn = spawnChild } = {}) {
+	if (rebuildLocked(cacheDir)) return false;
+	const args = [fileURLToPath(import.meta.url), '--rebuild', `--repo-root=${repoRoot}`, `--cache-dir=${cacheDir}`];
+	if (pluginRoot) args.push(`--plugin-root=${pluginRoot}`);
+	if (version) args.push(`--version=${version}`);
+	const child = spawn(process.execPath, args, { detached: true, stdio: 'ignore', env: { ...process.env, NODE_NO_WARNINGS: '1' } });
+	child.unref?.();
+	return true;
+}
+
+/**
+ * The detached rebuild: take the cache dir's rebuild lock (mkdir; a stale one is reclaimed), build inline with no
+ * budget (ensureIndex: temp file + atomic rename), release. Never throws. → true when it ran.
+ */
+export function rebuildIndexLocked(opts) {
+	const lock = path.join(opts.cacheDir, REBUILD_LOCK);
+	try {
+		fs.mkdirSync(lock, { mode: 0o700 });
+	} catch {
+		if (rebuildLocked(opts.cacheDir)) return false;
+		try { fs.rmSync(lock, { recursive: true, force: true }); fs.mkdirSync(lock, { mode: 0o700 }); } catch { return false; }
+	}
+	try {
+		const h = ensureIndex({ ...opts, staleWhileRevalidate: false });
+		closeIndex(h);
+		return Boolean(h);
+	} catch {
+		return false;
+	} finally {
+		try { fs.rmSync(lock, { recursive: true, force: true }); } catch { /* best effort */ }
 	}
 }
 
@@ -1344,4 +1440,13 @@ export function listEvents(db) {
 	} catch {
 		return [];
 	}
+}
+
+// `node index-db.mjs --rebuild --repo-root=… --cache-dir=… [--plugin-root=…] [--version=…]`: the detached rebuild that
+// spawnDetachedRebuild starts (engsys#288).
+if (process.argv[1] && fs.existsSync(process.argv[1]) && fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url)) && process.argv.includes('--rebuild')) {
+	const arg = (k) => { const a = process.argv.find((x) => x.startsWith(`--${k}=`)); return a ? a.slice(k.length + 3) : undefined; };
+	const repoRoot = arg('repo-root');
+	const cacheDir = arg('cache-dir');
+	if (repoRoot && cacheDir) rebuildIndexLocked({ repoRoot, cacheDir, pluginRoot: arg('plugin-root'), version: arg('version') });
 }

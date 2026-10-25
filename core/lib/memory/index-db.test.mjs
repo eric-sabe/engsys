@@ -25,6 +25,9 @@ import {
 	computeWatermark,
 	TRUST_SCHEMA,
 	ensureIndex,
+	normalizeManifest,
+	rebuildIndexLocked,
+	spawnDetachedRebuild,
 	isRepoAllowlisted,
 	listEvents,
 	loadClassADocs,
@@ -1035,3 +1038,146 @@ describe('queryIndex', () => {
 	});
 });
 
+// engsys#288: since memory sync went live, every brief hit the SubagentStart hook's 2 s budget mid-rebuild (an
+// autocommit build of ~4k rows took 6-7 s), was killed before the rename, and so never persisted: every brief empty.
+describe('engsys#288: the brief never waits on a rebuild, and a rebuild is fast and shared', () => {
+	const readWatermark = (dir) => {
+		const { DatabaseSync } = require('node:sqlite');
+		const db = new DatabaseSync(join(dir, '.git', 'engsys-memory', 'index.sqlite'), { readOnly: true });
+		try { return db.prepare('SELECT manifest FROM watermark WHERE id = 0').get().manifest; } finally { db.close(); }
+	};
+	const dbFile = (dir) => join(dir, '.git', 'engsys-memory', 'index.sqlite');
+	const plugin = (name) => {
+		const root = mkdtempSync(join(tmpdir(), `memory-idx-288-${name}-`));
+		mkdirSync(join(root, 'lessons-library'));
+		writeFileSync(join(root, 'lessons-library', 'bundled-one.md'), '---\nglobs: []\nstacks: []\nroles: []\nkeywords: ["bundled"]\nsecurity: false\nsupersedes: []\n---\n\n# Bundled\n\nbody\n');
+		return root;
+	};
+
+	test('normalizeManifest keys bundled lessons and repo files by relative path', () => {
+		assert.deepEqual(
+			normalizeManifest({ '/p1/lessons-library/a.md': 'x', '/r/docs/agent-lessons/b.md': 'y', '/elsewhere/c.md': 'z' }, { repoRoot: '/r', lessonsDir: '/p1/lessons-library' }),
+			{ 'bundled:a.md': 'x', 'repo:docs/agent-lessons/b.md': 'y', '/elsewhere/c.md': 'z' },
+		);
+	});
+
+	test('sessions with different plugin roots (same content) and different worktrees share one index: no rebuild ping-pong', { skip: !SQLITE_AVAILABLE }, () => {
+		const dir = makeRepo();
+		const p1 = plugin('a');
+		const p2 = plugin('b');
+		const wt = mkdtempSync(join(tmpdir(), 'memory-idx-288-wt-'));
+		rmSync(wt, { recursive: true, force: true });
+		try {
+			hermeticGit(dir, [...GIT_OPTS, 'worktree', 'add', '-q', '-b', 'w288', wt], { isolateConfig: true });
+			closeIndex(ensureIndex({ repoRoot: dir, pluginRoot: p1 }));
+			const before = fs.statSync(dbFile(dir)).mtimeMs;
+			const mark = readWatermark(dir);
+			closeIndex(ensureIndex({ repoRoot: dir, pluginRoot: p2 }));
+			closeIndex(ensureIndex({ repoRoot: wt, pluginRoot: p2 }));
+			assert.equal(readWatermark(dir), mark, 'same watermark from every session');
+			assert.equal(fs.statSync(dbFile(dir)).mtimeMs, before, 'never rebuilt');
+			// positive control: a real content change in the bundled library does rebuild
+			writeFileSync(join(p2, 'lessons-library', 'bundled-one.md'), '---\nglobs: []\nstacks: []\nroles: []\nkeywords: []\nsecurity: false\nsupersedes: []\n---\n\n# Changed\n');
+			closeIndex(ensureIndex({ repoRoot: dir, pluginRoot: p2 }));
+			assert.notEqual(readWatermark(dir), mark);
+		} finally {
+			for (const d of [wt, dir, p1, p2]) rmSync(d, { recursive: true, force: true });
+		}
+	});
+
+	test('a full build of thousands of rows is one transaction (fast enough for the hook)', { skip: !SQLITE_AVAILABLE }, () => {
+		const dir = makeRepo();
+		try {
+			const cache = join(dir, '.git', 'engsys-memory');
+			mkdirSync(cache, { recursive: true });
+			const lines = [];
+			for (let i = 0; i < 3000; i++) lines.push(JSON.stringify({ k: `fixture/repo:issue:${i}`, kind: 'issue', repo: 'fixture/repo', number: i + 1, author_kind: 'bot', author_id: 1, updated_at: '2026-07-01T00:00:00Z', text: `event ${i}` }));
+			writeFileSync(join(cache, 'delta.jsonl'), `${lines.join('\n')}\n`);
+			const t0 = Date.now();
+			const h = ensureIndex({ repoRoot: dir });
+			const ms = Date.now() - t0;
+			assert.ok(h);
+			assert.equal(h.db.prepare('SELECT COUNT(*) AS n FROM events').get().n, 3000);
+			closeIndex(h);
+			assert.ok(ms < 1500, `3000 events built in ${ms} ms (autocommit took seconds)`);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('stale-while-revalidate: a slow rebuild never blocks — the previous index is served (stale) and the rebuild is handed off', { skip: !SQLITE_AVAILABLE }, () => {
+		const dir = makeRepo();
+		try {
+			closeIndex(ensureIndex({ repoRoot: dir }));
+			const before = fs.statSync(dbFile(dir)).mtimeMs;
+			const oldMark = readWatermark(dir);
+			// the sources change, so the watermark no longer matches
+			writeFileSync(join(dir, 'docs', 'agent-lessons', 'two.md'), '---\nglobs: []\nstacks: []\nroles: []\nkeywords: ["sprockets"]\nsecurity: false\nsupersedes: []\n---\n\n# Sprockets\n\nbody\n');
+			commitAndPush(dir, 'add two');
+			// a build that would take 3 s (well past the hook's 2 s)
+			const { DatabaseSync } = require('node:sqlite');
+			class SlowDb extends DatabaseSync {
+				exec(sql) { if (sql === 'COMMIT') Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3000); return super.exec(sql); }
+			}
+			const spawned = [];
+			const t0 = Date.now();
+			const h = ensureIndex({ repoRoot: dir, sqlite: { DatabaseSync: SlowDb }, staleWhileRevalidate: true, spawnRebuild: (args) => spawned.push(args) });
+			const ms = Date.now() - t0;
+			assert.ok(h, 'served');
+			assert.equal(h.stale, true, 'marked stale, so a caller drops its Class B events');
+			assert.ok(h.docs.some((d) => d.key === 'lesson:two'), 'the docs returned are this run\'s fresh ones');
+			closeIndex(h);
+			assert.ok(ms < 1500, `returned in ${ms} ms, not after the 3 s build`);
+			assert.equal(spawned.length, 1, 'the rebuild was handed off');
+			assert.equal(spawned[0].repoRoot, dir);
+			assert.ok(spawned[0].cacheDir.endsWith(join('.git', 'engsys-memory')), spawned[0].cacheDir);
+			assert.equal(fs.statSync(dbFile(dir)).mtimeMs, before, 'nothing built inline');
+			assert.equal(readWatermark(dir), oldMark);
+			// the hand-off (here run in-process; spawnDetachedRebuild runs the same thing detached) persists the new index
+			assert.equal(rebuildIndexLocked({ repoRoot: dir, cacheDir: join(dir, '.git', 'engsys-memory') }), true);
+			assert.notEqual(readWatermark(dir), oldMark, 'persisted');
+			const fresh = ensureIndex({ repoRoot: dir, staleWhileRevalidate: true, spawnRebuild: () => { throw new Error('no rebuild needed now'); } });
+			assert.equal(fresh.stale, false);
+			assert.ok(queryIndex(fresh.db, { text: 'sprockets' }).some((r) => r.key === 'lesson:two'));
+			closeIndex(fresh);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('no index at all: built inline even with stale-while-revalidate (nothing to serve)', { skip: !SQLITE_AVAILABLE }, () => {
+		const dir = makeRepo();
+		try {
+			const h = ensureIndex({ repoRoot: dir, staleWhileRevalidate: true, spawnRebuild: () => { throw new Error('must not hand off'); } });
+			assert.ok(h);
+			assert.equal(h.stale, false);
+			closeIndex(h);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('spawnDetachedRebuild really runs detached, persists the index atomically, and one lock stops a second', { skip: !SQLITE_AVAILABLE }, async () => {
+		const dir = makeRepo();
+		try {
+			const cacheDir = join(dir, '.git', 'engsys-memory');
+			closeIndex(ensureIndex({ repoRoot: dir }));
+			const oldMark = readWatermark(dir);
+			writeFileSync(join(dir, 'docs', 'agent-lessons', 'three.md'), '---\nglobs: []\nstacks: []\nroles: []\nkeywords: ["gears"]\nsecurity: false\nsupersedes: []\n---\n\n# Gears\n\nbody\n');
+			commitAndPush(dir, 'add three');
+			// a held lock: no second rebuild is started
+			mkdirSync(join(cacheDir, 'index.rebuild.lock'));
+			assert.equal(spawnDetachedRebuild({ repoRoot: dir, cacheDir }), false);
+			rmSync(join(cacheDir, 'index.rebuild.lock'), { recursive: true });
+			assert.equal(spawnDetachedRebuild({ repoRoot: dir, cacheDir }), true);
+			const deadline = Date.now() + 20_000;
+			while (readWatermark(dir) === oldMark && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+			assert.notEqual(readWatermark(dir), oldMark, 'the detached rebuild persisted the new index');
+			while (fs.existsSync(join(cacheDir, 'index.rebuild.lock')) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+			assert.equal(fs.existsSync(join(cacheDir, 'index.rebuild.lock')), false, 'and released its lock');
+			assert.deepEqual(fs.readdirSync(cacheDir).filter((f) => f.startsWith('index.sqlite.tmp-')), [], 'no temp left behind');
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});

@@ -797,7 +797,9 @@ export function buildBrief(opts = {}) {
 		const excluded = resolveExcludedAgents(config, { repoRoot });
 		const classBAllowed = !isClassBExcluded(opts.agentType, excluded);
 
-		const handle = ensureIndex({ repoRoot, pluginRoot: opts.pluginRoot, allowedRepos: opts.allowedRepos, cacheDir: opts.cacheDir, version: opts.version ?? 'dev', sqlite: opts.sqlite });
+		// engsys#288: the brief runs on the SubagentStart hook's wall-clock budget, so a stale index is served while a
+		// detached rebuild refreshes it (never a cold rebuild inline that the hook would kill before it persists).
+		const handle = ensureIndex({ repoRoot, pluginRoot: opts.pluginRoot, allowedRepos: opts.allowedRepos, cacheDir: opts.cacheDir, version: opts.version ?? 'dev', sqlite: opts.sqlite, staleWhileRevalidate: opts.staleWhileRevalidate ?? true, spawnRebuild: opts.spawnRebuild });
 		if (!handle) return empty;
 
 		// Reviewed-ref content only, via `handle.docs` (loadClassADocs -> loadProjectClassADocs) — NOT
@@ -849,7 +851,9 @@ export function buildBrief(opts = {}) {
 		);
 
 		let pointers = [];
-		if (classBAllowed) {
+		// A stale index (a rebuild is under way) never surfaces Class B: its events were verified against inputs that may
+		// have changed since (engsys#266 trust); Class A still renders from this run's fresh docs.
+		if (classBAllowed && !handle.stale) {
 			const events = listEvents(handle.db);
 			pointers = selectPointers(
 				events,

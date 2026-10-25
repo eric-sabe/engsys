@@ -140,10 +140,21 @@ directory is shared by every worktree, is never committed, and survives `git wor
 
 - **Sources:** Class A files, plus the events from every configured repo's ref and the local delta.
 - **Watermark:** a manifest of `path → sha1` for every source, plus the engsys version. Directory
-  mtimes are **not** used; they miss in-place edits, and git checkout resets them.
-- **Rebuild** whenever the manifest differs. Build into `index.sqlite.tmp-<pid>`, then `rename()` it
-  into place. Readers open read-only. If a lock or error occurs, **fail open**: return an empty
-  result, never throw into a hook. Expected cost is ~100 ms wall for 10k events.
+  mtimes are **not** used; they miss in-place edits, and git checkout resets them. Paths are
+  location-independent (`bundled:<rel>` for the lessons library, `repo:<rel>` for project files;
+  engsys#288): every session shares one cache dir per repo but has its own plugin root and may run
+  from another worktree, and absolute keys made each session rebuild what the last one wrote.
+- **Rebuild** whenever the manifest differs. Build into `index.sqlite.tmp-<pid>` in ONE transaction
+  (no per-row fsync: an autocommit build of ~4k rows took 6–7 s), then `rename()` it into place.
+  Readers open read-only. If a lock or error occurs, **fail open**: return an empty result, never
+  throw into a hook. A full keystone build (~300 docs, ~1.7k events) takes ~0.5 s with the sources.
+- **The brief never waits on a rebuild** (engsys#288). On its SubagentStart budget it calls
+  `ensureIndex({ staleWhileRevalidate: true })`: a stale index is served (marked `stale`, so the
+  brief drops its Class B pointers, whose trust inputs may have moved; Class A renders from this
+  run's fresh docs) and the rebuild is handed to a detached `node index-db.mjs --rebuild`, guarded by
+  `<cacheDir>/index.rebuild.lock` (stale after 120 s) and persisted atomically. With no index at all
+  it builds inline. The heartbeat's `--delta` and `--consume` rebuild inline right after moving
+  events, so a brief normally finds the index current.
 - **Schema:** `docs(key, class, kind, path, symbol, roles, globs, keywords, body)` as FTS5 with
   `porter unicode61`, plus plain tables for frontmatter and the event fields.
 - **Runtime:** `node:sqlite` requires Node ≥ 22.5 (FTS5 verified on 22.22). Run with
