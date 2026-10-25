@@ -41,6 +41,8 @@
 #                          default security-review-requested), or a new `<!-- nyx-review -->` comment landed on a PR
 #                          that carries it: the verdict may have landed. Re-run preflight for #N (and re-check its
 #                          gate request at that head). The tick re-preflights such PRs every time as the backstop.
+#                          The labeled list comes from the same mmLists GraphQL read (never search), and label_removed
+#                          needs the PR missing from two polls in a row (engsys#272).
 #   STOP                   ledger issue closed (kill switch) — script exits
 #   HANDBACK_INCOMPLETE <agent> (<id>): <remains>
 #                         a subagent handed back unfinished work (the engsys hand-back hook's log
@@ -315,19 +317,26 @@ fhd_event() {
 # or a check, so nothing above sees it. secreview.tsv holds the PRs that carried the label last cycle; nyx.seen the
 # nyx-review comment ids seen on them (the first cycle of a fresh state dir, and a PR's first labeled cycle, only record, so
 # a restart or a new label does not fire for a comment that was already there).
-# A failed read changes nothing (no false "label removed").
+# A failed read changes nothing (no false "label removed"), and the list comes from the mmLists GraphQL read (not search),
+# with the two-poll rule for label_removed (engsys#272).
 NYX_RE='^\s*<!-- nyx-review -->'
 verdict_event() {
-  local raw n ids id woke first=0
-  raw=$("$FLEET_GH" pr list -R "$REPO" --state open --limit 200 --label "$REVIEW_LABEL" --json number,labels 2>/dev/null) || return 0
-  printf '%s' "$raw" | jq -e 'type == "array"' >/dev/null 2>&1 || return 0   # no list is no answer, never "no label anywhere"
-  printf '%s' "$raw" | jq -r --arg rl "$(printf '%s' "$REVIEW_LABEL" | tr '[:upper:]' '[:lower:]')" \
-    '.[] | select(any(.labels[]; (.name | ascii_downcase) == $rl)) | .number' 2>/dev/null | LC_ALL=C sort -u >"$W/secreview.new" || return 0
+  local n ids id woke first=0
+  # the review list from this cycle's mmLists read (engsys#272: not search); none this cycle is no answer, never
+  # "no label anywhere"
+  [ -n "${LISTS_RAW:-}" ] || return 0
+  printf '%s' "$LISTS_RAW" | jq -r --arg rl "$(printf '%s' "$REVIEW_LABEL" | tr '[:upper:]' '[:lower:]')" \
+    '.data.repository.review.nodes[] | select(any(.labels.nodes[]?; (.name | ascii_downcase) == $rl)) | .number' 2>/dev/null \
+    | LC_ALL=C sort -u >"$W/secreview.new" || return 0
   [ -f "$W/secreview.tsv" ] || first=1
-  touch "$W/secreview.tsv" "$W/nyx.seen"
-  [ "$first" = 1 ] || LC_ALL=C comm -23 "$W/secreview.tsv" "$W/secreview.new" | while IFS= read -r n; do
+  touch "$W/secreview.tsv" "$W/secreview.gone" "$W/nyx.seen"
+  LC_ALL=C sort -u -o "$W/secreview.gone" "$W/secreview.gone"
+  # label_removed needs the PR missing from two polls in a row (secreview.gone), as READY does: one short read never wakes
+  LC_ALL=C comm -23 "$W/secreview.tsv" "$W/secreview.new" >"$W/secreview.absent"
+  [ "$first" = 1 ] || LC_ALL=C comm -12 "$W/secreview.gone" "$W/secreview.absent" | while IFS= read -r n; do
     [ -n "$n" ] && echo "VERDICT_WAKE #$n label_removed"
   done
+  LC_ALL=C comm -23 "$W/secreview.absent" "$W/secreview.gone" >"$W/secreview.pending"   # missing once: still on record
   : >"$W/nyx.new"
   while IFS= read -r n; do
     case "$n" in '' | *[!0-9]*) continue ;; esac
@@ -347,7 +356,8 @@ verdict_event() {
   done <"$W/secreview.new"
   # bounded: the newest PRs' entries are kept
   LC_ALL=C sort -u "$W/nyx.seen" "$W/nyx.new" | sort -t "$(printf '\t')" -k1,1n | tail -n 2000 >"$W/nyx.keep" && mv "$W/nyx.keep" "$W/nyx.seen"
-  mv "$W/secreview.new" "$W/secreview.tsv"
+  LC_ALL=C sort -u "$W/secreview.new" "$W/secreview.pending" >"$W/secreview.tsv"
+  mv "$W/secreview.pending" "$W/secreview.gone"; rm -f "$W/secreview.new" "$W/secreview.absent"
 }
 
 while true; do
@@ -363,16 +373,20 @@ while true; do
     if [ "$STATE" = "CLOSED" ]; then echo "STOP"; exit 0; fi
   fi
 
-  # --- new / withdrawn mm:ready PRs, and operator-gate wakes on parked PRs (engsys#272) ------
-  # One GraphQL read of both lists from repository.pullRequests(labels:, states: OPEN): the repository's own index,
-  # NOT `gh pr list --label`, which goes through the eventually consistent search API and can leave a PR out of a poll
-  # while search reindexes it (keystone#4694). An answer without data.repository is no answer. 100 per list.
-  if RAW=$("$FLEET_GH" api graphql -f owner="${REPO%%/*}" -f name="${REPO##*/}" -f query='
-      query mmLists($owner: String!, $name: String!) { repository(owner: $owner, name: $name) {
+  # --- new / withdrawn mm:ready PRs, operator-gate wakes on parked PRs, the review request label (engsys#272) ------
+  # One GraphQL read of the three label lists from repository.pullRequests(labels:, states: OPEN): the repository's own
+  # index, NOT `gh pr list --label`, which goes through the eventually consistent search API and can leave a PR out of
+  # a poll while search reindexes it (keystone#4694). An answer without data.repository is no answer. 100 per list.
+  # verdict_event (below) reads the review list from LISTS_RAW, set only by a good answer this cycle.
+  LISTS_RAW=""
+  if RAW=$("$FLEET_GH" api graphql -f owner="${REPO%%/*}" -f name="${REPO##*/}" -f review="$REVIEW_LABEL" -f query='
+      query mmLists($owner: String!, $name: String!, $review: String!) { repository(owner: $owner, name: $name) {
         ready: pullRequests(labels: ["mm:ready"], states: OPEN, first: 100) { nodes { number title labels(first: 30) { nodes { name } } } }
         blocked: pullRequests(labels: ["mm:blocked"], states: OPEN, first: 100) {
-          nodes { number mergeStateStatus labels(first: 30) { nodes { name } } reviews(last: 1) { totalCount nodes { state } } } } } }' 2>/dev/null) \
-      && printf '%s' "$RAW" | jq -e '(.data.repository.ready.nodes | type == "array") and (.data.repository.blocked.nodes | type == "array")' >/dev/null 2>&1; then
+          nodes { number mergeStateStatus labels(first: 30) { nodes { name } } reviews(last: 1) { totalCount nodes { state } } } }
+        review: pullRequests(labels: [$review], states: OPEN, first: 100) { nodes { number labels(first: 30) { nodes { name } } } } } }' 2>/dev/null) \
+      && printf '%s' "$RAW" | jq -e '[.data.repository.ready.nodes, .data.repository.blocked.nodes, .data.repository.review.nodes] | all(type == "array")' >/dev/null 2>&1; then
+    LISTS_RAW="$RAW"
     printf '%s' "$RAW" | jq -r '.data.repository.ready.nodes[] | select(any(.labels.nodes[]?; .name == "mm:ready"))
         | "#\(.number)\t\(.title // "" | gsub("[\t\r\n]"; " "))"' \
       | LC_ALL=C sort -t "$(printf '\t')" -k1,1 -u > "$W/ready.new"

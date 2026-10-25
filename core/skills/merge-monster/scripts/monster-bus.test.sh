@@ -82,8 +82,9 @@ overdue_row() { # overdue_row <name> <task>: a running registry row whose deadli
 
 echo "READY/UNREADY never flap on a parked gate; GATE_REVIEW wakes the gate-check (engsys#272)"
 LISTS="$T/resp/api-graphql-lists"
-# lists <ready nodes JSON> <blocked nodes JSON>: the mmLists GraphQL answer
-lists() { printf '{"data":{"repository":{"ready":{"nodes":[%s]},"blocked":{"nodes":[%s]}}}}\n' "$1" "$2"; }
+# lists <ready nodes> <blocked nodes> [<review-label nodes>]: the mmLists GraphQL answer
+lists() { printf '{"data":{"repository":{"ready":{"nodes":[%s]},"blocked":{"nodes":[%s]},"review":{"nodes":[%s]}}}}\n' "$1" "$2" "${3:-}"; }
+vnode() { printf '{"number":%s,"labels":{"nodes":[{"name":"mm:ready"},{"name":"%s"}]}}' "$1" "${2:-security-review-requested}"; }
 rnode() { printf '{"number":%s,"title":"chore(fleet): pin engsys","labels":{"nodes":[{"name":"mm:ready"},{"name":"mm:blocked"}]}}' "$1"; }
 bnode() { # bnode <number> <mergeStateStatus> <review count> <latest state>
   printf '{"number":%s,"mergeStateStatus":"%s","labels":{"nodes":[{"name":"mm:ready"},{"name":"mm:blocked"}]},"reviews":{"totalCount":%s,"nodes":[%s]}}' \
@@ -98,7 +99,7 @@ wbus 4
 hasnt "  …and never UNREADY" "UNREADY"
 hasnt "  …and no GATE_REVIEW on its first parked cycles" "GATE_REVIEW"
 grep -q "query mmLists" "$T/gh.log" && ok "  …read from repository.pullRequests(labels:), one GraphQL call for both lists" || bad "  …read through GraphQL" "$(cat "$T/gh.log")"
-grep -q "pr list .*--label mm:ready\|pr list .*--label mm:blocked" "$T/gh.log" && bad "  …never the search-backed gh pr list --label" "$(grep 'pr list' "$T/gh.log")" || ok "  …never the search-backed gh pr list --label"
+grep -q "pr list .*--label" "$T/gh.log" && bad "  …never the search-backed gh pr list --label (mm:ready, mm:blocked or the review label)" "$(grep 'pr list' "$T/gh.log")" || ok "  …never the search-backed gh pr list --label (mm:ready, mm:blocked or the review label)"
 wbus 2
 hasnt "  …nor READY again from a new bus (the record is on disk)" "READY #4694"
 # case A, the #4694 pattern: every other read comes back empty
@@ -413,23 +414,32 @@ nyx_gql() { # nyx_gql <id>...: the PR's last comments, one nyx-review per id plu
   for i in "$@"; do nodes="$nodes,{\"id\":\"$i\",\"body\":\"<!-- nyx-review -->\\nNYX-VERDICT: PASS\"}"; done
   printf '{"data":{"repository":{"pullRequest":{"comments":{"nodes":[%s]}}}}}\n' "$nodes" >"$T/resp/api-graphql"
 }
-printf '[%s]\n' "$(labeled_pr 20)" >"$T/resp/pr-list"; nyx_gql IC_n1
+LISTS="$T/resp/api-graphql-lists"
+lists "" "" "$(vnode 20)" >"$LISTS"; nyx_gql IC_n1
 bus 2 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents
 hasnt "mm-watch.sh: the first cycle only records what is there (a restart does not re-fire)" "VERDICT_WAKE"
+grep -q "pr list .*--label" "$T/gh.log" && bad "  …the review label list comes from the mmLists GraphQL read, never gh pr list --label" "$(grep 'pr list' "$T/gh.log")" || ok "  …the review label list comes from the mmLists GraphQL read, never gh pr list --label"
+grep -q -- "-f review=security-review-requested" "$T/gh.log" && ok "  …asking for the configured label" || bad "  …asking for the configured label" "$(grep mmLists "$T/gh.log" | head -1)"
 nyx_gql IC_n1 IC_n2 IC_n3
 bus 3 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents
 has "  …a new nyx-review comment on a labeled PR is an event" "VERDICT_WAKE #20 nyx_review_comment"
 [ "$(count_of 'VERDICT_WAKE #20 nyx_review_comment')" = 1 ] && ok "  …once, for two new comments over several cycles" || bad "  …once" "$OUT"
-printf '[%s]\n' "$(pr_json 20 CLEAN)" >"$T/resp/pr-list"
+# case A for the review list: every other read is empty, and nothing wakes
+lists "" "" "" >"$LISTS.flap"; rm -f "$LISTS.flapn"
+bus 6 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents
+[ "$(cat "$LISTS.flapn" 2>/dev/null || echo 0)" -ge 3 ] && ok "  (case A replay on the review list: full and empty reads alternated $(cat "$LISTS.flapn") times)" || bad "the review-list replay alternated" "$(cat "$LISTS.flapn" 2>/dev/null)"
+hasnt "  …alternating full and empty reads: no label_removed" "label_removed"
+rm -f "$LISTS.flap" "$LISTS.flapn"
+lists "" "" "" >"$LISTS"
 bus 3 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents
-has "  …and so is the label's removal" "VERDICT_WAKE #20 label_removed"
+has "  …and so is the label's removal (missing two polls in a row)" "VERDICT_WAKE #20 label_removed"
 [ "$(count_of 'VERDICT_WAKE #20 label_removed')" = 1 ] && ok "  …once" || bad "  …once" "$OUT"
-printf '[%s]\n' "$(labeled_pr 21)" >"$T/resp/pr-list"; nyx_gql IC_old
+lists "" "" "$(vnode 21)" >"$LISTS"; nyx_gql IC_old
 bus 3 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents
 hasnt "  …a PR labeled later with a nyx-review comment already on it: no wake for that old comment" "VERDICT_WAKE #21 nyx_review_comment"
-rm -f "$T/resp/pr-list"
+rm -f "$LISTS"
 bus 2 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents
-hasnt "  …an unreadable PR list is no event" "VERDICT_WAKE"
+hasnt "  …an unreadable list is no event" "VERDICT_WAKE"
 # a review-label conflict across merge configs is said loudly, never silently replaced by the default
 printf 'security_review_label: needs-nyx\n' >"$T/lbl-a.yml"; printf 'security_review_label: other\n' >"$T/lbl-b.yml"
 ENGSYS_MM_CONFIG="$T/lbl-a.yml" bus 2 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents --config "$T/lbl-b.yml"
