@@ -27,7 +27,7 @@ roster_field() { # roster_field <name> <n> → field n of <name>'s rendered rost
 roster_default_env() { sed -n 's/^ENV_FILE=//p' "$FLEET_STATE/roster" | tail -n 1 | sed -e 's/[[:space:]][[:space:]]*#.*$//' -e 's/[[:space:]]*$//'; }
 roster_model_header() { sed -n 's/^MODEL=//p' "$FLEET_STATE/roster" | tail -n 1 | sed -e 's/[[:space:]][[:space:]]*#.*$//' -e 's/[[:space:]]*$//'; }
 norm_words() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr '_ ' '--'; }
-# A security-tier line, as the launcher reads it (launch-agent-sessions.sh is_security_line): its env file
+# A security-tier line, as the launcher reads it (lib/session-env.sh is_security_line, sourced by launch-agent-sessions.sh): its env file
 # (5th field, else the roster's ENV_FILE) is named security or nyx in any case, or any --model in its flags
 # (or the roster's MODEL=) names Claude Opus 4.8.
 is_security_session() { # is_security_session <name>

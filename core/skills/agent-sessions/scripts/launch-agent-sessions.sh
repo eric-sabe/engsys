@@ -81,9 +81,12 @@ unset ENGSYS_MM_CONFIG   # engsys#229: set per merge-role line (lib/session-env.
 unset ENGSYS_MEMORY_CONFIG   # engsys#262: set for a line on its own per-session login dir (lib/session-env.sh), never inherited
 # engsys#287: the fleet's Claude config dir as the fleet kit gave it to this launcher (fleet-env.sh exports it); a line
 # gets this value or none, never what its window inherited
+# shellcheck disable=SC2034  # read by lib/session-env.sh
 LAUNCHER_FLEET_CFG="${FLEET_CLAUDE_CONFIG_DIR:-}"
 # and the per-session dirs' parent (the fleet kit passes it; core/lib/mm-config.mjs searches it inside a session)
+# shellcheck disable=SC2034  # read by lib/session-env.sh
 LAUNCHER_CFG_SESSIONS="${ENGSYS_CONFIG_DIR_SESSIONS:-}"
+# shellcheck disable=SC2034  # VERDICT_KEY_FILE and MEMORY_KEY_FILE are read by lib/session-env.sh
 while [ $# -gt 0 ]; do
   case "$1" in
     --roster) ROSTER="$2"; shift 2 ;;
