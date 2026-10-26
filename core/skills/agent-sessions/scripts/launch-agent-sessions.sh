@@ -77,8 +77,8 @@ unset ENGSYS_SECURITY_VERDICT_KEY_FILE
 # F5: the memory signing key PATH arrives the same way (--memory-key-file) and reaches only merge/maintain lines.
 MEMORY_KEY_FILE=""
 unset ENGSYS_MEMORY_SIGNING_KEY_FILE
-unset ENGSYS_MM_CONFIG   # engsys#229: set per merge-role line below, never inherited (nor seen by the tmux server)
-unset ENGSYS_MEMORY_CONFIG   # engsys#262: set below for a line on its own per-session login dir, never inherited
+unset ENGSYS_MM_CONFIG   # engsys#229: set per merge-role line (lib/session-env.sh), never inherited (nor seen by the tmux server)
+unset ENGSYS_MEMORY_CONFIG   # engsys#262: set for a line on its own per-session login dir (lib/session-env.sh), never inherited
 # engsys#287: the fleet's Claude config dir as the fleet kit gave it to this launcher (fleet-env.sh exports it); a line
 # gets this value or none, never what its window inherited
 LAUNCHER_FLEET_CFG="${FLEET_CLAUDE_CONFIG_DIR:-}"
@@ -95,6 +95,11 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# engsys#287: the harness-neutral core (identity, line policy, the trust environment) and, below, one harness adapter.
+LAUNCHER_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/lib"
+# shellcheck source=lib/session-env.sh
+. "$LAUNCHER_LIB/session-env.sh"
+
 REPO="$(pwd)"
 ROSTER_DIR="$(cd "$(dirname "$ROSTER")" 2>/dev/null && pwd)" || ROSTER_DIR="$REPO"
 [ -f "$ROSTER" ] || { echo "error: roster not found: $ROSTER (see the agent-sessions skill's roster.example)" >&2; exit 1; }
@@ -105,8 +110,6 @@ case "$LAUNCH_START_TIMEOUT_SEC" in '' | *[!0-9]*) echo "error: LAUNCH_START_TIM
 # The one line typed into a window, `. <launch file>`, stays far below MAX_CANON (1024 bytes); a launch dir whose
 # path would push it past this is refused rather than truncated.
 LAUNCH_LINE_MAX=512
-# launchd jobs (the fleet supervisor) run with a fixed PATH that may not include where Claude Code was
-# installed: the native installer uses ~/.local/bin. Look in the standard install locations before failing.
 HARNESS="${HARNESS:-${FLEET_HARNESS:-claude}}"
 
 # ---------------------------------------------------------------------------
@@ -124,7 +127,7 @@ while IFS= read -r line; do
     '' | \#*) continue ;;
     NAMESPACE=*) NAMESPACE="${line#NAMESPACE=}" ;;
     TMUX_SESSION=*) TMUX_SESSION="${line#TMUX_SESSION=}" ;;
-    ENV_FILE=*) ENV_FILE="${line#ENV_FILE=}"; ENV_FILE="${ENV_FILE/#\~/$HOME}" ;;
+    ENV_FILE=*) ENV_FILE="${line#ENV_FILE=}"; ENV_FILE="$(expand_tilde "$ENV_FILE")" ;;
     MODEL=*) MODEL="${line#MODEL=}" ;;
     HARNESS=*) HARNESS="${line#HARNESS=}" ;;
     PREFLIGHT=*) PREFLIGHTS+=("${line#PREFLIGHT=}") ;;
@@ -133,17 +136,35 @@ while IFS= read -r line; do
   esac
 done < "$ROSTER"
 
-case "$HARNESS" in
-  claude | copilot | antigravity) ;;
-  agy) HARNESS=antigravity ;;
-  *) echo "error: unsupported HARNESS '$HARNESS' (expected claude, copilot, or antigravity)" >&2; exit 1 ;;
-esac
+# The one place a harness is chosen by name (engsys#287): HARNESS selects the adapter lib/harness/<HARNESS>.sh, and
+# everything after this asks the adapter (harness_*) or its declared capabilities (has_capability), never the name.
+# launch-golden.test.sh lints that no other HARNESS comparison exists outside lib/harness/.
+case "$HARNESS" in agy) HARNESS=antigravity ;; esac # adapter-select: `agy` is an alias
+adapter_name_ok() { case "$1" in '' | *[!a-z0-9_-]*) return 1 ;; esac; return 0; }
+if ! adapter_name_ok "$HARNESS" || [ ! -f "$LAUNCHER_LIB/harness/$HARNESS.sh" ]; then
+  echo "error: unsupported HARNESS '$HARNESS' (expected claude, copilot, or antigravity)" >&2; exit 1
+fi
+# load_harness_adapter <file>: source it, and fail now when it lacks a required function or declares an unknown
+# capability. HARNESS_CAPS is read once, here.
+load_harness_adapter() {
+  local f cap
+  unset -f harness_bin harness_capabilities harness_translate_flags harness_run_cmd harness_prelaunch
+  # shellcheck source=/dev/null
+  . "$1"
+  for f in harness_bin harness_capabilities harness_translate_flags harness_run_cmd; do
+    declare -F "$f" >/dev/null || { echo "error: harness adapter $1 does not define $f" >&2; return 1; }
+  done
+  HARNESS_CAPS="$(harness_capabilities)"
+  for cap in $HARNESS_CAPS; do
+    case " $HARNESS_KNOWN_CAPS " in *" $cap "*) ;; *) echo "error: harness adapter $1 declares an unknown capability: $cap" >&2; return 1 ;; esac
+  done
+  HARNESS_BIN="$(harness_bin)"
+  [ -n "$HARNESS_BIN" ] || { echo "error: harness adapter $1 names no binary (harness_bin)" >&2; return 1; }
+}
+load_harness_adapter "$LAUNCHER_LIB/harness/$HARNESS.sh" || exit 1
 
-HARNESS_BIN="claude"
-case "$HARNESS" in
-  copilot) HARNESS_BIN="copilot" ;;
-  antigravity) HARNESS_BIN="agy" ;;
-esac
+# launchd jobs (the fleet supervisor) run with a fixed PATH that may not include where Claude Code was
+# installed: the native installer uses ~/.local/bin. Look in the standard install locations before failing.
 if ! command -v "$HARNESS_BIN" >/dev/null 2>&1; then
   for d in "$HOME/.local/bin" /opt/homebrew/bin /usr/local/bin; do
     if [ -x "$d/$HARNESS_BIN" ]; then PATH="$d:$PATH"; export PATH; break; fi
@@ -164,7 +185,7 @@ SETTINGS_FILE="$HOME/.claude/${NAMESPACE}-messaging-settings.json"
 # The naming convention is only *safe* because the monster skills validate
 # every inbound message against the repo before acting.
 # ---------------------------------------------------------------------------
-if [ "$HARNESS" = "claude" ]; then
+if has_capability settings_file; then
   if [ ! -f "$SETTINGS_FILE" ]; then
     mkdir -p "$(dirname "$SETTINGS_FILE")"
     printf '{\n  "crossSessionInbound": "accept"\n}\n' > "$SETTINGS_FILE"
@@ -197,226 +218,8 @@ for pf in ${PREFLIGHTS[@]+"${PREFLIGHTS[@]}"}; do
   bash -c "$pf" || echo "warning: preflight failed (sessions start anyway): $pf" >&2
 done
 
-# Translate Claude-style roster flags into shell-escaped Copilot CLI flags when HARNESS=copilot.
-translate_copilot_flags() {
-  local raw="$1" out=() tok q=()
-  set -f
-  # shellcheck disable=SC2086
-  set -- $raw
-  set +f
-  while [ $# -gt 0 ]; do
-    tok="$1"; shift
-    case "$tok" in
-      --dangerously-skip-permissions)
-        out+=(--yolo --mode autopilot --no-ask-user) ;;
-      --remote-control)
-        out+=(--remote) ;;
-      --permission-mode)
-        if [ "${1:-}" = "bypassPermissions" ]; then out+=(--yolo); fi
-        [ $# -eq 0 ] || shift ;;
-      --effort)
-        if [ $# -gt 0 ]; then out+=(--reasoning-effort "$1"); shift; fi ;;
-      --model)
-        if [ $# -gt 0 ]; then
-          case "$1" in
-            opus | fable | claude-opus-5* | claude-fable-*) out+=(--model claude-opus-5.5) ;;
-            claude-opus-4-8) out+=(--model claude-opus-4.8) ;;
-            sonnet | claude-sonnet-5*) out+=(--model claude-sonnet-5.5) ;;
-            haiku | claude-haiku-*) out+=(--model claude-haiku-5.5) ;;
-            *) out+=(--model "$1") ;;
-          esac
-          shift
-        fi ;;
-      --*=~ | --*=~/*)
-        out+=("${tok/=\~/=$HOME}") ;;
-      \~ | \~/*)
-        out+=("${tok/#\~/$HOME}") ;;
-      *)
-        out+=("$tok") ;;
-    esac
-  done
-  if [ "${#out[@]}" -gt 0 ]; then
-    local item
-    for item in "${out[@]}"; do
-      q+=("$(printf '%q' "$item")")
-    done
-    printf '%s' "${q[*]}"
-  fi
-}
-
-# Translate Claude-style roster flags into shell-escaped Antigravity CLI (agy) flags when HARNESS=antigravity.
-# When a 2nd argument (<session-name>) is supplied and --remote-control (or AGY_REMOTE_CONTROL=1) is active,
-# appends `--remote-control-name <session-name>` unless `--remote-control-name` was already passed explicitly (#283).
-translate_antigravity_flags() {
-  local raw="$1" session_name="${2:-}" out=() tok q=() has_rc=0 has_rc_name=0
-  set -f
-  # shellcheck disable=SC2086
-  set -- $raw
-  set +f
-  while [ $# -gt 0 ]; do
-    tok="$1"; shift
-    case "$tok" in
-      --dangerously-skip-permissions)
-        out+=(--dangerously-skip-permissions) ;;
-      --remote-control)
-        out+=(--remote-control); has_rc=1 ;;
-      --remote-control-name)
-        has_rc_name=1
-        if [ $# -gt 0 ]; then out+=(--remote-control-name "$1"); shift; fi ;;
-      --remote-control-name=*)
-        has_rc_name=1
-        out+=("$tok") ;;
-      --permission-mode)
-        if [ "${1:-}" = "bypassPermissions" ]; then out+=(--dangerously-skip-permissions); fi
-        [ $# -eq 0 ] || shift ;;
-      --effort)
-        if [ $# -gt 0 ]; then out+=(--effort "$1"); shift; fi ;;
-      --model)
-        if [ $# -gt 0 ]; then
-          if is_security_model "$1"; then
-            echo "error: Antigravity cannot run the security model ($1); refusing to map it to another model" >&2
-            return 1
-          fi
-          case "$1" in
-            opus | sonnet | fable | claude-* | pro) out+=(--model gemini-4-argon) ;;
-            haiku | flash) out+=(--model gemini-3.8-flash) ;;
-            inherit) ;;
-            *) out+=(--model "$1") ;;
-          esac
-          shift
-        fi ;;
-      --*=~ | --*=~/*)
-        out+=("${tok/=\~/=$HOME}") ;;
-      \~ | \~/*)
-        out+=("${tok/#\~/$HOME}") ;;
-      *)
-        out+=("$tok") ;;
-    esac
-  done
-  if [ "${AGY_REMOTE_CONTROL:-0}" = 1 ] && [ "$has_rc" = 0 ]; then
-    out+=(--remote-control); has_rc=1
-  fi
-  if [ "$has_rc" = 1 ] && [ "$has_rc_name" = 0 ] && [ -n "$session_name" ]; then
-    out+=(--remote-control-name "$session_name")
-  fi
-  if [ "${#out[@]}" -gt 0 ]; then
-    local item
-    for item in "${out[@]}"; do
-      q+=("$(printf '%q' "$item")")
-    done
-    printf '%s' "${q[*]}"
-  fi
-}
-
-# Antigravity per-session `--remote-control --remote-control-name <name>` is self-contained per tmux TUI
-# process (#283). The standalone host background daemon (`agy remote-control start`, which serves saved
-# `~/.gemini/antigravity-cli/conversations/*.pb` files from disk in a separate headless process) is
-# strictly opt-in via AGY_REMOTE_CONTROL_AUTOSTART=1 and defaults to off (0) so it does not compete with
-# or cold-load `.pb` files away from live tmux sessions.
-if [ "$HARNESS" = "antigravity" ] && [ "${AGY_REMOTE_CONTROL_AUTOSTART:-0}" = 1 ]; then
-  agy_needs_rc=0
-  if [ "${AGY_REMOTE_CONTROL:-0}" = 1 ]; then
-    agy_needs_rc=1
-  else
-    for spec in "${SESSIONS[@]}"; do
-      case "$spec" in *--remote-control*) agy_needs_rc=1; break ;; esac
-    done
-  fi
-  if [ "$agy_needs_rc" = 1 ]; then
-    if ! agy remote-control status 2>/dev/null | grep -Eqi 'Daemon status:[[:space:]]*(running|active)'; then
-      agy_rc_name="${FLEET_ID:-$NAMESPACE}-$(hostname -s 2>/dev/null || echo host)"
-      if agy remote-control start --name "$agy_rc_name" >/dev/null 2>&1; then
-        echo "started Antigravity remote-control daemon: $agy_rc_name"
-      else
-        echo "warning: agy remote-control start failed (sessions start anyway)" >&2
-      fi
-    fi
-  fi
-fi
-
-# Model names are normalized before any policy match: lowercase, quotes dropped, a `[…]` suffix (for
-# example a context-window tag) and a trailing date stamp stripped.
-norm_model() {
-  local m
-  m="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d "\"'")"
-  m="${m%%\[*}"
-  m="$(printf '%s' "$m" | sed -E 's/[-@.]?(19|20)[0-9]{2}-?[0-9]{2}-?[0-9]{2}$//')"
-  printf '%s' "$m"
-}
-# 0 when a model names Claude Opus 4.8 in any spelling (claude-opus-4-8, claude-opus-4.8, …) or the
-# `security` alias.
-is_security_model() {
-  local m
-  m="$(norm_model "$1")"
-  case "$m" in claude-opus-4-8* | claude-opus-4.8* | security) return 0 ;; esac
-  return 1
-}
-# engsys#229: the repo's merge-monster config inside the fleet config dir (the instance plugin's
-# repos/<owner>/<repo>/merge-monster.yml, core/lib/mm-config.mjs), for a merge-role line's ENGSYS_MM_CONFIG. Prints the
-# first readable one, or nothing. Looked up in the session's own Claude config dir, then the launcher's.
-resolve_mm_config() { # resolve_mm_config <workdir> <session config dir>
-  local script args=() d out
-  script="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../lib" 2>/dev/null && pwd)/mm-config.mjs"
-  [ -f "$script" ] && command -v node >/dev/null && command -v jq >/dev/null || return 0
-  for d in "$2" "${CLAUDE_CONFIG_DIR:-}"; do [ -z "$d" ] || args+=(--config-dir "$d"); done
-  [ "${#args[@]}" -gt 0 ] || args+=(--config-dir "$HOME/.claude")
-  out="$(node "$script" resolve --cwd "$1" "${args[@]}" 2>/dev/null)" || return 0
-  jq -r '.configs[0] // empty' <<<"$out" 2>/dev/null || true
-}
-# 0 when an env file is the security lane: its name, without directory and extension, normalizes to
-# `security` or `nyx`.
-is_security_env() {
-  local b
-  [ -n "$1" ] || return 1
-  b="${1##*/}"; b="${b%.*}"
-  b="$(printf '%s' "$b" | tr '[:upper:]' '[:lower:]' | tr -d "\"' ")"
-  case "$b" in security | nyx) return 0 ;; esac
-  return 1
-}
-# The --model value(s) in a flag string, one per line (both `--model X` and `--model=X`).
-model_values() {
-  local tok prev=""
-  set -f
-  # shellcheck disable=SC2086
-  set -- $1
-  set +f
-  for tok in "$@"; do
-    [ "$prev" = "--model" ] && printf '%s\n' "$tok"
-    case "$tok" in --model=*) printf '%s\n' "${tok#--model=}" ;; esac
-    prev="$tok"
-  done
-  return 0
-}
-# A security-tier roster line: a model that names Claude Opus 4.8, or the security env lane.
-is_security_line() { # is_security_line <flags> <env file> → 0 when security tier
-  local m
-  is_security_env "$2" && return 0
-  while IFS= read -r m; do
-    [ -n "$m" ] && is_security_model "$m" && return 0
-  done < <(model_values "$1")
-  return 1
-}
-# The monster role a prompt runs, case-insensitively and with `_`, spaces or `-` between the words:
-# merge | maintain, or empty.
-prompt_role() {
-  local p
-  p="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr '_ ' '--')"
-  case "$p" in
-    *merge-monster*) echo merge ;;
-    *maintenance-monster*) echo maintain ;;
-  esac
-  return 0
-}
-# 0 when a prompt runs the resource broker (the third monster), with the same tolerance as prompt_role.
-prompt_is_broker() {
-  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr '_ ' '--')" in *resource-broker*) return 0 ;; esac
-  return 1
-}
-# 0 when the host (fleet launch) classified this session as a monster or a supervised session.
-is_supervised_session() {
-  case " ${ENGSYS_SUPERVISED_SESSIONS:-} " in *" $1 "*) return 0 ;; esac
-  return 1
-}
+# One-time per launch, after the preflights: the adapter's own pre-launch step (e.g. the agy remote-control daemon).
+if declare -F harness_prelaunch >/dev/null; then harness_prelaunch; fi
 
 # engsys#236: the launch dir (header). Checked once per run: owned by this user, open to nobody else, never a
 # symlink, and absolute, because the window's shell reads the file from its own cwd. A missing one is created 0700;
@@ -485,198 +288,35 @@ launch_one() {
     *) echo "error: session name '$name' must start with '${NAMESPACE}-' (the namespace fence)" >&2; return 1 ;;
   esac
   [ -n "$workdir" ] || workdir="$REPO"
-  workdir="${workdir/#\~/$HOME}"
+  workdir="$(expand_tilde "$workdir")"
   [ -d "$workdir" ] || { echo "error: workdir for '$name' not found: $workdir" >&2; return 1; }
 
   # Per-session env (5th roster field) replaces the roster-level ENV_FILE.
   local session_env="$ENV_FILE"
   if [ -n "$env_file" ]; then
-    env_file="${env_file/#\~/$HOME}"
+    env_file="$(expand_tilde "$env_file")"
     case "$env_file" in /*) ;; *) env_file="$ROSTER_DIR/$env_file" ;; esac
     [ -f "$env_file" ] || { echo "error: env file for '$name' not found: $env_file" >&2; return 1; }
     session_env="$env_file"
   fi
 
-  local cmd run_cmd="" run role=""
-  # The session's own name and a per-launch id, for the monsters' baton (engsys#62): the holder is
-  # <fleet>:<ENGSYS_SESSION>, and a fencing token on disk is honored only by the launch that took it.
-  # A merge or maintenance monster (by its prompt, as lib/host-roles.sh reads it) also gets
-  # ENGSYS_SINGLETON_ROLE, which arms the plugin's singleton-write guard hook for the session and
-  # every agent it dispatches; any other session has it unset.
+  local cmd run_cmd run role
   run="$(date -u +%Y%m%dT%H%M%SZ)-$$-${RANDOM}"
   role="$(prompt_role "$prompt")"
-  # The monsters and the security lane are Claude-only: the merge and maintain batons and security work
-  # stay on Claude (security on Claude Opus 4.8), so a non-Claude harness never launches them.
-  local flags="${MODEL:+$MODEL }${extra:-}"
-  if [ "$HARNESS" != "claude" ]; then
-    if [ -n "$role" ]; then
-      echo "error: refusing to launch '$name' (role=$role) on HARNESS=$HARNESS: merge and maintenance monsters run only on HARNESS=claude" >&2
-      return 1
-    fi
-    if prompt_is_broker "$prompt"; then
-      echo "error: refusing to launch '$name' (resource broker) on HARNESS=$HARNESS: monsters run only on HARNESS=claude" >&2
-      return 1
-    fi
-    if is_supervised_session "$name"; then
-      echo "error: refusing to launch '$name' on HARNESS=$HARNESS: the host classifies it as a monster or supervised session, which runs only on HARNESS=claude" >&2
-      return 1
-    fi
-    if is_security_line "$flags" "${session_env:-}"; then
-      echo "error: refusing to launch '$name' on HARNESS=$HARNESS: security-tier sessions run only on HARNESS=claude with claude-opus-4-8" >&2
-      return 1
-    fi
-  elif [ "$role" = maintain ] || is_security_env "${session_env:-}"; then
-    # On Claude, the maintenance monster and the security env lane run on Claude Opus 4.8 and nothing else.
-    local m ok=0
-    while IFS= read -r m; do
-      [ -n "$m" ] || continue
-      if is_security_model "$m" && [ "$(norm_model "$m")" != security ]; then ok=1; else ok=0; break; fi
-    done < <(model_values "$flags")
-    if [ "$ok" != 1 ]; then
-      echo "error: refusing to launch '$name': the maintenance monster and the security lane must run with --model claude-opus-4-8 (got: $(model_values "$flags" | tr '\n' ' '))" >&2
-      return 1
-    fi
-  fi
-  # The trust environment (engsys#287). Every trust variable is decided by this launcher alone:
-  #   identity: ENGSYS_SESSION, ENGSYS_SESSION_RUN, ENGSYS_SESSION_ROOT, ENGSYS_SINGLETON_ROLE (the baton holder, its
-  #     fencing token, and the switch for the singleton-write and hand-back guards);
-  #   keys: ENGSYS_SECURITY_VERDICT_KEY_FILE, ENGSYS_MEMORY_SIGNING_KEY_FILE;
-  #   config: ENGSYS_MEMORY_CONFIG, ENGSYS_MM_CONFIG, CLAUDE_CONFIG_DIR, FLEET_CLAUDE_CONFIG_DIR, FLEET_CLAUDE_CONFIG_DIR_SCOPE,
-  #     ENGSYS_CONFIG_DIR_SESSIONS.
-  # 1. set or cleared before the env file, 2. the env file is sourced, 3. re-decided after it from launcher state only:
-  # exported when this line is granted it, otherwise unset. None is ever left over from the env file or from the
-  # window's inherited environment (a tmux server's global environment can hold anything). The golden launch lines
-  # (launch-golden.test.sh) pin this.
-  # ENGSYS_SESSION_ROOT is the directory the session was launched in: a guarded `fleet msg send`
-  # takes its --body-file only from <root>/tmp, wherever the session cd's later (engsys#108).
-  local root
+  # The line's Claude-style flags: the roster MODEL, then its own (a space between them only when both are set).
+  local flags="${MODEL}${MODEL:+${extra:+ }}${extra:-}"
+  # Which lines this harness may run is decided by the adapter's capabilities (lib/session-env.sh, rule 5).
+  check_line_policy "$name" "$prompt" "$role" "$flags" "${session_env:-}" || return 1
+  local root identity
   root="$(cd "$workdir" && pwd -P)" || { echo "error: cannot resolve workdir for '$name': $workdir" >&2; return 1; }
-  local identity
-  identity="export ENGSYS_SESSION=$(printf %q "$name") ENGSYS_SESSION_RUN=$(printf %q "$run") ENGSYS_SESSION_ROOT=$(printf %q "$root")"
-  if [ -n "$role" ]; then identity+=" ENGSYS_SINGLETON_ROLE=$role && "; else identity+=" && unset ENGSYS_SINGLETON_ROLE && "; fi
-  cmd="$identity"
-  cmd+="unset ENGSYS_MEMORY_SIGNING_KEY_FILE && "   # F5: never inherited; set below, after the env file, for merge/maintain
-  # engsys#197 (option B), narrowed by engsys#229: only a security-ENV session (security.env / nyx.env, the
-  # security lane) on Claude is handed the PATH of the fleet's verdict key (ENGSYS_SECURITY_VERDICT_KEY_FILE, passed
-  # by core/fleet/launch.sh as --verdict-key-file from FLEET_SECURITY_VERDICT_KEY=on); every other session has it
-  # unset, whatever its model or env file (a merge-role line never gets it). A merge session on Opus 4.8 reads attacker-authored PR content, so it must not be
-  # able to mint a PASS; it still verifies, because mm-preflight.sh reads the key file by path. Decided here, before the env
-  # file, so a later assignment in an env file is overwritten below. Defence in depth, not a boundary: the
-  # key file is readable by the same OS user (core/lib/security-verdict.mjs).
-  local verdict_key_file="$VERDICT_KEY_FILE"
-  if [ -n "$verdict_key_file" ] && [ "$HARNESS" = claude ] && [ "$role" != merge ] && is_security_env "${session_env:-}"; then
-    cmd+="export ENGSYS_SECURITY_VERDICT_KEY_FILE=$(printf %q "$verdict_key_file") && "
-  else
-    cmd+="unset ENGSYS_SECURITY_VERDICT_KEY_FILE && "
-  fi
-  cmd+="unset ENGSYS_MEMORY_CONFIG && "   # engsys#262: cleared here, set again below for a line on a per-session login dir
-  cmd+="unset ENGSYS_MM_CONFIG && "   # engsys#229: cleared here, set again below for a merge-role line once its config dir is known
-  cmd+="cd $(printf %q "$workdir") && "
-  if [ -n "$session_env" ]; then
-    cmd+="set -a && . $(printf %q "$session_env") && set +a && "
-    # the session's identity again (engsys#287): an env file can't rename the baton holder, swap its run id, or
-    # arm or disarm the singleton guard
-    cmd+="$identity"
-  fi
-  # engsys#287: the per-session dirs' parent from this launcher's own environment, or none; never the env file's or the
-  # window's (core/lib/mm-config.mjs searches every dir under it for a session's plugins)
-  if [ -n "$LAUNCHER_CFG_SESSIONS" ]; then cmd+="export ENGSYS_CONFIG_DIR_SESSIONS=$(printf %q "$LAUNCHER_CFG_SESSIONS") && "; else cmd+="unset ENGSYS_CONFIG_DIR_SESSIONS && "; fi
-  if [ -n "$session_env" ]; then
-    # and again after it, always (engsys#287): an env file can neither add the key path to a non-security session,
-    # nor set one when no key is configured, nor drop it from a security one
-    if [ -n "$verdict_key_file" ] && [ "$HARNESS" = claude ] && [ "$role" != merge ] && is_security_env "${session_env:-}"; then
-      cmd+="export ENGSYS_SECURITY_VERDICT_KEY_FILE=$(printf %q "$verdict_key_file") && "
-    else
-      cmd+="unset ENGSYS_SECURITY_VERDICT_KEY_FILE && "
-    fi
-  fi
-  # F5: a merge or maintain line on Claude gets the PATH of the fleet's memory signing key (memory-sync signs what
-  # it writes to refs/engsys/memory/* with it); no other line does. Decided after the env file, so an env file can
-  # neither hand it to another line nor take it from a monster. Set only when a key is configured
-  # (FLEET_MEMORY_SIGNING_KEY=on); otherwise unset on every line, so an env file can't supply one (engsys#287).
-  if [ -n "$MEMORY_KEY_FILE" ] && [ "$HARNESS" = claude ] && { [ "$role" = merge ] || [ "$role" = maintain ]; }; then
-    cmd+="export ENGSYS_MEMORY_SIGNING_KEY_FILE=$(printf %q "$MEMORY_KEY_FILE") && "
-  else
-    cmd+="unset ENGSYS_MEMORY_SIGNING_KEY_FILE && "
-  fi
-  # The Claude Code config dir comes from the launcher's own environment (the fleet kit sets it from
-  # FLEET_CLAUDE_CONFIG_DIR), never from the tmux server's, which may predate it, and it is decided after
-  # the env file, so an accidental assignment there can't move a session to another dir. (Env files are
-  # trusted, PR-reviewed shell code: a PATH wrapper, a DEBUG trap, `enable -n` or NODE_OPTIONS in one can
-  # still change what runs. This guards against mistakes, not a hostile env file.) With
-  # FLEET_CLAUDE_CONFIG_DIR_INTERACTIVE set (scope supervised), only the sessions it names run with it
-  # unset (~/.claude), and never one this launcher itself sees as a monster, the resource broker, a
-  # supervised session or a security-tier line: an unknown session fails toward the fleet dir.
-  local cfg_dir="${CLAUDE_CONFIG_DIR:-}"
-  if [ -n "$cfg_dir" ] && [ -n "${FLEET_CLAUDE_CONFIG_DIR_INTERACTIVE+x}" ]; then
-    case "$FLEET_CLAUDE_CONFIG_DIR_INTERACTIVE" in
-      *" $name "*)
-        if [ -z "$role" ] && ! prompt_is_broker "$prompt" && ! is_supervised_session "$name" \
-          && ! is_security_line "$flags" "${session_env:-}"; then cfg_dir=""; fi ;;
-    esac
-  fi
-  # One login per session (engsys#205): the fleet kit passes ENGSYS_CONFIG_DIR_SESSIONS (<fleet dir>.sessions) and a
-  # session that gets the fleet dir runs on <that>/<its name>. The name is validated here too: nothing with a
-  # slash, a leading dot or ".." can step out of that directory.
-  local gate_dir="${CLAUDE_CONFIG_DIR:-}" memory_cfg=""
-  if [ -n "$cfg_dir" ] && [ -n "${ENGSYS_CONFIG_DIR_SESSIONS:-}" ]; then
-    case "$name" in
-      '' | .* | */* | *..* | *[!A-Za-z0-9._-]*) echo "error: refusing to launch '$name': its name can't be a per-session Claude config dir name" >&2; return 1 ;;
-    esac
-    cfg_dir="${ENGSYS_CONFIG_DIR_SESSIONS%/}/$name"
-    # engsys#262: a per-session login dir carries no memory.yml (by design: engsys#230 pins only the fleet dir's
-    # copy), so the memory brief is pointed at the fleet dir's own, the launcher's CLAUDE_CONFIG_DIR.
-    [ -z "${CLAUDE_CONFIG_DIR:-}" ] || memory_cfg="${CLAUDE_CONFIG_DIR%/}/memory.yml"
-  fi
-  [ -z "$cfg_dir" ] || gate_dir="$cfg_dir"
-  # A function named claude in an env file must not stand in for the binary either. The whole line is one
-  # fail-closed && chain (engsys#236 review): a `;` here restarted it, so an env file whose last command failed
-  # skipped `set +a` and the key path's re-decision above, and claude still ran. zsh's `unset -f` fails for a
-  # function that doesn't exist, hence the `|| true`.
-  cmd+="{ unset -f claude 2>/dev/null || true; } && "
-  # Under scope supervised the session knows the fleet dir and the scope, so the baton can refuse a
-  # session that isn't on it (lib/lease/baton.mjs launchedSessionGate).
-  if [ -n "${FLEET_CLAUDE_CONFIG_DIR_INTERACTIVE+x}" ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
-    cmd+="export FLEET_CLAUDE_CONFIG_DIR=$(printf %q "$gate_dir") FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised && "
-  elif [ -n "$LAUNCHER_FLEET_CFG" ]; then
-    # engsys#287: the fleet's own dir, from this launcher's environment (the fleet kit exports it), never the window's:
-    # core/lib/mm-config.mjs searches it (and its per-session siblings) for a session's plugins
-    cmd+="export FLEET_CLAUDE_CONFIG_DIR=$(printf %q "$LAUNCHER_FLEET_CFG") && unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && "
-  else
-    cmd+="unset FLEET_CLAUDE_CONFIG_DIR FLEET_CLAUDE_CONFIG_DIR_SCOPE && "
-  fi
-  # engsys#262: decided after the env file, like the config dir itself, so an env file can neither move it nor set
-  # one on a line that gets none (it would outrank the reviewed memory.yml).
-  if [ -n "$memory_cfg" ]; then cmd+="export ENGSYS_MEMORY_CONFIG=$(printf %q "$memory_cfg") && "; else cmd+="unset ENGSYS_MEMORY_CONFIG && "; fi
-  if [ -n "$cfg_dir" ]; then cmd+="export CLAUDE_CONFIG_DIR=$(printf %q "$cfg_dir") && "; else cmd+="unset CLAUDE_CONFIG_DIR && "; fi
-  # engsys#229, belt and braces beside mm-preflight's own discovery: a merge-role line is told where its repo's fleet merge
-  # config is; every other line, and a merge line whose config isn't found, has it unset. Decided after the env file,
-  # so an env file can neither move it nor set one (engsys#287).
-  local mm_cfg=""
-  [ "$role" != merge ] || [ "$HARNESS" != claude ] || mm_cfg="$(resolve_mm_config "$workdir" "$cfg_dir")"
-  if [ -n "$mm_cfg" ]; then cmd+="export ENGSYS_MM_CONFIG=$(printf %q "$mm_cfg") && "; else cmd+="unset ENGSYS_MM_CONFIG && "; fi
-  # The harness itself (run_cmd) follows the launch file's self-removal (below).
-  if [ "$HARNESS" = "copilot" ]; then
-    run_cmd+="copilot --name $(printf %q "$name")"
-    [ -n "$prompt" ] && run_cmd+=" -i $(printf %q "$prompt")"
-    local copilot_flags
-    copilot_flags="$(translate_copilot_flags "${MODEL:+$MODEL }${extra:-}")"
-    [ -n "$copilot_flags" ] && run_cmd+=" $copilot_flags"
-  elif [ "$HARNESS" = "antigravity" ]; then
-    run_cmd+="agy"
-    [ -n "$prompt" ] && run_cmd+=" -i $(printf %q "$prompt")"
-    local agy_flags
-    agy_flags="$(translate_antigravity_flags "${MODEL:+$MODEL }${extra:-}" "$name")" || { echo "error: refusing to launch '$name' on HARNESS=antigravity" >&2; return 1; }
-    [ -n "$agy_flags" ] && run_cmd+=" $agy_flags"
-  else
-    run_cmd+="command claude --name $(printf %q "$name") --settings $(printf %q "$SETTINGS_FILE")"
-    # The prompt goes BEFORE the model/extra flags: several claude flags take a
-    # list (--add-dir, --allowedTools, …) and would swallow a trailing prompt as
-    # one more value — the session would start with no instruction.
-    [ -n "$prompt" ] && run_cmd+=" $(printf %q "$prompt")"
-    [ -n "$MODEL" ] && run_cmd+=" $MODEL"
-    [ -n "$extra" ] && run_cmd+=" $extra"
-  fi
+  identity="$(session_identity "$name" "$run" "$root" "$role")"
+  # The trust environment (engsys#287): one harness-neutral function, its rules written down in lib/session-env.sh.
+  cmd="$(assemble_trust_env "$name" "$prompt" "$role" "$flags" "${session_env:-}" "$workdir" "$identity")" || return 1
+  # The harness itself (run_cmd) follows the launch file's self-removal (below). An adapter refuses a line by
+  # failing its flag translation.
+  local harness_flags
+  harness_flags="$(harness_translate_flags "$flags" "$name")" || { echo "error: refusing to launch '$name' on HARNESS=$HARNESS" >&2; return 1; }
+  run_cmd="$(harness_run_cmd "$name" "$prompt" "$harness_flags")"
 
   # A duplicate logical name ANYWHERE the same user runs claude makes Claude
   # Code suffix this one (name-2), which breaks name addressing. Reject a name

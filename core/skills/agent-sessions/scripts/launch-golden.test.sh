@@ -16,6 +16,10 @@
 #   UPDATE_GOLDEN=1      rewrite the goldens from this launcher (review the diff before committing it)
 #   LAUNCHER=<path>      render with another launcher (a baseline); GOLDEN_DIR=<dir> compares/writes there instead
 #
+# Also (engsys#287 phase 2): HOME with an `&` in it; a test-only fourth adapter (fixtures/harness/fake.sh) dropped
+# into a copy of lib/harness/; adapter load errors; and a lint that HARNESS is compared only where the adapter is
+# selected.
+#
 # A change to anything under fixtures/launch-golden/claude/ is a change to what every Claude session starts with,
 # the trust environment included: name it in the PR body (SKILL.md § Golden launch lines).
 set -euo pipefail
@@ -64,7 +68,7 @@ if [ "$me" = agy ] && [ "${1:-}" = remote-control ]; then echo "agy $*" >>"$FAKE
 exit 0
 SH
 chmod +x "$T/bin/tmux" "$T/bin/fake-harness"
-for h in claude copilot agy; do ln -s fake-harness "$T/bin/$h"; done
+for h in claude copilot agy fake; do ln -s fake-harness "$T/bin/$h"; done   # fake: the test-only adapter's binary
 printf '#!/bin/sh\necho testhost\n' >"$T/bin/hostname"; chmod +x "$T/bin/hostname"
 
 # --- fixture roster, env files, config dirs ----------------------------------------------------
@@ -129,7 +133,7 @@ render() {
     supervised) envs+=(CLAUDE_CONFIG_DIR="$FC" FLEET_CLAUDE_CONFIG_DIR="$FC" FLEET_CLAUDE_CONFIG_DIR_INTERACTIVE=" acme-build acme-plain ") ;;
     per-session-supervised) envs+=(CLAUDE_CONFIG_DIR="$FC" FLEET_CLAUDE_CONFIG_DIR="$FC" ENGSYS_CONFIG_DIR_SESSIONS="$FC.sessions" FLEET_CLAUDE_CONFIG_DIR_INTERACTIVE=" acme-build acme-plain ") ;;
   esac
-  local args=(--roster "$W/roster" --launch-dir "$T/launch")
+  local args=(--roster "${R_ROSTER:-$W/roster}" --launch-dir "$T/launch")
   [ "$vk" = off ] || args+=(--verdict-key-file "$KEYS/verdict.key")
   [ "$mk" = off ] || args+=(--memory-key-file "$KEYS/memory.key")
   rm -rf "${T:?}/home" "${T:?}/out" "${T:?}/launch" "${T:?}/session" "${T:?}/agy-rc"; mkdir -p "$T/home" "$T/out"
@@ -139,7 +143,7 @@ render() {
   {
     printf '# harness=%s config-dir=%s verdict-key=%s memory-key=%s%s\n' "$harness" "$mode" "$vk" "$mk" "${*:+ $*}"
     local n
-    for n in $NAMES; do
+    for n in ${R_NAMES:-$NAMES}; do
       printf '\n== %s\n' "$n"
       if [ -f "$T/out/$n.launch" ]; then
         printf 'launch: %s\n' "$(cat "$T/out/$n.launch")"
@@ -186,28 +190,115 @@ check antigravity "remote-control.rc-on" antigravity shared off off AGY_REMOTE_C
 check antigravity "remote-control.autostart-on" antigravity shared off off AGY_REMOTE_CONTROL_AUTOSTART=1
 check antigravity "remote-control.rc-on.autostart-on" antigravity shared off off AGY_REMOTE_CONTROL=1 AGY_REMOTE_CONTROL_AUTOSTART=1
 
-# Negative control: a launcher that sources the env file again AFTER the trust decisions (the ordering the trust
-# environment depends on) must fail against the Claude goldens. Rendered from a copy beside the real lib/.
+# ~ expansion when HOME holds an `&` (engsys#287 review): a pattern substitution (${x/#\~/$HOME}) turns the `&` into
+# the match on bash 5.2+, so the workdir, the env files and the translated flags must splice $HOME in literally.
+echo "golden launch lines: HOME with an & in it (workdir, env files and flags given with ~)"
+AH="$T/u/a&b"
+mkdir -p "$AH/w"
+printf '%s\n' "$HOSTILE" >"$AH/session.env"; printf '%s\n' "$HOSTILE" >"$AH/lane.env"
+cat >"$T/amp-roster" <<'EOF'
+NAMESPACE=acme
+ENV_FILE=~/session.env
+acme-tilde|~/w||--model opus --add-dir ~/worktrees --add-dir=~/other
+acme-lane|~/w||--model opus|~/lane.env
+EOF
+for harness in claude copilot antigravity; do
+  rm -rf "${AH:?}/.claude"
+  R_ROSTER="$T/amp-roster" R_NAMES="acme-tilde acme-lane" check "$harness" "home-ampersand" "$harness" shared off off HOME="$AH"
+done
+
+if [ -z "${LAUNCHER:-}" ]; then
+  # A copy of the launcher and its lib/ beside the real core/lib, for the cases below that change one file of it.
+  kit() { # kit <dir> → <dir>/core/skills/agent-sessions/scripts holding launch-agent-sessions.sh and lib/
+    mkdir -p "$1/core/skills/agent-sessions/scripts"
+    ln -s "$(cd "$HERE/../../../lib" && pwd -P)" "$1/core/lib"
+    cp "$HERE/launch-agent-sessions.sh" "$1/core/skills/agent-sessions/scripts/"
+    cp -R "$HERE/lib" "$1/core/skills/agent-sessions/scripts/lib"
+  }
+  has_text() { case "$2" in *"$3"*) ok "$1" ;; *) no "$1" "missing: $3" ;; esac; }
+
+  # A fourth adapter with minimal capabilities, added by dropping one file into lib/harness/: the launcher and the
+  # core are byte-for-byte the shipped ones. A plain session launches with no trust variable granted; monster,
+  # broker, supervised and security-tier lines are refused.
+  echo "a test-only fourth adapter: no core change, plain sessions launch, monster and security lines refused"
+  kit "$T/fakekit"
+  FK="$T/fakekit/core/skills/agent-sessions/scripts"
+  cp "$HERE/fixtures/harness/fake.sh" "$FK/lib/harness/fake.sh"
+  if cmp -s "$HERE/launch-agent-sessions.sh" "$FK/launch-agent-sessions.sh" && cmp -s "$HERE/lib/session-env.sh" "$FK/lib/session-env.sh"; then
+    ok "fake adapter: the launcher and lib/session-env.sh are unchanged"
+  else no "fake adapter: the kit's core differs"; fi
+  saved_launch="$LAUNCH"; LAUNCH="$FK/launch-agent-sessions.sh"
+  for mode in shared per-session; do
+    check fake "$mode.verdict-on.memory-on" fake "$mode" on on
+  done
+  got="$(render fake per-session on on)"
+  LAUNCH="$saved_launch"
+  has_text "fake adapter: a plain session launches" "$got" "argv: fake --name acme-plain"
+  has_text "fake adapter: merge monster refused" "$got" "refusing to launch 'acme-mm' (role=merge) on HARNESS=fake"
+  has_text "fake adapter: maintenance monster refused" "$got" "refusing to launch 'acme-maintain' (role=maintain) on HARNESS=fake"
+  has_text "fake adapter: resource broker refused" "$got" "refusing to launch 'acme-broker' (resource broker) on HARNESS=fake"
+  has_text "fake adapter: security-tier line refused" "$got" "refusing to launch 'acme-nyx' on HARNESS=fake: security-tier"
+  plain="$(printf '%s\n' "$got" | awk '/^== acme-plain$/ { on = 1; next } /^== / { on = 0 } on')"
+  for v in ENGSYS_SECURITY_VERDICT_KEY_FILE ENGSYS_MEMORY_SIGNING_KEY_FILE ENGSYS_MM_CONFIG ENGSYS_MEMORY_CONFIG CLAUDE_CONFIG_DIR; do
+    has_text "fake adapter: the plain session has no $v (no capability for it)" "$plain" "env: $v <unset>"
+  done
+  if [ ! -e "$T/home/.claude" ]; then ok "fake adapter: no messaging settings file (no settings_file)"; else no "fake adapter: wrote a settings file"; fi
+fi
+
 if [ "${UPDATE_GOLDEN:-0}" != 1 ] && [ -z "${LAUNCHER:-}" ]; then
+  # Negative control: a core that sources the env file again AFTER the trust decisions (the ordering the trust
+  # environment depends on) must fail against the Claude goldens.
   echo "negative control: breaking the env-file ordering on a Claude line fails the golden"
-  mkdir -p "$T/neg/core/skills/agent-sessions/scripts"
-  ln -s "$(cd "$HERE/../../../lib" && pwd -P)" "$T/neg/core/lib"
-  BROKEN="$T/neg/core/skills/agent-sessions/scripts/launch-agent-sessions.sh"
+  kit "$T/neg"
+  NEG_CORE="$T/neg/core/skills/agent-sessions/scripts/lib/session-env.sh"
   # after the line that drops a `claude` function (which follows every trust decision), source the env file again
-  # shellcheck disable=SC2016 # the launcher's literal source text
+  # shellcheck disable=SC2016 # the core's literal source text
   awk -v target='  cmd+="{ unset -f claude 2>/dev/null || true; } && "' \
     -v add='  [ -z "$session_env" ] || cmd+="set -a && . $(printf %q "$session_env") && set +a && "' \
-    '{ print } $0 == target { print add }' "$LAUNCH" >"$BROKEN"
-  if cmp -s "$LAUNCH" "$BROKEN"; then no "negative control: the mutation did not apply (the launcher's text moved; update the awk target)"
+    '{ print } $0 == target { print add }' "$HERE/lib/session-env.sh" >"$NEG_CORE"
+  if cmp -s "$HERE/lib/session-env.sh" "$NEG_CORE"; then no "negative control: the mutation did not apply (the core's text moved; update the awk target)"
   else
-    got="$(LAUNCH="$BROKEN"; render claude per-session on on)"
+    got="$(LAUNCH="$T/neg/core/skills/agent-sessions/scripts/launch-agent-sessions.sh"; render claude per-session on on)"
     want="$GOLDEN/claude/per-session.verdict-on.memory-on.txt"
     if diff -q "$want" <(printf '%s\n' "$got") >/dev/null; then no "negative control: the broken ordering rendered the golden unchanged"
     else ok "negative control: the broken ordering differs from the golden"; fi
     case "$got" in *"/hostile/"*) ok "negative control: …and the env file's values survive in it (the reason it must fail)" ;;
       *) no "negative control: …the hostile values did not show" "$got" ;; esac
   fi
+
+  # An adapter is checked when it is loaded: a missing required function, or an unknown capability, stops the launch.
+  echo "adapter load: a missing function or an unknown capability is an error"
+  printf 'harness_bin() { printf fake; }\nharness_capabilities() { :; }\nharness_translate_flags() { :; }\n' >"$FK/lib/harness/nofn.sh"
+  printf 'harness_bin() { printf fake; }\nharness_capabilities() { printf "monster_roles telepathy"; }\nharness_translate_flags() { :; }\nharness_run_cmd() { :; }\n' >"$FK/lib/harness/badcap.sh"
+  for a in nofn:"does not define harness_run_cmd" badcap:"declares an unknown capability: telepathy"; do
+    rm -rf "$T/out"; mkdir -p "$T/out"; rc=0
+    out="$(cd "$W" && env -i PATH="$T/bin:/usr/bin:/bin" HOME="$T/home" FAKE="$T" TEST_BASH="$BASH" HARNESS="${a%%:*}" LAUNCH_START_TIMEOUT_SEC=0 \
+      "$BASH" "$FK/launch-agent-sessions.sh" --roster "$W/roster" --launch-dir "$T/launch" 2>&1)" || rc=$?
+    if [ "$rc" -ne 0 ] && [ -z "$(ls "$T/out")" ]; then ok "adapter ${a%%:*}: refused at load, nothing launched"; else no "adapter ${a%%:*}: rc=$rc" "$out"; fi
+    has_text "adapter ${a%%:*}: says why" "$out" "${a#*:}"
+  done
 fi
+
+# Capability checks, not harness names (engsys#287): outside lib/harness/*.sh the launcher and its core compare
+# HARNESS with nothing, except at the one line that selects the adapter (marked `# adapter-select`).
+echo "lint: no HARNESS string comparisons outside the adapters and the adapter-select line"
+HARNESS_CMP_RE='\$\{?HARNESS(:-[^}]*)?\}?"?[[:space:]]*(!=|==?)[[:space:]]|[[:space:]](!=|==?)[[:space:]]+"?\$\{?HARNESS([^A-Za-z0-9_]|$)|case[[:space:]]+"?\$\{?HARNESS([^A-Za-z0-9_]|$)'
+lint_ok=1
+# shellcheck disable=SC2016 # the samples are launcher source text
+for sample in 'if [ "$HARNESS" != "claude" ]; then' '[ "${HARNESS:-claude}" = copilot ]' '[[ claude == $HARNESS ]]' 'case "$HARNESS" in'; do
+  printf '%s\n' "$sample" | grep -Eq "$HARNESS_CMP_RE" || { lint_ok=0; no "lint: the pattern misses: $sample"; }
+done
+# shellcheck disable=SC2016 # the samples are launcher source text
+for sample in '    HARNESS=*) HARNESS="${line#HARNESS=}" ;;' 'echo "on HARNESS=$HARNESS: refused"' 'HARNESS="${HARNESS:-${FLEET_HARNESS:-claude}}"'; do
+  if printf '%s\n' "$sample" | grep -Eq "$HARNESS_CMP_RE"; then lint_ok=0; no "lint: the pattern flags a non-comparison: $sample"; fi
+done
+[ "$lint_ok" = 0 ] || ok "lint: the pattern catches comparisons and only comparisons (controls)"
+hits="$(cd "$HERE" && grep -nE "$HARNESS_CMP_RE" launch-agent-sessions.sh lib/*.sh || true)"
+others="$(printf '%s\n' "$hits" | grep -v '# adapter-select' | grep -v '^$' || true)"
+if [ -z "$others" ]; then ok "lint: no HARNESS comparison outside lib/harness/ and the adapter-select line"
+else no "lint: HARNESS compared outside the adapters (ask the adapter or a capability instead)" "$others"; fi
+if [ "$(printf '%s\n' "$hits" | grep -c '# adapter-select')" = 1 ]; then ok "lint: exactly one adapter-select line"
+else no "lint: expected exactly one adapter-select line" "$hits"; fi
 
 echo "launch-golden.test: $pass passed, $fail failed"
 [ "$fail" = 0 ]

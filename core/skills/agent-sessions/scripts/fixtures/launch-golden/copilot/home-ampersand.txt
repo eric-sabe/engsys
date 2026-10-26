@@ -1,0 +1,42 @@
+# harness=copilot config-dir=shared verdict-key=off memory-key=off HOME=<T>/u/a&b
+
+== acme-tilde
+launch: export ENGSYS_SESSION=acme-tilde ENGSYS_SESSION_RUN=<RUN> ENGSYS_SESSION_ROOT=<T>/u/a\&b/w && unset ENGSYS_SINGLETON_ROLE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_CONFIG && unset ENGSYS_MM_CONFIG && cd <T>/u/a\&b/w && set -a && . <T>/u/a\&b/session.env && set +a && export ENGSYS_SESSION=acme-tilde ENGSYS_SESSION_RUN=<RUN> ENGSYS_SESSION_ROOT=<T>/u/a\&b/w && unset ENGSYS_SINGLETON_ROLE && unset ENGSYS_CONFIG_DIR_SESSIONS && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && { unset -f claude 2>/dev/null || true; } && export FLEET_CLAUDE_CONFIG_DIR=<T>/fleetcfg && unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && unset ENGSYS_MEMORY_CONFIG && export CLAUDE_CONFIG_DIR=<T>/fleetcfg && unset ENGSYS_MM_CONFIG && command rm -f -- <LAUNCH_FILE> && copilot --name acme-tilde --model claude-opus-5.5 --add-dir <T>/u/a\&b/worktrees --add-dir=<T>/u/a\&b/other
+argv: copilot --name acme-tilde --model claude-opus-5.5 --add-dir <T>/u/a\&b/worktrees --add-dir=<T>/u/a\&b/other
+env: ENGSYS_SESSION=acme-tilde
+env: ENGSYS_SESSION_RUN=<RUN>
+env: ENGSYS_SESSION_ROOT=<T>/u/a&b/w
+env: ENGSYS_SINGLETON_ROLE <unset>
+env: ENGSYS_SECURITY_VERDICT_KEY_FILE <unset>
+env: ENGSYS_MEMORY_SIGNING_KEY_FILE <unset>
+env: ENGSYS_MEMORY_CONFIG <unset>
+env: ENGSYS_MM_CONFIG <unset>
+env: CLAUDE_CONFIG_DIR=<T>/fleetcfg
+env: FLEET_CLAUDE_CONFIG_DIR=<T>/fleetcfg
+env: FLEET_CLAUDE_CONFIG_DIR_SCOPE <unset>
+env: ENGSYS_CONFIG_DIR_SESSIONS <unset>
+env: ENV_FILE_SOURCED=1
+
+== acme-lane
+launch: export ENGSYS_SESSION=acme-lane ENGSYS_SESSION_RUN=<RUN> ENGSYS_SESSION_ROOT=<T>/u/a\&b/w && unset ENGSYS_SINGLETON_ROLE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_CONFIG && unset ENGSYS_MM_CONFIG && cd <T>/u/a\&b/w && set -a && . <T>/u/a\&b/lane.env && set +a && export ENGSYS_SESSION=acme-lane ENGSYS_SESSION_RUN=<RUN> ENGSYS_SESSION_ROOT=<T>/u/a\&b/w && unset ENGSYS_SINGLETON_ROLE && unset ENGSYS_CONFIG_DIR_SESSIONS && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && { unset -f claude 2>/dev/null || true; } && export FLEET_CLAUDE_CONFIG_DIR=<T>/fleetcfg && unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && unset ENGSYS_MEMORY_CONFIG && export CLAUDE_CONFIG_DIR=<T>/fleetcfg && unset ENGSYS_MM_CONFIG && command rm -f -- <LAUNCH_FILE> && copilot --name acme-lane --model claude-opus-5.5
+argv: copilot --name acme-lane --model claude-opus-5.5
+env: ENGSYS_SESSION=acme-lane
+env: ENGSYS_SESSION_RUN=<RUN>
+env: ENGSYS_SESSION_ROOT=<T>/u/a&b/w
+env: ENGSYS_SINGLETON_ROLE <unset>
+env: ENGSYS_SECURITY_VERDICT_KEY_FILE <unset>
+env: ENGSYS_MEMORY_SIGNING_KEY_FILE <unset>
+env: ENGSYS_MEMORY_CONFIG <unset>
+env: ENGSYS_MM_CONFIG <unset>
+env: CLAUDE_CONFIG_DIR=<T>/fleetcfg
+env: FLEET_CLAUDE_CONFIG_DIR=<T>/fleetcfg
+env: FLEET_CLAUDE_CONFIG_DIR_SCOPE <unset>
+env: ENGSYS_CONFIG_DIR_SESSIONS <unset>
+env: ENV_FILE_SOURCED=1
+
+-- launcher (exit 0)
+launched: acme-tilde  (<T>/u/a&b/w)
+launched: acme-lane  (<T>/u/a&b/w)
+
+done. attach with:  tmux attach -t acme
+cross-session messaging is name-addressed under the 'acme-' namespace.

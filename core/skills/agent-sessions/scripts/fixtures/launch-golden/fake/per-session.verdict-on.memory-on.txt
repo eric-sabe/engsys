@@ -1,0 +1,78 @@
+# harness=fake config-dir=per-session verdict-key=on memory-key=on
+
+== acme-mm
+not launched
+
+== acme-maintain
+not launched
+
+== acme-broker
+not launched
+
+== acme-build
+launch: export ENGSYS_SESSION=acme-build ENGSYS_SESSION_RUN=<RUN> ENGSYS_SESSION_ROOT=<T>/w && unset ENGSYS_SINGLETON_ROLE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_CONFIG && unset ENGSYS_MM_CONFIG && cd <T>/w && set -a && . <T>/w/session.env && set +a && export ENGSYS_SESSION=acme-build ENGSYS_SESSION_RUN=<RUN> ENGSYS_SESSION_ROOT=<T>/w && unset ENGSYS_SINGLETON_ROLE && export ENGSYS_CONFIG_DIR_SESSIONS=<T>/fleetcfg.sessions && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && { unset -f claude 2>/dev/null || true; } && export FLEET_CLAUDE_CONFIG_DIR=<T>/fleetcfg && unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && unset ENGSYS_MEMORY_CONFIG && unset CLAUDE_CONFIG_DIR && unset ENGSYS_MM_CONFIG && command rm -f -- <LAUNCH_FILE> && fake --name acme-build --model opus --effort medium --remote-control --permission-mode auto
+argv: fake --name acme-build --model opus --effort medium --remote-control --permission-mode auto
+env: ENGSYS_SESSION=acme-build
+env: ENGSYS_SESSION_RUN=<RUN>
+env: ENGSYS_SESSION_ROOT=<T>/w
+env: ENGSYS_SINGLETON_ROLE <unset>
+env: ENGSYS_SECURITY_VERDICT_KEY_FILE <unset>
+env: ENGSYS_MEMORY_SIGNING_KEY_FILE <unset>
+env: ENGSYS_MEMORY_CONFIG <unset>
+env: ENGSYS_MM_CONFIG <unset>
+env: CLAUDE_CONFIG_DIR <unset>
+env: FLEET_CLAUDE_CONFIG_DIR=<T>/fleetcfg
+env: FLEET_CLAUDE_CONFIG_DIR_SCOPE <unset>
+env: ENGSYS_CONFIG_DIR_SESSIONS=<T>/fleetcfg.sessions
+env: ENV_FILE_SOURCED=1
+
+== acme-nyx
+not launched
+
+== acme-plain
+launch: export ENGSYS_SESSION=acme-plain ENGSYS_SESSION_RUN=<RUN> ENGSYS_SESSION_ROOT=<T>/w && unset ENGSYS_SINGLETON_ROLE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_CONFIG && unset ENGSYS_MM_CONFIG && cd <T>/w && set -a && . <T>/w/session.env && set +a && export ENGSYS_SESSION=acme-plain ENGSYS_SESSION_RUN=<RUN> ENGSYS_SESSION_ROOT=<T>/w && unset ENGSYS_SINGLETON_ROLE && export ENGSYS_CONFIG_DIR_SESSIONS=<T>/fleetcfg.sessions && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && { unset -f claude 2>/dev/null || true; } && export FLEET_CLAUDE_CONFIG_DIR=<T>/fleetcfg && unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && unset ENGSYS_MEMORY_CONFIG && unset CLAUDE_CONFIG_DIR && unset ENGSYS_MM_CONFIG && command rm -f -- <LAUNCH_FILE> && fake --name acme-plain
+argv: fake --name acme-plain
+env: ENGSYS_SESSION=acme-plain
+env: ENGSYS_SESSION_RUN=<RUN>
+env: ENGSYS_SESSION_ROOT=<T>/w
+env: ENGSYS_SINGLETON_ROLE <unset>
+env: ENGSYS_SECURITY_VERDICT_KEY_FILE <unset>
+env: ENGSYS_MEMORY_SIGNING_KEY_FILE <unset>
+env: ENGSYS_MEMORY_CONFIG <unset>
+env: ENGSYS_MM_CONFIG <unset>
+env: CLAUDE_CONFIG_DIR <unset>
+env: FLEET_CLAUDE_CONFIG_DIR=<T>/fleetcfg
+env: FLEET_CLAUDE_CONFIG_DIR_SCOPE <unset>
+env: ENGSYS_CONFIG_DIR_SESSIONS=<T>/fleetcfg.sessions
+env: ENV_FILE_SOURCED=1
+
+== acme-dirs
+launch: export ENGSYS_SESSION=acme-dirs ENGSYS_SESSION_RUN=<RUN> ENGSYS_SESSION_ROOT=<T>/w && unset ENGSYS_SINGLETON_ROLE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_CONFIG && unset ENGSYS_MM_CONFIG && cd <T>/w && set -a && . <T>/w/session.env && set +a && export ENGSYS_SESSION=acme-dirs ENGSYS_SESSION_RUN=<RUN> ENGSYS_SESSION_ROOT=<T>/w && unset ENGSYS_SINGLETON_ROLE && export ENGSYS_CONFIG_DIR_SESSIONS=<T>/fleetcfg.sessions && unset ENGSYS_SECURITY_VERDICT_KEY_FILE && unset ENGSYS_MEMORY_SIGNING_KEY_FILE && { unset -f claude 2>/dev/null || true; } && export FLEET_CLAUDE_CONFIG_DIR=<T>/fleetcfg && unset FLEET_CLAUDE_CONFIG_DIR_SCOPE && unset ENGSYS_MEMORY_CONFIG && unset CLAUDE_CONFIG_DIR && unset ENGSYS_MM_CONFIG && command rm -f -- <LAUNCH_FILE> && fake --name acme-dirs --model opus --add-dir ~/worktrees --add-dir=~/other
+argv: fake --name acme-dirs --model opus --add-dir <T>/home/worktrees --add-dir=\~/other
+env: ENGSYS_SESSION=acme-dirs
+env: ENGSYS_SESSION_RUN=<RUN>
+env: ENGSYS_SESSION_ROOT=<T>/w
+env: ENGSYS_SINGLETON_ROLE <unset>
+env: ENGSYS_SECURITY_VERDICT_KEY_FILE <unset>
+env: ENGSYS_MEMORY_SIGNING_KEY_FILE <unset>
+env: ENGSYS_MEMORY_CONFIG <unset>
+env: ENGSYS_MM_CONFIG <unset>
+env: CLAUDE_CONFIG_DIR <unset>
+env: FLEET_CLAUDE_CONFIG_DIR=<T>/fleetcfg
+env: FLEET_CLAUDE_CONFIG_DIR_SCOPE <unset>
+env: ENGSYS_CONFIG_DIR_SESSIONS=<T>/fleetcfg.sessions
+env: ENV_FILE_SOURCED=1
+
+-- launcher (exit 1)
+error: refusing to launch 'acme-mm' (role=merge) on HARNESS=fake: merge and maintenance monsters run only on HARNESS=claude
+SKIPPED: acme-mm (see the error above)
+error: refusing to launch 'acme-maintain' (role=maintain) on HARNESS=fake: merge and maintenance monsters run only on HARNESS=claude
+SKIPPED: acme-maintain (see the error above)
+error: refusing to launch 'acme-broker' (resource broker) on HARNESS=fake: monsters run only on HARNESS=claude
+SKIPPED: acme-broker (see the error above)
+launched: acme-build  (<T>/w)
+error: refusing to launch 'acme-nyx' on HARNESS=fake: security-tier sessions run only on HARNESS=claude with claude-opus-4-8
+SKIPPED: acme-nyx (see the error above)
+launched: acme-plain  (<T>/w)
+launched: acme-dirs  (<T>/w)
+error: 4 roster session(s) not launched; 3 launched
