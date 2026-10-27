@@ -126,6 +126,30 @@ trust-environment change. Checklist line for the PR body:
 
 - [ ] Claude goldens (`core/skills/agent-sessions/scripts/fixtures/launch-golden/claude/`): unchanged, or each changed file is named here with the reason.
 
+## Harness adapters (engsys#287)
+
+The launcher keeps roster parsing, preflights, the launch dir and tmux. What a line is and what it may carry lives in
+`scripts/lib/session-env.sh`, the harness-neutral core: the session identity, the line policy (`check_line_policy`),
+and the trust environment, assembled by one function, `assemble_trust_env`, whose ordering rules are the comment
+block at the top of that file. Everything harness-specific is an adapter, `scripts/lib/harness/<harness>.sh`,
+selected by `HARNESS` in exactly one place (a lint in `launch-golden.test.sh` fails on any other `HARNESS`
+comparison outside the adapters). Each adapter defines, or the launch fails when it is loaded:
+
+| Function | Purpose |
+| -------- | ------- |
+| `harness_bin` | the executable name |
+| `harness_capabilities` | a space-separated subset of `monster_roles security_lane memory_signing mm_config claude_config_dir settings_file remote_control inbox_hook` (an unknown one is an error) |
+| `harness_translate_flags <claude-style flags> <name>` | the shell-escaped argv tail; non-zero refuses the line |
+| `harness_run_cmd <name> <prompt> <translated flags>` | the command that starts the harness |
+| `harness_prelaunch` (optional) | a one-time step after the preflights (the `agy` remote-control daemon) |
+
+The core decides with capabilities, never names: monster, broker, supervised and security-tier lines need
+`monster_roles` (security tier also `security_lane`); the verdict key needs `security_lane`, the memory signing key
+`memory_signing`, `ENGSYS_MM_CONFIG` `mm_config`, `CLAUDE_CONFIG_DIR` / `ENGSYS_MEMORY_CONFIG` `claude_config_dir`,
+and the messaging settings file `settings_file`. Today: claude declares all but `remote_control`; copilot
+`claude_config_dir inbox_hook`; antigravity `claude_config_dir remote_control inbox_hook`. Adding a harness is one
+new adapter file and its goldens; `scripts/fixtures/harness/fake.sh` is the test-only proof that nothing else changes.
+
 ## Running from a fleet repo
 
 The launcher and supervisor need not live in the repo they drive. A separate

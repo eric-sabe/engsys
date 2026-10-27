@@ -167,8 +167,13 @@ if [ "$rc" -ne 0 ]; then ok "tmux failure: exits non-zero"; else no "tmux failur
 has "tmux failure: names the failed call" "$err" "tmux send-keys failed for 'acme-build'"
 has "tmux failure: the line is reported skipped" "$err" "SKIPPED: acme-build"
 
-echo "translate_antigravity_flags fails hard on the security model"
-eval "$(sed -n -e '/^norm_model()/,/^}/p' -e '/^is_security_model()/,/^}/p' -e '/^translate_antigravity_flags()/,/^}/p' "$LAUNCH")"
+echo "the Antigravity adapter's flag translation fails hard on the security model"
+# the core (is_security_model) and the adapter, as the launcher loads them (engsys#287)
+# shellcheck source=lib/session-env.sh
+. "$HERE/lib/session-env.sh"
+# shellcheck source=lib/harness/antigravity.sh
+. "$HERE/lib/harness/antigravity.sh"
+translate_antigravity_flags() { harness_translate_flags "$@"; }
 for m in claude-opus-4-8 claude-opus-4.8 'CLAUDE-OPUS-4-8[1m]' security; do
   set +e; out="$(translate_antigravity_flags "--model $m" 2>/dev/null)"; trc=$?; set -e
   if [ "$trc" -ne 0 ] && [ -z "$out" ]; then ok "agy translate: --model $m fails, nothing mapped"; else no "agy translate: --model $m" "rc=$trc out=$out"; fi

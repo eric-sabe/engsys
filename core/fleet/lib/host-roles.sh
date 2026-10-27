@@ -28,7 +28,7 @@ fleet_host_render() { # fleet_host_render <value> → rendered when it holds __N
 }
 
 fleet_host_kind() { # fleet_host_kind <prompt> <in-ledger 0|1> → merge | maintain | broker | monster | interactive
-  # The launcher's tolerance (launch-agent-sessions.sh prompt_role): any case, `_` or spaces between words.
+  # The launcher's tolerance (lib/session-env.sh prompt_role, sourced by launch-agent-sessions.sh): any case, `_` or spaces between words.
   case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr '_ ' '--')" in
     *merge-monster*) echo merge ;;
     *maintenance-monster*) echo maintain ;;

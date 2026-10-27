@@ -614,7 +614,7 @@ export function inspectPinsAndTrust(ctx) {
   const versionsMatch = pkgVer === pluginVer && pkgVer === marketVer;
   const isClean = dirtyRes.ok && dirtyRes.stdout === '';
 
-  // The trust closure `fleet verify --engsys-dir` hashes: the whole core/fleet and core/lib trees plus the
+  // The trust closure `fleet verify --engsys-dir` hashes: the whole core/fleet, core/lib and launcher lib/ trees plus the
   // kit files outside them (verify-wrappers.mjs ENGSYS_HOST_TREES / ENGSYS_HOST_FILES). Here: presence only.
   const hostRequired = [...new Set([...ENGSYS_HOST_TREES, ...ENGSYS_HOST_FILES, ...ENGSYS_HOST_PATHS])];
   const missingHost = hostRequired.filter((rel) => !fs.existsSync(path.join(engsysDir, rel)));

@@ -1253,7 +1253,7 @@ test('run(): --pin-repo checks the pin checkout against GitHub and caches only a
   assert.match(c.text(), /defines hooks \(unverified against origin\)/);
 });
 
-test('host closure: the whole core/fleet and core/lib trees are compared, planted files included', () => {
+test('host closure: the whole core/fleet, core/lib and launcher lib/ trees are compared, planted files included', () => {
   const hostDir = tmp('verify-host-tree-');
   for (const p of FILES) {
     const dest = path.join(hostDir, p);
@@ -1261,7 +1261,10 @@ test('host closure: the whole core/fleet and core/lib trees are compared, plante
     fs.copyFileSync(path.join(REPO, p), dest);
   }
   assert.deepEqual(compareHost(release.tree, scanHost(hostDir), hostDir), [], 'positive control: a faithful copy matches');
-  assert.deepEqual(ENGSYS_HOST_TREES, ['core/fleet', 'core/lib']);
+  assert.deepEqual(ENGSYS_HOST_TREES, ['core/fleet', 'core/lib', 'core/skills/agent-sessions/scripts/lib']);
+  // engsys#287: the launcher's trust core and adapters are sourced from the host kit, so a planted adapter counts too
+  fs.writeFileSync(path.join(hostDir, 'core', 'skills', 'agent-sessions', 'scripts', 'lib', 'harness', 'evil.sh'), 'harness_bin() { :; }\n');
+  fs.appendFileSync(path.join(hostDir, 'core', 'skills', 'agent-sessions', 'scripts', 'lib', 'session-env.sh'), '\n# edited\n');
   fs.writeFileSync(path.join(hostDir, 'core', 'lib', 'lease', 'extra.mjs'), 'export {}\n');
   fs.appendFileSync(path.join(hostDir, 'core', 'lib', 'lease', 'baton.mjs'), '\n// edited\n');
   fs.appendFileSync(path.join(hostDir, 'core', 'fleet', 'identity', 'git-env.sh'), '\n# edited\n');
@@ -1271,7 +1274,9 @@ test('host closure: the whole core/fleet and core/lib trees are compared, plante
     'missing core/fleet/identity/gh-app-token.mjs',
     'modified core/fleet/identity/git-env.sh',
     'modified core/lib/lease/baton.mjs',
+    'modified core/skills/agent-sessions/scripts/lib/session-env.sh',
     'unexpected core/lib/lease/extra.mjs',
+    'unexpected core/skills/agent-sessions/scripts/lib/harness/evil.sh',
   ]);
 });
 

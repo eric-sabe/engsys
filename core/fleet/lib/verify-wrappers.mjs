@@ -95,9 +95,10 @@ const P = (rel) => `${PLUGIN_SUBDIR}/${rel}`;
  * identity shim, git-env.sh, the launcher wrapper and the verifier itself, and the shared libraries
  * it loads. Whole trees, not a hand-picked list: every regular file under each tree must be a blob of
  * the release with the same content, every release file under it must be on disk, and any symlink is
- * `not-a-file`. Checked against the same release tree when --engsys-dir is given.
+ * `not-a-file`. Checked against the same release tree when --engsys-dir is given. The session launcher's
+ * lib/ (its trust core and harness adapters, engsys#287) is sourced by the launcher, so it is a whole tree too.
  */
-export const ENGSYS_HOST_TREES = ['core/fleet', 'core/lib'];
+export const ENGSYS_HOST_TREES = ['core/fleet', 'core/lib', 'core/skills/agent-sessions/scripts/lib'];
 /** Single host files outside those trees that the kit runs from ENGSYS_DIR. */
 export const ENGSYS_HOST_FILES = [
   'core/skills/agent-sessions/scripts/fleet-supervisor.sh',
