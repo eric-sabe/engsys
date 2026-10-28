@@ -492,6 +492,7 @@ export async function main({ argv = process.argv.slice(2), stdin = process.stdin
 	// failure path is caught and logged there, not silently swallowed).
 	let skippedBudget = false;
 	let spawnFailed = false;
+	let startAgentType = null;
 	try {
 		// cr review (round 2): on the non-Claude pre-agent path, `consumePendingDispatch` must look
 		// up the record `recordPendingDispatch` filed under the TARGET identity (`agentType`,
@@ -506,7 +507,7 @@ export async function main({ argv = process.argv.slice(2), stdin = process.stdin
 		// engsys#264: the start's own identity still goes to memory-brief, which excludes Class B if
 		// EITHER identity is excluded — a bare excluded type (a project `nyx`) that matched a teammate
 		// literally named `nyx` must not shed its exclusion by adopting that teammate's type.
-		let startAgentType = null;
+
 		if (!isPreAgent && pending?.matchedBy === 'name' && typeof pending.agentType === 'string' && pending.agentType) {
 			startAgentType = agentType;
 			agentType = pending.agentType;
@@ -541,7 +542,7 @@ export async function main({ argv = process.argv.slice(2), stdin = process.stdin
 	}
 
 	const elapsedMs = now() - t0;
-	logInjection(hookCacheDir(), { ts: new Date(now()).toISOString(), agent_type: agentType, ...logKeys, ms: elapsedMs, skipped_budget: skippedBudget, spawn_failed: spawnFailed });
+	logInjection(hookCacheDir(), { ts: new Date(now()).toISOString(), agent_type: agentType, ...(startAgentType ? { start_agent_type: startAgentType } : {}), ...logKeys, ms: elapsedMs, skipped_budget: skippedBudget, spawn_failed: spawnFailed });
 	recordHookTelemetry({
 		hook: 'subagent-memory-inject',
 		event: 'SubagentStart',

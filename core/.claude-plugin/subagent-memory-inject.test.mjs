@@ -701,5 +701,7 @@ describe('pending dispatch for a teammate-name agent_type (engsys#262)', () => {
 		const nyx = run('s-264b', 'nyx', 'nyx');
 		assert.equal(nyx.agent_type, 'engsys:isabelle', 'the start still adopts the teammate record (lessons follow the dispatched type)');
 		assert.deepEqual(nyx.pointer_keys, [], 'but the nyx start identity keeps Class B out');
+		assert.equal(nyx.start_agent_type, 'nyx', 'the log shows which identity kept Class B out');
+		assert.equal(control.start_agent_type, 'helper');
 	});
 });

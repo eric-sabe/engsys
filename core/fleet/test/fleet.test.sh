@@ -1170,7 +1170,7 @@ FLEET_INSTANCE="$INST" ENGSYS_HOST="$ENGSYS_HOST" bash -c '. "$ENGSYS_HOST/core/
 dalert
 eq "…so its next deferral is dated afresh: not alerted at once" "$(dsaid 'session acme-mm has been running on its old plugins')" 2
 FLEET_INSTANCE="$INST" ENGSYS_HOST="$ENGSYS_HOST" bash -c '. "$ENGSYS_HOST/core/fleet/lib/fleet-env.sh"; . "$ENGSYS_HOST/core/fleet/lib/session-dirs.sh"; fleet_sync_deferred_set drop acme-mm'
-# a link notify would refuse (--re must be a plain https URL, engsys#238) is left out: posted at info level, still latched
+# a link notify would drop (--re must be a plain https URL, engsys#238, #255) is left out: posted at info level, still latched
 FLEET_INSTANCE="$INST" ENGSYS_HOST="$ENGSYS_HOST" bash -c '. "$ENGSYS_HOST/core/fleet/lib/fleet-env.sh"; . "$ENGSYS_HOST/core/fleet/lib/session-dirs.sh"; fleet_sync_deferred_set add acme-mm'
 echo $(( $(date +%s) - 25 * 3600 )) >"$STATE/sync-deferred.since/acme-mm"
 DEFER_URL="http://github.com/acme/app/issues/11" dalert
