@@ -22,6 +22,7 @@ import {
   loadVerifiedRefEvents,
   mergeFleetStreams,
   peerFleetWeight,
+  pubkeysFingerprint,
 } from './ref-consumer.mjs';
 import { FLEET_REF_PREFIX, MEMORY_REF_PREFIX, fleetEventsRef, tailRef } from './ref-store.mjs';
 import { publicKeyB64, signTip } from './signing.mjs';
@@ -315,22 +316,31 @@ describe('ref-consumer: the read path (engsys#266)', () => {
     assert.deepEqual(mergeFleetStreams([{ fleet: 'mark-fleet', events: [{ k: 'a', signed_fleet: 'mark-fleet', updated_at: '2026-10-02' }] }, { fleet: 'bob', events: [{ k: 'a', signed_fleet: 'bob', updated_at: '2026-10-01' }] }], 'eric')[0].signed_fleet, 'mark-fleet', 'between peers, the newer copy');
   });
 
-  it('caches verdicts per (ref, tip, reviewed SHA, keys): a warm read skips verification; a new tip, a key change or a tampered local ref re-verifies', () => {
+  it('re-verifies every tip on every read, trusting no verdict from disk (engsys#274)', () => {
     const f = consumed();
     let verifies = 0;
     const counting = (cmd, args, opts) => { if (args.includes('rev-list')) verifies++; return exec(cmd, args, opts); };
-    load(f, { exec: counting });
-    assert.equal(verifies, 2, 'cold: both tips verified');
-    assert.ok(fs.existsSync(path.join(f.cache, VERIFY_CACHE_FILE)));
+    assert.equal(load(f, { exec: counting }).length, 4);
+    assert.equal(verifies, 2, 'both tips verified');
     verifies = 0;
     assert.equal(load(f, { exec: counting }).length, 4);
-    assert.equal(verifies, 0, 'warm: served from the cache');
-    assert.equal(load(f, { exec: counting, config: { fleet_memory_pubkeys: { eric: KEYS.eric } } }).filter((e) => e.signed_fleet === 'mark-fleet').length, 0, 'dropping a fleet\'s key drops its stream');
-    assert.ok(verifies > 0, 'a key change re-verifies');
-    // a local process pointing the local ref at an unsigned commit: re-verified (new sha), excluded
+    assert.equal(verifies, 2, 'and verified again: nothing is served from a cache');
+    assert.equal(fs.existsSync(path.join(f.cache, VERIFY_CACHE_FILE)), false, 'no verdict file is written');
+    assert.equal(load(f, { config: { fleet_memory_pubkeys: { eric: KEYS.eric } } }).filter((e) => e.signed_fleet === 'mark-fleet').length, 0, 'dropping a fleet\'s key drops its stream');
+  });
+
+  it('a planted verdict file plus a local ref to an unsigned commit stamps nothing fleet_signed (engsys#274)', () => {
+    const f = consumed();
+    // The attack in #274: a same-user process points the local ref at an unsigned commit and writes the old cache
+    // format's `ok: true` verdict for exactly that (ref, tip, reviewed SHA, keys).
     const unsigned = git(f.consumer, ['commit-tree', git(f.consumer, ['mktree'], `100644 blob ${git(f.consumer, ['hash-object', '-w', '--stdin'], jsonl([ev('evil')]))}\tevents.jsonl\n`), '-m', 'x'], '');
     git(f.consumer, ['update-ref', MARK_TAIL, unsigned]);
-    assert.deepEqual(load(f).filter((e) => e.k === 'evil'), []);
+    const key = `${MARK_TAIL}@${unsigned}|${resolveReviewedSha(f.consumer) || '-'}|${pubkeysFingerprint(CONFIG)}`;
+    fs.writeFileSync(path.join(f.cache, VERIFY_CACHE_FILE), JSON.stringify({ [key]: { ok: true, fleet: 'mark-fleet', keys: ['evil'] } }));
+    const events = load(f);
+    assert.deepEqual(events.filter((e) => e.k === 'evil'), [], 'the planted verdict is ignored');
+    assert.equal(events.filter((e) => e.signed_fleet === 'mark-fleet').length, 0, 'the unsigned tip contributes nothing');
+    assert.equal(fs.existsSync(path.join(f.cache, VERIFY_CACHE_FILE)), false, 'the leftover file is removed');
   });
 
   it('no keys configured: nothing is read', () => {

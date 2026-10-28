@@ -83,12 +83,15 @@ refused, and readers never trust them.
     (a wiped or fresh git dir). With neither, the first staged tip that verifies is **trusted on
     first use**, with a logged warning: a fresh host can be handed a stale (but validly signed) tip
     once. The R3 drill checks a fresh host's first fetch against the live tips.
-  - **Brief-time reads:** `loadClassBEvents` reads the consumed local refs only through
-    `loadVerifiedRefEvents`, which re-verifies each tip (verdicts cached per ref, tip, reviewed SHA
-    and pubkeys in `<cache>/ref-verify-cache.json`, so a warm brief re-verifies nothing) and stamps
+  - **Index-build reads:** `loadClassBEvents` reads the consumed local refs only through
+    `loadVerifiedRefEvents`, which re-verifies each tip on every read and stamps
     its events `author_kind: 'fleet_signed'`, `signed_fleet: <fleet>`. Any other ref under
     `refs/engsys/memory/` (the retired paths, an unknown leaf) is still read label-stripped as
     `untrusted_ref`, and a `delta.jsonl` line claiming `fleet_signed` is too.
+    No verdict is persisted (engsys#274): a cached `ok: true` entry plus a local ref planted by a
+    same-user process would have stamped arbitrary events `fleet_signed`. A leftover
+    `<cache>/ref-verify-cache.json` is deleted on the next read. This runs only when the index is
+    built, not on every brief (engsys#290).
   - **Skip, never block:** a failed fetch, a bad signature, a rollback or a git error keeps the last
     verified state, is logged (`memory-sync: consume: …`, latched like the write warnings) and never
     fails the heartbeat or a brief.

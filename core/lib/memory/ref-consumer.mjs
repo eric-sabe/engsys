@@ -13,10 +13,9 @@
 //                                       the previous tip (merge, `replace: true` tail, compaction alike), so content
 //                                       is never assumed append-only; only ancestry is checked. A stale signed tip
 //                                       can't be re-parented: the signature binds its parent.
-//   loadVerifiedRefEvents(repoRoot, o)  the brief's synchronous read path (index-db loadClassBEvents): re-verify each
-//                                       local consumable tip and return its events stamped `fleet_signed`. Verdicts
-//                                       are cached per (ref, tip, reviewed SHA, pubkeys), so a brief re-verifies
-//                                       only what changed.
+//   loadVerifiedRefEvents(repoRoot, o)  the index build's synchronous read path (index-db loadClassBEvents): re-verify
+//                                       every local consumable tip, every time, and return its events stamped
+//                                       `fleet_signed`. No verdict is persisted (engsys#274).
 //
 // Which refs are consumed: every ref in a fleet's namespace, `refs/engsys/memory/fleet/<fleet>/{events,merge,maintain}`
 // (signing.mjs refFleet, engsys#266), each signed by the fleet its path names. The retired shared
@@ -48,6 +47,9 @@ export const FLEET_REF_PREFIX = `${MEMORY_REF_PREFIX}fleet/`;
 export const INCOMING_PREFIX = 'refs/engsys/memory-incoming/';
 export const STAGED_FETCH_REFSPEC = `+${FLEET_REF_PREFIX}*:${INCOMING_PREFIX}fleet/*`;
 export const TIPS_FILE = 'memory-ref-tips.json';
+// engsys#274: the verdict cache this module used to keep. A file a same-user process could plant `ok: true` entries in
+// (with a matching local ref) would stamp arbitrary events `fleet_signed`, so verdicts are no longer persisted, and a
+// leftover file is deleted on the next read.
 export const VERIFY_CACHE_FILE = 'ref-verify-cache.json';
 const ZERO_OID = '0'.repeat(40);
 // A rejection that describes configuration, not an attack: a fleet whose key isn't in memory.yml yet. Logged once per
@@ -217,7 +219,7 @@ export function consumeMemoryRefs(repoRoot, { remote = 'origin', repo = '', stat
   return { ok: true, fetched: true, results };
 }
 
-/** A stable fingerprint of the configured pubkeys: a key change invalidates every cached verdict. */
+/** A stable fingerprint of the configured pubkeys, part of the index watermark: a key change rebuilds the index. */
 export function pubkeysFingerprint(config) {
   const raw = config?.fleet_memory_pubkeys && typeof config.fleet_memory_pubkeys === 'object' ? config.fleet_memory_pubkeys : {};
   const norm = Object.keys(raw).sort().map((f) => [f, [].concat(raw[f] ?? []).map(String).sort()]);
@@ -227,9 +229,10 @@ export function pubkeysFingerprint(config) {
 /**
  * The brief's read path: the events of every local consumed ref whose tip verifies, stamped
  * `author_kind: 'fleet_signed'` / `signed_fleet`, merged by `k` with `ownFleet`'s copy winning a collision
- * (then the newer `updated_at`). Verdicts are cached in `<cacheDir>/VERIFY_CACHE_FILE` per (ref, tip,
- * reviewed SHA, pubkeys); a cache hit re-reads only the blob. `resolveSha` is the reviewed-SHA resolver
- * (index-db passes its own, to keep the import graph acyclic at call time). Never throws.
+ * (then the newer `updated_at`). Every tip is re-verified on every call: no verdict is trusted from disk (engsys#274).
+ * This runs only when the index is built (engsys#290), not on every brief, so the cost (a few hundred ms on keystone)
+ * stays off the hook's budget. `cacheDir` is only where a leftover VERIFY_CACHE_FILE is removed. `resolveSha` is the
+ * reviewed-SHA resolver (index-db passes its own, to keep the import graph acyclic at call time). Never throws.
  */
 export function loadVerifiedRefEvents(repoRoot, { config = {}, cacheDir = '', ownFleet = process.env.FLEET_ID || '', resolveSha, exec = execFileSync, refs = null } = {}) {
   let local;
@@ -240,44 +243,27 @@ export function loadVerifiedRefEvents(repoRoot, { config = {}, cacheDir = '', ow
   if (!pubkeys.size) return [];
   let reviewedSha = null;
   try { reviewedSha = resolveSha ? resolveSha(repoRoot) : null; } catch { reviewedSha = null; }
-  const fp = pubkeysFingerprint(config);
-  const cacheFile = cacheDir ? path.join(cacheDir, VERIFY_CACHE_FILE) : '';
-  const cache = (cacheFile && readJson(cacheFile)) || {};
-  const nextCache = {};
-  let cacheDirty = false;
+  if (cacheDir) {
+    try { fs.rmSync(path.join(cacheDir, VERIFY_CACHE_FILE), { force: true }); } catch { /* best effort: it is never read */ }
+  }
   const streams = [];
   for (const { ref, sha } of local) {
-    const key = `${ref}@${sha}|${reviewedSha || '-'}|${fp}`;
-    let verdict = cache[key];
-    let content = null;
     try {
-      if (!verdict || typeof verdict.ok !== 'boolean') {
-        const tip = readTip(exec, repoRoot, sha);
-        if (tip.error) verdict = { ok: false, reason: tip.error };
-        else {
-          content = tip.content;
-          const v = verifyMemoryRefTipSync(repoRoot, { ref, parent: tip.parent, content, sigText: tip.sigText, pubkeys, exec, ...(resolveSha ? { resolveSha: () => reviewedSha } : {}) });
-          verdict = v.ok ? { ok: true, fleet: v.fleet, keys: v.events.map((e) => e.k).filter((k) => typeof k === 'string') } : { ok: false, reason: v.reason };
-        }
-        cacheDirty = true;
-      }
-      nextCache[key] = verdict;
-      if (!verdict.ok) continue;
-      if (content === null) content = git(exec, repoRoot, ['show', `${sha}:events.jsonl`]);
-      const keep = new Set(verdict.keys);
+      const tip = readTip(exec, repoRoot, sha);
+      if (tip.error) continue;
+      const v = verifyMemoryRefTipSync(repoRoot, { ref, parent: tip.parent, content: tip.content, sigText: tip.sigText, pubkeys, exec, ...(resolveSha ? { resolveSha: () => reviewedSha } : {}) });
+      if (!v.ok) continue;
+      const keep = new Set(v.events.map((e) => e.k).filter((k) => typeof k === 'string'));
       const events = [];
-      for (const raw of parseEventsJsonl(content).events) {
+      for (const raw of parseEventsJsonl(tip.content).events) {
         if (!raw || typeof raw !== 'object' || !keep.has(raw.k)) continue;
         const { author_kind: _ak, author_id: _aid, editor_kind: _ek, editor_id: _eid, signed_fleet: _sf, ...rest } = raw;
-        events.push({ ...rest, author_kind: 'fleet_signed', author_id: null, signed_fleet: verdict.fleet });
+        events.push({ ...rest, author_kind: 'fleet_signed', author_id: null, signed_fleet: v.fleet });
       }
-      streams.push({ fleet: verdict.fleet, events });
+      streams.push({ fleet: v.fleet, events });
     } catch {
       /* one unreadable ref never costs the others */
     }
-  }
-  if (cacheFile && (cacheDirty || Object.keys(cache).length !== Object.keys(nextCache).length)) {
-    try { writeJsonAtomic(cacheFile, nextCache); } catch { /* the cache is an optimisation only */ }
   }
   return mergeFleetStreams(streams, ownFleet);
 }
