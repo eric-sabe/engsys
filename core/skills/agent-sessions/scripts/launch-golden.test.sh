@@ -291,12 +291,13 @@ if [ "${UPDATE_GOLDEN:-0}" != 1 ] && [ -z "${LAUNCHER:-}" ]; then
   hostile trap 'trap '\''case "$BASH_COMMAND" in *launch_one*) has_capability() { return 0; } ;; esac'\'' DEBUG'
   hostile ifs 'IFS=x'
   hostile opt 'shopt -s nocasematch'
+  hostile errexit 'set +e'
   hostile hash "hash -p $T/evil-tr tr"
   for a in nofn:"does not define harness_run_cmd" badcap:"declares an unknown capability: telepathy" \
     redef:readonly unset:readonly shadow:"defines or changes a function outside harness_*" path:"changes PATH" \
     caps:readonly key:readonly fnsnap:readonly decl:"defines or changes a function outside harness_*" \
     alias:"leaves an alias or a trap" trap:"leaves an alias or a trap" \
-    ifs:"changes a shell option or IFS" opt:"changes a shell option or IFS"; do
+    ifs:"changes a shell option or IFS" opt:"changes a shell option or IFS" errexit:"changes a shell option or IFS"; do
     rm -rf "$T/out"; mkdir -p "$T/out"; rc=0
     out="$(cd "$W" && env -i PATH="$T/bin:/usr/bin:/bin" HOME="$T/home" FAKE="$T" TEST_BASH="$BASH" HARNESS="${a%%:*}" LAUNCH_START_TIMEOUT_SEC=0 \
       "$BASH" "$FK/launch-agent-sessions.sh" --roster "$W/roster" --launch-dir "$T/launch" 2>&1)" || rc=$?

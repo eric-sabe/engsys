@@ -173,7 +173,8 @@ exec 9>&2
 trap 'adapter_exit=$?; builtin read -r -d "" adapter_err <"$ADAPTER_ERR" || [[ 1 ]]; builtin printf "%s" "${adapter_err:-}" >&9; rm -f "$ADAPTER_ERR"; [[ $adapter_exit != 0 ]] || adapter_exit=1; builtin exit "$adapter_exit"' EXIT
 LAUNCHER_TRAPS="$(trap -p)"
 readonly LAUNCHER_TRAPS
-# shell_state → the shell options and IFS, to compare across the load.
+# shell_state → the shell options and IFS, to compare across the load. Callers append $- (the parent's flags): inside
+# $(...) errexit reads as off, so `set +o` alone misses a `set +e`.
 shell_state() { builtin shopt -p; builtin set +o; builtin printf 'IFS=%q\n' "$IFS"; }
 # fn_snapshot → every function defined now (names and bodies) except harness_* ones. Builtins called through
 # `builtin`, and no process substitution (bash 3.2 truncates `$(… < <(…))` output at random).
@@ -199,7 +200,7 @@ adapter_ran() {
   esac
   [[ "$PATH" == "$CORE_PATH" ]] || { builtin echo "error: $1 changes PATH (engsys#297)" >&2; return 1; }
   [[ -z "$(builtin alias -p)" && "$3" == "$LAUNCHER_TRAPS" ]] || { builtin echo "error: $1 leaves an alias or a trap (engsys#297)" >&2; return 1; }
-  [[ "$(shell_state)" == "$4" ]] || { builtin echo "error: $1 changes a shell option or IFS (engsys#297)" >&2; return 1; }
+  [[ "$(shell_state)$-" == "$4" ]] || { builtin echo "error: $1 changes a shell option or IFS (engsys#297)" >&2; return 1; }
   builtin hash -r
 }
 # source_adapter <file>: source it here, its stderr to ADAPTER_ERR.
@@ -233,7 +234,7 @@ while IFS= read -r core_fn; do
 done <<<"$(compgen -A function)"
 adapter_file="$LAUNCHER_LIB/harness/$HARNESS.sh"
 fns_before_adapter="$(fn_snapshot)"
-shell_before_adapter="$(shell_state)"
+shell_before_adapter="$(shell_state)$-"
 source_adapter "$adapter_file" || true
 adapter_ran "harness adapter $adapter_file" "$fns_before_adapter" "$(trap -p)" "$shell_before_adapter" || builtin exit 1
 check_adapter "$adapter_file" || exit 1
