@@ -857,6 +857,9 @@ function buildBriefOnce(opts) {
 		);
 
 		let pointers = [];
+		// Class B trust is decided here, at render time (selectPointers re-checks isEventTrusted and validatePointerEvent on
+		// every event read back from the writable index), not when the index is built; that is why ensureIndex can skip
+		// loading events for a fresh or stale index (engsys#290).
 		// A stale index (a rebuild is under way) never surfaces Class B: its events were verified against inputs that may
 		// have changed since (engsys#266 trust); Class A still renders from this run's fresh docs.
 		if (classBAllowed && !handle.stale) {

@@ -35,9 +35,10 @@ import { claimDispatch, noteDispatch } from './handback-guard.mjs';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const MEMORY_BRIEF = path.resolve(HERE, '..', 'scripts', 'memory-brief.mjs');
 const TIMEOUT_MS = 2000;
-// engsys#290: ENGSYS_MEMORY_BRIEF_BUDGET_MS overrides TIMEOUT_MS, for a caller that checks the brief's content rather
-// than its speed (the end-to-end tests, the xray self-test) and would otherwise fail whenever the host is loaded. It
-// only lengthens or shortens this hook's own wait: Claude Code's hook timeout still bounds the hook. Clamped to
+// engsys#290: ENGSYS_MEMORY_BRIEF_BUDGET_MS overrides TIMEOUT_MS, for tests and diagnostics only: a caller that checks
+// the brief's content rather than its speed (the end-to-end tests, the xray self-test) and would otherwise fail whenever
+// the host is loaded. Don't set it for real sessions: hooks.json gives this hook 5 s, so a budget above about 4.5 s
+// trades this hook's own timeout (logged as spawn_failed) for a harness kill with no log line. Clamped to
 // [MIN_SPAWN_MS, 60 s]; anything unparseable keeps TIMEOUT_MS.
 const MAX_BUDGET_MS = 60_000;
 // Below this, less budget remains than a bare `node` process typically needs just to start —
@@ -159,9 +160,9 @@ function sweepExpiredDispatches(pendingDir, nowMs) {
 
 /** Stash a short-lived pending dispatch record at `PreToolUse` (`Agent|Task`) so the subsequent
  * `SubagentStart` hook can recover the task prompt, prompt path hints, and target worktree (#142). */
-export function recordPendingDispatch(input, { cwd, now = () => Date.now() } = {}) {
+export function recordPendingDispatch(input, { cwd, now = () => Date.now(), cacheDir: knownCacheDir } = {}) {
 	try {
-		const cacheDir = resolveCacheDir(cwd);
+		const cacheDir = knownCacheDir !== undefined ? knownCacheDir : resolveCacheDir(cwd);
 		if (!cacheDir) return null;
 		const pendingDir = path.join(cacheDir, 'pending-dispatch');
 		fs.mkdirSync(pendingDir, { recursive: true, mode: 0o700 });
@@ -201,9 +202,9 @@ export function recordPendingDispatch(input, { cwd, now = () => Date.now() } = {
  * Nothing else: a start that matches neither gets no record (and so no prompt), never another
  * dispatch's — parallel dispatches would otherwise swap prompts, paths and worktrees.
  * Returns the parsed record plus `matchedBy` (`'name'` | `'type'`). */
-export function consumePendingDispatch(input, { cwd, now = () => Date.now() } = {}) {
+export function consumePendingDispatch(input, { cwd, now = () => Date.now(), cacheDir: knownCacheDir } = {}) {
 	try {
-		const cacheDir = resolveCacheDir(cwd);
+		const cacheDir = knownCacheDir !== undefined ? knownCacheDir : resolveCacheDir(cwd);
 		if (!cacheDir) return null;
 		const pendingDir = path.join(cacheDir, 'pending-dispatch');
 		const ts = now();
@@ -393,9 +394,8 @@ export function runMemoryBrief({ agentType, prompt, touchedPaths, cwd, timeoutMs
 	}
 }
 
-function logInjection(cwd, record) {
+function logInjection(cacheDir, record) {
 	try {
-		const cacheDir = resolveCacheDir(cwd);
 		if (!cacheDir) return;
 		fs.mkdirSync(cacheDir, { recursive: true });
 		fs.appendFileSync(path.join(cacheDir, 'injections.jsonl'), `${JSON.stringify(record)}\n`);
@@ -426,6 +426,14 @@ export async function main({ argv = process.argv.slice(2), stdin = process.stdin
 		if (top) cwd = top;
 	} catch { /* not a repo, or git unavailable — keep rawCwd; memory-brief fails open from there */ }
 
+	// engsys#290: the hook needs the cache dir up to twice (the pending record, then the log); resolve it once, on first
+	// use, so a slow git costs its timeout once, not twice.
+	let cacheDirMemo;
+	const hookCacheDir = () => {
+		if (cacheDirMemo === undefined) cacheDirMemo = resolveCacheDir(cwd);
+		return cacheDirMemo;
+	};
+
 	// PreToolUse (`Agent|Task`) mode (#142): stash the dispatch prompt, prompt path hints, and any
 	// target worktree path under `<cacheDir>/pending-dispatch/` so the immediately following
 	// SubagentStart hook can consume it. Always fails open with `{}`.
@@ -434,7 +442,7 @@ export async function main({ argv = process.argv.slice(2), stdin = process.stdin
 		// engsys#286: the hand-back guard acts only on agents this session dispatched; tell it about this one first
 		// (no git needed), whatever happens to the memory brief's own record below.
 		if (input) noteDispatch(input, { now });
-		if (input) recordPendingDispatch(input, { cwd, now });
+		if (input) recordPendingDispatch(input, { cwd, now, cacheDir: hookCacheDir() });
 		recordHookTelemetry({
 			hook: 'subagent-memory-inject',
 			event: 'PreToolUse',
@@ -490,7 +498,7 @@ export async function main({ argv = process.argv.slice(2), stdin = process.stdin
 		// event) would derive internally. Without this, the prefixes never matched and the pending
 		// dispatch (prompt, prompt paths, worktree) was silently lost on every non-Claude harness.
 		const lookupInput = isPreAgent && input ? { ...input, agent_type: agentType } : input;
-		const pending = lookupInput ? consumePendingDispatch(lookupInput, { cwd, now }) : null;
+		const pending = lookupInput ? consumePendingDispatch(lookupInput, { cwd, now, cacheDir: hookCacheDir() }) : null;
 		// engsys#262: a teammate start reports its teammate name as agent_type; the record matched BY
 		// that name carries the dispatched subagent_type, which is what lesson `roles` and the Class B
 		// exclusion set are keyed on (a `nyx-221` teammate is still Nyx).
@@ -527,7 +535,7 @@ export async function main({ argv = process.argv.slice(2), stdin = process.stdin
 	}
 
 	const elapsedMs = now() - t0;
-	logInjection(cwd, { ts: new Date(now()).toISOString(), agent_type: agentType, ...logKeys, ms: elapsedMs, skipped_budget: skippedBudget, spawn_failed: spawnFailed });
+	logInjection(hookCacheDir(), { ts: new Date(now()).toISOString(), agent_type: agentType, ...logKeys, ms: elapsedMs, skipped_budget: skippedBudget, spawn_failed: spawnFailed });
 	recordHookTelemetry({
 		hook: 'subagent-memory-inject',
 		event: 'SubagentStart',

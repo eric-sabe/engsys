@@ -205,6 +205,10 @@ directory is shared by every worktree, is never committed, and survives `git wor
 - At `SubagentStart`, consumes the matching pending-dispatch record (verifying any candidate
   worktree shares `--git-common-dir` with `cwd`), runs `memory-brief` with a 2 s budget, and returns
   `{"hookSpecificOutput":{"hookEventName":"SubagentStart","additionalContext":…}}`.
+- `ENGSYS_MEMORY_BRIEF_BUDGET_MS` overrides the 2 s budget, clamped to 300 ms–60 s (engsys#290). It is for
+  tests and diagnostics that check what a brief says rather than how fast it arrives (the end-to-end
+  hook tests, the xray self-test). Don't set it for real sessions: `hooks.json` gives the hook 5 s, so
+  a budget over about 4.5 s turns a logged timeout into a harness kill with no log line.
 - **Fail-open:** any error, timeout or empty brief returns `{}`. It never blocks a dispatch.
   Keep it separate from any enforcement hook, which must fail closed.
 - Logs `{ts, agent_type, lesson_keys, pointer_keys, bytes, ms}` to `injections.jsonl`. These logs are
