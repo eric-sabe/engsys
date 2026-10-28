@@ -1364,6 +1364,9 @@ export async function runLiveHookSelfTest(ctx) {
         ...baseEnv,
         ENGSYS_MEMORY_CACHE_DIR: cacheDir,
         CLAUDE_PROJECT_DIR: ctx.engsysDir,
+        // engsys#290: this checks that a brief is injected, not how fast; the hook's own 2 s budget would fail it on
+        // a loaded host. The spawn timeouts below stay above it.
+        ENGSYS_MEMORY_BRIEF_BUDGET_MS: '10000',
       };
       const rPre = spawnSync(
         process.execPath,
@@ -1378,7 +1381,7 @@ export async function runLiveHookSelfTest(ctx) {
             tool_input: { subagent_type: 'engsys:isabelle', prompt: 'Review core/fleet/verify.sh bash quoting and git locks' },
           }),
           encoding: 'utf8',
-          timeout: 5000,
+          timeout: 15000,
         },
       );
       const rSub = spawnSync(
@@ -1394,7 +1397,7 @@ export async function runLiveHookSelfTest(ctx) {
             cwd: ctx.engsysDir,
           }),
           encoding: 'utf8',
-          timeout: 5000,
+          timeout: 15000,
         },
       );
       const outJson = JSON.parse(rSub.stdout || '{}');

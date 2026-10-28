@@ -27,6 +27,7 @@
 //   closeIndex(db)                             -> best-effort close; never throws
 //   resolveMemoryConfigPath(env?, opts?)       -> the ONE operator memory.yml path (engsys#262, #268), or null
 //   readOperatorMemoryConfig(env?)             -> that file parsed to a plain object, or null
+//   withBriefMemo(fn)                          -> fn(), with the repo facts below resolved once (engsys#290)
 //
 // `opts.sqlite` (ensureIndex) and `opts.now`/`opts.fs` are injection points for tests — notably to
 // simulate "node:sqlite is unavailable" without needing an actual Node build that lacks it (§13: "the
@@ -118,17 +119,51 @@ export function validatePointerEvent(event, { allowedMarkers } = {}) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// per-brief memo (engsys#290)
+// ---------------------------------------------------------------------------------------------
+
+// One brief asked git the same questions several times: the reviewed SHA five times, the origin repo twice, and so
+// on. Each answer is a git process, and under host load a process start is what costs, not the work. Inside
+// withBriefMemo each of these facts is resolved once. The memo lives only for that synchronous call, so a
+// long-running caller never sees an old answer; outside it every call asks git again, as before.
+let briefMemo = null;
+
+/** Run `fn` (synchronous) with the repo facts it resolves (reviewed SHA, origin repo, memory refs, cache dir,
+ * operator config) memoized for the call. Nested calls share the outer memo. */
+export function withBriefMemo(fn) {
+	const outer = briefMemo;
+	briefMemo = outer ?? new Map();
+	try {
+		return fn();
+	} finally {
+		briefMemo = outer;
+	}
+}
+
+function memoized(key, compute, copy = (v) => v) {
+	if (!briefMemo) return compute();
+	if (!briefMemo.has(key)) briefMemo.set(key, compute());
+	return copy(briefMemo.get(key));
+}
+
+// ---------------------------------------------------------------------------------------------
 // paths
 // ---------------------------------------------------------------------------------------------
 
 /** `$(git rev-parse --git-common-dir)/engsys-memory`, absolute. Null outside a git repo or if git
  * is unavailable — callers treat null as "no cache; build in memory only / fail open". */
 export function resolveCacheDir(cwd = process.cwd()) {
+	return memoized(`cacheDir\0${cwd}`, () => resolveCacheDirUncached(cwd));
+}
+
+function resolveCacheDirUncached(cwd) {
 	try {
 		const common = execFileSync(
 			'git',
 			['-C', cwd, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
-			{ encoding: 'utf8', timeout: 500, killSignal: 'SIGKILL', stdio: ['ignore', 'pipe', 'ignore'] },
+			// engsys#290: 1500 ms, not 500. Under host load one git start can take longer than 500 ms, and a null
+			// cache dir drops the dispatch record and the whole brief. The hook's own budget still bounds the total.
+			{ encoding: 'utf8', timeout: 1500, killSignal: 'SIGKILL', stdio: ['ignore', 'pipe', 'ignore'] },
 		).trim();
 		if (!common) return null;
 		return path.join(common, 'engsys-memory');
@@ -244,6 +279,10 @@ function stripControlAndBidi(s) {
  * itself. This function's job is only to stop a `tag`/`heads` namesake from shadowing it.
  */
 export function resolveReviewedSha(repoRoot, { defaultBranch } = {}) {
+	return memoized(`reviewedSha\0${repoRoot}\0${defaultBranch ?? ''}`, () => resolveReviewedShaUncached(repoRoot, defaultBranch));
+}
+
+function resolveReviewedShaUncached(repoRoot, defaultBranch) {
 	const names = [];
 	try {
 		const symref = execFileSync('git', ['-C', repoRoot, 'symbolic-ref', 'refs/remotes/origin/HEAD'], { encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
@@ -570,6 +609,10 @@ export function normalizeRepoUrl(url) {
  */
 export function resolveOriginRepo(repoRoot) {
 	if (!repoRoot) return null;
+	return memoized(`originRepo\0${repoRoot}`, () => resolveOriginRepoUncached(repoRoot));
+}
+
+function resolveOriginRepoUncached(repoRoot) {
 	try {
 		const superproj = execFileSync(
 			'git',
@@ -718,6 +761,14 @@ function resolveMemoryConfig(env, { repoRoot = null, cwd = process.cwd(), log = 
  * An accepted ENGSYS_MEMORY_CONFIG is read at its validated realpath, opened with O_NOFOLLOW (that path holds no
  * symlink, so one appearing there afterwards is refused rather than followed). */
 export function readOperatorMemoryConfig(env = process.env, opts = {}) {
+	// Memoized only for the live environment and the default checks: a test's own env, logger or afterCheck hook
+	// always runs the full resolution.
+	if (env !== process.env || opts.afterCheck || opts.log || opts.cwd) return readOperatorMemoryConfigUncached(env, opts);
+	const key = ['operatorConfig', opts.repoRoot ?? '', process.cwd(), env.ENGSYS_MEMORY_CONFIG ?? '', env.CLAUDE_CONFIG_DIR ?? '', env.HOME ?? ''].join('\0');
+	return memoized(key, () => readOperatorMemoryConfigUncached(env, opts), (v) => (v ? structuredClone(v) : v));
+}
+
+function readOperatorMemoryConfigUncached(env, opts) {
 	const { readPath, validated } = resolveMemoryConfig(env, opts);
 	if (!readPath) return null;
 	opts.afterCheck?.(); // test hook: the window between the in-repo check and the read
@@ -877,6 +928,10 @@ export function loadClassADocs(roots, manifest = {}, opts = {}) {
  */
 export function listMemoryRefShas(repoRoot) {
 	if (!repoRoot) return [];
+	return memoized(`memoryRefs\0${repoRoot}`, () => listMemoryRefShasUncached(repoRoot), (refs) => refs.map((r) => ({ ...r })));
+}
+
+function listMemoryRefShasUncached(repoRoot) {
 	try {
 		const out = execFileSync(
 			'git',
@@ -1162,7 +1217,6 @@ export function ensureIndex(opts = {}) {
 	const { docs } = loadClassADocs(roots, manifest, { repoRoot, allowlisted, pluginRoot: opts.pluginRoot, allowedRepos: opts.allowedRepos, defaultBranch: opts.defaultBranch, reviewedSha: opts.reviewedSha });
 	const refShas = allowlisted ? listMemoryRefShas(repoRoot) : [];
 	const operatorConfig = refShas.length ? readOperatorMemoryConfig(process.env, { repoRoot }) : null;
-	const events = loadClassBEvents(cacheDir, { repoRoot, refShas, operatorConfig });
 	let eventsFingerprint = 0;
 	try {
 		const st = fs.statSync(path.join(cacheDir, 'delta.jsonl'));
@@ -1219,6 +1273,10 @@ export function ensureIndex(opts = {}) {
 		} catch { /* best effort */ }
 		const tmpPath = `${dbPath}.tmp-${process.pid}-${Date.now()}`;
 		try {
+			// Class B is loaded (and its ref tips verified) only here, for a build: the watermark is computed from the
+			// delta file's stat, the ref tips and the keys, never from the events, so a fresh or stale index needs none
+			// of that work (engsys#290).
+			const events = (opts.loadEvents ?? loadClassBEvents)(cacheDir, { repoRoot, refShas, operatorConfig });
 			buildInto(tmpPath, { sqlite, docs, events, manifest: watermark });
 			fs.renameSync(tmpPath, dbPath); // atomic on the same filesystem — the safe handoff under concurrency
 		} catch (err) {
