@@ -24,7 +24,7 @@ import {
   tailRef,
 } from '../lib/memory/ref-store.mjs';
 import { FLEET_ID_RE, readSigningKeyFile, signTip } from '../lib/memory/signing.mjs';
-import { consumeMemoryRefs, loadVerifiedRefEvents } from '../lib/memory/ref-consumer.mjs';
+import { consumeMemoryRefs } from '../lib/memory/ref-consumer.mjs';
 import { closeIndex, ensureIndex, resolveCacheDir, resolveReviewedSha } from '../lib/memory/index-db.mjs';
 import { isEventTrusted as sharedIsEventTrusted } from '../lib/memory/trust.mjs';
 import { loadConfig } from './memory-brief.mjs';
@@ -1582,9 +1582,9 @@ export async function runMemorySync({
     const warnings = [];
     const res = consume(repoRoot, { remote, repo, stateDir, config: cfg, log: (l) => warnings.push(l) });
     if (res.ok && cacheDir && (res.results || []).some((r) => r.status === 'accepted')) {
-    // engsys#288: when a tip moved, rebuild the index now, off the brief's clock, so the next brief finds it current
-    // instead of serving the stale one while a detached rebuild catches up. The rebuild re-verifies the tips itself;
-    // there is no verdict cache to warm any more (engsys#274).
+      // engsys#288: when a tip moved, rebuild the index now, off the brief's clock, so the next brief finds it current
+      // instead of serving the stale one while a detached rebuild catches up. The rebuild re-verifies the tips itself;
+      // there is no verdict cache to warm any more (engsys#274).
       if (rebuildIndex) {
         try { closeIndex(ensureIndex({ repoRoot, cacheDir })); } catch { /* fail-open: the brief rebuilds it */ }
       }
