@@ -57,6 +57,7 @@ import {
 	resolveCacheDir,
 	resolveReviewedSha,
 	validatePointerEvent,
+	withBriefMemo,
 } from '../lib/memory/index-db.mjs';
 import { isEventTrusted } from '../lib/memory/trust.mjs';
 import { peerFleetWeight } from '../lib/memory/ref-consumer.mjs';
@@ -789,6 +790,11 @@ export function isReviewedOnDefaultBranch(doc, { repoRoot, sha }) {
  * (no node:sqlite, no index, bad config) yields the empty brief, per the hook's fail-open contract.
  */
 export function buildBrief(opts = {}) {
+	// engsys#290: one brief asks git the same few questions many times over; under withBriefMemo each is asked once.
+	return withBriefMemo(() => buildBriefOnce(opts));
+}
+
+function buildBriefOnce(opts) {
 	const repoRoot = opts.repoRoot ?? process.cwd();
 	const empty = { text: '', lessonKeys: [], pointerKeys: [], bytes: 0 };
 	try {

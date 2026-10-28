@@ -44,6 +44,8 @@ import {
 	resolveMemoryConfigPath,
 	repoCheckoutRoots,
 	readOperatorMemoryConfig,
+	listMemoryRefShas,
+	withBriefMemo,
 } from './index-db.mjs';
 
 // engsys#262: the operator's memory.yml is ENGSYS_MEMORY_CONFIG, else $CLAUDE_CONFIG_DIR/memory.yml, else
@@ -1180,6 +1182,88 @@ describe('engsys#288: the brief never waits on a rebuild, and a rebuild is fast 
 			while (fs.existsSync(join(cacheDir, 'index.rebuild.lock')) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
 			assert.equal(fs.existsSync(join(cacheDir, 'index.rebuild.lock')), false, 'and released its lock');
 			assert.deepEqual(fs.readdirSync(cacheDir).filter((f) => f.startsWith('index.sqlite.tmp-')), [], 'no temp left behind');
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe('engsys#290: one brief resolves each repo fact once, and loads Class B only to build', { concurrency: 1 }, () => {
+	test('withBriefMemo: the reviewed SHA is resolved once inside the call, and afresh outside it', () => {
+		const dir = makeRepo();
+		try {
+			const first = resolveReviewedSha(dir);
+			const advance = () => {
+				writeFileSync(join(dir, 'README.md'), `moved ${Date.now()}\n`);
+				commitAndPush(dir, 'advance');
+			};
+			const inside = withBriefMemo(() => {
+				const a = resolveReviewedSha(dir);
+				advance();
+				return [a, resolveReviewedSha(dir)];
+			});
+			assert.deepEqual(inside, [first, first], 'one answer for the whole brief');
+			const after = resolveReviewedSha(dir);
+			assert.notEqual(after, first, 'outside the memo git is asked again');
+			assert.equal(resolveReviewedSha(dir), after);
+			// a nested call shares the outer memo
+			withBriefMemo(() => {
+				const outer = resolveReviewedSha(dir);
+				advance();
+				assert.equal(withBriefMemo(() => resolveReviewedSha(dir)), outer);
+			});
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('withBriefMemo: memoized values are copies, so a caller cannot change what the next caller gets', () => {
+		const dir = makeRepo();
+		const cfgDir = mkdtempSync(join(tmpdir(), 'memory-idx-290-cfg-'));
+		const prev = process.env.CLAUDE_CONFIG_DIR;
+		try {
+			hermeticGit(dir, [...GIT_OPTS, 'update-ref', 'refs/engsys/memory/fleet/eric/events', 'HEAD'], { isolateConfig: true });
+			writeFileSync(join(cfgDir, 'memory.yml'), 'repos: [fixture/repo]\nfleet_memory_pubkeys: {}\n');
+			process.env.CLAUDE_CONFIG_DIR = cfgDir;
+			withBriefMemo(() => {
+				const refs = listMemoryRefShas(dir);
+				assert.equal(refs.length, 1);
+				refs[0].sha = 'f'.repeat(40);
+				refs.push({ ref: 'refs/engsys/memory/forged', sha: 'e'.repeat(40) });
+				assert.equal(listMemoryRefShas(dir).length, 1);
+				assert.notEqual(listMemoryRefShas(dir)[0].sha, 'f'.repeat(40));
+				const cfg = readOperatorMemoryConfig(process.env, { repoRoot: dir });
+				cfg.repos.push('attacker/repo');
+				cfg.fleet_memory_pubkeys.evil = 'x';
+				assert.deepEqual(readOperatorMemoryConfig(process.env, { repoRoot: dir }), { repos: ['fixture/repo'], fleet_memory_pubkeys: {} });
+			});
+		} finally {
+			if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+			else process.env.CLAUDE_CONFIG_DIR = prev;
+			rmSync(dir, { recursive: true, force: true });
+			rmSync(cfgDir, { recursive: true, force: true });
+		}
+	});
+
+	test('ensureIndex loads Class B only when it builds inline: never for a fresh index, never for a stale one', { skip: !SQLITE_AVAILABLE }, () => {
+		const dir = makeRepo();
+		try {
+			const calls = [];
+			const loadEvents = (...args) => { calls.push(args); return loadClassBEvents(...args); };
+			closeIndex(ensureIndex({ repoRoot: dir, loadEvents }));
+			assert.equal(calls.length, 1, 'a missing index is built inline, with its events');
+			closeIndex(ensureIndex({ repoRoot: dir, loadEvents, staleWhileRevalidate: true, spawnRebuild: () => {} }));
+			assert.equal(calls.length, 1, 'fresh: nothing to build, no events loaded');
+			writeFileSync(join(dir, 'docs', 'agent-lessons', 'two.md'), '---\nglobs: []\nstacks: []\nroles: []\nkeywords: ["sprockets"]\nsecurity: false\nsupersedes: []\n---\n\n# Sprockets\n\nbody\n');
+			commitAndPush(dir, 'add two');
+			const spawned = [];
+			const h = ensureIndex({ repoRoot: dir, loadEvents, staleWhileRevalidate: true, spawnRebuild: (a) => spawned.push(a) });
+			assert.equal(h.stale, true);
+			closeIndex(h);
+			assert.equal(spawned.length, 1);
+			assert.equal(calls.length, 1, 'stale: the detached rebuild loads them, the brief does not');
+			closeIndex(ensureIndex({ repoRoot: dir, loadEvents }));
+			assert.equal(calls.length, 2, 'positive control: an inline rebuild loads them');
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}

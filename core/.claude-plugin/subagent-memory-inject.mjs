@@ -35,11 +35,23 @@ import { claimDispatch, noteDispatch } from './handback-guard.mjs';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const MEMORY_BRIEF = path.resolve(HERE, '..', 'scripts', 'memory-brief.mjs');
 const TIMEOUT_MS = 2000;
+// engsys#290: ENGSYS_MEMORY_BRIEF_BUDGET_MS overrides TIMEOUT_MS, for a caller that checks the brief's content rather
+// than its speed (the end-to-end tests, the xray self-test) and would otherwise fail whenever the host is loaded. It
+// only lengthens or shortens this hook's own wait: Claude Code's hook timeout still bounds the hook. Clamped to
+// [MIN_SPAWN_MS, 60 s]; anything unparseable keeps TIMEOUT_MS.
+const MAX_BUDGET_MS = 60_000;
 // Below this, less budget remains than a bare `node` process typically needs just to start —
 // spawning memory-brief anyway would only burn that startup cost en route to a guaranteed timeout.
 const MIN_SPAWN_MS = 300;
 
 const PENDING_TTL_MS = 30_000;
+
+/** The hook's wall-clock budget: TIMEOUT_MS, or a valid ENGSYS_MEMORY_BRIEF_BUDGET_MS (engsys#290). */
+export function briefBudgetMs(env = process.env) {
+	const raw = env.ENGSYS_MEMORY_BRIEF_BUDGET_MS;
+	if (typeof raw !== 'string' || !/^\d{1,6}$/.test(raw.trim())) return TIMEOUT_MS;
+	return Math.min(MAX_BUDGET_MS, Math.max(MIN_SPAWN_MS, Number(raw.trim())));
+}
 
 function firstString(...candidates) {
 	for (const c of candidates) if (typeof c === 'string' && c.length) return c;
@@ -498,7 +510,7 @@ export async function main({ argv = process.argv.slice(2), stdin = process.stdin
 		// node startup — not TIMEOUT_MS on top of whatever resolveTouchedPaths already spent. Below
 		// MIN_SPAWN_MS there isn't even enough budget left for node's own startup, so the spawn is
 		// SKIPPED outright (saves that startup cost too) rather than launched to a guaranteed timeout.
-		const remainingMs = TIMEOUT_MS - (now() - budgetStart);
+		const remainingMs = briefBudgetMs() - (now() - budgetStart);
 		skippedBudget = remainingMs < MIN_SPAWN_MS;
 		const result = skippedBudget ? null : runMemoryBrief({ agentType, prompt, touchedPaths, cwd: diffCwd, timeoutMs: remainingMs });
 		spawnFailed = !skippedBudget && !result;

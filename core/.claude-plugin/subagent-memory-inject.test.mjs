@@ -18,6 +18,7 @@ try { require('node:sqlite'); } catch { SQLITE_AVAILABLE = false; }
 import { fileURLToPath } from 'node:url';
 import { hermeticGit } from '../lib/git-env.mjs';
 import {
+	briefBudgetMs,
 	consumePendingDispatch,
 	extractAgentType,
 	extractPrompt,
@@ -36,6 +37,9 @@ delete process.env.CLAUDE_CONFIG_DIR;
 process.env.HOME = mkdtempSync(join(tmpdir(), 'memory-test-home-'));
 
 const SCRIPT = fileURLToPath(new URL('./subagent-memory-inject.mjs', import.meta.url));
+// engsys#290: the end-to-end tests check what the brief says, not how fast it arrives — give the hook a budget a loaded
+// host can't overrun, so they don't fail whenever other suites are running.
+const E2E_BUDGET = { ENGSYS_MEMORY_BRIEF_BUDGET_MS: '20000' };
 // engsys#286: the hooks also note/claim dispatches for the hand-back guard; keep that state out of the shared tmpdir.
 process.env.ENGSYS_HANDBACK_DIR = mkdtempSync(join(tmpdir(), 'inject-handbacks-'));
 
@@ -198,7 +202,7 @@ describe('main — pre-agent mode on a non-Claude harness (engsys v2.0.1 M5)', (
 					tool_input: { subagent_type: 'engsys:isabelle' }, // resolvable target
 				}),
 				encoding: 'utf8',
-				env: { ...process.env, ENGSYS_HARNESS: 'copilot', NODE_NO_WARNINGS: '1' },
+				env: { ...process.env, ...E2E_BUDGET, ENGSYS_HARNESS: 'copilot', NODE_NO_WARNINGS: '1' },
 				cwd,
 			});
 			assert.doesNotThrow(() => JSON.parse(out));
@@ -227,7 +231,7 @@ describe('main — pre-agent mode on a non-Claude harness (engsys v2.0.1 M5)', (
 			hermeticGit(cwd, [...GIT_OPTS, 'add', '-A'], { isolateConfig: true });
 			hermeticGit(cwd, [...GIT_OPTS, 'commit', '-q', '-m', 'init'], { isolateConfig: true });
 
-			const env = { ...process.env, ENGSYS_HARNESS: 'copilot', NODE_NO_WARNINGS: '1' };
+			const env = { ...process.env, ...E2E_BUDGET, ENGSYS_HARNESS: 'copilot', NODE_NO_WARNINGS: '1' };
 			const out = execFileSync('node', [SCRIPT, 'pre-agent'], {
 				input: JSON.stringify({
 					session_id: 'sess-f-pending',
@@ -342,6 +346,23 @@ describe('runMemoryBrief', () => {
 	});
 });
 
+describe('briefBudgetMs (engsys#290)', () => {
+	test('defaults to 2000 ms', () => {
+		assert.equal(briefBudgetMs({}), 2000);
+	});
+	test('ENGSYS_MEMORY_BRIEF_BUDGET_MS overrides it, clamped to [300, 60000]', () => {
+		assert.equal(briefBudgetMs({ ENGSYS_MEMORY_BRIEF_BUDGET_MS: '20000' }), 20000);
+		assert.equal(briefBudgetMs({ ENGSYS_MEMORY_BRIEF_BUDGET_MS: ' 900 ' }), 900);
+		assert.equal(briefBudgetMs({ ENGSYS_MEMORY_BRIEF_BUDGET_MS: '5' }), 300);
+		assert.equal(briefBudgetMs({ ENGSYS_MEMORY_BRIEF_BUDGET_MS: '999999' }), 60000);
+	});
+	test('an unparseable value keeps the default', () => {
+		for (const v of ['', 'fast', '-1', '1e4', '12.5', '0x100', '1234567']) {
+			assert.equal(briefBudgetMs({ ENGSYS_MEMORY_BRIEF_BUDGET_MS: v }), 2000, v);
+		}
+	});
+});
+
 describe('main — fail-open contract', () => {
 	// A NON-git temp dir for `defaultCwd` — these tests fall back to it (no `cwd` in the, unparsed,
 	// stdin), and it must resolve to "no cache dir, no index, empty brief" deterministically. Using
@@ -394,7 +415,7 @@ describe('CLI end to end', () => {
 			agent_type: 'isabelle',
 			touched_paths: ['scripts/git-core-bare-flip-worktrees-fixture.ts'],
 		});
-		const out = execFileSync('node', [SCRIPT], { input: payload, encoding: 'utf8', env: { ...process.env, NODE_NO_WARNINGS: '1' } });
+		const out = execFileSync('node', [SCRIPT], { input: payload, encoding: 'utf8', env: { ...process.env, ...E2E_BUDGET, NODE_NO_WARNINGS: '1' } });
 		const parsed = JSON.parse(out);
 		assert.equal(parsed.hookSpecificOutput.hookEventName, 'SubagentStart');
 		assert.match(parsed.hookSpecificOutput.additionalContext, /lesson:/);
@@ -418,7 +439,7 @@ describe('CLI end to end', () => {
 			hermeticGit(dir, [...GIT_OPTS, 'commit', '-q', '-m', 'init'], { isolateConfig: true });
 			hermeticGit(dir, [...GIT_OPTS, 'push', '-q', '-f', 'origin', 'HEAD:main'], { isolateConfig: true }); // origin/main == HEAD, no diff at all
 			const payload = JSON.stringify({ cwd: dir, agent_type: 'isabelle', touched_paths: ['scripts/git-core-bare-flip-worktrees-fixture.ts'] });
-			const out = execFileSync('node', [SCRIPT], { input: payload, encoding: 'utf8', env: { ...process.env, NODE_NO_WARNINGS: '1' } });
+			const out = execFileSync('node', [SCRIPT], { input: payload, encoding: 'utf8', env: { ...process.env, ...E2E_BUDGET, NODE_NO_WARNINGS: '1' } });
 			const parsed = JSON.parse(out);
 			assert.equal(parsed.hookSpecificOutput.hookEventName, 'SubagentStart');
 			assert.match(parsed.hookSpecificOutput.additionalContext, /lesson:/);
@@ -472,7 +493,7 @@ describe('CLI end to end', () => {
 			hermeticGit(wt, [...GIT_OPTS, 'add', '-A'], { isolateConfig: true });
 			hermeticGit(wt, [...GIT_OPTS, 'commit', '-q', '-m', 'touch charge.ts in subagent worktree'], { isolateConfig: true });
 
-			const env = { ...process.env, NODE_NO_WARNINGS: '1', ENGSYS_MEMORY_REPOS: 'fixture/repo' };
+			const env = { ...process.env, ...E2E_BUDGET, NODE_NO_WARNINGS: '1', ENGSYS_MEMORY_REPOS: 'fixture/repo' };
 			const prePayload = JSON.stringify({
 				session_id: 'sess-142',
 				cwd: parent,
@@ -615,7 +636,7 @@ describe('pending dispatch for a teammate-name agent_type (engsys#262)', () => {
 		hermeticGit(parent, [...GIT_OPTS, 'commit', '-q', '-m', 'init'], { isolateConfig: true });
 		hermeticGit(parent, [...GIT_OPTS, 'push', '-q', '-f', 'origin', 'HEAD:main'], { isolateConfig: true });
 		hermeticGit(parent, [...GIT_OPTS, 'update-ref', 'refs/remotes/origin/main', 'HEAD'], { isolateConfig: true });
-		const env = { ...process.env, NODE_NO_WARNINGS: '1', ENGSYS_MEMORY_REPOS: 'fixture/repo' };
+		const env = { ...process.env, ...E2E_BUDGET, NODE_NO_WARNINGS: '1', ENGSYS_MEMORY_REPOS: 'fixture/repo' };
 		execFileSync('node', [SCRIPT, 'pre-agent'], {
 			input: JSON.stringify({ session_id: 's-e2e', cwd: parent, hook_event_name: 'PreToolUse', tool_name: 'Agent', tool_input: { subagent_type: 'engsys:nyx', name: 'nyx-221', prompt: 'review the diff' } }),
 			encoding: 'utf8', env,
