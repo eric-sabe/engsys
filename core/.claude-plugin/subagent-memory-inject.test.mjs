@@ -338,6 +338,19 @@ describe('runMemoryBrief', () => {
 		assert.equal(result.text, 'hi');
 	});
 
+	test('engsys#264: passes --start-agent-type= only when it differs from the adopted agent type', () => {
+		const argsFor = (opts) => {
+			let captured = null;
+			runMemoryBrief({ cwd: '.', exec: (cmd, args) => { captured = args; return JSON.stringify({ text: '', lessonKeys: [], pointerKeys: [], bytes: 0 }); }, ...opts });
+			return captured;
+		};
+		const adopted = argsFor({ agentType: 'engsys:isabelle', startAgentType: 'nyx' });
+		assert.ok(adopted.includes('--agent-type=engsys:isabelle'));
+		assert.ok(adopted.includes('--start-agent-type=nyx'));
+		assert.ok(!argsFor({ agentType: 'engsys:isabelle' }).some((a) => a.startsWith('--start-agent-type')));
+		assert.ok(!argsFor({ agentType: 'nyx', startAgentType: 'nyx' }).some((a) => a.startsWith('--start-agent-type')));
+	});
+
 	test('spawns with process.execPath, not a bare "node" resolved off PATH', () => {
 		let capturedCmd = null;
 		const fakeExec = (cmd) => { capturedCmd = cmd; return JSON.stringify({ text: '', lessonKeys: [], pointerKeys: [], bytes: 0 }); };
@@ -648,5 +661,45 @@ describe('pending dispatch for a teammate-name agent_type (engsys#262)', () => {
 		assert.match(JSON.parse(out).hookSpecificOutput?.additionalContext ?? '', /lesson:nyx-only/, 'the nyx-scoped lesson reaches the nyx teammate');
 		const rows = readFileSync(join(parent, '.git', 'engsys-memory', 'injections.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
 		assert.equal(rows.at(-1).agent_type, 'engsys:nyx', 'logged (and Class B-excluded) as nyx');
+	});
+
+	test('end to end (engsys#264): a bare nyx start that matches a teammate named nyx keeps its Class B exclusion', { skip: !SQLITE_AVAILABLE }, () => {
+		const parent = mkdtempSync(join(tmpdir(), 'inject-264-e2e-'));
+		const origin = mkdtempSync(join(tmpdir(), 'inject-264-origin-'));
+		repos.push(parent, origin);
+		const GIT_OPTS = ['-c', 'user.name=a', '-c', 'user.email=a@b.c'];
+		hermeticGit(origin, [...GIT_OPTS, 'init', '-q', '--bare'], { isolateConfig: true });
+		hermeticGit(parent, [...GIT_OPTS, 'init', '-q'], { isolateConfig: true });
+		hermeticGit(parent, [...GIT_OPTS, 'remote', 'add', 'origin', 'https://github.com/fixture/repo.git'], { isolateConfig: true });
+		hermeticGit(parent, [...GIT_OPTS, 'remote', 'set-url', '--push', 'origin', origin], { isolateConfig: true });
+		mkdirSync(join(parent, 'docs', 'agent-lessons'), { recursive: true });
+		mkdirSync(join(parent, '.claude'), { recursive: true });
+		writeFileSync(join(parent, 'docs', 'agent-lessons', 'one.md'), '---\nglobs: []\nstacks: []\nroles: []\nkeywords: []\nsecurity: false\nsupersedes: []\n---\n\n# One\n\n**Trigger:** x.\n');
+		writeFileSync(join(parent, '.claude', 'memory.yml'), 'trusted_bot_user_ids: [500]\n');
+		hermeticGit(parent, [...GIT_OPTS, 'add', '-A'], { isolateConfig: true });
+		hermeticGit(parent, [...GIT_OPTS, 'commit', '-q', '-m', 'init'], { isolateConfig: true });
+		hermeticGit(parent, [...GIT_OPTS, 'push', '-q', '-f', 'origin', 'HEAD:main'], { isolateConfig: true });
+		hermeticGit(parent, [...GIT_OPTS, 'update-ref', 'refs/remotes/origin/main', 'HEAD'], { isolateConfig: true });
+		const cacheDir = join(parent, '.git', 'engsys-memory');
+		mkdirSync(cacheDir, { recursive: true });
+		writeFileSync(join(cacheDir, 'delta.jsonl'), `${JSON.stringify({ k: 'ev1', kind: 'review_thread', path: 'docs/agent-lessons/one.md', line: 1, outcome: 'fixed', updated_at: new Date().toISOString(), author_kind: 'bot', author_id: 500, text: 'x' })}\n`);
+		const env = { ...process.env, ...E2E_BUDGET, NODE_NO_WARNINGS: '1', ENGSYS_MEMORY_REPOS: 'fixture/repo' };
+		const run = (session, name, startType) => {
+			execFileSync('node', [SCRIPT, 'pre-agent'], {
+				input: JSON.stringify({ session_id: session, cwd: parent, hook_event_name: 'PreToolUse', tool_name: 'Agent', tool_input: { subagent_type: 'engsys:isabelle', name, prompt: 'fix docs/agent-lessons/one.md' } }),
+				encoding: 'utf8', env,
+			});
+			execFileSync('node', [SCRIPT], {
+				input: JSON.stringify({ session_id: session, cwd: parent, hook_event_name: 'SubagentStart', agent_id: 'a-1', agent_type: startType }),
+				encoding: 'utf8', env,
+			});
+			return readFileSync(join(cacheDir, 'injections.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).at(-1);
+		};
+		const control = run('s-264a', 'helper', 'helper');
+		assert.equal(control.agent_type, 'engsys:isabelle');
+		assert.ok(control.pointer_keys.includes('ev1'), 'positive control: a non-excluded teammate gets the Class B pointer');
+		const nyx = run('s-264b', 'nyx', 'nyx');
+		assert.equal(nyx.agent_type, 'engsys:isabelle', 'the start still adopts the teammate record (lessons follow the dispatched type)');
+		assert.deepEqual(nyx.pointer_keys, [], 'but the nyx start identity keeps Class B out');
 	});
 });

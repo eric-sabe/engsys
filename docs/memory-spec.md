@@ -486,7 +486,10 @@ is just the fleet config (if any) over the defaults.
   lesson roles and the Class B exclusion), then by type; a start that matches neither gets no
   record, never another parallel dispatch's (engsys#262). Only a bare (un-namespaced) start matches by
   name: a real typed start such as `engsys:nyx` never does, so a teammate named `engsys:nyx` can't make the
-  real Nyx adopt its type and lose the Class B exclusion.
+  real Nyx adopt its type and lose the Class B exclusion. An adopted type never removes an exclusion
+  either: the hook passes the start's own identity as `--start-agent-type`, and Class B is withheld if
+  either identity is excluded, so a bare `nyx` start that matches a teammate named `nyx` stays
+  excluded (engsys#264).
 - `node:sqlite` with FTS5 and `bm25()` works on Node 22.22.3 (SQLite 3.51.3).
 - A naive in-place SQLite rebuild by concurrent processes fails (`database is locked`) and duplicates
   rows. Temp file + rename is safe.
