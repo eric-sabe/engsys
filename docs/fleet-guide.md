@@ -433,7 +433,10 @@ reports them as a mismatch until the fleet has its own directory (or you allow t
    `--dangerously-skip-permissions`, so auto-mode classifier config doesn't apply to them; if the fleet's
    interactive sessions ever need one, add a fleet-specific `autoMode` to `<dir>/settings.json` by hand.
 2. Log in with the fleet's seat: `CLAUDE_CONFIG_DIR=~/.config/acme/claude claude`, then `/login` and
-   `/exit`. Check it with `CLAUDE_CONFIG_DIR=~/.config/acme/claude claude auth status --text`.
+   `/exit`. Check it with `CLAUDE_CONFIG_DIR=~/.config/acme/claude claude auth status --text`. Run these from an
+   empty directory (`cd "$(mktemp -d)"`), **not from `~`**: there `claude` reads `~/.claude/settings.json` as the
+   project settings of `$HOME` and installs the plugins they declare into the fleet dir at project scope for
+   `$HOME` (engsys#235). The same goes for every `CLAUDE_CONFIG_DIR=<dir> claude` login below.
 3. Accept workspace trust for the pin checkout once, with the monsters' flags:
    `cd <PIN_DIR> && CLAUDE_CONFIG_DIR=~/.config/acme/claude claude --dangerously-skip-permissions`, accept,
    `/exit`.
@@ -1244,6 +1247,24 @@ The pins are in the pin repo's `.claude/settings.json` (section 3). `fleet sync`
 
 `fleet sync --check` reports drift only. Sync refuses to run over uncommitted changes to tracked files in
 either checkout (it names the checkout). It never restarts anything.
+
+Every `claude plugin …` and `claude auth status` call sync makes runs from its own empty temp dir (never from a
+project, and never under `$HOME`, even with a `TMPDIR` there), at user scope (engsys#112, engsys#235).
+
+**Project-scope installs for `$HOME` (engsys#235).** A `claude` run from `~` on a fleet dir records project-scope
+installs whose `projectPath` is `$HOME` (it reads `~/.claude/settings.json` as that "project's" settings). When a
+marketplace that only project settings declare has to move, those installs used to count as another project's, and
+the move was refused. `$HOME` is not a project: in a fleet config dir (never `~/.claude` itself) sync now drops them
+from `<dir>/plugins/installed_plugins.json` itself, a file-only edit with no `claude` on the session's login, after
+a backup beside it (`installed_plugins.json.engsys235-<UTC time>.bak`), and says so in a WARNING naming the plugins
+and the backup. `$HOME` is matched as written, with trailing slashes, or through a symlink either side. A real other
+project among them still refuses the move, and the file is left untouched; the message names the `$HOME` ones as
+strays that sync removes once the rest is gone, so never run `claude` from `~` to remove them.
+
+**One failing dir does not stop the others (engsys#235).** With several config dirs (per-session mode, or scope
+`supervised`), a dir whose plugin step fails (a refused marketplace move, a failed install, a settings rewrite) is
+reported as `NOT synced` with its reason, and sync goes on with the next dir. The run then fails at the end, naming
+every dir that failed (`the plugin step failed in: …`); what did sync is stamped in `.fleet/last-change`.
 
 **Running sessions' own dirs (per-session mode, engsys#253).** Step 4 skips the own dir of a session that is running
 (a claude process in its tmux window). Any `claude` call there, even `auth status` or `plugin list`, is a second

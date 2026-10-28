@@ -1914,5 +1914,80 @@ rc_is "a bad value is refused" 1
 has "…saying why" "$OUT" "FLEET_MEMORY_SIGNING_KEY must be on or off"
 rm -f "$LC" "$MEM_KEY"
 
+echo "== K4. engsys#235: \$HOME project-scope strays don't block the pin; one failing session dir doesn't stop the others"
+setconf "FLEET_CLAUDE_CONFIG_DIR=$FCFG" "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on"
+rm -rf "$SESS" "$FAKE/claude-cfg" "$FAKE/tmux" "$STATE"/sync-deferred*; : >"$FAKE/tmux.log"
+run fleet config-dir init; login_all acme-mm acme-build acme-security acme-rel
+run fleet sync; rc_is "K4 setup: every session dir synced" 0
+# The real CLI lists what <dir>/plugins/installed_plugins.json holds; this wrapper over the stub shows that file's
+# project-scope installs in `plugin list`, so the file-only drop sync does is what the next list sees.
+mkdir -p "$T/bin235"
+cat >"$T/bin235/claude" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+next="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd -P)/claude"
+f="${CLAUDE_CONFIG_DIR:-/nonexistent}/plugins/installed_plugins.json"
+if [ "${1:-} ${2:-}" = "plugin list" ] && [ -f "$f" ]; then
+  "$next" "$@" | jq --slurpfile f "$f" '[.[] | select(.scope != "project")]
+    + [$f[0].plugins | to_entries[] | .key as $id | (.value | if type == "array" then .[] else . end)
+       | select(.scope == "project") | {id: $id, version, scope, projectPath, enabled: true}]'
+else exec "$next" "$@"; fi
+SH
+chmod +x "$T/bin235/claude"
+k4_phantom() { # k4_phantom <session> <projectPath>...: its engsys marketplace off the pin, engsys installed at project scope there
+  local s d; s="$(stub_state "$1")"; d="$SESS/$1/plugins"; shift
+  jq 'map(if .name == "engsys" then .ref = "v1.0.0" else . end)' "$s/marketplaces.json" >"$s/m.json" && mv "$s/m.json" "$s/marketplaces.json"
+  mkdir -p "$d"
+  jq -n '{version: 2, plugins: {"engsys@engsys": [$ARGS.positional[] | {scope: "project", projectPath: ., version: "1.0.0", installPath: ""}],
+    "other@elsewhere": [{scope: "project", projectPath: "/keep/me", version: "1.0.0", installPath: ""}]}}' --args "$@" >"$d/installed_plugins.json"
+}
+K4F="$SESS/acme-mm/plugins/installed_plugins.json"
+ln -sfn "$HOME" "$T/homelink"
+mkdir -p "$HOME/.claude"; echo '{"extraKnownMarketplaces":{"engsys":{"source":{"source":"github","repo":"vendor/engsys"}}}}' >"$HOME/.claude/settings.json"
+cp "$HOME/.claude/settings.json" "$T/k4-home-settings"
+# the incident: only project settings declare the marketplace, and acme-mm's dir has engsys installed for "project" $HOME,
+# written as $HOME, with a trailing slash, and through a symlink to it
+k4_phantom acme-mm "$HOME" "$HOME/" "$T/homelink"; cp "$K4F" "$T/k4-installed.orig"
+OPATH="$PATH"; export PATH="$T/bin235:$PATH" FAKE_CLAUDE_PROJECT_DECLARED=engsys
+m="$(mark)"; c="$(cwd_mark)"; run fleet sync
+rc_is "\$HOME project-scope strays no longer stop the sync" 0
+has "…said loudly" "$OUT" "WARNING $SESS/acme-mm: dropped project-scope installs for \$HOME ($HOME), which is not a project"
+has "…naming where the backup is" "$OUT" "Backup: $K4F.engsys235-"
+eq "…all three spellings of \$HOME are gone from the file" "$(jq -c '.plugins["engsys@engsys"] // "gone"' "$K4F")" '"gone"'
+eq "…another marketplace's install is left alone" "$(jq -r '.plugins["other@elsewhere"][0].projectPath' "$K4F")" "/keep/me"
+k4bak="$( (ls "$K4F".engsys235-*.bak 2>/dev/null || true) | head -n 1)"
+if [ -n "$k4bak" ] && cmp -s "$k4bak" "$T/k4-installed.orig"; then ok "…the backup is the file as it was"; else bad "…the backup is the file as it was" "${k4bak:-no backup}"; fi
+eq "…then the one unscoped remove ran" "$(on_dir "$m" acme-mm | grep 'plugin marketplace remove engsys' | grep -vc -- '--scope' || true)" 1
+has "…and acme-mm is back at the pin" "$(on_dir "$m" acme-mm)" "plugin install engsys@engsys --scope user"
+eq "…no claude ran from \$HOME or under it" "$(cwd_since "$c" | cut -f1 | grep -cE "^$HOME(/|\$)" || true)" 0
+eq "…and ~/.claude/settings.json is untouched" "$(cat "$HOME/.claude/settings.json")" "$(cat "$T/k4-home-settings")"
+run fleet sync --check; rc_is "…the host is in sync" 0
+# a real other project beside the stray: still refused, the file untouched; and that dir's failure no longer stops
+# the dirs after it (engsys#235 proposal 3)
+k4_phantom acme-mm "$HOME" "/other/real/project"; cp "$K4F" "$T/k4-installed.orig"
+rm -rf "$(stub_state acme-build)" "$(stub_state acme-rel)"   # behind the pins too: nothing installed
+m="$(mark)"; run fleet sync
+rc_is "a real other project's install still refuses that dir, and the run fails" 1
+has "…naming it" "$OUT" "engsys@engsys (/other/real/project)"
+has "…and calling the \$HOME one a stray, not to be removed with claude from ~" "$OUT" "The installs for \$HOME are strays"
+if cmp -s "$K4F" "$T/k4-installed.orig"; then ok "…the file is untouched while refused"; else bad "…the file is untouched while refused" "$(diff "$T/k4-installed.orig" "$K4F" || true)"; fi
+has "…the dirs after it are synced all the same" "$(on_dir "$m" acme-build)" "plugin install engsys@engsys --scope user"
+has "…every one of them" "$(on_dir "$m" acme-rel)" "plugin install engsys@engsys --scope user"
+has "…the failed one is reported" "$OUT" "claude config dir $SESS/acme-mm: NOT synced (the reason is above); going on with the other dirs"
+has "…and summed up at the end" "$OUT" "the plugin step failed in: $SESS/acme-mm"
+hasnt "…never claims synced" "$OUT" "fleet-sync: synced."
+k4_phantom acme-mm "$HOME"
+run fleet sync; rc_is "…once only the \$HOME stray is left, a plain sync heals the host" 0
+export PATH="$OPATH"; unset FAKE_CLAUDE_PROJECT_DECLARED
+# a TMPDIR under $HOME: the plugin calls still run outside it (claude would find ~/.claude/settings.json on the way up)
+mkdir -p "$HOME/tmp"; s="$(stub_state acme-mm)"
+jq 'map(if .name == "engsys" then .ref = "v1.0.0" else . end)' "$s/marketplaces.json" >"$s/m.json" && mv "$s/m.json" "$s/marketplaces.json"
+c="$(cwd_mark)"; TMPDIR="$HOME/tmp" run fleet sync
+rc_is "sync with TMPDIR under \$HOME exits 0" 0
+eq "…no claude ran under \$HOME" "$(cwd_since "$c" | cut -f1 | grep -cE "^$HOME(/|\$)" || true)" 0
+eq "…every one from sync's own empty dir" "$(cwd_since "$c" | cut -f1 | grep -cvE '/fleet-sync\.[^/]+/cwd$' || true)" 0
+rm -rf "$HOME/tmp" "$HOME/.claude/settings.json" "$T/homelink" "$T/bin235"
+cp "$T/flc.bak" "$LC"; rm -rf "$SESS" "$FAKE/tmux" "$FAKE/claude-cfg"; : >"$FAKE/tmux.log"
+
 # =============================================================================================
 finish fleet.test
