@@ -147,13 +147,72 @@ adapter_name_ok() { case "$1" in '' | *[!a-z0-9_-]*) return 1 ;; esac; return 0;
 if ! adapter_name_ok "$HARNESS" || [ ! -f "$LAUNCHER_LIB/harness/$HARNESS.sh" ]; then
   echo "error: unsupported HARNESS '$HARNESS' (expected claude, copilot, or antigravity)" >&2; exit 1
 fi
-# load_harness_adapter <file>: source it, and fail now when it lacks a required function or declares an unknown
-# capability. HARNESS_CAPS is read once, here.
-load_harness_adapter() {
-  local f cap
+# engsys#297: the adapter is sourced into this shell, so it could change the trust core under it (harness_prelaunch
+# cannot: it runs in a subshell, below). This catches an adapter that does so by accident or naively; it is not a boundary against a
+# deliberate one (a function named `builtin`, or `enable -n`, still defeats any check made from inside the shell).
+# The boundary is `fleet verify`, which hashes lib/harness/ with the rest of the kit (ENGSYS_HOST_TREES).
+# - The launcher state the core reads is frozen (readonly) before the adapter loads; HARNESS_CAPS and HARNESS_BIN
+#   once validated.
+# - Every function defined before the adapter (the core's, and the launcher's own up to here) is readonly, and so are
+#   the adapter's harness_* functions once loaded.
+# - After the load (adapter_ran): no function added or changed outside harness_* (fn_snapshot; this also catches a
+#   function shadowing a command or builtin), no frozen name assigned or unset, PATH, IFS and every shell option
+#   unchanged, no alias and no trap left, and the command hash table flushed (`hash -p` would retarget a command).
+readonly HARNESS_KNOWN_CAPS VERDICT_KEY_FILE MEMORY_KEY_FILE LAUNCHER_FLEET_CFG LAUNCHER_CFG_SESSIONS \
+  CLAUDE_CONFIG_DIR ENGSYS_CONFIG_DIR_SESSIONS FLEET_CLAUDE_CONFIG_DIR_INTERACTIVE ENGSYS_SUPERVISED_SESSIONS
+readonly CORE_PATH="$PATH"
+# The adapter's stderr while it runs here goes to ADAPTER_ERR and is replayed: by adapter_ran, or by the EXIT trap when
+# bash itself stops the launcher (an assignment to a readonly variable ends a bash 5 shell on the spot).
+# The replay goes to fd 9, the launcher's own stderr: when bash stops it, stderr may still point at ADAPTER_ERR. Until
+# the adapter is done (the trap is cleared then), every way out is a failure: the trap keeps a non-zero status and
+# turns 0 into 1 (bash 3.2 exits 0 when a readonly assignment ends the shell).
+ADAPTER_ERR="$(mktemp "${TMPDIR:-/tmp}/launch-adapter.XXXXXX")"
+readonly ADAPTER_ERR
+exec 9>&2
+# shellcheck disable=SC2154 # adapter_exit and adapter_err are assigned in the trap itself
+trap 'adapter_exit=$?; builtin read -r -d "" adapter_err <"$ADAPTER_ERR" || [[ 1 ]]; builtin printf "%s" "${adapter_err:-}" >&9; rm -f "$ADAPTER_ERR"; [[ $adapter_exit != 0 ]] || adapter_exit=1; builtin exit "$adapter_exit"' EXIT
+LAUNCHER_TRAPS="$(trap -p)"
+readonly LAUNCHER_TRAPS
+# shell_state → the shell options and IFS, to compare across the load. Callers append $- (the parent's flags): inside
+# $(...) errexit reads as off, so `set +o` alone misses a `set +e`.
+shell_state() { builtin shopt -p; builtin set +o; builtin printf 'IFS=%q\n' "$IFS"; }
+# fn_snapshot → every function defined now (names and bodies) except harness_* ones. Builtins called through
+# `builtin`, and no process substitution (bash 3.2 truncates `$(… < <(…))` output at random).
+fn_snapshot() {
+  local IFS=$'\n' fn names
+  # shellcheck disable=SC2161 # `[[ 1 ]]`, a keyword, where `true` could be a function the adapter defined
+  builtin read -r -d '' -a names <<<"$(builtin compgen -A function)" || [[ 1 ]]
+  for fn in "${names[@]}"; do
+    [[ $fn == harness_* ]] || builtin declare -f -- "$fn"
+  done
+}
+# adapter_ran <what> <function snapshot before> <traps now> <shell state before>: replay the adapter's stderr, then fail when it changed the
+# core (above). The traps are passed in: `trap -p` inside a function does not list a DEBUG trap. bash reports an
+# assignment to a frozen name on stderr; bash 3.2 then carries on with the frozen value kept.
+adapter_ran() {
+  local err
+  err="$(<"$ADAPTER_ERR")"
+  : >"$ADAPTER_ERR"
+  [[ -z "$err" ]] || builtin printf '%s\n' "$err" >&2
+  [[ "$(fn_snapshot)" == "$2" ]] || { builtin echo "error: $1 defines or changes a function outside harness_* (engsys#297)" >&2; return 1; }
+  case "$err" in *"readonly function"* | *"readonly variable"* | *"cannot unset"*)
+    builtin echo "error: $1 assigns or unsets a readonly (frozen) variable or function (engsys#297)" >&2; return 1 ;;
+  esac
+  [[ "$PATH" == "$CORE_PATH" ]] || { builtin echo "error: $1 changes PATH (engsys#297)" >&2; return 1; }
+  [[ -z "$(builtin alias -p)" && "$3" == "$LAUNCHER_TRAPS" ]] || { builtin echo "error: $1 leaves an alias or a trap (engsys#297)" >&2; return 1; }
+  [[ "$(shell_state)$-" == "$4" ]] || { builtin echo "error: $1 changes a shell option or IFS (engsys#297)" >&2; return 1; }
+  builtin hash -r
+}
+# source_adapter <file>: source it here, its stderr to ADAPTER_ERR.
+source_adapter() {
   unset -f harness_bin harness_capabilities harness_translate_flags harness_run_cmd harness_prelaunch
   # shellcheck source=/dev/null
-  . "$1"
+  . "$1" 2>"$ADAPTER_ERR"
+}
+# check_adapter <file>: fail when it lacks a required function, declares an unknown capability or names no binary.
+# HARNESS_CAPS is read once, here; then the adapter's functions are frozen.
+check_adapter() {
+  local f cap
   for f in harness_bin harness_capabilities harness_translate_flags harness_run_cmd; do
     declare -F "$f" >/dev/null || { echo "error: harness adapter $1 does not define $f" >&2; return 1; }
   done
@@ -161,10 +220,28 @@ load_harness_adapter() {
   for cap in $HARNESS_CAPS; do
     case " $HARNESS_KNOWN_CAPS " in *" $cap "*) ;; *) echo "error: harness adapter $1 declares an unknown capability: $cap" >&2; return 1 ;; esac
   done
+  readonly HARNESS_CAPS
   HARNESS_BIN="$(harness_bin)"
   [ -n "$HARNESS_BIN" ] || { echo "error: harness adapter $1 names no binary (harness_bin)" >&2; return 1; }
+  readonly HARNESS_BIN
+  for f in harness_bin harness_capabilities harness_translate_flags harness_run_cmd harness_prelaunch; do
+    if declare -F "$f" >/dev/null; then readonly -f "$f"; fi
+  done
 }
-load_harness_adapter "$LAUNCHER_LIB/harness/$HARNESS.sh" || exit 1
+# Freeze every function defined so far (an inherited harness_* is the adapter's to replace: source_adapter unsets it).
+while IFS= read -r core_fn; do
+  case "$core_fn" in harness_*) ;; *) readonly -f "$core_fn" ;; esac
+done <<<"$(compgen -A function)"
+adapter_file="$LAUNCHER_LIB/harness/$HARNESS.sh"
+fns_before_adapter="$(fn_snapshot)"
+shell_before_adapter="$(shell_state)$-"
+source_adapter "$adapter_file" || true
+adapter_ran "harness adapter $adapter_file" "$fns_before_adapter" "$(trap -p)" "$shell_before_adapter" || builtin exit 1
+check_adapter "$adapter_file" || exit 1
+# The adapter is done running in this shell: from here on its functions run only in subshells.
+trap - EXIT
+rm -f "$ADAPTER_ERR"
+exec 9>&-
 
 # launchd jobs (the fleet supervisor) run with a fixed PATH that may not include where Claude Code was
 # installed: the native installer uses ~/.local/bin. Look in the standard install locations before failing.
@@ -222,7 +299,11 @@ for pf in ${PREFLIGHTS[@]+"${PREFLIGHTS[@]}"}; do
 done
 
 # One-time per launch, after the preflights: the adapter's own pre-launch step (e.g. the agy remote-control daemon).
-if declare -F harness_prelaunch >/dev/null; then harness_prelaunch; fi
+# engsys#297: in a subshell, so nothing it sets (a variable, a function, IFS, an option, the hash table) reaches the
+# launcher.
+if declare -F harness_prelaunch >/dev/null; then
+  ( harness_prelaunch ) || { echo "error: harness_prelaunch failed for HARNESS=$HARNESS" >&2; exit 1; }
+fi
 
 # engsys#236: the launch dir (header). Checked once per run: owned by this user, open to nobody else, never a
 # symlink, and absolute, because the window's shell reads the file from its own cwd. A missing one is created 0700;
