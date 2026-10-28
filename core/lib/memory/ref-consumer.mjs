@@ -219,7 +219,7 @@ export function consumeMemoryRefs(repoRoot, { remote = 'origin', repo = '', stat
   return { ok: true, fetched: true, results };
 }
 
-/** A stable fingerprint of the configured pubkeys: a key change invalidates every cached verdict. */
+/** A stable fingerprint of the configured pubkeys, part of the index watermark: a key change rebuilds the index. */
 export function pubkeysFingerprint(config) {
   const raw = config?.fleet_memory_pubkeys && typeof config.fleet_memory_pubkeys === 'object' ? config.fleet_memory_pubkeys : {};
   const norm = Object.keys(raw).sort().map((f) => [f, [].concat(raw[f] ?? []).map(String).sort()]);
