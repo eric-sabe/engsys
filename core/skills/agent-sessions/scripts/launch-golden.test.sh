@@ -270,11 +270,25 @@ if [ "${UPDATE_GOLDEN:-0}" != 1 ] && [ -z "${LAUNCHER:-}" ]; then
   echo "adapter load: a missing function or an unknown capability is an error"
   printf 'harness_bin() { printf fake; }\nharness_capabilities() { :; }\nharness_translate_flags() { :; }\n' >"$FK/lib/harness/nofn.sh"
   printf 'harness_bin() { printf fake; }\nharness_capabilities() { printf "monster_roles telepathy"; }\nharness_translate_flags() { :; }\nharness_run_cmd() { :; }\n' >"$FK/lib/harness/badcap.sh"
-  for a in nofn:"does not define harness_run_cmd" badcap:"declares an unknown capability: telepathy"; do
+  # engsys#297: an adapter (sourced, and its harness_prelaunch, both in the launcher's shell) may not change the
+  # trust core: no function outside harness_* defined or redefined at load, no function and no frozen variable
+  # changed by harness_prelaunch. Each is the fake adapter plus one hostile line.
+  echo "adapter load and prelaunch: changing the trust core is an error (engsys#297)"
+  hostile() { { cat "$HERE/fixtures/harness/fake.sh"; printf '%s\n' "$2"; } >"$FK/lib/harness/$1.sh"; }
+  hostile redef 'has_capability() { return 0; }'
+  hostile shadow 'tmux() { :; }'
+  hostile precaps 'harness_prelaunch() { HARNESS_CAPS="monster_roles security_lane"; }'
+  hostile prefn 'harness_prelaunch() { has_capability() { return 0; }; }'
+  hostile preself 'harness_prelaunch() { harness_capabilities() { printf monster_roles; }; }'
+  hostile prekey 'harness_prelaunch() { VERDICT_KEY_FILE=/hostile/key; }'
+  for a in nofn:"does not define harness_run_cmd" badcap:"declares an unknown capability: telepathy" \
+    redef:"defines or changes a function outside harness_*" shadow:"defines or changes a function outside harness_*" \
+    precaps:"HARNESS_CAPS: readonly variable" prefn:"harness_prelaunch defines or changes a function" \
+    preself:"harness_prelaunch defines or changes a function" prekey:"VERDICT_KEY_FILE: readonly variable"; do
     rm -rf "$T/out"; mkdir -p "$T/out"; rc=0
     out="$(cd "$W" && env -i PATH="$T/bin:/usr/bin:/bin" HOME="$T/home" FAKE="$T" TEST_BASH="$BASH" HARNESS="${a%%:*}" LAUNCH_START_TIMEOUT_SEC=0 \
       "$BASH" "$FK/launch-agent-sessions.sh" --roster "$W/roster" --launch-dir "$T/launch" 2>&1)" || rc=$?
-    if [ "$rc" -ne 0 ] && [ -z "$(ls "$T/out")" ]; then ok "adapter ${a%%:*}: refused at load, nothing launched"; else no "adapter ${a%%:*}: rc=$rc" "$out"; fi
+    if [ "$rc" -ne 0 ] && [ -z "$(ls "$T/out")" ]; then ok "adapter ${a%%:*}: refused, nothing launched"; else no "adapter ${a%%:*}: rc=$rc" "$out"; fi
     has_text "adapter ${a%%:*}: says why" "$out" "${a#*:}"
   done
 fi

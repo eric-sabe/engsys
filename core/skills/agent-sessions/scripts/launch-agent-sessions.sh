@@ -147,13 +147,27 @@ adapter_name_ok() { case "$1" in '' | *[!a-z0-9_-]*) return 1 ;; esac; return 0;
 if ! adapter_name_ok "$HARNESS" || [ ! -f "$LAUNCHER_LIB/harness/$HARNESS.sh" ]; then
   echo "error: unsupported HARNESS '$HARNESS' (expected claude, copilot, or antigravity)" >&2; exit 1
 fi
-# load_harness_adapter <file>: source it, and fail now when it lacks a required function or declares an unknown
-# capability. HARNESS_CAPS is read once, here.
+# engsys#297: the adapter runs in this shell (sourced here, harness_prelaunch below), so it must not change the trust
+# core under it. The launcher state the core reads is frozen before the adapter loads, and HARNESS_CAPS and
+# HARNESS_BIN as soon as they are validated. The functions are checked: fn_snapshot prints every function defined
+# now (names and bodies) except the adapter's own harness_* ones.
+readonly HARNESS_KNOWN_CAPS VERDICT_KEY_FILE MEMORY_KEY_FILE LAUNCHER_FLEET_CFG LAUNCHER_CFG_SESSIONS
+fn_snapshot() {
+  local fn
+  while IFS= read -r fn; do
+    case "$fn" in harness_*) ;; *) declare -f "$fn" ;; esac
+  done < <(compgen -A function)
+}
+# load_harness_adapter <file>: source it, and fail now when it defines anything but harness_* functions, changes a
+# function defined before it, lacks a required function or declares an unknown capability. HARNESS_CAPS is read
+# once, here.
 load_harness_adapter() {
-  local f cap
+  local f cap before
   unset -f harness_bin harness_capabilities harness_translate_flags harness_run_cmd harness_prelaunch
+  before="$(fn_snapshot)"
   # shellcheck source=/dev/null
   . "$1"
+  [ "$(fn_snapshot)" = "$before" ] || { echo "error: harness adapter $1 defines or changes a function outside harness_* (engsys#297)" >&2; return 1; }
   for f in harness_bin harness_capabilities harness_translate_flags harness_run_cmd; do
     declare -F "$f" >/dev/null || { echo "error: harness adapter $1 does not define $f" >&2; return 1; }
   done
@@ -161,8 +175,10 @@ load_harness_adapter() {
   for cap in $HARNESS_CAPS; do
     case " $HARNESS_KNOWN_CAPS " in *" $cap "*) ;; *) echo "error: harness adapter $1 declares an unknown capability: $cap" >&2; return 1 ;; esac
   done
+  readonly HARNESS_CAPS
   HARNESS_BIN="$(harness_bin)"
   [ -n "$HARNESS_BIN" ] || { echo "error: harness adapter $1 names no binary (harness_bin)" >&2; return 1; }
+  readonly HARNESS_BIN
 }
 load_harness_adapter "$LAUNCHER_LIB/harness/$HARNESS.sh" || exit 1
 
@@ -222,7 +238,14 @@ for pf in ${PREFLIGHTS[@]+"${PREFLIGHTS[@]}"}; do
 done
 
 # One-time per launch, after the preflights: the adapter's own pre-launch step (e.g. the agy remote-control daemon).
-if declare -F harness_prelaunch >/dev/null; then harness_prelaunch; fi
+# engsys#297: it runs in this shell, so it may change no function (its own included) and no frozen variable: an
+# assignment to one fails, and so does the launch.
+if declare -F harness_prelaunch >/dev/null; then
+  fns_before_prelaunch="$(fn_snapshot; declare -f harness_bin harness_capabilities harness_translate_flags harness_run_cmd harness_prelaunch)"
+  harness_prelaunch || { echo "error: harness_prelaunch failed for HARNESS=$HARNESS" >&2; exit 1; }
+  [ "$(fn_snapshot; declare -f harness_bin harness_capabilities harness_translate_flags harness_run_cmd harness_prelaunch)" = "$fns_before_prelaunch" ] \
+    || { echo "error: harness_prelaunch defines or changes a function (engsys#297)" >&2; exit 1; }
+fi
 
 # engsys#236: the launch dir (header). Checked once per run: owned by this user, open to nobody else, never a
 # symlink, and absolute, because the window's shell reads the file from its own cwd. A missing one is created 0700;
