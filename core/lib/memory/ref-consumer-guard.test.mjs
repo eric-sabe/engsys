@@ -41,7 +41,7 @@ const NON_CONSUMER_RULES = {
 	'core/lib/memory/ref-store.mjs': { allowFetchTokens: true },
 	// Reads local ref tips only through stripRefEventTrustLabels, which discards every embedded
 	// trust label and stamps author_kind 'untrusted_ref' (rejected unconditionally by trust.mjs).
-	// engsys#266: the consumed refs go through ref-consumer.mjs loadVerifiedRefEvents (re-verified, cached per tip).
+	// engsys#266: the consumed refs go through ref-consumer.mjs loadVerifiedRefEvents (re-verified on every read, engsys#274).
 	'core/lib/memory/index-db.mjs': {
 		allowReadTokens: true,
 		allowConsumerApi: true,
