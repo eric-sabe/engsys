@@ -156,16 +156,17 @@ fi
 # and reports a VERDICT_WAKE line when the outcome moved (latched per PR in .watch/verdict.<N>: outcome and head), so
 # an unchanged wait stays NOOP. It only wakes the model; the model's own preflight still decides.
 PREFLIGHT="${MM_PREFLIGHT:-$here/mm-preflight.sh}"
+VERDICT_FAIL_MAX="${MM_VERDICT_FAIL_MAX:-3}"
 KEY_FILE="$(monster_cfg_child "$CONFIG" ready_requirements security_verdict_key_file)"
 verdict_lines() {
-  local n rc out err head key why labeled wait_new="$W/verdict-wait.new" open cands f
+  local n rc out err head key why fails labeled wait_new="$W/verdict-wait.new" open cands f
   : >"$wait_new"
   : >"$W/secstale-due"
   open=$(printf '%s' "$SNAP" | jq -r '.[].number' 2>/dev/null | sort -u)
   cands=$( { printf '%s' "$SNAP" | jq -r '.[] | select(.securityReview == true) | .number' 2>/dev/null
              cat "$W/verdict-wait" 2>/dev/null || true; } | sort -un)
   # a latch outlives neither the label nor the wait: a PR asked again later is judged afresh
-  for f in "$W"/verdict.[0-9]*; do
+  for f in "$W"/verdict.[0-9]* "$W"/verdict-fail.[0-9]*; do
     [ -f "$f" ] || continue
     printf '%s\n' "$cands" | grep -qx "${f##*.}" || rm -f "$f"
   done
@@ -175,7 +176,7 @@ verdict_lines() {
     labeled=$(printf '%s' "$SNAP" | jq -r --argjson n "$n" '[.[] | select(.number == $n and .securityReview == true)] | length' 2>/dev/null)
     # a remembered PR that left the pipeline (no mm: label: bounced, or withdrawn) is no longer parked
     if [ "$labeled" = 0 ] && [ "$(printf '%s' "$SNAP" | jq -r --argjson n "$n" '[.[] | select(.number == $n) | (.mm // [])[]] | length' 2>/dev/null)" = 0 ]; then
-      rm -f "$W/verdict.$n"; continue
+      rm -f "$W/verdict.$n" "$W/verdict-fail.$n"; continue
     fi
     rc=0
     out=$(bash "$PREFLIGHT" --repo "$REPO" --pr "$n" ${CONFIG:+--config "$CONFIG"} ${KEY_FILE:+--security-key-file "$KEY_FILE"} 2>"$W/verdict.err") || rc=$?
@@ -183,12 +184,19 @@ verdict_lines() {
     head=$(printf '%s' "$out" | jq -r '.headRefOid // empty' 2>/dev/null | head -c 12)
     [ -n "$head" ] || head=$(printf '%s' "$err" | jq -r '.head // empty' 2>/dev/null | head -c 12)
     case "$rc" in
-      3) printf '%s\n' "$n" >>"$wait_new"
+      3) rm -f "$W/verdict-fail.$n"; printf '%s\n' "$n" >>"$wait_new"
          if [ "$labeled" = 0 ]; then key="label_removed_no_verdict"; else rm -f "$W/verdict.$n"; printf '%s\n' "$n" >>"$W/secstale-due"; continue; fi ;;
-      0) key="preflight_pass" ;;
+      0) rm -f "$W/verdict-fail.$n"; key="preflight_pass" ;;
       # a failure keeps the PR watched: it may be a transient gh error, and a real one (FINDINGS for this head) ends
       # the watch by itself once the model bounces the PR (no mm: label) or the lane removes the request label
-      *) printf '%s\n' "$n" >>"$wait_new"
+      # engsys#244: ...but not forever. A bounce can leave only mm:blocked (which a verdict-pending PR with an operator
+      # gate legitimately carries too, so the labels alone cannot tell them apart), so after VERDICT_FAIL_MAX
+      # consecutive failures (not exit 3) on the same head the PR leaves the wait, and stops costing a preflight per
+      # tick. A new head, a pass, or exit 3 starts the count over; the request label alone still keeps it watched.
+      *) fails=1
+         [ "$(cut -d' ' -f1 "$W/verdict-fail.$n" 2>/dev/null || true)" != "${head:--}" ] || fails=$(( $(cut -d' ' -f2 "$W/verdict-fail.$n") + 1 ))
+         printf '%s %s\n' "${head:--}" "$fails" >"$W/verdict-fail.$n"
+         [ "$fails" -ge "$VERDICT_FAIL_MAX" ] || printf '%s\n' "$n" >>"$wait_new"
          why=$(printf '%s' "$err" | jq -r '.reason // empty' 2>/dev/null | cut -d: -f1 | tr -c 'A-Za-z0-9_\n-' '_' | head -c 60)
          key="preflight_fail:${why:-exit_$rc}" ;;
     esac
