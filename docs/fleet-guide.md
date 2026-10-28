@@ -1265,7 +1265,13 @@ is synced when the session is down, before its new process starts:
   every problem it finds is an install at another version than the pin (`version` lines, what a deferred pin change
   looks like) and each of those installs matches its own release, file by file (the old tag, from GitHub); it prints
   them. Any other problem (a hook, settings, user-scope config, memory, a changed file of the old version) is alerted
-  and held as always; an old release that can't be read is "not verified". The session runs what it loaded at start. A held gate would also stop the supervisor from
+  and held as always; an old release that can't be read is "not verified". An old release whose tag GitHub no longer
+  has (deleted, engsys#260) is "behind, cannot re-verify": everything else is still checked (a problem there is a
+  mismatch), and with none the session is not held, and one alert is posted (incident
+  `wrapper-integrity-deferred-gone[-<name>]`, resolved by the next check without it). The version comes from the
+  dir's own files, so a forged one (a release that never was) looks the same, and the alert says so. Holding it would last until
+  someone ran `fleet restart` by hand, and the relaunch is what fixes it. A moved (re-cut) old tag is not told apart
+  from tampering: its changed files are a mismatch. The session runs what it loaded at start. A held gate would also stop the supervisor from
   cycling a monster that sits idle after its rotation request. This leaves no gap: the launch syncs the dir and
   verifies it again, without `--max-age`, before the session starts. Residual risk: `.fleet/sync-deferred` is host
   state. A process running as the fleet's user could add a live session to it and quiet that session's

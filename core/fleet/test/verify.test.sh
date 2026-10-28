@@ -86,6 +86,8 @@ cat >"$T/bin/gh" <<'SH'
 echo "gh $*" >>"$FAKE/gh.log"
 c="$(cat "$FAKE/commit")"
 if [ "${1:-}" = api ] && [ -f "$FAKE/gh-fail" ]; then echo "error connecting to api.github.com" >&2; exit 1; fi
+# engsys#260: the old release a deferred dir runs, its tag deleted on GitHub
+if [ "${1:-} ${2:-}" = "api repos/vendor/engsys/git/ref/tags/v0.9.0" ] && [ -f "$FAKE/tag-gone" ]; then echo '{"message":"Not Found"}'; echo "gh: Not Found (HTTP 404)" >&2; exit 1; fi
 case "${1:-} ${2:-}" in
   # v0.9.0: an older release (engsys#253: a deferred dir behind the pin is checked against its own release), same tree
   "api repos/vendor/engsys/git/ref/tags/v1.0.0" | "api repos/vendor/engsys/git/ref/tags/v0.9.0") printf '{"ref":"refs/tags/v1.0.0","object":{"type":"commit","sha":"%s"}}\n' "$c" ;;
@@ -1083,6 +1085,27 @@ has "…naming the file" "$OUT" "mm-act.sh"
 hasnt "…not passed as a deferral" "$OUT" "Not held, not alerted"
 eq "…and alerted" "$(comments)" "$((c0 + 1))"
 restore; rm -f "$I/.fleet"/verify-wrappers*.json "$I/.fleet"/verify-wrappers.alerted*
+echo "…engsys#260: the old release's tag is gone from GitHub: behind, cannot re-verify (not held, alerted once)"
+touch "$FAKE/tag-gone"; c0="$(comments)"
+run fleet verify --alert --max-age 0 --session acme-mm
+rc_is "…a deferred dir whose old release tag was deleted: passes (not held until a manual fleet restart)" 0
+has "…saying it can't be re-verified" "$OUT" "behind, cannot re-verify"
+has "…naming the release" "$OUT" "release gone: vendor/engsys@v0.9.0"
+eq "…alerted once" "$(comments)" "$((c0 + 1))"
+has "…as its own incident, saying the relaunch verifies it in full" "$(sed -n '/gh issue comment 5/,$p' "$FAKE/gh.log" | tail -n 20)" "verifies it in full before it starts"
+if [ -f "$I/.fleet/verify-deferred-gone.acme-mm" ]; then ok "…latched"; else bad "…latched"; fi
+run fleet verify --alert --max-age 0 --session acme-mm
+rc_is "…the next tick passes too" 0
+eq "…without a second alert (one incident, not every tick)" "$(comments)" "$((c0 + 1))"
+eq "…and no claude on the running session's dir" "$(calls)" 0
+run fleet verify --session acme-mm
+rc_is "…the launch-style check (no --max-age) is not relaxed by it" 1
+rm -f "$FAKE/tag-gone"; c0="$(comments)"
+run fleet verify --alert --max-age 0 --session acme-mm
+rc_is "…the tag back (checked against its own release again): passes" 0
+eq "…nothing new alerted (notify resolves only an incident it holds open)" "$(comments)" "$c0"
+if [ -f "$I/.fleet/verify-deferred-gone.acme-mm" ]; then bad "…the incident is resolved (latch cleared)"; else ok "…the incident is resolved (latch cleared)"; fi
+rm -f "$I/.fleet"/verify-wrappers*.json
 jq '. + {hooks: {SessionStart: [{hooks: [{type: "command", command: "/bin/echo planted"}]}]}}' "$PS/settings.json" >"$PS/s.tmp" && mv "$PS/s.tmp" "$PS/settings.json"
 rm -f "$I/.fleet"/verify-wrappers*.json; c0="$(comments)"
 run fleet verify --alert --max-age 0 --session acme-mm

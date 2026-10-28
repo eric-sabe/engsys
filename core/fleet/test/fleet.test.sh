@@ -1160,6 +1160,16 @@ dalert
 if [ -e "$STATE/sync-deferred.alerted.acme-mm" ] || [ -e "$STATE/sync-deferred.since/acme-mm" ]; then bad "synced at its restart: the incident is resolved (latch and since record gone)"; else ok "synced at its restart: the incident is resolved (latch and since record gone)"; fi
 dalert
 eq "…and not alerted again" "$(dsaid 'session acme-mm has been running on its old plugins')" 2
+# engsys#260: a drop with the list deleted by hand still removes the since record, so the next deferral starts its own clock
+FLEET_INSTANCE="$INST" ENGSYS_HOST="$ENGSYS_HOST" bash -c '. "$ENGSYS_HOST/core/fleet/lib/fleet-env.sh"; . "$ENGSYS_HOST/core/fleet/lib/session-dirs.sh"; fleet_sync_deferred_set add acme-mm'
+echo $(( $(date +%s) - 25 * 3600 )) >"$STATE/sync-deferred.since/acme-mm"
+rm -f "$STATE/sync-deferred"
+FLEET_INSTANCE="$INST" ENGSYS_HOST="$ENGSYS_HOST" bash -c '. "$ENGSYS_HOST/core/fleet/lib/fleet-env.sh"; . "$ENGSYS_HOST/core/fleet/lib/session-dirs.sh"; fleet_sync_deferred_set drop acme-mm'
+if [ -e "$STATE/sync-deferred.since/acme-mm" ]; then bad "a drop with sync-deferred deleted by hand removes the since record"; else ok "a drop with sync-deferred deleted by hand removes the since record"; fi
+FLEET_INSTANCE="$INST" ENGSYS_HOST="$ENGSYS_HOST" bash -c '. "$ENGSYS_HOST/core/fleet/lib/fleet-env.sh"; . "$ENGSYS_HOST/core/fleet/lib/session-dirs.sh"; fleet_sync_deferred_set add acme-mm'
+dalert
+eq "…so its next deferral is dated afresh: not alerted at once" "$(dsaid 'session acme-mm has been running on its old plugins')" 2
+FLEET_INSTANCE="$INST" ENGSYS_HOST="$ENGSYS_HOST" bash -c '. "$ENGSYS_HOST/core/fleet/lib/fleet-env.sh"; . "$ENGSYS_HOST/core/fleet/lib/session-dirs.sh"; fleet_sync_deferred_set drop acme-mm'
 # a link notify would refuse (--re must be a plain https URL, engsys#238) is left out: posted at info level, still latched
 FLEET_INSTANCE="$INST" ENGSYS_HOST="$ENGSYS_HOST" bash -c '. "$ENGSYS_HOST/core/fleet/lib/fleet-env.sh"; . "$ENGSYS_HOST/core/fleet/lib/session-dirs.sh"; fleet_sync_deferred_set add acme-mm'
 echo $(( $(date +%s) - 25 * 3600 )) >"$STATE/sync-deferred.since/acme-mm"

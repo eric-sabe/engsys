@@ -35,6 +35,8 @@
 #                                                    the mismatch's fingerprint: a different mismatch alerts again)
 #                      wrapper-integrity-unverified  the check could not run (latch: .fleet/verify-wrappers.unverified)
 #                      engsys-ref-forced             ENGSYS_REF forced away from the pin (latch: .fleet/verify-ref-forced.alerted)
+#                      wrapper-integrity-deferred-gone  a running session's deferred dir runs a release whose tag is gone
+#                                                    (engsys#260, not held; latch: .fleet/verify-deferred-gone.<name>)
 #   --auto-sync      (the supervisor's tick) when the only problems are `stale` (the pin checkout is behind
 #                    the default branch and files the sessions load changed there) and PIN_DIR is on the
 #                    default branch with a clean tracked tree, run `fleet sync --no-jobs` once (fast-forward +
@@ -74,7 +76,11 @@
 # what it loaded at start, and holding the gate would stop the supervisor
 # from cycling a monster that sits idle after its rotation request. Any other problem (a hook, settings, user-scope
 # config, memory, tampered files of the old version, ...) is alerted and held as always. That is no gap at the gate: `fleet launch` syncs the dir and verifies it again, without
-# --max-age, before it starts the session. Residual: the list is a file in .fleet/, so a process running as the fleet's
+# --max-age, before it starts the session. An old release whose tag GitHub no longer has (deleted, engsys#260) can't be
+# checked: the rest still is (a problem there is a MISMATCH), and with none the dir is "behind, cannot re-verify": not held
+# (holding it would last until someone ran fleet restart by hand, and the relaunch is what fixes it), alerted once
+# (incident wrapper-integrity-deferred-gone, latch .fleet/verify-deferred-gone, resolved by the next definite verdict
+# without it). A tag that was moved (re-cut) is not told apart from tampering: its changed files are a MISMATCH. Residual: the list is a file in .fleet/, so a process running as the fleet's
 # user could add a live session's name to it and quiet that session's version-mismatch alert until it restarts (it could
 # already edit fleet.conf or the verify cache, verify-wrappers.mjs).
 #
@@ -254,13 +260,19 @@ if [ -n "$repo" ] && [ -n "$ref" ]; then
   done <<<"$pack_plugins"
 fi
 
-rc=0 out="" plist="" cfg_missing=0 deferred_pass=0
+rc=0 out="" plist="" cfg_missing=0 deferred_pass=0 deferred_gone=""
 # deferred_check (engsys#253): the session runs, and fleet sync left its dir behind the pins until it restarts; the launch
 # syncs and re-verifies it. It passes (deferred_pass=1, rc 0, no alert) only when EVERY problem is an install at another
 # version than the pin (`version` lines: what a deferred pin change looks like) AND each of those installs matches its OWN
 # release, file by file (the verifier run again with each behind plugin's tag set to its installed version; the host kit,
 # which is at the new pin, is left out of that run). Tampered files of the old version are a MISMATCH (rc 1, alerted); an
 # old release that can't be checked is "not verified" (rc 3). Any other problem keeps the first run's verdict.
+# engsys#260: an old release whose tag GitHub answers 404 for (the verifier's --release-gone-exit: exit 4, everything else
+# checked and clean) passes as "behind, cannot re-verify" (deferred_gone, alerted once below). A 404 there is no outage:
+# the first run read the same repos moments ago (a mismatch is never served from the cache), so only the tag is missing.
+# The version comes from the dir's own files, so a forged one (a release that never was) lands here too: that is why it is
+# alerted, worded as possible tampering, and never held on: holding changes nothing for the running session (running
+# sessions are never stopped by the gate), and the relaunch, the one thing the gate decides, is verified in full.
 deferred_check() {
   local probs line id ver map="" a=() i nx="" dout drc=0
   probs="$(sed -n 's/^  \(.*\)$/\1/p' <<<"$out")"
@@ -283,12 +295,18 @@ deferred_check() {
     esac
     a+=("$i")
   done
+  a+=(--release-gone-exit)
   dout="$(node "$FLEET_KIT_DIR/lib/verify-wrappers.mjs" "${a[@]}" 2>&1)" || drc=$?
   if [ "$drc" = 1 ] && ! grep -q '^verify: MISMATCH' <<<"$dout"; then drc=3; fi
+  # node exits 4 on an internal failure of its own too: only the verifier's line counts (engsys#260)
+  if [ "$drc" = 4 ] && ! grep -q '^verify: release gone: [^(]*[^ (] (no such tag' <<<"$dout"; then drc=3; fi
   case "$drc" in
     0) out="$out"$'\n'"fleet verify: each install behind the pin matches its own release ($(awk 'NF { printf "%s%s v%s", s, $1, $2; s = ", " }' <<<"$map")): session $session is running on what it loaded before fleet sync, which left its dir alone while it runs; the dir is synced and verified again before it relaunches (fleet restart $session). Not held, not alerted."
        rc=0 deferred_pass=1 ;;
     1) out="$out"$'\n'"fleet verify: the dir of running session $session is behind the pin, and its installs do NOT match their own release either:"$'\n'"$dout"; rc=1 ;;
+    4) deferred_gone="$(sed -n 's/^verify: release gone: \([^(]*[^ (]\) (no such tag.*$/\1/p' <<<"$dout" | tail -n 1)"
+       out="$out"$'\n'"$dout"$'\n'"fleet verify: behind, cannot re-verify: session $session is running on what it loaded before fleet sync, and the release of ${deferred_gone:-an install behind the pin} is no longer on GitHub (its tag is gone), so those files can't be checked against it; everything else in its dir matches. Not held: the relaunch syncs the dir to the pin and verifies it in full first (fleet restart $session). Alerted once."
+       rc=0 deferred_pass=1 ;;
     *) out="$out"$'\n'"fleet verify: not verified: the installs of running session $session are behind the pin, and their own release could not be checked:"$'\n'"$dout"; rc=3 ;;
   esac
 }
@@ -488,6 +506,18 @@ if [ "$rc" = 1 ] && [ -f "$FLEET_STATE/sync-deferred.user-claude" ]; then
   out="$out"$'\n'"fleet verify: the supervisor's auto-sync left ~/.claude alone while interactive roles run on it (engsys#253): run fleet sync yourself"
 fi
 printf '%s\n' "$out"
+
+# engsys#260: "behind, cannot re-verify" (deferred_check) is one incident, posted once per set of gone releases and resolved
+# by the next definite verdict (0 or 1) that is not that; a check that could not run (3) leaves it as it is
+GONE_LATCH="$FLEET_STATE/verify-deferred-gone$SFX"
+if [ "$alert" = 1 ] && [ -n "$deferred_gone" ]; then
+  if [ "$(cat "$GONE_LATCH" 2>/dev/null)" != "$deferred_gone" ]; then
+    notify --level alert --incident "wrapper-integrity-deferred-gone$INC" "Plugin check on $host (session $session): the session runs on plugins it loaded before a pin change (fleet sync leaves its config dir alone while it runs), and the release they came from ($deferred_gone) is not on GitHub: its tag was deleted, or the version its dir reports was never released. So those files can't be checked while it runs; everything else in its dir matches. It is not held: its next relaunch syncs the dir to the pin ($ref) and verifies it in full before it starts. Please restart it now to bring it back under the check: fleet restart $session. If nobody deleted that tag on purpose, treat it as possible tampering of that dir and check who changed it." \
+      && printf '%s\n' "$deferred_gone" >"$GONE_LATCH"
+  fi
+elif [ "$alert" = 1 ] && [ -f "$GONE_LATCH" ] && [ "$rc" != 3 ]; then
+  notify --level info --incident "wrapper-integrity-deferred-gone$INC" --resolve "Resolved: session ${session:-} on $host no longer runs on a release that can't be checked." && rm -f "$GONE_LATCH"
+fi
 
 if [ "$alert" = 1 ] && { [ "$deferred_pass" = 0 ] || [ "$rc" != 0 ]; }; then
   # the info-level incident of the warn-only stage (engsys#227): closed once, whatever this run found — an

@@ -155,7 +155,9 @@ fleet_sync_deferred() { # fleet_sync_deferred <name> → 0 when <name>'s dir is 
 # under a mkdir lock (atomic). The edit takes milliseconds: a lock held for 10 s belongs to a holder that died, and is taken over.
 fleet_sync_deferred_set() { # fleet_sync_deferred_set add|drop <name>
   local f="$FLEET_STATE/sync-deferred" l="$FLEET_STATE/locks/sync-deferred.lock" t i=0 rc=0
-  [ "$1" = add ] || [ -f "$f" ] || return 0
+  # a drop goes on while there is a since record, even with the list gone (an operator deleted it, engsys#260): a since
+  # record left behind would date the session's next deferral from the old one, and its 24h alert would fire at once
+  [ "$1" = add ] || [ -f "$f" ] || [ -e "$f.since/$2" ] || return 0
   [ "$1" != add ] || ! fleet_sync_deferred "$2" || return 0
   mkdir -p "$FLEET_STATE/locks"
   until mkdir "$l" 2>/dev/null; do
@@ -176,7 +178,7 @@ fleet_sync_deferred_set() { # fleet_sync_deferred_set add|drop <name>
 # fleet_sync_deferred_alert [<github url>] → once per tick (supervise.sh): one `fleet notify --level action` per session
 # deferred for longer than SYNC_DEFER_ALERT_HOURS (fleet.conf, default 24), latched in sync-deferred.alerted.<name>,
 # and resolved once the session is no longer deferred. A deferral never clears by itself while the session runs.
-# The action level needs a link (--re, an https URL with no markup: notify.mjs refuses anything else, engsys#238): the
+# The action level needs a link (--re, an https URL with no markup: notify.mjs drops anything else, engsys#238, #255): the
 # caller's status or ledger issue; with none that qualifies it is posted as info. Routing (the host operator's DM for
 # action) is notify's.
 fleet_sync_deferred_alert() {

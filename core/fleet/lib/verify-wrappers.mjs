@@ -40,7 +40,7 @@
 //                       [--check-user-config --claude-json <file> --allowed-user-files "<sha256> ..."]
 //                       [--pin-repo <owner/repo>] [--operators-team <org/team>] [--memory-config <file> ...]
 //                       [--market-plugin "<plugin>@<marketplace>|<owner/repo>|<ref>" ...]
-//                       [--cache <file> --max-age-min <n>]
+//                       [--cache <file> --max-age-min <n>] [--release-gone-exit]
 //
 // --engsys-dir: the host kit (ENGSYS_HOST_TREES, ENGSYS_HOST_FILES) against the same release tree.
 // --user-settings-dir: the Claude config dir the sessions use (FLEET_CLAUDE_CONFIG_DIR, else ~/.claude);
@@ -63,10 +63,16 @@
 //   --allowed-user-files (hashed as a config-dir memory.yml) and, with --operators-team, list exactly the team.
 // --fleet-config-dir (engsys#201): --user-settings-dir is a fleet config dir (not ~/.claude): warn when its settings.json
 //   doesn't switch the claude.ai skill/plugin sync off. Synced skills are never trusted by source (see userConfigItems).
+// --release-gone-exit (engsys#260, verify.sh's deferred_check only): a release whose tag GitHub answers 404 for
+//   (git/ref/tags/<tag>: deleted, or never cut) is not checked, and everything else still is: any problem is a MISMATCH
+//   as always, and with none the exit is 4 (the `verify: release gone:` line names them) instead of 3. Only the tag lookup
+//   counts; any other failure is still "not verified". A tag that was moved (re-cut) is not told apart: its tree is
+//   compared as usual, so changed files are a MISMATCH.
 //
 // Exit: 0 everything matches | 1 MISMATCH (a definite difference) | 3 not verified (GitHub unreachable,
-//       API error, truncated tree, nothing installed) | 2 usage. Callers hold merge/maintain sessions on
-//       anything but 0. A mismatch ends with a `fingerprint: <sha1>` line naming that exact mismatch.
+//       API error, truncated tree, nothing installed) | 4 (--release-gone-exit only) no problem, but a release tag
+//       is gone | 2 usage. Callers hold merge/maintain sessions on anything but 0. A mismatch ends with a
+//       `fingerprint: <sha1>` line naming that exact mismatch.
 //
 // --cache / --max-age-min: the supervisor's throttle. A pass is cached with the local blob SHAs it was
 // computed from; within <n> minutes, a run whose local SHAs are unchanged for the same repo and tag
@@ -1499,7 +1505,12 @@ function ghJson(gh, endpoint, timeoutMs, cwd = undefined) {
  * `ahead` (the default branch has moved on from it) or `identical` mean the commit is on that branch.
  */
 export async function fetchRelease({ repo, tag, gh = 'gh', timeoutMs = 30_000 }) {
-  let obj = (await ghJson(gh, `repos/${repo}/git/ref/tags/${tag}`, timeoutMs)).object;
+  let obj;
+  try { obj = (await ghJson(gh, `repos/${repo}/git/ref/tags/${tag}`, timeoutMs)).object; } catch (e) {
+    // engsys#260: GitHub says there is no such tag (deleted, or never cut); only --release-gone-exit treats it apart
+    if (e instanceof Unverified && e.httpStatus === 404) e.releaseGone = `${repo}@${tag}`;
+    throw e;
+  }
   for (let i = 0; obj && obj.type === 'tag' && i < 5; i++) obj = (await ghJson(gh, `repos/${repo}/git/tags/${obj.sha}`, timeoutMs)).object;
   if (!obj || obj.type !== 'commit' || !/^[0-9a-f]{40}$/.test(obj.sha || '')) throw new Unverified(`tag ${tag} does not resolve to a commit`);
   const defaultBranch = (await ghJson(gh, `repos/${repo}`, timeoutMs)).default_branch;
@@ -1551,6 +1562,7 @@ export function parseArgs(argv) {
     claudeJson: '',
     checkUserConfig: false,
     marketPlugins: [],
+    releaseGoneExit: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
@@ -1584,6 +1596,7 @@ export function parseArgs(argv) {
       case '--claude-json': a.claudeJson = v(); break;
       case '--messaging-settings': a.messagingSettings = v(); break;
       case '--check-user-config': a.checkUserConfig = true; break;
+      case '--release-gone-exit': a.releaseGoneExit = true; break;
       case '--enforce-instance-on-main': break; // engsys#227: always enforced now; accepted so an older caller still runs
       case '--market-plugin': {
         const [id, repo, tag, ...extra] = v().split('|');
@@ -1805,23 +1818,33 @@ export async function run(argv, {
     }
   }
 
+  // --release-gone-exit (engsys#260): a release whose tag is gone is left out (null below), and the rest is still checked
+  const gone = [];
+  const isGone = (e) => a.releaseGoneExit && e instanceof Unverified && typeof e.releaseGone === 'string';
   let rel;
   try { rel = await fetch({ repo: a.repo, tag: a.tag }); } catch (e) {
-    out(`verify: not verified against ${target}: ${e instanceof Unverified ? e.message : String(e && e.message || e)}`);
-    return 3;
+    if (isGone(e)) { rel = null; gone.push(e.releaseGone); } else {
+      out(`verify: not verified against ${target}: ${e instanceof Unverified ? e.message : String(e && e.message || e)}`);
+      return 3;
+    }
   }
   const problems = [];
-  if (rel.status !== 'ahead' && rel.status !== 'identical') {
+  if (rel && rel.status !== 'ahead' && rel.status !== 'identical') {
     problems.push(`release    ${a.tag} is commit ${rel.commit}, which is not on ${rel.defaultBranch} (compare: ${rel.status})`);
   }
-  for (const d of compare(rel.tree, local)) problems.push(`${d.kind.padEnd(10)} ${cachePath(d.root, d.path)} ${d.have}`);
+  if (rel) for (const d of compare(rel.tree, local)) problems.push(`${d.kind.padEnd(10)} ${cachePath(d.root, d.path)} ${d.have}`);
   // the engsys marketplace's own plugins (the stack packs, engsys#224) share the engsys release, whose on-main check above is strict
   const released = new Map([[`${a.repo}@${a.tag}`, rel]]);
   for (const mp of market) {
     try {
       const key = `${mp.repo}@${mp.tag}`;
-      if (!released.has(key)) released.set(key, await fetch({ repo: mp.repo, tag: mp.tag }));
+      if (!released.has(key)) {
+        let r;
+        try { r = await fetch({ repo: mp.repo, tag: mp.tag }); } catch (e) { if (!isGone(e)) throw e; r = null; gone.push(e.releaseGone); }
+        released.set(key, r);
+      }
       const mrel = released.get(key);
+      if (mrel === null) continue;   // its release is gone (engsys#260): named in the exit-4 line, never a pass
       if (mrel !== rel && mrel.status !== 'ahead' && mrel.status !== 'identical') {
         const line = `${mp.id}: ${mp.tag} of ${mp.repo} is commit ${mrel.commit}, which is not on ${mrel.defaultBranch} (compare: ${mrel.status})`;
         // the engsys release's rule (eric-sabe/engsys#227); the recovery is a release tagged on the default branch
@@ -1842,6 +1865,7 @@ export async function run(argv, {
     }
   }
   if (host) {
+    if (!rel) { out(`verify: not verified: the host kit can't be checked: ${target} is gone`); return 3; }
     for (const d of compareHost(rel.tree, host, a.engsysDir)) problems.push(`${d.kind.padEnd(10)} ${d.absPath} ${d.have}`);
   }
   let warnings = [];
@@ -1870,6 +1894,11 @@ export async function run(argv, {
   }
   warnLines(warnings);
   if (problems.length) return mismatch(problems);
+  // engsys#260: nothing that could be checked is wrong, but these releases could not be checked at all: never a pass, never cached
+  if (gone.length) {
+    out(`verify: release gone: ${[...new Set(gone)].join(', ')} (no such tag on GitHub), so the files installed from it can't be checked; everything else matches`);
+    return 4;
+  }
 
   if (a.cache) {
     try { writeCache(a.cache, { repo: a.repo, tag: a.tag, local, market: marketLocal, host, project: projectKey, operators, info, warnings, result: 'ok', verifiedAt: now() }); } catch (e) {
