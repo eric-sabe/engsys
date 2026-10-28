@@ -83,7 +83,7 @@ refused, and readers never trust them.
     (a wiped or fresh git dir). With neither, the first staged tip that verifies is **trusted on
     first use**, with a logged warning: a fresh host can be handed a stale (but validly signed) tip
     once. The R3 drill checks a fresh host's first fetch against the live tips.
-  - **Brief-time reads:** `loadClassBEvents` reads the consumed local refs only through
+  - **Index-build reads:** `loadClassBEvents` reads the consumed local refs only through
     `loadVerifiedRefEvents`, which re-verifies each tip on every read and stamps
     its events `author_kind: 'fleet_signed'`, `signed_fleet: <fleet>`. Any other ref under
     `refs/engsys/memory/` (the retired paths, an unknown leaf) is still read label-stripped as
