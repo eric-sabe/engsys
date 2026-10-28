@@ -137,13 +137,21 @@ export function validateArgs(args) {
   if (!args.level && !args.resolve) throw '--level is required (info|action|alert)';
   if (args.level && !LEVELS.includes(args.level)) throw `--level must be one of info|action|alert (got '${args.level}')`;
   if (args.level === 'action' && !args.re && !args.resolve) throw "--level action requires --re <github-url>";
-  if (args.re && !RE_URL_RE.test(args.re)) throw '--re must be an https URL with no spaces, <, >, | or backticks';
   if (args.for !== null && args.for !== undefined && !args.for) throw '--for needs a fleet id or GitHub login';
   if (args.author !== null && args.author !== undefined && !args.author) throw '--author needs a GitHub login';
   if (args.everyone && args.level !== 'alert') throw '--everyone goes with --level alert';
   if ([args.for, args.author, args.everyone, args.noMention].filter(Boolean).length > 1) throw 'use one of --for, --author, --everyone, --no-mention';
   if (args.resolve && !args.incident) throw '--resolve requires --incident <key>';
   if (!args.resolve && !args.text) throw 'a message is required (unless --resolve)';
+}
+
+/** Drop an --re that is not a plain https URL, returning the warning to print ('' when it is fine). It never
+ * reaches Slack (engsys#238), but the message still posts: the link usually comes from a conf value, and a bad
+ * one must not silence every alert that carries it (engsys#255). An action without its link still posts. */
+export function dropInvalidRe(args) {
+  if (args.re === null || args.re === undefined || RE_URL_RE.test(args.re)) return '';
+  args.re = null;
+  return '--re is not an https URL with no spaces, <, >, | or backticks; posting without the link';
 }
 
 /** Filesystem-safe name for an incident key. */
@@ -179,7 +187,13 @@ export function planRoute({ level, forWho = null, author = null, everyone = fals
   if (noMention || (level === 'info' && !forWho && !author)) return { channel: { mention: '' }, dms: [], meantFor: null, warning: '' };
   if (forWho) {
     const r = recipientFor(reg, forWho);
-    if (r && slackMention(r.slack_operator)) return one(r.slack_operator, forWho);
+    // A disabled fleet's operator is still DMed when named explicitly: --for is a deliberate choice, unlike
+    // --everyone, which skips disabled fleets. The warning says so (engsys#255).
+    if (r && slackMention(r.slack_operator)) {
+      const route = one(r.slack_operator, forWho);
+      if (reg.fleets[r.fleet]?.enabled === false) route.warning = `${forWho}: fleet ${r.fleet} is disabled in the fleet registry; DMing its operator anyway`;
+      return route;
+    }
     return toChannel(forWho, !reg ? 'no fleet registry (FEDERATION_FILE)' : !r ? 'not in the fleet registry' : `fleet ${r.fleet} has no slack_operator`);
   }
   const owner = author ? fleetForBot(reg, author) : null;
@@ -498,6 +512,8 @@ async function main() {
     die(e);
     return;
   }
+  const reWarning = dropInvalidRe(args);
+  if (reWarning) warn(reWarning);
 
   const stateDir = process.env.FLEET_STATE;
   if (!stateDir) { die('FLEET_STATE is not set (run via `fleet notify`, not notify.mjs directly)', 1); return; }

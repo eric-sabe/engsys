@@ -572,7 +572,9 @@ fleet notify --sweep [--repo <owner/name>] [--apply]
 It posts with the fleet's bot token, prefixes the fleet id, routes by the rules above, and falls back to
 a comment on the fleet's status issue if Slack is unreachable. Monsters stop using a person's Slack
 connector for fleet posts. A recipient the registry can't resolve (or whose DM Slack refuses) falls
-back, loudly, to the channel, and the post says who it was meant for. `--re` must be a plain https URL. An incident's latch stores
+back, loudly, to the channel, and the post says who it was meant for. A `--for` naming a disabled fleet still DMs its
+operator, with a warning. `--re` must be a plain https URL: any other value is dropped with a warning and the message
+posts without the link, so a bad link in a conf never silences an alert (engsys#255). An incident's latch stores
 the DM channel and every DM thread it opened, so replies and `--resolve` land in the same threads.
 `--sweep` resolves the latches whose pull request already merged or closed (dry run unless `--apply`).
 
