@@ -88,7 +88,9 @@ bounded() { # bounded <secs> <cmd...> → the command's status, or 124 once it r
   local secs="$1" pid ticks=0 pids; shift
   "$@" &
   pid=$!
-  while kill -0 "$pid" 2>/dev/null; do
+  # Still one of this shell's RUNNING jobs, not just a live pid: once the job ends its pid can be reused, and
+  # `jobs -r` drops it even before it is reaped (kill -0 would follow the reused pid).
+  while jobs -rp | grep -qx "$pid"; do
     if [ "$ticks" -ge $((secs * 5)) ]; then
       pids="$(tree_pids "$pid")"
       # shellcheck disable=SC2086 # one pid per word

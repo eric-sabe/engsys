@@ -616,7 +616,8 @@ bus 6 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --
 hasnt "  …alternating full and empty reads: no label_removed" "label_removed"
 rm -f "$LISTS.flap" "$LISTS.flapn"
 lists "" "" "" >"$LISTS"
-bus 3 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents
+# 6 s, not 3: the removal needs two consecutive 1 s polls, which a loaded host can stretch past 3 s
+bus 6 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents
 has "  …and so is the label's removal (missing two polls in a row)" "VERDICT_WAKE #20 label_removed"
 [ "$(count_of 'VERDICT_WAKE #20 label_removed')" = 1 ] && ok "  …once" || bad "  …once" "$OUT"
 lists "" "" "$(vnode 21)" >"$LISTS"; nyx_gql IC_old

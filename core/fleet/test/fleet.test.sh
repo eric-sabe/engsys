@@ -1856,7 +1856,7 @@ for n in acme-mm acme-build acme-security acme-rel; do rm -f "$FAKE/loggedin/$n"
 run env SSH_CONNECTION="10.0.0.1 1 10.0.0.2 22" PATH="$T/darwin-bin:$PATH" bash "$ENGSYS_HOST/core/fleet/bin/fleet" --instance "$INST" config-dir init
 rc_is "config-dir init over SSH on macOS exits 0" 0
 has "…says the login state is unknown" "$OUT" "login state unknown (SSH, Keychain not readable) for: acme-mm acme-build acme-security acme-rel"
-hasnt "…and prints no /login command for any session" "$OUT" "CLAUDE_CONFIG_DIR=$SESS/acme-mm claude"
+hasnt "…and prints no /login command for any session" "$OUT" "CLAUDE_CONFIG_DIR='$SESS/acme-mm"
 hasnt "…nor claims they are all logged in" "$OUT" "every session dir is logged in"
 run env -u SSH_CONNECTION -u SSH_TTY PATH="$T/darwin-bin:$PATH" bash "$ENGSYS_HOST/core/fleet/bin/fleet" --instance "$INST" config-dir init
 has "outside SSH the login commands are printed as before" "$OUT" "acme-mm: ${LOGIN}CLAUDE_CONFIG_DIR='$SESS/acme-mm' claude"
