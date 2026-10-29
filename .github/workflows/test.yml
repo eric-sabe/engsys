@@ -50,6 +50,20 @@ jobs:
           command -v shellcheck || brew install shellcheck
           /bin/bash --version | head -1
 
+      - name: Root-owned git for the guarded-push suites
+        # The guarded push runs only a git whose whole directory chain is root-owned (#92 NF2), and the
+        # runner's selected Xcode is not, so its real-git tests would skip. The Command Line Tools are
+        # root-owned, as on a fleet host: select them when the image has them, and show what resolves.
+        run: |
+          if [ -x /Library/Developer/CommandLineTools/usr/bin/git ]; then
+            sudo xcode-select -s /Library/Developer/CommandLineTools
+          fi
+          xcode-select -p
+          git_bin="$(xcrun --find git)"
+          echo "$git_bin"
+          d="$git_bin"
+          while [ "$d" != / ]; do ls -ld "$d"; d="$(dirname "$d")"; done
+
       - name: Git identity for test repos
         run: |
           git config --global user.name  "engsys-ci"

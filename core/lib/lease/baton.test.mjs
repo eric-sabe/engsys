@@ -1049,6 +1049,7 @@ test("N2: --new-branch creates a branch origin lacks (no force, never the defaul
       spawn: async (cmd, args) => { calls.push(args); return { code: 0, stdout: "", stderr: "", timedOut: false }; },
       remoteUrl: async () => `git@github.com:${REPO}.git`,
       pushConfig: async () => FLEET_CONFIG,
+      gitPath: () => "/usr/bin/git", // spawn is a stub: the host's own git (none root-owned on a GitHub runner) is not under test
       ...(newBranchPrefixes ? { newBranchPrefixes } : {}),
     });
     await b.startup();
@@ -1153,6 +1154,7 @@ test("#71 L3: a guarded push refuses a checkout whose own config sets credential
     spawn: async (cmd, args) => { calls.push(args); return { code: 0, stdout: "", stderr: "", timedOut: false }; },
     remoteUrl: async () => `https://github.com/${REPO}.git`,
     pushConfig,
+    gitPath: () => "/usr/bin/git", // spawn is a stub: the host's own git (none root-owned on a GitHub runner) is not under test
   });
   await s.baton.startup();
   const planted = await mk(async () => [...FLEET_CONFIG, { scope: "local", key: "http.https://github.com.proxy", value: "http://attacker" }])
@@ -1330,6 +1332,7 @@ test("#85 L4: the config is scanned again inside the fence, right before the pus
       spawn: async (cmd, args, opts) => { calls.push({ args, opts }); return { code: 0, stdout: "", stderr: "", timedOut: false }; },
       remoteUrl: async () => `https://github.com/${REPO}.git`,
       pushConfig: async () => { scans += 1; return scans === 1 ? FLEET_CONFIG : second; },
+      gitPath: () => "/usr/bin/git", // spawn is a stub: the host's own git (none root-owned on a GitHub runner) is not under test
     });
     return { r: await b.guard(["git", "-C", "../wt", "push", "origin", "agent/1-x"], { pr: 5 }), calls, scans: () => scans };
   };

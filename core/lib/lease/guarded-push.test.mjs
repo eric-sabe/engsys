@@ -182,6 +182,10 @@ test("#71 L3: an operator's global helper (no env-scoped config) is kept under t
 });
 
 test("#85 L3: the push's cleaned environment still authenticates through the fleet helper, and drops planted GIT_ASKPASS / NODE_OPTIONS / GIT_SSH_COMMAND", async (t) => {
+  // #92 NF2: the scan and the push run only the push's own git, by absolute path from a root-owned directory chain;
+  // a host with none (a GitHub runner's Xcode git is not root-owned) refuses them, so there is nothing to test there
+  const trusted = pushGit();
+  if (!trusted) { t.skip("no root-owned git on this host"); return; }
   resetMarks();
   const wt = checkout("wt-env", { plant: false });
   const home = mkdtempSync(join(ROOT, "home-"));
@@ -189,9 +193,6 @@ test("#85 L3: the push's cleaned environment still authenticates through the fle
   const entries = await readPushConfig(wt, { ...sessionEnv({ helper: APP_HELPER }), HOME: home });
   assert.deepEqual(unsafePushConfig(entries), [], "the fleet's env-scoped helper passes the scan");
   assert.deepEqual(unsafePushConfig(await readPushConfig(wt, { ...sessionEnv(), HOME: home })), [`credential.${ORIGIN.replace(/\/r\.git$/, "")}.helper`], "any other env-scoped helper is refused");
-  // #92 NF2: the push's own git, by absolute path from a root-owned directory (skip where there is none).
-  const trusted = pushGit();
-  if (!trusted) { t.skip("no root-owned git on this host"); return; }
   const r = await git(wt, [...pushConfigArgs(entries), "push", "origin", "HEAD:refs/heads/agent/5-x"], env, trusted);
   assert.equal(r.code, 0, r.stderr);
   assert.ok(remoteHas("agent/5-x"));
@@ -199,7 +200,8 @@ test("#85 L3: the push's cleaned environment still authenticates through the fle
   for (const m of ["evil-helper", "evil-askpass", "evil-ssh", "evil-hook"]) assert.equal(ran(m), false, `${m} must not run`);
 });
 
-test("#85 L3: an includeIf in the operator's global config that points into the checkout is read as the checkout's config and refused", async () => {
+test("#85 L3: an includeIf in the operator's global config that points into the checkout is read as the checkout's config and refused", async (t) => {
+  if (!pushGit()) { t.skip("no root-owned git on this host (readPushConfig runs only that git, #92 NF2)"); return; }
   const wt = realpathSync(checkout("wt-include"));
   const home = mkdtempSync(join(ROOT, "home-"));
   writeFileSync(join(wt, ".git", "evil.inc"), "[http]\n\tproxy = http://127.0.0.1:9\n");
