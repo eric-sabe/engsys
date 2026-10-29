@@ -1758,7 +1758,9 @@ the bucket id, its marker, its `manifest.json` (`source`, `creatorType`) and the
 config dir, where any session of this user can write them, and the manifest carries no content hashes, so a
 forged manifest plus a planted `SKILL.md` would look exactly like a real sync. There is no allowlist by bucket or
 author. The only exception is the existing one: an operator who reviews a file can list its sha256 in
-`VERIFY_ALLOWED_USER_FILES`, and it then has to be re-approved when upstream changes it.
+`VERIFY_ALLOWED_USER_FILES`, and it then has to be re-approved when upstream changes it. Operator decision
+(engsys#225): sync stays off by default, and a fleet that deliberately keeps it on uses that sha256 allowlist as the
+sanctioned path (no live claude.ai fetch, no signed manifests).
 
 **The alert** names the total and the categories (engsys plugin or host kit, pin checkout, unpinned
 user-scope plugins, MCP servers, user-scope skills/agents/files, user-scope hooks and commands, settings,
