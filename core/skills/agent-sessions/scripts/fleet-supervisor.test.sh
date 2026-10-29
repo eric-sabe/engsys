@@ -391,8 +391,10 @@ expect "  …and the table runs as before" "^launch acme-rel"
 
 # --- operator time format (#89): comments read in the operator's zone, the log stays ISO UTC ----
 printf 'TMUX_SESSION=acme\nLAUNCH_CMD=bash %s/launch.sh\nREPO=o/r\nacme-mm|1|60\n' "$T" >"$T/w/sup.conf"
-LASTISO="$(iso 90)"
-reset; ledger 90 "ok — merging #12"; pane busy; run
+reset; ledger 90 "ok — merging #12"; pane busy
+# the heartbeat the fixture actually wrote: recomputing iso 90 here can land a second later on a loaded host
+LASTISO="$(jq -r .body "$T/ledger-1.json" | sed -E 's/^last: ([^ ]+).*/\1/')"
+run
 expect "no time format: the escalation comment keeps the ISO heartbeat" "comment 1: .*last: $LASTISO"
 reset; ledger 90 "ok — merging #12"; pane busy
 : >"$T/actions"; (cd "$T/w" && OPERATOR_TIMEZONE=America/New_York OPERATOR_CLOCK=12h bash "$SUP" sup.conf >/dev/null 2>&1)
