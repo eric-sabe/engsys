@@ -265,6 +265,24 @@ fleet_keychain_advice() {
   echo "run this from a terminal in the Mac's own GUI session, or unlock the Keychain first (security unlock-keychain)"
 }
 
+# claude run from a directory under $HOME finds ~/.claude/settings.json on the way up and treats $HOME as the project,
+# so a plugin mutation there writes project-scope installs for it (engsys#235). Every claude the fleet scripts start
+# outside a project runs from fleet_outside_home_dir, and every login hint they print starts from an empty dir.
+# fleet_outside_home_dir → ${TMPDIR:-/tmp}, resolved, or /tmp when that is under $HOME (engsys#305)
+fleet_outside_home_dir() {
+  local t h
+  t="$(cd "${TMPDIR:-/tmp}" 2>/dev/null && pwd -P)" || t=/tmp
+  h="$(cd "$HOME" 2>/dev/null && pwd -P || printf '%s' "$HOME")"
+  case "$t/" in "$h"/*) t="$(cd /tmp && pwd -P)" ;; esac
+  printf '%s' "$t"
+}
+# fleet_login_cmd [<config dir>] → the command that logs a config dir in (then /login, /exit), from an empty dir, never
+# from ~ (engsys#304); no dir: Claude's own default
+fleet_login_cmd() {
+  # shellcheck disable=SC2016 # the $(mktemp -d) is for the operator's shell
+  printf 'cd "$(mktemp -d)" && %sclaude' "${1:+CLAUDE_CONFIG_DIR=$1 }"
+}
+
 FLEET_ENGSYS_REF_FORCED=0 FLEET_INSTANCE_REF_FORCED=0
 [ -z "${ENGSYS_REF:-}" ] || FLEET_ENGSYS_REF_FORCED=1
 [ -z "${INSTANCE_REF:-}" ] || FLEET_INSTANCE_REF_FORCED=1

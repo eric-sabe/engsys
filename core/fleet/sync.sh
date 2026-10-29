@@ -16,8 +16,8 @@
 #      $HOME); if the pin repo's settings change anyway, sync restores them and fails (engsys#112, engsys#235).
 #      Project-scope installs for $HOME (strays of a claude run from ~) don't block a marketplace move: in a
 #      fleet dir they are dropped from its installed_plugins.json, backed up, with a warning (engsys#235).
-#      A dir whose plugin step fails is reported and the other dirs are synced; the run fails at the end
-#      (engsys#235)
+#      A dir whose plugin step fails is reported and the other dirs are synced; the run fails at the end,
+#      after step 5 (engsys#235, engsys#305)
 #   5. re-installs the launchd jobs if their templates changed, or the files that decide which sessions
 #      run on this host (roster, supervisor conf, registry); and, whatever changed, unloads a supervisor
 #      job left installed on a host where no supervised session runs (lib/host-roles.sh)
@@ -89,7 +89,7 @@ main() {
 
   # State carried across the re-execs below (a moved checkout means new code, so we start over).
   local resumed="${FLEET_SYNC_RESUMED:-}" prev_instance="${FLEET_SYNC_PREV_INSTANCE:-}" prev_engsys="${FLEET_SYNC_PREV_ENGSYS:-}"
-  local changed="${FLEET_SYNC_CHANGED:-0}" drift=0 deferred=
+  local changed="${FLEET_SYNC_CHANGED:-0}" drift=0 deferred="" dirs_failed=""
   unset FLEET_SYNC_RESUMED FLEET_SYNC_PREV_INSTANCE FLEET_SYNC_PREV_ENGSYS FLEET_SYNC_CHANGED
   # recut_markets: the marketplaces whose pinned tag was re-cut and adopted (engsys#219). The ref and the plugin version are
   # unchanged, so step 4 would see nothing to do: it reinstalls these anyway. The list lives on disk (pin-recut.reinstall)
@@ -328,7 +328,7 @@ main() {
       # a session dir that does not exist yet must not stop the other sessions' sync: report it as drift
       if [ -n "$cfg_dir" ] && [ "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:-off}" = on ] && [ ! -d "$cfg_dir" ]; then
         say "claude config dir: $cfg_dir (session ${cfg_dir##*/}) does not exist"
-        warn "session ${cfg_dir##*/} has no config dir yet: fleet config-dir init --session ${cfg_dir##*/}, then log in with CLAUDE_CONFIG_DIR=$cfg_dir claude (fleet guide § 6.1). Its plugins are not synced."
+        warn "session ${cfg_dir##*/} has no config dir yet: fleet config-dir init --session ${cfg_dir##*/}, then log in with $(fleet_login_cmd "$cfg_dir") (fleet guide § 6.1). Its plugins are not synced."
         drift=1; ps_bad="$ps_bad ${cfg_dir##*/}"; recut_keep=" * "; continue
       fi
       drift_before="$drift"
@@ -374,11 +374,8 @@ main() {
     if [ -n "$ps_bad" ]; then
       warn "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on, but these sessions have no config dir or no login yet:$ps_bad. $(fleet_config_dir_fix)"
     fi
-    if [ -n "$dir_failed" ]; then
-      # what did sync is still stamped, so fleet restart --stale sees it (the failed dirs stay behind until a re-run)
-      if [ "$changed" = 1 ]; then mkdir -p "$FLEET_STATE"; date +%s >"$FLEET_STATE/last-change"; fi
-      fleet_die "the plugin step failed in:$dir_failed (each one's reason is above). Every other config dir was synced. NOT synced: fix those, then re-run: fleet sync"
-    fi
+    # engsys#305: the run still fails, but after step 5, so one bad dir doesn't hold back the launchd jobs
+    dirs_failed="$dir_failed"
     SYNC_CFG="${FLEET_CLAUDE_CONFIG_DIR:-}"
     GUARDED=(); sync_cleanup; trap - EXIT
   fi
@@ -402,6 +399,7 @@ main() {
     exit "$drift"
   fi
   if [ -n "$only_session" ]; then
+    [ -z "$dirs_failed" ] || fleet_die "the plugin step failed in:$dirs_failed (the reason is above). NOT synced: fix it, then re-run: fleet sync --session $only_session"
     # it started while this ran: its dir was left alone, like any running session's (and stays recorded for its restart)
     [ -z "$deferred" ] || fleet_die "session $only_session started while its dir was being synced: left behind the pins until it restarts (fleet restart $only_session)"
     say "session $only_session: its config dir is at the pins"
@@ -435,6 +433,11 @@ main() {
   fi
 
   mkdir -p "$FLEET_STATE"
+  if [ -n "$dirs_failed" ]; then
+    # what did sync is still stamped, so fleet restart --stale sees it (the failed dirs stay behind until a re-run)
+    [ "$changed" != 1 ] || date +%s >"$FLEET_STATE/last-change"
+    fleet_die "the plugin step failed in:$dirs_failed (each one's reason is above). Every other config dir was synced, and the launchd jobs were brought up to date. NOT synced: fix those, then re-run: fleet sync"
+  fi
   if [ "$changed" = 1 ]; then
     date +%s >"$FLEET_STATE/last-change"
     printf '%s engsys=%s %s=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$want_engsys" "${INSTANCE_MARKETPLACE:-instance}" "${want_instance:-none}" >>"$FLEET_STATE/sync.log"
@@ -631,13 +634,9 @@ recut_done() { # recut_done <marketplace> <dir | harness:<h>>: the re-cut reinst
 SYNC_TMP=""
 sync_tmp() { # call in the main shell (not in $(…)) so later calls share it; removed on exit
   [ -n "$SYNC_TMP" ] && return
-  SYNC_TMP="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/fleet-sync.XXXXXX")" && pwd -P)"
   # engsys#235: never a cwd under $HOME (a TMPDIR there): claude would find ~/.claude/settings.json on the way up and
-  # treat $HOME as the project, so a mutation could write project-scope installs for it. /tmp is outside any home.
-  case "$SYNC_TMP/" in
-    "$(cd "$HOME" 2>/dev/null && pwd -P || printf '%s' "$HOME")"/*)
-      rm -rf "$SYNC_TMP"; SYNC_TMP="$(cd "$(mktemp -d /tmp/fleet-sync.XXXXXX)" && pwd -P)" ;;
-  esac
+  # treat $HOME as the project, so a mutation could write project-scope installs for it
+  SYNC_TMP="$(cd "$(mktemp -d "$(fleet_outside_home_dir)/fleet-sync.XXXXXX")" && pwd -P)"
   mkdir -p "$SYNC_TMP/cwd" "$SYNC_TMP/snap"
   trap 'settings_guard_restore >/dev/null || true; sync_cleanup' EXIT
 }
@@ -748,7 +747,7 @@ claude_config_report() {
   elif [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ]; then what=" (interactive roles)"
   else what=""; fi
   if [ -n "$SYNC_CFG" ] && [ ! -d "$SYNC_CFG" ]; then
-    [ "$1" = 1 ] || fleet_die "FLEET_CLAUDE_CONFIG_DIR $SYNC_CFG does not exist. One-time setup: fleet config-dir init, log in with CLAUDE_CONFIG_DIR=$SYNC_CFG claude, then fleet sync (fleet guide § 6.1)"
+    [ "$1" = 1 ] || fleet_die "FLEET_CLAUDE_CONFIG_DIR $SYNC_CFG does not exist. One-time setup: fleet config-dir init, log in with $(fleet_login_cmd "$SYNC_CFG"), then fleet sync (fleet guide § 6.1)"
     say "claude config dir: $dir$what does not exist"; return 1
   fi
   if [ "$SYNC_LIVE" = 1 ]; then   # engsys#253: no claude on a live login; the supervisor's pane watch sees an expired one
@@ -765,10 +764,10 @@ claude_config_report() {
   say "claude config dir: $dir$what, ${li:-login unknown}"
   if [ "$li" = "NOT logged in" ]; then
     if [ -n "$SYNC_CFG" ]; then
-      warn "the fleet's Claude config dir is not logged in: CLAUDE_CONFIG_DIR=$dir claude, then /login. Until then fleet verify holds merge and maintain launches (and alerts)."
+      warn "the fleet's Claude config dir is not logged in: $(fleet_login_cmd "$dir"), then /login. Until then fleet verify holds merge and maintain launches (and alerts)."
       return 1
     fi
-    warn "$dir is not logged in: claude, then /login"
+    warn "$dir is not logged in: $(fleet_login_cmd), then /login"
   fi
   return 0
 }

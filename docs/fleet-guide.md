@@ -229,7 +229,7 @@ When Claude Code's login on the host stops working, every session the supervisor
 its first prompt with `Login expired · Please run /login` and waits. The supervisor reads that line in
 the panes and holds every relaunch until the login works again; it kills nothing in the meantime. You
 get one `fleet notify --level action --incident claude-auth-expired` asking you to run `/login` in any
-session (or `claude /login` in a terminal), the status issue's heartbeat and `fleet status` show
+session (or `cd "$(mktemp -d)" && claude /login` in a terminal), the status issue's heartbeat and `fleet status` show
 `auth: expired since <time>`, and the first tick after the login works resolves the alert and
 relaunches each held session once. Details: the agent-sessions skill and the header of
 `fleet-supervisor.sh` (engsys#103).
@@ -450,7 +450,8 @@ reports them as a mismatch until the fleet has its own directory (or you allow t
    `/exit`. Check it with `CLAUDE_CONFIG_DIR=~/.config/acme/claude claude auth status --text`. Run these from an
    empty directory (`cd "$(mktemp -d)"`), **not from `~`**: there `claude` reads `~/.claude/settings.json` as the
    project settings of `$HOME` and installs the plugins they declare into the fleet dir at project scope for
-   `$HOME` (engsys#235). The same goes for every `CLAUDE_CONFIG_DIR=<dir> claude` login below.
+   `$HOME` (engsys#235). The same goes for every `CLAUDE_CONFIG_DIR=<dir> claude` login below; every login command
+   the kit prints starts with `cd "$(mktemp -d)" && ` for that reason (engsys#304).
 3. Accept workspace trust for the pin checkout once, with the monsters' flags:
    `cd <PIN_DIR> && CLAUDE_CONFIG_DIR=~/.config/acme/claude claude --dangerously-skip-permissions`, accept,
    `/exit`.
@@ -637,7 +638,7 @@ So no two long-lived sessions may share a login:
   leave the base.
 - **One-time setup:** `fleet config-dir init` creates and seeds every session's dir (the same seed as the shared dir,
   `syncClaudeAiSkills` / `syncClaudeAiPlugins` false included; re-running it is safe) and prints, for each dir that
-  is not logged in, the commands to run: `CLAUDE_CONFIG_DIR=<its dir> claude`, `/login` with the fleet's seat, `/exit`,
+  is not logged in, the commands to run: `cd "$(mktemp -d)" && CLAUDE_CONFIG_DIR=<its dir> claude`, `/login` with the fleet's seat, `/exit`,
   and the workspace-trust step from section 6.1 step 3 for that dir. Then `fleet sync` (installs the pinned plugins
   into every session dir), `fleet verify`, `fleet restart --all`. `fleet config-dir init --session <name>` does one.
 - **Adopting it on a running fleet (engsys#212): the flag goes in last.** The order matters, because with the flag on
@@ -645,7 +646,7 @@ So no two long-lived sessions may share a login:
   1. `fleet config-dir init --per-session` (add `--session <name>` for one) creates every session's dir while the flag is
      still off. (Without `--per-session` and without the flag, `init` seeds the one shared dir instead.)
   2. Log each session in once and accept workspace trust once, **from a terminal in the Mac's own GUI session, not
-     over SSH**: `CLAUDE_CONFIG_DIR=<its dir> claude`, `/login`, `/exit`, then
+     over SSH**: `cd "$(mktemp -d)" && CLAUDE_CONFIG_DIR=<its dir> claude`, `/login`, `/exit`, then
      `cd <PIN_DIR> && CLAUDE_CONFIG_DIR=<its dir> claude --dangerously-skip-permissions`, trust, `/exit`. Over SSH the
      login Keychain can't be read (engsys#210), so `claude auth status` reports "not logged in" for a login that
      works, and `/login` there would replace it; `fleet config-dir init` over SSH says "login state unknown" and
@@ -656,7 +657,7 @@ So no two long-lived sessions may share a login:
   config dir or no login yet" and the steps above; `fleet verify` warns up front about sessions with no dir and
   reports a logged-out dir in that session's block. The integrity alert for a missing dir names
   `fleet config-dir init --session <name>` instead of waiting for it to clear: a missing dir never does.
-- **Re-login after a wipe is one session, not all:** `CLAUDE_CONFIG_DIR=<that dir> claude`, `/login`, `/exit`. The
+- **Re-login after a wipe is one session, not all:** `cd "$(mktemp -d)" && CLAUDE_CONFIG_DIR=<that dir> claude`, `/login`, `/exit`. The
   supervisor holds only that session and the alert (`claude-auth-expired-<session>`) names the dir and the command.
 - **Add a session:** add it to the roster, then `fleet config-dir init --session <name>`, log it in, `fleet sync`.
   Until it has a logged-in dir, `fleet launch` holds that session with the command to run; it never starts into a
@@ -1263,7 +1264,9 @@ The pins are in the pin repo's `.claude/settings.json` (section 3). `fleet sync`
 either checkout (it names the checkout). It never restarts anything.
 
 Every `claude plugin …` and `claude auth status` call sync makes runs from its own empty temp dir (never from a
-project, and never under `$HOME`, even with a `TMPDIR` there), at user scope (engsys#112, engsys#235).
+project, and never under `$HOME`, even with a `TMPDIR` there), at user scope (engsys#112, engsys#235). The same goes
+for the read-only `claude auth status` calls of `fleet config-dir init`, `fleet verify` and `fleet launch`, and for the
+supervisor's test request: they run from `TMPDIR`, or from `/tmp` when `TMPDIR` is under `$HOME` (engsys#305).
 
 **Project-scope installs for `$HOME` (engsys#235).** A `claude` run from `~` on a fleet dir records project-scope
 installs whose `projectPath` is `$HOME` (it reads `~/.claude/settings.json` as that "project's" settings). When a
@@ -1278,7 +1281,8 @@ strays that sync removes once the rest is gone, so never run `claude` from `~` t
 **One failing dir does not stop the others (engsys#235).** With several config dirs (per-session mode, or scope
 `supervised`), a dir whose plugin step fails (a refused marketplace move, a failed install, a settings rewrite) is
 reported as `NOT synced` with its reason, and sync goes on with the next dir. The run then fails at the end, naming
-every dir that failed (`the plugin step failed in: …`); what did sync is stamped in `.fleet/last-change`.
+every dir that failed (`the plugin step failed in: …`); what did sync is stamped in `.fleet/last-change`. Step 5
+still runs first (engsys#305): one bad dir does not hold back a launchd job reinstall or the supervisor-job cleanup.
 
 **Running sessions' own dirs (per-session mode, engsys#253).** Step 4 skips the own dir of a session that is running
 (a claude process in its tmux window). Any `claude` call there, even `auth status` or `plugin list`, is a second
@@ -1320,8 +1324,16 @@ anyway, the way sync did before. Use it only when a restart is not an option: it
 no job reloads. A shared dir (`FLEET_CLAUDE_CONFIG_DIR` without per-session mode, or `~/.claude`) is synced and
 checked as before: its sessions share one login and race each other anyway. One exception: `~/.claude` under scope
 `supervised` while an interactive role runs on it. `fleet status` reads its files then, and an unattended sync
-(`--no-jobs`, what the supervisor's `fleet verify --auto-sync` runs) leaves it alone, says so, and the integrity alert
-then tells you to run `fleet sync` yourself.
+(`--no-jobs`, what the supervisor's `fleet verify --auto-sync` runs) leaves it alone, says so, and records it in
+`.fleet/sync-deferred.user-claude`. No restart syncs it, so the supervisor's next tick posts one
+`fleet notify --level action` (incident `sync-deferred-user-claude`, linked like the session ones) asking you to run
+`fleet sync`, resolved once `~/.claude` is synced. Meanwhile `fleet verify` does not hold the monsters for it
+(engsys#302), in a launch's check as in the periodic one, when every problem it finds in `~/.claude` is an install at
+another version than the pin and each of those installs matches its own release, file by file, the same test as for a
+running session's deferred dir. A changed file of the old version, an old release that can't be checked (its tag gone
+included) or any other problem stays a mismatch and holds, as before. The trade-off (as in engsys#253): until that
+`fleet sync`, the interactive roles, and the security reviews they dispatch, run on an older release, one that still
+matches its own tag.
 
 **A re-cut pinned tag** (engsys#214, #216). A pinned release tag can be moved on origin (a re-cut). Sync asks
 origin (`git ls-remote`, the peeled tag) whether the checkout's local copy of the pinned tag is still origin's
@@ -1928,8 +1940,8 @@ major Claude Code upgrade.
 | `still at … after switching` | a checkout did not land on the pinned ref. Check the tag exists on the remote (`git ls-remote --tags origin`) |
 | `engsys … has no fleet kit` | the pinned engsys release predates the kit; pin one that includes `core/fleet/` |
 | Supervisor log: `RELAUNCH FAILED` with `claude not found on PATH` | the supervisor's launchd PATH can't see `claude`. The default job PATH covers `~/.local/bin` (native installer) and Homebrew; for anywhere else, override the PATH in `<instance>/jobs/launchd/fleet-supervisor.plist.tmpl`. Then `fleet install-jobs` (it warns until every tool resolves) and `fleet launch` for anything missing. The supervisor escalates a failed relaunch once on the ledger and comments again when it recovers |
-| Alert `claude-auth-expired-<session>`, or `fleet status` shows `auth (<session>): expired since …` (one login per session) | that one session's own login was lost; the others keep running. `CLAUDE_CONFIG_DIR=<its dir> claude`, `/login`, `/exit`. The next supervisor tick tests that dir, resolves the alert and relaunches the session once |
-| Alert `claude-auth-expired`, or `fleet status` shows `auth: expired since …` | Claude Code's login on the host no longer works, and the supervisor holds every relaunch so it doesn't relaunch sessions that can't answer. Run `/login` in any session's window (or `claude /login` in a terminal). The next supervisor tick sees a working login (a short test request; with `AUTH_PROBE=off`, a held pane answering normally), resolves the alert and relaunches each held session once. Nothing was killed while it waited |
+| Alert `claude-auth-expired-<session>`, or `fleet status` shows `auth (<session>): expired since …` (one login per session) | that one session's own login was lost; the others keep running. `cd "$(mktemp -d)" && CLAUDE_CONFIG_DIR=<its dir> claude`, `/login`, `/exit`. The next supervisor tick tests that dir, resolves the alert and relaunches the session once |
+| Alert `claude-auth-expired`, or `fleet status` shows `auth: expired since …` | Claude Code's login on the host no longer works, and the supervisor holds every relaunch so it doesn't relaunch sessions that can't answer. Run `/login` in any session's window (or `cd "$(mktemp -d)" && claude /login` in a terminal). The next supervisor tick sees a working login (a short test request; with `AUTH_PROBE=off`, a held pane answering normally), resolves the alert and relaunches each held session once. Nothing was killed while it waited |
 | Launchd job runs but `node: command not found` | node is not in `/opt/homebrew/bin` (nvm/fnm install). Install Homebrew node; launchd does not read your shell profile |
 | The fleet stopped after a reboot | the fleet user is not logged in (FileVault disables auto-login). Log in over Screen Sharing (section 6.2) |
 | `not launching acme-mm: its engsys plugin does not match vX.Y.Z` | `fleet verify` found protected plugin files, or an install, that don't match the pinned release. See "Plugin integrity" in section 7 |

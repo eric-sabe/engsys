@@ -439,6 +439,21 @@ auth_add_lines() { # auth_add_lines <file> <lines> → appended, each line once
   done <<<"$2"
 }
 
+# claude run from a dir under $HOME treats $HOME as the project (it finds ~/.claude/settings.json on the way up,
+# engsys#235), so the test request runs outside it, and the login hints start from an empty dir (engsys#304, #305).
+# The same as the fleet kit's fleet_outside_home_dir / fleet_login_cmd (lib/fleet-env.sh), which this script does not source.
+outside_home_dir() { # ${TMPDIR:-/tmp}, resolved, or /tmp when that is under $HOME
+  local t h
+  t="$(cd "${TMPDIR:-/tmp}" 2>/dev/null && pwd -P)" || t=/tmp
+  h="$(cd "$HOME" 2>/dev/null && pwd -P || printf '%s' "$HOME")"
+  case "$t/" in "$h"/*) t="$(cd /tmp && pwd -P)" ;; esac
+  printf '%s' "$t"
+}
+login_cmd() { # login_cmd [<config dir>]
+  # shellcheck disable=SC2016 # the $(mktemp -d) is for the operator's shell
+  printf 'cd "$(mktemp -d)" && %sclaude' "${1:+CLAUDE_CONFIG_DIR=$1 }"
+}
+
 # The test request: does a login/seat work right now? Accepts optional target harness $1. Sets AUTH_PROBE_WHY.
 auth_probe() {
   AUTH_PROBE_WHY=""
@@ -455,7 +470,7 @@ auth_probe() {
     (umask 077; printf '%s %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${AUTH_PROBE_CFG:-${CLAUDE_CONFIG_DIR:-default}}" "claude -p (auth probe)" >>"$STATE_DIR/claude-invocations.log"
       if [ "$(wc -c <"$STATE_DIR/claude-invocations.log")" -gt 204800 ] && [ ! -L "$STATE_DIR/claude-invocations.log.tmp" ]; then tail -n 500 "$STATE_DIR/claude-invocations.log" >"$STATE_DIR/claude-invocations.log.tmp" && mv "$STATE_DIR/claude-invocations.log.tmp" "$STATE_DIR/claude-invocations.log"; fi) 2>/dev/null || true
   fi
-  dir="$(mktemp -d "${TMPDIR:-/tmp}/fleet-supervisor-auth.XXXXXX")"
+  dir="$(mktemp -d "$(outside_home_dir)/fleet-supervisor-auth.XXXXXX")"
   if [ "$h" = "copilot" ]; then
     (cd "$dir" && exec copilot -p 'Reply with the single word OK' -s --no-custom-instructions --disable-builtin-mcps --model claude-haiku-5.5) </dev/null >"$dir/probe.out" 2>&1 &
   elif [ "$h" = "antigravity" ]; then
@@ -639,9 +654,9 @@ auth_alert() { # the incident's one alert; retried each tick while held until it
     [ -z "$r" ] || [ -z "$l" ] || re="https://github.com/$r/issues/$l"
   fi
   if [ -n "$AUTH_SCOPE" ]; then
-    text="The Claude Code login of session \`$AUTH_SCOPE\` expired on $HOST_NAME (its own config dir ${SESSION_CONFIG_DIR_BASE%/}/$AUTH_SCOPE). Log it in: \`CLAUDE_CONFIG_DIR=${SESSION_CONFIG_DIR_BASE%/}/$AUTH_SCOPE claude\`, then \`/login\` and \`/exit\` (or \`/login\` in its own window); the session resumes on the next supervisor tick. Only \`$AUTH_SCOPE\` is held: the other sessions keep running, and nothing is killed. First seen $(head -n 1 "$AUTH_EXPIRED") in $(sed -n 2p "$AUTH_EXPIRED")."
+    text="The Claude Code login of session \`$AUTH_SCOPE\` expired on $HOST_NAME (its own config dir ${SESSION_CONFIG_DIR_BASE%/}/$AUTH_SCOPE). Log it in: \`$(login_cmd "${SESSION_CONFIG_DIR_BASE%/}/$AUTH_SCOPE")\`, then \`/login\` and \`/exit\` (or \`/login\` in its own window); the session resumes on the next supervisor tick. Only \`$AUTH_SCOPE\` is held: the other sessions keep running, and nothing is killed. First seen $(head -n 1 "$AUTH_EXPIRED") in $(sed -n 2p "$AUTH_EXPIRED")."
   else
-    text="Claude Code login expired on $HOST_NAME. Run \`/login\` in any session (or \`claude /login\`); the fleet resumes on the next supervisor tick. Until then the supervisor relaunches and kills nothing. First seen $(head -n 1 "$AUTH_EXPIRED") in $(sed -n 2p "$AUTH_EXPIRED")."
+    text="Claude Code login expired on $HOST_NAME. Run \`/login\` in any session (or \`$(login_cmd) /login\`); the fleet resumes on the next supervisor tick. Until then the supervisor relaunches and kills nothing. First seen $(head -n 1 "$AUTH_EXPIRED") in $(sed -n 2p "$AUTH_EXPIRED")."
   fi
   if [ -n "$re" ]; then set -- --level action --re "$re"; else set -- --level alert; fi # action needs a link
   if notify "$@" --incident "$AUTH_INCIDENT" "$text"; then
@@ -1253,11 +1268,11 @@ if [ -n "$HEARTBEAT_CMD" ] && [ $((UP + ROTATING + DOWN)) -gt 0 ]; then
       AUTH_SINCE="$(head -n 1 "$AUTH_EXPIRED")"
       AUTH_HELD_NAMES="$(auth_held_names)"
       SUMMARY="$SUMMARY; auth: expired since $AUTH_SINCE, relaunches held"
-      set -- "$SUMMARY" "$(human_text "Claude Code login expired on $HOST_NAME since $AUTH_SINCE. Run \`/login\` in any session (or \`claude /login\`); the fleet resumes on the next supervisor tick.${AUTH_HELD_NAMES:+ Relaunches held: $AUTH_HELD_NAMES.}")"
+      set -- "$SUMMARY" "$(human_text "Claude Code login expired on $HOST_NAME since $AUTH_SINCE. Run \`/login\` in any session (or \`$(login_cmd) /login\`); the fleet resumes on the next supervisor tick.${AUTH_HELD_NAMES:+ Relaunches held: $AUTH_HELD_NAMES.}")"
     elif [ -n "$SESSION_CONFIG_DIR_BASE" ] && [ "$AUTH_HELD_SET" != " " ]; then
       AUTH_HELD_NAMES="$(printf '%s' "$AUTH_HELD_SET" | xargs | sed 's/ /, /g')"
       SUMMARY="$SUMMARY; auth: own login expired for $AUTH_HELD_NAMES (only those are held)"
-      set -- "$SUMMARY" "$(human_text "The Claude Code login of $AUTH_HELD_NAMES expired on $HOST_NAME (each session has its own login; the other sessions keep running). Log each in with CLAUDE_CONFIG_DIR=${SESSION_CONFIG_DIR_BASE%/}/<session> claude, then /login; it resumes on the next supervisor tick.")"
+      set -- "$SUMMARY" "$(human_text "The Claude Code login of $AUTH_HELD_NAMES expired on $HOST_NAME (each session has its own login; the other sessions keep running). Log each in with $(login_cmd "${SESSION_CONFIG_DIR_BASE%/}/<session>"), then /login; it resumes on the next supervisor tick.")"
     fi
     # shellcheck disable=SC2086
     if $HEARTBEAT_CMD "$@" >>"$LOG" 2>&1; then

@@ -713,6 +713,35 @@ printf '\n# tampered\n' >>"$UCACHE/skills/merge-monster/scripts/mm-act.sh"
 run fleet verify
 rc_is "a tampered engsys file in ~/.claude holds the monsters" 1
 has "…named" "$OUT" "$UCACHE/skills/merge-monster/scripts/mm-act.sh"
+cp "$E/core/skills/merge-monster/scripts/mm-act.sh" "$UCACHE/skills/merge-monster/scripts/mm-act.sh"
+echo "…engsys#302: ~/.claude left behind the pin by an unattended sync holds nothing while it matches its own release"
+UPL="$(cat "$FAKE/plugins-user.json")"
+jq 'map(if .id == "engsys@engsys" then .version = "0.9.0" else . end)' <<<"$UPL" >"$FAKE/plugins-user.json"
+run fleet verify
+rc_is "a ~/.claude behind the pin, not deferred by sync: MISMATCH, held" 1
+touch "$I/.fleet/sync-deferred.user-claude"; c0="$(comments)"
+run fleet verify --alert
+rc_is "…deferred by the supervisor's sync: the launch gate passes" 0
+has "…after checking it against its own release" "$OUT" "/.claude is behind the pin, and each install behind it matches its own release (engsys@engsys v0.9.0)"
+has "…saying what to run" "$OUT" "Not held; run fleet sync to bring it to the pin."
+eq "…not alerted by verify (the supervisor's tick asks for the sync)" "$(comments)" "$c0"
+# the periodic check reads ~/.claude's files (engsys#223)
+jq '{version: 2, plugins: (group_by(.id) | map({key: .[0].id, value: map({scope, version, installPath})}) | from_entries)}' "$FAKE/plugins-user.json" >"$HOME/.claude/plugins/installed_plugins.json"
+run fleet verify --alert --max-age 0
+rc_is "…the periodic check passes too" 0
+rm -f "$HOME/.claude/plugins/installed_plugins.json"
+printf '\n# tampered\n' >>"$UCACHE/skills/merge-monster/scripts/mm-act.sh"
+run fleet verify --alert
+rc_is "…but a tampered file of the old version it runs is a MISMATCH, deferred or not" 1
+has "…saying its installs do not match their own release" "$OUT" "/.claude is behind the pin, and its installs do NOT match their own release either"
+eq "…and alerted" "$(comments)" "$((c0 + 1))"
+cp "$E/core/skills/merge-monster/scripts/mm-act.sh" "$UCACHE/skills/merge-monster/scripts/mm-act.sh"
+touch "$FAKE/tag-gone"
+run fleet verify
+rc_is "…and an old release that can't be checked (its tag gone) holds" 1
+has "…saying so" "$OUT" "could not be checked against their own release: held as a mismatch"
+rm -f "$FAKE/tag-gone" "$I/.fleet/sync-deferred.user-claude" "$I/.fleet"/verify-wrappers*.alerted* "$I/.fleet"/verify-wrappers*.json
+printf '%s\n' "$UPL" >"$FAKE/plugins-user.json"
 printf '%s\nFLEET_CLAUDE_CONFIG_DIR=%s\n' "$CONF0" "$FCFG2" >"$I/fleet/fleet.conf"
 run fleet verify
 rc_is "scope all: ~/.claude isn't the monsters' dir and isn't checked" 0
