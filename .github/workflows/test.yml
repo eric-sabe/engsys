@@ -1,0 +1,60 @@
+# .github/workflows/test.yml
+# Runs `npm test` (scripts/run-tests.mjs: every suite, in parallel workers, each in its own TMPDIR) on
+# every pull request and on pushes to main (engsys#233).
+#
+# macOS only, on purpose: the fleet runs on macOS hosts and its launchd jobs run /bin/bash 3.2, and
+# the shell suites check under that bash (macos-latest ships it as /bin/bash). Several suites also use
+# macOS tools (plutil, launchctl stubs, BSD stat/date), so an ubuntu leg would need work before it
+# could go green.
+#
+# Node 22: the memory suites need node:sqlite (Node >= 22.5; they skip without it), which is wider
+# than package.json's engines floor of 20.11.
+
+name: Test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: npm test (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+
+      - name: Install test tools
+        # jq is on the runner image; shellcheck is not always. The suites skip their shellcheck
+        # checks without it, so install it to get them.
+        run: |
+          command -v jq
+          command -v shellcheck || brew install shellcheck
+          /bin/bash --version | head -1
+
+      - name: Git identity for test repos
+        run: |
+          git config --global user.name  "engsys-ci"
+          git config --global user.email "engsys-ci@example.invalid"
+          git config --global init.defaultBranch main
+
+      - name: Run tests
+        run: npm test
