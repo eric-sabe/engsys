@@ -56,6 +56,20 @@ never touches one whose ledger is closed. The decision table is in the
 It only manages the sessions listed in `fleet/supervisor.conf.tmpl`; that list is what the kit means
 by "monsters".
 
+**Who watches the supervisor.** It pages for everything else, so it can't report its own absence: on
+macOS an unanswered privacy prompt can stop launchd from starting any of the fleet's jobs while the
+monsters, which run in tmux, keep heartbeating (ff-engsys-fleet#48). Every `fleet supervise` run
+therefore first writes `.fleet/supervisor.tick`, and the maintenance monster checks it on every tick
+(`mnt-supervisor-watch.sh`, run by `mnt-tick.sh`). When the stamp is older than 3 x the job's
+`StartInterval` (15 minutes at the default 300 s; `supervisor_stale_intervals` or
+`supervisor_stale_minutes` in the maintenance monster's config overrides it), it sends one
+`fleet notify --level alert --incident fleet-supervisor-stalled` with the recovery steps (check
+`launchctl print gui/$UID/com.<org>.fleet.fleet-supervisor`, answer the prompts, `launchctl kickstart -k`)
+and resolves it once the supervisor ticks again. A host where the supervisor job isn't installed, or
+was booted out with `fleet install-jobs --unload`, is never alerted on. This check lives on the same host,
+so a host that is asleep or down needs a watcher from outside as well (the instance's own heartbeat watch
+on its status issue, for example).
+
 **Ledgers** are the fleet's shared memory and its control surface. Everything a monster knows, it
 reconciles from live GitHub on startup, so a session can be killed and relaunched at any time with no
 local state to migrate. That property is what makes rotation, upgrades and rollbacks cheap.

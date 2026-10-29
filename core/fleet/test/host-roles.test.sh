@@ -356,8 +356,15 @@ has "…the registry reason wins" "$OUT" "merge home for acme/app is fleet alice
 
 echo "== D. supervise: a filtered conf, and nothing to do when nothing is left"
 conf FLEET_ID=bob; registry alice alice; local_conf; reset_tmux; stale_ledgers; : >"$FAKE/gh.log"
+rm -f "$STATE/supervisor.tick"
 run fleet supervise
 rc_is "supervise exits 0" 0
+# ff-engsys-fleet#48: every run stamps its tick for the maintenance monster's watch (mnt-supervisor-watch.sh)
+TICKF="$(cat "$STATE/supervisor.tick" 2>/dev/null || true)"
+matches "the tick stamp: epoch" "$TICKF" '^epoch=[0-9]+$'
+matches "the tick stamp: ISO time" "$TICKF" '^at=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$'
+has "the tick stamp: the launchd label" "$TICKF" "label=com.acme.fleet.fleet-supervisor"
+has "the tick stamp: the job's plist" "$TICKF" "plist=$HOME/Library/LaunchAgents/com.acme.fleet.fleet-supervisor.plist"
 SUP="$(cat "$STATE/supervisor.conf")"
 has "conf: excluded sessions are dropped" "$SUP" "# not on this host: acme-mm (merge home for acme/app is fleet alice)"
 hasnt "conf: …no line for them" "$SUP" "acme-mm|11|60"

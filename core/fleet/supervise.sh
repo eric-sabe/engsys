@@ -56,12 +56,29 @@
 # SYNC_DEFER_ALERT_HOURS (fleet.conf, default 24) on a config dir fleet sync left behind the pins (engsys#253), and
 # resolves it once the session restarted.
 #
+# Every run first writes the tick stamp $FLEET_STATE/supervisor.tick (epoch=, at=, label=, plist=), before anything
+# that can stop the tick. The supervisor can't report its own absence (ff-engsys-fleet#48: launchd stalled behind
+# macOS privacy prompts for 19.5 h and 36 h), so the maintenance monster's tick reads the stamp
+# (core/skills/maintenance-monster/scripts/mnt-supervisor-watch.sh) and alerts once when it is older than
+# 3 x the job's StartInterval.
+#
 # Usage: supervise.sh [--instance <dir>]
 set -euo pipefail
 if [ "${1:-}" = --instance ]; then FLEET_INSTANCE="${2:?--instance needs a directory}"; export FLEET_INSTANCE; shift 2; fi
 case "${1:-}" in -h | --help) sed -n '2,/^set -/{/^set -/!p;}' "$0"; exit 0 ;; esac
 # shellcheck source=lib/fleet-env.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib/fleet-env.sh"
+
+# The tick stamp (ff-engsys-fleet#48): $FLEET_STATE/supervisor.tick, written first, before anything that can stop
+# the tick, so it says only "the supervisor job ran at <time>". The maintenance monster's tick reads it
+# (mnt-supervisor-watch.sh) and alerts once when it is older than 3 x the job's StartInterval. `plist` names the
+# launchd job this host would run it from: no such file (the job is not installed here) keeps the watch silent.
+supervisor_label="com.${FLEET_ORG}.fleet.fleet-supervisor"
+{ mkdir -p "$FLEET_STATE" \
+  && printf 'epoch=%s\nat=%s\nlabel=%s\nplist=%s\n' "$(date -u +%s)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$supervisor_label" \
+    "$HOME/Library/LaunchAgents/$supervisor_label.plist" >"$FLEET_STATE/supervisor.tick.$$" \
+  && mv "$FLEET_STATE/supervisor.tick.$$" "$FLEET_STATE/supervisor.tick"; } 2>/dev/null \
+  || { rm -f "$FLEET_STATE/supervisor.tick.$$" 2>/dev/null; echo "fleet supervise: WARNING could not write $FLEET_STATE/supervisor.tick" >&2; }
 
 fleet_check_engsys
 [ -f "$FLEET_REPO/fleet/supervisor.conf.tmpl" ] || fleet_die "no fleet/supervisor.conf.tmpl — the supervisor is not enabled for this instance"
