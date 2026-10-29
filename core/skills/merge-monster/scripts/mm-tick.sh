@@ -192,11 +192,13 @@ verdict_lines() {
       # engsys#244: ...but not forever. A bounce can leave only mm:blocked (which a verdict-pending PR with an operator
       # gate legitimately carries too, so the labels alone cannot tell them apart), so after VERDICT_FAIL_MAX
       # consecutive failures (not exit 3) on the same head the PR leaves the wait, and stops costing a preflight per
-      # tick. A new head, a pass, or exit 3 starts the count over; the request label alone still keeps it watched.
-      *) fails=1
-         [ "$(cut -d' ' -f1 "$W/verdict-fail.$n" 2>/dev/null || true)" != "${head:--}" ] || fails=$(( $(cut -d' ' -f2 "$W/verdict-fail.$n") + 1 ))
+      # tick. A new head, a pass, or exit 3 starts the count over; while the request label is on, the PR stays in the
+      # wait whatever the count (mm-security-stale reads the wait, and dropping it would resolve its incident).
+      *) prev=$(cat "$W/verdict-fail.$n" 2>/dev/null || true); pc=${prev#* }
+         [[ $pc =~ ^[0-9]+$ ]] || pc=0
+         fails=1; [ "${prev%% *}" != "${head:--}" ] || fails=$(( pc + 1 ))
          printf '%s %s\n' "${head:--}" "$fails" >"$W/verdict-fail.$n"
-         [ "$fails" -ge "$VERDICT_FAIL_MAX" ] || printf '%s\n' "$n" >>"$wait_new"
+         { [ "$labeled" = 0 ] && [ "$fails" -ge "$VERDICT_FAIL_MAX" ]; } || printf '%s\n' "$n" >>"$wait_new"
          why=$(printf '%s' "$err" | jq -r '.reason // empty' 2>/dev/null | cut -d: -f1 | tr -c 'A-Za-z0-9_\n-' '_' | head -c 60)
          key="preflight_fail:${why:-exit_$rc}" ;;
     esac
