@@ -458,6 +458,11 @@ reports a `VERDICT_WAKE` line only when the outcome moved (latched per PR,
 outcome and head), so an unchanged wait stays `NOOP`. A failed run
 (`preflight_fail:<reason>`, possibly a transient `gh` error) keeps the PR
 watched: re-run preflight yourself and bounce only if your run fails too.
+Not forever (engsys#244): after 3 consecutive failures (not exit 3) on the
+same head, a PR with no request label leaves the wait, so a bounce that
+leaves only `mm:blocked` stops costing a preflight per tick. Labels alone
+cannot decide this, because a verdict-pending PR with an operator gate
+carries `mm:blocked` too.
 The tick and the bus resolve the label with preflight's own discovery
 (`core/lib/security-sensitive.mjs review-label`); if it cannot be resolved
 (two configs disagree), they say so in a `CONFIG_WARNING` line (escalate

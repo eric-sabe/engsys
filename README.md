@@ -299,8 +299,12 @@ A self-hosted, privacy-preserving GitHub activity dashboard ships in [`dashboard
 
 ```bash
 npm test                     # runs installer selftests + all Node & shell test suites
+ENGSYS_TEST_JOBS=1 npm test  # one suite at a time, output streamed live
+npm test -- fleet            # only the suites whose command contains "fleet"
 npm run build:plugins        # regenerates .claude-plugin manifests & hooks (--check to verify)
 ```
+
+`npm test` runs the suites in parallel (`min(cores - 1, 6)` workers by default; set `ENGSYS_TEST_JOBS` to change it), each in its own `TMPDIR`; a failing suite's `TMPDIR` is kept and its path printed. The [Test workflow](.github/workflows/test.yml) runs it on every pull request and on pushes to `main`, on macOS so the shell suites also check under `/bin/bash` 3.2.
 
 ## License
 

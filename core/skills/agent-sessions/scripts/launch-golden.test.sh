@@ -59,7 +59,11 @@ cat >"$T/bin/fake-harness" <<'SH'
 me="$(basename "$0")"
 if [ "$me" = agy ] && [ "${1:-}" = remote-control ]; then echo "agy $*" >>"$FAKE/agy-rc"; exit 0; fi
 {
-  printf 'argv: %s' "$me"; [ "$#" = 0 ] || printf ' %q' "$@"; printf '\n'
+  # %q of a `~` at the start of a word or after `=`/`:` is `\~` on bash 5.2+ and a bare `~` on bash 3.2: render it the
+  # 5.2+ way on every bash (idempotent there), so the snapshot names what was received, not the bash that printed it
+  printf 'argv: %s' "$me"
+  for a in "$@"; do q="$(printf '%q' "$a")"; q="$(printf '%s' "$q" | sed -E 's/(^|[=:])~/\1\\~/g')"; printf ' %s' "$q"; done
+  printf '\n'
   for v in ENGSYS_SESSION ENGSYS_SESSION_RUN ENGSYS_SESSION_ROOT ENGSYS_SINGLETON_ROLE ENGSYS_SECURITY_VERDICT_KEY_FILE ENGSYS_MEMORY_SIGNING_KEY_FILE \
     ENGSYS_MEMORY_CONFIG ENGSYS_MM_CONFIG CLAUDE_CONFIG_DIR FLEET_CLAUDE_CONFIG_DIR FLEET_CLAUDE_CONFIG_DIR_SCOPE ENGSYS_CONFIG_DIR_SESSIONS ENV_FILE_SOURCED; do
     if [ -n "${!v+x}" ]; then printf 'env: %s=%s\n' "$v" "${!v}"; else printf 'env: %s <unset>\n' "$v"; fi
@@ -68,6 +72,8 @@ if [ "$me" = agy ] && [ "${1:-}" = remote-control ]; then echo "agy $*" >>"$FAKE
 exit 0
 SH
 chmod +x "$T/bin/tmux" "$T/bin/fake-harness"
+# the fakes' `#!/usr/bin/env bash` is the bash running this test, not whichever bash sits beside node or jq on PATH
+ln -s "$BASH" "$T/bin/bash"
 for h in claude copilot agy fake; do ln -s fake-harness "$T/bin/$h"; done   # fake: the test-only adapter's binary
 printf '#!/bin/sh\necho testhost\n' >"$T/bin/hostname"; chmod +x "$T/bin/hostname"
 

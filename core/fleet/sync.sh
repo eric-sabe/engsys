@@ -12,8 +12,12 @@
 #      compared with origin's, and the checkout, or the isolated worktree, follows origin's commit)
 #   4. reinstalls the user-level plugins when a marketplace ref moved (remove -> add #ref -> install
 #      each enabled plugin), installs any enabled plugin that's missing, and checks each one is at the
-#      pinned version. Every `claude plugin` call is user-scope and runs outside any project; if the
-#      pin repo's settings change anyway, sync restores them and fails (engsys#112)
+#      pinned version. Every `claude plugin` call is user-scope and runs outside any project (and outside
+#      $HOME); if the pin repo's settings change anyway, sync restores them and fails (engsys#112, engsys#235).
+#      Project-scope installs for $HOME (strays of a claude run from ~) don't block a marketplace move: in a
+#      fleet dir they are dropped from its installed_plugins.json, backed up, with a warning (engsys#235).
+#      A dir whose plugin step fails is reported and the other dirs are synced; the run fails at the end
+#      (engsys#235)
 #   5. re-installs the launchd jobs if their templates changed, or the files that decide which sessions
 #      run on this host (roster, supervisor conf, registry); and, whatever changed, unloads a supervisor
 #      job left installed on a host where no supervised session runs (lib/host-roles.sh)
@@ -281,7 +285,7 @@ main() {
       [ "${#cfg_dirs[@]}" -gt 0 ] || fleet_die "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on, but no session on this host uses the fleet's config dir"
     fi
     if [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] && [ "${FLEET_CLAUDE_CONFIG_DIR_SCOPE:-all}" = supervised ] && [ -z "$only_session" ]; then cfg_dirs+=(""); fi
-    local cfg_dir ps_bad="" own_sess drift_before
+    local cfg_dir ps_bad="" own_sess drift_before dir_rep dir_rc dir_state dir_failed=""
     for cfg_dir in "${cfg_dirs[@]}"; do
       SYNC_CFG="$cfg_dir" SYNC_LIVE=0 own_sess=""
       [ -z "$cfg_dir" ] || [ "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:-off}" != on ] || own_sess="${cfg_dir##*/}"
@@ -328,11 +332,37 @@ main() {
         drift=1; ps_bad="$ps_bad ${cfg_dir##*/}"; recut_keep=" * "; continue
       fi
       drift_before="$drift"
-      if ! claude_config_report "$check"; then
+      if [ "$check" = 1 ]; then
+        dir_rep=0; claude_config_report "$check" || dir_rep=1
+        sync_claude_plugins
+      else
+        # engsys#235: one dir that fails (a fleet_die in the plugin step) must not leave every dir after it behind the
+        # pins. Each dir runs in a subshell under its own errexit (`set +e` around it: a `( … ) ||` would switch errexit
+        # off inside), and hands main's state back through a file; a failed one is reported, the rest go on, and the
+        # run fails at the end. The subshell restores the guarded settings on any exit (main's EXIT trap is not run
+        # in it, so it never removes SYNC_TMP either).
+        dir_state="$SYNC_TMP/dir.state"; rm -f "$dir_state"
+        set +e
+        (
+          set -e
+          trap 'settings_guard_restore >/dev/null || true' EXIT
+          dir_rep=0; claude_config_report "$check" || dir_rep=1
+          sync_claude_plugins
+          printf '%s\n%s\n%s\n%s\n' "$dir_rep" "$changed" "$drift" "$recut_keep" >"$dir_state"
+        )
+        dir_rc=$?
+        set -e
+        if [ "$dir_rc" != 0 ] || [ ! -s "$dir_state" ]; then
+          warn "claude config dir ${cfg_dir:-$HOME/.claude}: NOT synced (the reason is above); going on with the other dirs"
+          dir_failed+=" ${cfg_dir:-$HOME/.claude}"; drift=1; recut_keep=" * "
+          continue
+        fi
+        { IFS= read -r dir_rep; IFS= read -r changed; IFS= read -r drift; IFS= read -r recut_keep; } <"$dir_state"
+      fi
+      if [ "$dir_rep" != 0 ]; then
         drift=1
         [ "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:-off}" != on ] || ps_bad="$ps_bad ${cfg_dir##*/}"
       fi
-      sync_claude_plugins
       # --check: a running session's own dir that is behind waits for its restart (sync leaves it alone), not for a sync
       if [ "$check" = 1 ] && [ "$SYNC_LIVE" = 1 ] && [ -n "$own_sess" ] && [ "$drift" = 1 ] && [ "$drift_before" = 0 ]; then
         drift=0; deferred+=" $own_sess"
@@ -343,6 +373,11 @@ main() {
     # engsys#212: turning the flag on before the dirs exist and are logged in is the common adoption slip; say so once
     if [ -n "$ps_bad" ]; then
       warn "FLEET_CLAUDE_CONFIG_DIR_PER_SESSION=on, but these sessions have no config dir or no login yet:$ps_bad. $(fleet_config_dir_fix)"
+    fi
+    if [ -n "$dir_failed" ]; then
+      # what did sync is still stamped, so fleet restart --stale sees it (the failed dirs stay behind until a re-run)
+      if [ "$changed" = 1 ]; then mkdir -p "$FLEET_STATE"; date +%s >"$FLEET_STATE/last-change"; fi
+      fleet_die "the plugin step failed in:$dir_failed (each one's reason is above). Every other config dir was synced. NOT synced: fix those, then re-run: fleet sync"
     fi
     SYNC_CFG="${FLEET_CLAUDE_CONFIG_DIR:-}"
     GUARDED=(); sync_cleanup; trap - EXIT
@@ -597,6 +632,12 @@ SYNC_TMP=""
 sync_tmp() { # call in the main shell (not in $(…)) so later calls share it; removed on exit
   [ -n "$SYNC_TMP" ] && return
   SYNC_TMP="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/fleet-sync.XXXXXX")" && pwd -P)"
+  # engsys#235: never a cwd under $HOME (a TMPDIR there): claude would find ~/.claude/settings.json on the way up and
+  # treat $HOME as the project, so a mutation could write project-scope installs for it. /tmp is outside any home.
+  case "$SYNC_TMP/" in
+    "$(cd "$HOME" 2>/dev/null && pwd -P || printf '%s' "$HOME")"/*)
+      rm -rf "$SYNC_TMP"; SYNC_TMP="$(cd "$(mktemp -d /tmp/fleet-sync.XXXXXX)" && pwd -P)" ;;
+  esac
   mkdir -p "$SYNC_TMP/cwd" "$SYNC_TMP/snap"
   trap 'settings_guard_restore >/dev/null || true; sync_cleanup' EXIT
 }
@@ -622,17 +663,81 @@ marketplace_remove() {
       printf '%s\n' "$err" >&2   # the refusal itself, then the retry below
       # Unscoped remove also uninstalls the marketplace's plugins at project scope. Refuse when another project
       # (anything but PIN_DIR itself, whose installs sync reinstalls) has one, as seen by the config dir being synced.
-      local others pin_real
-      pin_real="$(cd "$PIN_DIR" 2>/dev/null && pwd -P || printf '%s' "$PIN_DIR")"
-      others="$(plugin_cli list --json | jq -r --arg m "$m" --arg pin "$PIN_DIR" --arg pinr "$pin_real" '
-        .[] | select((.id // "") | endswith("@" + $m)) | select((.scope // "") == "project" and (.projectPath // "") != $pin and (.projectPath // "") != $pinr)
-        | "\(.id) (\(.projectPath // "?"))"' | paste -sd, - | sed 's/,/, /g')"
+      local others
+      # engsys#235: $HOME is not a project. A `claude` run from ~ on a fleet dir reads ~/.claude/settings.json as
+      # project settings for $HOME and installs what it declares at project scope there; such strays are dropped from
+      # the dir's file (backed up) instead of blocking the pin. Real other projects are still refused, below.
+      others="$(project_installs "$m")"
+      if [ -n "$others" ] && home_strays_drop "$m" "$others"; then others="$(project_installs "$m")"; fi
+      local hnote="" op
+      while IFS=$'\t' read -r _ op; do
+        if [ -n "$op" ] && is_home_path "$op"; then
+          hnote=" The installs for \$HOME are strays from a claude run from ~ (engsys#235): in a fleet config dir sync drops them itself once nothing else blocks; never run claude from ~ to remove them."
+          break
+        fi
+      done <<<"$others"
+      others="$(printf '%s\n' "$others" | awk -F'\t' 'NF { printf "%s%s (%s)", (n++ ? ", " : ""), $1, ($2 == "" ? "?" : $2) }')"
       if [ -n "$others" ]; then
-        fleet_die "marketplace $m is declared only by project settings, and removing it from every scope would uninstall plugins of other projects: $others. Not moving it. Uninstall those (claude plugin uninstall <plugin> --scope project, from that project), then fleet sync."
+        fleet_die "marketplace $m is declared only by project settings, and removing it from every scope would uninstall plugins of other projects: $others. Not moving it. Uninstall those (claude plugin uninstall <plugin> --scope project, from that project), then fleet sync.$hnote"
       fi
       plugin_cli marketplace remove "$m" >/dev/null ;;
     *) printf '%s\n' "$err" >&2; return "$rc" ;;
   esac
+}
+# project_installs <marketplace> → "<id>\t<projectPath>" per project-scope install of it, as the config dir being synced
+# sees them, for any project but PIN_DIR itself (whose installs sync reinstalls)
+project_installs() {
+  local pin_real
+  pin_real="$(cd "$PIN_DIR" 2>/dev/null && pwd -P || printf '%s' "$PIN_DIR")"
+  plugin_cli list --json | jq -r --arg m "$1" --arg pin "$PIN_DIR" --arg pinr "$pin_real" '
+    .[] | select((.id // "") | endswith("@" + $m)) | select((.scope // "") == "project" and (.projectPath // "") != $pin and (.projectPath // "") != $pinr)
+    | [.id, (.projectPath // "")] | @tsv'
+}
+# is_home_path <path> → 0 when it names $HOME: as written, with trailing slashes, or through a symlink either side
+is_home_path() {
+  local p="$1" h="$HOME" pr hr
+  case "$p" in /*) ;; *) return 1 ;; esac
+  [ -n "$h" ] || return 1
+  while [ "${p%/}" != "$p" ] && [ "$p" != / ]; do p="${p%/}"; done
+  while [ "${h%/}" != "$h" ] && [ "$h" != / ]; do h="${h%/}"; done
+  [ "$p" != "$h" ] || return 0
+  pr="$(cd "$p" 2>/dev/null && pwd -P)" || return 1
+  hr="$(cd "$h" 2>/dev/null && pwd -P)" || return 1
+  [ "$pr" = "$hr" ]
+}
+# home_strays_drop <marketplace> <project_installs output> → 0 when it dropped them: every listed install is for $HOME
+# (engsys#235), and the dir is a fleet config dir (never ~/.claude: the operator's own, maybe live). A file-only edit of
+# <dir>/plugins/installed_plugins.json, backed up beside it first; no claude runs for it (on a session's login, engsys#223).
+# Anything else (a real project among them, an unreadable file, a symlink) → 1, untouched, and the caller refuses as before.
+home_strays_drop() {
+  local m="$1" list="$2" id p strays="[]" ids="" f bak tmp
+  [ -n "$SYNC_CFG" ] || return 1
+  [ "$(cd "$SYNC_CFG" 2>/dev/null && pwd -P || echo "$SYNC_CFG")" != "$(cd "$HOME/.claude" 2>/dev/null && pwd -P || echo "$HOME/.claude")" ] || return 1
+  while IFS=$'\t' read -r id p; do
+    [ -n "$id" ] || continue
+    is_home_path "$p" || return 1
+    strays="$(jq -cn --argjson a "$strays" --arg p "$p" '$a + [$p] | unique')"; ids+="${ids:+, }$id"
+  done <<<"$list"
+  [ -n "$ids" ] || return 1
+  f="$SYNC_CFG/plugins/installed_plugins.json"
+  [ -f "$f" ] && [ ! -L "$f" ] && jq -e 'type == "object" and (.plugins | type == "object")' "$f" >/dev/null 2>&1 || return 1
+  bak="$f.engsys235-$(date -u +%Y%m%dT%H%M%SZ).bak"
+  cp -p "$f" "$bak" || return 1
+  tmp="$(mktemp "$f.XXXXXX")" || return 1
+  cp -p "$f" "$tmp"   # the file's own mode, not mktemp's
+  # v2 keeps a list of installs per id, v1 one object: drop this marketplace's project installs for those paths only
+  if ! jq --arg m "$m" --argjson s "$strays" '
+      def stray: type == "object" and (.scope // "") == "project" and ((.projectPath // "") as $p | $s | index($p)) != null;
+      .plugins |= with_entries(
+        if (.key | endswith("@" + $m)) then
+          .value |= (if type == "array" then map(select(stray | not)) elif stray then null else . end)
+          | select(.value != null and .value != [])
+        else . end)' "$f" >"$tmp"; then
+    rm -f "$tmp"; return 1
+  fi
+  mv "$tmp" "$f"
+  warn "$SYNC_CFG: dropped project-scope installs for \$HOME ($HOME), which is not a project: $ids. A claude run from ~ with CLAUDE_CONFIG_DIR=$SYNC_CFG reads ~/.claude/settings.json as that \"project's\" settings and installs what it declares; they blocked moving marketplace $m. Backup: $bak. Run claude for a fleet dir from an empty directory, never from ~ (engsys#235)."
+  return 0
 }
 # claude_config_report <check> → which config dir the fleet uses and whether it is logged in (no account
 # details, no token). A FLEET_CLAUDE_CONFIG_DIR that doesn't exist stops a sync: create it and log in first.

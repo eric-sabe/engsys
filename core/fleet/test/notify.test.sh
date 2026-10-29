@@ -79,9 +79,18 @@ const server = http.createServer((req, res) => {
 });
 server.listen(0, '127.0.0.1', () => { process.stdout.write(`${server.address().port}\n`); });
 JS
-coproc SLACK_STUB { POSTS_FILE="$POSTS_FILE" node "$T/slack-stub.mjs"; }
-read -r -u "${SLACK_STUB[0]}" PORT
-PIDS+=("$SLACK_STUB_PID")
+# No coproc: it is bash 4+, and on bash 3.2 (stock macOS /bin/bash) this file failed to parse — and the cleanup
+# trap turned that into exit 0, so the suite passed without running a check. The stub writes its port to a file.
+PORT_FILE="$T/slack-stub.port"
+POSTS_FILE="$POSTS_FILE" node "$T/slack-stub.mjs" >"$PORT_FILE" &
+PIDS+=("$!"); disown "$!" 2>/dev/null || true   # cleanup kills it by pid; no "Terminated" job notice
+PORT=""
+for _ in $(seq 1 100); do
+  # a whole line: the port and its newline (a newline-terminated file's last byte reads back as empty)
+  if [ -s "$PORT_FILE" ] && [ -z "$(tail -c 1 "$PORT_FILE")" ]; then PORT="$(head -1 "$PORT_FILE")"; break; fi
+  sleep 0.1
+done
+[ -n "$PORT" ] || { echo "notify.test.sh: the Slack stub never reported its port" >&2; exit 1; }
 export SLACK_API_URL="http://127.0.0.1:$PORT"
 
 # --- run: info level, no incident --------------------------------------------------------------

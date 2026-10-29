@@ -499,9 +499,10 @@ function kindOf(abs) {
 /**
  * Parse one settings command strictly (section header above). → { programs: [abs system binary paths],
  * files: [abs regular files it runs or names], problems: [reasons] }. A command with any problem can't
- * be pinned.
+ * be pinned. rootBinDirs is a test seam (the tests' own wrapper fixtures, so a check of a wrapper doesn't
+ * depend on the host shipping it, e.g. /usr/bin/timeout); no caller in the kit passes it.
  */
-export function parseSettingsCommand(command, { home = os.homedir(), projectDir = '', depth = 0 } = {}) {
+export function parseSettingsCommand(command, { home = os.homedir(), projectDir = '', depth = 0, rootBinDirs = ROOT_BIN_DIRS } = {}) {
   const programs = [];
   const files = [];
   const lx = lexCommand(command, { home, projectDir });
@@ -526,7 +527,7 @@ export function parseSettingsCommand(command, { home = os.homedir(), projectDir 
       if (SHELLS.includes(name) && args[i] === '-c') {
         if (depth >= 1) { problems.push(`${name} -c nested more than once`); return; }
         if (i + 1 >= args.length) { problems.push(`${name} -c without a command`); return; }
-        const sub = parseSettingsCommand(args[i + 1], { home, projectDir, depth: depth + 1 });
+        const sub = parseSettingsCommand(args[i + 1], { home, projectDir, depth: depth + 1, rootBinDirs });
         programs.push(...sub.programs); files.push(...sub.files); problems.push(...sub.problems);
         for (const a of args.slice(i + 2)) if (a.includes('/')) fileArg(a, 'an argument');
         return;
@@ -554,7 +555,7 @@ export function parseSettingsCommand(command, { home = os.homedir(), projectDir 
       const base = path.basename(prog);
       const pathOnly = (isInterp(base) || base === 'env')
         ? underSystem(prog) && underSystem(real)
-        : ROOT_BIN_DIRS.some((d) => prog.startsWith(`${d}/`)) && ROOT_BIN_DIRS.some((d) => real.startsWith(`${d}/`));
+        : rootBinDirs.some((d) => prog.startsWith(`${d}/`)) && rootBinDirs.some((d) => real.startsWith(`${d}/`));
       if (pathOnly && (k === 'file' || k === 'symlink')) {
         programs.push(prog);
         if (base === 'env') {
@@ -1060,9 +1061,9 @@ export function hookCommands(cfg) {
  * $CLAUDE_PROJECT_DIR) to a regular file inside projectDir; system interpreters are fine. Anything
  * that can't be pinned is a problem. Not covered: what a script itself imports or sources.
  */
-export function hookTargets(command, projectDir, { home = os.homedir() } = {}) {
+export function hookTargets(command, projectDir, { home = os.homedir(), rootBinDirs } = {}) {
   const root = path.resolve(projectDir);
-  const p = parseSettingsCommand(command, { home, projectDir: root });
+  const p = parseSettingsCommand(command, { home, projectDir: root, rootBinDirs });
   const problems = p.problems.map((r) => `hook       settings.json command can't be pinned (${r}): ${command}`);
   const realRoot = (() => { try { return fs.realpathSync(root); } catch { return root; } })();
   const targets = [];

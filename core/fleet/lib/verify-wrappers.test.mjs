@@ -1144,11 +1144,18 @@ test('hookTargets: a task runner is refused however it is spelled, a direct scri
   fs.writeFileSync(path.join(dir, 'scripts', 'lint.sh'), 'echo lint\n');
   fs.writeFileSync(path.join(dir, 'package.json'), '{"scripts":{"lint":"echo hi"}}\n');
   fs.writeFileSync(path.join(dir, 'gradlew'), '#!/bin/sh\n');
+  // the test's own root-bin dir holds the timeout wrapper: macOS ships /usr/bin/timeout only from 26, and the GitHub
+  // macOS runner has none, so the wrapper checks below must not depend on the host having it (rootBinDirs seam)
+  const rootbin = path.join(fs.realpathSync(dir), 'rootbin');
+  fs.mkdirSync(rootbin);
+  const TIMEOUT = path.join(rootbin, 'timeout');
+  fs.writeFileSync(TIMEOUT, '#!/bin/sh\n', { mode: 0o755 });
+  const ROOT = { rootBinDirs: ['/bin', '/usr/bin', rootbin] };
   // positive control: the same hook as a direct script, with the runner only named in an argument of a no-op
   assert.deepEqual(hookTargets('bash "$CLAUDE_PROJECT_DIR/scripts/lint.sh"', dir), { targets: ['scripts/lint.sh'], problems: [] });
   assert.deepEqual(hookTargets('echo make; bash "$CLAUDE_PROJECT_DIR/scripts/lint.sh" npm', dir).problems, [], 'a runner name as a script argument is just data');
   const refused = (cmd, name) => {
-    const r = hookTargets(cmd, dir);
+    const r = hookTargets(cmd, dir, ROOT);
     assert.match(r.problems.join('\n'), new RegExp(`a task runner \\(${name}\\) runs manifest code that isn't pinned; use a direct committed script`), cmd);
   };
   refused('npm run lint', 'npm');
@@ -1163,11 +1170,11 @@ test('hookTargets: a task runner is refused however it is spelled, a direct scri
   refused('/usr/bin/nice npm run lint', 'npm');
   // the wrapped command hidden inside a shell string or a script argument (CodeRabbit, engsys#185 review)
   refused('/usr/bin/xargs sh -c "npm run lint"', 'npm');
-  refused('/usr/bin/timeout 5 bash -c "cd x && make lint"', 'make');
+  refused(`${TIMEOUT} 5 bash -c "cd x && make lint"`, 'make');
   refused('/usr/bin/nice node_modules/.bin/npm run lint', 'npm');
   // allowlist, not denylist (Nyx and review on the first push): a root-owned program that can run what its arguments name
   const unlisted = (cmd, re = /is not on the list of system programs|not an absolute path|found on PATH that is not an interpreter|can load code|task runner/) => {
-    const r = hookTargets(cmd, dir);
+    const r = hookTargets(cmd, dir, ROOT);
     assert.ok(r.problems.length > 0, `${cmd}: must be refused`);
     assert.match(r.problems.join('\n'), re, cmd);
   };
@@ -1193,7 +1200,7 @@ test('hookTargets: a task runner is refused however it is spelled, a direct scri
   // a wrapper whose command comes from its input, or from a file (CodeRabbit round 3)
   unlisted('/usr/bin/xargs -a /tmp/x /usr/bin/nice', /xargs with an option that reads or builds its command/);
   unlisted('/usr/bin/xargs -a/tmp/x /usr/bin/nice', /xargs with an option that reads or builds its command/);
-  unlisted('/usr/bin/xargs /usr/bin/timeout 5', /timeout without a command of its own/);
+  unlisted(`/usr/bin/xargs ${TIMEOUT} 5`, /timeout without a command of its own/);
   unlisted('/usr/bin/xargs /usr/bin/nice', /nice without a command of its own/);
   unlisted('/usr/bin/xargs -I{} {}', /xargs with an option that reads or builds its command/);
   unlisted('/usr/bin/xargs -I/usr/bin/true /usr/bin/true', /xargs with an option that reads or builds its command/);
@@ -1202,7 +1209,7 @@ test('hookTargets: a task runner is refused however it is spelled, a direct scri
   // positive controls: the allowlist and the wrappers still let the safe forms through
   assert.deepEqual(hookTargets('/usr/bin/nice true make-docs.sh cmake-build', dir).problems, [], 'true is a no-op, whatever it is given');
   assert.deepEqual(hookTargets('/bin/sleep 1', dir).problems, []);
-  assert.deepEqual(hookTargets('/usr/bin/timeout 5 bash "$CLAUDE_PROJECT_DIR/scripts/lint.sh"', dir).problems, [], 'a wrapper around an interpreter with a pinned script');
+  assert.deepEqual(hookTargets(`${TIMEOUT} 5 bash "$CLAUDE_PROJECT_DIR/scripts/lint.sh"`, dir, ROOT).problems, [], 'a wrapper around an interpreter with a pinned script');
   assert.deepEqual(hookTargets('/usr/bin/nice -n 5 bash "$CLAUDE_PROJECT_DIR/scripts/lint.sh"', dir).problems, []);
   assert.deepEqual(hookTargets('/usr/bin/xargs -n 1 bash "$CLAUDE_PROJECT_DIR/scripts/lint.sh"', dir).problems, []);
   assert.deepEqual(hookTargets('perl "$CLAUDE_PROJECT_DIR/hook.pl"', dir).problems, [], 'perl with an absolute pinned script is the interpreter form');

@@ -520,9 +520,10 @@ elif [ "$alert" = 1 ] && [ -f "$GONE_LATCH" ] && [ "$rc" != 3 ]; then
 fi
 
 if [ "$alert" = 1 ] && { [ "$deferred_pass" = 0 ] || [ "$rc" != 0 ]; }; then
-  # the info-level incident of the warn-only stage (engsys#227): closed once, whatever this run found — an
-  # off-main instance tag is now a mismatch, alerted (and held) below like any other
-  if [ -f "$OFFMAIN_LATCH" ] && [ "$rc" != 3 ]; then
+  # the info-level incident of the warn-only stage (engsys#227): closed once by a check that completed (0 or 1, engsys#248:
+  # never on a usage error or a check that couldn't run), whatever it found — an off-main instance tag is now a mismatch,
+  # alerted (and held) below like any other
+  if [ -f "$OFFMAIN_LATCH" ] && { [ "$rc" = 0 ] || [ "$rc" = 1 ]; }; then
     notify --level info --incident "instance-release-off-main$INC" --resolve "Resolved: an instance release off its default branch is now a plugin-check mismatch (alerted as one if it still is), no longer a separate warning." && rm -f "$OFFMAIN_LATCH"
   fi
   case "$rc" in
@@ -548,7 +549,13 @@ Details: fleet verify" && printf '%s\n' "$fp|$auto_sync|$sync_why" >"$LATCH"
         # engsys#253: the supervisor's auto-sync leaves ~/.claude alone while an interactive role runs on it
         unote=""; [ ! -f "$FLEET_STATE/sync-deferred.user-claude" ] || unote=" The supervisor's auto-sync did not sync ~/.claude, because interactive roles were running on it: if the mismatch is there, run fleet sync yourself."
         lines="$(sed -n 's/^  \(.*\)$/\1/p' <<<"$out" | awk 'NR <= 5')"
-        notify --level alert --incident "wrapper-integrity$INC" "Plugin check on $host${session:+ (session $session)}: ${summary:-a mismatch}. What the merge and maintain monsters load does not match $repo@$ref (the engsys plugin and host kit), $PIN_REPO's default branch on GitHub (the pin checkout), or the allowed Claude settings in $claude_cfg. Merge and maintain sessions will not be launched or relaunched here until it matches; running sessions and their batons were left as they are.$unote${hint:+ For the user-scope items: $hint.} To fix: for plugin files, reinstall (claude plugin uninstall --scope user engsys@$ENGSYS_MARKETPLACE from outside any project, delete its cache directory, fleet sync); for the pin checkout, restore it to GitHub's main and check who changed it; for a user-scope item, remove it or allowlist it (VERIFY_ALLOWED_USER_PLUGINS / _HOOKS / _FILES). First of them:
+        # engsys#248: when every mismatch is a release tag off its repo's default branch, reinstalling fixes nothing: the
+        # recovery is a release on that branch
+        fix="for plugin files, reinstall (claude plugin uninstall --scope user engsys@$ENGSYS_MARKETPLACE from outside any project, delete its cache directory, fleet sync); for the pin checkout, restore it to GitHub's main and check who changed it; for a user-scope item, remove it or allowlist it (VERIFY_ALLOWED_USER_PLUGINS / _HOOKS / _FILES)"
+        if sed -n 's/^  \(.*\)$/\1/p' <<<"$out" | grep -q . && ! sed -n 's/^  \(.*\)$/\1/p' <<<"$out" | grep -qv '^release '; then
+          fix="the release tag must be a commit on its repo's default branch, and reinstalling won't change that. For the instance plugin, cut a release on its default branch (fleet pin --release next, merge its release PR, then run it again); for engsys, pin a release tagged on main (fleet pin --engsys vX.Y.Z), or re-tag this one on main if it was cut off main by mistake, and check who tagged it"
+        fi
+        notify --level alert --incident "wrapper-integrity$INC" "Plugin check on $host${session:+ (session $session)}: ${summary:-a mismatch}. What the merge and maintain monsters load does not match $repo@$ref (the engsys plugin and host kit), $PIN_REPO's default branch on GitHub (the pin checkout), or the allowed Claude settings in $claude_cfg. Merge and maintain sessions will not be launched or relaunched here until it matches; running sessions and their batons were left as they are.$unote${hint:+ For the user-scope items: $hint.} To fix: $fix. First of them:
 $lines
 Details: fleet verify" && printf '%s\n' "$fp" >"$LATCH"
       fi ;;

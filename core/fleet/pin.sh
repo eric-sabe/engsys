@@ -251,7 +251,10 @@ release_instance() { # release_instance <vX.Y.Z|next> <owner/repo> <engsys tag> 
 
   # validate with a scratch config dir: the check reads the tree only and must not touch the host's Claude state
   cfg="$(mktemp -d "$FLEET_STATE/validate-cfg.XXXXXX")" || fleet_die "couldn't make a scratch config dir in $FLEET_STATE"
-  trap 'rm -rf "$cfg"' EXIT   # this runs in $(...): the trap covers a failed validation too
+  # this runs in $(...): the trap covers a failed validation too. The path goes into the trap now, not as "$cfg":
+  # bash 3.2 (stock macOS /bin/bash) runs an EXIT trap after `exit` has unwound the function, so a local reads unset.
+  # shellcheck disable=SC2064 # expanded now, on purpose (above)
+  trap "rm -rf -- $(printf '%q' "$cfg")" EXIT
   must env CLAUDE_CONFIG_DIR="$cfg" claude plugin validate "$wt"
   for dir in ${plugin_dirs[@]+"${plugin_dirs[@]}"}; do must env CLAUDE_CONFIG_DIR="$cfg" claude plugin validate "$dir"; done
   rm -rf "$cfg"
@@ -287,7 +290,7 @@ release_instance() { # release_instance <vX.Y.Z|next> <owner/repo> <engsys tag> 
     closed="$(gh pr list -R "$repo" --head "$branch" --state closed --json url -q '.[0].url // empty' || true)"
     [ -z "$closed" ] || say "the earlier release PR for $want ($closed) was closed without merging — re-creating it"
     must git -C "$wt" commit -q -am "release: $want"
-    say "pushing $branch…"
+    say "pushing ${branch}…"   # braces: bash 3.2 reads the bytes of … as part of the name ($branch… is unbound)
     must git -C "$wt" push -q --force origin "HEAD:refs/heads/$branch"   # our own generated branch; --force covers a re-run after a half-finished push
     must gh pr create -R "$repo" --head "$branch" --base main --title "release: $want" --body "Stamps version \`$ver\` into \`.claude-plugin/marketplace.json\` and every plugin it lists (nothing else).$ci_note
 
@@ -372,7 +375,7 @@ open_pin_pr() { # open_pin_pr <cur_engsys> <new_engsys> <cur_inst> <new_inst> �
   must git -C "$wt" commit -q -m "$title" -- .claude/settings.json   # only the settings file, whatever the setup step touched
   files="$(git -C "$wt" diff --name-only refs/remotes/origin/main HEAD)"
   [ "$files" = ".claude/settings.json" ] || fleet_die "the pin commit changed more than .claude/settings.json ($files) — inspect $wt"
-  say "pushing $branch…"
+  say "pushing ${branch}…"   # braces: bash 3.2 reads the bytes of … as part of the name ($branch… is unbound)
   must git -C "$wt" push -q -u --force origin "$branch"   # our own generated branch; --force covers a re-run after a half-finished push
   body="Moves the fleet's plugin pins in \`.claude/settings.json\` (nothing else):
 
