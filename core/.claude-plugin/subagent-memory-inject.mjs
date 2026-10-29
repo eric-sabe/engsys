@@ -349,12 +349,13 @@ export function resolveTouchedPaths(input, { cwd, exec = execFileSync } = {}) {
 /** Run memory-brief.mjs --json as a child process with a hard wall-clock budget. Returns
  * `{ text, lessonKeys, pointerKeys, bytes }`, or null on ANY failure (non-zero exit, timeout,
  * spawn error, unparseable output) — all treated identically as "no brief". Never throws. */
-export function runMemoryBrief({ agentType, prompt, touchedPaths, cwd, timeoutMs = TIMEOUT_MS, scriptPath = MEMORY_BRIEF, exec = execFileSync } = {}) {
+export function runMemoryBrief({ agentType, startAgentType, prompt, touchedPaths, cwd, timeoutMs = TIMEOUT_MS, scriptPath = MEMORY_BRIEF, exec = execFileSync } = {}) {
 	// The `=` form for every value that could itself start with `--` (a task prompt, a touched
 	// path) — memory-brief.mjs's space-separated form would read such a value as the NEXT flag and
 	// silently drop it (memory-brief.mjs's parseArgs doc comment has the full rationale).
 	const args = [scriptPath, '--json', `--repo-root=${cwd}`];
 	if (agentType) args.push(`--agent-type=${agentType}`);
+	if (startAgentType && startAgentType !== agentType) args.push(`--start-agent-type=${startAgentType}`);
 	// Truncated: one argv element over Linux's MAX_ARG_STRLEN (128 KiB) makes the spawn itself fail
 	// with E2BIG — fails open to {} either way, but silently, for exactly the long, detailed task
 	// prompts where a targeted brief would matter most. BM25 only needs a prefix of the prompt.
@@ -491,6 +492,7 @@ export async function main({ argv = process.argv.slice(2), stdin = process.stdin
 	// failure path is caught and logged there, not silently swallowed).
 	let skippedBudget = false;
 	let spawnFailed = false;
+	let startAgentType = null;
 	try {
 		// cr review (round 2): on the non-Claude pre-agent path, `consumePendingDispatch` must look
 		// up the record `recordPendingDispatch` filed under the TARGET identity (`agentType`,
@@ -502,7 +504,12 @@ export async function main({ argv = process.argv.slice(2), stdin = process.stdin
 		// engsys#262: a teammate start reports its teammate name as agent_type; the record matched BY
 		// that name carries the dispatched subagent_type, which is what lesson `roles` and the Class B
 		// exclusion set are keyed on (a `nyx-221` teammate is still Nyx).
+		// engsys#264: the start's own identity still goes to memory-brief, which excludes Class B if
+		// EITHER identity is excluded — a bare excluded type (a project `nyx`) that matched a teammate
+		// literally named `nyx` must not shed its exclusion by adopting that teammate's type.
+
 		if (!isPreAgent && pending?.matchedBy === 'name' && typeof pending.agentType === 'string' && pending.agentType) {
+			startAgentType = agentType;
 			agentType = pending.agentType;
 		}
 		const prompt = extractPrompt(input) || pending?.prompt || '';
@@ -520,7 +527,7 @@ export async function main({ argv = process.argv.slice(2), stdin = process.stdin
 		// SKIPPED outright (saves that startup cost too) rather than launched to a guaranteed timeout.
 		const remainingMs = briefBudgetMs() - (now() - budgetStart);
 		skippedBudget = remainingMs < MIN_SPAWN_MS;
-		const result = skippedBudget ? null : runMemoryBrief({ agentType, prompt, touchedPaths, cwd: diffCwd, timeoutMs: remainingMs });
+		const result = skippedBudget ? null : runMemoryBrief({ agentType, startAgentType, prompt, touchedPaths, cwd: diffCwd, timeoutMs: remainingMs });
 		spawnFailed = !skippedBudget && !result;
 		if (result) {
 			briefText = result.text ?? '';
@@ -535,7 +542,7 @@ export async function main({ argv = process.argv.slice(2), stdin = process.stdin
 	}
 
 	const elapsedMs = now() - t0;
-	logInjection(hookCacheDir(), { ts: new Date(now()).toISOString(), agent_type: agentType, ...logKeys, ms: elapsedMs, skipped_budget: skippedBudget, spawn_failed: spawnFailed });
+	logInjection(hookCacheDir(), { ts: new Date(now()).toISOString(), agent_type: agentType, ...(startAgentType ? { start_agent_type: startAgentType } : {}), ...logKeys, ms: elapsedMs, skipped_budget: skippedBudget, spawn_failed: spawnFailed });
 	recordHookTelemetry({
 		hook: 'subagent-memory-inject',
 		event: 'SubagentStart',

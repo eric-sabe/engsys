@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   apiBase, composeText, escapeSlack, hostOperator, incidentSlug, latchPr, missingSlackConfig, parseArgs, parseEnvFile,
-  planRoute, resolveFleetId, slackMention, validateArgs,
+  dropInvalidRe, planRoute, resolveFleetId, slackMention, validateArgs,
 } from './notify.mjs';
 import { parseFederation } from './lib/federation.mjs';
 
@@ -497,6 +497,16 @@ test('planRoute: alert --everyone → channel without mention + a DM per enabled
   assert.deepEqual(planRoute({ level: 'alert', everyone: true, cfg: HOST, reg: null }).dms, ['U0000000009']);
 });
 
+test('planRoute: --for a disabled fleet still DMs its operator, with a warning (engsys#255)', () => {
+  for (const who of ['retired', 'gone-op']) {
+    const r = planRoute({ level: 'action', forWho: who, cfg: HOST, reg: REG });
+    assert.deepEqual(r.dms, ['U0000000005'], who);
+    assert.match(r.warning, /fleet retired is disabled in the fleet registry; DMing its operator anyway/, who);
+  }
+  assert.equal(planRoute({ level: 'action', forWho: 'mark-fleet', cfg: HOST, reg: REG }).warning, '', 'an enabled fleet: no warning');
+  assert.deepEqual(planRoute({ level: 'action', forWho: 'feedfrwd-fleet-retired[bot]', cfg: HOST, reg: REG }).dms, [], 'a disabled fleet\'s bot is not resolved (fleetForBot skips it)');
+});
+
 test('planRoute: --for resolves a fleet id, an operator login or a fleet bot to one DM', () => {
   for (const who of ['mark-fleet', 'mdbardsley', 'MDBardsley', 'feedfrwd-fleet-mark-fleet[bot]']) {
     const r = planRoute({ level: 'action', forWho: who, cfg: HOST, reg: REG });
@@ -538,21 +548,38 @@ test('validateArgs: one routing flag; --everyone only on alert; --sweep stands a
   assert.throws(() => validateArgs({ sweep: true, repo: 'bad repo', text: '' }), /--repo must be/);
 });
 
-test('validateArgs: --re must be a plain https URL (it reaches DMs unescaped)', () => {
+test('dropInvalidRe: only a plain https URL is kept (it reaches DMs unescaped); anything else is dropped (engsys#255)', () => {
   for (const ok of ['https://github.com/acme/app/pull/9', 'https://x/3?a=1&b=2', 'https://github.com/acme/app/pull/9#issuecomment-5']) {
-    assert.doesNotThrow(() => validateArgs({ level: 'action', re: ok, text: 'x' }), ok);
+    const args = { level: 'action', re: ok, text: 'x' };
+    assert.doesNotThrow(() => validateArgs(args), ok);
+    assert.equal(dropInvalidRe(args), '', ok);
+    assert.equal(args.re, ok);
   }
-  for (const bad of ['http://github.com/x', 'javascript:alert(1)', 'https://x/1|click me', 'https://x/<!here>', 'https://x/a b', 'github.com/x']) {
-    assert.throws(() => validateArgs({ level: 'info', re: bad, text: 'x' }), /--re must be an https URL/, bad);
+  for (const bad of ['http://github.com/x', 'javascript:alert(1)', 'https://x/1|click me', 'https://x/<!here>', 'https://x/a b', 'github.com/x', '']) {
+    const args = { level: 'info', re: bad, text: 'x' };
+    assert.doesNotThrow(() => validateArgs(args), bad);
+    assert.match(dropInvalidRe(args), /--re is not an https URL/, bad);
+    assert.equal(args.re, null, bad);
   }
+  assert.equal(dropInvalidRe({ re: null }), '', 'no --re: nothing to say');
 });
 
-test('--re that is not a plain https URL is rejected before anything posts', async () => {
+test('--re that is not a plain https URL is dropped with a warning and the alert still posts, without the link (engsys#255)', async () => {
   posts = [];
   const r = await run(['--level', 'action', '--re', 'https://x/1|<!channel>', 'decide'], { env: { SLACK_ENV: slackEnv('re.env', { SLACK_OPERATOR_ID: 'U0000000001' }) } });
-  assert.equal(r.code, 2);
-  assert.match(r.stderr, /--re must be an https URL/);
-  assert.equal(posts.length, 0);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stderr, /--re is not an https URL .*posting without the link/);
+  assert.equal(posts.length, 1);
+  assert.doesNotMatch(posts[0].text, /x\/1|<!channel>|GitHub:/, 'the bad link never reaches Slack');
+  assert.match(posts[0].text, /decide/);
+});
+
+test('--re dropped from an alert-level post (the supervisor login alert) still posts too', async () => {
+  posts = [];
+  const r = await run(['--level', 'alert', '--re', 'http://github.com/acme/app/issues/1', 'login expired'], { env: { SLACK_ENV: slackEnv('re2.env', { SLACK_OPERATOR_ID: 'U0000000001' }) } });
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(posts.length >= 1, true);
+  assert.ok(posts.every((p) => !p.text.includes('http://')));
 });
 
 test('latchPr: a PR link, or mm-<N> only when the latch\'s link is in --repo', () => {

@@ -785,8 +785,9 @@ export function isReviewedOnDefaultBranch(doc, { repoRoot, sha }) {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * Build the full brief. `opts`: agentType, prompt, issue, touchedPaths (string[]), repoRoot,
- * pluginRoot, budgetBytes, now. ALWAYS resolves (never rejects/throws) — any internal failure
+ * Build the full brief. `opts`: agentType, startAgentType (the identity SubagentStart reported,
+ * when the hook adopted a different one; Class B only), prompt, issue, touchedPaths (string[]),
+ * repoRoot, pluginRoot, budgetBytes, now. ALWAYS resolves (never rejects/throws) — any internal failure
  * (no node:sqlite, no index, bad config) yields the empty brief, per the hook's fail-open contract.
  */
 export function buildBrief(opts = {}) {
@@ -801,7 +802,10 @@ function buildBriefOnce(opts) {
 		const config = loadConfig(repoRoot, { pluginRoot: opts.pluginRoot, allowedRepos: opts.allowedRepos });
 		const budgetBytes = opts.budgetBytes ?? config.brief_bytes ?? DEFAULTS.brief_bytes;
 		const excluded = resolveExcludedAgents(config, { repoRoot });
-		const classBAllowed = !isClassBExcluded(opts.agentType, excluded);
+		// engsys#264: when the hook adopted a teammate's dispatched type, the identity the start itself
+		// reported is checked too. An adopted type may add an exclusion, never remove one.
+		const startExcluded = typeof opts.startAgentType === 'string' && opts.startAgentType !== '' && isClassBExcluded(opts.startAgentType, excluded);
+		const classBAllowed = !isClassBExcluded(opts.agentType, excluded) && !startExcluded;
 
 		// engsys#288: the brief runs on the SubagentStart hook's wall-clock budget, so a stale index is served while a
 		// detached rebuild refreshes it (never a cold rebuild inline that the hook would kill before it persists).
@@ -1054,6 +1058,7 @@ export function main(argv, { out = console.log, err = console.error, cwd = proce
 	const result = buildBrief({
 		repoRoot,
 		agentType: typeof rawAgentType === 'string' ? rawAgentType : null,
+		startAgentType: typeof args['start-agent-type'] === 'string' ? args['start-agent-type'] : null,
 		prompt: typeof args.prompt === 'string' ? args.prompt : '',
 		issue: args.issue,
 		touchedPaths,

@@ -1115,6 +1115,29 @@ describe('buildBrief — end to end, fail-open, and the agent exclusion boundary
 		}
 	});
 
+	test('engsys#264: an excluded start identity keeps Class B out even when the hook adopted a non-excluded type', { skip: !SQLITE_AVAILABLE }, () => {
+		const dir = makeRepo({ agentsSecurityTrue: ['nyx'], lessons: [['one', { keywords: ['widget'] }]] });
+		try {
+			mkdirSync(join(dir, '.claude'), { recursive: true });
+			writeFileSync(join(dir, '.claude', 'memory.yml'), 'trusted_bot_user_ids: [500]\n');
+			commitAndPush(dir, 'add memory.yml');
+			const cacheDir = join(dir, '.git', 'engsys-memory');
+			mkdirSync(cacheDir, { recursive: true });
+			writeFileSync(
+				join(cacheDir, 'delta.jsonl'),
+				`${JSON.stringify({ k: 'ev1', kind: 'review_thread', path: 'docs/agent-lessons/one.md', line: 1, outcome: 'fixed', updated_at: new Date().toISOString(), author_kind: 'bot', author_id: 500, text: 'x' })}\n`,
+			);
+			const brief = (startAgentType) => buildBrief({ repoRoot: dir, agentType: 'engsys:isabelle', startAgentType, prompt: 'widget', touchedPaths: ['docs/agent-lessons/one.md'] });
+			assert.deepEqual(brief('nyx').pointerKeys, [], 'a start that reported nyx gets no Class B, whatever type it adopted');
+			assert.deepEqual(brief('NYX').pointerKeys, [], 'compared case-insensitively, like the agent type');
+			assert.ok(brief('isabelle-2').pointerKeys.includes('ev1'), 'positive control: a non-excluded start identity changes nothing');
+			assert.ok(brief(null).pointerKeys.includes('ev1'), 'no start identity (no adoption) leaves the adopted type alone in charge');
+			assert.ok(brief('').pointerKeys.includes('ev1'), 'an empty start identity is "none", not a fail-closed unknown agent');
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	test('engsys#288: on a stale index the brief returns at once with Class A, no Class B, and hands the rebuild off', { skip: !SQLITE_AVAILABLE }, () => {
 		const dir = makeRepo({ lessons: [['one', { keywords: ['widget'] }]] });
 		try {

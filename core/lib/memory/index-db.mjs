@@ -1017,7 +1017,7 @@ export function loadClassBEvents(cacheDir, { repoRoot = null, refShas = null, pl
 				: [];
 		// engsys#266: the consumed refs (refs/engsys/memory/fleet/<fleet>/{events,merge,maintain}) are read only through the
 		// consumer's verified path — their tips were moved there by the staged fetch and are re-verified here
-		// (cached per tip) — and come back stamped `fleet_signed`, which trust.mjs re-checks against the current keys.
+		// on every read (engsys#274) — and come back stamped `fleet_signed`, which trust.mjs re-checks against the current keys.
 		const consumed = refs.filter((r) => isConsumedRef(r.ref));
 		if (consumed.length) {
 			const op = operatorConfig !== undefined ? operatorConfig : readOperatorMemoryConfig(process.env, { repoRoot });

@@ -83,12 +83,15 @@ refused, and readers never trust them.
     (a wiped or fresh git dir). With neither, the first staged tip that verifies is **trusted on
     first use**, with a logged warning: a fresh host can be handed a stale (but validly signed) tip
     once. The R3 drill checks a fresh host's first fetch against the live tips.
-  - **Brief-time reads:** `loadClassBEvents` reads the consumed local refs only through
-    `loadVerifiedRefEvents`, which re-verifies each tip (verdicts cached per ref, tip, reviewed SHA
-    and pubkeys in `<cache>/ref-verify-cache.json`, so a warm brief re-verifies nothing) and stamps
+  - **Index-build reads:** `loadClassBEvents` reads the consumed local refs only through
+    `loadVerifiedRefEvents`, which re-verifies each tip on every read and stamps
     its events `author_kind: 'fleet_signed'`, `signed_fleet: <fleet>`. Any other ref under
     `refs/engsys/memory/` (the retired paths, an unknown leaf) is still read label-stripped as
     `untrusted_ref`, and a `delta.jsonl` line claiming `fleet_signed` is too.
+    No verdict is persisted (engsys#274): a cached `ok: true` entry plus a local ref planted by a
+    same-user process would have stamped arbitrary events `fleet_signed`. A leftover
+    `<cache>/ref-verify-cache.json` is deleted on the next read. This runs only when the index is
+    built, not on every brief (engsys#290).
   - **Skip, never block:** a failed fetch, a bad signature, a rollback or a git error keeps the last
     verified state, is logged (`memory-sync: consume: …`, latched like the write warnings) and never
     fails the heartbeat or a brief.
@@ -486,7 +489,10 @@ is just the fleet config (if any) over the defaults.
   lesson roles and the Class B exclusion), then by type; a start that matches neither gets no
   record, never another parallel dispatch's (engsys#262). Only a bare (un-namespaced) start matches by
   name: a real typed start such as `engsys:nyx` never does, so a teammate named `engsys:nyx` can't make the
-  real Nyx adopt its type and lose the Class B exclusion.
+  real Nyx adopt its type and lose the Class B exclusion. An adopted type never removes an exclusion
+  either: the hook passes the start's own identity as `--start-agent-type`, and Class B is withheld if
+  either identity is excluded, so a bare `nyx` start that matches a teammate named `nyx` stays
+  excluded (engsys#264).
 - `node:sqlite` with FTS5 and `bm25()` works on Node 22.22.3 (SQLite 3.51.3).
 - A naive in-place SQLite rebuild by concurrent processes fails (`database is locked`) and duplicates
   rows. Temp file + rename is safe.
