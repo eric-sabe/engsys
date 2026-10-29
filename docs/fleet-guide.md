@@ -59,13 +59,20 @@ by "monsters".
 **Who watches the supervisor.** It pages for everything else, so it can't report its own absence: on
 macOS an unanswered privacy prompt can stop launchd from starting any of the fleet's jobs while the
 monsters, which run in tmux, keep heartbeating (ff-engsys-fleet#48). Every `fleet supervise` run
-therefore first writes `.fleet/supervisor.tick`, and the maintenance monster checks it on every tick
-(`mnt-supervisor-watch.sh`, run by `mnt-tick.sh`). When the stamp is older than 3 x the job's
+therefore first writes `.fleet/supervisor.tick`, and `.fleet/supervisor.tick.done` once the tick
+completed (nothing to do, or the supervisor exited 0). The maintenance monster checks both on every tick
+(`mnt-supervisor-watch.sh`, run by `mnt-tick.sh`). When the start stamp is older than 3 x the job's
 `StartInterval` (15 minutes at the default 300 s; `supervisor_stale_intervals` or
 `supervisor_stale_minutes` in the maintenance monster's config overrides it), it sends one
 `fleet notify --level alert --incident fleet-supervisor-stalled` with the recovery steps (check
 `launchctl print gui/$UID/com.<org>.fleet.fleet-supervisor`, answer the prompts, `launchctl kickstart -k`)
-and resolves it once the supervisor ticks again. A host where the supervisor job isn't installed, or
+and resolves it once the supervisor ticks again. When the start stamp is fresh but the end stamp is older
+than that, the job runs but every tick dies before it completes (an engsys checkout `fleet verify`
+rejects, a missing template, a supervisor error): the same incident, saying so, until a tick completes
+again. A supervisor that predates the end stamp doesn't name it in its start stamp, and is watched on the
+start stamp alone. A stamp dated more than the threshold in the future (clock skew, a corrupt stamp) counts
+as stale, so it can't keep the watch quiet. The alert's notify is bounded at 30 s; one that hangs is killed
+and retried on the next tick. A host where the supervisor job isn't installed, or
 was booted out with `fleet install-jobs --unload`, is never alerted on. This check lives on the same host,
 so a host that is asleep or down needs a watcher from outside as well (the instance's own heartbeat watch
 on its status issue, for example).
@@ -451,7 +458,9 @@ reports them as a mismatch until the fleet has its own directory (or you allow t
    empty directory (`cd "$(mktemp -d)"`), **not from `~`**: there `claude` reads `~/.claude/settings.json` as the
    project settings of `$HOME` and installs the plugins they declare into the fleet dir at project scope for
    `$HOME` (engsys#235). The same goes for every `CLAUDE_CONFIG_DIR=<dir> claude` login below; every login command
-   the kit prints starts with `cd "$(mktemp -d)" && ` for that reason (engsys#304).
+   the kit prints starts with `cd "$(mktemp -d)" && ` for that reason (engsys#304). The dir in it is single-quoted,
+   so one with spaces pastes whole; a leading `~/` stays outside the quotes so your shell still expands it
+   (`CLAUDE_CONFIG_DIR=~/'.claude'`, engsys#308).
 3. Accept workspace trust for the pin checkout once, with the monsters' flags:
    `cd <PIN_DIR> && CLAUDE_CONFIG_DIR=~/.config/acme/claude claude --dangerously-skip-permissions`, accept,
    `/exit`.
@@ -1283,6 +1292,7 @@ strays that sync removes once the rest is gone, so never run `claude` from `~` t
 reported as `NOT synced` with its reason, and sync goes on with the next dir. The run then fails at the end, naming
 every dir that failed (`the plugin step failed in: …`); what did sync is stamped in `.fleet/last-change`. Step 5
 still runs first (engsys#305): one bad dir does not hold back a launchd job reinstall or the supervisor-job cleanup.
+If that reinstall fails too, the run still ends with the summary, which says so, and fails (engsys#308).
 
 **Running sessions' own dirs (per-session mode, engsys#253).** Step 4 skips the own dir of a session that is running
 (a claude process in its tmux window). Any `claude` call there, even `auth status` or `plugin list`, is a second

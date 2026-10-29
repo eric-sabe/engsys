@@ -407,7 +407,16 @@ main() {
   fi
 
   # --- 5. launchd jobs, when their templates (or the config they render from) changed ------------
-  local jobs_changed=0 fed_rel=()
+  # install-jobs failing stops the sync as before, unless a dir already failed: then the summary below is still printed
+  # (and the run still fails), engsys#308.
+  jobs_run() {
+    local rc=0
+    bash "$FLEET_KIT_DIR/install-jobs.sh" "$@" || rc=$?
+    [ "$rc" = 0 ] && return 0
+    [ -n "$dirs_failed" ] || exit "$rc"
+    jobs_failed="$rc"
+  }
+  local jobs_changed=0 fed_rel=() jobs_failed=""
   case "$FEDERATION_FILE" in "$FLEET_REPO"/*) fed_rel=("${FEDERATION_FILE#"$FLEET_REPO"/}") ;; esac
   if [ -n "$prev_instance" ] && ! git -C "$FLEET_REPO" diff --quiet "$prev_instance" HEAD -- jobs/launchd fleet/fleet.conf fleet/roster.tmpl fleet/supervisor.conf.tmpl ${fed_rel[@]+"${fed_rel[@]}"} 2>/dev/null; then jobs_changed=1; fi
   if [ -n "$prev_engsys" ] && ! git -C "$ENGSYS_DIR" diff --quiet "$prev_engsys" HEAD -- core/fleet/jobs core/fleet/install-jobs.sh core/fleet/lib/host-roles.sh 2>/dev/null; then jobs_changed=1; fi
@@ -419,7 +428,7 @@ main() {
   elif [ "$jobs_changed" = 1 ]; then
     if command -v launchctl >/dev/null 2>&1; then
       say "launchd templates changed — reinstalling jobs"
-      bash "$FLEET_KIT_DIR/install-jobs.sh" --instance "$FLEET_REPO"
+      jobs_run --instance "$FLEET_REPO"
     else
       say "launchd templates changed, but launchctl isn't available here — run: fleet install-jobs"
     fi
@@ -428,7 +437,7 @@ main() {
     fleet_host_init
     if [ -n "$(fleet_ledger_sessions)" ] && [ -z "$(fleet_host_supervised)" ]; then
       say "the supervisor job is installed, but no supervised session runs on this host: unloading it"
-      bash "$FLEET_KIT_DIR/install-jobs.sh" --instance "$FLEET_REPO" --only fleet-supervisor
+      jobs_run --instance "$FLEET_REPO" --only fleet-supervisor
     fi
   fi
 
@@ -436,6 +445,9 @@ main() {
   if [ -n "$dirs_failed" ]; then
     # what did sync is still stamped, so fleet restart --stale sees it (the failed dirs stay behind until a re-run)
     [ "$changed" != 1 ] || date +%s >"$FLEET_STATE/last-change"
+    if [ -n "$jobs_failed" ]; then
+      fleet_die "the plugin step failed in:$dirs_failed (each one's reason is above). Every other config dir was synced, but install-jobs failed too (exit $jobs_failed, above), so the launchd jobs may not be up to date. NOT synced: fix those, then re-run: fleet sync"
+    fi
     fleet_die "the plugin step failed in:$dirs_failed (each one's reason is above). Every other config dir was synced, and the launchd jobs were brought up to date. NOT synced: fix those, then re-run: fleet sync"
   fi
   if [ "$changed" = 1 ]; then

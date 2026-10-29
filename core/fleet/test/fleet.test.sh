@@ -145,6 +145,7 @@ SH
 cat >"$T/bin/launchctl" <<'SH'
 #!/usr/bin/env bash
 echo "launchctl $*" >>"$FAKE/launchctl.log"
+[ "${FAKE_LAUNCHCTL_FAIL:-}" != "$1" ] || exit 5   # FAKE_LAUNCHCTL_FAIL=<subcommand> makes that one fail
 exit 0
 SH
 chmod +x "$T/bin/"*
@@ -313,6 +314,14 @@ rc_is "FLEET_INSTANCE is honoured" 0
   # shellcheck source=/dev/null
   . "$ENGSYS_HOST/core/fleet/lib/fleet-env.sh"
   eq "conf: ~ expands, PIN_DIR" "$PIN_DIR" "$HOME/git/app"
+  # engsys#308: the login hint quotes the dir (spaces), and keeps restart.sh's ~/.claude fallback expandable when pasted
+  eq "login hint: a dir with a space is quoted" "$(fleet_login_cmd "$T/a dir")" "${LOGIN}CLAUDE_CONFIG_DIR='$T/a dir' claude"
+  # shellcheck disable=SC2088 # a literal ~, on purpose
+  eq "login hint: ~/.claude keeps its ~ unquoted" "$(fleet_login_cmd '~/.claude')" "${LOGIN}CLAUDE_CONFIG_DIR=~/'.claude' claude"
+  mkdir -p "$T/lc-bin"; printf '#!/bin/sh\nprintf "%%s" "$CLAUDE_CONFIG_DIR"\n' >"$T/lc-bin/claude"; chmod +x "$T/lc-bin/claude"
+  eq "login hint, pasted: a dir with a space and a quote arrives whole" "$(PATH="$T/lc-bin:$PATH" bash -c "$(fleet_login_cmd "$T/it's a dir")")" "$T/it's a dir"
+  # shellcheck disable=SC2088
+  eq "login hint, pasted: ~/.claude expands" "$(PATH="$T/lc-bin:$PATH" bash -c "$(fleet_login_cmd '~/.claude')")" "$HOME/.claude"
   eq "conf: ENGSYS_DIR defaults to ~/git/engsys" "$ENGSYS_DIR" "$HOME/git/engsys"
   eq "conf: ENGSYS_MARKETPLACE defaults to engsys" "$ENGSYS_MARKETPLACE" engsys
   eq "conf: READY_LABEL default" "$READY_LABEL" "mm:ready"
@@ -465,7 +474,7 @@ has "…reporting the default dir" "$OUT" "claude config dir: $HOME/.claude"
 printf 'FLEET_CLAUDE_CONFIG_DIR=%s\n' "$T/missing-cfg" >>"$LC"
 run fleet sync
 rc_is "a FLEET_CLAUDE_CONFIG_DIR that doesn't exist stops sync" 1
-has "…with the one-time setup" "$OUT" "log in with ${LOGIN}CLAUDE_CONFIG_DIR=$T/missing-cfg claude"
+has "…with the one-time setup" "$OUT" "log in with ${LOGIN}CLAUDE_CONFIG_DIR='$T/missing-cfg' claude"
 cp "$T/flc.bak" "$LC"
 # A fleet dir seeded before the claude.ai sync switches existed: sync adds them, keeps every other key, and
 # never touches ~/.claude/settings.json (engsys#200).
@@ -818,13 +827,13 @@ rc_is "per-session init exits 0" 0
 for n in acme-mm acme-build acme-security acme-rel; do
   [ -f "$SESS/$n/settings.json" ] && ok "init: $n has its own dir" || bad "init: $n has its own dir"
   eq "…seeded with the claude.ai sync off" "$(jq -c '[.syncClaudeAiSkills, .syncClaudeAiPlugins]' "$SESS/$n/settings.json")" '[false,false]'
-  has "…and the one-time login command is printed for it" "$OUT" "$n: ${LOGIN}CLAUDE_CONFIG_DIR=$SESS/$n claude"
+  has "…and the one-time login command is printed for it" "$OUT" "$n: ${LOGIN}CLAUDE_CONFIG_DIR='$SESS/$n' claude"
   eq "…mode 700" "$(mode_of "$SESS/$n")" 700
 done
 login_all acme-mm
 run fleet config-dir init
 hasnt "init (idempotent): a logged-in dir is not asked to log in again" "$OUT" "acme-mm: ${LOGIN}CLAUDE_CONFIG_DIR"
-has "…the others still are" "$OUT" "acme-build: ${LOGIN}CLAUDE_CONFIG_DIR=$SESS/acme-build claude"
+has "…the others still are" "$OUT" "acme-build: ${LOGIN}CLAUDE_CONFIG_DIR='$SESS/acme-build' claude"
 run fleet config-dir init --session acme-mm
 has "init --session: just that one" "$OUT" "session acme-mm -> $SESS/acme-mm"
 hasnt "…not the others" "$OUT" "session acme-build"
@@ -861,13 +870,13 @@ rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"
 mv "$SESS/acme-mm" "$SESS/acme-mm.away"; run fleet launch acme-mm
 rc_is "no dir yet: the launch is refused" 1
 has "…saying what to run" "$OUT" "fleet config-dir init --session acme-mm"
-has "…and how to log in" "$OUT" "CLAUDE_CONFIG_DIR=$SESS/acme-mm claude"
+has "…and how to log in" "$OUT" "CLAUDE_CONFIG_DIR='$SESS/acme-mm' claude"
 eq "…nothing reached tmux" "$(grep -c send-keys "$FAKE/tmux.log" || true)" 0
 mv "$SESS/acme-mm.away" "$SESS/acme-mm"
 rm -f "$FAKE/loggedin/acme-security" "$STATE/auth-ok.acme-security"; touch "$FAKE/loggedout/acme-security"
 run fleet launch
 rc_is "one logged-out session dir: the whole launch exits non-zero" 1
-has "…naming it and the command" "$OUT" "SKIPPED: acme-security (its own Claude login ($SESS/acme-security) is not logged in: ${LOGIN}CLAUDE_CONFIG_DIR=$SESS/acme-security claude"
+has "…naming it and the command" "$OUT" "SKIPPED: acme-security (its own Claude login ($SESS/acme-security) is not logged in: ${LOGIN}CLAUDE_CONFIG_DIR='$SESS/acme-security' claude"
 has "…while the other sessions start" "$(tl acme-mm)" "export CLAUDE_CONFIG_DIR=$SESS/acme-mm"
 hasnt "…and the logged-out one does not" "$(cat "$FAKE/tmux.log")" "[acme:acme-security]"
 login_all acme-security
@@ -907,7 +916,7 @@ echo '{"syncClaudeAiSkills":false,"syncClaudeAiPlugins":false}' >"$SESS/acme-sec
 rm -f "$FAKE/loggedin/acme-mm"; touch "$FAKE/loggedout/acme-mm"; rm -f "$STATE/auth-ok.acme-mm"
 run fleet verify
 rc_is "a logged-out session dir is 'not verified' (a hold) for that session" 3
-has "…naming its dir and the login command" "$(sed -n '/== session acme-mm/,/== session acme-build/p' <<<"$OUT")" "(${LOGIN}CLAUDE_CONFIG_DIR=$SESS/acme-mm claude, then /login"
+has "…naming its dir and the login command" "$(sed -n '/== session acme-mm/,/== session acme-build/p' <<<"$OUT")" "(${LOGIN}CLAUDE_CONFIG_DIR='$SESS/acme-mm' claude, then /login"
 run fleet verify --session acme-security
 rc_is "…the others still pass" 0
 login_all acme-mm
@@ -1850,7 +1859,7 @@ has "…says the login state is unknown" "$OUT" "login state unknown (SSH, Keych
 hasnt "…and prints no /login command for any session" "$OUT" "CLAUDE_CONFIG_DIR=$SESS/acme-mm claude"
 hasnt "…nor claims they are all logged in" "$OUT" "every session dir is logged in"
 run env -u SSH_CONNECTION -u SSH_TTY PATH="$T/darwin-bin:$PATH" bash "$ENGSYS_HOST/core/fleet/bin/fleet" --instance "$INST" config-dir init
-has "outside SSH the login commands are printed as before" "$OUT" "acme-mm: ${LOGIN}CLAUDE_CONFIG_DIR=$SESS/acme-mm claude"
+has "outside SSH the login commands are printed as before" "$OUT" "acme-mm: ${LOGIN}CLAUDE_CONFIG_DIR='$SESS/acme-mm' claude"
 # the single-dir form
 setconf "INSTANCE_MARKETPLACE=" "GH_APP_ENV=" "ENGSYS_REF=v1.4.0"
 touch "$FAKE/loggedout/$(basename "$T/one-dir")"
@@ -2005,6 +2014,15 @@ has "…every one of them" "$(on_dir "$m" acme-rel)" "plugin install engsys@engs
 has "…the failed one is reported" "$OUT" "claude config dir $SESS/acme-mm: NOT synced (the reason is above); going on with the other dirs"
 has "…and summed up at the end" "$OUT" "the plugin step failed in: $SESS/acme-mm"
 hasnt "…never claims synced" "$OUT" "fleet-sync: synced."
+# engsys#308: install-jobs failing too still ends in the summary, and the run still fails
+k4_phantom acme-mm "$HOME" "/other/real/project"; rm -rf "$(stub_state acme-build)" "$(stub_state acme-rel)"
+git -C "$ENGSYS_HOST" checkout -q v1.0.0; : >"$FAKE/launchctl.log"
+FAKE_LAUNCHCTL_FAIL=bootstrap run fleet sync
+rc_is "a failed dir, then install-jobs failing too: the run fails" 1
+matches "…install-jobs did run, and launchctl bootstrap failed" "$(cat "$FAKE/launchctl.log")" '^launchctl bootstrap '
+has "…the summary is still printed" "$OUT" "the plugin step failed in: $SESS/acme-mm"
+has "…saying install-jobs failed too" "$OUT" "but install-jobs failed too (exit "
+hasnt "…not that the jobs are up to date" "$OUT" "and the launchd jobs were brought up to date"
 k4_phantom acme-mm "$HOME"
 run fleet sync; rc_is "…once only the \$HOME stray is left, a plain sync heals the host" 0
 export PATH="$OPATH"; unset FAKE_CLAUDE_PROJECT_DECLARED

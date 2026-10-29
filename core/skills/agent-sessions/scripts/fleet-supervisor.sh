@@ -450,8 +450,16 @@ outside_home_dir() { # ${TMPDIR:-/tmp}, resolved, or /tmp when that is under $HO
   printf '%s' "$t"
 }
 login_cmd() { # login_cmd [<config dir>]
+  # The dir single-quoted for the operator's shell (spaces, $), its ' as '\''; a leading ~ or ~/ stays unquoted so the
+  # shell still expands it (restart.sh's ~/.claude fallback): ~/'.claude'.
+  local d="${1:-}" t=""
   # shellcheck disable=SC2016 # the $(mktemp -d) is for the operator's shell
-  printf 'cd "$(mktemp -d)" && %sclaude' "${1:+CLAUDE_CONFIG_DIR=$1 }"
+  printf 'cd "$(mktemp -d)" && '
+  [ -n "$d" ] || { printf 'claude'; return 0; }
+  # shellcheck disable=SC2088 # a literal ~, on purpose
+  case "$d" in "~") t="~" d="" ;; "~/"*) t="~/" d="${d#"~/"}" ;; esac
+  [ -z "$d" ] || d="'$(printf '%s' "$d" | sed "s/'/'\\\\''/g")'"
+  printf 'CLAUDE_CONFIG_DIR=%s%s claude' "$t" "$d"
 }
 
 # The test request: does a login/seat work right now? Accepts optional target harness $1. Sets AUTH_PROBE_WHY.

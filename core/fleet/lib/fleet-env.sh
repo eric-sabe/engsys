@@ -279,8 +279,16 @@ fleet_outside_home_dir() {
 # fleet_login_cmd [<config dir>] → the command that logs a config dir in (then /login, /exit), from an empty dir, never
 # from ~ (engsys#304); no dir: Claude's own default
 fleet_login_cmd() {
+  # The dir single-quoted for the operator's shell (spaces, $), its ' as '\''; a leading ~ or ~/ stays unquoted so the
+  # shell still expands it (restart.sh's ~/.claude fallback): ~/'.claude'.
+  local d="${1:-}" t=""
   # shellcheck disable=SC2016 # the $(mktemp -d) is for the operator's shell
-  printf 'cd "$(mktemp -d)" && %sclaude' "${1:+CLAUDE_CONFIG_DIR=$1 }"
+  printf 'cd "$(mktemp -d)" && '
+  [ -n "$d" ] || { printf 'claude'; return 0; }
+  # shellcheck disable=SC2088 # a literal ~, on purpose
+  case "$d" in "~") t="~" d="" ;; "~/"*) t="~/" d="${d#"~/"}" ;; esac
+  [ -z "$d" ] || d="'$(printf '%s' "$d" | sed "s/'/'\\\\''/g")'"
+  printf 'CLAUDE_CONFIG_DIR=%s%s claude' "$t" "$d"
 }
 
 FLEET_ENGSYS_REF_FORCED=0 FLEET_INSTANCE_REF_FORCED=0

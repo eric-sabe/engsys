@@ -616,7 +616,7 @@ pconf; reset; rm -f "$T"/pane-* "$T"/capture-* "$T/probe-ok" "$T"/integrity-bad-
 echo zsh >"$T/pane-acme-mm"; : >"$T/capture-acme-mm"
 echo 2.1.285 >"$T/pane-acme-rel"; cp "$T/fixture-login-expired" "$T/capture-acme-rel"; run
 expect "205: a login error in one session's pane starts a hold for that session" "^notify --level action .*--incident claude-auth-expired-acme-rel "
-expect "  …the alert names the session, its dir and the login command" "^notify .*claude-auth-expired-acme-rel .*session .acme-rel. expired .*$CFGB/acme-rel.*\`cd \"\$(mktemp -d)\" && CLAUDE_CONFIG_DIR=$CFGB/acme-rel claude\`"
+expect "  …the alert names the session, its dir and the login command" "^notify .*claude-auth-expired-acme-rel .*session .acme-rel. expired .*$CFGB/acme-rel.*\`cd \"\$(mktemp -d)\" && CLAUDE_CONFIG_DIR='$CFGB/acme-rel' claude\`"
 expect "  …and says only that session is held" "^notify .*Only .acme-rel. is held: the other sessions keep running"
 expect "  …no global alert" "!--incident claude-auth-expired "
 expect "  …the test request ran on that session's own dir" "^probe-cfg $CFGB/acme-rel"
@@ -991,6 +991,26 @@ expect "  …the log says RELAUNCH FAILED with the reason" "^log-failed"
 expect "  …and never 'relaunched'" "!^log-relaunched"
 [ -z "$(ls -A "$T/home/.local/state/engsys/launch" 2>/dev/null)" ] && echo "no-launch-file" >>"$T/actions"
 expect "  …and no launch file is left behind" "^no-launch-file"
+
+# engsys#308: the login hint quotes the config dir for the operator's shell, keeping a leading ~ expandable; the copy
+# here is the fleet kit's fleet_login_cmd (lib/fleet-env.sh) line for line.
+lc_eq() { # lc_eq <name> <got> <want>
+  if [ "$2" = "$3" ]; then pass=$((pass + 1)); echo "  ok  $1"; else fail=$((fail + 1)); echo "  FAIL $1"; echo "       got:  $2"; echo "       want: $3"; fi
+}
+LCF="$(sed -n '/^login_cmd() {/,/^}/p' "$HERE/fleet-supervisor.sh")"
+KITF="$HERE/../../../fleet/lib/fleet-env.sh"
+lc_eq "308: login_cmd's body is fleet_login_cmd's" "$(printf '%s\n' "$LCF" | tail -n +2)" "$(sed -n '/^fleet_login_cmd() {/,/^}/p' "$KITF" | tail -n +2)"
+lc() { (eval "$LCF"; login_cmd "$@"); }
+# shellcheck disable=SC2016 # the hint's own text
+LH='cd "$(mktemp -d)" && '
+lc_eq "  …a dir with a space is quoted" "$(lc "$T/a dir")" "${LH}CLAUDE_CONFIG_DIR='$T/a dir' claude"
+# shellcheck disable=SC2088 # a literal ~, on purpose
+lc_eq "  …~/.claude keeps its ~ unquoted" "$(lc '~/.claude')" "${LH}CLAUDE_CONFIG_DIR=~/'.claude' claude"
+lc_eq "  …no dir: claude's own default" "$(lc)" "${LH}claude"
+mkdir -p "$T/lc-bin"; printf '#!/bin/sh\nprintf "%%s" "$CLAUDE_CONFIG_DIR"\n' >"$T/lc-bin/claude"; chmod +x "$T/lc-bin/claude"
+lc_eq "  …pasted, a dir with a space and a quote arrives whole" "$(PATH="$T/lc-bin:$PATH" bash -c "$(lc "$T/it's a dir")")" "$T/it's a dir"
+# shellcheck disable=SC2088
+lc_eq "  …pasted, ~/.claude expands" "$(PATH="$T/lc-bin:$PATH" HOME="$T/h" bash -c "$(lc '~/.claude')")" "$T/h/.claude"
 
 # launch-agent-sessions.sh harness policy and flag translation: launch-agent-sessions.test.sh.
 

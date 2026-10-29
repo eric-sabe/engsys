@@ -11,9 +11,9 @@
 #   3d. when the --config has an enabled findings_harvest: block and its window is due (mnt-harvest.sh due: read-only,
 #       no network), print HARVEST_DUE: run § Findings harvest on this wake;
 #   3e. check this host's fleet supervisor is still ticking (mnt-supervisor-watch.sh, ff-engsys-fleet#48): its tick
-#       stamp older than supervisor_stale_intervals (default 3) x its launchd StartInterval, or supervisor_stale_minutes,
-#       sends ONE `fleet notify --level alert` and resolves it once the stamp is fresh; silent where no supervisor job
-#       is installed;
+#       stamp (or, engsys#308, the end stamp of its last completed tick) older than supervisor_stale_intervals
+#       (default 3) x its launchd StartInterval, or supervisor_stale_minutes, sends ONE `fleet notify --level alert`
+#       and resolves it once both are fresh; silent where no supervisor job is installed;
 #   4. write the ledger heartbeat only when one is due (none in the last 0.75 x heartbeat_minutes);
 #   5. print `NOOP` when nothing changed, else the delta, one line each:
 #        + <item> / - <item>          a finding appeared in / left the snapshot, or changed (one of each)
@@ -23,6 +23,7 @@
 #        HARVEST_CONFIG_ERROR <why>        the findings_harvest: block is invalid (once; escalate the config)
 #        SUPERVISOR_STALLED … notified     the host's supervisor stopped ticking; the operator alert went out (once)
 #        SUPERVISOR_STALLED … notify_failed  …and the alert could not be sent (retried next tick): tell the operator
+#        SUPERVISOR_FAILING … notified|notify_failed  it starts, but no tick completed within the threshold
 #        SUPERVISOR_RECOVERED … / SUPERVISOR_UNWATCHED …  it ticks again (or its job is gone); the alert is resolved
 #        BATON_HANDOVER maintain <fleet>   federation.yml moved the role's home (§ Handover)
 #        SNAPSHOT_ERROR <why>              the snapshot failed: GitHub state is unknown this tick

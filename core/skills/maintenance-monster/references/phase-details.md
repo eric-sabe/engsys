@@ -584,7 +584,9 @@ behind unanswered macOS privacy prompts, while this session (tmux, not launchd) 
 alerted (ff-engsys-fleet#48). So the tick watches it: `mnt-tick.sh` runs `mnt-supervisor-watch.sh` every time.
 
 - **The record.** Every `fleet supervise` run first writes `$FLEET_STATE/supervisor.tick` (`epoch=`, `at=`,
-  `label=`, `plist=`). A fleet-launched session has `FLEET_STATE` in its environment.
+  `label=`, `plist=`, `done=`), and, once the tick completed (nothing to do, or `fleet-supervisor.sh` exited 0), the
+  end stamp `done=` names (`supervisor.tick.done`: `epoch=`, `at=`; engsys#308). A fleet-launched session has
+  `FLEET_STATE` in its environment.
 - **The threshold.** `supervisor_stale_intervals` (default 3) x the `StartInterval` in the job's plist (300 s when
   unreadable), so 15 minutes by default; `supervisor_stale_minutes` sets minutes outright and wins over intervals.
   Both are config keys the tick reads from `--config`. The environment variables `SUPERVISOR_STALE_INTERVALS` and
@@ -593,8 +595,17 @@ alerted (ff-engsys-fleet#48). So the tick watches it: `mnt-tick.sh` runs `mnt-su
   recovery steps (`launchctl print gui/<uid>/<label>`: `runs` not increasing; answer the prompts at the Mac, "Don't
   Allow" is fine; `launchctl kickstart -k gui/<uid>/<label>`), latched in `<state_dir>/.watch/supervisor-stalled.alerted`
   and printed as `SUPERVISOR_STALLED … notified`. Still stale → nothing. Fresh again → the incident is resolved
-  (`SUPERVISOR_RECOVERED … resolved`) and the latch cleared. A notify that fails leaves no latch
-  (`… notify_failed`), so the next tick tries again.
+  (`SUPERVISOR_RECOVERED … resolved`) and the latch cleared. A notify that fails, or takes longer than 30 s (killed,
+  with its children), leaves no latch (`… notify_failed`), so the next tick tries again.
+- **Ticks that start but never complete.** Start stamp fresh, end stamp older than the threshold: every run dies early
+  (an engsys checkout `fleet verify` rejects, a missing `fleet/supervisor.conf.tmpl`, a supervisor error). Same
+  incident and latch, printed as `SUPERVISOR_FAILING last=<start> completed=<end|never> age=<m>m … notified`. The end
+  stamp is required only when the start stamp names it (`done=`): a supervisor that predates it is watched on the
+  start stamp alone, never alerted for the stamp it doesn't write. A named end stamp that doesn't exist yet ages from
+  the first tick that saw it missing (`<state_dir>/.watch/supervisor-done-missing.since`; `completed=never`).
+- **A stamp from the future.** Up to the threshold ahead of now counts as age 0; further ahead (clock skew, a corrupt
+  epoch) counts as stale (`SUPERVISOR_STALLED … future=<m>m …`, or `SUPERVISOR_FAILING` for the end stamp), so it can't
+  keep the watch quiet.
 - **Silent where there is no supervisor.** No `FLEET_STATE` (a session the fleet did not launch, a non-fleet
   install), no tick file, no plist at the path the stamp names (the job is not installed on this host), or a job
   `launchctl print` can't find (booted out with `fleet install-jobs --unload`): no line, no alert. An alert that is

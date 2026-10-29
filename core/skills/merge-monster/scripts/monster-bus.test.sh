@@ -341,6 +341,74 @@ has "  …says notify_failed" "notify_failed"
 run "${SWR[@]}"
 has "  …next tick: the alert goes out" "notified"
 rm -rf "$T/sw"
+# engsys#308: a notify that hangs is killed at the timeout (with its children) and counts as failed: no latch
+printf '#!/usr/bin/env bash\nsleep 8 &\necho $! >"$FAKE/sw-hang.pid"\nwait\n' >"$T/bin/sw-notify-hang.sh"; chmod +x "$T/bin/sw-notify-hang.sh"
+rm -f "$FAKE/sw-hang.pid"; stamp $((NOW - 3600)); t0=$(date +%s)
+run env FLEET_STATE="$FS" SUPERVISOR_WATCH_LAUNCHCTL="$T/bin/lctl-stub.sh" SUPERVISOR_WATCH_NOTIFY_TIMEOUT=1 FAKE="$FAKE" BATON_NOTIFY_CMD="bash $T/bin/sw-notify-hang.sh" bash "$SW" --state-dir "$T/sw" --now "$NOW"
+t1=$(date +%s)
+rc_is "  …a notify that hangs (engsys#308): exit 0" 0
+[ $((t1 - t0)) -lt 6 ] && ok "  …bounded at the timeout ($((t1 - t0)) s, the notifier sleeps 8)" || bad "  …bounded at the timeout" "took $((t1 - t0)) s"
+has "  …counted as a failed notify" "SUPERVISOR_STALLED last=iso-$((NOW - 3600)) age=60m threshold=15m notify_failed"
+[ ! -e "$T/sw/.watch/supervisor-stalled.alerted" ] && ok "  …no latch, so the next tick retries" || bad "  …no latch, so the next tick retries"
+hp="$(cat "$FAKE/sw-hang.pid" 2>/dev/null || true)"
+[ -n "$hp" ] && ! kill -0 "$hp" 2>/dev/null && ok "  …and the notifier's own child is killed too" || bad "  …and the notifier's own child is killed too" "pid ${hp:-none}"
+run "${SWR[@]}" --now "$NOW"
+has "  …next tick: the alert goes out" "notified"
+rm -rf "$T/sw"; : >"$T/sw-notify.log"
+# engsys#308: the end stamp. A start stamp naming it (done=) makes it required; a stale one alerts as FAILING
+DF="$FS/supervisor.tick.done"
+stampd() { stamp "$1"; printf 'done=%s\n' "$DF" >>"$FS/supervisor.tick"; }
+done_at() { printf 'epoch=%s\nat=iso-%s\n' "$1" "$1" >"$DF"; }
+stampd $((NOW - 60)); done_at $((NOW - 120))
+run "${SWR[@]}" --now "$NOW"
+[ -z "$OUT" ] && ok "  …a fresh start and a fresh end stamp → nothing" || bad "  …a fresh start and a fresh end stamp → nothing" "$OUT"
+done_at $((NOW - 901))
+run "${SWR[@]}" --now "$NOW"
+has "  …fresh start, end stamp older than the threshold → SUPERVISOR_FAILING" "SUPERVISOR_FAILING last=iso-$((NOW - 60)) completed=iso-$((NOW - 901)) age=15m threshold=15m notified"
+[ "$(swn 'level alert --incident fleet-supervisor-stalled')" = 1 ] && ok "  …one alert, the stall incident" || bad "  …one alert, the stall incident" "$(cat "$T/sw-notify.log")"
+OUT="$(cat "$T/sw-notify.log")"; has "  …saying its ticks don't complete" "but its ticks don't complete"
+run "${SWR[@]}" --now "$NOW"
+[ -z "$OUT" ] && ok "  …still failing → no repeat" || bad "  …still failing → no repeat" "$OUT"
+done_at $((NOW - 10))
+run "${SWR[@]}" --now "$NOW"
+has "  …a completed tick again → SUPERVISOR_RECOVERED" "SUPERVISOR_RECOVERED last=iso-$((NOW - 60))"
+# named but never written: it ages from the first watch that saw it missing
+rm -f "$DF"; stampd $((NOW - 60))
+run "${SWR[@]}" --now "$NOW"
+[ -z "$OUT" ] && ok "  …a named end stamp missing for the first time → nothing yet" || bad "  …a named end stamp missing for the first time → nothing yet" "$OUT"
+stampd $((NOW + 840))
+run "${SWR[@]}" --now $((NOW + 900))
+[ -z "$OUT" ] && ok "  …missing for 15 min (the threshold) → nothing yet" || bad "  …missing for 15 min (the threshold) → nothing yet" "$OUT"
+run "${SWR[@]}" --now $((NOW + 901))
+has "  …missing for longer, the start stamp fresh → SUPERVISOR_FAILING completed=never" "SUPERVISOR_FAILING last=iso-$((NOW + 840)) completed=never age=15m threshold=15m notified"
+stampd $((NOW - 3000)); run "${SWR[@]}" --now $((NOW + 1000)) # a stale start: the missing-since clock restarts
+stampd $((NOW + 1000))
+run "${SWR[@]}" --now $((NOW + 1010))
+[ -z "$OUT" ] && ok "  …an open alert with the end stamp still missing is not resolved by a fresh start" || bad "  …an open alert with the end stamp still missing is not resolved by a fresh start" "$OUT"
+done_at $((NOW + 1005))
+run "${SWR[@]}" --now $((NOW + 1010))
+has "  …only a completed tick resolves it" "SUPERVISOR_RECOVERED last=iso-$((NOW + 1000))"
+rm -rf "$T/sw"; : >"$T/sw-notify.log"
+# backward compatibility: a supervisor that predates the end stamp names none; an old end stamp beside it is ignored
+stamp $((NOW - 60)); done_at $((NOW - 86400))
+run "${SWR[@]}" --now "$NOW"
+[ -z "$OUT" ] && [ "$(swn notify)" = 0 ] && ok "  …a start stamp without done= is watched on itself alone (no false alert)" || bad "  …a start stamp without done= is watched on itself alone (no false alert)" "$OUT"
+rm -f "$DF"
+run "${SWR[@]}" --now "$NOW"
+[ -z "$OUT" ] && ok "  …and with no end stamp at all → nothing" || bad "  …and with no end stamp at all → nothing" "$OUT"
+# a stamp dated in the future: up to the threshold ahead is age 0; further ahead is stale, never fresh forever
+stamp $((NOW + 600))
+run "${SWR[@]}" --now "$NOW"
+[ -z "$OUT" ] && ok "  …a start stamp 10 min ahead (within the threshold) → nothing" || bad "  …a start stamp 10 min ahead (within the threshold) → nothing" "$OUT"
+stamp $((NOW + 86400))
+run "${SWR[@]}" --now "$NOW"
+has "  …a start stamp a day ahead → stale (SUPERVISOR_STALLED future=)" "SUPERVISOR_STALLED last=iso-$((NOW + 86400)) future=1440m threshold=15m notified"
+OUT="$(cat "$T/sw-notify.log")"; has "  …the alert names the clock or a corrupt stamp" "the host clock is off or the stamp is corrupt"
+rm -rf "$T/sw"; : >"$T/sw-notify.log"
+stampd $((NOW - 60)); done_at $((NOW + 86400))
+run "${SWR[@]}" --now "$NOW"
+has "  …an end stamp a day ahead → SUPERVISOR_FAILING" "SUPERVISOR_FAILING last=iso-$((NOW - 60)) completed=iso-$((NOW + 86400))"
+rm -rf "$T/sw" "$DF"; : >"$T/sw-notify.log"
 # wired into the tick: a stale supervisor is a tick delta once, then NOOP
 held maintain
 mkdir -p "$T/state/.watch"; date +%s >"$T/state/.watch/last-heartbeat"
