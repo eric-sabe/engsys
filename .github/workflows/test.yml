@@ -62,7 +62,9 @@ jobs:
           git_bin="$(xcrun --find git)"
           echo "$git_bin"
           d="$git_bin"
-          while [ "$d" != / ]; do ls -ld "$d"; d="$(dirname "$d")"; done
+          bad=""
+          while [ "$d" != / ]; do ls -ld "$d"; [ "$(stat -f %Su "$d")" = root ] || bad="$d"; d="$(dirname "$d")"; done
+          [ -z "$bad" ] || echo "::warning::git's directory chain is not root-owned ($bad): the guarded-push real-git tests will skip"
 
       - name: Git identity for test repos
         run: |
