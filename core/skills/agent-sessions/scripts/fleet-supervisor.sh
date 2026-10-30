@@ -781,8 +781,15 @@ relaunch() { # relaunch <name> <ledger> <repo> <reason>
   else
     local tail_lines first_err
     tail_lines="$(tail -n 5 "$out" | cut -c1-200)"
-    # the launcher's first error line is the specific one (e.g. "launch did not start for …"); the rest is its summary
+    # the launcher's first error line is the specific one (e.g. "launch did not start for …"); the rest is its summary.
+    # launch.sh refusing on its plugin check prints no "error:" line: its verify line names the cause, its own
+    # "fleet: not launching" line only the refusal (engsys#311)
     first_err="$(grep -m 1 '^error: ' "$out" | cut -c1-300 || true)"
+    [ -n "$first_err" ] || first_err="$(grep -m 1 '^verify: not verified' "$out" | cut -c1-300 || true)"
+    [ -n "$first_err" ] || first_err="$(grep -m 1 '^fleet: not launching' "$out" | cut -c1-300 || true)"
+    if [ -n "$first_err" ] && grep -qiE 'TLS handshake timeout|i/o timeout|connection (refused|reset)|could not resolve host|no such host|HTTP 50[0-9]' "$out"; then
+      first_err="$first_err (GitHub looks unreachable from this host: likely transient, the next tick retries)"
+    fi
     cat "$out" >>"$LOG"; rm -f "$out"
     if [ ! -f "$alerted" ] && notify --level alert --incident "launch-failed-$name" "fleet-supervisor: relaunch of \`$name\` on $HOST_NAME FAILED ($reason_h): ${first_err:-the launcher printed no error line; see logs/fleet-supervisor/supervisor.log}. The supervisor retries every tick and resolves this once a relaunch starts."; then
       date -u +%Y-%m-%dT%H:%M:%SZ >"$alerted"

@@ -703,6 +703,8 @@ rm -f "$T"/pane-* "$T"/capture-* "$T/probe-ok"
 cat >"$T/launch.sh" <<'SH'
 #!/usr/bin/env bash
 if [ -f "$FAKE/launch-fail" ]; then echo "attempt $1" >>"$FAKE/actions"; echo "error: claude not found on PATH" >&2; exit 1; fi
+# $FAKE/launch-refuse present = launch.sh refusing on its plugin check with GitHub unreachable: no "error:" line (engsys#311)
+if [ -f "$FAKE/launch-refuse" ]; then echo "attempt $1" >>"$FAKE/actions"; echo "verify: not verified against o/engsys@v9: gh api repos/o/engsys/git/blobs/abc failed: net/http: TLS handshake timeout" >&2; echo "fleet: not launching $1: the engsys plugin check could not run (exit 3), so the plugin is unverified (above)." >&2; exit 1; fi
 echo "launch $1 harness=${FLEET_ACTIVE_HARNESS:-unset}" >>"$FAKE/actions"; echo "2.1.300" >"$FAKE/pane-$1"
 printf '⏺ Reading the ledger first.\n' >"$FAKE/capture-$1"
 SH
@@ -958,6 +960,13 @@ reset; touch "$T/notify-fail" "$T/launch-fail"; ledger 90 "ok — merging #12"; 
 rm -f "$T/notify-fail"; run
 expect "236: an alert that could not be delivered is retried next tick" "^notify --level alert --incident launch-failed-acme-mm"
 rm -f "$T/launch-fail"
+
+# engsys#311: launch.sh refusing on an unreachable GitHub prints no "error:" line; the alert names its verify line
+reset; rm -f "$T/notify-fail"; ledger 90 "ok — merging #12"; pane exited; touch "$T/launch-refuse"; run
+expect "311: a verify refusal → the alert carries the verify line" "^notify --level alert --incident launch-failed-acme-mm .*FAILED (.*): verify: not verified against o/engsys@v9: .*TLS handshake timeout"
+expect "  …marked transient" "^notify --level alert .*(GitHub looks unreachable from this host: likely transient, the next tick retries)"
+expect "  …not the empty-output fallback" "!^notify .*printed no error line"
+rm -f "$T/launch-refuse"; run
 
 # engsys#236 end to end: the real launcher, whose new window's shell never runs the launch line (a fake tmux whose
 # pane stays at zsh): the supervisor alerts and logs RELAUNCH FAILED, never "relaunched"
