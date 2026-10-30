@@ -18,6 +18,7 @@ import {
   evaluateObservedRecords,
   probeHttpHealth,
   probeSyntheticCommand,
+  probeOutputLine,
 } from './adapters.mjs';
 import {
   evaluateServiceTransition,
@@ -1095,6 +1096,32 @@ describe('Trust boundary (engsys v2.0.1): registry location, probe execution, ga
     const real = probeSyntheticCommand({ check: 'tool-version', params: { tool: 'node' } }, { env: { PATH: path.dirname(process.execPath) } });
     assert.equal(real.status, 'healthy');
     assert.match(real.detail, /^v\d+\./);
+  });
+
+  test('details summarize probe output: no raw JSON, box-drawing rules or ANSI escapes (engsys#312)', () => {
+    const run = (out) => probeSyntheticCommand({ check: 'tool-version', params: { tool: 'node' } }, { execFn: () => out });
+    // gh api /rate_limit: the cut-off JSON prefix used to land on the board.
+    const json = run(JSON.stringify({ resources: { core: { limit: 5000, used: 436, remaining: 4564 } } }));
+    assert.equal(json.status, 'healthy');
+    assert.equal(json.detail, 'JSON object');
+    // coderabbit auth status: a box-drawing rule first, colored text after it.
+    const box = run('────────────────────\n\x1b[32m✔\x1b[0m Authenticated as fleet-bot\n────────────────────\n');
+    assert.equal(box.detail, '✔ Authenticated as fleet-bot');
+    assert.equal(run('───\n   \n').detail, 'ok');
+    assert.equal(run('[1,2').detail, 'JSON output (unparsed)');
+    assert.equal(run('v22.1.0\n').detail, 'v22.1.0');
+    // The failure snippet takes the same line.
+    const execFn = () => {
+      const e = new Error('exit 2');
+      e.status = 2;
+      e.stdout = '════\n\x1b[31mservice unavailable\x1b[0m\n';
+      e.stderr = '';
+      throw e;
+    };
+    const fail = probeSyntheticCommand({ check: 'tool-version', params: { tool: 'node' } }, { execFn });
+    assert.equal(fail.status, 'down');
+    assert.equal(fail.detail, 'synthetic probe failed (exit 2): service unavailable');
+    assert.equal(probeOutputLine('x'.repeat(300)).length, 160);
   });
 
   test('every kind gets a scrubbed env: credentials only for the group it declares', () => {

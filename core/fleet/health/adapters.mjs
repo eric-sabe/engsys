@@ -439,6 +439,29 @@ export function isAuthOrContextFailure(outputText, errCode = null) {
   return AUTH_FAILURE_PATTERNS.some((re) => re.test(text));
 }
 
+/**
+ * One readable line of probe output for a detail (engsys#312): ANSI escapes stripped, lines with no letter or digit
+ * (box-drawing rules, blank padding) skipped, and JSON summarized, never echoed (a cut-off JSON prefix is noise).
+ */
+export function probeOutputLine(text, maxLen = 160) {
+  const clean = String(text ?? '')
+    // eslint-disable-next-line no-control-regex
+    .replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '')
+    // eslint-disable-next-line no-control-regex
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+    .trim();
+  if (/^[[{]/.test(clean)) {
+    try {
+      const v = JSON.parse(clean);
+      return Array.isArray(v) ? `JSON array (${v.length} item(s))` : 'JSON object';
+    } catch {
+      return 'JSON output (unparsed)';
+    }
+  }
+  const line = clean.split('\n').map((l) => l.trim()).find((l) => /[\p{L}\p{N}]/u.test(l));
+  return line ? line.slice(0, maxLen) : '';
+}
+
 function runCommandSafe(cmdSpec, { timeoutMs = 10000, env = process.env, cwd = os.tmpdir(), execFn = execFileSync } = {}) {
   try {
     // argv array, no shell, and only the variables this kind needs (probe-kinds.mjs).
@@ -493,7 +516,7 @@ export function probeSyntheticCommand(probeCfg, { env = process.env, execFn = ex
   if (authSpec) {
     const authRes = runCommandSafe(authSpec, { timeoutMs, env, cwd, execFn });
     if (!authRes.ok) {
-      const msg = (authRes.stderr || authRes.stdout || 'auth_check failed').trim().split('\n')[0].slice(0, 160);
+      const msg = probeOutputLine(authRes.stderr || authRes.stdout) || 'auth_check failed';
       return {
         status: 'healthy',
         authLocalFailure: true,
@@ -518,7 +541,7 @@ export function probeSyntheticCommand(probeCfg, { env = process.env, execFn = ex
       };
     }
     if (isAuthOrContextFailure(combined, res.errCode)) {
-      const firstLine = combined.split('\n')[0]?.slice(0, 160) || 'missing local auth/context';
+      const firstLine = probeOutputLine(combined) || 'missing local auth/context';
       return {
         status: 'healthy',
         authLocalFailure: true,
@@ -529,7 +552,7 @@ export function probeSyntheticCommand(probeCfg, { env = process.env, execFn = ex
     }
     const degCodes = Array.isArray(probeCfg.degraded_exit_codes) ? probeCfg.degraded_exit_codes : [];
     const status = degCodes.includes(res.code) ? 'degraded' : 'down';
-    const snippet = combined.split('\n')[0]?.slice(0, 160) || `exit ${res.code ?? 1}`;
+    const snippet = probeOutputLine(combined) || `exit ${res.code ?? 1}`;
     return {
       status,
       detail: `synthetic probe failed (exit ${res.code ?? 1}): ${snippet}`,
@@ -561,7 +584,7 @@ export function probeSyntheticCommand(probeCfg, { env = process.env, execFn = ex
     }
   }
 
-  const firstLine = res.stdout.trim().split('\n')[0]?.slice(0, 120) || 'ok';
+  const firstLine = probeOutputLine(res.stdout, 120) || 'ok';
   return {
     status: 'healthy',
     detail: firstLine,
