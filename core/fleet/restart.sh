@@ -112,7 +112,7 @@ status() {
     since="$(head -n 1 "$sup_state/auth.expired")"
     since="$(node "$FLEET_KIT_DIR/../lib/operator-time.mjs" "$since" 2>/dev/null || printf '%s' "$since")"
     [ ! -s "$sup_state/auth.held" ] || held="$(paste -sd, - <"$sup_state/auth.held" | sed 's/,/, /g')"
-    local login_hint="claude /login"
+    local login_hint; login_hint="$(fleet_login_cmd) /login"
     [ "${HARNESS:-claude}" = copilot ] && login_hint="gh auth login"
     echo "auth: expired since $since. The supervisor relaunches and kills nothing until it works${held:+ (held: $held)}; run /login in any session, or $login_hint"
   fi
@@ -123,7 +123,7 @@ status() {
     sess="${f##*/auth.}"; sess="${sess%.expired}"
     since="$(head -n 1 "$f")"; since="$(node "$FLEET_KIT_DIR/../lib/operator-time.mjs" "$since" 2>/dev/null || printf '%s' "$since")"
     dirp="$(fleet_session_config_dir "$sess" 2>/dev/null || true)"
-    echo "auth ($sess): expired since $since. Only $sess is held; the others keep running. Log it in: CLAUDE_CONFIG_DIR=${dirp:-<its dir>} claude, then /login"
+    echo "auth ($sess): expired since $since. Only $sess is held; the others keep running. Log it in: $(fleet_login_cmd "${dirp:-<its dir>}"), then /login"
   done
   if [ "$LAST_CHANGE" != 0 ]; then
     echo "last host change: $(date -r "$LAST_CHANGE" '+%Y-%m-%d %H:%M' 2>/dev/null || date -d "@$LAST_CHANGE" '+%Y-%m-%d %H:%M')  ($(tail -1 "$FLEET_STATE/sync.log" 2>/dev/null | cut -d' ' -f2-))"
@@ -168,7 +168,7 @@ cycle() {
   esac
   if why="$(login_expired "$n")"; then
     dir="$(fleet_session_config_dir "$n" 2>/dev/null || true)"
-    echo "$n: login expired, not cycled ($why). Re-login: CLAUDE_CONFIG_DIR=${dir:-${FLEET_CLAUDE_CONFIG_DIR:-~/.claude}} claude, then /login. The supervisor relaunches it on its next tick once the login works."
+    echo "$n: login expired, not cycled ($why). Re-login: $(fleet_login_cmd "${dir:-${FLEET_CLAUDE_CONFIG_DIR:-~/.claude}}"), then /login. The supervisor relaunches it on its next tick once the login works."
     return 0
   fi
   if is_monster "$n"; then

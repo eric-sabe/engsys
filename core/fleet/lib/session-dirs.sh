@@ -105,9 +105,9 @@ fleet_session_dirs_missing() {
 # login Keychain is not readable there, engsys#210).
 fleet_config_dir_fix() {
   if [ "${FLEET_CLAUDE_CONFIG_DIR_PER_SESSION:-off}" = on ]; then
-    echo "fleet config-dir init${1:+ --session $1}, then log in once and accept workspace trust once per session (CLAUDE_CONFIG_DIR=<dir> claude: /login, /exit) from a terminal in the Mac's own GUI session, not SSH, then fleet sync, fleet verify, and restart each monster (fleet guide § 6.1)"
+    echo "fleet config-dir init${1:+ --session $1}, then log in once and accept workspace trust once per session ($(fleet_login_cmd "<dir>"): /login, /exit) from a terminal in the Mac's own GUI session, not SSH, then fleet sync, fleet verify, and restart each monster (fleet guide § 6.1)"
   else
-    echo "fleet config-dir init, then log in once and accept workspace trust (CLAUDE_CONFIG_DIR=<dir> claude: /login, /exit) from a terminal in the Mac's own GUI session, not SSH, then fleet sync and fleet restart --all (fleet guide § 6.1)"
+    echo "fleet config-dir init, then log in once and accept workspace trust ($(fleet_login_cmd "<dir>"): /login, /exit) from a terminal in the Mac's own GUI session, not SSH, then fleet sync and fleet restart --all (fleet guide § 6.1)"
   fi
 }
 
@@ -178,6 +178,7 @@ fleet_sync_deferred_set() { # fleet_sync_deferred_set add|drop <name>
 # fleet_sync_deferred_alert [<github url>] → once per tick (supervise.sh): one `fleet notify --level action` per session
 # deferred for longer than SYNC_DEFER_ALERT_HOURS (fleet.conf, default 24), latched in sync-deferred.alerted.<name>,
 # and resolved once the session is no longer deferred. A deferral never clears by itself while the session runs.
+# A deferred ~/.claude (scope supervised, sync-deferred.user-claude) gets its own at once (engsys#302).
 # The action level needs a link (--re, an https URL with no markup: notify.mjs drops anything else, engsys#238, #255): the
 # caller's status or ledger issue; with none that qualifies it is posted as info. Routing (the host operator's DM for
 # action) is notify's.
@@ -191,10 +192,20 @@ fleet_sync_deferred_alert() {
     fleet_sync_deferred "$n" && continue
     node "$FLEET_KIT_DIR/notify.mjs" --incident "sync-deferred-$n" --resolve "Resolved: session $n on $host restarted, and its config dir was synced to the pins." >&2 && rm -f "$lf"
   done
-  [ -f "$f" ] || return 0
   lvl=(--level info)
   local re_ok='^https://[^][:space:]<>|`]+$'
   if [ "${#url}" -le 508 ] && [[ "$url" =~ $re_ok ]]; then lvl=(--level action --re "$url"); fi
+  # engsys#302: ~/.claude left behind by an unattended sync while interactive roles ran on it (sync.sh,
+  # sync-deferred.user-claude). No restart syncs it, so it is alerted at once, latched in sync-deferred.user-claude.alerted;
+  # fleet verify does not hold the monsters for it while its installs match their own release.
+  local uf="$f.user-claude"
+  if [ -f "$uf" ] && [ ! -f "$uf.alerted" ]; then
+    node "$FLEET_KIT_DIR/notify.mjs" "${lvl[@]}" --incident sync-deferred-user-claude "Fleet on $host: ~/.claude, which the interactive roles run on, is behind the pins. The supervisor's fleet sync left it alone because they were running on it (a second claude on their login can log them out), and nothing syncs it by itself. Please run fleet sync. Until then the interactive roles, and the security reviews they dispatch, run on the plugins they had; the monsters are not held for it while those still match their own release (fleet verify)." >&2 \
+      && date +%s >"$uf.alerted"
+  elif [ ! -f "$uf" ] && [ -f "$uf.alerted" ]; then
+    node "$FLEET_KIT_DIR/notify.mjs" --incident sync-deferred-user-claude --resolve "Resolved: ~/.claude on $host was synced to the pins." >&2 && rm -f "$uf.alerted"
+  fi
+  [ -f "$f" ] || return 0
   while IFS= read -r n; do
     [ -n "$n" ] && [ ! -f "$f.alerted.$n" ] || continue
     at="$(cat "$f.since/$n" 2>/dev/null)" && [[ "$at" =~ ^[0-9]+$ ]] || continue

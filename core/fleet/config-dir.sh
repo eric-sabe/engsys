@@ -99,7 +99,7 @@ for f in settings.json .claude.json; do
 done
 }
 # logged_in <dir> → 0 only when claude says so explicitly (an unknown answer prints the login command too)
-logged_in() { [ "$( (cd "${TMPDIR:-/tmp}" && CLAUDE_CONFIG_DIR="$1" fleet_dir_lock "$1" claude auth status --json </dev/null) 2>/dev/null | jq -r '.loggedIn // empty' 2>/dev/null || true)" = true ]; }
+logged_in() { [ "$( (cd "$(fleet_outside_home_dir)" && CLAUDE_CONFIG_DIR="$1" fleet_dir_lock "$1" claude auth status --json </dev/null) 2>/dev/null | jq -r '.loggedIn // empty' 2>/dev/null || true)" = true ]; }
 
 if [ "$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION" = on ] && [ -z "$dir" ]; then
   fleet_roster_prepare
@@ -128,7 +128,7 @@ if [ "$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION" = on ] && [ -z "$dir" ]; then
     echo "fleet config-dir: log each of these in once, with the fleet's seat (then /exit), and accept workspace trust in PIN_DIR for each:"
     while IFS='|' read -r n d; do
       [ -n "$n" ] || continue
-      echo "  $n: CLAUDE_CONFIG_DIR=$d claude                      # /login, then /exit"
+      echo "  $n: $(fleet_login_cmd "$d")   # /login, then /exit"
       echo "  $n: cd $PIN_DIR && CLAUDE_CONFIG_DIR=$d claude --dangerously-skip-permissions   # trust, /exit"
     done <<<"$login_needed"
   elif [ -z "$login_unknown" ]; then
@@ -153,7 +153,7 @@ if ! logged_in "$dir" && fleet_keychain_unreadable; then
 fi
 cat <<EOF
 fleet config-dir: next, once:
-  1. CLAUDE_CONFIG_DIR=$dir claude            # /login with the fleet's seat, then /exit
+  1. $(fleet_login_cmd "$dir")   # /login with the fleet's seat, then /exit
   2. cd $PIN_DIR && CLAUDE_CONFIG_DIR=$dir claude --dangerously-skip-permissions   # accept workspace trust, /exit
   3. set FLEET_CLAUDE_CONFIG_DIR=$dir in fleet/fleet.conf (or ~/.config/$FLEET_ORG/fleet.local.conf)
   4. fleet sync                                 # installs the pinned plugins into $dir

@@ -83,6 +83,10 @@
 # without it). A tag that was moved (re-cut) is not told apart from tampering: its changed files are a MISMATCH. Residual: the list is a file in .fleet/, so a process running as the fleet's
 # user could add a live session's name to it and quiet that session's version-mismatch alert until it restarts (it could
 # already edit fleet.conf or the verify cache, verify-wrappers.mjs).
+# ~/.claude under scope supervised that the supervisor's auto-sync left alone while interactive roles ran on it
+# (.fleet/sync-deferred.user-claude) gets the same test in every check, a launch's too (engsys#302): no restart syncs it, so
+# holding it would hold every monster relaunch until someone ran fleet sync. Passed, it is not alerted here; the
+# supervisor's tick asks for that fleet sync (fleet_sync_deferred_alert). An old release that can't be checked holds.
 #
 # Exit: 0 match | 1 MISMATCH | 3 not verified (GitHub unreachable, no pin or not a tag, nothing installed)
 #       | 2 usage. Merge and maintain sessions start only on 0 (engsys#86 review H1).
@@ -194,7 +198,7 @@ dir_logged_out() {
   fi
   if [ "$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION" = on ] && [ -n "$max_age" ] && at="$(cat "$ok" 2>/dev/null)" && [[ "$at" =~ ^[0-9]+$ ]] \
     && [ $(( $(date +%s) - at )) -lt $(( max_age * 60 )) ]; then return 1; fi
-  li="$( (cd "${TMPDIR:-/tmp}" && CLAUDE_CONFIG_DIR="$FLEET_CLAUDE_CONFIG_DIR" fleet_dir_lock "$FLEET_CLAUDE_CONFIG_DIR" claude auth status --json </dev/null) 2>/dev/null | jq -r 'if .loggedIn == true then "true" elif .loggedIn == false then "false" else "" end' 2>/dev/null || true)"
+  li="$( (cd "$(fleet_outside_home_dir)" && CLAUDE_CONFIG_DIR="$FLEET_CLAUDE_CONFIG_DIR" fleet_dir_lock "$FLEET_CLAUDE_CONFIG_DIR" claude auth status --json </dev/null) 2>/dev/null | jq -r 'if .loggedIn == true then "true" elif .loggedIn == false then "false" else "" end' 2>/dev/null || true)"
   if [ "$FLEET_CLAUDE_CONFIG_DIR_PER_SESSION" = on ]; then
     if [ "$li" = true ]; then date +%s >"$ok"; else rm -f "${ok:?}"; fi
   fi
@@ -273,22 +277,28 @@ rc=0 out="" plist="" cfg_missing=0 deferred_pass=0 deferred_gone=""
 # The version comes from the dir's own files, so a forged one (a release that never was) lands here too: that is why it is
 # alerted, worded as possible tampering, and never held on: holding changes nothing for the running session (running
 # sessions are never stopped by the gate), and the relaunch, the one thing the gate decides, is verified in full.
-deferred_check() {
-  local probs line id ver map="" a=() i nx="" dout drc=0
-  probs="$(sed -n 's/^  \(.*\)$/\1/p' <<<"$out")"
-  [ -n "$probs" ] && ! grep -qv '^version ' <<<"$probs" || return 0
+# deferred_recheck <first run's output> <cache file> <verifier args...> → rc 1 unless EVERY problem in that output is a
+# `version` line of an install at another version than the pin (one version per plugin); else the verifier is run again
+# with each behind plugin's tag set to its installed version (the host kit, which is at the new pin, is left out; its
+# --cache, if any, is the given file) and drc (its verdict: 0, 1 MISMATCH, 4 release gone, 3 anything else), dout (its
+# output) and dmap ("<plugin id> <version>" per behind install) are set.
+deferred_recheck() {
+  local first="$1" cachef="$2" probs line id ver a=() i nx=""; shift 2
+  drc=0 dout="" dmap=""
+  probs="$(sed -n 's/^  \(.*\)$/\1/p' <<<"$first")"
+  [ -n "$probs" ] && ! grep -qv '^version ' <<<"$probs" || return 1
   while IFS= read -r line; do
-    [[ "$line" =~ ^version\ +([^ ]+)\ .*\ is\ ([0-9]+\.[0-9]+\.[0-9]+),\ not\ the\ pin\  ]] || return 0
+    [[ "$line" =~ ^version\ +([^ ]+)\ .*\ is\ ([0-9]+\.[0-9]+\.[0-9]+),\ not\ the\ pin\  ]] || return 1
     id="${BASH_REMATCH[1]}" ver="${BASH_REMATCH[2]}"
-    if grep -q "^$id " <<<"$map"; then grep -Fxq "$id $ver" <<<"$map" || return 0; else map+="$id $ver"$'\n'; fi
+    if grep -q "^$id " <<<"$dmap"; then grep -Fxq "$id $ver" <<<"$dmap" || return 1; else dmap+="$id $ver"$'\n'; fi
   done <<<"$probs"
-  oldtag() { local v; v="$(awk -v i="$1" '$1 == i { print $2; exit }' <<<"$map")"; [ -n "$v" ] && printf 'v%s' "$v"; }
-  for i in "${args[@]}"; do
+  oldtag() { local v; v="$(awk -v i="$1" '$1 == i { print $2; exit }' <<<"$dmap")"; [ -n "$v" ] && printf 'v%s' "$v"; }
+  for i in "$@"; do
     case "$nx" in
       tag) a+=("$(oldtag "engsys@$ENGSYS_MARKETPLACE" || printf '%s' "$i")"); nx=""; continue ;;
       market) id="${i%%|*}"; if ver="$(oldtag "$id")"; then a+=("${i%|*}|$ver"); else a+=("$i"); fi; nx=""; continue ;;
       skip) nx=""; continue ;;
-      cache) a+=("$FLEET_STATE/verify-wrappers$SFX.deferred.json"); nx=""; continue ;;
+      cache) a+=("$cachef"); nx=""; continue ;;
     esac
     case "$i" in
       --tag) nx=tag ;; --market-plugin) nx=market ;; --engsys-dir) nx=skip; continue ;; --cache) nx=cache ;;
@@ -300,14 +310,36 @@ deferred_check() {
   if [ "$drc" = 1 ] && ! grep -q '^verify: MISMATCH' <<<"$dout"; then drc=3; fi
   # node exits 4 on an internal failure of its own too: only the verifier's line counts (engsys#260)
   if [ "$drc" = 4 ] && ! grep -q '^verify: release gone: [^(]*[^ (] (no such tag' <<<"$dout"; then drc=3; fi
+  case "$drc" in 0 | 1 | 4) ;; *) drc=3 ;; esac
+}
+behind_list() { awk 'NF { printf "%s%s v%s", s, $1, $2; s = ", " }' <<<"$dmap"; }
+deferred_check() {
+  deferred_recheck "$out" "$FLEET_STATE/verify-wrappers$SFX.deferred.json" "${args[@]}" || return 0
   case "$drc" in
-    0) out="$out"$'\n'"fleet verify: each install behind the pin matches its own release ($(awk 'NF { printf "%s%s v%s", s, $1, $2; s = ", " }' <<<"$map")): session $session is running on what it loaded before fleet sync, which left its dir alone while it runs; the dir is synced and verified again before it relaunches (fleet restart $session). Not held, not alerted."
+    0) out="$out"$'\n'"fleet verify: each install behind the pin matches its own release ($(behind_list)): session $session is running on what it loaded before fleet sync, which left its dir alone while it runs; the dir is synced and verified again before it relaunches (fleet restart $session). Not held, not alerted."
        rc=0 deferred_pass=1 ;;
     1) out="$out"$'\n'"fleet verify: the dir of running session $session is behind the pin, and its installs do NOT match their own release either:"$'\n'"$dout"; rc=1 ;;
     4) deferred_gone="$(sed -n 's/^verify: release gone: \([^(]*[^ (]\) (no such tag.*$/\1/p' <<<"$dout" | tail -n 1)"
        out="$out"$'\n'"$dout"$'\n'"fleet verify: behind, cannot re-verify: session $session is running on what it loaded before fleet sync, and the release of ${deferred_gone:-an install behind the pin} is no longer on GitHub (its tag is gone), so those files can't be checked against it; everything else in its dir matches. Not held: the relaunch syncs the dir to the pin and verifies it in full first (fleet restart $session). Alerted once."
        rc=0 deferred_pass=1 ;;
     *) out="$out"$'\n'"fleet verify: not verified: the installs of running session $session are behind the pin, and their own release could not be checked:"$'\n'"$dout"; rc=3 ;;
+  esac
+}
+# user_deferred_check (engsys#302): ~/.claude under scope supervised, which the supervisor's auto-sync left alone while
+# interactive roles ran on it (.fleet/sync-deferred.user-claude, engsys#253), stays behind the pins until someone runs fleet
+# sync: no restart syncs it. Held, it would hold every monster relaunch until then. So it passes (urc 0) only when EVERY
+# problem in it is an install at another version than the pin and each of those installs matches its OWN release, file by
+# file, the same test as deferred_check; the supervisor's tick alerts the record ("run fleet sync", fleet_sync_deferred_alert).
+# Tampered files of the old version, an old release that can't be checked (its tag gone included), or any other problem:
+# the MISMATCH stands and holds, as before. The trade-off of engsys#253: until the sync an interactive session, and the
+# security reviews it dispatches, run on an older release, one that still matches its own tag.
+user_deferred_check() {
+  deferred_recheck "$uout" "$FLEET_STATE/verify-wrappers-user.deferred.json" "${uargs[@]}" || return 0
+  case "$drc" in
+    0) uout="$uout"$'\n'"fleet verify: ~/.claude is behind the pin, and each install behind it matches its own release ($(behind_list)): the supervisor's auto-sync left it alone while interactive roles ran on it. Not held; run fleet sync to bring it to the pin."
+       urc=0 ;;
+    1) uout="$uout"$'\n'"fleet verify: ~/.claude is behind the pin, and its installs do NOT match their own release either:"$'\n'"$dout" ;;
+    *) uout="$uout"$'\n'"$dout"$'\n'"fleet verify: ~/.claude is behind the pin, and its installs could not be checked against their own release: held as a mismatch until fleet sync brings it to the pin" ;;
   esac
 }
 # The Claude Code config dir the fleet's sessions run with: FLEET_CLAUDE_CONFIG_DIR (fleet-env.sh exports
@@ -333,7 +365,7 @@ elif [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] && ! [ -d "$FLEET_CLAUDE_CONFIG_DIR" 
   out="fleet verify: not verified: FLEET_CLAUDE_CONFIG_DIR not found: $FLEET_CLAUDE_CONFIG_DIR ($(fleet_config_dir_fix "$session"))"; rc=3
 elif [ -n "${FLEET_CLAUDE_CONFIG_DIR:-}" ] && [ "${HARNESS:-claude}" = claude ] && dir_logged_out; then
   # A rotation must not relaunch a monster into a login prompt: hold until the fleet seat is logged in.
-  out="fleet verify: not verified: the fleet's Claude config dir $FLEET_CLAUDE_CONFIG_DIR is not logged in (CLAUDE_CONFIG_DIR=$FLEET_CLAUDE_CONFIG_DIR claude, then /login)"; rc=3
+  out="fleet verify: not verified: the fleet's Claude config dir $FLEET_CLAUDE_CONFIG_DIR is not logged in ($(fleet_login_cmd "$FLEET_CLAUDE_CONFIG_DIR"), then /login)"; rc=3
 else
   plist="$(mktemp "$FLEET_STATE/plugin-list.XXXXXX")"
   if [ "${HARNESS:-claude}" = "copilot" ]; then
@@ -437,6 +469,7 @@ else
         urc=0; uout="$(node "$FLEET_KIT_DIR/lib/verify-wrappers.mjs" "${uargs[@]}" 2>&1)" || urc=$?
         if [ "$urc" = 1 ] && ! grep -q '^verify: MISMATCH' <<<"$uout"; then urc=3; fi
         case "$urc" in 0 | 1 | 3) ;; *) urc=3 ;; esac
+        if [ "$urc" = 1 ] && [ -f "$FLEET_STATE/sync-deferred.user-claude" ]; then user_deferred_check; fi
         out="$out"$'\n'"fleet verify: ~/.claude (interactive roles, FLEET_CLAUDE_CONFIG_DIR_SCOPE=supervised): the engsys plugin${pack_plugins:+, its stack packs}${inst_plugins:+ and the $INSTANCE_MARKETPLACE plugin(s)}"$'\n'"$uout"
         rc="$urc"
       fi

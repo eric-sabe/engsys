@@ -56,12 +56,39 @@
 # SYNC_DEFER_ALERT_HOURS (fleet.conf, default 24) on a config dir fleet sync left behind the pins (engsys#253), and
 # resolves it once the session restarted.
 #
+# Every run stamps its start ($FLEET_STATE/supervisor.tick) and, once the tick completed, its end
+# ($FLEET_STATE/supervisor.tick.done), for the maintenance monster's stall watch (ff-engsys-fleet#48, engsys#308): see
+# "The tick stamps" below.
+#
 # Usage: supervise.sh [--instance <dir>]
 set -euo pipefail
 if [ "${1:-}" = --instance ]; then FLEET_INSTANCE="${2:?--instance needs a directory}"; export FLEET_INSTANCE; shift 2; fi
 case "${1:-}" in -h | --help) sed -n '2,/^set -/{/^set -/!p;}' "$0"; exit 0 ;; esac
 # shellcheck source=lib/fleet-env.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib/fleet-env.sh"
+
+# The tick stamps (ff-engsys-fleet#48, engsys#308). The supervisor can't report its own absence (launchd stalled
+# behind macOS privacy prompts for 19.5 h and 36 h), so the maintenance monster's tick reads these
+# (core/skills/maintenance-monster/scripts/mnt-supervisor-watch.sh) and alerts once when one is older than 3 x the
+# job's StartInterval.
+#   $FLEET_STATE/supervisor.tick       written first, before anything that can stop the tick: "the job ran at <time>".
+#                                      `plist` names the launchd job this host would run it from (no such file: the job
+#                                      is not installed here, and the watch stays silent); `done` names the end stamp,
+#                                      which tells the watch this supervisor writes one (one that predates it doesn't,
+#                                      and is then watched on the start stamp alone).
+#   $FLEET_STATE/supervisor.tick.done  written once the tick completed: nothing to do, or fleet-supervisor.sh exited 0.
+#                                      A run that dies after the start stamp (fleet_check_engsys, a missing template, a
+#                                      supervisor error) leaves it to age while the start stamp stays fresh.
+supervisor_label="com.${FLEET_ORG}.fleet.fleet-supervisor"
+tick_stamp() { # tick_stamp <file> [<extra line>...]: write the stamp atomically; a warning, never a stop, when it can't
+  local f="$1"; shift
+  { mkdir -p "$FLEET_STATE" \
+    && { printf 'epoch=%s\nat=%s\nlabel=%s\nplist=%s\n' "$(date -u +%s)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$supervisor_label" \
+      "$HOME/Library/LaunchAgents/$supervisor_label.plist"; [ $# = 0 ] || printf '%s\n' "$@"; } >"$f.$$" \
+    && mv "$f.$$" "$f"; } 2>/dev/null \
+    || { rm -f "$f.$$" 2>/dev/null; echo "fleet supervise: WARNING could not write $f" >&2; }
+}
+tick_stamp "$FLEET_STATE/supervisor.tick" "done=$FLEET_STATE/supervisor.tick.done"
 
 fleet_check_engsys
 [ -f "$FLEET_REPO/fleet/supervisor.conf.tmpl" ] || fleet_die "no fleet/supervisor.conf.tmpl — the supervisor is not enabled for this instance"
@@ -152,7 +179,15 @@ if [ "$kept" = 0 ] && { fleet_host_registry_alert >/dev/null || [ -f "$FLEET_REP
 fi
 if [ "$kept" = 0 ]; then
   echo "fleet supervise: no supervised session runs on this host${dropped:+ (not on this host:$dropped)}; nothing to do"
+  tick_stamp "$FLEET_STATE/supervisor.tick.done"
   exit 0
 fi
 cd "$FLEET_REPO"
-exec bash "$ENGSYS_DIR/core/skills/agent-sessions/scripts/fleet-supervisor.sh" "$conf"
+# One compound command, parsed whole before it runs and left only by its exit: the supervisor can fleet sync this
+# checkout (verify --auto-sync) while it runs, and bash must not read the rest of a rewritten script afterwards.
+{
+  rc=0
+  bash "$ENGSYS_DIR/core/skills/agent-sessions/scripts/fleet-supervisor.sh" "$conf" || rc=$?
+  [ "$rc" != 0 ] || tick_stamp "$FLEET_STATE/supervisor.tick.done"
+  exit "$rc"
+}

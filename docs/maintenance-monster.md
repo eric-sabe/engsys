@@ -294,6 +294,23 @@ error); the harvester refuses to run without one. Harvested titles stay untruste
 title's first tokens in 2+ PRs, which review findings rarely repeat, so with the default settings it usually proposes
 nothing; tuning that is a later operator decision. Details: the skill's references § Findings harvest.
 
+## Supervisor watch
+
+The fleet supervisor can't report its own absence: when macOS privacy prompts stalled every fleet launchd job for
+19.5 h and then 36 h (ff-engsys-fleet#48), the monsters kept heartbeating from tmux and nothing alerted. The
+maintenance monster is alive in tmux on the same host, so its tick watches the supervisor:
+`mnt-tick.sh` runs `mnt-supervisor-watch.sh`, which reads the stamp `fleet supervise` writes on every run
+(`$FLEET_STATE/supervisor.tick`) and the end stamp it writes once a tick completed (`supervisor.tick.done`).
+Either older than `supervisor_stale_intervals` (default 3) x the job's launchd `StartInterval` (or
+`supervisor_stale_minutes`), or dated further than that in the future → one
+`fleet notify --level alert --incident fleet-supervisor-stalled` (bounded at 30 s; a hung or failed notify is retried
+next tick) with the check and recovery steps, latched in the state dir, and resolved once the supervisor ticks (and
+completes ticks) again. A supervisor that predates the end stamp doesn't name it and is watched on the start stamp
+alone. It is
+silent on a host with no supervisor job (no `FLEET_STATE`, no stamp, no installed plist, or a job booted out on
+purpose) and never fails the tick. It can't see a host that is asleep or down; that needs a watcher outside the host.
+Details: the skill's references § Supervisor watch.
+
 ## Expert routing
 
 | Category                                     | Agent      |

@@ -145,6 +145,7 @@ SH
 cat >"$T/bin/launchctl" <<'SH'
 #!/usr/bin/env bash
 echo "launchctl $*" >>"$FAKE/launchctl.log"
+[ "${FAKE_LAUNCHCTL_FAIL:-}" != "$1" ] || exit 5   # FAKE_LAUNCHCTL_FAIL=<subcommand> makes that one fail
 exit 0
 SH
 chmod +x "$T/bin/"*
@@ -281,6 +282,9 @@ ENGSYS_HOST="$HOME/git/engsys"
 STATE="$INST/.fleet"
 fleet() { bash "$ENGSYS_HOST/core/fleet/bin/fleet" --instance "$INST" "$@"; }
 mark() { wc -l <"$FAKE/claude.log" | tr -d ' '; }
+# engsys#304: every login hint starts from an empty dir, never from ~ (fleet_login_cmd)
+# shellcheck disable=SC2016 # the $(mktemp -d) is the hint's own text
+LOGIN='cd "$(mktemp -d)" && '
 since() { tail -n +"$(($1 + 1))" "$FAKE/claude.log"; }
 lineno() { grep -n -m1 -- "$2" <<<"$1" | cut -d: -f1; } # lineno <text> <fixed pattern> → first line number ('' if none)
 json_names() { jq -r "$2" "$FAKE/claude/$1.json" | sort | paste -sd' ' -; }
@@ -310,6 +314,14 @@ rc_is "FLEET_INSTANCE is honoured" 0
   # shellcheck source=/dev/null
   . "$ENGSYS_HOST/core/fleet/lib/fleet-env.sh"
   eq "conf: ~ expands, PIN_DIR" "$PIN_DIR" "$HOME/git/app"
+  # engsys#308: the login hint quotes the dir (spaces), and keeps restart.sh's ~/.claude fallback expandable when pasted
+  eq "login hint: a dir with a space is quoted" "$(fleet_login_cmd "$T/a dir")" "${LOGIN}CLAUDE_CONFIG_DIR='$T/a dir' claude"
+  # shellcheck disable=SC2088 # a literal ~, on purpose
+  eq "login hint: ~/.claude keeps its ~ unquoted" "$(fleet_login_cmd '~/.claude')" "${LOGIN}CLAUDE_CONFIG_DIR=~/'.claude' claude"
+  mkdir -p "$T/lc-bin"; printf '#!/bin/sh\nprintf "%%s" "$CLAUDE_CONFIG_DIR"\n' >"$T/lc-bin/claude"; chmod +x "$T/lc-bin/claude"
+  eq "login hint, pasted: a dir with a space and a quote arrives whole" "$(PATH="$T/lc-bin:$PATH" bash -c "$(fleet_login_cmd "$T/it's a dir")")" "$T/it's a dir"
+  # shellcheck disable=SC2088
+  eq "login hint, pasted: ~/.claude expands" "$(PATH="$T/lc-bin:$PATH" bash -c "$(fleet_login_cmd '~/.claude')")" "$HOME/.claude"
   eq "conf: ENGSYS_DIR defaults to ~/git/engsys" "$ENGSYS_DIR" "$HOME/git/engsys"
   eq "conf: ENGSYS_MARKETPLACE defaults to engsys" "$ENGSYS_MARKETPLACE" engsys
   eq "conf: READY_LABEL default" "$READY_LABEL" "mm:ready"
@@ -462,7 +474,7 @@ has "…reporting the default dir" "$OUT" "claude config dir: $HOME/.claude"
 printf 'FLEET_CLAUDE_CONFIG_DIR=%s\n' "$T/missing-cfg" >>"$LC"
 run fleet sync
 rc_is "a FLEET_CLAUDE_CONFIG_DIR that doesn't exist stops sync" 1
-has "…with the one-time setup" "$OUT" "log in with CLAUDE_CONFIG_DIR=$T/missing-cfg claude"
+has "…with the one-time setup" "$OUT" "log in with ${LOGIN}CLAUDE_CONFIG_DIR='$T/missing-cfg' claude"
 cp "$T/flc.bak" "$LC"
 # A fleet dir seeded before the claude.ai sync switches existed: sync adds them, keeps every other key, and
 # never touches ~/.claude/settings.json (engsys#200).
@@ -815,13 +827,13 @@ rc_is "per-session init exits 0" 0
 for n in acme-mm acme-build acme-security acme-rel; do
   [ -f "$SESS/$n/settings.json" ] && ok "init: $n has its own dir" || bad "init: $n has its own dir"
   eq "…seeded with the claude.ai sync off" "$(jq -c '[.syncClaudeAiSkills, .syncClaudeAiPlugins]' "$SESS/$n/settings.json")" '[false,false]'
-  has "…and the one-time login command is printed for it" "$OUT" "$n: CLAUDE_CONFIG_DIR=$SESS/$n claude"
+  has "…and the one-time login command is printed for it" "$OUT" "$n: ${LOGIN}CLAUDE_CONFIG_DIR='$SESS/$n' claude"
   eq "…mode 700" "$(mode_of "$SESS/$n")" 700
 done
 login_all acme-mm
 run fleet config-dir init
-hasnt "init (idempotent): a logged-in dir is not asked to log in again" "$OUT" "acme-mm: CLAUDE_CONFIG_DIR"
-has "…the others still are" "$OUT" "acme-build: CLAUDE_CONFIG_DIR=$SESS/acme-build claude"
+hasnt "init (idempotent): a logged-in dir is not asked to log in again" "$OUT" "acme-mm: ${LOGIN}CLAUDE_CONFIG_DIR"
+has "…the others still are" "$OUT" "acme-build: ${LOGIN}CLAUDE_CONFIG_DIR='$SESS/acme-build' claude"
 run fleet config-dir init --session acme-mm
 has "init --session: just that one" "$OUT" "session acme-mm -> $SESS/acme-mm"
 hasnt "…not the others" "$OUT" "session acme-build"
@@ -858,13 +870,13 @@ rm -rf "$FAKE/tmux"; : >"$FAKE/tmux.log"
 mv "$SESS/acme-mm" "$SESS/acme-mm.away"; run fleet launch acme-mm
 rc_is "no dir yet: the launch is refused" 1
 has "…saying what to run" "$OUT" "fleet config-dir init --session acme-mm"
-has "…and how to log in" "$OUT" "CLAUDE_CONFIG_DIR=$SESS/acme-mm claude"
+has "…and how to log in" "$OUT" "CLAUDE_CONFIG_DIR='$SESS/acme-mm' claude"
 eq "…nothing reached tmux" "$(grep -c send-keys "$FAKE/tmux.log" || true)" 0
 mv "$SESS/acme-mm.away" "$SESS/acme-mm"
 rm -f "$FAKE/loggedin/acme-security" "$STATE/auth-ok.acme-security"; touch "$FAKE/loggedout/acme-security"
 run fleet launch
 rc_is "one logged-out session dir: the whole launch exits non-zero" 1
-has "…naming it and the command" "$OUT" "SKIPPED: acme-security (its own Claude login ($SESS/acme-security) is not logged in: CLAUDE_CONFIG_DIR=$SESS/acme-security claude"
+has "…naming it and the command" "$OUT" "SKIPPED: acme-security (its own Claude login ($SESS/acme-security) is not logged in: ${LOGIN}CLAUDE_CONFIG_DIR='$SESS/acme-security' claude"
 has "…while the other sessions start" "$(tl acme-mm)" "export CLAUDE_CONFIG_DIR=$SESS/acme-mm"
 hasnt "…and the logged-out one does not" "$(cat "$FAKE/tmux.log")" "[acme:acme-security]"
 login_all acme-security
@@ -904,7 +916,7 @@ echo '{"syncClaudeAiSkills":false,"syncClaudeAiPlugins":false}' >"$SESS/acme-sec
 rm -f "$FAKE/loggedin/acme-mm"; touch "$FAKE/loggedout/acme-mm"; rm -f "$STATE/auth-ok.acme-mm"
 run fleet verify
 rc_is "a logged-out session dir is 'not verified' (a hold) for that session" 3
-has "…naming its dir and the login command" "$(sed -n '/== session acme-mm/,/== session acme-build/p' <<<"$OUT")" "CLAUDE_CONFIG_DIR=$SESS/acme-mm claude, then /login"
+has "…naming its dir and the login command" "$(sed -n '/== session acme-mm/,/== session acme-build/p' <<<"$OUT")" "(${LOGIN}CLAUDE_CONFIG_DIR='$SESS/acme-mm' claude, then /login"
 run fleet verify --session acme-security
 rc_is "…the others still pass" 0
 login_all acme-mm
@@ -1177,6 +1189,16 @@ DEFER_URL="http://github.com/acme/app/issues/11" dalert
 eq "a non-https link: still posted once" "$(dsaid 'session acme-mm has been running on its old plugins')" 3
 hasnt "…without the refused link" "$(grep 'running on its old plugins' "$FAKE/gh.log" | tail -n 1)" "http://github.com"
 if [ -f "$STATE/sync-deferred.alerted.acme-mm" ]; then ok "…and latched"; else bad "…and latched"; fi
+# engsys#302: ~/.claude left behind by an unattended sync: no restart syncs it, so it is alerted at once (action: run fleet sync)
+rm -rf "$STATE"/sync-deferred*; : >"$FAKE/gh.log"
+date +%s >"$UMARK"; dalert
+eq "a deferred ~/.claude is alerted at once" "$(dsaid '/.claude, which the interactive roles run on, is behind the pins')" 1
+has "…as an action linked to the status issue" "$(cat "$FAKE/gh.log")" "Approve or act on GitHub: https://github.com/acme/app/issues/11"
+has "…asking for a fleet sync" "$(cat "$FAKE/gh.log")" "Please run fleet sync."
+dalert
+eq "…latched: not again on the next tick" "$(dsaid '/.claude, which the interactive roles run on')" 1
+rm -f "$UMARK"; dalert
+if [ -e "$UMARK.alerted" ]; then bad "…synced: the incident is resolved (latch gone)"; else ok "…synced: the incident is resolved (latch gone)"; fi
 rm -rf "$STATE"/sync-deferred*
 cp "$T/flc.bak" "$LC"; rm -rf "$SESS" "$FAKE/tmux" "$FAKE/claude-cfg"; : >"$FAKE/tmux.log"
 
@@ -1346,7 +1368,7 @@ hasnt "no login hold → no auth line" "$OUT" "auth: expired"
 mkdir -p "$INST/logs/fleet-supervisor"; printf '2026-10-06T12:44:25Z\nthe `acme-mm` window\n' >"$INST/logs/fleet-supervisor/auth.expired"
 printf 'acme-mm\nacme-rel\n' >"$INST/logs/fleet-supervisor/auth.held"
 run fleet restart --status
-has "login hold → auth: expired since <time>" "$OUT" "auth: expired since 6 Oct 12:44 UTC. The supervisor relaunches and kills nothing until it works (held: acme-mm, acme-rel); run /login in any session, or claude /login"
+has "login hold → auth: expired since <time>" "$OUT" "auth: expired since 6 Oct 12:44 UTC. The supervisor relaunches and kills nothing until it works (held: acme-mm, acme-rel); run /login in any session, or ${LOGIN}claude /login"
 run fleet status
 has "  …in \`fleet status\` too" "$OUT" "auth: expired since"
 rm -f "$INST/logs/fleet-supervisor/auth.expired" "$INST/logs/fleet-supervisor/auth.held"
@@ -1388,7 +1410,7 @@ SUP="$INST/logs/fleet-supervisor"; mkdir -p "$SUP"
 printf '2026-10-19T17:30:00Z\nthe `acme-mm` window\n' >"$SUP/auth.acme-mm.expired"; : >"$FAKE/tmux.log"
 run fleet restart acme-mm
 rc_is "restart of a session on an auth hold exits 0" 0
-has "…says its login expired and names the dir to re-login" "$OUT" "acme-mm: login expired, not cycled (its own login is on the supervisor's auth hold since 2026-10-19T17:30:00Z). Re-login: CLAUDE_CONFIG_DIR="
+has "…says its login expired and names the dir to re-login" "$OUT" "acme-mm: login expired, not cycled (its own login is on the supervisor's auth hold since 2026-10-19T17:30:00Z). Re-login: ${LOGIN}CLAUDE_CONFIG_DIR="
 has "…and that the supervisor relaunches it" "$OUT" "The supervisor relaunches it on its next tick"
 hasnt "…no rotation request typed" "$(cat "$FAKE/tmux.log")" "[send-keys]"
 hasnt "…nothing killed" "$(cat "$FAKE/tmux.log")" "[kill-window]"
@@ -1834,10 +1856,10 @@ for n in acme-mm acme-build acme-security acme-rel; do rm -f "$FAKE/loggedin/$n"
 run env SSH_CONNECTION="10.0.0.1 1 10.0.0.2 22" PATH="$T/darwin-bin:$PATH" bash "$ENGSYS_HOST/core/fleet/bin/fleet" --instance "$INST" config-dir init
 rc_is "config-dir init over SSH on macOS exits 0" 0
 has "…says the login state is unknown" "$OUT" "login state unknown (SSH, Keychain not readable) for: acme-mm acme-build acme-security acme-rel"
-hasnt "…and prints no /login command for any session" "$OUT" "CLAUDE_CONFIG_DIR=$SESS/acme-mm claude"
+hasnt "…and prints no /login command for any session" "$OUT" "CLAUDE_CONFIG_DIR='$SESS/acme-mm"
 hasnt "…nor claims they are all logged in" "$OUT" "every session dir is logged in"
 run env -u SSH_CONNECTION -u SSH_TTY PATH="$T/darwin-bin:$PATH" bash "$ENGSYS_HOST/core/fleet/bin/fleet" --instance "$INST" config-dir init
-has "outside SSH the login commands are printed as before" "$OUT" "acme-mm: CLAUDE_CONFIG_DIR=$SESS/acme-mm claude"
+has "outside SSH the login commands are printed as before" "$OUT" "acme-mm: ${LOGIN}CLAUDE_CONFIG_DIR='$SESS/acme-mm' claude"
 # the single-dir form
 setconf "INSTANCE_MARKETPLACE=" "GH_APP_ENV=" "ENGSYS_REF=v1.4.0"
 touch "$FAKE/loggedout/$(basename "$T/one-dir")"
@@ -1976,8 +1998,14 @@ run fleet sync --check; rc_is "…the host is in sync" 0
 # the dirs after it (engsys#235 proposal 3)
 k4_phantom acme-mm "$HOME" "/other/real/project"; cp "$K4F" "$T/k4-installed.orig"
 rm -rf "$(stub_state acme-build)" "$(stub_state acme-rel)"   # behind the pins too: nothing installed
+k4_engsys="$(git -C "$ENGSYS_HOST" rev-parse HEAD)"; git -C "$ENGSYS_HOST" checkout -q v1.0.0; : >"$FAKE/launchctl.log"   # job templates move too
 m="$(mark)"; run fleet sync
 rc_is "a real other project's install still refuses that dir, and the run fails" 1
+# engsys#305: the failed dir no longer skips step 5
+has "…after step 5 all the same: the changed job templates are reinstalled" "$OUT" "launchd templates changed — reinstalling jobs"
+matches "…through launchctl" "$(cat "$FAKE/launchctl.log")" '^launchctl '
+has "…and the failure says so" "$OUT" "and the launchd jobs were brought up to date"
+eq "…the engsys checkout is back where it was" "$(git -C "$ENGSYS_HOST" rev-parse HEAD)" "$k4_engsys"
 has "…naming it" "$OUT" "engsys@engsys (/other/real/project)"
 has "…and calling the \$HOME one a stray, not to be removed with claude from ~" "$OUT" "The installs for \$HOME are strays"
 if cmp -s "$K4F" "$T/k4-installed.orig"; then ok "…the file is untouched while refused"; else bad "…the file is untouched while refused" "$(diff "$T/k4-installed.orig" "$K4F" || true)"; fi
@@ -1986,6 +2014,15 @@ has "…every one of them" "$(on_dir "$m" acme-rel)" "plugin install engsys@engs
 has "…the failed one is reported" "$OUT" "claude config dir $SESS/acme-mm: NOT synced (the reason is above); going on with the other dirs"
 has "…and summed up at the end" "$OUT" "the plugin step failed in: $SESS/acme-mm"
 hasnt "…never claims synced" "$OUT" "fleet-sync: synced."
+# engsys#308: install-jobs failing too still ends in the summary, and the run still fails
+k4_phantom acme-mm "$HOME" "/other/real/project"; rm -rf "$(stub_state acme-build)" "$(stub_state acme-rel)"
+git -C "$ENGSYS_HOST" checkout -q v1.0.0; : >"$FAKE/launchctl.log"
+FAKE_LAUNCHCTL_FAIL=bootstrap run fleet sync
+rc_is "a failed dir, then install-jobs failing too: the run fails" 1
+matches "…install-jobs did run, and launchctl bootstrap failed" "$(cat "$FAKE/launchctl.log")" '^launchctl bootstrap '
+has "…the summary is still printed" "$OUT" "the plugin step failed in: $SESS/acme-mm"
+has "…saying install-jobs failed too" "$OUT" "but install-jobs failed too (exit "
+hasnt "…not that the jobs are up to date" "$OUT" "and the launchd jobs were brought up to date"
 k4_phantom acme-mm "$HOME"
 run fleet sync; rc_is "…once only the \$HOME stray is left, a plain sync heals the host" 0
 export PATH="$OPATH"; unset FAKE_CLAUDE_PROJECT_DECLARED
@@ -1996,6 +2033,14 @@ c="$(cwd_mark)"; TMPDIR="$HOME/tmp" run fleet sync
 rc_is "sync with TMPDIR under \$HOME exits 0" 0
 eq "…no claude ran under \$HOME" "$(cwd_since "$c" | cut -f1 | grep -cE "^$HOME(/|\$)" || true)" 0
 eq "…every one from sync's own empty dir" "$(cwd_since "$c" | cut -f1 | grep -cvE '/fleet-sync\.[^/]+/cwd$' || true)" 0
+# engsys#305: the read-only login checks of config-dir init, verify and launch run outside $HOME too
+auth_cwds() { cwd_since "$1" | awk -F'\t' '$2 ~ /^auth status/ { print $1 }' | sort -u; }   # '' when none ran
+for k4cmd in "config-dir init" verify launch; do
+  rm -f "$STATE"/auth-ok.*; c="$(cwd_mark)"
+  # shellcheck disable=SC2086 # the subcommand and its argument
+  TMPDIR="$HOME/tmp" run fleet $k4cmd
+  eq "fleet $k4cmd with TMPDIR under \$HOME: its claude auth status calls ran from /tmp only" "$(auth_cwds "$c")" "$(cd /tmp && pwd -P)"
+done
 rm -rf "$HOME/tmp" "$HOME/.claude/settings.json" "$T/homelink" "$T/bin235"
 cp "$T/flc.bak" "$LC"; rm -rf "$SESS" "$FAKE/tmux" "$FAKE/claude-cfg"; : >"$FAKE/tmux.log"
 

@@ -257,13 +257,180 @@ run env FLEET_ID=alice "${MTICK[@]}" --config "$T/hv-on.yml"
 [ "$OUT" = NOOP ] && ok "  …latched for the window: NOOP" || bad "  …latched for the window: NOOP" "$OUT"
 printf 'repo: acme/app\nfindings_harvest:\n  enabled: true\n  cadence_days: 0\n' >"$T/hv-bad.yml"
 run env FLEET_ID=alice "${MTICK[@]}" --config "$T/hv-bad.yml"
+rc_is "  …an invalid block never fails the tick → exit 0" 0
 has "  …an invalid block is HARVEST_CONFIG_ERROR" "HARVEST_CONFIG_ERROR"
 run env FLEET_ID=alice "${MTICK[@]}" --config "$T/hv-bad.yml"
 hasnt "  …said once" "HARVEST_CONFIG_ERROR"
 rm -f "$T/state/.watch/harvest-config.said"
 printf 'repo: acme/app\nfindings_harvest:\n  enabled: true\n  trusted_bot_ids: [42]\n' >"$T/hv-trust.yml"
 run env FLEET_ID=alice "${MTICK[@]}" --config "$T/hv-trust.yml"
+rc_is "  …a refused trust key never fails the tick → exit 0" 0
 has "  …a trust list in the monster config is HARVEST_CONFIG_ERROR naming the key (trust comes only from memory.yml)" "HARVEST_CONFIG_ERROR mnt-harvest: findings_harvest.trusted_bot_ids is not supported"
+echo "the maintenance monster watches the host's fleet supervisor tick (ff-engsys-fleet#48)"
+SW="$MNT/mnt-supervisor-watch.sh" FS="$T/inst/.fleet" PL="$T/la/com.acme.fleet.fleet-supervisor.plist"
+mkdir -p "$FS" "$T/la"
+plist_every() { printf '<plist version="1.0">\n<dict>\n  <key>StartInterval</key>\n  <integer>%s</integer>\n  <key>RunAtLoad</key>\n  <true/>\n</dict>\n</plist>\n' "$1" >"$PL"; }
+plist_every 300
+stamp() { printf 'epoch=%s\nat=iso-%s\nlabel=com.acme.fleet.fleet-supervisor\nplist=%s\n' "$1" "$1" "$PL" >"$FS/supervisor.tick"; }
+printf '#!/usr/bin/env bash\nexit "$(cat "$FAKE/lctl-rc" 2>/dev/null || echo 0)"\n' >"$T/bin/lctl-stub.sh"
+printf '#!/usr/bin/env bash\necho "notify $*" >>"$FAKE/sw-notify.log"\n' >"$T/bin/sw-notify.sh"
+printf '#!/usr/bin/env bash\necho "notify-failed $*" >>"$FAKE/sw-notify.log"; exit 1\n' >"$T/bin/sw-notify-fail.sh"
+chmod +x "$T/bin/lctl-stub.sh" "$T/bin/sw-notify.sh" "$T/bin/sw-notify-fail.sh"
+: >"$T/sw-notify.log"
+swn() { grep -c "$1" "$T/sw-notify.log" || true; }
+SWENV=(env FLEET_STATE="$FS" SUPERVISOR_WATCH_LAUNCHCTL="$T/bin/lctl-stub.sh" BATON_NOTIFY_CMD="bash $T/bin/sw-notify.sh")
+SWR=("${SWENV[@]}" bash "$SW" --state-dir "$T/sw")
+NOW=$(date -u +%s)
+run env -u FLEET_STATE BATON_NOTIFY_CMD="bash $T/bin/sw-notify.sh" bash "$SW" --state-dir "$T/sw"
+[ "$RC" = 0 ] && [ -z "$OUT" ] && ok "mnt-supervisor-watch.sh: no FLEET_STATE (not a fleet session) → silent" || bad "mnt-supervisor-watch.sh: no FLEET_STATE (not a fleet session) → silent" "$OUT"
+run "${SWR[@]}"
+[ "$RC" = 0 ] && [ -z "$OUT" ] && ok "  …no tick file (no supervisor ran here) → silent" || bad "  …no tick file (no supervisor ran here) → silent" "$OUT"
+stamp $((NOW - 7200)); rm -f "$PL"
+run "${SWR[@]}"
+[ "$RC" = 0 ] && [ -z "$OUT" ] && ok "  …a 2 h old tick but no launchd job installed → silent" || bad "  …a 2 h old tick but no launchd job installed → silent" "$OUT"
+plist_every 300; echo 113 >"$T/lctl-rc"
+run "${SWR[@]}"
+[ -z "$OUT" ] && ok "  …the job is booted out (launchctl print fails) → silent" || bad "  …the job is booted out (launchctl print fails) → silent" "$OUT"
+rm -f "$T/lctl-rc"
+[ "$(swn notify)" = 0 ] && ok "  …and none of those notified" || bad "  …and none of those notified" "$(cat "$T/sw-notify.log")"
+stamp $((NOW - 60))
+run "${SWR[@]}"
+[ "$RC" = 0 ] && [ -z "$OUT" ] && ok "  …a fresh tick → nothing" || bad "  …a fresh tick → nothing" "$OUT"
+stamp $((NOW - 899))
+run "${SWR[@]}" --now "$NOW"
+[ -z "$OUT" ] && ok "  …just under 3 x the 300 s StartInterval → nothing" || bad "  …just under 3 x the 300 s StartInterval → nothing" "$OUT"
+stamp $((NOW - 901))
+run "${SWR[@]}" --now "$NOW"
+rc_is "  …stale: exit 0" 0
+has "  …stale: one SUPERVISOR_STALLED line" "SUPERVISOR_STALLED last=iso-$((NOW - 901)) age=15m threshold=15m notified"
+[ "$(swn 'level alert --incident fleet-supervisor-stalled')" = 1 ] && ok "  …one alert through fleet notify" || bad "  …one alert through fleet notify" "$(cat "$T/sw-notify.log")"
+OUT="$(cat "$T/sw-notify.log")"
+has "  …the alert says how to check" "launchctl print gui/$(id -u)/com.acme.fleet.fleet-supervisor"
+has "  …and how to recover" "answer the prompts at the Mac"
+has "  …including the kickstart" "launchctl kickstart -k gui/$(id -u)/com.acme.fleet.fleet-supervisor"
+stamp $((NOW - 3600))
+run "${SWR[@]}"
+[ -z "$OUT" ] && ok "  …still stale → no repeat line" || bad "  …still stale → no repeat line" "$OUT"
+[ "$(swn 'level alert')" = 1 ] && ok "  …and no second alert" || bad "  …and no second alert" "$(cat "$T/sw-notify.log")"
+stamp $((NOW - 30))
+run "${SWR[@]}"
+has "  …fresh again → SUPERVISOR_RECOVERED" "SUPERVISOR_RECOVERED last=iso-$((NOW - 30))"
+has "  …resolved" "resolved"
+[ "$(swn 'level info --incident fleet-supervisor-stalled --resolve')" = 1 ] && ok "  …the incident is resolved through fleet notify" || bad "  …the incident is resolved through fleet notify" "$(cat "$T/sw-notify.log")"
+[ ! -e "$T/sw/.watch/supervisor-stalled.alerted" ] && ok "  …and the latch is cleared" || bad "  …and the latch is cleared"
+run "${SWR[@]}"
+[ -z "$OUT" ] && [ "$(swn notify)" = 2 ] && ok "  …then quiet again" || bad "  …then quiet again" "$OUT"
+# the threshold follows the job's StartInterval, and is overridable
+plist_every 600; stamp $((NOW - 1000))
+run "${SWR[@]}" --now "$NOW"
+[ -z "$OUT" ] && ok "  …StartInterval 600: 1000 s old is still fresh (threshold 30 min)" || bad "  …StartInterval 600: 1000 s old is still fresh (threshold 30 min)" "$OUT"
+run "${SWR[@]}" --now "$NOW" --stale-intervals 1
+has "  …--stale-intervals 1 → stale at 10 min" "threshold=10m notified"
+rm -rf "$T/sw"; plist_every 300; stamp $((NOW - 200))
+run env SUPERVISOR_STALE_MIN=2 "${SWR[@]}" --now "$NOW"
+has "  …SUPERVISOR_STALE_MIN=2 → stale at 2 min" "threshold=2m notified"
+echo 3 >"$T/lctl-rc"
+run "${SWR[@]}"
+has "  …an open alert whose job is then booted out is resolved (UNWATCHED)" "SUPERVISOR_UNWATCHED the supervisor launchd job is not loaded resolved"
+[ ! -e "$T/sw/.watch/supervisor-stalled.alerted" ] && ok "  …latch cleared" || bad "  …latch cleared"
+rm -f "$T/lctl-rc"; rm -rf "$T/sw"; : >"$T/sw-notify.log"; stamp $((NOW - 3600))
+run env FLEET_STATE="$FS" SUPERVISOR_WATCH_LAUNCHCTL="$T/bin/lctl-stub.sh" BATON_NOTIFY_CMD="bash $T/bin/sw-notify-fail.sh" bash "$SW" --state-dir "$T/sw"
+rc_is "  …a notify that fails: exit 0 still" 0
+has "  …says notify_failed" "notify_failed"
+[ ! -e "$T/sw/.watch/supervisor-stalled.alerted" ] && ok "  …and leaves no latch, so the next tick retries" || bad "  …and leaves no latch, so the next tick retries"
+run "${SWR[@]}"
+has "  …next tick: the alert goes out" "notified"
+rm -rf "$T/sw"
+# engsys#308: a notify that hangs is killed at the timeout (with its children) and counts as failed: no latch
+printf '#!/usr/bin/env bash\nsleep 8 &\necho $! >"$FAKE/sw-hang.pid"\nwait\n' >"$T/bin/sw-notify-hang.sh"; chmod +x "$T/bin/sw-notify-hang.sh"
+rm -f "$FAKE/sw-hang.pid"; stamp $((NOW - 3600)); t0=$(date +%s)
+run env FLEET_STATE="$FS" SUPERVISOR_WATCH_LAUNCHCTL="$T/bin/lctl-stub.sh" SUPERVISOR_WATCH_NOTIFY_TIMEOUT=1 FAKE="$FAKE" BATON_NOTIFY_CMD="bash $T/bin/sw-notify-hang.sh" bash "$SW" --state-dir "$T/sw" --now "$NOW"
+t1=$(date +%s)
+rc_is "  …a notify that hangs (engsys#308): exit 0" 0
+[ $((t1 - t0)) -lt 6 ] && ok "  …bounded at the timeout ($((t1 - t0)) s, the notifier sleeps 8)" || bad "  …bounded at the timeout" "took $((t1 - t0)) s"
+has "  …counted as a failed notify" "SUPERVISOR_STALLED last=iso-$((NOW - 3600)) age=60m threshold=15m notify_failed"
+[ ! -e "$T/sw/.watch/supervisor-stalled.alerted" ] && ok "  …no latch, so the next tick retries" || bad "  …no latch, so the next tick retries"
+hp="$(cat "$FAKE/sw-hang.pid" 2>/dev/null || true)"
+[ -n "$hp" ] && ! kill -0 "$hp" 2>/dev/null && ok "  …and the notifier's own child is killed too" || bad "  …and the notifier's own child is killed too" "pid ${hp:-none}"
+run "${SWR[@]}" --now "$NOW"
+has "  …next tick: the alert goes out" "notified"
+rm -rf "$T/sw"; : >"$T/sw-notify.log"
+# engsys#308: the end stamp. A start stamp naming it (done=) makes it required; a stale one alerts as FAILING
+DF="$FS/supervisor.tick.done"
+stampd() { stamp "$1"; printf 'done=%s\n' "$DF" >>"$FS/supervisor.tick"; }
+done_at() { printf 'epoch=%s\nat=iso-%s\n' "$1" "$1" >"$DF"; }
+stampd $((NOW - 60)); done_at $((NOW - 120))
+run "${SWR[@]}" --now "$NOW"
+[ -z "$OUT" ] && ok "  …a fresh start and a fresh end stamp → nothing" || bad "  …a fresh start and a fresh end stamp → nothing" "$OUT"
+done_at $((NOW - 901))
+run "${SWR[@]}" --now "$NOW"
+has "  …fresh start, end stamp older than the threshold → SUPERVISOR_FAILING" "SUPERVISOR_FAILING last=iso-$((NOW - 60)) completed=iso-$((NOW - 901)) age=15m threshold=15m notified"
+[ "$(swn 'level alert --incident fleet-supervisor-stalled')" = 1 ] && ok "  …one alert, the stall incident" || bad "  …one alert, the stall incident" "$(cat "$T/sw-notify.log")"
+OUT="$(cat "$T/sw-notify.log")"; has "  …saying its ticks don't complete" "but its ticks don't complete"
+run "${SWR[@]}" --now "$NOW"
+[ -z "$OUT" ] && ok "  …still failing → no repeat" || bad "  …still failing → no repeat" "$OUT"
+done_at $((NOW - 10))
+run "${SWR[@]}" --now "$NOW"
+has "  …a completed tick again → SUPERVISOR_RECOVERED" "SUPERVISOR_RECOVERED last=iso-$((NOW - 60))"
+# named but never written: it ages from the first watch that saw it missing
+rm -f "$DF"; stampd $((NOW - 60))
+run "${SWR[@]}" --now "$NOW"
+[ -z "$OUT" ] && ok "  …a named end stamp missing for the first time → nothing yet" || bad "  …a named end stamp missing for the first time → nothing yet" "$OUT"
+stampd $((NOW + 840))
+run "${SWR[@]}" --now $((NOW + 900))
+[ -z "$OUT" ] && ok "  …missing for 15 min (the threshold) → nothing yet" || bad "  …missing for 15 min (the threshold) → nothing yet" "$OUT"
+run "${SWR[@]}" --now $((NOW + 901))
+has "  …missing for longer, the start stamp fresh → SUPERVISOR_FAILING completed=never" "SUPERVISOR_FAILING last=iso-$((NOW + 840)) completed=never age=15m threshold=15m notified"
+stampd $((NOW - 3000)); run "${SWR[@]}" --now $((NOW + 1000)) # a stale start: the missing-since clock restarts
+stampd $((NOW + 1000))
+run "${SWR[@]}" --now $((NOW + 1010))
+[ -z "$OUT" ] && ok "  …an open alert with the end stamp still missing is not resolved by a fresh start" || bad "  …an open alert with the end stamp still missing is not resolved by a fresh start" "$OUT"
+done_at $((NOW + 1005))
+run "${SWR[@]}" --now $((NOW + 1010))
+has "  …only a completed tick resolves it" "SUPERVISOR_RECOVERED last=iso-$((NOW + 1000))"
+rm -rf "$T/sw"; : >"$T/sw-notify.log"
+# backward compatibility: a supervisor that predates the end stamp names none; an old end stamp beside it is ignored
+stamp $((NOW - 60)); done_at $((NOW - 86400))
+run "${SWR[@]}" --now "$NOW"
+[ -z "$OUT" ] && [ "$(swn notify)" = 0 ] && ok "  …a start stamp without done= is watched on itself alone (no false alert)" || bad "  …a start stamp without done= is watched on itself alone (no false alert)" "$OUT"
+rm -f "$DF"
+run "${SWR[@]}" --now "$NOW"
+[ -z "$OUT" ] && ok "  …and with no end stamp at all → nothing" || bad "  …and with no end stamp at all → nothing" "$OUT"
+# a stamp dated in the future: up to the threshold ahead is age 0; further ahead is stale, never fresh forever
+stamp $((NOW + 600))
+run "${SWR[@]}" --now "$NOW"
+[ -z "$OUT" ] && ok "  …a start stamp 10 min ahead (within the threshold) → nothing" || bad "  …a start stamp 10 min ahead (within the threshold) → nothing" "$OUT"
+stamp $((NOW + 86400))
+run "${SWR[@]}" --now "$NOW"
+has "  …a start stamp a day ahead → stale (SUPERVISOR_STALLED future=)" "SUPERVISOR_STALLED last=iso-$((NOW + 86400)) future=1440m threshold=15m notified"
+OUT="$(cat "$T/sw-notify.log")"; has "  …the alert names the clock or a corrupt stamp" "the host clock is off or the stamp is corrupt"
+rm -rf "$T/sw"; : >"$T/sw-notify.log"
+stampd $((NOW - 60)); done_at $((NOW + 86400))
+run "${SWR[@]}" --now "$NOW"
+has "  …an end stamp a day ahead → SUPERVISOR_FAILING" "SUPERVISOR_FAILING last=iso-$((NOW - 60)) completed=iso-$((NOW + 86400))"
+rm -rf "$T/sw" "$DF"; : >"$T/sw-notify.log"
+# wired into the tick: a stale supervisor is a tick delta once, then NOOP
+held maintain
+mkdir -p "$T/state/.watch"; date +%s >"$T/state/.watch/last-heartbeat"
+echo '[]' >"$T/resp/pr-list"; echo '[]' >"$T/resp/run-list"
+run env FLEET_ID=alice "${MTICK[@]}"
+: >"$T/sw-notify.log"; stamp $((NOW - 3600))
+run env FLEET_ID=alice "${SWENV[@]}" "${MTICK[@]}"
+rc_is "mnt-tick.sh with a stalled supervisor → exit 0" 0
+has "  …SUPERVISOR_STALLED is a tick delta" "SUPERVISOR_STALLED last=iso-$((NOW - 3600))"
+run env FLEET_ID=alice "${SWENV[@]}" "${MTICK[@]}"
+[ "$OUT" = NOOP ] && ok "  …then NOOP while it stays stalled" || bad "  …then NOOP while it stays stalled" "$OUT"
+[ "$(swn 'level alert')" = 1 ] && ok "  …one alert across ticks" || bad "  …one alert across ticks" "$(cat "$T/sw-notify.log")"
+stamp $((NOW - 10))
+run env FLEET_ID=alice "${SWENV[@]}" "${MTICK[@]}"
+has "  …SUPERVISOR_RECOVERED once it ticks again" "SUPERVISOR_RECOVERED"
+printf 'repo: acme/app\nsupervisor_stale_minutes: 1\n' >"$T/sw.yml"; stamp $((NOW - 120))
+run env FLEET_ID=alice "${SWENV[@]}" "${MTICK[@]}" --config "$T/sw.yml"
+has "  …supervisor_stale_minutes in the config sets the threshold" "threshold=1m notified"
+printf 'garbage\n' >"$FS/supervisor.tick"; rm -rf "$T/state/.watch/supervisor-stalled.alerted"
+run env FLEET_ID=alice "${SWENV[@]}" "${MTICK[@]}"
+rc_is "  …an unreadable tick file never fails the tick" 0
+[ "$OUT" = NOOP ] && ok "  …and is silent" || bad "  …and is silent" "$OUT"
 rm -rf "$T/state"/baton-* "$T/state/.watch" "$T/state/harvest" "$T/resp"/*
 
 echo "the maintenance monster sees security-review requests (engsys#231)"
@@ -449,7 +616,8 @@ bus 6 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --
 hasnt "  …alternating full and empty reads: no label_removed" "label_removed"
 rm -f "$LISTS.flap" "$LISTS.flapn"
 lists "" "" "" >"$LISTS"
-bus 3 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents
+# 6 s, not 3: the removal needs two consecutive 1 s polls, which a loaded host can stretch past 3 s
+bus 6 "$HERE/mm-watch.sh" --repo acme/app --state-dir "$T/state" --interval 1 --no-agents
 has "  …and so is the label's removal (missing two polls in a row)" "VERDICT_WAKE #20 label_removed"
 [ "$(count_of 'VERDICT_WAKE #20 label_removed')" = 1 ] && ok "  …once" || bad "  …once" "$OUT"
 lists "" "" "$(vnode 21)" >"$LISTS"; nyx_gql IC_old

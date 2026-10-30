@@ -10,6 +10,10 @@
 #      only a CANDIDATE / TRIPWIRE_FAILED / OUT_OF_SCOPE line not printed before (and any ERROR) is a delta;
 #   3d. when the --config has an enabled findings_harvest: block and its window is due (mnt-harvest.sh due: read-only,
 #       no network), print HARVEST_DUE: run § Findings harvest on this wake;
+#   3e. check this host's fleet supervisor is still ticking (mnt-supervisor-watch.sh, ff-engsys-fleet#48): its tick
+#       stamp (or, engsys#308, the end stamp of its last completed tick) older than supervisor_stale_intervals
+#       (default 3) x its launchd StartInterval, or supervisor_stale_minutes, sends ONE `fleet notify --level alert`
+#       and resolves it once both are fresh; silent where no supervisor job is installed;
 #   4. write the ledger heartbeat only when one is due (none in the last 0.75 x heartbeat_minutes);
 #   5. print `NOOP` when nothing changed, else the delta, one line each:
 #        + <item> / - <item>          a finding appeared in / left the snapshot, or changed (one of each)
@@ -17,6 +21,10 @@
 #        HANDBACK_INCOMPLETE …             a subagent handed back unfinished work: resume it or take it over
 #        HARVEST_DUE window=<d> since=<d>  the weekly findings harvest is due (§ Findings harvest)
 #        HARVEST_CONFIG_ERROR <why>        the findings_harvest: block is invalid (once; escalate the config)
+#        SUPERVISOR_STALLED … notified     the host's supervisor stopped ticking; the operator alert went out (once)
+#        SUPERVISOR_STALLED … notify_failed  …and the alert could not be sent (retried next tick): tell the operator
+#        SUPERVISOR_FAILING … notified|notify_failed  it starts, but no tick completed within the threshold
+#        SUPERVISOR_RECOVERED … / SUPERVISOR_UNWATCHED …  it ticks again (or its job is gone); the alert is resolved
 #        BATON_HANDOVER maintain <fleet>   federation.yml moved the role's home (§ Handover)
 #        SNAPSHOT_ERROR <why>              the snapshot failed: GitHub state is unknown this tick
 #        HEARTBEAT_ERROR <why>             the heartbeat was due and failed
@@ -123,6 +131,13 @@ if [ -n "$CONFIG" ] && [ -f "$CONFIG" ] && grep -q '^findings_harvest:' "$CONFIG
     DELTA+=("HARVEST_CONFIG_ERROR $(printf '%s' "$HOUT" | tr '\n' ' ' | head -c 200)"); : >"$W/harvest-config.said"
   fi
 fi
+
+# 3e. is this host's fleet supervisor still ticking? (ff-engsys-fleet#48) One alert per stall, resolved when it ticks
+# again; silent on a host with no supervisor job (mnt-supervisor-watch.sh header). Never fails the tick.
+SW_INT="$(monster_cfg_scalar "$CONFIG" supervisor_stale_intervals)"
+SW_MIN="$(monster_cfg_scalar "$CONFIG" supervisor_stale_minutes)"
+while IFS= read -r l; do case "$l" in SUPERVISOR_*) DELTA+=("$l") ;; esac; done < <(bash "$here/mnt-supervisor-watch.sh" --state-dir "$DIR" \
+  ${SW_INT:+--stale-intervals "$SW_INT"} ${SW_MIN:+--stale-min "$SW_MIN"} 2>>"$W/supervisor-watch.err" || true)
 
 # 3c. INCOMPLETE hand-backs the bus has not relayed (engsys#126 review) ----------------------------
 while IFS= read -r l; do [ -n "$l" ] && DELTA+=("$l"); done < <(monster_handback_events "$DIR")

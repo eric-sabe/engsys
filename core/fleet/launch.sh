@@ -281,16 +281,16 @@ session_dir_problem() { # session_dir_problem <name>
   # a session that is already running is not a launch candidate (the launcher skips its window): leave its credential alone
   if tmux list-windows -a -F '#{window_name}' 2>/dev/null | grep -Fxq -- "$1"; then return 1; fi
   d="$(fleet_session_config_dir "$1")" || { echo "its name can't be a per-session config dir name"; return 0; }
-  if [ ! -d "$d" ]; then echo "its Claude config dir $d does not exist: run fleet config-dir init --session $1, then CLAUDE_CONFIG_DIR=$d claude (/login, /exit)"; return 0; fi
+  if [ ! -d "$d" ]; then echo "its Claude config dir $d does not exist: run fleet config-dir init --session $1, then $(fleet_login_cmd "$d") (/login, /exit)"; return 0; fi
   # a logged-in answer verify cached for this dir (auth-ok.<name>) within VERIFY_MAX_AGE_MIN is reused
   if at="$(cat "$FLEET_STATE/auth-ok.$1" 2>/dev/null)" && [[ "$at" =~ ^[0-9]+$ ]] && [ $(( $(date +%s) - at )) -lt $(( VERIFY_MAX_AGE_MIN * 60 )) ]; then return 1; fi
-  li="$( (cd "${TMPDIR:-/tmp}" && CLAUDE_CONFIG_DIR="$d" fleet_dir_lock "$d" claude auth status --json </dev/null) 2>/dev/null | jq -r 'if .loggedIn == true then "true" elif .loggedIn == false then "false" else "" end' 2>/dev/null || true)"
+  li="$( (cd "$(fleet_outside_home_dir)" && CLAUDE_CONFIG_DIR="$d" fleet_dir_lock "$d" claude auth status --json </dev/null) 2>/dev/null | jq -r 'if .loggedIn == true then "true" elif .loggedIn == false then "false" else "" end' 2>/dev/null || true)"
   if [ "$li" = true ]; then mkdir -p "$FLEET_STATE" && date +%s >"$FLEET_STATE/auth-ok.$1"; fi
   if [ "$li" = false ] && fleet_keychain_unreadable; then
     echo "fleet launch: $1: login state unknown (SSH, Keychain not readable); launching anyway. $(fleet_keychain_advice)" >&2
     return 1
   fi
-  if [ "$li" = false ]; then echo "its own Claude login ($d) is not logged in: CLAUDE_CONFIG_DIR=$d claude (/login, then /exit)"; return 0; fi
+  if [ "$li" = false ]; then echo "its own Claude login ($d) is not logged in: $(fleet_login_cmd "$d") (/login, then /exit)"; return 0; fi
   return 1
 }
 # deferred_dir_synced <name> → 0 when <name>'s own dir is not waiting for a sync, or was just synced (engsys#253)

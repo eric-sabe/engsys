@@ -147,7 +147,9 @@ how confident a disposition looks.
    `mnt-fp-candidates.sh` with its seen-latch (§ Standing false-positive
    policies), so a tripped tripwire surfaces even when no new alert fired,
    and a candidate you already judged does not come back every tick. Post
-   the weekly policy-disposition digest when one is due.
+   the weekly policy-disposition digest when one is due. The tick also
+   checks that this host's fleet supervisor is still ticking (§ Supervisor
+   watch) and alerts the operator once if it is not.
 
 ## The loop — on every wake (event or tick)
 
@@ -573,6 +575,48 @@ pushes to it again, edits its handoff, or opens a second one for the window.
 **Dry.** Without `apply`, the proposal (`proposal.md`) and the raw families (`families.json`) stay in
 `<state_dir>/harvest/<window>/`; the ledger gets one comment with the count and the path. An operator who wants it
 opened can run the harvester by hand (`harvest-findings.mjs run … --apply`) or set `apply: true`.
+
+## Supervisor watch
+
+The fleet supervisor (launchd, every 5 minutes) is what relaunches dead monsters and pages about everything else,
+so it can't report its own absence. On 2026-10-08 and 10-09 every fleet launchd job stopped for 19.5 h and 36 h
+behind unanswered macOS privacy prompts, while this session (tmux, not launchd) kept heartbeating and nothing
+alerted (ff-engsys-fleet#48). So the tick watches it: `mnt-tick.sh` runs `mnt-supervisor-watch.sh` every time.
+
+- **The record.** Every `fleet supervise` run first writes `$FLEET_STATE/supervisor.tick` (`epoch=`, `at=`,
+  `label=`, `plist=`, `done=`), and, once the tick completed (nothing to do, or `fleet-supervisor.sh` exited 0), the
+  end stamp `done=` names (`supervisor.tick.done`: `epoch=`, `at=`; engsys#308). A fleet-launched session has
+  `FLEET_STATE` in its environment.
+- **The threshold.** `supervisor_stale_intervals` (default 3) x the `StartInterval` in the job's plist (300 s when
+  unreadable), so 15 minutes by default; `supervisor_stale_minutes` sets minutes outright and wins over intervals.
+  Both are config keys the tick reads from `--config`. The environment variables `SUPERVISOR_STALE_INTERVALS` and
+  `SUPERVISOR_STALE_MIN` apply when the matching config key is absent.
+- **One alert per stall.** Stale → one `fleet notify --level alert --incident fleet-supervisor-stalled` carrying the
+  recovery steps (`launchctl print gui/<uid>/<label>`: `runs` not increasing; answer the prompts at the Mac, "Don't
+  Allow" is fine; `launchctl kickstart -k gui/<uid>/<label>`), latched in `<state_dir>/.watch/supervisor-stalled.alerted`
+  and printed as `SUPERVISOR_STALLED … notified`. Still stale → nothing. Fresh again → the incident is resolved
+  (`SUPERVISOR_RECOVERED … resolved`) and the latch cleared. A notify that fails, or takes longer than 30 s (killed,
+  with its children), leaves no latch (`… notify_failed`), so the next tick tries again.
+- **Ticks that start but never complete.** Start stamp fresh, end stamp older than the threshold: every run dies early
+  (an engsys checkout `fleet verify` rejects, a missing `fleet/supervisor.conf.tmpl`, a supervisor error). Same
+  incident and latch, printed as `SUPERVISOR_FAILING last=<start> completed=<end|never> age=<m>m … notified`. The end
+  stamp is required only when the start stamp names it (`done=`): a supervisor that predates it is watched on the
+  start stamp alone, never alerted for the stamp it doesn't write. A named end stamp that doesn't exist yet ages from
+  the first tick that saw it missing (`<state_dir>/.watch/supervisor-done-missing.since`; `completed=never`).
+- **A stamp from the future.** Up to the threshold ahead of now counts as age 0; further ahead (clock skew, a corrupt
+  epoch) counts as stale (`SUPERVISOR_STALLED … future=<m>m …`, or `SUPERVISOR_FAILING` for the end stamp), so it can't
+  keep the watch quiet.
+- **Silent where there is no supervisor.** No `FLEET_STATE` (a session the fleet did not launch, a non-fleet
+  install), no tick file, no plist at the path the stamp names (the job is not installed on this host), or a job
+  `launchctl print` can't find (booted out with `fleet install-jobs --unload`): no line, no alert. An alert that is
+  open when that happens is resolved (`SUPERVISOR_UNWATCHED <why> resolved`).
+- **Never fails the tick**: errors go to `<state_dir>/.watch/supervisor-watch.err`.
+
+On any of these lines: journal it and do nothing else; you can't fix launchd from here, and the operator alert is
+already out. `notify_failed` / `resolve_failed` on two ticks in a row → say it once in a ledger comment.
+
+This watch is on the same host. A host that is asleep or down stops this session too, so a watcher from outside
+(such as the fleet instance's own heartbeat watch on its status issue) is still needed for that case.
 
 ## Expert routing
 

@@ -356,8 +356,19 @@ has "…the registry reason wins" "$OUT" "merge home for acme/app is fleet alice
 
 echo "== D. supervise: a filtered conf, and nothing to do when nothing is left"
 conf FLEET_ID=bob; registry alice alice; local_conf; reset_tmux; stale_ledgers; : >"$FAKE/gh.log"
+rm -f "$STATE/supervisor.tick" "$STATE/supervisor.tick.done"
 run fleet supervise
 rc_is "supervise exits 0" 0
+# ff-engsys-fleet#48: every run stamps its tick for the maintenance monster's watch (mnt-supervisor-watch.sh)
+TICKF="$(cat "$STATE/supervisor.tick" 2>/dev/null || true)"
+matches "the tick stamp: epoch" "$TICKF" '^epoch=[0-9]+$'
+matches "the tick stamp: ISO time" "$TICKF" '^at=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$'
+has "the tick stamp: the launchd label" "$TICKF" "label=com.acme.fleet.fleet-supervisor"
+has "the tick stamp: the job's plist" "$TICKF" "plist=$HOME/Library/LaunchAgents/com.acme.fleet.fleet-supervisor.plist"
+# engsys#308: and the end of a completed tick, named in the start stamp (so the watch knows to require it)
+has "the tick stamp names the end stamp" "$TICKF" "done=$STATE/supervisor.tick.done"
+matches "a completed tick (the supervisor ran, exit 0) writes the end stamp" "$(cat "$STATE/supervisor.tick.done" 2>/dev/null || true)" '^epoch=[0-9]+$'
+matches "…with its ISO time" "$(cat "$STATE/supervisor.tick.done" 2>/dev/null || true)" '^at=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$'
 SUP="$(cat "$STATE/supervisor.conf")"
 has "conf: excluded sessions are dropped" "$SUP" "# not on this host: acme-mm (merge home for acme/app is fleet alice)"
 hasnt "conf: …no line for them" "$SUP" "acme-mm|11|60"
@@ -395,10 +406,19 @@ has "single-fleet: the broker stays on its ledger" "$(cat "$STATE/supervisor.con
 hasnt "single-fleet: no status issue, so no STATUS_URL" "$(cat "$STATE/supervisor.conf")" "STATUS_URL="
 conf FLEET_ID=bob; registry alice alice
 local_conf ROLES=build,design; : >"$FAKE/gh.log"
+printf 'epoch=1\nat=old\n' >"$STATE/supervisor.tick.done"
 run fleet supervise
 rc_is "nothing left to supervise: exits 0" 0
 has "…and says so" "$OUT" "no supervised session runs on this host"
 eq "…without touching GitHub" "$(cat "$FAKE/gh.log")" ""
+matches "…a completed tick too: the end stamp is rewritten" "$(cat "$STATE/supervisor.tick.done")" '^epoch=[0-9]{2,}$'
+# a run that dies after the start stamp: the start stamp is fresh, the end stamp is left to age (engsys#308)
+mv "$I/fleet/supervisor.conf.tmpl" "$T/tmpl.bak"; printf 'epoch=1\nat=old\n' >"$STATE/supervisor.tick.done"; rm -f "$STATE/supervisor.tick"
+run fleet supervise
+rc_is "no template: supervise fails" 1
+matches "…after writing the start stamp" "$(cat "$STATE/supervisor.tick" 2>/dev/null || true)" '^epoch=[0-9]+$'
+eq "…but not the end stamp" "$(cat "$STATE/supervisor.tick.done")" "$(printf 'epoch=1\nat=old')"
+mv "$T/tmpl.bak" "$I/fleet/supervisor.conf.tmpl"
 
 echo "== E. the supervisor never relaunches an excluded session, even from a stale conf"
 reset_tmux; stale_ledgers; : >"$FAKE/gh.log"; mkdir -p "$T/sup"
