@@ -18,6 +18,7 @@ import {
   evaluateObservedRecords,
   probeHttpHealth,
   probeSyntheticCommand,
+  probeOutputLine,
 } from './adapters.mjs';
 import {
   evaluateServiceTransition,
@@ -1095,6 +1096,48 @@ describe('Trust boundary (engsys v2.0.1): registry location, probe execution, ga
     const real = probeSyntheticCommand({ check: 'tool-version', params: { tool: 'node' } }, { env: { PATH: path.dirname(process.execPath) } });
     assert.equal(real.status, 'healthy');
     assert.match(real.detail, /^v\d+\./);
+  });
+
+  test('details summarize probe output: no raw JSON, box-drawing rules or ANSI escapes (engsys#312)', () => {
+    const run = (out) => probeSyntheticCommand({ check: 'tool-version', params: { tool: 'node' } }, { execFn: () => out });
+    // gh api /rate_limit: the cut-off JSON prefix used to land on the board.
+    const json = run(JSON.stringify({ resources: { core: { limit: 5000, used: 436, remaining: 4564 } } }));
+    assert.equal(json.status, 'healthy');
+    assert.equal(json.detail, 'JSON object');
+    // coderabbit auth status: a box-drawing rule first, colored text after it.
+    const box = run('────────────────────\n\x1b[32m✔\x1b[0m Authenticated as fleet-bot\n────────────────────\n');
+    assert.equal(box.detail, '✔ Authenticated as fleet-bot');
+    assert.equal(run('───\n   \n').detail, 'ok');
+    // Only output that parses is JSON: a log prefix or a cut-off array stays text.
+    assert.equal(run('[INFO] ok\n').detail, '[INFO] ok');
+    assert.equal(run('[1,2').detail, '[1,2');
+    assert.equal(run('──\n{"x":1}\n').detail, 'JSON object');
+    assert.equal(run('\x1b[38:5:1mred\x1b[0m \x1b(Bplain\n').detail, 'red plain');
+    assert.equal(run('ok\rhidden\x08\x1b\x9b31m\n').detail, 'ok hidden');
+    assert.equal(run('v22.1.0\n').detail, 'v22.1.0');
+    // The failure snippet takes the same line.
+    const execFn = () => {
+      const e = new Error('exit 2');
+      e.status = 2;
+      e.stdout = '════\n\x1b[31mservice unavailable\x1b[0m\n';
+      e.stderr = '';
+      throw e;
+    };
+    const fail = probeSyntheticCommand({ check: 'tool-version', params: { tool: 'node' } }, { execFn });
+    assert.equal(fail.status, 'down');
+    assert.equal(fail.detail, 'synthetic probe failed (exit 2): service unavailable');
+    // gh api failing: the JSON error body on stdout, gh's own line on stderr; the reason survives.
+    const ghFail = probeSyntheticCommand({ check: 'tool-version', params: { tool: 'node' } }, {
+      execFn: () => {
+        const e = new Error('exit 1');
+        e.status = 1;
+        e.stdout = '{"message":"Bad gateway","documentation_url":"https://docs.github.com"}';
+        e.stderr = 'gh: Bad gateway (HTTP 502)';
+        throw e;
+      },
+    });
+    assert.equal(ghFail.detail, 'synthetic probe failed (exit 1): Bad gateway');
+    assert.equal(probeOutputLine('x'.repeat(300)).length, 160);
   });
 
   test('every kind gets a scrubbed env: credentials only for the group it declares', () => {

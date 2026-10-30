@@ -11,7 +11,7 @@ import { probeStatuspage, runProbe, VALID_STATUSES, STATUSPAGE_INDICATORS, STATU
 
 // ---------------------------------------------------------------------------------------------
 // Watch-bus vocabulary (engsys#181). A bus line reaches a monster's context, so it carries only fixed words: the service
-// id (registry-validated), the state enum, a reason code and the gate words. Probe output (`detail`, the first line of a
+// id (registry-validated), the state enum, a reason code and the gate words. Probe output (`detail`, one summarized line of a
 // command's or an API's response), the advice and the runbook stay on the board and in the local state files.
 // ---------------------------------------------------------------------------------------------
 // An explicit allowlist, not just a character class (review Low): the adapters' own fixed status words, the Statuspage

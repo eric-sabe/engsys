@@ -703,6 +703,8 @@ rm -f "$T"/pane-* "$T"/capture-* "$T/probe-ok"
 cat >"$T/launch.sh" <<'SH'
 #!/usr/bin/env bash
 if [ -f "$FAKE/launch-fail" ]; then echo "attempt $1" >>"$FAKE/actions"; echo "error: claude not found on PATH" >&2; exit 1; fi
+# $FAKE/launch-refuse present = launch.sh refusing on its plugin check with GitHub unreachable: no "error:" line (engsys#311)
+if [ -f "$FAKE/launch-refuse" ]; then echo "attempt $1" >>"$FAKE/actions"; echo "verify: not verified against o/engsys@v9: gh api repos/o/engsys/git/blobs/abc failed: net/http: TLS handshake timeout" >&2; echo "fleet: not launching $1: the engsys plugin check could not run (exit 3), so the plugin is unverified (above)." >&2; exit 1; fi
 echo "launch $1 harness=${FLEET_ACTIVE_HARNESS:-unset}" >>"$FAKE/actions"; echo "2.1.300" >"$FAKE/pane-$1"
 printf '⏺ Reading the ledger first.\n' >"$FAKE/capture-$1"
 SH
@@ -958,6 +960,34 @@ reset; touch "$T/notify-fail" "$T/launch-fail"; ledger 90 "ok — merging #12"; 
 rm -f "$T/notify-fail"; run
 expect "236: an alert that could not be delivered is retried next tick" "^notify --level alert --incident launch-failed-acme-mm"
 rm -f "$T/launch-fail"
+
+# engsys#311: launch.sh refusing on an unreachable GitHub prints no "error:" line; the alert names its verify line
+reset; rm -f "$T/notify-fail"; ledger 90 "ok — merging #12"; pane exited; touch "$T/launch-refuse"; run
+expect "311: a verify refusal → the alert carries the verify line" "^notify --level alert --incident launch-failed-acme-mm .*FAILED (.*): verify: not verified against o/engsys@v9: .*TLS handshake timeout"
+expect "  …marked transient" "^notify --level alert .*(GitHub looks unreachable from this host: likely transient, the next tick retries)"
+expect "  …not the empty-output fallback" "!^notify .*printed no error line"
+rm -f "$T/launch-refuse"; run
+# …a plain error line with a local "Connection refused" (tmux socket) is not called a GitHub outage
+cat >"$T/launch-tmux.sh" <<'SH'
+#!/usr/bin/env bash
+echo "attempt $1" >>"$FAKE/actions"; echo "error: tmux: error connecting to /private/tmp/tmux-501/default (Connection refused)" >&2; exit 1
+SH
+sed -i.bak "s|^LAUNCH_CMD=.*|LAUNCH_CMD=bash $T/launch-tmux.sh|" "$T/w/sup.conf"
+reset; ledger 90 "ok — merging #12"; pane exited; run
+expect "311: a local connection error → alert carries it" "^notify --level alert --incident launch-failed-acme-mm .*FAILED (.*): error: tmux: error connecting"
+expect "  …without the GitHub-transient note" "!GitHub looks unreachable"
+# …verify.sh's own prefix is picked up too
+printf '#!/usr/bin/env bash\necho "attempt $1" >>"$FAKE/actions"; echo "fleet verify: not verified: the engsys ref '"'"'main'"'"' is not a release tag (vX.Y.Z)" >&2; echo "fleet: not launching $1: the engsys plugin check could not run (exit 3)" >&2; exit 1\n' >"$T/launch-tmux.sh"
+reset; ledger 90 "ok — merging #12"; pane exited; run
+expect "311: verify.sh's 'fleet verify: not verified' line → the alert carries it" "^notify --level alert --incident launch-failed-acme-mm .*FAILED (.*): fleet verify: not verified: the engsys ref"
+expect "  …not transient (no network failure in it)" "!GitHub looks unreachable"
+run
+# …a MISMATCH is never called transient, whatever its text carries
+printf '#!/usr/bin/env bash\necho "attempt $1" >>"$FAKE/actions"; echo "fleet: not launching $1: its engsys plugin does not pass the integrity check (skills/connection refused)" >&2; exit 1\n' >"$T/launch-tmux.sh"
+reset; ledger 90 "ok — merging #12"; pane exited; run
+expect "311: an integrity MISMATCH → the alert carries the refusal" "^notify --level alert --incident launch-failed-acme-mm .*FAILED (.*): fleet: not launching acme-mm: its engsys plugin does not pass the integrity check"
+expect "  …never marked transient" "!GitHub looks unreachable"
+mv "$T/w/sup.conf.bak" "$T/w/sup.conf"; run
 
 # engsys#236 end to end: the real launcher, whose new window's shell never runs the launch line (a fake tmux whose
 # pane stays at zsh): the supervisor alerts and logs RELAUNCH FAILED, never "relaunched"
