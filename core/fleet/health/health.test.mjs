@@ -1108,7 +1108,12 @@ describe('Trust boundary (engsys v2.0.1): registry location, probe execution, ga
     const box = run('────────────────────\n\x1b[32m✔\x1b[0m Authenticated as fleet-bot\n────────────────────\n');
     assert.equal(box.detail, '✔ Authenticated as fleet-bot');
     assert.equal(run('───\n   \n').detail, 'ok');
-    assert.equal(run('[1,2').detail, 'JSON output (unparsed)');
+    // Only output that parses is JSON: a log prefix or a cut-off array stays text.
+    assert.equal(run('[INFO] ok\n').detail, '[INFO] ok');
+    assert.equal(run('[1,2').detail, '[1,2');
+    assert.equal(run('──\n{"x":1}\n').detail, 'JSON object');
+    assert.equal(run('\x1b[38:5:1mred\x1b[0m \x1b(Bplain\n').detail, 'red plain');
+    assert.equal(run('ok\rhidden\x08\x1b\x9b31m\n').detail, 'ok hidden');
     assert.equal(run('v22.1.0\n').detail, 'v22.1.0');
     // The failure snippet takes the same line.
     const execFn = () => {
@@ -1121,6 +1126,17 @@ describe('Trust boundary (engsys v2.0.1): registry location, probe execution, ga
     const fail = probeSyntheticCommand({ check: 'tool-version', params: { tool: 'node' } }, { execFn });
     assert.equal(fail.status, 'down');
     assert.equal(fail.detail, 'synthetic probe failed (exit 2): service unavailable');
+    // gh api failing: the JSON error body on stdout, gh's own line on stderr; the reason survives.
+    const ghFail = probeSyntheticCommand({ check: 'tool-version', params: { tool: 'node' } }, {
+      execFn: () => {
+        const e = new Error('exit 1');
+        e.status = 1;
+        e.stdout = '{"message":"Bad gateway","documentation_url":"https://docs.github.com"}';
+        e.stderr = 'gh: Bad gateway (HTTP 502)';
+        throw e;
+      },
+    });
+    assert.equal(ghFail.detail, 'synthetic probe failed (exit 1): Bad gateway');
     assert.equal(probeOutputLine('x'.repeat(300)).length, 160);
   });
 

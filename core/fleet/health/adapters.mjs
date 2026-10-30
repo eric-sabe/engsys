@@ -441,25 +441,52 @@ export function isAuthOrContextFailure(outputText, errCode = null) {
 
 /**
  * One readable line of probe output for a detail (engsys#312): ANSI escapes stripped, lines with no letter or digit
- * (box-drawing rules, blank padding) skipped, and JSON summarized, never echoed (a cut-off JSON prefix is noise).
+ * (box-drawing rules, blank padding) skipped, and JSON summarized, never echoed. Output is JSON only when it parses
+ * (whole, or one line of it); an object's string `message` (a GitHub API error body) is the summary, else
+ * "JSON object" / "JSON array (n item(s))". Anything else, `[INFO] ok` included, is text.
  */
+function jsonSummary(v) {
+  if (Array.isArray(v)) return `JSON array (${v.length} item(s))`;
+  if (v && typeof v === 'object') return typeof v.message === 'string' && v.message.trim() ? v.message.trim() : 'JSON object';
+  return null;
+}
+
+function parsedJson(text) {
+  if (!/^[[{]/.test(text)) return undefined;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
 export function probeOutputLine(text, maxLen = 160) {
   const clean = String(text ?? '')
     // eslint-disable-next-line no-control-regex
-    .replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '')
+    .replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, '') // CSI, every parameter byte (0x30-0x3F)
     // eslint-disable-next-line no-control-regex
-    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '') // OSC
+    // eslint-disable-next-line no-control-regex
+    .replace(/\x1b[ -\/]*[0-~]/g, '') // two-byte and charset escapes (ESC ( B, ESC =)
+    // eslint-disable-next-line no-control-regex
+    .replace(/\x9b[0-?]*[ -\/]*[@-~]/g, '') // 8-bit CSI
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\x00-\x09\x0b-\x1f\x7f-\x9f]/g, ' ') // what is left of C0/C1 controls (CR, BS, lone ESC); LF stays
+    .replace(/ {2,}/g, ' ')
     .trim();
-  if (/^[[{]/.test(clean)) {
-    try {
-      const v = JSON.parse(clean);
-      return Array.isArray(v) ? `JSON array (${v.length} item(s))` : 'JSON object';
-    } catch {
-      return 'JSON output (unparsed)';
+  const whole = jsonSummary(parsedJson(clean));
+  if (whole) return whole.slice(0, maxLen);
+  for (const raw of clean.split('\n')) {
+    const line = raw.trim();
+    if (!/[\p{L}\p{N}]/u.test(line)) continue;
+    const parsed = parsedJson(line);
+    if (parsed !== undefined) {
+      const summary = jsonSummary(parsed);
+      if (summary) return summary.slice(0, maxLen);
     }
+    return line.slice(0, maxLen);
   }
-  const line = clean.split('\n').map((l) => l.trim()).find((l) => /[\p{L}\p{N}]/u.test(l));
-  return line ? line.slice(0, maxLen) : '';
+  return '';
 }
 
 function runCommandSafe(cmdSpec, { timeoutMs = 10000, env = process.env, cwd = os.tmpdir(), execFn = execFileSync } = {}) {
