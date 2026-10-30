@@ -782,12 +782,16 @@ relaunch() { # relaunch <name> <ledger> <repo> <reason>
     local tail_lines first_err
     tail_lines="$(tail -n 5 "$out" | cut -c1-200)"
     # the launcher's first error line is the specific one (e.g. "launch did not start for …"); the rest is its summary.
-    # launch.sh refusing on its plugin check prints no "error:" line: its verify line names the cause, its own
+    # launch.sh refusing on its plugin check prints no "error:" line: the verify line (verify-wrappers' "verify: not
+    # verified …" or verify.sh's "fleet verify: not verified: …") names the cause, its own
     # "fleet: not launching" line only the refusal (engsys#311)
     first_err="$(grep -m 1 '^error: ' "$out" | cut -c1-300 || true)"
-    [ -n "$first_err" ] || first_err="$(grep -m 1 '^verify: not verified' "$out" | cut -c1-300 || true)"
+    [ -n "$first_err" ] || first_err="$(grep -m 1 -E '^(fleet )?verify: not verified' "$out" | cut -c1-300 || true)"
     [ -n "$first_err" ] || first_err="$(grep -m 1 '^fleet: not launching' "$out" | cut -c1-300 || true)"
-    if [ -n "$first_err" ] && grep -qiE 'TLS handshake timeout|i/o timeout|connection (refused|reset)|could not resolve host|no such host|HTTP 50[0-9]' "$out"; then
+    # only a "not verified" line (verify rc 3: the check could not run) says what was unreachable; a local tool's
+    # "connection refused" is not GitHub's outage, and a MISMATCH ("fleet: not launching … does not match") never is
+    if printf '%s\n' "$first_err" | grep -qE '^(fleet )?verify: not verified' \
+      && printf '%s\n' "$first_err" | grep -qiE 'TLS handshake timeout|i/o timeout|connection (refused|reset)|could not resolve host|no such host|HTTP 50[0-9]'; then
       first_err="$first_err (GitHub looks unreachable from this host: likely transient, the next tick retries)"
     fi
     cat "$out" >>"$LOG"; rm -f "$out"

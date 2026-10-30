@@ -967,6 +967,27 @@ expect "311: a verify refusal → the alert carries the verify line" "^notify --
 expect "  …marked transient" "^notify --level alert .*(GitHub looks unreachable from this host: likely transient, the next tick retries)"
 expect "  …not the empty-output fallback" "!^notify .*printed no error line"
 rm -f "$T/launch-refuse"; run
+# …a plain error line with a local "Connection refused" (tmux socket) is not called a GitHub outage
+cat >"$T/launch-tmux.sh" <<'SH'
+#!/usr/bin/env bash
+echo "attempt $1" >>"$FAKE/actions"; echo "error: tmux: error connecting to /private/tmp/tmux-501/default (Connection refused)" >&2; exit 1
+SH
+sed -i.bak "s|^LAUNCH_CMD=.*|LAUNCH_CMD=bash $T/launch-tmux.sh|" "$T/w/sup.conf"
+reset; ledger 90 "ok — merging #12"; pane exited; run
+expect "311: a local connection error → alert carries it" "^notify --level alert --incident launch-failed-acme-mm .*FAILED (.*): error: tmux: error connecting"
+expect "  …without the GitHub-transient note" "!GitHub looks unreachable"
+# …verify.sh's own prefix is picked up too
+printf '#!/usr/bin/env bash\necho "attempt $1" >>"$FAKE/actions"; echo "fleet verify: not verified: the engsys ref '"'"'main'"'"' is not a release tag (vX.Y.Z)" >&2; echo "fleet: not launching $1: the engsys plugin check could not run (exit 3)" >&2; exit 1\n' >"$T/launch-tmux.sh"
+reset; ledger 90 "ok — merging #12"; pane exited; run
+expect "311: verify.sh's 'fleet verify: not verified' line → the alert carries it" "^notify --level alert --incident launch-failed-acme-mm .*FAILED (.*): fleet verify: not verified: the engsys ref"
+expect "  …not transient (no network failure in it)" "!GitHub looks unreachable"
+run
+# …a MISMATCH is never called transient, whatever its text carries
+printf '#!/usr/bin/env bash\necho "attempt $1" >>"$FAKE/actions"; echo "fleet: not launching $1: its engsys plugin does not pass the integrity check (skills/connection refused)" >&2; exit 1\n' >"$T/launch-tmux.sh"
+reset; ledger 90 "ok — merging #12"; pane exited; run
+expect "311: an integrity MISMATCH → the alert carries the refusal" "^notify --level alert --incident launch-failed-acme-mm .*FAILED (.*): fleet: not launching acme-mm: its engsys plugin does not pass the integrity check"
+expect "  …never marked transient" "!GitHub looks unreachable"
+mv "$T/w/sup.conf.bak" "$T/w/sup.conf"; run
 
 # engsys#236 end to end: the real launcher, whose new window's shell never runs the launch line (a fake tmux whose
 # pane stays at zsh): the supervisor alerts and logs RELAUNCH FAILED, never "relaunched"
