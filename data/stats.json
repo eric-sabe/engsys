@@ -1,18 +1,18 @@
 {
-  "generatedAt": "2026-11-20T06:18:44.846Z",
+  "generatedAt": "2026-11-21T06:17:23.900Z",
   "window": {
     "from": "2025-10-22",
-    "to": "2026-11-20",
+    "to": "2026-11-21",
     "bucket": "week"
   },
   "repoCount": 51,
   "totals": {
     "issuesOpened": 4620,
-    "issuesClosed": 4153,
-    "commits": 7393,
-    "prsMerged": 2442,
-    "locAdded": 4737570,
-    "locRemoved": 832614
+    "issuesClosed": 4155,
+    "commits": 7409,
+    "prsMerged": 2455,
+    "locAdded": 4759321,
+    "locRemoved": 841335
   },
   "agentCount": 1,
   "agentTotals": {
@@ -1093,13 +1093,13 @@
     {
       "weekStart": "2026-11-16",
       "issuesOpened": 46,
-      "issuesClosed": 45,
-      "commits": 121,
-      "prsMerged": 71,
-      "locAdded": 182042,
-      "locRemoved": 10278,
-      "locAddedViaPR": 177816,
-      "locAddedDirect": 4226,
+      "issuesClosed": 47,
+      "commits": 137,
+      "prsMerged": 84,
+      "locAdded": 203793,
+      "locRemoved": 18999,
+      "locAddedViaPR": 199489,
+      "locAddedDirect": 4304,
       "agentIssuesOpened": 0,
       "agentIssuesClosed": 0,
       "agentCommits": 0,
@@ -1444,7 +1444,8 @@
     "2026-11-17": 16,
     "2026-11-18": 25,
     "2026-11-19": 42,
-    "2026-11-20": 15
+    "2026-11-20": 25,
+    "2026-11-21": 6
   },
   "agentDaily": {
     "2026-09-25": 7,
@@ -1486,11 +1487,11 @@
   },
   "languages": {
     "TypeScript": 43630321,
-    "Python": 20077936,
+    "Python": 20232495,
     "JavaScript": 10023856,
     "HTML": 7093245,
     "Kotlin": 5240830,
-    "Shell": 3868981,
+    "Shell": 3872343,
     "Java": 2587551,
     "Rust": 1620642,
     "PLpgSQL": 1470634,
@@ -2636,11 +2637,11 @@
       "alias": "Hazy Tapir",
       "totals": {
         "issuesOpened": 93,
-        "issuesClosed": 94,
-        "commits": 279,
-        "prsMerged": 109,
-        "locAdded": 212973,
-        "locRemoved": 20039
+        "issuesClosed": 95,
+        "commits": 284,
+        "prsMerged": 114,
+        "locAdded": 216170,
+        "locRemoved": 20198
       },
       "series": [
         {
@@ -3710,12 +3711,12 @@
         {
           "weekStart": "2026-11-16",
           "issuesOpened": 31,
-          "issuesClosed": 32,
-          "commits": 25,
-          "prsMerged": 25,
-          "locAdded": 30414,
-          "locRemoved": 3381,
-          "locAddedViaPR": 30414,
+          "issuesClosed": 33,
+          "commits": 30,
+          "prsMerged": 30,
+          "locAdded": 33611,
+          "locRemoved": 3540,
+          "locAddedViaPR": 33611,
           "locAddedDirect": 0,
           "agentIssuesOpened": 0,
           "agentIssuesClosed": 0,
@@ -3765,14 +3766,15 @@
         "2026-11-13": 1,
         "2026-11-10": 12,
         "2026-11-09": 2,
-        "2026-11-20": 2,
+        "2026-11-21": 2,
+        "2026-11-20": 5,
         "2026-11-19": 13,
         "2026-11-18": 8,
         "2026-11-16": 2
       },
       "agentDaily": {},
       "languages": {
-        "Python": 3439810,
+        "Python": 3567817,
         "JavaScript": 2163151,
         "PLpgSQL": 1366346,
         "Go": 360069,
@@ -4889,10 +4891,10 @@
       "totals": {
         "issuesOpened": 1,
         "issuesClosed": 0,
-        "commits": 106,
+        "commits": 108,
         "prsMerged": 2,
-        "locAdded": 16452,
-        "locRemoved": 1457
+        "locAdded": 16530,
+        "locRemoved": 1474
       },
       "series": [
         {
@@ -5963,12 +5965,12 @@
           "weekStart": "2026-11-16",
           "issuesOpened": 1,
           "issuesClosed": 0,
-          "commits": 27,
+          "commits": 29,
           "prsMerged": 2,
-          "locAdded": 3754,
-          "locRemoved": 161,
+          "locAdded": 3832,
+          "locRemoved": 178,
           "locAddedViaPR": 27,
-          "locAddedDirect": 3727,
+          "locAddedDirect": 3805,
           "agentIssuesOpened": 0,
           "agentIssuesClosed": 0,
           "agentCommits": 0,
@@ -5991,7 +5993,8 @@
         "2026-10-03": 6,
         "2026-10-31": 5,
         "2026-10-30": 6,
-        "2026-11-20": 9,
+        "2026-11-21": 1,
+        "2026-11-20": 10,
         "2026-11-19": 5,
         "2026-11-18": 5,
         "2026-11-17": 3,
@@ -5999,8 +6002,8 @@
       },
       "agentDaily": {},
       "languages": {
-        "Python": 262582,
-        "Shell": 107679,
+        "Python": 263349,
+        "Shell": 110750,
         "HCL": 3950,
         "HTML": 1558
       }
@@ -6011,10 +6014,10 @@
       "totals": {
         "issuesOpened": 0,
         "issuesClosed": 0,
-        "commits": 585,
-        "prsMerged": 60,
-        "locAdded": 217774,
-        "locRemoved": 4690
+        "commits": 591,
+        "prsMerged": 65,
+        "locAdded": 218559,
+        "locRemoved": 4727
       },
       "series": [
         {
@@ -7085,11 +7088,11 @@
           "weekStart": "2026-11-16",
           "issuesOpened": 0,
           "issuesClosed": 0,
-          "commits": 7,
-          "prsMerged": 7,
-          "locAdded": 976,
-          "locRemoved": 189,
-          "locAddedViaPR": 976,
+          "commits": 13,
+          "prsMerged": 12,
+          "locAdded": 1761,
+          "locRemoved": 226,
+          "locAddedViaPR": 1761,
           "locAddedDirect": 0,
           "agentIssuesOpened": 0,
           "agentIssuesClosed": 0,
@@ -7137,7 +7140,8 @@
         "2026-11-11": 1,
         "2026-11-10": 2,
         "2026-11-09": 1,
-        "2026-11-20": 1,
+        "2026-11-21": 3,
+        "2026-11-20": 4,
         "2026-11-19": 3,
         "2026-11-18": 2,
         "2026-11-16": 1
@@ -8232,10 +8236,10 @@
       "totals": {
         "issuesOpened": 4,
         "issuesClosed": 4,
-        "commits": 50,
-        "prsMerged": 30,
-        "locAdded": 158994,
-        "locRemoved": 11830
+        "commits": 52,
+        "prsMerged": 32,
+        "locAdded": 176680,
+        "locRemoved": 20336
       },
       "series": [
         {
@@ -9287,11 +9291,11 @@
           "weekStart": "2026-11-16",
           "issuesOpened": 4,
           "issuesClosed": 4,
-          "commits": 26,
-          "prsMerged": 17,
-          "locAdded": 130647,
-          "locRemoved": 3906,
-          "locAddedViaPR": 130647,
+          "commits": 28,
+          "prsMerged": 19,
+          "locAdded": 148333,
+          "locRemoved": 12412,
+          "locAddedViaPR": 148333,
           "locAddedDirect": 0,
           "agentIssuesOpened": 0,
           "agentIssuesClosed": 0,
@@ -9315,7 +9319,7 @@
         "2026-11-13": 5,
         "2026-11-12": 1,
         "2026-11-10": 2,
-        "2026-11-20": 1,
+        "2026-11-20": 3,
         "2026-11-19": 3,
         "2026-11-18": 3,
         "2026-11-17": 12,
@@ -9323,7 +9327,7 @@
       },
       "agentDaily": {},
       "languages": {
-        "Python": 2180484,
+        "Python": 2206269,
         "Shell": 11900
       }
     },
@@ -9332,11 +9336,11 @@
       "alias": "Shiny Platypus",
       "totals": {
         "issuesOpened": 5,
-        "issuesClosed": 4,
-        "commits": 27,
-        "prsMerged": 15,
-        "locAdded": 8473,
-        "locRemoved": 184
+        "issuesClosed": 5,
+        "commits": 28,
+        "prsMerged": 16,
+        "locAdded": 8478,
+        "locRemoved": 186
       },
       "series": [
         {
@@ -10406,12 +10410,12 @@
         {
           "weekStart": "2026-11-16",
           "issuesOpened": 5,
-          "issuesClosed": 4,
-          "commits": 8,
-          "prsMerged": 8,
-          "locAdded": 955,
-          "locRemoved": 69,
-          "locAddedViaPR": 955,
+          "issuesClosed": 5,
+          "commits": 9,
+          "prsMerged": 9,
+          "locAdded": 960,
+          "locRemoved": 71,
+          "locAddedViaPR": 960,
           "locAddedDirect": 0,
           "agentIssuesOpened": 0,
           "agentIssuesClosed": 0,
@@ -10432,7 +10436,7 @@
         "2026-11-03": 1,
         "2026-11-02": 4,
         "2026-11-14": 1,
-        "2026-11-20": 2,
+        "2026-11-20": 3,
         "2026-11-19": 3,
         "2026-11-18": 2,
         "2026-11-17": 1
@@ -10441,7 +10445,7 @@
       "languages": {
         "Java": 130321,
         "Python": 102932,
-        "Shell": 27684,
+        "Shell": 27975,
         "JavaScript": 10471,
         "HTML": 1231
       }
