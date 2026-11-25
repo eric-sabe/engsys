@@ -1,18 +1,18 @@
 {
-  "generatedAt": "2026-11-24T06:19:03.045Z",
+  "generatedAt": "2026-11-25T06:19:09.730Z",
   "window": {
     "from": "2025-10-22",
-    "to": "2026-11-24",
+    "to": "2026-11-25",
     "bucket": "week"
   },
   "repoCount": 51,
   "totals": {
     "issuesOpened": 4621,
     "issuesClosed": 4155,
-    "commits": 7473,
-    "prsMerged": 2490,
-    "locAdded": 4778906,
-    "locRemoved": 842051
+    "commits": 7495,
+    "prsMerged": 2500,
+    "locAdded": 4805111,
+    "locRemoved": 843479
   },
   "agentCount": 1,
   "agentTotals": {
@@ -1113,12 +1113,12 @@
       "weekStart": "2026-11-23",
       "issuesOpened": 1,
       "issuesClosed": 0,
-      "commits": 30,
-      "prsMerged": 15,
-      "locAdded": 10644,
-      "locRemoved": 535,
-      "locAddedViaPR": 10644,
-      "locAddedDirect": 0,
+      "commits": 52,
+      "prsMerged": 25,
+      "locAdded": 36849,
+      "locRemoved": 1963,
+      "locAddedViaPR": 34945,
+      "locAddedDirect": 1904,
       "agentIssuesOpened": 0,
       "agentIssuesClosed": 0,
       "agentCommits": 0,
@@ -1467,7 +1467,8 @@
     "2026-11-21": 36,
     "2026-11-22": 4,
     "2026-11-23": 26,
-    "2026-11-24": 4
+    "2026-11-24": 5,
+    "2026-11-25": 21
   },
   "agentDaily": {
     "2026-09-25": 7,
@@ -1509,7 +1510,7 @@
   },
   "languages": {
     "TypeScript": 43630321,
-    "Python": 20617964,
+    "Python": 21170636,
     "JavaScript": 10033873,
     "HTML": 7093245,
     "Kotlin": 5240830,
@@ -1520,7 +1521,7 @@
     "Bicep": 1127750,
     "Svelte": 1017111,
     "Swift": 911634,
-    "TeX": 704670,
+    "TeX": 802943,
     "CSS": 427692,
     "Go": 371691,
     "HCL": 214919,
@@ -8339,10 +8340,10 @@
       "totals": {
         "issuesOpened": 4,
         "issuesClosed": 4,
-        "commits": 78,
-        "prsMerged": 45,
-        "locAdded": 186178,
-        "locRemoved": 20458
+        "commits": 93,
+        "prsMerged": 55,
+        "locAdded": 210479,
+        "locRemoved": 21498
       },
       "series": [
         {
@@ -9413,11 +9414,11 @@
           "weekStart": "2026-11-23",
           "issuesOpened": 0,
           "issuesClosed": 0,
-          "commits": 8,
-          "prsMerged": 4,
-          "locAdded": 1510,
-          "locRemoved": 29,
-          "locAddedViaPR": 1510,
+          "commits": 23,
+          "prsMerged": 14,
+          "locAdded": 25811,
+          "locRemoved": 1069,
+          "locAddedViaPR": 25811,
           "locAddedDirect": 0,
           "agentIssuesOpened": 0,
           "agentIssuesClosed": 0,
@@ -9447,11 +9448,12 @@
         "2026-11-18": 3,
         "2026-11-17": 12,
         "2026-11-16": 7,
+        "2026-11-25": 15,
         "2026-11-23": 8
       },
       "agentDaily": {},
       "languages": {
-        "Python": 2547078,
+        "Python": 3081929,
         "Shell": 11900
       }
     },
@@ -49837,10 +49839,10 @@
       "totals": {
         "issuesOpened": 0,
         "issuesClosed": 0,
-        "commits": 1,
+        "commits": 8,
         "prsMerged": 0,
-        "locAdded": 18248,
-        "locRemoved": 0
+        "locAdded": 20152,
+        "locRemoved": 388
       },
       "series": [
         {
@@ -49880,16 +49882,37 @@
           "agentPrsReviewedByYou": 0,
           "agentLocAdded": 0,
           "agentLocRemoved": 0
+        },
+        {
+          "weekStart": "2026-11-23",
+          "issuesOpened": 0,
+          "issuesClosed": 0,
+          "commits": 7,
+          "prsMerged": 0,
+          "locAdded": 1904,
+          "locRemoved": 388,
+          "locAddedViaPR": 0,
+          "locAddedDirect": 1904,
+          "agentIssuesOpened": 0,
+          "agentIssuesClosed": 0,
+          "agentCommits": 0,
+          "agentPrsMerged": 0,
+          "agentPrsMergedByYou": 0,
+          "agentPrsReviewedByYou": 0,
+          "agentLocAdded": 0,
+          "agentLocRemoved": 0
         }
       ],
       "daily": {
-        "2026-11-14": 1
+        "2026-11-14": 1,
+        "2026-11-25": 6,
+        "2026-11-24": 1
       },
       "agentDaily": {},
       "languages": {
-        "TeX": 664197,
+        "TeX": 762470,
         "BibTeX Style": 57748,
-        "Python": 8623,
+        "Python": 26444,
         "Perl": 153
       }
     },
